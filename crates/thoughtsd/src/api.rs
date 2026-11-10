@@ -452,6 +452,7 @@ struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<Stri
 async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>) -> R {
     let chat = st.chats.get(&id).await.ok_or_else(|| anyhow::anyhow!("no such chat"))?;
     if chat.running { bail!("this chat is still running"); }
+    if let Some(lib) = st.settings.read().await.library() { crate::trust::require(&lib)?; }
     if chat.provider != "claude" { bail!("Codex support arrives in the next milestone"); }
     let s = st.settings.read().await.clone();
     let library = s.library();
