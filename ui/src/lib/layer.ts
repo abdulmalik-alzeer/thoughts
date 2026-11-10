@@ -499,14 +499,10 @@ export async function exportPack(): Promise<'saved' | 'copied' | 'cancelled'> {
   const d = new Date();
   const name = `thoughts-pack-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
   if ((window as any).__TAURI_INTERNALS__) {
-    // The native window has no download bar: ask where to save, then let the shell write the file.
+    // The native window has no download bar: the shell opens the save dialog itself and writes the file.
     try {
-      const { save } = await import('@tauri-apps/plugin-dialog');
-      const path = await save({ defaultPath: name, filters: [{ name: 'Thoughts pack', extensions: ['json'] }] });
-      if (!path) return 'cancelled';
       const { invoke } = await import('@tauri-apps/api/core');
-      await invoke('save_text_file', { path, contents: text });
-      return 'saved';
+      return (await invoke('save_pack', { name: name.replace(/\.json$/, ''), contents: text })) ? 'saved' : 'cancelled';
     } catch {
       try { await navigator.clipboard.writeText(text); return 'copied'; } catch { /* fall through to a download */ }
     }

@@ -1,6 +1,6 @@
 // Generates ui/public/plugin-frame.html: the document every sandboxed plugin / custom-view frame loads.
 // The frame has an opaque origin, where the CSP keyword 'self' matches nothing, so the fixed runtime is
-// inlined and allowed by its exact sha256 hash (plus the app's own origins as a second route).
+// inlined and allowed by its exact sha256 hash (the desktop build adds the same hash to its own policy).
 // Plugin modules themselves run from blob: URLs. Nothing in the frame can reach the network.
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -10,7 +10,7 @@ export function genPluginFrame() {
   const dir = fileURLToPath(new URL('../ui/public/', import.meta.url));
   const runtime = readFileSync(dir + 'plugin-frame.js', 'utf8').replace(/<\/(script)/gi, '<\\/$1');
   const hash = createHash('sha256').update(runtime, 'utf8').digest('base64');
-  const csp = `default-src 'none'; script-src 'sha256-${hash}' tauri://localhost http://tauri.localhost https://tauri.localhost blob:; ` +
+  const csp = `default-src 'none'; script-src 'sha256-${hash}' blob:; ` +
     `style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'`;
   const html = `<!doctype html>
 <html>
@@ -23,7 +23,6 @@ export function genPluginFrame() {
 <body>
 <div id="root"></div>
 <script>${runtime}</script>
-<script src="plugin-frame.js"></script>
 </body>
 </html>
 `;

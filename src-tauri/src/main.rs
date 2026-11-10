@@ -147,17 +147,20 @@ fn ensure_daemon() -> Result<thoughtsd::paths::DaemonInfo, String> {
     Err("The Thoughts daemon did not start".into())
 }
 
-/// Save an exported customisation pack to the place the user picked in the save dialog.
-/// JSON packs only, with a size cap, and never over an existing folder.
+/// Save an exported customisation pack. The save dialog is opened here, in native code, so the
+/// destination is always one the user picked; the window never supplies a path.
 #[tauri::command]
-fn save_text_file(path: String, contents: String) -> Result<(), String> {
-    let p = std::path::PathBuf::from(&path);
-    if !p.is_absolute() || p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) != Some("json".into()) {
-        return Err("packs are saved as .json files".into());
-    }
+async fn save_pack(app: tauri::AppHandle, name: String, contents: String) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
     if contents.len() > 8 << 20 { return Err("pack is too large".into()); }
-    if p.is_dir() { return Err("that is a folder".into()); }
-    std::fs::write(&p, contents).map_err(|e| e.to_string())
+    let safe: String = name.chars().filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ')).take(60).collect();
+    let file = format!("{}.json", if safe.trim().is_empty() { "thoughts-pack" } else { safe.trim() });
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().set_file_name(&file).add_filter("Thoughts pack", &["json"]).blocking_save_file()
+    }).await.map_err(|e| e.to_string())?;
+    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(false) };
+    std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 /// Open a document from the library in the user's default app. Only regular files inside the
@@ -473,7 +476,7 @@ fn main() {
         )
         .invoke_handler(tauri::generate_handler![
             open_library_file,
-            save_text_file,
+            save_pack,
             daemon_info,
             restart_daemon,
             set_dock_icon,
