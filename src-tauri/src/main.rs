@@ -75,10 +75,26 @@ fn spawn_daemon() -> anyhow::Result<()> {
 /// Never starts a daemon. With `wait: false` it only sends the request (used on exit).
 fn stop_daemon(wait: bool) {
     let Some((i, _)) = daemon_alive() else { return };
-    let _ = ureq::post(&format!("http://127.0.0.1:{}/api/shutdown", i.port))
-        .set("Authorization", &format!("Bearer {}", i.token))
-        .timeout(Duration::from_secs(2))
-        .call();
+    // The daemon refuses with BUSY:: while a save (wrap/reorganize) is mid-flight. Give it up to a
+    // minute to finish rather than cutting a save in half; only then insist.
+    let shutdown = |force: bool| {
+        ureq::post(&format!("http://127.0.0.1:{}/api/shutdown", i.port))
+            .set("Authorization", &format!("Bearer {}", i.token))
+            .set("Content-Type", "application/json")
+            .timeout(Duration::from_secs(2))
+            .send_string(if force { r#"{"force":true}"# } else { "{}" })
+    };
+    let busy = |r: Result<ureq::Response, ureq::Error>| match r {
+        Err(ureq::Error::Status(_, resp)) => resp.into_string().map(|b| b.contains("BUSY::")).unwrap_or(false),
+        _ => false,
+    };
+    let waited = Instant::now();
+    let mut refused = busy(shutdown(false));
+    while refused && waited.elapsed() < Duration::from_secs(60) {
+        std::thread::sleep(Duration::from_secs(2));
+        refused = busy(shutdown(false));
+    }
+    if refused { let _ = shutdown(true); }
     if !wait {
         return;
     }
