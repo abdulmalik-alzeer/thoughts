@@ -4,20 +4,32 @@ import { t } from './i18n';
 
 marked.setOptions({ gfm: true, breaks: false });
 
-const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
 
 /** Render markdown to sanitized HTML (frontmatter stripped).
- *  Code blocks get a copy button and tables a horizontally scrollable wrapper; both are added AFTER
- *  sanitising, from fixed markup only, so nothing user-controlled bypasses DOMPurify. */
+ *  Code blocks get a copy button and tables a horizontally scrollable wrapper, added on the sanitised
+ *  DOM tree. */
 export function md(src: string): string {
   const body = src.replace(/^---\n[\s\S]*?\n---\n?/, '');
-  const clean = DOMPurify.sanitize(marked.parse(body, { async: false }) as string);
-  const label = esc(t('md.copyCode'));
-  return clean
-    .replace(/<pre(\s[^>]*)?>/g, (m) => `<div class="md-code"><button type="button" class="md-copy" data-md-copy>${label}</button>${m}`)
-    .replace(/<\/pre>/g, '</pre></div>')
-    .replace(/<table(\s[^>]*)?>/g, (m) => `<div class="md-table" tabindex="0">${m}`)
-    .replace(/<\/table>/g, '</table></div>');
+  // Sanitise to a DOM fragment, then add the wrappers with DOM APIs (never by editing the HTML string).
+  const frag = DOMPurify.sanitize(marked.parse(body, { async: false }) as string, { RETURN_DOM_FRAGMENT: true });
+  for (const pre of Array.from(frag.querySelectorAll('pre'))) {
+    const wrap = document.createElement('div');
+    wrap.className = 'md-code';
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'md-copy'; btn.setAttribute('data-md-copy', '');
+    btn.textContent = t('md.copyCode');
+    pre.replaceWith(wrap);
+    wrap.append(btn, pre);
+  }
+  for (const table of Array.from(frag.querySelectorAll('table'))) {
+    const wrap = document.createElement('div');
+    wrap.className = 'md-table'; wrap.tabIndex = 0;
+    table.replaceWith(wrap);
+    wrap.append(table);
+  }
+  const host = document.createElement('div');
+  host.append(frag);
+  return host.innerHTML;
 }
 
 /** Delegated click handler for rendered markdown: wire it on the container (`onclick={mdClick}`).
