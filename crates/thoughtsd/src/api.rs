@@ -224,7 +224,8 @@ fn foreign_config(path: &std::path::Path) -> Vec<String> {
         if rd.flatten().any(|e| !e.file_name().to_string_lossy().ends_with(".sample")) { found.push("git hooks in .git/hooks".into()); }
     }
     if let Ok(cfg) = std::fs::read_to_string(path.join(".git/config")) {
-        for k in ["fsmonitor", "sshcommand", "hookspath", "[filter", "textconv"] {
+        for k in ["fsmonitor", "sshcommand", "hookspath", "[filter", "textconv", "[include", "[includeif",
+                  "gpg", "program", "helper", "askpass", "external", "[merge", "pager", "editor", "[alias", "[diff"] {
             if cfg.to_lowercase().contains(k) { found.push(format!("custom git setting ({k}) in .git/config")); }
         }
     }

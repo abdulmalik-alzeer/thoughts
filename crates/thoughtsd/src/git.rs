@@ -14,10 +14,16 @@ pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<
     // Never run code a library's own git config could smuggle in (hooks, fsmonitor, ssh command).
     #[cfg(windows)] let no_hooks = "NUL";
     #[cfg(not(windows))] let no_hooks = "/dev/null";
-    c.args(["-c", "core.fsmonitor=false", "-c", &format!("core.hooksPath={no_hooks}"), "-c", "core.sshCommand=ssh"]);
+    c.env("GIT_CONFIG_NOSYSTEM", "1");
+    for kv in ["core.fsmonitor=false", &format!("core.hooksPath={no_hooks}"), "core.sshCommand=ssh",
+               "core.askPass=", "core.pager=cat", "core.editor=true", "diff.external=",
+               "commit.gpgSign=false", "tag.gpgSign=false", "gpg.program=gpg", "protocol.ext.allow=never",
+               "credential.helper="] {
+        c.args(["-c", kv]);
+    }
     if store == "file" {
         let f = crate::paths::git_credentials_file();
-        c.args(["-c", "credential.helper=", "-c", &format!("credential.helper=store --file={}", f.display())]);
+        c.args(["-c", &format!("credential.helper=store --file={}", f.display())]);
     } else if let Ok(exe) = std::env::current_exe() {
         c.env("GIT_ASKPASS", exe).env("THOUGHTS_ASKPASS", "1");
     }
