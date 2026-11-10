@@ -40,7 +40,7 @@ pub fn shell_path() -> &'static str {
 pub fn find_binary(custom: &Option<String>, name: &str) -> Option<PathBuf> {
     if let Some(c) = custom.as_ref().filter(|c| !c.is_empty()) {
         let p = PathBuf::from(c);
-        return p.exists().then_some(p);
+        return (p.is_absolute() && p.is_file()).then_some(p);
     }
     let sep = if cfg!(windows) { ';' } else { ':' };
     for dir in shell_path().split(sep) {
@@ -90,7 +90,8 @@ pub async fn options(state: &AppState) -> Value {
     json!({
         "models": quoted(&flag_block(&help, "--model")),
         "efforts": paren_list(&flag_block(&help, "--effort")),
-        "permissionModes": paren_list(&flag_block(&help, "--permission-mode")),
+        // Only the modes the daemon accepts, in a stable order — never bypassPermissions.
+        "permissionModes": crate::settings::PERMISSION_MODES,
     })
 }
 
@@ -137,7 +138,11 @@ fn quoted(block: &str) -> Vec<String> {
 async fn provider_env(state: &AppState, c: &mut Command) {
     let s = state.settings.read().await.ai.claude.clone();
     if let Some(url) = s.base_url.filter(|u| !u.is_empty()) {
+        // Never hand a token to an address that would not pass settings validation.
+        if crate::settings::check_base_url(&url).is_err() { return; }
         c.env("ANTHROPIC_BASE_URL", url);
+        // The token belongs to the address it was saved for: `has_api_token` is cleared whenever the address changes.
+        if !s.has_api_token { return; }
         if let Ok(tok) = keyring::Entry::new("thoughts-ai", "claude").and_then(|e| e.get_password()) {
             c.env("ANTHROPIC_AUTH_TOKEN", tok);
         }
@@ -154,6 +159,46 @@ pub struct RunSpec {
     pub append_system: Option<String>,
 }
 
+/// What every run is told about the user's language.
+pub fn language_note(lang: &str) -> &'static str {
+    if lang == "ar" {
+        "The user's interface language is Arabic. Reply, and write all notes, titles, summaries and todos, in Arabic unless the user writes in another language."
+    } else {
+        "The user's interface language is English. Reply, and write all notes, titles, summaries and todos, in the language the user writes in (English by default)."
+    }
+}
+
+/// `--settings` JSON denying the AI any access to the user's private folders. `None` when there are none.
+/// Rules are given both relative to the library (when the run starts there) and as absolute paths,
+/// so they hold when the library is only an added folder.
+pub fn private_deny_settings(library: Option<&Path>, cwd: &Path, private: &[String]) -> anyhow::Result<Option<String>> {
+    let mut deny: Vec<String> = vec![];
+    for raw in private {
+        let rel = crate::paths::clean_rel(raw)?;
+        let mut pats = vec![];
+        if let Some(lib) = library {
+            if lib == cwd { pats.push(format!("./{rel}")); }
+            let abs = lib.join(&rel).to_string_lossy().replace('\\', "/");
+            // Absolute paths in permission rules are written with a leading `//` (`//c/…` on Windows).
+            let abs = match abs.strip_prefix('/') {
+                Some(rest) => format!("//{rest}"),
+                None => format!("//{}", abs.replacen(':', "", 1)),
+            };
+            pats.push(abs);
+        } else {
+            pats.push(format!("./{rel}"));
+        }
+        for p in pats {
+            for tool in ["Read", "Edit"] {
+                deny.push(format!("{tool}({p})"));
+                deny.push(format!("{tool}({p}/**)"));
+            }
+        }
+    }
+    if deny.is_empty() { return Ok(None); }
+    Ok(Some(json!({"permissions": {"deny": deny}}).to_string()))
+}
+
 /// Start a streaming run in the background. Events go out on the broadcast
 /// channel; the finished chat is persisted. `on_done` runs after completion.
 pub async fn start_run(
@@ -161,22 +206,40 @@ pub async fn start_run(
     spec: RunSpec,
     on_done: Option<Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'static, ()> + Send>>,
 ) -> anyhow::Result<()> {
+    // The one gate every AI run passes through (chats, wrap, reorganize, modules, customize).
+    crate::settings::check_permission_mode(spec.options.permission_mode.as_deref())?;
+    crate::settings::check_cli_value("model", spec.options.model.as_deref())?;
+    crate::settings::check_cli_value("effort", spec.options.effort.as_deref())?;
+    crate::settings::check_cli_value("session", spec.resume.as_deref())?;
+    let settings = state.settings.read().await.clone();
+    // Nothing runs in a folder the user has not trusted. The app layer is the app's own folder.
+    let layer = crate::paths::app_layer_dir();
+    for dir in std::iter::once(&spec.cwd).chain(spec.add_dirs.iter()) {
+        if *dir != layer { crate::trust::require(dir)?; }
+    }
+    let deny = private_deny_settings(settings.library().as_deref(), &spec.cwd, &settings.private_paths)?;
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
     c.current_dir(&spec.cwd)
         .args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
+    if let Some(d) = &deny { c.args(["--settings", d]); }
     if let Some(r) = &spec.resume { c.args(["--resume", r]); }
     if let Some(m) = spec.options.model.as_ref().filter(|s| !s.is_empty()) { c.args(["--model", m]); }
     if let Some(e) = spec.options.effort.as_ref().filter(|s| !s.is_empty()) { c.args(["--effort", e]); }
-    if let Some(p) = spec.options.permission_mode.as_ref().filter(|s| !s.is_empty()) { c.args(["--permission-mode", p]); }
+    // "default" means the CLI's own default: pass no flag (newer CLIs no longer accept the word).
+    if let Some(p) = spec.options.permission_mode.as_ref().filter(|s| !s.is_empty() && *s != "default") { c.args(["--permission-mode", p]); }
     for d in &spec.add_dirs { c.arg("--add-dir").arg(d); }
-    if let Some(sys) = &spec.append_system { c.args(["--append-system-prompt", sys]); }
+    let lang = language_note(&settings.language);
+    let sys = match &spec.append_system { Some(s) => format!("{s}\n\n{lang}"), None => lang.to_string() };
+    c.args(["--append-system-prompt", &sys]);
     provider_env(&state, &mut c).await;
     c.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = c.spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
+    let (Some(mut stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
+        anyhow::bail!("could not connect to the assistant process");
+    };
     let prompt = spec.prompt.clone();
     tokio::spawn(async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
@@ -186,12 +249,12 @@ pub async fn start_run(
     let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
     state.runs.lock().await.insert(spec.chat_id.clone(), kill_tx);
     let id = spec.chat_id.clone();
+    state.interrupted.lock().await.retain(|(c, _)| c != &id);
+    let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };
     if let Some(ch) = state.chats.update(&id, |c| c.running = true).await {
         state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
     }
 
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         let mut err_lines = BufReader::new(stderr).lines();
@@ -208,7 +271,7 @@ pub async fn start_run(
             tokio::select! {
                 _ = &mut kill_rx => {
                     let _ = child.kill().await;
-                    push(&state, &id, Msg::new("system", "Stopped.")).await;
+                    push(&state, &id, Msg::new("system", stopped)).await;
                     break;
                 }
                 line = lines.next_line() => {
@@ -236,7 +299,7 @@ pub async fn start_run(
 }
 
 pub async fn push(state: &AppState, chat_id: &str, m: Msg) {
-    let mv = serde_json::to_value(&m).unwrap();
+    let mv = serde_json::to_value(&m).unwrap_or(Value::Null);
     state.chats.update(chat_id, |c| c.messages.push(m)).await;
     state.emit(json!({"type": "chat.message", "chatId": chat_id, "message": mv}));
 }
@@ -305,6 +368,7 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
                 c.cost_usd += cost;
                 if sid.is_some() { c.session_id = sid; }
             }).await;
+            state.add_usage(cost).await;
             if is_err {
                 let txt = ev["result"].as_str().map(String::from)
                     .unwrap_or_else(|| format!("Run ended: {}", ev["subtype"].as_str().unwrap_or("error")));
@@ -330,14 +394,16 @@ fn tool_label(name: &str, input: &Value) -> String {
 /// One-shot, tool-less completion (used for mini-wraps and titles).
 pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> anyhow::Result<String> {
     let bin = binary(state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
+    crate::settings::check_cli_value("model", model.as_deref())?;
     let mut c = cmd(&bin);
     c.current_dir(crate::paths::home())
         .args(["-p", "--output-format", "json", "--no-session-persistence", "--tools", ""]);
     if let Some(m) = model.filter(|m| !m.is_empty()) { c.args(["--model", &m]); }
+    c.args(["--append-system-prompt", language_note(&state.settings.read().await.language)]);
     provider_env(state, &mut c).await;
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = c.spawn()?;
-    let mut stdin = child.stdin.take().unwrap();
+    let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("could not connect to the assistant process"))?;
     stdin.write_all(prompt.as_bytes()).await?;
     drop(stdin);
     let out = child.wait_with_output().await?;
@@ -358,5 +424,27 @@ mod tests {
         assert_eq!(paren_list(&flag_block(HELP, "--effort")), ["low", "medium", "high", "xhigh", "max"]);
         assert_eq!(paren_list(&flag_block(HELP, "--permission-mode")), ["acceptEdits", "auto", "plan"]);
         assert_eq!(quoted(&flag_block(HELP, "--model")), ["fable", "opus", "sonnet"]);
+    }
+
+    #[test]
+    fn private_folders_become_deny_rules() {
+        let lib = Path::new("/home/u/Library");
+        assert_eq!(private_deny_settings(Some(lib), lib, &[]).unwrap(), None);
+        let v: Value = serde_json::from_str(&private_deny_settings(Some(lib), lib, &["me/finances".into()]).unwrap().unwrap()).unwrap();
+        let deny: Vec<&str> = v["permissions"]["deny"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        for want in ["Read(./me/finances/**)", "Edit(./me/finances/**)", "Read(//home/u/Library/me/finances/**)", "Edit(//home/u/Library/me/finances)"] {
+            assert!(deny.contains(&want), "missing {want} in {deny:?}");
+        }
+        // Running elsewhere (a project, the app layer): only the absolute form applies.
+        let v = private_deny_settings(Some(lib), Path::new("/home/u/proj"), &["me".into()]).unwrap().unwrap();
+        assert!(v.contains("Read(//home/u/Library/me/**)") && !v.contains("./me"));
+        assert!(private_deny_settings(Some(lib), lib, &["../etc".into()]).is_err());
+        assert!(private_deny_settings(Some(lib), lib, &["/etc".into()]).is_err());
+    }
+
+    #[test]
+    fn language_note_follows_setting() {
+        assert!(language_note("ar").contains("Arabic"));
+        assert!(language_note("en").contains("English"));
     }
 }

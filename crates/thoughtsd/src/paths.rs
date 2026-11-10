@@ -16,12 +16,73 @@ pub fn extensions_dir() -> PathBuf { home().join("extensions") }
 pub fn settings_file() -> PathBuf { home().join("settings.json") }
 pub fn daemon_file() -> PathBuf { home().join("daemon.json") }
 pub fn git_credentials_file() -> PathBuf { home().join("git-credentials") }
+pub fn usage_file() -> PathBuf { home().join("usage.json") }
+
+/// The OS user's home folder, as an error rather than a panic when it cannot be determined.
+pub fn user_home() -> anyhow::Result<PathBuf> {
+    dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not find your home folder"))
+}
+
+/// Expand a leading `~/`.
+pub fn expand_tilde(raw: &str) -> anyhow::Result<PathBuf> {
+    match raw.strip_prefix("~/") {
+        Some(rest) => Ok(user_home()?.join(rest)),
+        None => Ok(PathBuf::from(raw)),
+    }
+}
+
+/// Create `d` (and parents) readable by the owner only, and tighten it if it already exists.
+pub fn create_private_dir(d: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(d)?;
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(d)?;
+    Ok(())
+}
 
 pub fn ensure_dirs() -> std::io::Result<()> {
     for d in [home(), chats_dir(), attachments_dir(), extensions_dir()] {
-        std::fs::create_dir_all(d)?;
+        create_private_dir(&d)?;
     }
     Ok(())
+}
+
+/// Write `bytes` to `path` atomically: a temp file in the same folder, then a rename, so a crash
+/// never leaves a half-written file. `private` files are created 0600 (never chmod-after).
+pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    // A library file that is a symlink keeps being one: write through to its target.
+    let target = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_symlink() && !private => std::fs::canonicalize(path)?,
+        _ => path.to_path_buf(),
+    };
+    let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let name = target.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let tmp = dir.join(format!(".{}.{}.tmp", name.to_string_lossy(), uuid::Uuid::new_v4().simple()));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // Keep an existing shared file's mode; new shared files get the usual 0644 (minus umask).
+        let mode = if private { 0o600 } else {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(&target).map(|m| m.permissions().mode() & 0o777).unwrap_or(0o644)
+        };
+        opts.mode(mode);
+    }
+    let res = (|| {
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, &target)
+    })();
+    if res.is_err() { let _ = std::fs::remove_file(&tmp); }
+    res
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -38,18 +99,37 @@ pub fn read_daemon_info() -> Option<DaemonInfo> {
 }
 
 pub fn write_daemon_info(info: &DaemonInfo) -> std::io::Result<()> {
-    let p = daemon_file();
-    std::fs::write(&p, serde_json::to_string_pretty(info).unwrap())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    let text = serde_json::to_string_pretty(info).map_err(std::io::Error::other)?;
+    write_atomic(&daemon_file(), text.as_bytes(), true)
 }
 
 pub fn clear_daemon_info() {
     let _ = std::fs::remove_file(daemon_file());
+}
+
+/// Normalise a library-relative folder path: forward slashes, no leading `./`, no trailing slash.
+/// Refuses absolute paths, `..`, and characters that cannot be expressed safely in a permission rule.
+pub fn clean_rel(rel: &str) -> anyhow::Result<String> {
+    let rel = rel.trim().replace('\\', "/");
+    if rel.starts_with('/') || rel.starts_with('~') || Path::new(&rel).is_absolute() { anyhow::bail!("path must be relative to the library: {rel}"); }
+    if rel.chars().any(|c| c.is_control() || "()*?[]{}\"'`$!:".contains(c)) { anyhow::bail!("path contains unsupported characters: {rel}"); }
+    let mut parts = vec![];
+    for comp in rel.split('/') {
+        match comp.trim() {
+            "" | "." => {}
+            ".." => anyhow::bail!("path may not contain '..': {rel}"),
+            c => parts.push(c.to_string()),
+        }
+    }
+    if parts.is_empty() { anyhow::bail!("empty path"); }
+    Ok(parts.join("/"))
+}
+
+/// Is library-relative `rel` equal to, or inside, one of `dirs` (already cleaned with `clean_rel`)?
+pub fn is_under(rel: &str, dirs: &[String]) -> bool {
+    let rel = rel.replace('\\', "/");
+    let rel = rel.trim_start_matches("./").trim_start_matches('/').to_lowercase();
+    dirs.iter().any(|d| { let d = d.to_lowercase(); rel == d || rel.starts_with(&format!("{d}/")) })
 }
 
 /// Join `rel` onto `root`, refusing anything that escapes `root`.
@@ -95,5 +175,30 @@ mod tests {
         assert!(safe_join(&lib, "dangling").is_err());
         assert!(safe_join(&lib, "../x").is_err());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_is_private_from_creation() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("wa-{}", uuid::Uuid::new_v4()));
+        create_private_dir(&d.join("sub")).unwrap();
+        assert_eq!(std::fs::metadata(d.join("sub")).unwrap().permissions().mode() & 0o777, 0o700);
+        let f = d.join("sub/secret.json");
+        write_atomic(&f, b"one", true).unwrap();
+        write_atomic(&f, b"two", true).unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "two");
+        assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        // No temp files left behind.
+        assert_eq!(std::fs::read_dir(d.join("sub")).unwrap().count(), 1);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn clean_rel_rejects_escapes() {
+        assert_eq!(clean_rel(" ./me/finances/ ").unwrap(), "me/finances");
+        for bad in ["../x", "a/../b", "/etc", "~/x", "a/**", "x)y", ""] { assert!(clean_rel(bad).is_err(), "{bad}"); }
+        let dirs = vec!["me/finances".to_string()];
+        assert!(is_under("me/finances/tax.md", &dirs) && is_under("Me/Finances", &dirs));
+        assert!(!is_under("me/finances-old/x.md", &dirs));
     }
 }

@@ -88,7 +88,7 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
 pub fn trust(p: &Path) -> anyhow::Result<()> {
     let mut m = load();
     m.insert(canon(p), fingerprint(p, &findings(p)));
-    std::fs::write(store(), serde_json::to_string_pretty(&m)?)?;
+    crate::paths::write_atomic(&store(), serde_json::to_string_pretty(&m)?.as_bytes(), true)?;
     Ok(())
 }
 
