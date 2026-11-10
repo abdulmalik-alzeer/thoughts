@@ -26,13 +26,21 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
         .args(["-c", "core.fsmonitor=false", "rev-parse", arg]).output().ok().filter(|o| o.status.success())
         .map(|o| { let p = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()); if p.is_absolute() { p } else { path.join(p) } });
     // Every non-markdown file under .claude/ (scripts a hook could call); skills' .md edits don't re-prompt.
-    fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+    // Symlinks are never followed (their target string is hashed instead); depth and count are capped.
+    fn walk(d: &Path, depth: usize, out: &mut Vec<PathBuf>, links: &mut Vec<String>) {
+        if depth > 8 || out.len() > 2000 { links.push("limit".into()); return; }
         if let Ok(rd) = std::fs::read_dir(d) { for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() { walk(&p, out) } else if p.extension().map_or(true, |x| x != "md") { out.push(p) }
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() { links.push(format!("{}->{}", p.display(), std::fs::read_link(&p).map(|t| t.display().to_string()).unwrap_or_default())); }
+            else if ft.is_dir() { walk(&p, depth + 1, out, links) }
+            else if ft.is_file() && p.extension().map_or(true, |x| x != "md") { out.push(p) }
         } }
     }
-    let mut extra = vec![]; walk(&path.join(".claude"), &mut extra); extra.sort(); files.extend(extra);
+    let (mut extra, mut links) = (vec![], vec![]);
+    walk(&path.join(".claude"), 0, &mut extra, &mut links);
+    extra.sort(); links.sort(); files.extend(extra);
+    h.update(links.join("\n"));
     for d in [git("--absolute-git-dir"), git("--git-common-dir")].into_iter().flatten() {
         files.push(d.join("config")); files.push(d.join("config.worktree"));
         // Files pulled in through include.path / includeIf.
@@ -53,7 +61,10 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
     }
     for p in files {
         h.update(p.to_string_lossy().as_bytes()); h.update([0]);
-        if let Ok(b) = std::fs::read(&p) { h.update(&b); }
+        // Hash at most 4 MB per file; don't follow a symlinked top-level file either.
+        if std::fs::symlink_metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
+            if let Ok(f) = std::fs::File::open(&p) { use std::io::Read; let mut b = vec![]; let _ = f.take(4 << 20).read_to_end(&mut b); h.update(&b); }
+        }
         h.update([0xff]);
     }
     format!("{:x}", h.finalize())
