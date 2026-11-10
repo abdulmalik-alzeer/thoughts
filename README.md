@@ -5,7 +5,7 @@
 <p align="center"><b>Your second brain, on your Mac.</b><br>
 Talk things through with AI. Thoughts keeps what matters: ideas, notes and todos, organized and yours.</p>
 
-<p align="center"><img src="design/screenshots/home-saudi-night.png" width="820" alt="Thoughts home screen"></p>
+<p align="center"><a href="README.ar.md">العربية</a></p>
 
 ---
 
@@ -16,8 +16,9 @@ I think AI ends that. Apps will become living things that learn how you work and
 around you, one conversation at a time.
 
 Thoughts is my attempt to build one. Ask it for a new view, a workflow or a look, and it builds it
-for you. Every change is versioned and can be undone in one click, and updates never overwrite
-what you've made your own.
+for you. You see a preview before anything changes, every change is versioned and can be undone in
+one click, and updates never overwrite what you've made your own.
+See [Making Thoughts your own](docs/CUSTOMISING.md).
 
 ## What it does
 
@@ -28,17 +29,18 @@ what you've made your own.
   waiting to be wrapped.
 - **Yours, in plain files.** Everything is ordinary text files in a folder on your Mac. No lock-in,
   no proprietary database. Sync it with iCloud, Dropbox or git, or keep it local.
-- **Made for anyone.** Accountants, consultants, students, founders: Thoughts adapts to how you
-  work. Turn modules on and off, and pick from three themes in Day and Night.
-- **English and Arabic.** Full right-to-left support.
-
-<p align="center">
-  <img src="design/screenshots/themes.png" width="820" alt="Saudi, High tech and High contrast themes">
-</p>
+- **Who it's for.** Today, Thoughts fits best if you already think with Claude and want that
+  thinking kept instead of lost in old chats. It is being shaped for professionals: setup asks
+  what you do (accounting, law, consulting, teaching, research, building a product) and arranges
+  your library around clients, matters, classes or projects, with meeting notes and due dates.
+  Turn modules on and off, and pick from three themes in Day and Night.
+- **English and Arabic.** Full right-to-left support, and the assistant writes your notes in the
+  language you work in.
 
 ## Get started
 
-1. Install [Claude Code](https://claude.com/claude-code) and sign in once. Thoughts sets up the rest.
+1. Install [Claude Code](https://claude.com/claude-code) and sign in once (this needs a paid
+   Claude plan or an API key). Thoughts sets up the rest.
 2. Download the latest **Thoughts .dmg** from Releases and drag it into Applications.
 3. Open Thoughts. A short setup creates your library and walks you through the basics.
 
@@ -46,14 +48,16 @@ Requires a Mac with Apple Silicon (M1 or later).
 
 ## Updates
 
-Thoughts updates itself. Your library is never touched by an update. If you've customized the app,
-Thoughts checks what changed and asks before touching anything you made: keep it, carry it over,
-or reset it.
+Thoughts tells you when a new version is ready. Your library is never touched by an update. If
+you've customized the app, Thoughts compares what you changed with the original and only asks
+where both you and the new version changed the same thing: keep mine, use new, or let the
+assistant merge the two.
 
 ## Privacy
 
 Your files stay on your computer. Thoughts talks to the AI only when you chat, and syncs only
-where you tell it to.
+where you tell it to. There is no analytics or tracking. You can mark folders the assistant must
+never open. The details, in plain language: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ---
 

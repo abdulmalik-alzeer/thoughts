@@ -1,34 +1,30 @@
-# Thoughts Starter Kit
+# Welcome to your library
 
-A personal thinking library you run with [Claude Code](https://claude.com/claude-code). Your ideas, projects, daily reviews, and tasks live as plain markdown files, developed through conversations with Claude across many sessions. There is no application code — **the files are the product**.
+This folder is your library: everything you think through with the assistant, kept as ordinary text files that belong to you. You can read them in the app, open them with any text editor, copy them, or back them up like any other folder.
 
-## Requirements
+## How it works
 
-- Claude Code (CLI or desktop app)
-- git
+1. **Talk.** Open a chat and think out loud: a client question, a plan, a lesson, a decision. Write in whatever language you prefer; the assistant answers and keeps notes in the same language.
+2. **Wrap.** When you are done, press **Wrap**. The assistant turns the conversation into tidy notes, decisions and todos, and shows you what it will save before anything is saved. Nothing you discussed is lost, and nothing is saved without you seeing it.
+3. **Come back.** Next time, the home screen shows what you were working on. Pick any item and the assistant recaps where you left off.
 
-## Setup — one time
+## Everyday things
 
-1. Unzip this folder wherever you keep long-lived things (e.g. `~/Thoughts`). Rename the folder if you like.
-2. Open a terminal in the folder and run `claude`.
-3. Say: **"init the library"** (or run `/init-library`).
+- **Capture an idea.** Say "new idea: ..." in a chat, or use the capture button. One line is enough; you can develop it later.
+- **Start a client, matter, class or project.** Say "new client: ..." (or whichever word fits your work). It gets its own page with notes, todos and meeting notes.
+- **Save a meeting.** Paste or dictate your rough notes and say "meeting notes". You get a clean, dated note, and the action items become todos.
+- **Add a todo with a due date.** Add the task in the Todos view and pick a date. Or just tell the assistant: "remind me to send the report by Thursday".
+- **Find things.** Use Search for any word or name. Or ask: "what did we decide about ...?"
+- **Undo.** Every save is kept in your library's history. Open History to see what changed and restore an earlier version. Nothing is overwritten for good.
 
-Claude will ask a few questions — what you'll use the library for (project ideas, daily briefs, todo lists, a personal profile…), your name, whether to sync with GitHub — then tailor the library to your answers, make the first commit, and delete the init command so it can never run twice.
+## Making it yours
 
-After that, just talk:
+The library adapts to how you work. After a wrap, the assistant may suggest one small improvement, for example a checklist for something you do every month. It only suggests; nothing changes until you agree. You can also say "tune-up" at any time for a short review of how the library is working for you.
 
-- *"new idea: a faster month-end close"* — captures and files it
-- *"continue faster-month-end-close"* — resumes where you left off
-- *"check-in"* — daily/weekly debrief
-- *"wrap"* — saves the session's thinking into files and commits
+## Keeping things private
 
-Everything else is explained in `CLAUDE.md`, which Claude reads automatically every session.
+Your files stay in this folder. In Settings, under Privacy, you can mark folders the assistant must never open. Avoid putting passwords, bank details or ID numbers in notes.
 
-## What's in the box
+---
 
-```
-CLAUDE.md            ← the library's rules (Claude reads this every session)
-INDEX.md             ← master index of your ideas (starts empty)
-.claude/skills/      ← the rituals: init-library, new-idea, continue-idea,
-                       wrap, check-in, interview-me, reindex, review-library
-```
+*For developers:* the library is plain markdown with optional git history. You can also run the assistant from a terminal inside this folder; `CLAUDE.md` holds the rules it follows and `.claude/skills/` holds the routines.

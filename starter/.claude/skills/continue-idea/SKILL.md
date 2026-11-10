@@ -1,15 +1,17 @@
 ---
 name: continue-idea
-description: Resume a previous idea discussion with minimal token use — recap where it left off and continue. Use when the user wants to continue, revisit, or pick up an existing idea.
+description: Resume an existing idea or work item (client, matter, class, project) with a short recap of where it left off. Use when the user wants to continue, revisit, or pick something back up.
 ---
 
-# Continue an idea
+# Continue an item
+
+Reply in the user's language, in plain words.
 
 ## Steps
 
-1. **Resolve.** Find the idea's line in INDEX.md (grep by name or keywords). Multiple candidates → ask which one. No match → offer to start it as a new idea.
-2. **Read the resume package — nothing more:** the idea's `README.md`, plus the top 2–3 entries of its `log.md`. Do not open `notes/` yet.
-3. **Recap in 3–5 lines:** current state, what was last decided, ending with the open questions / next steps. Then ask which thread to pull — or follow the focus the user already stated.
-4. **During discussion:** open a `notes/` file only when the README's `## Files` map or the user makes it relevant.
-5. **Dormant ideas:** if status is `parked`, `done`, or `dropped`, say so and confirm reactivation before diving in (status flips to `active` at the next wrap).
-6. When the session winds down, offer `/wrap`.
+1. **Find it.** Look for the item's line in INDEX.md by name or keywords. Several candidates → ask which. No match → offer to create it.
+2. **Read only the resume package:** the item's `README.md`, the newest 2–3 entries of its `log.md`, and its `todo.md` if it exists. Do not open notes, meetings or outputs yet.
+3. **Recap in 3–5 lines:** where things stand, what was last decided, open todos that are overdue or due soon (compare `@due` dates with today), and the open questions. Then ask which thread to pick up — or follow the focus the user already gave.
+4. **While talking:** open a note or meeting file only when the README's `## Files` list or the user makes it relevant.
+5. **Dormant items:** if the status is `parked`, `done` or `dropped`, say so in plain words ("this one is on hold") and confirm before reopening it (status becomes `active` at the next wrap).
+6. When the conversation winds down, offer to wrap.

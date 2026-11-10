@@ -1,16 +1,16 @@
 ---
 name: reindex
-description: Rebuild INDEX.md from idea README frontmatter and report drift. Use when the index looks stale or wrong, or after manual file moves.
+description: Rebuild INDEX.md from the front pages of every idea and work item, and report anything that had drifted. Use when the index looks stale or wrong, or after folders were moved or renamed by hand.
 ---
 
 # Reindex
 
-INDEX.md is derived data; idea READMEs are the source of truth.
+INDEX.md is rebuilt from item READMEs, which are the source of truth.
 
 ## Steps
 
-1. **Collect.** Glob `*/*/README.md` (every idea README — exactly two levels: `area/slug`).
-2. **Read frontmatter only** (first ~15 lines of each): `title`, `status`, `area`, `updated`, `summary`.
-3. **Rebuild INDEX.md** in the standard format — `## <area>` headings alphabetical; within an area, most recently `updated:` first; keep the explanatory header at the top of the file.
-4. **Report drift:** ideas that were missing from the old index, orphan index lines whose folder no longer exists, `area:` frontmatter that disagrees with the folder's actual location, and missing or malformed frontmatter.
-5. **Commit** — message `reindex`.
+1. **Collect.** Find every `*/*/README.md` — exactly two levels deep (`area/item`). Skip `me/`, `routines/`, `meetings/`, `tasks/`, folders starting with a dot, and folders the app marks private.
+2. **Read the note details only** (the first lines between `---`): `title`, `kind`, `status`, `area`, `updated`, `summary`.
+3. **Rebuild INDEX.md** in the standard format — `## <area>` headings alphabetical; within an area, most recently updated first; keep the explanatory header at the top.
+4. **Tell the user what was out of step**, in plain words and their language: items that were missing from the index, index lines whose folder no longer exists, items whose recorded area differs from where they actually are, and items with missing details.
+5. **Save** — outside the Thoughts app only: `reindex`.

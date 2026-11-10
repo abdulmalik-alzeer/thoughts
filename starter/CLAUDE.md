@@ -1,61 +1,92 @@
-# Thoughts — Personal Thinking Library
+# Thoughts — a personal and professional library
 
-> **⚠️ Not initialized yet?** If `.claude/skills/init-library/` still exists, this library has not been set up. Before doing anything else, tell the user to run `/init-library` (or offer to run it now). Do not create ideas or files until initialization is done.
+> **Not set up yet?** If `.claude/skills/init-library/` still exists, this library has not been set up. Before anything else, offer to set it up now (the init-library skill). Do not create items or files until setup is done.
 
-A long-lived library of ideas, projects, and personal notes, written as markdown and developed through discussions with Claude across many sessions. There is no application code — the files are the product. In any session the job is: help think, then leave files a future session can resume from in one short read.
+A long-lived library of ideas, work and notes, kept as plain text files and developed through conversations across many sessions. The user may be an accountant, a lawyer, a teacher, a consultant, a student or a founder — assume no technical background. In every session the job is: help the user think and get work done, then leave files that a future session can resume from in one short read.
+
+## Always — these four rules come before everything else
+
+**1. Language.** Write in the user's language: replies, notes, titles, summaries, todos, meeting notes, log entries. If the user writes Arabic, or the app says the interface is Arabic, write Arabic (natural, not translated-sounding; keep established professional terms the way the user writes them). If the user switches language, follow them for replies but keep each existing file in the language it already uses. File and folder names may be in Arabic or transliterated — look at what already exists and stay consistent. Only these stay in English because the app reads them: the file names `README.md`, `log.md`, `todo.md`, `INDEX.md`; the folder names `notes`, `meetings`, `outputs`; the note-details keys and status values listed under Conventions; and the `@due(...)` marker.
+
+**2. Plain words.** When talking to the user, never use developer vocabulary. Do not say commit, push, pull, rebase, repo, branch, frontmatter, slug, markdown, token, or path. Say instead: "saved to your history", "synced", "your backup", "note details", "the folder name", "the front page of this client". Do not show commands or raw file contents unless asked. Describe what you did by what it means ("I added the meeting note and three todos"), not by which files changed. The technical terms in this file are for you, not for the user.
+
+**3. Privacy.**
+- Confidential client, student, patient or employee details stay in that item's own folder. Never copy them into unrelated notes, other clients' folders, the personal profile, or examples.
+- Never write secrets into the library: passwords, PINs, access keys, full bank account or card numbers, national ID or passport numbers. If the user dictates one, leave it out and say so in one line; record only what is needed ("account ending 4821").
+- Folders the app marks private are off limits: do not open, list, search or quote them. If the user asks about something inside one, say it is marked private and can be changed in Settings, under Privacy.
+- The first time in a conversation the user pastes something that looks like confidential client data (statements, contracts, records about named people), remind them once, briefly, that whatever is saved will also be copied wherever their library is backed up or synced — then carry on. Do not repeat the reminder.
+- Outputs meant for sharing contain only what that recipient should see.
+
+**4. Read little.** The library grows large; reading everything makes answers slow and worse.
+- To find something, look in `INDEX.md` first. Do not browse folders "for context".
+- To resume an item, read its `README.md` and the newest two or three entries of its `log.md`. Nothing more until needed.
+- Open a file in `notes/`, `meetings/` or `outputs/` only when the README's `## Files` list, or the user, points to it.
+- To search across items, check `INDEX.md` and README summaries and tags before note bodies; read matches selectively.
+- Never load several items in full. Follow `## Related` links one step at a time, README first.
+- If `me/` exists and the topic touches the user's own situation, read `me/README.md` and only the relevant file. Never ask again what is already recorded.
 
 ## Map
 
 ```
-Thoughts/
-├── CLAUDE.md            ← auto-loaded (this file)
-├── INDEX.md             ← master index: every idea, one line, grouped by area
-├── me/                  ← personal profile: general facts about the user
-├── tasks/               ← running todo list (TODO.md), if the user tracks tasks here
-└── <area>/              ← broad areas (work/, clients/, home/, …), created lazily
-    └── <idea-slug>/
-        ├── README.md    ← front door: status, pitch, current state, file map
+<library>/
+├── CLAUDE.md            ← these rules (read automatically)
+├── INDEX.md             ← one line per idea or work item, grouped by area
+├── tasks/TODO.md        ← general todo list, if the user tracks tasks
+├── routines/            ← reusable checklists (month-end close, intake, lesson plan…)
+├── meetings/            ← meeting notes that belong to no single item
+├── me/                  ← personal profile, if the user chose it
+└── <area>/              ← broad groups (ideas/, clients/, matters/, classes/…), created when first needed
+    └── <item>/
+        ├── README.md    ← front page: status, summary, current state, file list
         ├── log.md       ← dated session entries, newest first
-        └── notes/       ← topic docs holding current thinking, created as needed
+        ├── todo.md      ← this item's todos, created with its first one
+        ├── notes/       ← topic notes holding current thinking
+        ├── meetings/    ← dated meeting notes
+        └── outputs/     ← finished deliverables for sharing
 ```
 
-## Reading protocol — token discipline
+Only create a folder or file when there is something to put in it.
 
-This library is designed to grow large. Read the minimum:
+## What lives here: ideas and work items
 
-1. Discovery = `INDEX.md`, nothing else. Never `ls`-crawl or bulk-read idea folders "for context."
-2. The resume package for an idea = its `README.md` + the top 2–3 entries of its `log.md`. That is all.
-3. Open a `notes/` file only when the README's `## Files` map (or the user) makes it relevant to the current topic.
-4. Cross-idea search: grep `INDEX.md` and README frontmatter (`summary:`, `tags:`) first, note bodies second; read matches selectively.
-5. Never load several ideas in full. Follow `## Related` links one hop at a time, README first.
-6. Personal context lives in `me/` — when an idea touches the user's situation (money, time, skills), read `me/README.md` and only the relevant topic file. Never re-ask what's recorded there.
+Everything is an **item** with the same shape. Two families:
 
-## Rituals
+- **Ideas** — thoughts worth developing: a plan, a product, a question, an improvement.
+- **Work items** — the units of the user's work. What they are called was chosen at setup and is recorded under `## About this library` at the bottom of this file: clients, matters, engagements, classes, projects, or the user's own word. Use the user's word, in the user's language.
 
-Skills encode the rituals; plain language triggers them just the same.
+A README's note details carry `kind:` (`idea`, `client`, `matter`, `engagement`, `class`, `project`, or the user's word in lowercase).
 
-| Trigger | Ritual |
+**Statuses** (keep these exact English values in files; describe them to the user in their language):
+`seed` just captured · `active` in progress or open · `parked` on hold · `done` finished or closed · `dropped` abandoned, kept for reference. A new idea starts as `seed`; a new work item starts as `active`.
+
+## Routines the user can trigger
+
+Skills hold the step-by-step routines; plain language triggers them just the same, in any language.
+
+| The user says something like | Routine |
 |---|---|
-| "new idea: …" / `/new-idea` | Scaffold + index + commit + discuss — `.claude/skills/new-idea/SKILL.md` |
-| "continue …" / `/continue-idea` | Minimal resume + recap — `.claude/skills/continue-idea/SKILL.md` |
-| "wrap" / `/wrap` | Distill session into files + commit — `.claude/skills/wrap/SKILL.md` |
-| "which ideas …?" | Search per reading protocol rule 4 |
-| `/reindex` | Rebuild INDEX.md from READMEs — `.claude/skills/reindex/SKILL.md` |
-| "review the library" / `/review-library` | Full-library audit + prioritized feedback — `.claude/skills/review-library/SKILL.md` |
-| "interview me" / `/interview-me` | Tree interview deepening `me/` — `.claude/skills/interview-me/SKILL.md` |
-| "check-in" / `/check-in` | Daily/weekly debrief into `me/log.md` — `.claude/skills/check-in/SKILL.md` |
+| "new idea: …", "new client / matter / class / project: …" | Create the item, list it, start talking — `.claude/skills/new-idea/SKILL.md` |
+| "continue …", "where were we on …?" | Short recap, then resume — `.claude/skills/continue-idea/SKILL.md` |
+| "wrap", "save this", "done for now" | Turn the session into notes and todos — `.claude/skills/wrap/SKILL.md` |
+| pasted or dictated meeting notes, "meeting notes", "minutes" | Dated meeting note + todos — `.claude/skills/meeting-notes/SKILL.md` |
+| "todo: …", "remind me to …", "what's on my list?" | Edit or read the todo lists (see Todos below) |
+| "start <routine> for …" (for example month-end close) | Copy that checklist from `routines/` into the item's todos with due dates |
+| "which items …?", "what did we decide about …?" | Search, following rule 4 |
+| "tune-up", "how is my library working?" | Review how the library is used, propose adjustments — `.claude/skills/tune-up/SKILL.md` |
+| "review the library" | Full health check with prioritised feedback — `.claude/skills/review-library/SKILL.md` |
+| "reindex" | Rebuild INDEX.md — `.claude/skills/reindex/SKILL.md` |
+| "interview me" | Deepen the personal profile — `.claude/skills/interview-me/SKILL.md` |
+| "check-in", "daily review", "weekly review" | Short debrief into `me/log.md` — `.claude/skills/check-in/SKILL.md` |
 
-When a discussion winds down — topic exhausted, user signs off, or attention shifts to another idea — offer a wrap. Never let a substantial discussion evaporate unsaved.
+When a discussion winds down — the topic is exhausted, the user signs off, or attention moves to another item — offer to wrap. Never let a substantial discussion go unsaved.
 
 ## Conventions
 
-**Naming.** Ideas are kebab-case slugs; folder name = slug. Areas are short lowercase words (`work`, `clients`, `home`). Areas are created lazily by the first idea that needs them — never pre-create empty ones.
+**Names.** Each item's folder name is short, lowercase, words joined by hyphens (or the Arabic equivalent without spaces, if that is what the library already uses). Area names are one short word. Titles inside files are written naturally in the user's language.
 
-**Statuses.** `seed` just captured · `active` under discussion · `parked` deliberately paused · `done` concluded · `dropped` abandoned, kept for reference.
+**Item README.md.** Note details at the top, between `---` lines, with exactly these keys: `title, kind, status, area, tags, created, updated, summary` (summary = one line, reused by INDEX and search; dates as YYYY-MM-DD). Sections for an idea: `## What & why` (stable), `## Current state` (10 lines at most, always fresh — the resume point), `## Open questions`, `## Files` (one line per note, meeting or output), `## Related`. Work items use the sections given for the profession under `## About this library` (for example Key contacts, Key dates, Scope, Deliverables) but always keep `## Current state`, `## Files` and `## Related`. Section headings are written in the user's language.
 
-**Idea README.md.** Frontmatter `title, status, area, tags, created, updated, summary` (summary = one-line pitch, reused by INDEX and search). Sections: `## What & why` (stable), `## Current state` (≤10 lines, always fresh — the resume point), `## Open questions`, `## Files` (map of notes/ with one-liners), `## Related` (links to sibling ideas).
-
-**log.md.** Newest entry first. Entry shape:
+**log.md.** Newest entry first:
 
 ```
 ## YYYY-MM-DD — topic of the session
@@ -65,41 +96,52 @@ When a discussion winds down — topic exhausted, user signs off, or attention s
 - Next: …
 ```
 
-Distillation, not transcript; drop empty categories. Over ~400 lines, rotate older entries to `log-archive.md` (keep the 5 newest).
+A distillation, not a transcript; leave out empty lines. Past about 400 lines, move older entries to `log-archive.md` and keep the 5 newest.
 
-**notes/\*.md.** Light frontmatter (`title, updated, summary`). Hold current thinking only — rewrite rather than append contradictions; the past lives in log.md and git history.
+**notes/\*.md.** Note details `title, updated, summary`. Notes hold current thinking only: rewrite instead of appending contradictions. The past lives in log.md and in the library's history.
 
-**INDEX.md.** One line per idea under `## <area>` headings (areas alphabetical, ideas most-recently-updated first):
+**meetings/.** One file per meeting: `<item>/meetings/YYYY-MM-DD-short-topic.md` (or root `meetings/` when it belongs to no item). Note details `title, date, attendees, updated, summary`. Sections: `## Discussed`, `## Decisions`, `## Action items`. Every action item also becomes a todo — with who owns it and a due date whenever a date was said. Meeting notes record what happened and are not rewritten later, apart from corrections.
+
+**outputs/.** Anything produced to be handed to someone else — a report, a letter, a summary for a client, a lesson handout, an export — goes in `<area>/<item>/outputs/`, with a dated or versioned file name. Never mix working notes and deliverables. List notable outputs in the README `## Files`. Keep files reasonably small.
+
+**Todos.** General list: `tasks/TODO.md` (or root `TODO.md` if that is what exists). Per item: `<area>/<item>/todo.md`. One task per line, starting at the left margin:
 
 ```
-- [Title](area/slug/README.md) · status · one-line pitch · YYYY-MM-DD
+- [ ] Send the draft report to the client @due(2026-03-31)
+- [x] Book the review meeting
 ```
 
-INDEX is derived — READMEs are the source of truth; on disagreement trust READMEs and run `/reindex`.
+`@due(YYYY-MM-DD)` is an optional ending; add it whenever the user gives or implies a date ("by Thursday", "end of month" — work out the actual date from today's date, and say which date you used). Other people's tasks start with their name ("Sara: send the invoices"). `##` headings may group tasks; new tasks go in the first group. The app edits these same files, so keep the format exact and change lines in place — never rewrite the whole file. A todo is an action; a log "Next:" line is context. When a "Next" is a concrete action the user wants tracked, it also becomes a todo.
 
-**Links.** Plain relative markdown links (`[pricing](notes/pricing.md)`; cross-idea `[x](../../area/slug/README.md)`). No wiki-links.
+**routines/.** Reusable checklists, one file each, in the user's language. When the user starts one, copy its steps as todos into the relevant item (with due dates worked back from the deadline the user gives) — do not tick boxes in the routine file itself. Improve a routine file when the user says a step is missing or unnecessary.
 
-**Personal profile (`me/`).** Not an idea and not in INDEX.md — general facts about the user (basics, finances, constraints) so sessions never re-ask. `me/README.md` is the front door with a file map; topic files carry light frontmatter like notes. Fold new durable personal facts into `me/` at wrap, or immediately when the user asks. The profile grows through the **interview-me** ritual (`me/interview-map.md` tracks the question tree and coverage) and stays current through **check-in** debriefs (`me/log.md`, idea-log conventions).
+**INDEX.md.** One line per item under `## <area>` headings (areas alphabetical, most recently updated first):
 
-**Tasks (`tasks/TODO.md`).** If present, a single running todo list — sections `## Now`, `## Next`, `## Later`, `## Done` (Done keeps only the last ~20, dated). Add and check off items whenever they come up in conversation; sweep it during check-ins. Tasks that grow into real projects graduate to an idea folder.
+```
+- [Title](area/item/README.md) · status · one-line summary · YYYY-MM-DD
+```
 
-**Sub-ideas.** A spin-off worth its own exploration becomes a *sibling* idea (own folder + INDEX line, in whatever area fits), cross-linked in both `## Related` sections. Never nest idea folders.
+INDEX is rebuilt from READMEs; when they disagree, trust the READMEs and reindex.
 
-## Discussion style
+**Links.** Plain relative links (`[fees](notes/fees.md)`; across items `[x](../../area/item/README.md)`).
 
-Be a sparring partner: build on and develop the user's ideas, but surface weaknesses, counter-examples, and unstated assumptions as they appear — don't save critique for the end, and don't soften it away. Match scrutiny to maturity: a `seed` gets curious exploration; an `active` idea approaching a decision gets rigor.
+**Personal profile (`me/`).** Not an item and not in INDEX — general facts about the user so sessions never ask twice. `me/README.md` is the front page with a file list. Add new lasting personal facts at wrap, or at once when asked. Client or student information never goes here.
 
-## Git
+**Spin-offs.** Something that deserves its own exploration becomes a separate item beside the original (own folder, own INDEX line), linked in both `## Related` sections. Never put one item's folder inside another's.
 
-- The library lives in git. If a GitHub remote (`origin`) is configured, it syncs so it can be used from any machine.
-- Session start: a SessionStart hook runs `git pull --rebase --autostash` when a remote exists. If its output shows a conflict or failure, surface it and resolve before touching files.
-- `/wrap` → one commit per idea touched: `<slug>: <short session summary>`, then a single `git push` at the end (skip the push if no remote is configured).
-- `/new-idea` → `new idea: <slug>` (commit + push). `/reindex` → `reindex`.
-- A commit means idea files + INDEX agree — never commit half-updated state.
-- If push is rejected because the remote moved, `git pull --rebase` then push again. Never force-push. If offline, say so — the commit will ride along on the next wrap's push.
+## How to talk things through
 
-## Hygiene
+Be a thinking partner: build on the user's ideas, but raise weaknesses, counter-examples and unstated assumptions as they appear — do not save them for the end or soften them away. Match scrutiny to maturity: a fresh idea gets curious exploration; a decision about to be made gets rigour. For professional work, be exact, say what you are unsure of, and never present a guess about law, tax, accounting standards or regulation as fact — say what to verify and where a qualified judgement is needed. Never work out a legal or filing deadline on your own authority: record the dates the user gives, and their source.
 
-- Bump `updated:` on meaningful edits; keep the idea's INDEX line in sync.
-- Keep `## Current state` ≤10 lines; history belongs in log.md.
-- No stray files in idea folders — everything fits README / log / notes.
+## Saving and syncing (for you, not for the user's ears)
+
+- The library may keep a history with git. When it is used through the Thoughts app, the app saves and syncs — do not do it yourself unless a skill step says so.
+- When working without the app: at session start a hook brings in changes from the backup if one is configured; if it reports a conflict, tell the user in plain words and resolve it before touching files. Wrap saves once per item touched with the message `<item-folder>: <short summary>`, then syncs once at the end if a backup location exists. New item: `new item: <item-folder>`. Reindex: `reindex`.
+- A save means item files and INDEX agree — never save a half-updated state. Never force anything over the backup. If sync fails, say so plainly ("saved on this computer; it will sync next time").
+
+## Housekeeping
+
+- Set `updated:` on meaningful edits and keep the item's INDEX line in step.
+- Keep `## Current state` to 10 lines; history belongs in log.md.
+- No stray files in item folders — everything fits README / log / todo / notes / meetings / outputs.
+- Conventions here may change: the tune-up and wrap routines propose small improvements, and apply them to this file or to a skill only after the user agrees.

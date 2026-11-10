@@ -1,15 +1,19 @@
 ---
 name: wrap
-description: End-of-session ritual — distill the discussion into the idea's files, update INDEX.md, and commit. Use when a discussion winds down or the user says wrap, save, or done for now.
+description: End-of-session routine — turn the discussion into the item's notes, log and todos (with due dates), update INDEX.md, and finish with at most one suggestion for improving how the library works. Use when a discussion winds down or the user says wrap, save, or done for now.
 ---
 
 # Wrap a session
 
-Turn the discussion into files a future session can resume from in one short read. For **each idea touched this session**, run all steps (one commit per idea).
+Turn the discussion into files a future session can resume from in one short read.
+
+**Language:** write every title, note, log entry and todo in the user's language — the language of the conversation, or of the existing file when adding to one. **Plain words:** when reporting to the user, say what was kept, not which files changed.
+
+For **each item touched this session** (idea or work item), do steps 1–7. Talk that belongs to no item: todos go to the general list; anything worth keeping becomes a new item (new-idea routine) or, for a meeting, a note in root `meetings/`.
 
 ## Steps
 
-1. **Distill** the session into one log entry, prepended to `log.md` (newest first):
+1. **Log entry**, added at the top of `log.md`:
 
    ```
    ## YYYY-MM-DD — <topic of the session>
@@ -19,20 +23,34 @@ Turn the discussion into files a future session can resume from in one short rea
    - Next: …
    ```
 
-   Distillation, not transcript — only lines that earn their place; drop empty categories.
+   A distillation, not a transcript — only lines that earn their place; leave out empty categories.
 
-2. **Merge substance into notes/.** Durable reasoning, designs, comparisons, research → create or update `notes/<topic>.md` (light frontmatter: `title`, `updated`, `summary`). Notes hold *current* thinking — rewrite rather than append contradictions. Create the `notes/` dir with the first note. Keep the README `## Files` map in sync (one-liner per note).
+2. **Notes.** Lasting reasoning, designs, comparisons, research → create or update `notes/<topic>.md` (note details `title, updated, summary`). Notes hold *current* thinking — rewrite instead of appending contradictions. If the session was a meeting, write it as a meeting note instead (meeting-notes routine). Anything produced for someone else goes in `outputs/`. Keep the README `## Files` list in step.
 
-3. **Refresh README:** rewrite `## Current state` (≤10 lines), update `## Open questions`, bump `status:` if it changed (e.g. `seed` → `active`), set `updated:` to today. Add `## Related` links if new connections to sibling ideas emerged.
+3. **Action items → todos.** Go through the session for anything someone agreed or needs to do. Each becomes one line in the item's `todo.md` (general tasks: the general list):
+   - Start with the owner's name when it is not the user.
+   - When a date was mentioned or implied ("by Thursday", "before month-end", "next week's class"), work out the actual date from today's date and end the line with `@due(YYYY-MM-DD)`. No date mentioned → no due date; do not invent one.
+   - Do not duplicate a todo that already exists; tick off (`- [x]`) those the session shows are finished.
+   - Edit lines in place; never rewrite the file.
 
-4. **INDEX.md:** update the idea's line (status · pitch · date) and move it to the top of its area section.
+4. **README:** rewrite `## Current state` (10 lines at most), update `## Open questions` and any work-item sections that changed (key dates, contacts, scope), change `status:` if it moved, set `updated:` to today. Add `## Related` links for new connections.
 
-5. **Log rotation:** if `log.md` exceeds ~400 lines, move older entries to `log-archive.md`, keeping the 5 newest in `log.md`.
+5. **INDEX.md:** update the item's line (status · summary · date) and move it to the top of its area.
 
-6. **Commit** — stage only that idea's folder plus INDEX.md; message `<slug>: <short session summary>` (e.g. `quarterly-close: agreed the review checklist`).
+6. **Privacy check** before saving: no secrets or ID/bank numbers in what you wrote; no client's details in another item's folder or in `me/`.
 
-7. **Push** — once, after all ideas are committed: `git push` (skip silently if no remote is configured). If rejected because the remote moved, `git pull --rebase` then push again — never force-push. If offline or push fails, tell the user plainly; the commits will ride along on the next wrap.
+7. **Long logs:** past about 400 lines, move older entries to `log-archive.md`, keeping the 5 newest.
 
-8. **Confirm** to the user in 1–2 lines what was captured, the commit message(s) used, and that the push succeeded (or why it didn't).
+8. **Save and sync** — only when working outside the Thoughts app (inside it, the app saves after showing the user a preview). One history entry per item — that item's folder plus INDEX.md — with the message `<item-folder>: <short summary>`; then sync once at the end if a backup location exists. If the backup has moved on, bring its changes in first and try again; never force. If sync fails, say plainly that everything is saved on this computer and will sync next time.
 
-**Spawned sub-ideas:** if the session produced a spin-off worth its own exploration, run the new-idea ritual for it as a *sibling* idea and cross-link both `## Related` sections before committing the parent.
+9. **Confirm** in two or three lines: what was kept, the todos added (with their dates, so the user can correct a wrong date), and whether it synced.
+
+10. **Grow with the user — at most one suggestion.** Look back over this session and the last few log entries of the items touched. If you see a *recurring* pattern that the library does not yet support, propose **one** small improvement, in one or two plain sentences, and ask whether to apply it. Examples:
+    - The same steps were done again by hand → "You have done this reconciliation three months running. Shall I save it as a routine so it becomes a ready checklist?"
+    - A README section is always empty, or the user keeps adding the same extra one → adjust the work-item sections.
+    - Meeting notes always need the same extra heading → add it to the meeting-notes routine.
+    - The user corrects the same thing each time (tone, date format, a term) → record the preference.
+
+    Rules: one suggestion or none — say nothing when no real pattern exists, and never repeat a suggestion the user declined (note declined ones under `## About this library` in CLAUDE.md as "Not wanted: …"). Apply only after the user says yes; then make the change to CLAUDE.md, the routine file or the skill, and tell them in one line what will be different from now on. When wrapping without the user present (the app wraps several chats at once), write the suggestion as the last line of your summary instead of asking, and change nothing.
+
+**Spin-offs:** if the session produced something worth its own exploration, create it as a separate item (new-idea routine) and link both `## Related` sections.

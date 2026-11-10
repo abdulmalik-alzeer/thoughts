@@ -1,31 +1,33 @@
 ---
 name: interview-me
-description: Tree-structured interview that deepens the me/ profile — high-level root questions per life domain branching into ever more specific follow-ups. Use when the user says interview me, or wants to fill out, deepen, or complete their personal profile.
+description: Structured interview that deepens the me/ personal profile — one broad opening question per area of life, branching into more specific follow-ups. Use when the user says interview me, or wants to fill out, deepen, or complete their personal profile.
 ---
 
 # Interview me
 
-Goal: make `me/` comprehensive enough that any future need — generating a CV, choosing a course, scoping an income project — can be served from the files without re-asking anything. The interview is a **tree**: each life domain is a root with one high-level question; every answer spawns deeper follow-ups; follow-ups not yet asked persist as *threads* in `me/interview-map.md` so the tree survives across sessions.
+Goal: make `me/` complete enough that any future need — writing a CV, choosing a course, planning a career or money decision — can be served from the files without asking again. The interview is a **tree**: each domain of life starts with one broad question; every answer leads to deeper follow-ups; follow-ups not yet asked are kept as *threads* in `me/interview-map.md` so the interview continues across sessions.
+
+Speak and write in the user's language, in plain words. This profile is about the user only — never record confidential details about their clients, students or employer here.
 
 ## Steps
 
-1. **Load** `me/README.md`, `me/interview-map.md`, and the topic file(s) of the domain being explored. Never ask anything a topic file already answers — deepen past it instead.
-2. **Pick a branch.** The user's choice if they named one; otherwise recommend one domain — weakest coverage or highest-value open threads — and start there. Don't offer a menu of everything.
-3. **Open.** Untouched domain → ask its root question from the map. Returning to a domain → resume its open threads, briefly reminding the user where the tree left off.
-4. **Drill.** From each answer, generate the natural deeper questions and ask them in batches of 2–4 — never a wall of ten, never one-at-a-time trivia. Chase **record-grade specifics**: dates, employers, titles, technologies, numbers, outcomes, names. One clarifying push on a vague answer, then move on. It's an interview, not a form — react to what's interesting, challenge inconsistencies with what's already on file.
-5. **Prune, don't chase.** A promising side-branch that would derail the current line → write it into the map as a thread and stay on course.
-6. **Stop when signal drops** — answers thin out or the user tires. Never ask "for completeness."
+1. **Load** `me/README.md`, `me/interview-map.md`, and the file(s) for the domain being explored. Never ask what a file already answers — go deeper instead.
+2. **Pick a branch.** The user's choice if they named one; otherwise recommend one domain — the least covered, or the one with the most valuable open threads. Do not offer a menu of everything.
+3. **Open.** Untouched domain → ask its opening question from the map. Returning → resume its open threads, briefly reminding the user where things left off.
+4. **Go deeper.** From each answer, ask the natural next questions in batches of 2–4 — never a wall of ten, never one-at-a-time trivia. Look for **specifics worth recording**: dates, employers, titles, qualifications, tools, numbers, outcomes. One clarifying push on a vague answer, then move on. React to what is interesting; point out inconsistencies with what is on file.
+5. **Park side-tracks.** A promising tangent that would derail the current line → write it into the map as a thread and stay on course.
+6. **Stop when it thins out** — answers get short or the user tires. The user may decline any question; never press on sensitive ground, and never ask "for completeness".
 
 ## Save (every session, even short ones)
 
-7. **Topic files:** fold answers into `me/<topic>.md` (light frontmatter: `title, updated, summary`). Current truth only — rewrite contradictions rather than appending; superseded facts just disappear. Keep `me/README.md`'s file map in sync.
-8. **Map:** update the domain's coverage level, delete answered threads, add newly spawned ones, bump `updated:`.
-9. **Commit** — `me: interview — <domain>`.
+7. **Topic files:** fold answers into `me/<topic>.md` (note details `title, updated, summary`). Current truth only — rewrite instead of appending contradictions. No ID numbers, bank details or passwords. Keep the file list in `me/README.md` in step.
+8. **Map:** update the domain's coverage level, remove answered threads, add new ones, set `updated:`.
+9. **Save** — outside the Thoughts app only: `me: interview — <domain>`.
 
-## Graduation
+## When it is mostly done
 
-When most domains reach `covered`, say so and propose starting the **check-in ritual** (daily/weekly reviews — see `check-in` skill): the profile is built, now it needs maintaining.
+When most domains reach `covered`, say so and suggest regular **check-ins** to keep the profile current.
 
 ## Coverage levels
 
-`untouched` → `seeded` (root question answered) → `covered` (main threads closed) → `deep` (exhausted for now). Levels can regress — life changes reopen domains.
+`untouched` → `seeded` (opening question answered) → `covered` (main threads closed) → `deep` (exhausted for now). Levels can go back down — life changes reopen domains.
