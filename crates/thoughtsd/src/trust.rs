@@ -26,14 +26,19 @@ pub fn trust(p: &Path) -> anyhow::Result<()> {
 /// Claude settings keys that run commands.
 const CLAUDE_KEYS: &[&str] = &["hooks", "apiKeyHelper", "statusLine", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper", "fileSuggestion"];
 
-/// Git config keys (as listed by `git config --list`) that can run programs.
+/// Repo-local git config is allowlisted: anything outside these plain keys is reported.
 fn risky_git_key(k: &str) -> bool {
     let k = k.to_lowercase();
-    k.starts_with("include.") || k.starts_with("includeif.") || k.starts_with("filter.") || k.starts_with("credential")
-        || k.starts_with("gpg.") || k.starts_with("alias.") || k.ends_with(".textconv") || k.ends_with(".command")
-        || k.ends_with(".driver") || k.ends_with(".program") || k.ends_with(".helper")
-        || ["core.fsmonitor", "core.hookspath", "core.sshcommand", "core.pager", "core.editor", "core.askpass",
-            "diff.external", "sequence.editor", "uploadpack.packobjectshook"].contains(&k.as_str())
+    const SAFE: &[&str] = &["core.repositoryformatversion", "core.bare", "core.filemode", "core.logallrefupdates",
+        "core.ignorecase", "core.precomposeunicode", "core.symlinks", "core.autocrlf", "pull.rebase", "init.defaultbranch",
+        "user.name", "user.email"];
+    let parts: Vec<&str> = k.split('.').collect();
+    let sub_ok = match (parts.first(), parts.last()) {
+        (Some(&"remote"), Some(l)) if parts.len() >= 3 => ["url", "fetch", "pushurl", "prune"].contains(l),
+        (Some(&"branch"), Some(l)) if parts.len() >= 3 => ["remote", "merge", "rebase"].contains(l),
+        _ => false,
+    };
+    !(SAFE.contains(&k.as_str()) || sub_ok)
 }
 
 /// Everything in `path` that could execute code. Empty means nothing found.

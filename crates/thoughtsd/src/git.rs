@@ -14,10 +14,10 @@ pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<
     // Never run code a library's own git config could smuggle in (hooks, fsmonitor, ssh command).
     #[cfg(windows)] let no_hooks = "NUL";
     #[cfg(not(windows))] let no_hooks = "/dev/null";
-    c.env("GIT_CONFIG_NOSYSTEM", "1");
+    c.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_ATTR_NOSYSTEM", "1");
     for kv in ["core.fsmonitor=false", &format!("core.hooksPath={no_hooks}"), "core.sshCommand=ssh",
                "core.askPass=", "core.pager=cat", "core.editor=true", "diff.external=",
-               "commit.gpgSign=false", "tag.gpgSign=false", "gpg.program=gpg", "protocol.ext.allow=never",
+               "commit.gpgSign=false", "tag.gpgSign=false", "gpg.program=gpg", "protocol.ext.allow=never", "core.gitProxy=",
                "credential.helper="] {
         c.args(["-c", kv]);
     }
