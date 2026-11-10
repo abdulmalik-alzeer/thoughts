@@ -1,65 +1,116 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
   import { onMount } from 'svelte';
-  import { api, post } from '../lib/api';
-  import { go, refreshChats, toast } from '../lib/store.svelte';
-  import { t } from '../lib/i18n';
+  import { api, on, post } from '../lib/api';
+  import { go, refreshChats } from '../lib/store.svelte';
+  import { t, tn, fmtDate, fmtNum } from '../lib/i18n';
+  import { fail } from '../lib/content/util';
 
   let ideas = $state<any[]>([]);
+  let loading = $state(true);
+  let loadError = $state('');
   let status = $state('');
   let q = $state('');
   let newIdea = $state('');
+  let busy = $state(false);
 
-  onMount(async () => { try { ideas = await api('/library/ideas'); } catch (e: any) { toast(e.message); } });
+  async function load() {
+    try { ideas = await api('/library/ideas'); loadError = ''; }
+    catch (e: any) { loadError = e?.message ?? String(e); }
+    finally { loading = false; }
+  }
+  onMount(() => { load(); return on((e) => { if (e.type === 'library.changed' || e.type === 'resync') load(); }); });
 
-  const statuses = $derived([...new Set(ideas.map((i) => i.status).filter(Boolean))]);
+  const ORDER = ['active', 'seed', 'parked', 'done', 'dropped'];
+  const statuses = $derived([...new Set(ideas.map((i) => i.status).filter(Boolean))].sort((a, b) => (ORDER.indexOf(a) + 99) % 99 - (ORDER.indexOf(b) + 99) % 99));
   const shown = $derived(ideas.filter((i) => (!status || i.status === status) &&
-    (!q || `${i.title} ${i.summary} ${(i.tags || []).join(' ')}`.toLowerCase().includes(q.toLowerCase()))));
+    (!q.trim() || `${i.title} ${i.summary} ${(i.tags || []).join(' ')}`.toLowerCase().includes(q.trim().toLowerCase()))));
   const areas = $derived([...new Set(shown.map((i) => i.area))].sort());
 
+  /** Known statuses are translated; anything custom is shown as written. */
+  const statusLabel = (s: string) => { const k = `idea.status.${s}`; const x = t(k); return x === k ? s : x; };
+  const when = (d: any) => (/^\d{4}-\d{2}-\d{2}/.test(String(d)) ? fmtDate(String(d).slice(0, 10) + 'T12:00:00') : String(d ?? ''));
+
   async function capture() {
-    if (!newIdea.trim()) return;
-    const c = await post('/chats', {});
-    await post(`/chats/${c.id}/send`, { text: `new idea: ${newIdea}` });
-    newIdea = '';
-    await refreshChats();
-    go({ kind: 'chat', id: c.id });
+    const text = newIdea.trim();
+    if (!text || busy) return;
+    busy = true;
+    try {
+      const c = await post('/chats', {});
+      await post(`/chats/${c.id}/send`, { text: `new idea: ${text}` });
+      newIdea = '';
+      await refreshChats().catch(() => {});
+      go({ kind: 'chat', id: c.id });
+    } catch (e) { fail(e); }
+    finally { busy = false; }
   }
 </script>
 
 <div class="page">
   <h1>{t('ideas')}</h1>
   <form class="row" onsubmit={(e) => { e.preventDefault(); capture(); }}>
-    <input class="grow" placeholder="Describe a new idea…" bind:value={newIdea} />
-    <button class="btn primary">Capture</button>
+    <input class="grow" placeholder={t('idea.newPlaceholder')} aria-label={t('idea.newPlaceholder')} bind:value={newIdea} dir="auto" />
+    <button class="btn primary" disabled={!newIdea.trim() || busy}><Icon name="ideas" size={14} /> {t('idea.capture')}</button>
   </form>
-  <div class="row filters">
-    <input placeholder={t('search')} bind:value={q} style="max-width:260px" />
-    <button class="pill" class:accent={!status} onclick={() => (status = '')}>all</button>
-    {#each statuses as s}<button class="pill" class:accent={status === s} onclick={() => (status = s)}>{s}</button>{/each}
-  </div>
-  {#if !ideas.length}<p class="muted">No ideas yet. Capture one above, or say “new idea: …” in any chat.</p>{/if}
-  {#each areas as area}
-    <h2>{area}</h2>
-    <div class="grid">
-      {#each shown.filter((i) => i.area === area) as i (i.path)}
-        <button class="idea surface lit" onclick={() => go({ kind: 'docs', path: i.path })}>
-          <div class="row"><b class="grow">{i.title}</b><span class="pill">{i.status}</span></div>
-          <p class="muted">{i.summary}</p>
-          <div class="row sm muted"><span class="grow">{i.updated}</span>{#if i.level}<span class="pill">{i.level}</span>{/if}{#if i.openTodos}<span class="row" style="gap:4px"><Icon name="todos" size={13} /> {i.openTodos}</span>{/if}</div>
-        </button>
-      {/each}
+
+  {#if loading}
+    <div class="grid sk" aria-busy="true"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+  {:else if loadError && !ideas.length}
+    <div class="state" role="alert"><Icon name="warning" size={24} /><p>{t('idea.loadFailed')}</p><p class="muted sm" dir="auto">{loadError}</p>
+      <button class="btn primary" onclick={() => { loading = true; load(); }}><Icon name="retry" size={14} /> {t('idea.tryAgain')}</button></div>
+  {:else if !ideas.length}
+    <div class="state"><Icon name="ideas" size={28} /><h2>{t('idea.emptyTitle')}</h2><p class="muted">{t('idea.emptyBody')}</p></div>
+  {:else}
+    <div class="row filters">
+      <input type="search" placeholder={t('idea.searchPlaceholder')} aria-label={t('idea.searchPlaceholder')} bind:value={q} class="q" dir="auto" />
+      <div class="row pills" role="group" aria-label={t('idea.statusFilter')}>
+        <button class="pill" class:accent={!status} aria-pressed={!status} onclick={() => (status = '')}>{t('idea.all')}</button>
+        {#each statuses as s}<button class="pill" class:accent={status === s} aria-pressed={status === s} onclick={() => (status = s)}>{statusLabel(s)}</button>{/each}
+      </div>
+      <span class="grow"></span>
+      <span class="muted sm" role="status">{tn('idea.count', shown.length)}</span>
     </div>
-  {/each}
+    {#if !shown.length}
+      <div class="state">
+        <Icon name="search" size={24} />
+        <p>{t('idea.noMatches')}</p>
+        <button class="btn" onclick={() => { q = ''; status = ''; }}>{t('idea.clearFilters')}</button>
+      </div>
+    {/if}
+    {#each areas as area}
+      <h2 dir="auto">{area}</h2>
+      <div class="grid">
+        {#each shown.filter((i) => i.area === area) as i (i.path)}
+          <button class="idea surface lit" onclick={() => go({ kind: 'docs', path: i.path })}>
+            <div class="row"><b class="grow" dir="auto">{i.title}</b>{#if i.status}<span class="pill st-{i.status}">{statusLabel(i.status)}</span>{/if}</div>
+            <p class="muted" dir="auto">{i.summary}</p>
+            <div class="row sm muted"><span class="grow">{when(i.updated)}</span>{#if i.level}<span class="pill"><bdi>{i.level}</bdi></span>{/if}
+              {#if i.openTodos}<span class="row" style="gap:4px" title={tn('idea.openTodos', i.openTodos)}><Icon name="todos" size={13} /> <span aria-hidden="true">{fmtNum(i.openTodos)}</span><span class="sr">{tn('idea.openTodos', i.openTodos)}</span></span>{/if}</div>
+          </button>
+        {/each}
+      </div>
+    {/each}
+  {/if}
 </div>
 
 <style>
   .filters { margin: 12px 0; flex-wrap: wrap; }
-  .filters .pill { cursor: pointer; }
+  .q { max-width: 260px; }
+  .pills { flex-wrap: wrap; gap: 6px; }
+  .filters .pill { font: inherit; font-size: 12px; font-weight: 500; border: 0; cursor: pointer; padding: 3px 11px; }
+  .pill { font-size: 12px; }
+  .pill.st-active { background: var(--tint); color: var(--accent); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
   .idea { font: inherit; color: inherit; text-align: start; box-sizing: border-box; cursor: pointer; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; transition: transform .2s; }
   .idea > * { position: relative; }
   .idea:hover { transform: translateY(-2px); }
+  .idea b { overflow-wrap: anywhere; }
   .idea p { margin: 0; font-size: 13px; display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .state { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 40px 0; color: var(--muted); }
+  .state h2 { margin: 4px 0 0; color: var(--fg); }
+  .state p { margin: 0; max-width: 440px; }
+  .sk { margin-top: 16px; }
+  .skel { height: 110px; border-radius: var(--radius-lg); background: var(--fill); }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .sm { font-size: 12px; }
 </style>

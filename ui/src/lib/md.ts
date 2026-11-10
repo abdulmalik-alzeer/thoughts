@@ -1,12 +1,58 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
+import { t } from './i18n';
 
 marked.setOptions({ gfm: true, breaks: false });
 
-/** Render markdown to sanitized HTML (frontmatter stripped). */
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+
+/** Render markdown to sanitized HTML (frontmatter stripped).
+ *  Code blocks get a copy button and tables a horizontally scrollable wrapper; both are added AFTER
+ *  sanitising, from fixed markup only, so nothing user-controlled bypasses DOMPurify. */
 export function md(src: string): string {
   const body = src.replace(/^---\n[\s\S]*?\n---\n?/, '');
-  return DOMPurify.sanitize(marked.parse(body, { async: false }) as string);
+  const clean = DOMPurify.sanitize(marked.parse(body, { async: false }) as string);
+  const label = esc(t('md.copyCode'));
+  return clean
+    .replace(/<pre(\s[^>]*)?>/g, (m) => `<div class="md-code"><button type="button" class="md-copy" data-md-copy>${label}</button>${m}`)
+    .replace(/<\/pre>/g, '</pre></div>')
+    .replace(/<table(\s[^>]*)?>/g, (m) => `<div class="md-table" tabindex="0">${m}`)
+    .replace(/<\/table>/g, '</table></div>');
+}
+
+/** Delegated click handler for rendered markdown: wire it on the container (`onclick={mdClick}`).
+ *  Returns true when the click was a copy button and has been handled. */
+export function mdClick(e: Event): boolean {
+  const btn = (e.target as HTMLElement | null)?.closest?.('[data-md-copy]') as HTMLButtonElement | null;
+  if (!btn) return false;
+  e.preventDefault();
+  const code = btn.parentElement?.querySelector('pre')?.innerText ?? '';
+  const done = (ok: boolean) => {
+    btn.textContent = t(ok ? 'md.copied' : 'md.copyFailed');
+    setTimeout(() => { btn.textContent = t('md.copyCode'); }, 1600);
+  };
+  navigator.clipboard.writeText(code).then(() => done(true), () => done(false));
+  return true;
+}
+
+// Styles for the two wrappers live here because rendered markdown is injected HTML (no component scope).
+if (typeof document !== 'undefined' && !document.getElementById('md-extras')) {
+  const s = document.createElement('style');
+  s.id = 'md-extras';
+  s.textContent = `
+.md-code { position: relative; margin: 0 0 10px; }
+.md-code pre { margin: 0; overflow-x: auto; direction: ltr; text-align: left; }
+.md-copy { position: absolute; top: 6px; inset-inline-end: 6px; font: inherit; font-size: 12px; font-weight: 500; line-height: 1.4;
+  color: var(--muted); background: var(--panel, var(--bg)); border: 1px solid var(--hairline); border-radius: 7px; padding: 2px 8px;
+  cursor: pointer; opacity: 0; transition: opacity .15s; }
+.md-code:hover .md-copy, .md-copy:focus-visible { opacity: 1; }
+.md-copy:hover { color: var(--fg); }
+@media (hover: none) { .md-copy { opacity: 1; } }
+.md-table { overflow-x: auto; max-width: 100%; margin: 0 0 10px; }
+.md-table table { min-width: max-content; }
+@media print { .md-copy { display: none !important; } .md-table { overflow: visible; } }
+`;
+  document.head.appendChild(s);
 }
 
 /** Resolve a relative markdown link against the file it appears in. */
