@@ -35,8 +35,8 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
             let Ok(ft) = e.file_type() else { continue };
             if ft.is_symlink() {
                 links.push(format!("{}->{}", p.display(), std::fs::read_link(&p).map(|t| t.display().to_string()).unwrap_or_default()));
-                // Also hash what it resolves to when that is a regular file.
-                if std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false) { out.push(p) }
+                // Also hash what it resolves to, but only a regular file inside the library.
+                out.push(p)
             }
             else if ft.is_dir() { walk(&p, depth + 1, out, links) }
             else if ft.is_file() && p.extension().map_or(true, |x| x != "md") { out.push(p) }
@@ -46,7 +46,10 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
     walk(&path.join(".claude"), 0, &mut extra, &mut links);
     extra.sort(); links.sort(); files.extend(extra);
     h.update(links.join("\n"));
-    for d in [git("--absolute-git-dir"), git("--git-common-dir")].into_iter().flatten() {
+    let root = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let git_dirs: Vec<PathBuf> = [git("--absolute-git-dir"), git("--git-common-dir")].into_iter().flatten()
+        .filter_map(|d| std::fs::canonicalize(d).ok()).collect();
+    for d in git_dirs.clone() {
         files.push(d.join("config")); files.push(d.join("config.worktree"));
         // Files pulled in through include.path / includeIf.
         for name in ["config", "config.worktree"] {
@@ -66,9 +69,18 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
     }
     for p in files {
         h.update(p.to_string_lossy().as_bytes()); h.update([0]);
-        // Whole file, streamed (bounded memory); symlinks are resolved to the regular file they point at.
-        if std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
-            if let Ok(mut f) = std::fs::File::open(&p) { let _ = std::io::copy(&mut f, &mut h); }
+        // Whole file, streamed, up to 16 MB; bigger files can never match a stored trust. Symlinks are
+        // read only when they resolve to a regular file inside the library (never /dev, /proc, …).
+        let real = std::fs::canonicalize(&p).ok();
+        let inside = real.as_ref().map_or(false, |r| r.starts_with(&root) || git_dirs.iter().any(|g| r.starts_with(g)));
+        if inside && real.as_ref().and_then(|r| std::fs::metadata(r).ok()).map_or(false, |m| m.is_file()) {
+            const LIMIT: u64 = 16 << 20;
+            if let Ok(f) = std::fs::File::open(real.unwrap()) {
+                use std::io::Read;
+                let n = std::io::copy(&mut f.take(LIMIT + 1), &mut h).unwrap_or(0);
+                h.update(n.to_le_bytes());
+                if n > LIMIT { h.update(format!("{:?}", std::time::SystemTime::now())); }
+            }
         }
         h.update([0xff]);
     }
