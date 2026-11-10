@@ -41,12 +41,30 @@ pub fn trusted_file() -> PathBuf { home().join("trusted.json") }
 /// The staging copy of the customisation layer (a git worktree of the app layer).
 pub fn app_layer_staging_dir() -> PathBuf { home().join("app-layer-staging") }
 
-/// Everything under the app's home (`home`) that an assistant run must never read: credentials,
-/// the daemon's token, settings, and the user's saved conversations. Files first, then folders.
+/// Everything under the app's home (`home`) that a customise run must never read or change: every
+/// file and folder the daemon keeps there (credentials, token, settings, chats, workflow approvals,
+/// usage, pending state…) except the staging worktree it works in and the live layer (which the
+/// caller protects separately). Known names are always listed, even before they exist, and anything
+/// else found in the folder is added, so a new state file is protected by default.
 pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    let files = ["daemon.json", "settings.json", "git-credentials", "trusted.json", "secrets.json", "runs.json", "usage.json", "layer-pending.json"];
-    let dirs = ["chats", "attachments", "logs"];
-    (files.iter().map(|f| home.join(f)).collect(), dirs.iter().map(|d| home.join(d)).collect())
+    const FILES: &[&str] = &["daemon.json", "daemon.lock", "settings.json", "git-credentials", "trusted.json", "secrets.json",
+        "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "workflows-approved.json",
+        "workflows-state.json", "suggestions.json", "base-manifest.json"];
+    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree"];
+    const OPEN: &[&str] = &["app-layer-staging", "app-layer"];
+    let mut files: Vec<PathBuf> = FILES.iter().map(|f| home.join(f)).collect();
+    let mut dirs: Vec<PathBuf> = DIRS.iter().map(|d| home.join(d)).collect();
+    if let Ok(rd) = std::fs::read_dir(home) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if OPEN.contains(&name.as_str()) { continue; }
+            let p = e.path();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let list = if is_dir { &mut dirs } else { &mut files };
+            if !list.contains(&p) { list.push(p); }
+        }
+    }
+    (files, dirs)
 }
 
 /// Where Reorganize works, so the library's own folder never leaves the user's branch.
