@@ -1,0 +1,154 @@
+name: Release
+
+# Push a tag like v0.0.2 to build installers for every platform and attach them to a
+# DRAFT GitHub Release. Nothing is published until a person publishes the draft.
+# Every signing step is skipped when its secrets are missing, so this also works with
+# no secrets at all (unsigned builds). See docs/RELEASING.md.
+#
+# Secrets (Settings -> Secrets and variables -> Actions -> Secrets):
+#   macOS signing       APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY
+#   macOS notarisation  APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+#   Windows signing     WINDOWS_CERTIFICATE, WINDOWS_CERTIFICATE_PASSWORD
+#   Updater             TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+# Variables (same page -> Variables):
+#   UPDATER_PUBKEY      the updater PUBLIC key (not secret)
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (universal)
+            os: macos-latest
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - name: Windows (NSIS installer)
+            os: windows-latest
+            args: ''
+            rust-targets: ''
+          - name: Linux (deb + AppImage)
+            os: ubuntu-22.04
+            args: ''
+            rust-targets: ''
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match the version in Cargo.toml
+        shell: bash
+        run: |
+          version=$(grep -A3 '^\[workspace.package\]' Cargo.toml | grep '^version' | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - name: Linux system packages (Tauri)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+      - uses: Swatinem/rust-cache@v2
+      - run: npm ci
+
+      # --- macOS: Developer ID signing + notarisation (only when the secrets exist) ---
+      # Tauri signs when APPLE_CERTIFICATE + APPLE_SIGNING_IDENTITY are set and notarises
+      # when APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID are set. They are exported only when
+      # non-empty, because an empty variable would make the build try to sign and fail.
+      - name: macOS signing and notarisation
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          put() { printf '%s<<__EOV__\n%s\n__EOV__\n' "$1" "$2" >> "$GITHUB_ENV"; }
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            put APPLE_CERTIFICATE "$APPLE_CERTIFICATE"
+            put APPLE_CERTIFICATE_PASSWORD "$APPLE_CERTIFICATE_PASSWORD"
+            put APPLE_SIGNING_IDENTITY "$APPLE_SIGNING_IDENTITY"
+            echo "macOS signing: on"
+            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
+              put APPLE_ID "$APPLE_ID"
+              put APPLE_PASSWORD "$APPLE_PASSWORD"
+              put APPLE_TEAM_ID "$APPLE_TEAM_ID"
+              echo "macOS notarisation: on"
+            else
+              echo "macOS notarisation: off (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID missing)"
+            fi
+          else
+            echo "macOS signing: off (unsigned build)"
+          fi
+
+      # --- Windows: sign with a .pfx certificate (only when the secrets exist) ---
+      - name: Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { Write-Host "Windows signing: off (unsigned build)"; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          Remove-Item $pfx
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Windows signing: on"
+
+      # --- Updater: only when both the public key (variable) and private key (secret) exist ---
+      - name: Updater signing key
+        shell: bash
+        env:
+          UPDATER_PUBKEY: ${{ vars.UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          put() { printf '%s<<__EOV__\n%s\n__EOV__\n' "$1" "$2" >> "$GITHUB_ENV"; }
+          if [ -n "$UPDATER_PUBKEY" ] && [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            put UPDATER_PUBKEY "$UPDATER_PUBKEY"
+            put UPDATER_ENDPOINT "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/latest.json"
+            put TAURI_SIGNING_PRIVATE_KEY "$TAURI_SIGNING_PRIVATE_KEY"
+            put TAURI_SIGNING_PRIVATE_KEY_PASSWORD "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+            echo "Updater: on"
+          else
+            echo "Updater: off (this build will say updates are not configured)"
+          fi
+
+      - name: Write release config
+        run: node scripts/release-config.mjs
+
+      - name: Build and upload to a draft release
+        uses: tauri-apps/tauri-action@v0.5.20
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Thoughts ${{ github.ref_name }}
+          releaseBody: See the assets below to download and install this version.
+          releaseDraft: true
+          prerelease: false
+          args: --config src-tauri/release.conf.json ${{ matrix.args }}
