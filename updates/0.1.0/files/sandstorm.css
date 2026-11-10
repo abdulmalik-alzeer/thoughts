@@ -1,0 +1,8 @@
+[data-theme="sandstorm"][data-mode="light"] {
+  --bg: #f6efe3; --panel: #efe4d2; --panel-2: #e7d8c1; --fg: #3b2a1a; --muted: #8a7258;
+  --accent: #c0762c; --accent-fg: #fff; --border: #dcc8a8; --danger: #a83a2a; --ok: #4f7a3a;
+}
+[data-theme="sandstorm"][data-mode="dark"] {
+  --bg: #1d1712; --panel: #261e17; --panel-2: #30261d; --fg: #f0e2cc; --muted: #a8916f;
+  --accent: #e39a4f; --accent-fg: #1d1712; --border: #3e3226; --danger: #e0705e; --ok: #8fbf6e;
+}
