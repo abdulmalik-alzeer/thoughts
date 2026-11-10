@@ -25,8 +25,28 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
         .current_dir(path).env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["-c", "core.fsmonitor=false", "rev-parse", arg]).output().ok().filter(|o| o.status.success())
         .map(|o| { let p = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()); if p.is_absolute() { p } else { path.join(p) } });
+    // Every non-markdown file under .claude/ (scripts a hook could call); skills' .md edits don't re-prompt.
+    fn walk(d: &Path, out: &mut Vec<PathBuf>) {
+        if let Ok(rd) = std::fs::read_dir(d) { for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() { walk(&p, out) } else if p.extension().map_or(true, |x| x != "md") { out.push(p) }
+        } }
+    }
+    let mut extra = vec![]; walk(&path.join(".claude"), &mut extra); extra.sort(); files.extend(extra);
     for d in [git("--absolute-git-dir"), git("--git-common-dir")].into_iter().flatten() {
         files.push(d.join("config")); files.push(d.join("config.worktree"));
+        // Files pulled in through include.path / includeIf.
+        for name in ["config", "config.worktree"] {
+            if let Ok(o) = std::process::Command::new(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()))
+                .env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1")
+                .args(["-c", "core.fsmonitor=false", "config", "--file"]).arg(d.join(name))
+                .args(["--includes", "--list", "--show-origin", "--null"]).output()
+            {
+                for rec in String::from_utf8_lossy(&o.stdout).split('\0') {
+                    if let Some(f) = rec.strip_prefix("file:") { files.push(PathBuf::from(f)); }
+                }
+            }
+        }
         if let Ok(rd) = std::fs::read_dir(d.join("hooks")) {
             let mut hooks: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect(); hooks.sort(); files.extend(hooks);
         }
