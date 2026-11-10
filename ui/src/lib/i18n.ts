@@ -17,7 +17,7 @@ const en = {
   light: 'Day', dark: 'Night', system: 'System', saudi: 'Saudi', contrast: 'High contrast', tech: 'High tech',
   unwrapped: 'unwrapped', typeMessage: 'Message… (@ to mention a file, ⌘↩ to send)',
   wrapNagTitle: 'Time to wrap', next: 'Next', back: 'Back', finish: 'Finish', modules: 'Features',
-  addLater: 'Add later', enable: 'Enable', enabled: 'Enabled', general: 'General', ai: 'AI',
+  addLater: 'Add later', enable: 'Enable', enabled: 'Enabled', general: 'General', ai: 'Assistant',
   git: 'Sync & Git', remotes: 'Backup & sync locations', daemon: 'Background service', appLayer: 'Customisations',
   noLibrary: 'No library yet', noChats: 'No chats yet — start one.', views: 'Views',
   wrapNagBody: 'You have {n} chats that aren’t saved into your library yet. Wrap summarises them into your ideas, notes and todos, then saves them to the history — so nothing you thought through evaporates.',
@@ -29,7 +29,7 @@ const en = {
 const wrapNagTailAr = ' «تلخيص وحفظ» يستخلص منها أفكارك وملاحظاتك ومهامك ثم يحفظها في السجل — حتى لا يضيع شيء مما فكّرت فيه.';
 
 const ar: Partial<Record<keyof typeof en | `wrapNagBody_${'two' | 'few' | 'many'}`, string>> = {
-  home: 'الرئيسية', heroSub: 'ملاحظاتك وأفكارك ومهامك في مكان واحد. اسأل عمّا تشاء، وفكّر بصوت مسموع، ثم احفظ ما يهمّك عبر «تلخيص وحفظ».', continueSub: 'آخر الأفكار التي عملت عليها.', linkFolder: 'ربط مجلد', goodMorning: 'صباح الخير', goodAfternoon: 'طاب يومك', goodEvening: 'مساء الخير',
+  home: 'الرئيسية', heroSub: 'ملاحظاتك وأفكارك ومهامك في مكان واحد. اسأل عمّا تشاء، وفكّر بصوت مسموع، ثم احفظ ما يهمّك عبر «تلخيص وحفظ».', continueSub: 'آخر الأفكار التي عملت عليها.', linkFolder: 'ربط مجلد', goodMorning: 'صباح الخير', goodAfternoon: 'طاب نهارك', goodEvening: 'مساء الخير',
   askPlaceholder: 'اسأل عمّا تشاء، أو فكّر بصوت مسموع…', captureIdea: 'دوّن فكرة', addTodoChip: 'أضف مهمة', checkIn: 'مراجعة دورية',
   activeIdeas: 'أفكار نشطة', openTodos: 'مهام مفتوحة', toWrapAction: 'محادثات بانتظار الحفظ — اضغط للحفظ', allSaved: 'كل المحادثات محفوظة',
   notesInLibrary: 'ملاحظات في المكتبة', continueWhere: 'تابع من حيث توقفت', seeAll: 'عرض الكل', recentChats: 'أحدث المحادثات',
@@ -44,8 +44,8 @@ const ar: Partial<Record<keyof typeof en | `wrapNagBody_${'two' | 'few' | 'many'
   light: 'نهاري', dark: 'ليلي', system: 'حسب النظام', saudi: 'سعودية', contrast: 'تباين عالٍ', tech: 'تقنية عالية',
   unwrapped: 'لم تُلخَّص بعد', typeMessage: 'اكتب رسالتك… (@ للإشارة إلى ملف، ⌘↩ للإرسال)',
   wrapNagTitle: 'حان وقت التلخيص والحفظ', next: 'التالي', back: 'رجوع', finish: 'إنهاء', modules: 'المزايا',
-  addLater: 'أضفها لاحقاً', enable: 'تفعيل', enabled: 'مفعّلة', general: 'عام', ai: 'الذكاء الاصطناعي',
-  git: 'المزامنة و Git', remotes: 'مواقع النسخ الاحتياطي والمزامنة', daemon: 'خدمة الخلفية', appLayer: 'التخصيصات',
+  addLater: 'أضفها لاحقاً', enable: 'تفعيل', enabled: 'مفعّلة', general: 'عام', ai: 'المساعد',
+  git: 'المزامنة وGit', remotes: 'مواقع النسخ الاحتياطي والمزامنة', daemon: 'خدمة الخلفية', appLayer: 'التخصيصات',
   noLibrary: 'لا توجد مكتبة بعد', noChats: 'لا محادثات بعد — ابدأ واحدة.', views: 'الواجهات',
   wrapNagBody: 'لديك محادثات لم تُحفظ في مكتبتك بعد ({n}).' + wrapNagTailAr,
   wrapNagBody_one: 'لديك محادثة واحدة لم تُحفظ في مكتبتك بعد.' + wrapNagTailAr,
@@ -85,6 +85,10 @@ export const fmtNum = (n: number) => new Intl.NumberFormat(lang() === 'ar' ? 'ar
 export function fmtDate(d: string | number | Date, opts: Intl.DateTimeFormatOptions = { dateStyle: 'medium' }): string {
   return new Intl.DateTimeFormat(lang() === 'ar' ? 'ar-SA-u-ca-gregory-nu-latn' : 'en', opts).format(new Date(d));
 }
+
+/** A US-dollar amount (the assistant's usage is billed in dollars) in the app language's number style. */
+export const fmtMoney = (usd: number) =>
+  new Intl.NumberFormat(lang() === 'ar' ? 'ar-SA-u-nu-latn' : 'en', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: usd > 0 && usd < 1 ? 3 : 2 }).format(usd);
 
 export function ago(when: string | number): string {
   const m = Math.max(0, Math.round((Date.now() - new Date(when).getTime()) / 60000));

@@ -32,7 +32,14 @@ export type PendingChange = {
   exists: boolean; summary?: string; files?: { path: string; status: 'added' | 'modified' | 'deleted' }[];
   pluginChanged?: boolean; origin?: 'customize' | 'import' | 'update'; outsideChanges?: string[]; chatId?: string; running?: boolean;
   workflowChanged?: boolean; workflows?: { name: string; trigger: any; prompt: string }[];
+  /** Hash of the staged content, sent back on Keep; and validation problems that block Keep. */
+  signature?: string; problems?: { path: string; message: string }[];
+  [extra: string]: any;
 };
+/** `nav.json` from the customisation layer: hide, reorder and relabel sidebar items. */
+export type NavConfig = { hidden: string[]; order: string[]; labels: Record<string, { en?: string; ar?: string }> };
+/** `todos.json` from the customisation layer: default grouping, order and filter of the Todos view. */
+export type TodosConfig = { groupBy?: 'list' | 'due' | 'tag' | 'none'; sort?: 'list' | 'due'; filter?: 'all' | 'soon' | 'overdue'; showDone?: boolean };
 
 const ls = {
   get(k: string): string | null { try { return localStorage.getItem(k); } catch { return null; } },
@@ -54,6 +61,9 @@ export const app = $state({
   customThemes: [] as { id: string; name: string }[],
   /** Slots filled by the customisation layer: `home.json` plus what plugins register. */
   home: { chips: [], hidden: [], order: [] } as HomeConfig,
+  /** `nav.json` / `todos.json` from the layer (null when the user has none). Set by lib/layer.ts. */
+  nav: null as NavConfig | null,
+  todosCfg: null as TodosConfig | null,
   homeWidgets: [] as HomeWidget[],
   homeChips: [] as HomeChip[],
   itemActions: [] as ItemAction[],
@@ -70,6 +80,13 @@ export const app = $state({
   /** False while the background service is unreachable mid-session. */
   online: true,
   sidebarCollapsed: ls.get('thoughts.sidebar') === 'collapsed',
+  /** "Show estimated cost" (a per-device preference; see `costVisible`). */
+  showCost: ls.get('thoughts.showCost') === '1',
+  /** Open todos due today or overdue (kept fresh by lib/reminders.ts); shown on the Todos nav item. */
+  dueToday: 0,
+  /** Whether Back / Forward have somewhere to go (view history, see `goBack`). */
+  canBack: false,
+  canForward: false,
   showPalette: false,
   showRollback: false,
   showWrapNag: false,
@@ -109,6 +126,13 @@ export function setSidebarCollapsed(v: boolean) {
   app.sidebarCollapsed = v;
   ls.set('thoughts.sidebar', v ? 'collapsed' : 'open');
 }
+
+export function setShowCost(v: boolean) {
+  app.showCost = v;
+  ls.set('thoughts.showCost', v ? '1' : '0');
+}
+/** Dollar estimates are hidden for people on a Claude plan (they don't pay per message) unless they ask to see them. */
+export const costVisible = () => app.showCost || !!app.settings?.ai?.claude?.hasApiToken;
 
 export async function refreshChats() {
   app.chats = await api('/chats');
@@ -170,8 +194,13 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
 
 let leaving = false;
 
-/** Navigate. A view with unsaved work (`app.leaveGuard`) is asked first; resolves false when the user stays. */
-export async function go(v: View): Promise<boolean> {
+// View history for Back / Forward (Cmd/Ctrl+[ and ], mouse back buttons). Not persisted.
+const trail: View[] = [{ kind: 'home' }];
+let at = 0;
+const sameView = (a: View, b: View) => a.kind === b.kind && (a.id ?? '') === (b.id ?? '') && (a.path ?? '') === (b.path ?? '');
+function syncTrail() { app.canBack = at > 0; app.canForward = at < trail.length - 1; }
+
+async function leave(): Promise<boolean> {
   if (leaving) return false;
   const guard = app.leaveGuard;
   if (guard) {
@@ -181,7 +210,33 @@ export async function go(v: View): Promise<boolean> {
     finally { leaving = false; }
     if (app.leaveGuard === guard) app.leaveGuard = null;
   }
+  return true;
+}
+
+/** Navigate. A view with unsaved work (`app.leaveGuard`) is asked first; resolves false when the user stays. */
+export async function go(v: View): Promise<boolean> {
+  if (!(await leave())) return false;
   if (v.kind !== app.view.kind) track('view.' + v.kind);
+  if (!sameView(v, trail[at])) {
+    trail.splice(at + 1);
+    trail.push({ ...v });
+    if (trail.length > 60) trail.shift();
+    at = trail.length - 1;
+    syncTrail();
+  }
   app.view = v;
   return true;
 }
+
+async function step(d: number): Promise<boolean> {
+  const to = trail[at + d];
+  if (!to || !(await leave())) return false;
+  at += d;
+  syncTrail();
+  if (to.kind !== app.view.kind) track('view.' + to.kind);
+  app.view = { ...to };
+  return true;
+}
+/** Back / forward through the views visited in this session. */
+export const goBack = () => step(-1);
+export const goForward = () => step(1);

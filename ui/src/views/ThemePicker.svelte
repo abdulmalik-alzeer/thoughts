@@ -51,7 +51,7 @@
 </div>
 
 <style>
-  .lbl { font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  .lbl { font-size: var(--fs-xs); color: var(--muted); margin: 10px 0 4px; }
   .themes { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
   .th { font: inherit; color: inherit; text-align: start; cursor: pointer; border: 1px solid var(--hairline); background: var(--panel); border-radius: var(--radius-lg); padding: 10px; display: flex; flex-direction: column; gap: 6px; }
   .th.active { box-shadow: 0 0 0 2px var(--accent); }

@@ -5,7 +5,8 @@
   import { keys } from '../lib/shortcuts';
   let { close }: { close: () => void } = $props();
   // icon + i18n key stem (shell.tour.<stem>Title / <stem>Body)
-  const cards = [['home', 'home'], ['chats', 'chat'], ['wrap', 'wrap'], ['docs', 'files'], ['projects', 'folders'], ['palette', 'yours']];
+  // The short version: the rest (files, folders) is explained in Help and in each view's empty state.
+  const cards = [['home', 'home'], ['chats', 'chat'], ['wrap', 'wrap'], ['palette', 'yours']];
   let i = $state(0);
   let box = $state<HTMLElement | null>(null);
   // Next/Get started swap places, so put focus back on the main button after each step.
@@ -39,8 +40,7 @@
 
 <style>
   .tour { max-width: 460px; text-align: center; padding: 28px; }
-  .ic { width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 14px; display: grid; place-items: center; background: var(--tint); color: var(--accent); }
-  :global([data-theme="contrast"]) .ic { color: var(--accent-fg); }
+  .ic { width: 56px; height: 56px; border-radius: 16px; margin: 0 auto 14px; display: grid; place-items: center; background: var(--tint); color: var(--on-tint); }
   p { color: var(--muted); margin: 0 0 18px; }
   .dots { display: flex; justify-content: center; gap: 6px; margin-bottom: 18px; }
   .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--fill-2); border: 1px solid var(--muted); }

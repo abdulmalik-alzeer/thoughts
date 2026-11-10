@@ -1,12 +1,17 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { api, connect, on, post, reloadApp } from './lib/api';
-  import { app, applyTheme, cachedLook, command, go, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast } from './lib/store.svelte';
-  import { loadLayer, layerBooted, retryLayer, checkPending, discardPending, keepPending, openReview, stopPreview } from './lib/layer';
+  import { api, connect, daemonStale, on, post, reconnect, reloadApp } from './lib/api';
+  import { app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track } from './lib/store.svelte';
+  import { loadLayer, layerBooted, retryLayer, checkPending, openReview, undoLastLayer } from './lib/layer';
+  import { failed } from './lib/errors';
+  import { navLabel } from './lib/terms';
+  import { startReminders } from './lib/reminders';
+  import { askBusy } from './lib/shell';
+  import { fold } from './lib/CommandPalette.svelte';
   import { checkAppUpdate, checkLayerUpdates } from './lib/updates';
   import { t, tn, ago, fmtDate, fmtNum } from './lib/i18n';
-  import { matchShortcut, keys, tip, isMac } from './lib/shortcuts';
-  import { choiceDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
+  import { matchShortcut, keys, tip, isMac, isTyping } from './lib/shortcuts';
+  import { choiceDialog, confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
   import Chat from './views/Chat.svelte';
   import Ideas from './views/Ideas.svelte';
@@ -22,6 +27,8 @@
   import Tour from './views/Tour.svelte';
   import Home from './views/Home.svelte';
   import Help from './views/Help.svelte';
+  import History from './views/History.svelte';
+  import PreviewBanner from './views/PreviewBanner.svelte';
   import Icon from './lib/Icon.svelte';
   import Logo from './lib/Logo.svelte';
   import Dialogs from './lib/Dialogs.svelte';
@@ -34,6 +41,7 @@
   let libraryGone = $state(false);
   let dismissedRuns = $state<string[]>([]);
   let ideas = $state<any[]>([]);
+  let stale = $state(daemonStale());
 
   // ---------- boot ----------
   async function boot() {
@@ -61,6 +69,7 @@
       loadLayer().catch((e) => toast(t('shell.layerFailed'), { kind: 'error', detail: e.message })),
     ]);
     checkLibrary();
+    startReminders();
     // A change staged earlier (or by an import / app update) is still waiting for a decision.
     checkPending(true);
     try {
@@ -92,19 +101,12 @@
     if (noticed || !app.status) return;
     noticed = true;
     if (app.status.settingsRecovered) { toast(t('layer.settingsRecovered'), { kind: 'error', key: 'recovered', duration: 0 }); post('/status/ack-recovered').catch(() => {}); }
+    if (app.status.settingsNewer) toast(t('ui.settingsNewer'), { kind: 'error', key: 'newer-settings', duration: 0 });
     const n = Number(app.status.unreadableChats) || 0;
     if (n > 0) toast(tn('layer.unreadableChats', n), { kind: 'error', key: 'unreadable', duration: 0 });
   }
 
   const layerError = (err: any) => toast(t('shell.layerFailed'), { kind: 'error', detail: err.message });
-  let previewBusy = $state(false);
-  async function previewAct(fn: () => Promise<void>, failKey: string) {
-    if (previewBusy) return;
-    previewBusy = true;
-    try { await fn(); } catch (e: any) { toast(t(failKey), { kind: 'error', detail: e?.message ?? String(e) }); }
-    finally { previewBusy = false; }
-  }
-
   // Links in rendered markdown (chats, docs, plugins) must never navigate the app window.
   // Safe external links open in the default browser; everything else is dropped.
   function guardLinks(e: MouseEvent) {
@@ -129,6 +131,7 @@
           if (e.online && !was && app.ready) toast(t('shell.backOnline'), { kind: 'success', key: 'conn' });
           return;
         }
+        if (e.type === 'daemon.stale') { stale = !!e.stale; return; }
         if (!app.ready) return;
         if (e.type === 'chat.updated' || e.type === 'chat.done') {
           await refreshChats();
@@ -159,11 +162,36 @@
         listen('open-settings', () => command('settings'));
         listen('open-help', () => command('help'));
         listen('check-updates', () => checkAppUpdate(true));
+        // "Undo last app change" in the native menu: the shell only tells us; we ask the background service.
+        listen('undo-layer', () => { undoLastLayer(); });
+        // The Recovery menu asked for a restart while work is running: say what, and let the user decide.
+        listen('daemon-busy', async (ev: any) => {
+          const w = ev?.payload ?? {};
+          if (await askBusy({ saving: !!w.saving, chats: Array.isArray(w.chats) ? w.chats.map(String) : [] }, 'restart')) forceRestart();
+        });
       }
     })();
     window.addEventListener('thoughts:command', onCommand);
-    return () => { off(); window.removeEventListener('thoughts:command', onCommand); };
+    window.addEventListener('mouseup', onMouseNav);
+    return () => { off(); window.removeEventListener('thoughts:command', onCommand); window.removeEventListener('mouseup', onMouseNav); };
   });
+
+  async function forceRestart() {
+    try { await reconnect(true); toast(t('set.restarted'), { kind: 'success', key: 'restart' }); }
+    catch (e: any) { toast(t('ui.restartFailed'), { kind: 'error', detail: e?.message ?? String(e) }); }
+  }
+  async function restartStale() {
+    if (!(await confirmDialog({ title: t('ui.stale.confirmTitle'), body: t('ui.stale.confirmBody'), confirmLabel: t('ui.stale.restart'), danger: true }))) return;
+    forceRestart();
+  }
+
+  // Mouse "back" / "forward" buttons.
+  function onMouseNav(e: MouseEvent) {
+    if (e.button !== 3 && e.button !== 4) return;
+    if (!app.ready || !app.settings?.onboarded || document.querySelector('[aria-modal="true"]')) return;
+    e.preventDefault();
+    command(e.button === 3 ? 'back' : 'forward');
+  }
 
   async function notify(title: string, body: string) {
     try {
@@ -182,20 +210,25 @@
     } catch (e: any) { toast(t('shell.newChatFailed'), { kind: 'error', detail: e.message }); }
   }
 
+  // A wrap holds the library while it runs: Wrap and Sync wait for it.
+  const wrapRunning = $derived(!!app.status?.busy || app.chats.some((c) => c.kind === 'wrap' && c.running));
+
   async function startWrap() {
     if (!app.wrap.count) { app.showWrapNag = false; toast(t('shell.nothingToWrap')); return; }
+    if (wrapRunning) { toast(t('ui.wrapRunning'), { key: 'wrap' }); return; }
     try {
       const r = await post('/wrap');
       app.showWrapNag = false;
       await refreshChats();
       go({ kind: 'chat', id: r.chatId });
-    } catch (e: any) { toast(t('shell.wrapFailed'), { kind: 'error', detail: e.message }); }
+    } catch (e: any) { failed(t('shell.wrapFailed'), e, { key: 'wrap' }); }
   }
 
   const syncOn = $derived(!!app.settings?.sync?.mode?.startsWith('git'));
 
   async function sync() {
     if (syncing) return;
+    if (wrapRunning) { toast(t('ui.syncWaitsForWrap'), { key: 'sync' }); return; }
     if (!syncOn) { toast(t('shell.syncOff'), { action: { label: t('settings'), run: () => go({ kind: 'settings' }) } }); return; }
     syncing = true;
     try {
@@ -205,7 +238,7 @@
     } catch (e: any) {
       const m = /CONFLICT::(.*)/s.exec(e.message || '');
       if (m) await resolveConflict(m[1].split(';').map((f) => f.trim()).filter(Boolean));
-      else toast(t('shell.syncFailed'), { kind: 'error', key: 'sync', detail: e.message });
+      else failed(t('shell.syncFailed'), e, { key: 'sync' });
     } finally { syncing = false; }
   }
 
@@ -237,7 +270,6 @@
   function onboarded(setupChatId: string | null) {
     afterOnboard();
     refreshStatus();
-    showTour = true;
     if (setupChatId) go({ kind: 'chat', id: setupChatId });
   }
 
@@ -249,14 +281,17 @@
     'wrap.start': () => startWrap(),
     'sync': () => sync(),
     'rollback': () => (app.showRollback = true),
-    'history': () => (app.showRollback = true),
+    'history': () => go({ kind: 'history' }),
+    'back': () => goBack(),
+    'forward': () => goForward(),
     'customise': () => go({ kind: 'settings', id: 'appLayer' }),
     'review': () => openReview(),
     'updates.check': () => checkAppUpdate(true),
     'settings': () => go({ kind: 'settings' }),
     'help': () => go({ kind: 'help' }),
     'tour': () => (showTour = true),
-    'print': () => window.print(),
+    // Docs prints the open document itself (it listens for this command); every other view prints as shown.
+    'print': () => { if (app.view.kind !== 'docs') window.print(); },
     'palette': () => openPalette(!app.showPalette),
     'sidebar.toggle': () => setSidebarCollapsed(!app.sidebarCollapsed),
     'search.focus': () => focusSearch(),
@@ -297,9 +332,11 @@
     const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour;
     if (modal || (app.showPalette && id !== 'palette')) return;
     if (id.startsWith('nav.')) {
-      const k = nav[+id.slice(4) - 1];
-      if (!k) return;
-      id = 'nav.' + k;
+      const it = navItems[+id.slice(4) - 1];
+      if (!it) return;
+      e.preventDefault();
+      it.run();
+      return;
     }
     e.preventDefault();
     command(id);
@@ -322,8 +359,8 @@
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
   const chatHits = $derived.by(() => {
-    const q = searchQ.trim().toLowerCase();
-    return q ? app.chats.filter((c) => String(c.title || '').toLowerCase().includes(q)).slice(0, 6) : [];
+    const q = fold(searchQ.trim());
+    return q ? app.chats.filter((c) => fold(String(c.title || '')).includes(q)).slice(0, 6) : [];
   });
   type Hit = { key: string; icon: string; title: string; sub?: string; path?: boolean; open: () => void };
   const hits = $derived<Hit[]>([
@@ -347,6 +384,7 @@
     searchOpen = true;
     searching = true;
     searchTimer = setTimeout(async () => {
+      track('search');
       try {
         const r = await api('/library/search?q=' + encodeURIComponent(q));
         if (mine === searchSeq) fileHits = (Array.isArray(r) ? r : []).slice(0, 8);
@@ -391,14 +429,48 @@
   });
   const system = $derived(app.chats.filter((c) => c.kind !== 'chat').slice(0, 6));
 
-  const nav = $derived([
-    'home', 'chats', 'ideas',
-    ...(app.settings?.modules?.todos !== false ? ['todos'] : []),
-    ...(app.settings?.modules?.docs !== false ? ['docs'] : []),
-    ...(app.settings?.modules?.builds !== false ? ['projects'] : []),
-  ]);
   const meOpen = $derived(app.view.kind === 'docs' && (app.view.path ?? '').startsWith('me/'));
   const isActive = (k: string) => app.view.kind === k && !(k === 'docs' && meOpen);
+
+  // Sidebar items: built-ins, "Me" and plugin views — then `nav.json` (hidden / order / labels) from the
+  // customisation layer. Home can never be hidden; Settings and Help live in the footer, outside this list.
+  type NavItem = { id: string; label: string; icon: string; active: boolean; custom?: boolean; run: () => void };
+  const navItems = $derived.by((): NavItem[] => {
+    const m = app.settings?.modules ?? {};
+    const items: NavItem[] = [];
+    const add = (id: string, on = true) => { if (on) items.push({ id, label: navLabel(id), icon: id, active: isActive(id), run: () => { go({ kind: id }); } }); };
+    add('home'); add('chats'); add('ideas'); add('todos', m.todos !== false); add('docs', m.docs !== false); add('projects', m.builds !== false);
+    if (m.me) items.push({ id: 'me', label: navLabel('me'), icon: 'me', active: meOpen, run: () => { go({ kind: 'docs', path: 'me/README.md' }); } });
+    for (const v of app.pluginViews) items.push({ id: v.id, label: navLabel(v.id, v.title), icon: v.icon || 'plugin', custom: true, active: app.view.kind === 'plugin' && app.view.id === v.id, run: () => { go({ kind: 'plugin', id: v.id }); } });
+    const hidden = new Set((app.nav?.hidden ?? []).filter((id) => id !== 'home'));
+    const list = items.filter((i) => !hidden.has(i.id));
+    const order = app.nav?.order ?? [];
+    return [...order.map((id) => list.find((i) => i.id === id)).filter((i): i is NavItem => !!i), ...list.filter((i) => !order.includes(i.id))];
+  });
+
+  // ---------- focus and announcement on navigation ----------
+  // The new view's heading takes focus (so keyboard and screen-reader users land in the content) and the
+  // change is announced politely — unless the user is typing somewhere, which is never interrupted.
+  let announce = $state('');
+  let viewEl = $state<HTMLElement | null>(null);
+  const viewKey = $derived(`${app.view.kind}:${app.view.id ?? ''}:${app.view.path ?? ''}`);
+  let firstView = true;
+  $effect(() => {
+    viewKey;
+    if (!app.ready || !app.settings?.onboarded) return;
+    if (firstView) { firstView = false; return; }
+    const kind = app.view.kind;
+    tick().then(() => setTimeout(() => {
+      const h = viewEl?.querySelector<HTMLElement>('h1') ?? null;
+      const name = h?.textContent?.trim() || navLabel(kind, t(kind === 'help' ? 'shell.help' : kind === 'history' ? 'ui.hist.title' : kind));
+      announce = t('ui.nowShowing', { name });
+      const a = document.activeElement as HTMLElement | null;
+      if (a && a.isConnected && a !== document.body && isTyping(a)) return;
+      if (document.querySelector('[aria-modal="true"]')) return;
+      const target = h ?? viewEl;
+      if (target) { target.tabIndex = -1; target.focus({ preventScroll: true }); }
+    }, 80));
+  });
 
   const interrupted = $derived(((app.status?.interrupted ?? []) as { chatId: string; title: string }[]).filter((r) => !dismissedRuns.includes(r.chatId)).slice(0, 3));
 
@@ -411,16 +483,18 @@
     const add = (id: string, title: string, group: string, icon: string, extra: Partial<PaletteItem> = {}) =>
       items.push({ id, title, group, icon, keys: keys(id) || undefined, run: () => command(id), ...extra });
     add('chat.new', t('newChat'), g.act, 'plus');
-    nav.forEach((k, i) => add('nav.' + k, t(k), g.go, k, { keys: keys('nav.' + (i + 1)) || undefined }));
-    if (app.settings?.modules?.me) add('nav.me', t('me'), g.go, 'me');
-    for (const v of app.pluginViews) items.push({ id: 'view:' + v.id, title: v.title, group: g.go, icon: v.icon || 'plugin', run: () => go({ kind: 'plugin', id: v.id }) });
+    navItems.forEach((it, i) => items.push({ id: (it.custom ? 'view:' : 'nav.') + it.id, title: it.label, group: g.go, icon: it.icon, keys: keys('nav.' + (i + 1)) || undefined, run: it.run }));
     add('settings', t('settings'), g.go, 'settings');
     add('help', t('shell.help'), g.go, 'help', { keywords: 'help shortcuts privacy cost مساعدة اختصارات خصوصية' });
     add('wrap.start', t('shell.pal.wrap'), g.act, 'wrap', { keywords: 'wrap save حفظ تلخيص' });
     if (syncOn) add('sync', t('shell.pal.sync'), g.act, 'sync', { keywords: 'sync backup مزامنة' });
     add('customise', t('layer.customise'), g.act, 'palette', { keywords: 'customise customize personalise change app add-on plugin theme تخصيص تعديل إضافة' });
     if (app.pending?.exists) add('review', t('layer.reviewTitle'), g.act, 'eye', { keywords: 'review pending change مراجعة' });
-    add('rollback', t('shell.rb.title'), g.act, 'rollback', { keywords: 'history rollback undo restore السجل استعادة تراجع' });
+    add('history', t('ui.hist.title'), g.go, 'rollback', { keywords: 'history versions undo restore notes السجل استعادة تراجع نسخة' });
+    add('rollback', t('ui.pal.appHistory'), g.act, 'rollback', { keywords: 'history rollback undo restore app السجل استعادة تراجع التطبيق' });
+    add('nav.todos.calendar', t('ui.cal.title'), g.go, 'calendar', { keywords: 'calendar due dates month تقويم مواعيد', run: () => { go({ kind: 'todos', id: 'calendar' }); } });
+    if (app.canBack) add('back', t('ui.back'), g.go, 'left');
+    if (app.canForward) add('forward', t('ui.forward'), g.go, 'right');
     add('updates.check', t('layer.upd.check'), g.act, 'download', { keywords: 'update version تحديث' });
     add('search.focus', t('shell.pal.search'), g.act, 'search');
     add('sidebar.toggle', app.sidebarCollapsed ? t('shell.sidebarShow') : t('shell.sidebarHide'), g.act, 'sidebar');
@@ -506,15 +580,11 @@
         {/if}
       </form>
       <nav aria-label={t('shell.mainNav')}>
-        {#each nav as k, i}
-          <button class="nav" class:active={isActive(k)} aria-current={isActive(k) ? 'page' : undefined} title={tip(t(k), 'nav.' + (i + 1))} onclick={() => command('nav.' + k)}><Icon name={k} />{t(k)}</button>
-        {/each}
-        {#if app.settings.modules?.me}
-          <button class="nav" class:active={meOpen} aria-current={meOpen ? 'page' : undefined} onclick={() => command('nav.me')}><Icon name="me" />{t('me')}</button>
-        {/if}
-        {#each app.pluginViews as v (v.id)}
-          {@const cur = app.view.kind === 'plugin' && app.view.id === v.id}
-          <button class="nav" class:active={cur} aria-current={cur ? 'page' : undefined} onclick={() => go({ kind: 'plugin', id: v.id })}><Icon name={v.icon || 'plugin'} /><span dir="auto">{v.title}</span></button>
+        {#each navItems as it, i (it.id)}
+          <button class="nav" class:active={it.active} aria-current={it.active ? 'page' : undefined} title={tip(it.label, 'nav.' + (i + 1))} onclick={it.run}>
+            <Icon name={it.icon} /><span class="grow ell" dir="auto">{it.label}</span>
+            {#if it.id === 'todos' && app.dueToday > 0}<span class="badge" title={tn('ui.dueNow', app.dueToday)}><span aria-hidden="true">{fmtNum(app.dueToday)}</span><span class="sr-only">{tn('ui.dueNow', app.dueToday)}</span></span>{/if}
+          </button>
         {/each}
       </nav>
 
@@ -541,7 +611,7 @@
           <div class="group" dir="auto">{pid ? (proj?.name ?? t('shell.project')) : t('library')}</div>
           {#each list as c (c.id)}
             <button class="chat" class:active={app.view.id === c.id} aria-current={app.view.id === c.id ? 'page' : undefined} title={c.title} onclick={() => go({ kind: 'chat', id: c.id })}>
-              <span class="dot" class:run={c.running} class:unw={c.unwrapped} title={dotLabel(c) || undefined}></span>
+              <span class="dot" class:run={c.running} class:unw={!c.running && c.unwrapped} title={dotLabel(c) || undefined}></span>
               <span class="grow ell"><bdi>{c.title}</bdi></span>
               {#if c.interrupted}<span class="cut" title={t('layer.chat.interrupted')}><Icon name="warning" size={12} /><span class="sr-only">({t('layer.chat.interruptedShort')})</span></span>{/if}
               {#if dotLabel(c)}<span class="sr-only">({dotLabel(c)})</span>{/if}
@@ -561,14 +631,14 @@
 
       <div class="foot">
         {#if (app.wrap as any).miniWrapsPaused}<div class="notice" role="status"><Icon name="offline" size={15} /><span class="grow">{t('layer.wrap.paused')}</span></div>{/if}
-        <button class="btn primary wide" onclick={() => command('wrap.start')} disabled={!app.wrap.count}
-          title={app.wrap.count ? tip(tn('shell.chatsToWrap', app.wrap.count), 'wrap.start') : t('shell.nothingToWrap')}>
-          <Icon name="wrap" size={15} /> {t('wrap')}
+        <button class="btn primary wide" onclick={() => command('wrap.start')} disabled={!app.wrap.count || wrapRunning} aria-busy={wrapRunning}
+          title={wrapRunning ? t('ui.wrapRunning') : app.wrap.count ? tip(tn('shell.chatsToWrap', app.wrap.count), 'wrap.start') : t('shell.nothingToWrap')}>
+          <Icon name="wrap" size={15} /> {wrapRunning ? t('ui.wrapRunningShort') : t('wrap')}
           {#if app.wrap.count}<span class="pill" aria-hidden="true">{fmtNum(app.wrap.count)}</span><span class="sr-only">— {tn('shell.chatsToWrap', app.wrap.count)}</span>{/if}
         </button>
         <div class="row tools">
-          {#if syncOn}<button class="iconbtn" class:busy={syncing} disabled={syncing} onclick={() => command('sync')} aria-label={syncing ? t('shell.syncing') : t('shell.syncTip')} title={syncing ? t('shell.syncing') : t('shell.syncTip')}><Icon name="sync" /></button>{/if}
-          <button class="iconbtn" onclick={() => command('rollback')} aria-label={t('shell.rb.title')} title={t('shell.rollbackTip')}><Icon name="rollback" /></button>
+          {#if syncOn}<button class="iconbtn" class:busy={syncing} disabled={syncing || wrapRunning} aria-busy={syncing} onclick={() => command('sync')} aria-label={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : t('shell.syncTip')} title={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : t('shell.syncTip')}><Icon name="sync" /></button>{/if}
+          <button class="iconbtn" class:on={app.view.kind === 'history'} onclick={() => command('history')} aria-label={t('ui.hist.title')} title={t('shell.rollbackTip')} aria-current={app.view.kind === 'history' ? 'page' : undefined}><Icon name="rollback" /></button>
           <button class="iconbtn" class:on={app.view.kind === 'help'} onclick={() => command('help')} aria-label={t('shell.help')} title={t('shell.help')} aria-current={app.view.kind === 'help' ? 'page' : undefined}><Icon name="help" /></button>
           <button class="iconbtn" onclick={() => command('palette')} aria-label={t('shell.palette')} title={tip(t('shell.palette'), 'palette')}><Icon name="command" /></button>
           <span class="grow"></span>
@@ -576,14 +646,43 @@
         </div>
       </div>
     </aside>
+    {:else}
+    <!-- Collapsed: a narrow rail keeps every destination one click away. -->
+    <aside class="rail no-print" aria-label={t('shell.sidebar')}>
+      <div class="drag" data-tauri-drag-region></div>
+      <button class="iconbtn" aria-label={t('shell.sidebarShow')} title={tip(t('shell.sidebarShow'), 'sidebar.toggle')} onclick={() => command('sidebar.toggle')}><Icon name="sidebar" class="flip-rtl" /></button>
+      <nav aria-label={t('shell.mainNav')}>
+        {#each navItems as it, i (it.id)}
+          <button class="iconbtn rb" class:on={it.active} aria-current={it.active ? 'page' : undefined} aria-label={it.label} title={tip(it.label, 'nav.' + (i + 1))} onclick={it.run}>
+            <Icon name={it.icon} />
+            {#if it.id === 'todos' && app.dueToday > 0}<span class="rdot" aria-hidden="true"></span><span class="sr-only">— {tn('ui.dueNow', app.dueToday)}</span>{/if}
+          </button>
+        {/each}
+        <button class="iconbtn rb" aria-label={t('newChat')} title={tip(t('newChat'), 'chat.new')} onclick={() => command('chat.new')}><Icon name="plus" /></button>
+        <button class="iconbtn rb" aria-label={t('shell.searchLabel')} title={tip(t('shell.searchLabel'), 'search.focus')} onclick={() => command('search.focus')}><Icon name="search" /></button>
+      </nav>
+      <span class="grow"></span>
+      <button class="iconbtn rb wrapb" disabled={!app.wrap.count || wrapRunning} aria-busy={wrapRunning} onclick={() => command('wrap.start')}
+        aria-label={wrapRunning ? t('ui.wrapRunning') : app.wrap.count ? `${t('wrap')} — ${tn('shell.chatsToWrap', app.wrap.count)}` : t('shell.nothingToWrap')}
+        title={wrapRunning ? t('ui.wrapRunning') : app.wrap.count ? tip(tn('shell.chatsToWrap', app.wrap.count), 'wrap.start') : t('shell.nothingToWrap')}>
+        <Icon name="wrap" />{#if app.wrap.count}<span class="rdot" aria-hidden="true"></span>{/if}
+      </button>
+      <button class="iconbtn rb" class:on={app.view.kind === 'history'} onclick={() => command('history')} aria-label={t('ui.hist.title')} title={t('shell.rollbackTip')}><Icon name="rollback" /></button>
+      <button class="iconbtn rb" class:on={app.view.kind === 'help'} onclick={() => command('help')} aria-label={t('shell.help')} title={t('shell.help')}><Icon name="help" /></button>
+      <button class="iconbtn rb" class:on={app.view.kind === 'settings'} onclick={() => command('settings')} aria-label={t('settings')} title={tip(t('settings'), 'settings')} aria-current={app.view.kind === 'settings' ? 'page' : undefined}><Icon name="settings" /></button>
+    </aside>
     {/if}
 
     <main class="main">
-      <div class="drag top no-print" data-tauri-drag-region>
-        {#if app.sidebarCollapsed}
-          <button class="iconbtn expand" aria-label={t('shell.sidebarShow')} title={tip(t('shell.sidebarShow'), 'sidebar.toggle')} onclick={() => command('sidebar.toggle')}><Icon name="sidebar" class="flip-rtl" /></button>
-        {/if}
-      </div>
+      <div class="drag top no-print" data-tauri-drag-region></div>
+      <div class="sr-only" role="status" aria-live="polite">{announce}</div>
+      {#if stale}
+        <div class="safe no-print" role="status">
+          <Icon name="download" size={16} />
+          <span class="grow">{t('ui.stale.body')}</span>
+          <button class="btn" onclick={restartStale}><Icon name="retry" size={14} /> {t('ui.stale.restart')}</button>
+        </div>
+      {/if}
       {#if !app.online}
         <div class="banner no-print" role="status"><Icon name="offline" size={15} /> {t('shell.reconnecting')}</div>
       {/if}
@@ -595,17 +694,8 @@
           <button class="btn" onclick={retryLayer}><Icon name="retry" size={14} /> {app.safeReason === 'crash' ? t('shell.safe.retry') : t('shell.safe.leave')}</button>
         </div>
       {/if}
-      {#if app.preview}
-        <div class="safe prev no-print" role="status">
-          <Icon name="eye" size={16} />
-          <span class="grow">{t('layer.previewBanner')}</span>
-          <button class="btn primary" disabled={previewBusy} onclick={() => previewAct(() => keepPending(), 'layer.keepFailed')}>{t('layer.keep')}</button>
-          <button class="btn" disabled={previewBusy} onclick={() => previewAct(discardPending, 'layer.discardFailed')}>{t('layer.discard')}</button>
-          <button class="btn" disabled={previewBusy} onclick={() => previewAct(stopPreview, 'shell.layerFailed')}>{t('layer.stopPreview')}</button>
-          <button class="btn ghost" disabled={previewBusy} onclick={openReview}>{t('layer.details')}</button>
-        </div>
-      {/if}
-      {#key `${app.view.kind}:${app.view.id ?? ''}:${app.view.path ?? ''}`}<div class="view">
+      {#if app.preview}<PreviewBanner />{/if}
+      {#key viewKey}<div class="view" bind:this={viewEl}>
       {#if libraryGone && app.view.kind !== 'settings' && app.view.kind !== 'help'}
         <div class="page missing">
           <div class="card" role="alert">
@@ -641,7 +731,8 @@
         </div>
       {:else if app.view.kind === 'ideas'}<Ideas />
       {:else if app.view.kind === 'docs'}{#key app.view.path}<Docs path={app.view.path} />{/key}
-      {:else if app.view.kind === 'todos'}<Todos />
+      {:else if app.view.kind === 'todos'}<Todos mode={app.view.id === 'calendar' ? 'calendar' : 'list'} />
+      {:else if app.view.kind === 'history'}<History />
       {:else if app.view.kind === 'projects'}<Projects {projects} reload={loadProjects} {newChat} />
       {:else if app.view.kind === 'settings'}<Settings reload={loadProjects} />
       {:else if app.view.kind === 'help'}<Help />
@@ -669,18 +760,27 @@
   .pulse { animation: breathe 1.6s ease-in-out infinite alternate; margin-bottom: 6px; }
   @keyframes breathe { to { opacity: .55; transform: scale(.96); } }
   .shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; }
-  .shell.collapsed { grid-template-columns: 1fr; }
+  .shell.collapsed { grid-template-columns: 50px 1fr; }
+  .rail { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 0 0 10px; min-height: 0; background: var(--sidebar-glass); border-inline-end: 1px solid var(--hairline); }
+  :global(html.native.os-macos) .rail { background: color-mix(in srgb, var(--sidebar) 40%, transparent); }
+  :global(html.native:not(.os-macos)) .rail { background: var(--sidebar); }
+  .rail nav { margin: 8px 0; align-items: center; gap: 2px; overflow: auto; min-height: 0; }
+  .rail .rb { position: relative; width: 34px; height: 32px; }
+  .rail .wrapb:not(:disabled) { color: var(--accent); }
+  .rdot { position: absolute; top: 4px; inset-inline-end: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); }
+  .badge { flex: none; font-size: var(--fs-xxs); font-weight: 600; min-width: 18px; text-align: center; padding: 0 5px; border-radius: 99px; background: var(--accent); color: var(--accent-fg); }
+  :global([data-theme="contrast"]) .nav.active .badge { background: var(--accent-fg); color: var(--accent); }
   .sidebar {
     background: var(--sidebar-glass); -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%);
     border-inline-end: 1px solid var(--hairline); display: flex; flex-direction: column; min-height: 0; padding: 0 10px 10px;
   }
   .drag { height: 30px; flex: none; }
-  .main { position: relative; overflow: auto; min-width: 0; background: var(--aura), var(--bg); background-repeat: no-repeat; }
+  /* `main` is a size container so views can adapt to the room they really have (sidebar open or not). */
+  .main { position: relative; overflow: auto; min-width: 0; background: var(--aura), var(--bg); background-repeat: no-repeat; container: main / inline-size; }
+  .view:focus { outline: none; }
   :global(html.native.os-macos) .sidebar { background: color-mix(in srgb, var(--sidebar) 40%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
   :global(html.native:not(.os-macos)) .sidebar { background: var(--sidebar); -webkit-backdrop-filter: none; backdrop-filter: none; }
   .main .drag.top { position: sticky; top: 0; height: 26px; z-index: 5; }
-  .expand { position: absolute; top: 2px; inset-inline-start: 10px; background: var(--glass); }
-  :global(html.native.os-macos[dir="ltr"]) .expand { inset-inline-start: 78px; }
   .brand { font-weight: 700; font-size: 15px; padding: 2px 6px 12px; letter-spacing: -.01em; gap: 8px; }
   .brand .iconbtn { margin-inline-end: -4px; }
 
@@ -696,8 +796,7 @@
   }
   .hit { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: 6px; font-size: 13px; cursor: pointer; }
   .hit :global(.icon) { flex: none; margin-top: 3px; color: var(--muted); }
-  .hit[aria-selected="true"] { background: var(--tint); }
-  :global([data-theme="contrast"]) .hit[aria-selected="true"] { background: var(--accent); color: var(--accent-fg); }
+  .hit[aria-selected="true"] { background: var(--tint); color: var(--on-tint); }
   :global([data-theme="contrast"]) .hit[aria-selected="true"] :global(*) { color: inherit; }
   .blk { display: block; }
   .note { margin: 0; padding: 8px; font-size: 13px; }
@@ -706,11 +805,10 @@
 
   .iconbtn { font: inherit; background: none; border: 0; padding: 0; cursor: pointer; width: 30px; height: 28px; display: grid; place-items: center; border-radius: 7px; color: var(--muted); flex: none; }
   .iconbtn:hover { background: var(--fill); color: var(--fg); }
-  .iconbtn.on { background: var(--tint); color: var(--accent); }
-  :global([data-theme="contrast"]) .iconbtn.on { color: var(--accent-fg); }
+  .iconbtn.on { background: var(--tint); color: var(--on-tint); }
   .iconbtn:disabled { opacity: .6; cursor: default; }
   .iconbtn.busy :global(.icon) { animation: spin 1s linear infinite; }
-  .iconbtn.sm { width: 22px; height: 22px; }
+  .iconbtn.sm { width: 24px; height: 24px; }
   .tools { gap: 2px; }
   nav { display: flex; flex-direction: column; gap: 1px; margin: 10px 0; }
   .nav, .chat {
@@ -719,14 +817,12 @@
     cursor: pointer; color: var(--fg); font-size: 13px;
   }
   .nav :global(.icon) { flex: none; color: var(--muted); }
-  .nav.active :global(.icon) { color: var(--accent); }
   .nav:hover, .chat:hover { background: var(--fill); }
-  .nav.active, .chat.active { background: var(--tint); color: var(--accent); font-weight: 600; }
-  :global([data-theme="contrast"]) .nav.active, :global([data-theme="contrast"]) .chat.active { background: var(--accent); }
-  :global([data-theme="contrast"]) .nav.active :global(.icon) { color: var(--accent-fg); }
+  .nav.active, .chat.active { background: var(--tint); color: var(--on-tint); font-weight: 600; }
+  .nav.active :global(.icon) { color: inherit; }
   .nav:focus-visible, .chat:focus-visible, .iconbtn:focus-visible { outline-offset: -2px; }
 
-  .notice { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; padding: 8px; margin-bottom: 8px; border-radius: var(--radius); background: var(--fill); border: var(--border-w) solid var(--hairline); }
+  .notice { display: flex; gap: 8px; align-items: flex-start; font-size: var(--fs-xs); padding: 8px; margin-bottom: 8px; border-radius: var(--radius); background: var(--fill); border: var(--border-w) solid var(--hairline); }
   .notice > :global(.icon) { flex: none; margin-top: 2px; color: var(--accent-2); }
   .run { gap: 2px; }
   .cut { flex: none; color: var(--accent-2); display: inline-flex; }
@@ -735,18 +831,20 @@
 
   .chats { flex: 1; min-height: 0; border-top: 1px solid var(--hairline); padding-top: 6px; }
   .sect { padding: 0 6px; color: var(--muted); }
-  .sect h2 { font-size: 12px; font-weight: 600; margin: 0; letter-spacing: 0; }
-  .group { font-size: 12px; color: var(--muted); padding: 8px 8px 2px; }
-  .empty { font-size: 12px; padding: 6px 8px; margin: 0; }
+  .sect h2 { font-size: var(--fs-xs); font-weight: 600; margin: 0; letter-spacing: 0; }
+  .group { font-size: var(--fs-xs); color: var(--muted); padding: 8px 8px 2px; }
+  .empty { font-size: var(--fs-xs); padding: 6px 8px; margin: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); flex: none; }
-  .dot.unw { background: var(--accent-2); }
-  .dot.run { background: var(--accent); animation: pulse 1s infinite alternate; }
-  :global([data-theme="contrast"]) .chat.active .dot { background: var(--accent-fg); }
+  /* State is carried by shape as well as colour: plain = small round, not saved yet = diamond, working = ring. */
+  .dot.unw { background: var(--accent-2); border-radius: 1px; transform: rotate(45deg); }
+  .dot.run { width: 9px; height: 9px; background: transparent; border: 2px solid var(--accent); animation: pulse 1s infinite alternate; }
+  :global([data-theme="contrast"]) .chat.active .dot { background: currentColor; }
+  :global([data-theme="contrast"]) .chat.active .dot.run { background: transparent; border-color: currentColor; }
   @keyframes pulse { to { opacity: .3; } }
   .foot { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--hairline); }
   .wide { justify-content: center; }
-  .sm { font-size: 12px; }
+  .sm { font-size: var(--fs-xs); }
 
   .banner {
     position: sticky; top: 30px; z-index: 6; width: fit-content; margin: 0 auto; display: flex; align-items: center; gap: 8px;
@@ -757,8 +855,6 @@
   .safe { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 4px 28px 0; padding: 10px 14px; border-radius: var(--radius-lg); background: var(--panel); border: var(--border-w) solid var(--accent-2); font-size: 13px; }
   .safe > :global(.icon) { flex: none; color: var(--accent-2); }
   .safe .grow { min-width: 220px; }
-  .prev { position: sticky; top: 30px; z-index: 6; border-color: var(--accent); box-shadow: var(--shadow); }
-  .prev > :global(.icon) { color: var(--accent); }
   .missing { display: grid; place-items: center; min-height: 70vh; max-width: none; }
   .missing .card { max-width: 520px; display: grid; gap: 10px; justify-items: start; padding: 24px; }
   .missing h1, .missing p { margin: 0; }

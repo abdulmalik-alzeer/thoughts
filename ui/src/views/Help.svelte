@@ -2,7 +2,7 @@
   import Icon from '../lib/Icon.svelte';
   import { api } from '../lib/api';
   import { app, command, toast } from '../lib/store.svelte';
-  import { t, fmtNum } from '../lib/i18n';
+  import { t, fmtMoney } from '../lib/i18n';
   import { shortcuts, keys } from '../lib/shortcuts';
 
   const terms = ['library', 'chat', 'wrap', 'sync', 'rollback'];
@@ -10,6 +10,11 @@
     keys: s.id === 'nav.1' ? `${keys(s)} … ${keys(shortcuts.find((x) => x.id === 'nav.6')!)}` : keys(s),
     label: t(s.label),
   })));
+  // The six tour cards, kept here for reference (icon + i18n stem).
+  const around = [['home', 'home'], ['chats', 'chat'], ['wrap', 'wrap'], ['docs', 'files'], ['projects', 'folders'], ['palette', 'yours']];
+  // Isolate an amount so it reads correctly inside Arabic text.
+  const iso = (x: string) => String.fromCodePoint(0x2068) + x + String.fromCodePoint(0x2069);
+  const usesFile = $derived(app.settings?.sync?.credentialStore === 'file');
   const monthCost = $derived(app.status?.usage?.monthCostUsd);
 
   let copying = $state(false);
@@ -48,7 +53,28 @@
         <dt>{t(`shell.help.term.${k}`)}</dt><dd>{t(`shell.help.def.${k}`)}</dd>
       {/each}
     </dl>
-    <button class="btn" onclick={() => command('tour')}><Icon name="book" size={15} /> {t('shell.pal.tour')}</button>
+  </section>
+
+  <section aria-labelledby="h-around">
+    <h2 id="h-around" class="row"><Icon name="book" size={18} /> {t('ob3.help.around')}</h2>
+    <dl>
+      {#each around as [icon, k]}
+        <dt class="row"><Icon name={icon} size={15} /> {t(`shell.tour.${k}Title`)}</dt><dd>{t(`shell.tour.${k}Body`, { palette: keys('palette') })}</dd>
+      {/each}
+    </dl>
+    <button class="btn" onclick={() => command('tour')}><Icon name="book" size={15} /> {t('ob3.help.takeTour')}</button>
+  </section>
+
+  <section aria-labelledby="h-hist">
+    <h2 id="h-hist" class="row"><Icon name="rollback" size={18} /> {t('ob3.help.history')}</h2>
+    <dl>
+      <dt>{t('ob3.help.notesHistT')}</dt><dd>{t('ob3.help.notesHist')}</dd>
+      <dt>{t('ob3.help.appHistT')}</dt><dd>{t('ob3.help.appHist')}</dd>
+    </dl>
+    <div class="row wrap">
+      <button class="btn" onclick={() => command('history')}><Icon name="rollback" size={15} /> {t('ob3.help.openNotesHist')}</button>
+      <button class="btn" onclick={() => command('rollback')}><Icon name="palette" size={15} /> {t('ob3.help.openAppHist')}</button>
+    </div>
   </section>
 
   <section aria-labelledby="h-cust">
@@ -61,7 +87,7 @@
     </dl>
     <div class="row wrap">
       <button class="btn primary" onclick={() => command('customise')}><Icon name="palette" size={15} /> {t('layer.customise')}</button>
-      <button class="btn" onclick={() => command('history')}><Icon name="rollback" size={15} /> {t('layer.history')}</button>
+      <button class="btn" onclick={() => command('rollback')}><Icon name="rollback" size={15} /> {t('ob3.help.openAppHist')}</button>
     </div>
   </section>
 
@@ -79,7 +105,7 @@
     <h2 id="h-priv" class="row"><Icon name="lock" size={18} /> {t('shell.help.privacy')}</h2>
     <dl>
       <dt>{t('shell.help.sentT')}</dt><dd>{t('shell.help.sent')}</dd>
-      <dt>{t('shell.help.localT')}</dt><dd>{t('shell.help.local')}</dd>
+      <dt>{t('shell.help.localT')}</dt><dd>{t('shell.help.local')} {t(usesFile ? 'ob3.help.secretsFile' : 'ob3.help.secretsBoth')}</dd>
       <dt>{t('shell.help.privateT')}</dt><dd>{t('shell.help.private')}</dd>
       <dt>{t('shell.help.noTrackT')}</dt><dd>{t('shell.help.noTrack')}</dd>
     </dl>
@@ -90,11 +116,11 @@
   <section aria-labelledby="h-cost">
     <h2 id="h-cost">{t('shell.help.cost')}</h2>
     <dl>
-      <dt>{t('shell.help.subT')}</dt><dd>{t('shell.help.sub')}</dd>
-      <dt>{t('shell.help.apiT')}</dt><dd>{t('shell.help.api')}</dd>
+      <dt>{t('shell.help.subT')}</dt><dd>{t('ob3.help.sub')}</dd>
+      <dt>{t('shell.help.apiT')}</dt><dd>{t('ob3.help.api')}</dd>
     </dl>
     {#if typeof monthCost === 'number'}
-      <p><bdi>{t('shell.help.costMonth', { n: fmtNum(Math.round(monthCost * 100) / 100) })}</bdi></p>
+      <p>{t('ob3.help.costMonth', { amount: iso(fmtMoney(monthCost)) })}</p>
     {/if}
   </section>
 
@@ -122,10 +148,10 @@
   dt { font-weight: 600; }
   dd { margin: 0; color: var(--muted); }
   table { width: 100%; }
-  th { text-align: start; font-size: 12px; font-weight: 600; color: var(--muted); }
+  th { text-align: start; font-size: var(--fs-xs); font-weight: 600; color: var(--muted); }
   td, th { border: 0; border-bottom: var(--border-w) solid var(--hairline); padding: 7px 8px; }
   td:first-child { white-space: nowrap; width: 1%; }
   .wrap { flex-wrap: wrap; }
-  .sm { font-size: 12px; }
+  .sm { font-size: var(--fs-xs); }
   h2.row { gap: 8px; }
 </style>

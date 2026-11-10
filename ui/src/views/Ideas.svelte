@@ -5,7 +5,9 @@
   import { api, on, post } from '../lib/api';
   import { go, refreshChats } from '../lib/store.svelte';
   import { t, tn, fmtDate, fmtNum } from '../lib/i18n';
-  import { fail } from '../lib/content/util';
+  import { failed } from '../lib/errors';
+  import { term } from '../lib/terms';
+  import { fold } from '../lib/CommandPalette.svelte';
 
   let ideas = $state<any[]>([]);
   let loading = $state(true);
@@ -25,7 +27,7 @@
   const ORDER = ['active', 'seed', 'parked', 'done', 'dropped'];
   const statuses = $derived([...new Set(ideas.map((i) => i.status).filter(Boolean))].sort((a, b) => (ORDER.indexOf(a) + 99) % 99 - (ORDER.indexOf(b) + 99) % 99));
   const shown = $derived(ideas.filter((i) => (!status || i.status === status) &&
-    (!q.trim() || `${i.title} ${i.summary} ${(i.tags || []).join(' ')}`.toLowerCase().includes(q.trim().toLowerCase()))));
+    (!q.trim() || fold(`${i.title} ${i.summary} ${(i.tags || []).join(' ')}`).includes(fold(q.trim())))));
   const areas = $derived([...new Set(shown.map((i) => i.area))].sort());
 
   /** Known statuses are translated; anything custom is shown as written. */
@@ -42,16 +44,16 @@
       newIdea = '';
       await refreshChats().catch(() => {});
       go({ kind: 'chat', id: c.id });
-    } catch (e) { fail(e); }
+    } catch (e) { failed(t('ui.idea.captureFailed'), e); }
     finally { busy = false; }
   }
 </script>
 
 <div class="page">
-  <h1>{t('ideas')}</h1>
+  <h1>{term('title')}</h1>
   <form class="row" onsubmit={(e) => { e.preventDefault(); capture(); }}>
-    <input class="grow" placeholder={t('idea.newPlaceholder')} aria-label={t('idea.newPlaceholder')} bind:value={newIdea} dir="auto" />
-    <button class="btn primary" disabled={!newIdea.trim() || busy}><Icon name="ideas" size={14} /> {t('idea.capture')}</button>
+    <input class="grow" placeholder={term('newPlaceholder')} aria-label={term('newPlaceholder')} bind:value={newIdea} dir="auto" />
+    <button class="btn primary" disabled={!newIdea.trim() || busy}><Icon name="ideas" size={14} /> {term('capture')}</button>
   </form>
 
   {#if loading}
@@ -60,7 +62,7 @@
     <div class="state" role="alert"><Icon name="warning" size={24} /><p>{t('idea.loadFailed')}</p><p class="muted sm" dir="auto">{loadError}</p>
       <button class="btn primary" onclick={() => { loading = true; load(); }}><Icon name="retry" size={14} /> {t('idea.tryAgain')}</button></div>
   {:else if !ideas.length}
-    <div class="state"><Icon name="ideas" size={28} /><h2>{t('idea.emptyTitle')}</h2><p class="muted">{t('idea.emptyBody')}</p></div>
+    <div class="state"><Icon name="ideas" size={28} /><h2>{term('emptyTitle')}</h2><p class="muted">{term('emptyBody')}</p><p class="muted sm">{t('ui.idea.emptyTip')}</p></div>
   {:else}
     <div class="row filters">
       <input type="search" placeholder={t('idea.searchPlaceholder')} aria-label={t('idea.searchPlaceholder')} bind:value={q} class="q" dir="auto" />
@@ -101,9 +103,9 @@
   .filters { margin: 12px 0; flex-wrap: wrap; }
   .q { max-width: 260px; }
   .pills { flex-wrap: wrap; gap: 6px; }
-  .filters .pill { font: inherit; font-size: 12px; font-weight: 500; border: 0; cursor: pointer; padding: 3px 11px; }
-  .pill { font-size: 12px; }
-  .pill.st-active { background: var(--tint); color: var(--accent); }
+  .filters .pill { font: inherit; font-size: var(--fs-xs); font-weight: 500; border: 0; cursor: pointer; padding: 3px 11px; }
+  .pill { font-size: var(--fs-xs); }
+  .pill.st-active { background: var(--tint); color: var(--on-tint); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
   .cell { position: relative; display: grid; }
   .ia { position: absolute; inset-block-end: 8px; inset-inline-end: 8px; }
@@ -118,5 +120,5 @@
   .sk { margin-top: 16px; }
   .skel { height: 110px; border-radius: var(--radius-lg); background: var(--fill); }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .sm { font-size: 12px; }
+  .sm { font-size: var(--fs-xs); }
 </style>

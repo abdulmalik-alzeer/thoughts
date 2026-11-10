@@ -3,6 +3,19 @@ import DOMPurify from 'dompurify';
 import { t } from './i18n';
 
 marked.setOptions({ gfm: true, breaks: false });
+// Task-list items: `<input>` is forbidden in rendered markdown, so a checkbox becomes a plain text
+// marker that a screen reader names ("done" / "not done").
+marked.use({
+  renderer: {
+    checkbox(a: any) {
+      const checked = typeof a === 'object' && a ? !!a.checked : !!a;
+      return `<span class="md-task" role="img" aria-label="${checked ? 'md-task-done' : 'md-task-open'}">${checked ? '[x]' : '[ ]'}</span> `;
+    },
+  },
+});
+
+/** Nothing interactive or frame-like may come out of markdown (the copy button is added afterwards, by us). */
+const FORBID_TAGS = ['style', 'form', 'input', 'button', 'textarea', 'select', 'iframe', 'object', 'embed'];
 
 
 /** Render markdown to sanitized HTML (frontmatter stripped).
@@ -11,7 +24,12 @@ marked.setOptions({ gfm: true, breaks: false });
 export function md(src: string): string {
   const body = src.replace(/^---\n[\s\S]*?\n---\n?/, '');
   // Sanitise to a DOM fragment, then add the wrappers with DOM APIs (never by editing the HTML string).
-  const frag = DOMPurify.sanitize(marked.parse(body, { async: false }) as string, { RETURN_DOM_FRAGMENT: true });
+  const frag = DOMPurify.sanitize(marked.parse(body, { async: false }) as string, { RETURN_DOM_FRAGMENT: true, FORBID_TAGS });
+  // Each block finds its own direction, so an Arabic paragraph and an English one sit correctly in
+  // the same answer; inline code is always left-to-right and isolated from the sentence around it.
+  for (const el of Array.from(frag.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th'))) el.setAttribute('dir', 'auto');
+  for (const code of Array.from(frag.querySelectorAll('code'))) if (!code.closest('pre')) code.setAttribute('dir', 'ltr');
+  for (const box of Array.from(frag.querySelectorAll('.md-task'))) box.setAttribute('aria-label', t(box.textContent === '[x]' ? 'chat3.taskDone' : 'chat3.taskOpen'));
   for (const pre of Array.from(frag.querySelectorAll('pre'))) {
     const wrap = document.createElement('div');
     wrap.className = 'md-code';
@@ -62,6 +80,9 @@ if (typeof document !== 'undefined' && !document.getElementById('md-extras')) {
 @media (hover: none) { .md-copy { opacity: 1; } }
 .md-table { overflow-x: auto; max-width: 100%; margin: 0 0 10px; }
 .md-table table { min-width: max-content; }
+.md :not(pre) > code[dir] { unicode-bidi: isolate; }
+.md-task { font-family: var(--mono); font-size: .92em; color: var(--muted); }
+.md li:has(> .md-task), .md li:has(> p > .md-task) { list-style: none; }
 @media print { .md-copy { display: none !important; } .md-table { overflow: visible; } }
 `;
   document.head.appendChild(s);

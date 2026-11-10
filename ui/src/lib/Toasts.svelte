@@ -75,6 +75,6 @@
   .act { flex: none; padding: 3px 10px; color: var(--accent); font-weight: 600; }
   .x { font: inherit; color: var(--muted); background: none; border: 0; border-radius: 6px; width: 24px; height: 24px; display: grid; place-items: center; flex: none; cursor: pointer; }
   .x:hover { background: var(--fill); color: var(--fg); }
-  .detail { margin: 0; max-height: 180px; overflow: auto; font-size: 12px; padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; text-align: start; }
-  .sm { font-size: 12px; padding: 3px 8px; }
+  .detail { margin: 0; max-height: 180px; overflow: auto; font-size: var(--fs-xs); padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; text-align: start; }
+  .sm { font-size: var(--fs-xs); padding: 3px 8px; }
 </style>

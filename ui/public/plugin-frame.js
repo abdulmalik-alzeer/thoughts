@@ -85,13 +85,28 @@
     ideas: { list: function () { return call('ideas.list'); } },
   };
 
-  /** Plugin API v1 — the only object a plugin receives. */
+  /** Plugin API v1 (with the v1.1 additions) — the only object a plugin receives.
+   *  Every call is checked by the host against the permissions the plugin declared. */
   function pluginApi() {
     return {
       version: 1,
-      library: data.library,
-      todos: { list: data.todos.list, add: function (text) { return call('todos.add', [text]); } },
-      ideas: data.ideas,
+      library: {
+        list: data.library.list, read: data.library.read, search: data.library.search,
+        // library:write — only inside the folders declared in "write", only .md/.json/.csv/.txt
+        write: function (path, text) { return call('library.write', [path, String(text)]); },
+        remove: function (path) { return call('library.remove', [path]); },
+      },
+      todos: {
+        list: data.todos.list,
+        add: function (text) { return call('todos.add', [text]); },
+        // `item` is a todo as todos.list() returns it, with its list's "file" (item actions get it ready-made).
+        setDone: function (item, done) { return call('todos.setDone', [item, done === undefined ? true : !!done]); },
+        edit: function (item, text) { return call('todos.edit', [item, text]); },
+        remove: function (item) { return call('todos.remove', [item]); },
+      },
+      ideas: { list: data.ideas.list, setStatus: function (path, status) { return call('ideas.setStatus', [path, status]); } },
+      // storage — one JSON document per plugin (256 KB at most)
+      storage: { get: function () { return call('storage.get'); }, set: function (obj) { return call('storage.set', [obj]); } },
       chat: { start: function (prompt) { return call('chat.start', [prompt]); } },
       ui: {
         toast: function (msg, opts) { call('ui.toast', [String(msg), opts && { kind: opts.kind }]).catch(noop); },

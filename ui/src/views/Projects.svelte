@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { failed } from '../lib/errors';
   import Icon from '../lib/Icon.svelte';
   import { del, post } from '../lib/api';
   import { app, go, toast } from '../lib/store.svelte';
@@ -31,7 +32,7 @@
       name = ''; path = ''; inside = false;
       await reload();
       toast(t('proj.linked'), { kind: 'success' });
-    } catch (e: any) { toast(e?.message || t('proj.failed'), { kind: 'error' }); }
+    } catch (e) { failed(t('proj.failed'), e); }
     finally { adding = false; }
   }
 
@@ -40,7 +41,7 @@
     if (!ok) return;
     removing[p.id] = true;
     try { await del(`/projects/${p.id}`); await reload(); }
-    catch (e: any) { toast(e?.message || t('proj.failed'), { kind: 'error' }); }
+    catch (e) { failed(t('proj.failed'), e); }
     finally { removing[p.id] = false; }
   }
 </script>
@@ -84,7 +85,7 @@
   .list { display: grid; gap: 10px; margin-top: 16px; }
   .chat { font: inherit; color: inherit; background: none; border: 0; text-align: start; display: flex; gap: 6px; align-items: center; cursor: pointer; font-size: 13px; padding: 3px 0; width: 100%; }
   .chat:hover { color: var(--accent); }
-  .sm { font-size: 12px; }
+  .sm { font-size: var(--fs-xs); }
   .path { display: inline-block; overflow-wrap: anywhere; }
   .check { display: flex; gap: 8px; align-items: center; color: var(--fg); font-size: 13px; }
   .actions { margin-top: 12px; }

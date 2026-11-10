@@ -1,17 +1,28 @@
+<script lang="ts" module>
+  type Attachment = { name: string; data: string; size: number; image: boolean; /** bytes were lost on restart: must be attached again */ missing?: boolean };
+  // Kept for the session, per chat: attachments still waiting in the composer (their bytes cannot
+  // go into localStorage) and the files of the last message sent (so Retry can send them again).
+  const pendingFiles = new Map<string, Attachment[]>();
+  const lastSent = new Map<string, { text: string; files: Attachment[] }>();
+  const DRAFT_MAX = 20000;
+  const draftKey = (id: string) => `thoughts.chatdraft:${id}`;
+</script>
+
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
   import { onMount, tick } from 'svelte';
   import { api, del, on, patch, post, ApiError } from '../lib/api';
   import { md, mdClick } from '../lib/md';
-  import { app, go, refreshChats } from '../lib/store.svelte';
-  import { t, lang } from '../lib/i18n';
+  import { app, costVisible, go, refreshChats } from '../lib/store.svelte';
+  import { t, tn, fmtMoney } from '../lib/i18n';
+  import { failed } from '../lib/errors';
+  import { normalizeCapture } from '../lib/capture';
   import { confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { openReview } from '../lib/layer';
-  import { MAX_FILE_BYTES, copyText, fail, fmtSize, isImageName, notify, readAsDataURL } from '../lib/content/util';
+  import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, readAsDataURL } from '../lib/content/util';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
 
-  type Attachment = { name: string; data: string; size: number; image: boolean };
 
   let chat = $state<any>(null);
   let loadState = $state<'loading' | 'ok' | 'missing' | 'error'>('loading');
@@ -33,19 +44,75 @@
   let dragDepth = 0;
   let scroller = $state<HTMLElement>();
   let input = $state<HTMLTextAreaElement>();
+  let escHint = $state(false);   // Esc was pressed once while the assistant is working
+  let escTimer: ReturnType<typeof setTimeout> | undefined;
+  let announce = $state('');     // one polite line for screen readers when an answer completes
+  let announceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // ---- draft: what was typed (and which files were waiting) survives chat switches and restarts ----
+  {
+    let d: any = null;
+    try { d = JSON.parse(localStorage.getItem(draftKey(id)) || 'null'); } catch { /* no draft */ }
+    if (d && typeof d === 'object') {
+      text = String(d.text ?? '').slice(0, DRAFT_MAX);
+      mentions = Array.isArray(d.mentions) ? d.mentions.filter((p: any) => typeof p === 'string').slice(0, 30) : [];
+      const mem = pendingFiles.get(id) ?? [];
+      const meta: any[] = Array.isArray(d.files) ? d.files.slice(0, 20) : [];
+      files = meta.map((m) => mem.find((f) => f.name === m.name && f.size === m.size) ?? { name: String(m.name ?? ''), size: Number(m.size) || 0, image: !!m.image, data: '', missing: true });
+    }
+  }
+  $effect(() => {
+    const draft = { text: text.slice(0, DRAFT_MAX), mentions: [...mentions], files: files.map((f) => ({ name: f.name, size: f.size, image: f.image })) };
+    const live = files.filter((f) => !f.missing).map((f) => ({ ...f }));
+    if (live.length) pendingFiles.set(id, live); else pendingFiles.delete(id);
+    try {
+      if (draft.text || draft.mentions.length || draft.files.length) localStorage.setItem(draftKey(id), JSON.stringify(draft));
+      else localStorage.removeItem(draftKey(id));
+    } catch { /* storage full or unavailable: the draft just isn't kept */ }
+  });
+
+  // A mention lives only as long as its "@path" is still in the text.
+  $effect(() => {
+    const keep = mentions.filter((p) => text.includes('@' + p));
+    if (keep.length !== mentions.length) mentions = keep;
+  });
+
+  // The box grows with the text up to about 40% of the window, then scrolls.
+  function grow() {
+    if (!input) return;
+    input.style.height = 'auto';
+    const max = Math.round(window.innerHeight * 0.4);
+    input.style.height = Math.min(input.scrollHeight + 2, max) + 'px';
+    input.style.overflowY = input.scrollHeight + 2 > max ? 'auto' : 'hidden';
+  }
+  $effect(() => { text; input; grow(); });
+
+  function say(msg: string) {
+    clearTimeout(announceTimer);
+    announce = msg;
+    announceTimer = setTimeout(() => (announce = ''), 4000);
+  }
 
   async function load(initial = false) {
     if (initial) loadState = 'loading';
     try {
       const c = await api(`/chats/${id}`);
       c.options ??= {};
+      // "Ask before changes" no longer exists: an older chat that stored it is read-only.
+      if (c.options.permissionMode === 'default') c.options.permissionMode = 'plan';
       chat = c;
       loadState = 'ok';
       // Seen: the "cut off" marker stays on screen for this visit but no longer follows the chat around.
       if (c.interrupted && initial) post(`/chats/${id}/ack-interrupted`).catch(() => {});
       await scrollDown(initial);
+      if (initial) {
+        const missing = files.filter((f) => f.missing).length;
+        if (missing) notify(tn('chat3.reattachNote', missing), { kind: 'info', key: 'reattach:' + id });
+        // Only a brand-new chat takes the cursor; otherwise the shell puts focus on the title.
+        if (!c.messages.length && !c.running && !['wrap', 'reorganize', 'setup'].includes(c.kind)) { await tick(); input?.focus(); }
+      }
     } catch (e: any) {
-      if (chat && !initial) return fail(e); // keep what is on screen; a refresh failed
+      if (chat && !initial) return failed(t('chat3.refreshFailed'), e); // keep what is on screen; a refresh failed
       loadError = e?.message ?? String(e);
       loadState = e instanceof ApiError && e.status === 404 ? 'missing' : 'error';
     }
@@ -66,9 +133,10 @@
 
   onMount(() => {
     load(true);
+    window.addEventListener('resize', grow);
     api('/ai/claude/options').then((o) => (opts = { models: [], efforts: [], permissionModes: [], ...o })).catch(() => {});
     api('/library/tree?exclude=private').then((x: any[]) => (tree = x.map((f) => f.path).filter((p) => p.endsWith('.md')))).catch(() => {});
-    return on((e) => {
+    const off = on((e) => {
       if (e.type === 'resync') { load(); return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
       if (!chat) return;
@@ -84,35 +152,44 @@
         thinking += e.text;
       } else if (e.type === 'chat.done') {
         streaming = ''; thinking = '';
+        escHint = false;
+        say(t('chat3.answerDone'));
         load();
       } else if (e.type === 'chat.updated') {
         chat.running = e.chat.running;
         chat.title = e.chat.title;
       }
     });
+    return () => { off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); };
   });
 
-  async function sendBody(body: any) {
+  async function sendBody(body: any, failKey = 'chat3.sendFailed') {
+    if (body.options?.permissionMode === 'default') body.options = { ...body.options, permissionMode: 'plan' };
     chat.running = true;
     stick = true;
     try { await post(`/chats/${id}/send`, body); return true; }
     catch (e: any) {
       // The service refuses files in private folders (or ones that no longer exist) as mentions.
       if (e instanceof ApiError && e.status === 400 && body.mentions?.length) notify(t('layer.mentionRejected'), { kind: 'error', detail: e.message });
-      else fail(e);
+      else failed(t(failKey), e);
       chat.running = false;
       return false;
     }
   }
 
   async function send() {
-    if (!text.trim() || chat.running) return;
+    if (!canSend || chat.running) return;
     const keep = { text, files: [...files], mentions: [...mentions] };
-    const body = { text, attachments: files.map(({ name, data }) => ({ name, data })), mentions, options: chat.options };
+    const ready = files.filter((f) => !f.missing);
+    // Files may go on their own; the assistant still needs a sentence to answer.
+    const words = text.trim() ? normalizeCapture(text) : tn('chat3.seeAttached', ready.length);
+    const body = { text: words, attachments: ready.map(({ name, data }) => ({ name, data })), mentions: [...mentions], options: chat.options };
     text = ''; files = []; mentions = []; mentionQ = null;
     // Nothing the user typed is lost when sending fails.
     if (!(await sendBody(body))) { text = keep.text; files = keep.files; mentions = keep.mentions; }
+    else lastSent.set(id, { text: words, files: ready.map((f) => ({ ...f })) });
   }
+  const canSend = $derived(!!text.trim() || files.some((f) => !f.missing));
 
   const lastUser = $derived(chat ? [...chat.messages].reverse().find((m: any) => m.role === 'user') : null);
   const lastAnswerId = $derived(chat ? [...chat.messages].reverse().find((m: any) => m.role === 'assistant' || m.role === 'error')?.id : null);
@@ -120,11 +197,16 @@
 
   async function retry() {
     if (!lastUser || chat.running) return;
-    await sendBody({ text: lastUser.text, attachments: [], mentions: lastUser.tool?.mentions ?? [], options: chat.options });
+    // The files of that message go again too (they are kept in memory for this session).
+    const prev = lastSent.get(id);
+    const again = prev && prev.text === lastUser.text ? prev.files : [];
+    if (!again.length && lastUser.attachments?.length) notify(t('chat3.retryNoFiles'), { kind: 'info' });
+    await sendBody({ text: lastUser.text, attachments: again.map(({ name, data }) => ({ name, data })), mentions: lastUser.tool?.mentions ?? [], options: chat.options }, 'chat3.retryFailed');
   }
 
   async function stop() {
-    try { await post(`/chats/${id}/stop`); } catch (e) { fail(e); }
+    escHint = false;
+    try { await post(`/chats/${id}/stop`); } catch (e) { failed(t('chat3.stopFailed'), e); }
   }
 
   async function copyMsg(s: string) {
@@ -140,7 +222,12 @@
     }
     if (e.key === 'Escape') {
       if (mentionQ !== null) { e.preventDefault(); mentionQ = null; }
-      else if (chat?.running) { e.preventDefault(); stop(); }
+      else if (chat?.running) {
+        // One stray Esc must not throw away an answer: the second press within 2 seconds stops it.
+        e.preventDefault();
+        if (escHint) { clearTimeout(escTimer); stop(); }
+        else { escHint = true; clearTimeout(escTimer); escTimer = setTimeout(() => (escHint = false), 2000); }
+      }
       return;
     }
     // Enter sends, Shift+Enter makes a new line (Cmd/Ctrl+Enter also sends). Never while an IME is composing.
@@ -163,6 +250,12 @@
     input!.focus();
   }
 
+  function dropMention(p: string) {
+    text = text.split('@' + p + ' ').join('').split('@' + p).join('');
+    mentions = mentions.filter((x) => x !== p);
+    input?.focus();
+  }
+
   const mentionHits = $derived(mentionQ === null ? [] : tree.filter((p) => p.toLowerCase().includes(mentionQ!.toLowerCase())).slice(0, 8));
 
   async function addFiles(list: Iterable<File>) {
@@ -171,7 +264,10 @@
       try {
         const data = await readAsDataURL(f);
         const name = f.name || t('chat.pastedName');
-        files.push({ name, data, size: f.size, image: f.type.startsWith('image/') || isImageName(name) });
+        const att = { name, data, size: f.size, image: f.type.startsWith('image/') || isImageName(name) };
+        // Attaching a file again fills the placeholder a restored draft left for it.
+        const gap = files.findIndex((x) => x.missing && x.name === name);
+        if (gap >= 0) files[gap] = att; else files.push(att);
       } catch { notify(t('chat.readFailed', { name: f.name }), { kind: 'error' }); }
     }
   }
@@ -202,7 +298,7 @@
   }
 
   async function saveOpts() {
-    try { await patch(`/chats/${id}`, { options: chat.options }); } catch (e) { fail(e); }
+    try { await patch(`/chats/${id}`, { options: chat.options }); } catch (e) { failed(t('chat3.optionsFailed'), e); }
   }
 
   async function moveTo(pid: string) {
@@ -210,27 +306,29 @@
       await patch(`/chats/${id}`, { projectId: pid || null });
       chat.projectId = pid || null;
       refreshChats().catch(() => {});
-    } catch (e) { fail(e); }
+    } catch (e) { failed(t('chat3.moveFailed'), e); }
   }
 
   async function rename() {
     const title = (await promptDialog({ title: t('chat.renameTitle'), value: chat.title, placeholder: t('chat.renamePlaceholder'), confirmLabel: t('save') }))?.trim();
     if (!title || title === chat.title) return;
-    try { await patch(`/chats/${id}`, { title }); chat.title = title; refreshChats().catch(() => {}); } catch (e) { fail(e); }
+    try { await patch(`/chats/${id}`, { title }); chat.title = title; refreshChats().catch(() => {}); } catch (e) { failed(t('chat3.renameFailed'), e); }
   }
 
   async function remove() {
     if (!(await confirmDialog({ title: t('chat.deleteTitle'), body: t('chat.deleteBody'), confirmLabel: t('delete'), danger: true }))) return;
     try {
       await del(`/chats/${id}`);
+      try { localStorage.removeItem(draftKey(id)); } catch { /* ignore */ }
+      pendingFiles.delete(id); lastSent.delete(id);
       await refreshChats().catch(() => {});
       go({ kind: 'chats' });
-    } catch (e) { fail(e); }
+    } catch (e) { failed(t('chat3.deleteFailed'), e); }
   }
 
   async function applyWrap() {
     try { await post(`/wrap/${id}/apply`, { note }); note = ''; chat.running = true; }
-    catch (e) { fail(e); }
+    catch (e) { failed(t('chat3.wrapApplyFailed'), e); }
   }
 
   let undoing = $state(false);
@@ -239,7 +337,7 @@
     if (!(await confirmDialog({ title: t('layer.wrap.undoTitle'), body: t('layer.wrap.undoBody'), confirmLabel: t('layer.wrap.undo') }))) return;
     undoing = true;
     try { await post(`/wrap/${id}/rollback`); notify(t('layer.wrap.undone'), { kind: 'success' }); await load(); }
-    catch (e) { fail(e); }
+    catch (e) { failed(t('chat3.wrapUndoFailed'), e); }
     finally { undoing = false; }
   }
   const phase = $derived(chat?.meta?.phase as string | undefined);
@@ -253,7 +351,9 @@
 
   /** Translated label when we have one, the raw value otherwise (models, future modes). */
   const label = (prefix: string, v: string) => { const k = `${prefix}.${v}`; const s = t(k); return s === k ? v : s; };
-  const usd = (n: number) => new Intl.NumberFormat(lang() === 'ar' ? 'ar-SA-u-nu-latn' : 'en', { style: 'currency', currency: 'USD' }).format(n);
+  const usd = fmtMoney;
+  // Only two choices remain: the assistant may edit notes, or it may only read.
+  const permModes = $derived((opts.permissionModes as string[]).filter((m) => m === 'acceptEdits' || m === 'plan'));
 </script>
 
 {#if loadState === 'loading'}
@@ -282,7 +382,7 @@
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="wrap" ondragenter={dragenter} ondragover={dragover} ondragleave={dragleave} ondrop={drop}>
     <header class="row">
-      <button class="title grow ell" onclick={rename} title={t('chat.rename')} aria-label={t('chat.renameAria', { title: chat.title })} dir="auto">{chat.title}</button>
+      <h1 class="h grow"><button class="title ell" onclick={rename} title={t('chat.rename')} aria-label={t('chat.renameAria', { title: chat.title })} dir="auto">{chat.title}</button></h1>
       {#if chat.kind === 'chat'}
         <select value={chat.projectId ?? ''} onchange={(e) => moveTo((e.target as HTMLSelectElement).value)} title={t('chat.group')} aria-label={t('chat.group')}>
           <option value="">{t('library')}</option>
@@ -291,7 +391,7 @@
       {:else}
         <span class="pill accent">{label('chat.kind', chat.kind)}</span>
       {/if}
-      {#if chat.costUsd > 0}
+      {#if chat.costUsd > 0 && costVisible()}
         <button class="pill cost" type="button" title={t('chat.costTip')} aria-label="{t('chat.costLabel', { cost: usd(chat.costUsd) })}. {t('chat.costTip')}"
           onclick={() => notify(t('chat.costTip'), { kind: 'info' })}><bdi>{usd(chat.costUsd)}</bdi> <Icon name="info" size={12} /></button>
       {/if}
@@ -309,7 +409,7 @@
     {/if}
 
     <div class="msgs-wrap">
-      <div class="msgs scroll" bind:this={scroller} {onscroll} role="log" aria-label={t('chat.conversation')}>
+      <div class="msgs scroll" bind:this={scroller} {onscroll} role="group" aria-label={t('chat.conversation')}>
         {#each chat.messages as m (m.id)}
           {#if m.role === 'user'}
             <div class="msg user">
@@ -369,10 +469,11 @@
         {#if thinking}<div class="msg sys muted ell think"><Icon name="thinking" size={13} /> <span class="ell" dir="auto">{thinking.slice(-160)}</span></div>{/if}
         {#if streaming}
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div class="msg ai"><div class="md" dir="auto" onclick={mdClick}>{@html md(streaming)}</div></div>
+          <div class="msg ai" aria-busy="true"><div class="md" dir="auto" onclick={mdClick}>{@html md(streaming)}</div></div>
         {/if}
         {#if chat.running && !streaming}<div class="msg sys muted working" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> {t('chat.working')}</div>{/if}
       </div>
+      <span class="sr" role="status" aria-live="polite">{announce}</span>
       {#if !stick}
         <button class="jump btn" onclick={() => scrollDown(true)}><Icon name="arrowDown" size={14} /> {t(unseen ? 'chat.jumpNew' : 'chat.jumpLatest')}</button>
       {/if}
@@ -389,8 +490,9 @@
         {#if chat.meta?.rolledBack === false && chat.meta?.canRollback}<button class="btn" disabled={undoing} onclick={undoPartialWrap}><Icon name="undo" size={14} /> {t('layer.wrap.undo')}</button>{/if}</div>
     {/if}
     {#if chat.kind === 'wrap' && !chat.running && phase === 'interrupted'}
-      <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t('layer.wrap.interrupted')}</span>
-        {#if chat.meta?.canRollback}<button class="btn" disabled={undoing} onclick={undoPartialWrap}><Icon name="undo" size={14} /> {t('layer.wrap.undo')}</button>{/if}</div>
+      <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t('layer.wrap.interrupted')} {t('chat3.wrapChoose')}</span>
+        <button class="btn primary" disabled={undoing} onclick={applyWrap} title={t('chat3.wrapFinishTip')}><Icon name="check" size={14} /> {t('chat3.wrapFinish')}</button>
+        {#if chat.meta?.canRollback !== false}<button class="btn" disabled={undoing} onclick={undoPartialWrap}><Icon name="undo" size={14} /> {t('layer.wrap.undo')}</button>{/if}</div>
     {/if}
     {#if chat.kind === 'reorganize' && !chat.running && (phase === 'interrupted' || phase === 'failed')}
       <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t(phase === 'failed' ? 'layer.reorg.failed' : 'layer.reorg.interrupted')}</span></div>
@@ -413,15 +515,24 @@
         {#if files.length}
           <ul class="files">
             {#each files as f, i (f.name + i)}
-              <li class="file">
-                {#if f.image}<img src={f.data} alt="" />{:else}<span class="ficon"><Icon name="docs" size={16} /></span>{/if}
-                <span class="fmeta"><bdi class="ell fname">{f.name}</bdi><span class="muted">{fmtSize(f.size)}</span></span>
+              <li class="file" class:gone={f.missing} title={f.missing ? t('chat3.reattachTip') : undefined}>
+                {#if f.image && !f.missing}<img src={f.data} alt="" />{:else}<span class="ficon"><Icon name={f.missing ? 'warning' : 'docs'} size={16} /></span>{/if}
+                <span class="fmeta"><bdi class="ell fname">{f.name}</bdi><span class="muted">{f.missing ? t('chat3.reattach') : fmtSize(f.size)}</span></span>
                 <button class="x" type="button" onclick={() => files.splice(i, 1)} aria-label={t('chat.removeFile', { name: f.name })} title={t('chat.removeFile', { name: f.name })}><Icon name="close" size={13} /></button>
               </li>
             {/each}
           </ul>
         {/if}
-        <textarea bind:this={input} bind:value={text} {oninput} onkeydown={keydown} {onpaste} rows="3" dir="auto"
+        {#if mentions.length}
+          <ul class="files chips" aria-label={t('chat3.mentioned')}>
+            {#each mentions as p (p)}
+              <li class="chip"><span aria-hidden="true">@</span><bdi class="ell">{p}</bdi>
+                <button class="x" type="button" onclick={() => dropMention(p)} aria-label={t('chat3.removeMention', { path: p })} title={t('chat3.removeMention', { path: p })}><Icon name="close" size={13} /></button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        <textarea bind:this={input} bind:value={text} {oninput} onkeydown={keydown} {onpaste} rows="2" dir="auto"
           placeholder={t('chat.placeholder')} aria-label={t('chat.messageLabel')}
           aria-controls={mentionHits.length ? 'mention-list' : undefined} aria-activedescendant={mentionHits.length ? `mention-${mentionIdx}` : undefined}></textarea>
         <div class="row controls">
@@ -437,17 +548,18 @@
               {#each opts.efforts as m}<option value={m}>{label('chat.effort', m)}</option>{/each}
             </select>
           {/if}
-          {#if opts.permissionModes.length}
+          {#if permModes.length}
             <select bind:value={chat.options.permissionMode} onchange={saveOpts} title={t('chat.permissionTip')} aria-label={t('permission')}>
               <option value={null}>{t('permission')}: {t('default')}</option>
-              {#each opts.permissionModes as m}<option value={m}>{label('chat.perm', m)}</option>{/each}
+              {#each permModes as m}<option value={m}>{label('chat3.perm', m)}</option>{/each}
             </select>
           {/if}
           <span class="grow"></span>
+          <span class="esc muted" role="status" aria-live="polite">{#if escHint}{t('chat3.escHint')}{/if}</span>
           {#if chat.running}
             <button class="btn danger" onclick={stop} title={t('chat.stopTip')}><Icon name="stop" size={13} /> {t('stop')}</button>
           {:else}
-            <button class="btn primary send" onclick={send} disabled={!text.trim()} title={t('chat.sendTip')} aria-label={t('send')}><Icon name="send" size={16} stroke={2.25} /></button>
+            <button class="btn primary send" onclick={send} disabled={!canSend} title={t('chat.sendTip')} aria-label={t('send')}><Icon name="send" size={16} stroke={2.25} /></button>
           {/if}
         </div>
       </div>
@@ -461,17 +573,18 @@
   .wrap { position: relative; display: flex; flex-direction: column; height: calc(100vh - 26px); padding: 0 24px 16px; max-width: 980px; margin: 0 auto; }
   header { padding-bottom: 8px; border-bottom: var(--border-w) solid var(--border); }
   header select { width: auto; }
-  .title { font: inherit; color: inherit; background: none; border: 0; padding: 2px 4px; margin-inline-start: -4px; border-radius: 6px; text-align: start; font-weight: 600; font-size: 16px; cursor: text; }
+  .h { margin: 0; font-size: inherit; font-weight: inherit; letter-spacing: 0; line-height: inherit; min-width: 0; display: flex; border-radius: 6px; }
+  .title { max-width: 100%; font: inherit; color: inherit; background: none; border: 0; padding: 2px 4px; margin-inline-start: -4px; border-radius: 6px; text-align: start; font-weight: 600; font-size: 16px; cursor: text; }
   .title:hover { background: var(--fill); }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; padding: 0; border: 0; }
-  .cost { font: inherit; font-size: 12px; font-weight: 500; border: 0; cursor: help; display: inline-flex; align-items: center; gap: 4px; }
-  .banner { margin-top: 8px; font-size: 12.5px; padding: 6px 10px; border-radius: var(--radius); background: var(--panel-2); border: var(--border-w) dashed var(--accent); }
+  .cost { font: inherit; font-size: var(--fs-xs); font-weight: 500; border: 0; cursor: help; display: inline-flex; align-items: center; gap: 4px; }
+  .banner { margin-top: 8px; font-size: var(--fs-sm); padding: 6px 10px; border-radius: var(--radius); background: var(--panel-2); border: var(--border-w) dashed var(--accent); }
 
   .state { align-items: center; justify-content: center; text-align: center; gap: 6px; }
   .state h2 { margin: 6px 0 0; }
   .state p { margin: 0; max-width: 420px; }
-  .state .detail { font-size: 12px; font-family: var(--mono); overflow-wrap: anywhere; }
+  .state .detail { font-size: var(--fs-xs); font-family: var(--mono); overflow-wrap: anywhere; }
   .state .row { margin-top: 12px; }
   .state :global(.back) { transform: scaleX(-1); }
   :global([dir="rtl"]) .state :global(.back) { transform: none; }
@@ -499,18 +612,18 @@
   .msg.ai .md { overflow-wrap: anywhere; }
   .msg.err { color: var(--danger); font-size: 13px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
   .errline { white-space: pre-wrap; align-items: flex-start; }
-  .msg.sys { font-size: 12.5px; }
+  .msg.sys { font-size: var(--fs-sm); }
   .hint { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 13.5px; }
 
   .acts { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }
   .msg:hover .acts, .acts:focus-within, .acts.show { opacity: 1; }
   @media (hover: none) { .acts { opacity: 1; } }
-  .act { font: inherit; font-size: 12px; color: var(--muted); background: none; border: 0; border-radius: 7px; padding: 3px 7px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
+  .act { font: inherit; font-size: var(--fs-xs); color: var(--muted); background: none; border: 0; border-radius: 7px; padding: 3px 7px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
   .act:hover { color: var(--fg); background: var(--fill); }
   .act.show { opacity: 1; }
 
   .toolrow { min-width: 0; }
-  .tool { font: inherit; background: none; border: 0; padding: 2px 4px; margin-inline-start: -4px; border-radius: 6px; text-align: start; cursor: pointer; font-family: var(--mono); font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; max-width: 100%; }
+  .tool { font: inherit; background: none; border: 0; padding: 2px 4px; margin-inline-start: -4px; border-radius: 6px; text-align: start; cursor: pointer; font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); display: flex; align-items: center; gap: 6px; max-width: 100%; }
   .tool:hover { color: var(--accent); }
   .tooldetail { margin: 4px 0 6px; padding: 8px 10px; border-radius: var(--radius); background: var(--fill); display: grid; gap: 4px; min-width: 0; }
   .tooldetail pre { margin: 0 0 4px; max-height: 260px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -522,32 +635,38 @@
   .dots i:nth-child(2) { animation-delay: .2s; } .dots i:nth-child(3) { animation-delay: .4s; }
   @keyframes blink { 0%, 80%, 100% { opacity: .25; } 40% { opacity: 1; } }
 
-  .jump { position: absolute; bottom: 10px; inset-inline-start: 50%; transform: translateX(-50%); border-radius: 99px; box-shadow: var(--shadow-lg); background: var(--panel); border: 1px solid var(--hairline); font-size: 12.5px; z-index: 3; }
+  .jump { position: absolute; bottom: 10px; inset-inline-start: 50%; transform: translateX(-50%); border-radius: 99px; box-shadow: var(--shadow-lg); background: var(--panel); border: 1px solid var(--hairline); font-size: var(--fs-sm); z-index: 3; }
   :global([dir="rtl"]) .jump { transform: translateX(50%); }
 
   .composer { position: relative; padding: 8px; border-radius: 16px; }
-  .composer textarea { border: 0; resize: none; background: transparent; box-shadow: none; }
+  .composer textarea { border: 0; resize: none; background: transparent; box-shadow: none; display: block; min-height: 56px; max-height: 40vh; overflow-y: hidden; }
+  .esc { font-size: var(--fs-xs); }
   .composer:focus-within { box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
   .controls { flex-wrap: wrap; }
-  .controls select { width: auto; font-size: 12px; padding: 4px 6px; }
+  .controls select { width: auto; font-size: var(--fs-xs); padding: 4px 6px; }
   .controls label { position: relative; margin: 0; color: var(--fg); font-size: 14px; }
   .controls label:focus-within { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
 
   .mentions { position: absolute; bottom: 100%; inset-inline-start: 8px; margin-bottom: 4px; padding: 4px; background: var(--panel); border: var(--border-w) solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-lg); display: flex; flex-direction: column; min-width: 320px; max-width: calc(100% - 16px); z-index: 5; }
-  .mentions button { font: inherit; color: inherit; background: none; border: 0; border-radius: 6px; text-align: start; padding: 5px 10px; cursor: pointer; font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mentions button { font: inherit; color: inherit; background: none; border: 0; border-radius: 6px; text-align: start; padding: 5px 10px; cursor: pointer; font-family: var(--mono); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mentions button.sel { background: var(--accent); color: var(--accent-fg); }
 
   .files { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
   .file { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 4px; border-radius: 10px; background: var(--fill); max-width: 240px; }
   .file img, .ficon { width: 36px; height: 36px; border-radius: 7px; object-fit: cover; flex: none; }
   .ficon { display: grid; place-items: center; background: var(--fill-2); color: var(--muted); }
-  .fmeta { display: flex; flex-direction: column; min-width: 0; font-size: 12px; line-height: 1.35; }
+  .fmeta { display: flex; flex-direction: column; min-width: 0; font-size: var(--fs-xs); line-height: 1.35; }
   .fname { display: block; font-weight: 500; }
-  .x { font: inherit; color: var(--muted); background: none; border: 0; border-radius: 6px; padding: 4px; cursor: pointer; display: grid; place-items: center; }
+  .file.gone { outline: 1px dashed var(--muted); outline-offset: -1px; }
+  .file.gone .fname { color: var(--muted); }
+  .chips { margin-bottom: 4px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 0 2px 0 8px; padding-inline: 8px 2px; border-radius: 99px; background: var(--tint); color: var(--on-tint); font-family: var(--mono); font-size: var(--fs-xs); }
+  .chip .x { color: inherit; }
+  .x { font: inherit; color: var(--muted); background: none; border: 0; border-radius: 6px; padding: 4px; min-width: 24px; min-height: 24px; flex: none; cursor: pointer; display: grid; place-items: center; }
   .x:hover { color: var(--fg); background: var(--fill-2); }
 
   .dropzone { position: absolute; inset: 0 12px 8px; z-index: 10; pointer-events: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-weight: 500; color: var(--accent); border: 2px dashed var(--accent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--bg) 88%, transparent); }
 
   .approve { margin-bottom: 8px; }
-  .sm { font-size: 12px; }
+  .sm { font-size: var(--fs-xs); }
 </style>

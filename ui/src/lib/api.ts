@@ -14,8 +14,9 @@ export const inTauri = () => typeof (window as any).__TAURI_INTERNALS__ !== 'und
 export async function connect(): Promise<void> {
   if (inTauri()) {
     const { invoke } = await import('@tauri-apps/api/core');
-    const i = await invoke<Info>('daemon_info');
+    const i = await invoke<Info & { stale?: boolean }>('daemon_info');
     info = { port: i.port, token: i.token };
+    if (i.stale !== undefined && i.stale !== stale) { stale = !!i.stale; listeners.forEach((l) => l({ type: 'daemon.stale', stale })); }
   } else {
     // Browser preview mode: http://localhost:1420/?port=…&token=… (read once, then stripped from the URL).
     const q = new URLSearchParams(location.search);
@@ -31,13 +32,24 @@ export async function connect(): Promise<void> {
   openSocket();
 }
 
-export async function reconnect() {
+/** True when an older background service was kept running because it was busy (it switches over later). */
+let stale = false;
+export const daemonStale = () => stale;
+
+/** Restart the background service. The shell refuses with `BUSY::{json}` while a save or a chat is
+ *  running unless `force` — see `withBusyPrompt` in lib/shell.ts, which asks the user. */
+export async function reconnect(force = false) {
   if (inTauri()) {
     const { invoke } = await import('@tauri-apps/api/core');
     try {
-      const i = await invoke<Info>('restart_daemon');
+      const i = await invoke<Info>('restart_daemon', { force });
       info = { port: i.port, token: i.token };
-    } catch (e: any) { throw new Error(await friendly(String(e?.message ?? e))); }
+      if (stale) { stale = false; listeners.forEach((l) => l({ type: 'daemon.stale', stale })); }
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (/^BUSY::\s*\{/.test(msg)) throw new ApiError(msg, 409, 'BUSY');
+      throw new Error(await friendly(msg));
+    }
     openSocket();
   }
 }
@@ -53,8 +65,32 @@ export function reloadApp(query = '') {
 
 /** Machine-readable daemon errors that have one plain-language meaning everywhere. */
 async function friendly(msg: string): Promise<string> {
-  if (/(^|\s)BUSY::/.test(msg)) { const { t } = await import('./i18n'); return t('layer.busy'); }
+  const m = /(?:^|\s)BUSY::(.*)$/s.exec(msg);
+  if (m) { const { t } = await import('./i18n'); return m[1].trim() || t('layer.busy'); }
   return msg;
+}
+
+/** The machine-readable prefix of a daemon error (`BUSY`, `CONFLICT`, `NO_HISTORY`, …), or ''. */
+export function codeOf(msg: string): string {
+  return /(?:^|\s)([A-Z][A-Z_]{2,})::/.exec(msg)?.[1] ?? '';
+}
+
+async function authed(path: string): Promise<Response> {
+  if (!info) await connect();
+  return fetch(`http://127.0.0.1:${info!.port}/api${path}`, { headers: { Authorization: `Bearer ${info!.token}` } });
+}
+
+/** Fetch any daemon path as a blob (PDF previews, the calendar file). Throws an ApiError when it fails. */
+export async function apiBlob(path: string): Promise<Blob> {
+  let r: Response;
+  try { r = await authed(path); }
+  catch { const { t } = await import('./i18n'); throw new ApiError(t('shell.unreachable'), 0); }
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = JSON.parse(await r.text())?.error || msg; } catch { /* not JSON */ }
+    throw new ApiError(await friendly(msg), r.status, codeOf(msg));
+  }
+  return r.blob();
 }
 
 /** Fetch a library file's bytes (`GET /api/library/raw?path=`). Null when missing or unsupported. */
@@ -113,7 +149,9 @@ export function on(fn: (e: any) => void): () => void {
 /** Error from the daemon. `status` is the HTTP status (0 when the service could not be reached). */
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) { super(message); this.status = status; }
+  /** Stable machine string: the daemon's `code`, or the `XXX::` prefix of the message ('' when none). */
+  code: string;
+  constructor(message: string, status: number, code = '') { super(message); this.status = status; this.code = code; }
 }
 
 export async function api<T = any>(path: string, opts: { method?: string; body?: any } = {}): Promise<T> {
@@ -146,7 +184,7 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
       await api('/library/trust', { method: 'POST', body: { path: m[1] } });
       return api<T>(path, opts);
     }
-    throw new ApiError(await friendly(msg), r.status);
+    throw new ApiError(await friendly(msg), r.status, codeOf(msg) || String(data?.code ?? ''));
   }
   return data as T;
 }

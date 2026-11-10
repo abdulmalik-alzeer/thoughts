@@ -8,6 +8,10 @@
   import { confirmDialog } from '../lib/dialog.svelte';
   import { clearLayerBootFlag, retryLayer, revertChange } from '../lib/layer';
   import { reloadApp } from '../lib/api';
+  import { failed as failToast } from '../lib/errors';
+
+  /** `embedded`: drawn inline (a tab of the History view) instead of as a dialog. */
+  let { embedded = false }: { embedded?: boolean } = $props();
 
   let history = $state<any[]>([]);
   let loading = $state(true);
@@ -35,7 +39,7 @@
       await post('/layer/rollback', { hash: h.hash });
       clearLayerBootFlag();
       reloadApp();
-    } catch (e: any) { toast(t('shell.rb.failed'), { kind: 'error', detail: e.message }); busy = false; }
+    } catch (e) { failToast(t('shell.rb.failed'), e); busy = false; }
   }
 
   /** Undo one change and keep everything made after it. */
@@ -47,14 +51,12 @@
       await revertChange(h.hash);
       toast(t('layer.undone'), { kind: 'success', key: 'layer' });
       await load();
-    } catch (e: any) { toast(t('layer.undoFailed'), { kind: 'error', detail: e.message }); }
+    } catch (e) { failToast(t('layer.undoFailed'), e); }
     finally { busy = false; }
   }
 </script>
 
-<div class="modal-bg no-print" role="presentation" onclick={(e) => e.target === e.currentTarget && close()}>
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rb-title" aria-describedby="rb-desc" tabindex="-1" use:trapFocus={{ onEscape: close }}>
-    <div class="row"><h1 class="grow row" id="rb-title"><Icon name="rollback" size={22} /> {t('shell.rb.title')}</h1><button class="btn ghost" onclick={close}>{t('close')}</button></div>
+{#snippet content()}
     <p class="muted" id="rb-desc">{t('shell.rb.intro')}</p>
     <p class="row wrap">
       {#if app.safeMode}
@@ -92,8 +94,18 @@
         {/each}
       </ul>
     {/if}
+{/snippet}
+
+{#if embedded}
+  <section class="emb" aria-describedby="rb-desc">{@render content()}</section>
+{:else}
+<div class="modal-bg no-print" role="presentation" onclick={(e) => e.target === e.currentTarget && close()}>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rb-title" aria-describedby="rb-desc" tabindex="-1" use:trapFocus={{ onEscape: close }}>
+    <div class="row"><h1 class="grow row" id="rb-title"><Icon name="rollback" size={22} /> {t('shell.rb.title')}</h1><button class="btn ghost" onclick={close}>{t('close')}</button></div>
+    {@render content()}
   </div>
 </div>
+{/if}
 
 <style>
   .hist { list-style: none; margin: 0; padding: 0; }
@@ -102,6 +114,6 @@
   .fl { margin: 4px 0 0; padding-inline-start: 18px; font-family: var(--mono); overflow-wrap: anywhere; }
   summary { cursor: pointer; }
   .acts { gap: 6px; }
-  .sm { font-size: 12px; }
+  .sm { font-size: var(--fs-xs); }
   .wrap { flex-wrap: wrap; }
 </style>

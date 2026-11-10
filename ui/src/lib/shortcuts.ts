@@ -7,6 +7,7 @@
 //   doc.open { path }     open a library file         search.focus
 //   wrap.start            sync            rollback    settings    help    tour    print
 //   palette               sidebar.toggle  theme.<id>  mode.<light|dark|system>
+//   back / forward        through the views visited this session   history (notes history)
 //   plugin:<command id>   a command registered by a plugin was run
 
 export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent);
@@ -37,6 +38,8 @@ export const shortcuts: Shortcut[] = [
   { id: 'wrap.start', label: 'shell.sc.wrap', code: 'KeyW', key: 'W', mod: true, shift: true },
   { id: 'sidebar.toggle', label: 'shell.sc.sidebar', code: 'Backslash', key: '\\', mod: true },
   { id: 'settings', label: 'shell.sc.settings', code: 'Comma', key: ',', mod: true },
+  { id: 'back', label: 'ui.sc.back', code: 'BracketLeft', key: '[', mod: true },
+  { id: 'forward', label: 'ui.sc.forward', code: 'BracketRight', key: ']', mod: true },
   { id: 'escape', label: 'shell.sc.escape', code: 'Escape', key: 'Esc' },
 ];
 

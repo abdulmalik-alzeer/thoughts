@@ -4,6 +4,7 @@ import { app, go, toast } from './store.svelte';
 import { choiceDialog, confirmDialog } from './dialog.svelte';
 import { t, tn } from './i18n';
 import { checkPending } from './layer';
+import { withBusyPrompt } from './shell';
 
 let checking = false;
 
@@ -17,7 +18,7 @@ export async function checkAppUpdate(manual = false) {
     let r: any;
     try { r = await invoke('update_check'); }
     catch (e: any) { if (manual) toast(t('layer.upd.checkFailed'), { kind: 'error', detail: String(e?.message ?? e) }); return; }
-    if (!r?.configured) { if (manual) toast(t('layer.upd.notConfigured'), { key: 'upd' }); return; }
+    if (!r?.configured) { if (manual) toast(t(r?.reason === 'deb' ? 'ui.upd.deb' : r?.reason === 'build' ? 'ui.upd.build' : 'layer.upd.notConfigured'), { key: 'upd' }); return; }
     if (!r.available) { if (manual) toast(t('layer.upd.none'), { kind: 'success', key: 'upd' }); return; }
     const ok = await confirmDialog({
       title: t('layer.upd.available', { version: r.version ?? '' }),
@@ -26,8 +27,10 @@ export async function checkAppUpdate(manual = false) {
     });
     if (!ok) return;
     toast(t('layer.upd.installing'), { key: 'upd', duration: 0 });
-    try { await invoke('update_install'); }
-    catch (e: any) { toast(t('layer.upd.installFailed'), { kind: 'error', key: 'upd', detail: String(e?.message ?? e) }); }
+    try {
+      const done = await withBusyPrompt((force) => invoke('update_install', { force }), 'update');
+      if (!done) toast(t('ui.busy.waiting'), { key: 'upd' });
+    } catch (e: any) { toast(t('layer.upd.installFailed'), { kind: 'error', key: 'upd', detail: String(e?.message ?? e) }); }
   } finally { checking = false; }
 }
 
@@ -42,6 +45,13 @@ export async function checkLayerUpdates() {
   try { s = await api('/updates/status'); } catch { return; } // older background service
   const applied: string[] = Array.isArray(s?.applied) ? s.applied : [];
   const key = `${s?.from ?? ''}>${s?.to ?? ''}`;
+  if (seen.get() !== key) {
+    // An older app version over newer defaults changes nothing; defaults dropped upstream are kept as the user's own.
+    if (s?.downgrade) toast(t('ui.upd.downgrade'), { key: 'upd-down' });
+    const removed: string[] = Array.isArray(s?.removed) ? s.removed : [];
+    if (removed.length) toast(t('ui.upd.removed'), { key: 'upd-removed', detail: removed.join('\n') });
+    if ((s?.downgrade || removed.length) && !applied.length) seen.set(key);
+  }
   if (applied.length && seen.get() !== key) {
     seen.set(key);
     toast(tn('layer.upd.applied', applied.length), { key: 'upd-applied', detail: applied.join('\n') });

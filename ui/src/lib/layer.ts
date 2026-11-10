@@ -16,7 +16,17 @@
 //   message says, and checks every data method against the permissions that plugin declared in
 //   `manifest.json` (`plugins["<file>.js"].permissions`: library:read, todos:read, todos:write,
 //   ideas:read, chat:start). Undeclared → the call rejects and the user sees one toast naming the
-//   plugin and the missing permission. Private library paths are never listed, read or searched.
+//   plugin and the missing permission. Private library paths are never listed, read or searched:
+//   every library call made for a plugin carries `scope=plugin`, and the DAEMON enforces private
+//   folders (and, for writes, the plugin's declared `write` folders via `allow=`). The `isPrivate`
+//   filter below is defence in depth only — never the source of truth.
+// * v1.1 (additive, apiVersion stays 1): `storage` (one JSON document per plugin), `library:write`
+//   (only inside the folders the plugin declared in `write`), `todos:write` also covers
+//   setDone/edit/remove, `ideas:write` → ideas.setStatus. Permissions, `write`, `apiVersion`,
+//   `description` and `unsupported` arrive resolved per plugin from `GET /api/layer` (the per-plugin
+//   `plugins/<name>.json`, falling back to manifest.json). Unsupported items are never loaded.
+// * While a staged change is being tried ("Try it") nothing a plugin does is saved: every call that
+//   would write is rejected and the user sees "Preview — nothing was saved".
 // * One hidden "background" frame per plugin runs for the whole session: it registers views,
 //   widgets, chips, commands and item actions and receives events. Callbacks (`run`) are invoked
 //   in that frame by handle. `render(el)` callbacks cannot draw into the app, so each visible
@@ -31,9 +41,10 @@
 // * Everything a plugin registered is disposed when the layer reloads; a plugin that throws is
 //   switched off on its own; the crash-loop guard below turns customisations off after a start
 //   that never finished.
-import { api, on, post, reloadApp, ApiError } from './api';
-import { app, toast, go, refreshChats, type PendingChange } from './store.svelte';
-import { t, fmtDate } from './i18n';
+import { api, on, post, put, reloadApp, ApiError } from './api';
+import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig } from './store.svelte';
+import { errCode, errDetail, failed } from './errors';
+import { t, fmtDate , lang } from './i18n';
 
 let styleEl: HTMLStyleElement | null = null;
 
@@ -61,18 +72,37 @@ type Surface = { kind: 'view' | 'widget' | 'html'; id: string };
 type Plugin = {
   name: string; kind: 'plugin' | 'view'; code: string; perms: Set<string>; dead: boolean;
   disposers: (() => void)[]; frames: Set<Frame>; warned: Set<string>; lastChat: number;
+  /** Library-relative folders (each ending in "/") this plugin may create and change files in. */
+  write: string[];
+  /** What the plugin says it is for; used as the accessible name of its frames. */
+  description: string;
+  /** Review-time test load: every data call answers with nothing and nothing is registered. */
+  dry?: { done: (error: string | null) => void };
 };
+/** A plugin or view of the layer as the user should see it listed (Settings, Review). */
+export type LayerItem = { name: string; kind: 'plugin' | 'view'; permissions: string[]; write: string[]; description: string; apiVersion: number; unsupported: boolean; message: string; error?: string };
 type Frame = { el: HTMLIFrameElement; plugin: Plugin; surface: Surface | null; events: Set<string> };
 
 let plugins: Plugin[] = [];
 const frames = new Set<Frame>();
 let bg: HTMLElement | null = null;
 
-const PERMS = ['library:read', 'todos:read', 'todos:write', 'ideas:read', 'chat:start'];
+const PERMS = ['library:read', 'library:write', 'todos:read', 'todos:write', 'ideas:read', 'ideas:write', 'chat:start', 'storage'];
+const VIEW_PERMS = ['library:read', 'todos:read', 'ideas:read'];
 const NEEDS: Record<string, string> = {
   'library.list': 'library:read', 'library.read': 'library:read', 'library.search': 'library:read',
-  'todos.list': 'todos:read', 'todos.add': 'todos:write', 'ideas.list': 'ideas:read', 'chat.start': 'chat:start',
+  'library.write': 'library:write', 'library.remove': 'library:write',
+  'todos.list': 'todos:read', 'todos.add': 'todos:write', 'todos.setDone': 'todos:write', 'todos.edit': 'todos:write', 'todos.remove': 'todos:write',
+  'ideas.list': 'ideas:read', 'ideas.setStatus': 'ideas:write', 'chat.start': 'chat:start',
+  'storage.get': 'storage', 'storage.set': 'storage',
 };
+/** Calls that change something. Rejected while a staged change is only being tried. */
+const WRITES = new Set(['library.write', 'library.remove', 'todos.add', 'todos.setDone', 'todos.edit', 'todos.remove', 'ideas.setStatus', 'storage.set', 'chat.start']);
+const WRITE_EXT = /\.(md|json|csv|txt)$/i;
+const STATUSES = ['seed', 'active', 'parked', 'done', 'dropped'];
+const STORAGE_MAX = 256 * 1024;
+/** The highest `apiVersion` this app can run. */
+export const API_VERSION = 1;
 const READ_ONLY = new Set(['library.list', 'library.read', 'library.search', 'todos.list', 'ideas.list', 'on', 'off']);
 /** Events a plugin may listen to, and the only fields it is given. */
 const EVENTS: Record<string, string[]> = {
@@ -160,7 +190,7 @@ function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Fra
   const el = document.createElement('iframe');
   el.setAttribute('sandbox', 'allow-scripts');
   el.setAttribute('referrerpolicy', 'no-referrer');
-  el.setAttribute('title', p.name.replace(/\.(js|html)$/, ''));
+  el.setAttribute('title', p.description || p.name.replace(/\.(js|html)$/, ''));
   el.style.cssText = surface
     ? `border:0;display:block;width:100%;height:${surface.kind === 'widget' ? '80px' : '100%'};background:transparent;color-scheme:normal`
     : 'border:0;width:0;height:0;position:absolute;visibility:hidden';
@@ -191,22 +221,59 @@ function background(): HTMLElement {
 }
 
 // ---------- host side of the RPC ----------
+/** Plain words for a permission (the v1.1 ones, and the widened todos:write, live in the layer3 dictionary). */
+export function permText(perm: string): string {
+  const k3 = 'layer3.perm.' + perm, s3 = t(k3);
+  return s3 !== k3 ? s3 : t('layer.perm.' + perm);
+}
+
 function denied(p: Plugin, perm: string): Error {
   if (!p.warned.has(perm)) {
     p.warned.add(perm);
-    toast(t('layer.permMissing', { name: p.name, perm: t('layer.perm.' + perm) }), { kind: 'error', key: `perm:${p.name}:${perm}` });
+    toast(t('layer.permMissing', { name: p.name, perm: permText(perm) }), { kind: 'error', key: `perm:${p.name}:${perm}` });
   }
   return Object.assign(new Error(`Permission "${perm}" is not declared for ${p.name} in manifest.json`), { code: 'permission' });
 }
 
 const str = (v: any, max: number) => String(v ?? '').slice(0, max);
-const isPrivate = (path: string) => ((app.settings?.privatePaths ?? []) as string[]).some((x) => { const b = String(x).replace(/\/+$/, ''); return !!b && (path === b || path.startsWith(b + '/')); });
+// Defence in depth only: the daemon enforces private folders for every `scope=plugin` call.
+const isPrivate = (path: string) => { const p = String(path).toLowerCase(); return ((app.settings?.privatePaths ?? []) as string[]).some((x) => { const b = String(x).replace(/\/+$/, '').toLowerCase(); return !!b && (p === b || p.startsWith(b + '/')); }); };
 function cleanPath(v: any): string {
   const p = String(v ?? '').replace(/\\/g, '/').replace(/^\.?\/+/, '');
   if (!p || p.split('/').some((s) => s === '..' || s === '') || /^([A-Za-z]:|~)/.test(p)) throw new Error('Invalid path');
   if (isPrivate(p)) throw new Error('That file is private');
   return p;
 }
+/** A path a plugin wants to create, change or remove: inside one of its declared folders, text files only. */
+function writePath(p: Plugin, v: any): string {
+  const path = cleanPath(v);
+  if (!WRITE_EXT.test(path)) throw new Error('Add-ons can only write .md, .json, .csv and .txt files');
+  const low = path.toLowerCase();
+  if (!p.write.some((w) => { const f = w.toLowerCase().replace(/\/+$/, ''); return low === f || low.startsWith(f + '/'); })) throw new Error(p.write.length ? `"${path}" is outside the folders this add-on declared (${p.write.join(', ')})` : 'This add-on declared no "write" folders');
+  return path;
+}
+const allowQuery = (p: Plugin) => 'scope=plugin&allow=' + encodeURIComponent(p.write.join(','));
+/** The `{file, line, text}` reference of a todo, from an item as todos.list() or an item action gave it. */
+function todoRef(v: any): { file: string; line: number; text: string } {
+  const it = v && typeof v === 'object' && v.item && typeof v.item === 'object' ? v.item : v;
+  const line = Number(it?.line);
+  if (!it || typeof it.file !== 'string' || !Number.isFinite(line) || typeof it.text !== 'string') throw new Error('Expected a todo item with "file", "line" and "text" (as returned by todos.list() with its list\'s "file")');
+  return { file: cleanPath(it.file), line, text: it.text };
+}
+// The daemon keys storage by the plugin's file name (e.g. `hours.js`).
+const storageName = (p: Plugin) => encodeURIComponent(p.name);
+function previewOnly(): Error {
+  toast(t('layer3.previewReadOnly'), { key: 'preview-readonly' });
+  return Object.assign(new Error('Preview: nothing was saved'), { code: 'preview' });
+}
+/** What a test load answers: empty data, and nothing is ever registered, written or shown. */
+function dryAnswer(method: string): any {
+  if (method === 'library.read') return '';
+  if (/\.(list|search)$/.test(method)) return [];
+  if (method === 'storage.get') return null;
+  return null;
+}
+
 const plain = (v: any) => { try { return JSON.parse(JSON.stringify(v ?? null)); } catch { return null; } };
 
 function register<T extends { id: string; plugin?: string }>(p: Plugin, key: 'pluginViews' | 'commands' | 'homeWidgets' | 'homeChips' | 'itemActions', item: T) {
@@ -222,15 +289,63 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
   const p = f.plugin;
   if (p.dead) throw new Error('This add-on was switched off');
   if (p.kind === 'view' && !READ_ONLY.has(method)) throw new Error(`"${method}" is not available to HTML views`);
+  if (p.dry) return dryAnswer(method);
   const perm = NEEDS[method];
   if (perm && !p.perms.has(perm)) throw denied(p, perm);
+  if (app.preview && WRITES.has(method)) throw previewOnly();
   const a = Array.isArray(args) ? args : [];
   const invoke = (cb: any) => (...x: any[]) => { if (!p.dead) postTo(f, { type: 'invoke', cb, args: x.map(plain) }); };
   switch (method) {
-    case 'library.list': return ((await api('/library/tree?exclude=private')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
-    case 'library.read': { const d = await api(`/library/file?path=${encodeURIComponent(cleanPath(a[0]))}`); return String(d.content ?? ''); }
-    case 'library.search': { const q = str(a[0], 200).trim(); return q ? ((await api('/library/search?q=' + encodeURIComponent(q))) as any[]).filter((x) => !isPrivate(x.path)).map(plain) : []; }
-    case 'todos.list': return ((await api('/todos')) as any[]).filter((l) => !isPrivate(l.file)).map(plain);
+    case 'library.list': return ((await api('/library/tree?scope=plugin&exclude=private')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
+    case 'library.read': { const d = await api(`/library/file?scope=plugin&path=${encodeURIComponent(cleanPath(a[0]))}`); return String(d.content ?? ''); }
+    case 'library.search': { const q = str(a[0], 200).trim(); return q ? ((await api('/library/search?scope=plugin&q=' + encodeURIComponent(q))) as any[]).filter((x) => !isPrivate(x.path)).map(plain) : []; }
+    case 'library.write': {
+      const path = writePath(p, a[0]);
+      if (typeof a[1] !== 'string') throw new Error('library.write(path, text): text must be a string');
+      if (a[1].length > 2 * 1024 * 1024) throw new Error('library.write: the text is too large (2 MB at most)');
+      await put('/library/file?' + allowQuery(p), { path, content: a[1] });
+      return { ok: true, path };
+    }
+    case 'library.remove': {
+      const path = writePath(p, a[0]);
+      await post('/library/delete?' + allowQuery(p), { path });
+      return { ok: true, path };
+    }
+    case 'todos.setDone': {
+      const ref = todoRef(a[0]);
+      const it = a[0]?.item && typeof a[0].item === 'object' ? a[0].item : a[0];
+      const want = a.length < 2 ? true : !!a[1];
+      // The daemon toggles; when the plugin told us the current state, do nothing if it already matches.
+      if (typeof it?.done === 'boolean' && it.done === want) return { ok: true };
+      await post('/todos/toggle', ref);
+      return { ok: true };
+    }
+    case 'todos.edit': {
+      const text = str(a[1], 500).replace(/\s*\n\s*/g, ' ').trim();
+      if (!text) throw new Error('todos.edit(item, text): text is empty');
+      await post('/todos/edit', { ...todoRef(a[0]), new_text: text });
+      return { ok: true };
+    }
+    case 'todos.remove': await post('/todos/delete', todoRef(a[0])); return { ok: true };
+    case 'ideas.setStatus': {
+      const path = cleanPath(typeof a[0] === 'string' ? a[0] : a[0]?.item?.path ?? a[0]?.path);
+      const status = str(a[1], 20).toLowerCase();
+      if (!STATUSES.includes(status)) throw new Error(`ideas.setStatus: status must be one of ${STATUSES.join(', ')}`);
+      await post('/library/ideas/status', { path, status });
+      return { ok: true };
+    }
+    case 'storage.get': {
+      try { const r = await api('/layer/storage/' + storageName(p)); return plain(r && typeof r === 'object' && 'data' in r ? r.data : r); }
+      catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }
+    }
+    case 'storage.set': {
+      const doc = plain(a[0]);
+      if (JSON.stringify(doc).length > STORAGE_MAX) throw new Error('storage.set: the document is too large (256 KB at most)');
+      await put('/layer/storage/' + storageName(p), doc);
+      return { ok: true };
+    }
+    // Each item also carries its list's `file`, so it can be passed straight to setDone/edit/remove.
+    case 'todos.list': return ((await api('/todos')) as any[]).filter((l) => !isPrivate(l.file)).map((l) => plain({ ...l, items: (Array.isArray(l.items) ? l.items : []).map((it: any) => ({ ...it, file: l.file })) }));
     case 'todos.add': {
       const text = str(a[0], 500).replace(/\s*\n\s*/g, ' ').trim();
       if (!text) throw new Error('todos.add(text): text is empty');
@@ -281,7 +396,10 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
     case 'ui.addItemAction': {
       const target = s.target === 'idea' ? 'idea' : s.target === 'todo' ? 'todo' : null;
       if (!target) throw new Error('addItemAction: target must be "todo" or "idea"');
-      register(p, 'itemActions', { id, target, label: str(s.label, 60), plugin: p.name, run: invoke(s.cb) });
+      // The callback gets the item's fields, plus `target` and `item` — so both `run(item)` and
+      // `run({ target, item })` work, and the value can be handed straight to todos.setDone/edit/remove.
+      const call = invoke(s.cb);
+      register(p, 'itemActions', { id, target, label: str(s.label, 60), plugin: p.name, run: (item: any) => { const it = plain(item) ?? {}; call({ ...it, target, item: it }); } });
       return null;
     }
     case 'ui.remove': {
@@ -300,6 +418,14 @@ function onMessage(e: MessageEvent) {
   const m = e.data;
   if (!m || typeof m !== 'object') return;
   const p = f.plugin;
+  if (p.dry) {
+    // A review-time test load: hand it the code, then only listen for "it loaded" or "it failed".
+    if (m.type === 'ready') postTo(f, { ...lookMsg('init'), kind: p.kind, name: p.name, code: p.code, surface: null });
+    else if (m.type === 'loaded') p.dry.done(null);
+    else if (m.type === 'failed') p.dry.done(str(m.error, 600) || 'failed');
+    else if (typeof m.method === 'string' && 'id' in m) postTo(f, { id: m.id, result: dryAnswer(m.method) });
+    return;
+  }
   if (m.type === 'ready') {
     postTo(f, { ...lookMsg('init'), kind: p.kind, name: p.name, code: p.code, surface: f.surface && f.surface.kind !== 'html' ? f.surface : null });
   } else if (m.type === 'failed') {
@@ -336,6 +462,38 @@ function permsOf(manifest: any, ...keys: string[]): Set<string> {
   return new Set();
 }
 
+/** A folder a plugin declared in `write`, normalised to "folder/". Null when it is not a plain library folder. */
+function writeFolder(v: any): string | null {
+  const w = String(v ?? '').replace(/\\/g, '/').replace(/^\.?\/+/, '').replace(/\/+$/, '');
+  if (!w || w.split('/').some((x) => !x || x === '..' || x.startsWith('.')) || /^([A-Za-z]:|~)/.test(w)) return null;
+  return w + '/';
+}
+
+/** One plugin / view of a `GET /api/layer` answer, with what it is allowed to do. The daemon sends
+ *  these resolved (per-plugin file, else manifest.json); an older daemon is read from the manifest. */
+function describe(src: any, kind: 'plugin' | 'view', manifest: any): LayerItem {
+  const name = String(src?.name ?? '');
+  const group = kind === 'view' ? 'views' : 'plugins';
+  const fallback = manifest?.[group]?.[name] ?? manifest?.[group]?.[`${group}/${name}`] ?? {};
+  const declared: any[] = Array.isArray(src?.permissions) ? src.permissions : [...permsOf(manifest, `${group}|${name}`, `${group}|${group}/${name}`)];
+  const allowed = kind === 'view' ? VIEW_PERMS : PERMS;
+  const apiVersion = Number(src?.apiVersion ?? fallback?.apiVersion ?? manifest?.apiVersion ?? 1) || 1;
+  const unsupported = src?.unsupported === true || apiVersion > API_VERSION;
+  const write = kind === 'view' ? [] : (Array.isArray(src?.write) ? src.write : Array.isArray(fallback?.write) ? fallback.write : []).map(writeFolder).filter((x: string | null): x is string => !!x).slice(0, 20);
+  return {
+    name, kind, apiVersion, unsupported,
+    permissions: declared.filter((x) => allowed.includes(x)),
+    write,
+    description: str(src?.description ?? fallback?.description, 300).trim(),
+    message: unsupported ? str(src?.message, 300).trim() || t('layer3.unsupported', { version: apiVersion }) : '',
+  };
+}
+
+/** What the loaded layer contains, including items that were not loaded (Settings → Customisations).
+ *  Kept on the reactive app state (`app.layerItems`) because this module is plain TypeScript. */
+export const layerItems = (): LayerItem[] => ((app as any).layerItems as LayerItem[] | undefined) ?? [];
+const setLayerItems = (v: LayerItem[]) => { (app as any).layerItems = v; };
+
 function unload() {
   for (const p of plugins) { p.dead = true; dispose(p); }
   plugins = [];
@@ -346,16 +504,42 @@ function unload() {
   app.itemActions = [];
 }
 
+const oneOf = <T extends string>(v: any, list: readonly T[]): T | undefined => (list.includes(v) ? v : undefined);
+/** `nav.json` → NavConfig (null when absent or not an object). Home can never be hidden. */
+function navConfig(v: any): NavConfig | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const labels: NavConfig['labels'] = {};
+  if (v.labels && typeof v.labels === 'object' && !Array.isArray(v.labels)) {
+    for (const [id, l] of Object.entries(v.labels as Record<string, any>).slice(0, 40)) {
+      if (!l || typeof l !== 'object') continue;
+      const en = typeof l.en === 'string' ? l.en.trim().slice(0, 40) : '', ar = typeof l.ar === 'string' ? l.ar.trim().slice(0, 40) : '';
+      if (en || ar) labels[String(id).slice(0, 120)] = { ...(en ? { en } : {}), ...(ar ? { ar } : {}) };
+    }
+  }
+  return { hidden: strings(v.hidden).filter((x) => !['home', 'settings', 'help'].includes(x)).slice(0, 60), order: strings(v.order).slice(0, 60), labels };
+}
+/** `todos.json` → TodosConfig (null when absent); unknown values are dropped, not guessed. */
+function todosConfig(v: any): TodosConfig | null {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+  const c: TodosConfig = {};
+  const g = oneOf(v.groupBy, ['list', 'due', 'tag', 'none'] as const); if (g) c.groupBy = g;
+  const s = oneOf(v.sort, ['list', 'due'] as const); if (s) c.sort = s;
+  const f = oneOf(v.filter, ['all', 'soon', 'overdue'] as const); if (f) c.filter = f;
+  if (typeof v.showDone === 'boolean') c.showDone = v.showDone;
+  return c;
+}
+
 const strings = (v: any) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
 
 /** Load the kept layer, or with `preview` the staged one ("Try it"). Nothing staged is loaded any other way. */
 export async function loadLayer(opts: { preview?: boolean } = {}) {
-  if (app.safeMode) return;
+  if (app.safeMode) { app.nav = null; app.todosCfg = null; setLayerItems([]); return; }
   const boot = firstLoad;
   firstLoad = false;
   if (boot && flag.get()) {
     app.safeMode = true;
     app.safeReason = 'crash';
+    app.nav = null; app.todosCfg = null;
     return;
   }
   const m = await api(opts.preview ? '/layer?preview=1' : '/layer');
@@ -372,30 +556,38 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
     hidden: strings(h.hidden),
     order: strings(h.order),
   };
+  // `order` may also name `widget:<id>` and `suggestions`; Home places them.
+  app.nav = navConfig(m.nav);
+  app.todosCfg = todosConfig(m.todos);
   const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
-  const mk = (name: string, kind: Plugin['kind'], code: string, perms: Set<string>): Plugin =>
-    ({ name, kind, code: String(code ?? ''), perms, dead: false, disposers: [], frames: new Set(), warned: new Set(), lastChat: 0 });
-  const views: any[] = m.views || [];
-  const list: any[] = m.plugins || [];
-  if (boot && (list.length || views.length)) flag.set();
-  for (const v of views) {
-    // Views get nothing by default; like add-ons they must declare read permissions in manifest.json ("views").
-    const READ = ['library:read', 'todos:read', 'ideas:read'];
-    const p = mk(v.name, 'view', v.code, new Set([...permsOf(manifest, `views|${v.name}`, `views|views/${v.name}`)].filter((x) => READ.includes(x))));
+  const mk = (it: LayerItem, code: string): Plugin =>
+    ({ name: it.name, kind: it.kind, code: String(code ?? ''), perms: new Set(it.permissions), write: it.write, description: it.description, dead: false, disposers: [], frames: new Set(), warned: new Set(), lastChat: 0 });
+  const views: any[] = Array.isArray(m.views) ? m.views : [];
+  const list: any[] = Array.isArray(m.plugins) ? m.plugins : [];
+  const items: LayerItem[] = [...list.map((x) => describe(x, 'plugin', manifest)), ...views.map((x) => describe(x, 'view', manifest))];
+  setLayerItems(items);
+  if (boot && items.some((x) => !x.unsupported)) flag.set();
+  views.forEach((v, i) => {
+    const it = items[list.length + i];
+    if (it.unsupported) return; // made for a newer app: listed in Settings, never run
+    // Views get nothing by default; like add-ons they must declare read permissions.
+    const p = mk(it, v.code);
     plugins.push(p);
     const id = 'view:' + v.name;
     register(p, 'pluginViews', { id, title: v.name.replace(/\.html$/, ''), icon: 'plugin', plugin: p.name, render: (el: HTMLElement) => mountSurface(p, { kind: 'html', id }, el) });
-  }
-  for (const src of list) {
-    const p = mk(src.name, 'plugin', src.code, permsOf(manifest, `plugins|${src.name}`, `plugins|plugins/${src.name}`));
+  });
+  list.forEach((src, i) => {
+    const it = items[i];
+    if (it.unsupported) return;
+    const p = mk(it, src.code);
     plugins.push(p);
     try { createFrame(p, null, background()); } catch (e) { fail(p, e); }
-  }
+  });
   relook();
 }
 
 // ---------- customise flow: ask → run → review → try / keep / discard ----------
-const sig = (p: PendingChange | null) => (p ? JSON.stringify([p.summary, p.files, p.origin]) : '');
+const sig = (p: PendingChange | null) => (p ? p.signature || JSON.stringify([p.summary, p.files, p.origin]) : '');
 let dismissed = '';
 const missing = (e: any) => e instanceof ApiError && (e.status === 404 || e.status === 405);
 
@@ -437,15 +629,27 @@ export async function tryPending() {
 
 export async function stopPreview() { await loadLayer(); }
 
-/** "Keep": make the staged change part of the app. */
-export async function keepPending(opts: { approveWorkflows?: boolean } = {}) {
-  const r = await post('/layer/pending/apply', opts.approveWorkflows ? { approveWorkflows: true } : {});
+/** "Keep": make the staged change part of the app. The signature of what the user reviewed goes
+ *  along; if the staged change was replaced meanwhile (`CHANGED::`) nothing is applied, the review is
+ *  reloaded for the user to look at again. */
+export async function keepPending(opts: { approveWorkflows?: boolean } = {}): Promise<void> {
+  if (app.pending?.problems?.length) { openReview(); throw new Error(t('layer3.problemsBlock')); }
+  let r: any;
+  try {
+    r = await post('/layer/pending/apply', { ...(app.pending?.signature ? { signature: app.pending.signature } : {}), ...(opts.approveWorkflows ? { approveWorkflows: true } : {}) });
+  } catch (e) {
+    if (errCode(e) !== 'CHANGED') throw e;
+    dismissed = '';
+    await checkPending(true);
+    toast(t('layer3.changedReload'), { kind: 'error', key: 'layer' });
+    return;
+  }
   app.pending = null;
   app.showReview = false;
-  await loadLayer().catch((e) => toast(t('shell.layerFailed'), { kind: 'error', detail: e.message }));
+  await loadLayer().catch((e) => failed(t('shell.layerFailed'), e));
   toast(t('layer.kept'), {
     kind: 'success', key: 'layer',
-    action: r?.hash ? { label: t('undo'), run: () => { revertChange(r.hash).then(() => toast(t('layer.undone'), { kind: 'success', key: 'layer' }), (e) => toast(t('layer.undoFailed'), { kind: 'error', detail: e.message })); } } : undefined,
+    action: r?.hash ? { label: t('undo'), run: () => { revertChange(r.hash).then(() => toast(t('layer.undone'), { kind: 'success', key: 'layer' }), (e) => failed(t('layer.undoFailed'), e)); } } : undefined,
   });
 }
 
@@ -463,17 +667,48 @@ export async function revertChange(hash: string) {
   if (!app.preview) await loadLayer().catch(() => {});
 }
 
-/** Permissions declared by the staged layer's plugins — read as data for the review panel, nothing is run. */
-export async function stagedPermissions(): Promise<{ name: string; permissions: string[] }[]> {
+/** Undo the most recent kept customisation (the native "Undo last app change" menu item). */
+export async function undoLastLayer(): Promise<void> {
+  try {
+    const r = await post('/layer/undo-last');
+    if (!app.preview) await loadLayer().catch(() => {});
+    const what = str(r?.summary ?? r?.undone ?? r?.subject, 120).replace(/^Undo:\s*/i, '').trim();
+    toast(what ? t('layer3.undidLast', { summary: what }) : t('layer.undone'), { kind: 'success', key: 'layer' });
+  } catch (e) {
+    const status = e instanceof ApiError ? e.status : 0;
+    if (errCode(e) === 'NOTHING' || ((status === 404 || status === 409) && !errCode(e))) toast(t('layer3.nothingToUndo'), { key: 'layer' });
+    else failed(t('layer3.undoLastFailed'), e, { key: 'layer' });
+  }
+}
+
+/** What the staged layer's add-ons and pages are allowed to do — read as data, nothing is run in the app. */
+export async function stagedItems(): Promise<LayerItem[]> {
   try {
     const m = await api('/layer?preview=1');
-    // Same lookup the runtime uses (permsOf), so what the review shows is exactly what will be granted.
-    const READ = ['library:read', 'todos:read', 'ideas:read'];
-    return [
-      ...(m.plugins || []).map((p: any) => ({ name: p.name, permissions: [...permsOf(m.manifest, `plugins|${p.name}`, `plugins|plugins/${p.name}`)] })),
-      ...(m.views || []).map((v: any) => ({ name: v.name, permissions: [...permsOf(m.manifest, `views|${v.name}`, `views|views/${v.name}`)].filter((x) => READ.includes(x)) })),
-    ];
+    const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
+    return [...(m.plugins || []).map((x: any) => describe(x, 'plugin', manifest)), ...(m.views || []).map((x: any) => describe(x, 'view', manifest))];
   } catch { return []; }
+}
+
+/** Test-load every staged add-on and page in a hidden sandbox frame that is given no data and can
+ *  change nothing, and report the ones that fail to start. Unsupported items are not run. */
+export async function dryLoadStaged(): Promise<LayerItem[]> {
+  let m: any;
+  try { m = await api('/layer?preview=1'); } catch { return []; }
+  const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
+  const sources: [any, 'plugin' | 'view'][] = [...(m.plugins || []).map((x: any) => [x, 'plugin'] as [any, 'plugin']), ...(m.views || []).map((x: any) => [x, 'view'] as [any, 'view'])];
+  return Promise.all(sources.map(async ([src, kind]) => {
+    const it = describe(src, kind, manifest);
+    if (it.unsupported) return it;
+    const error = await new Promise<string | null>((resolve) => {
+      let f: Frame | null = null;
+      const timer = setTimeout(() => finish(t('layer3.dryTimeout')), 6000);
+      function finish(err: string | null) { clearTimeout(timer); if (f) destroyFrame(f); f = null; resolve(err); }
+      const p: Plugin = { name: it.name, kind, code: String(src.code ?? ''), perms: new Set(), write: [], description: '', dead: false, disposers: [], frames: new Set(), warned: new Set(), lastChat: 0, dry: { done: finish } };
+      try { f = createFrame(p, null, background()); } catch (e: any) { finish(String(e?.message ?? e)); }
+    });
+    return error ? { ...it, error } : it;
+  }));
 }
 
 /** When a workflow runs, in plain words ("Every Friday at 4:00 PM", "After each wrap"). */
@@ -487,17 +722,29 @@ export function whenText(trigger: any): string {
     const day = fmtDate(new Date(2023, 0, 1 + (Number(trigger.weekday) || 0), 12), { weekday: 'long' });
     return t('layer.wf.weekly', { day, time });
   }
+  if (trigger.every === 'weekdays') {
+    // `days` (0 = Sunday) narrows or changes the default Monday–Friday.
+    const days: number[] = Array.isArray(trigger.days) ? [...new Set<number>(trigger.days.map(Number).filter((d: number) => d >= 0 && d <= 6))].sort() : [];
+    if (!days.length || days.join() === '1,2,3,4,5') return t('layer3.wf.weekdays', { time });
+    const names = new Intl.ListFormat(lang() === 'ar' ? 'ar' : 'en', { type: 'conjunction' }).format(days.map((d) => fmtDate(new Date(2023, 0, 1 + d, 12), { weekday: 'long' })));
+    return t('ui.wf.days', { days: names, time });
+  }
+  if (trigger.every === 'month') {
+    if (trigger.day === 'last') return t('layer3.wf.monthlyLast', { time });
+    const d = Math.min(28, Math.max(1, Number(trigger.day) || 1));
+    return t('layer3.wf.monthly', { day: d, time });
+  }
   return t('layer.wf.daily', { time });
 }
 
 // ---------- packs ----------
 /** Save the user's customisations as a pack file. Resolves 'saved', 'copied' (clipboard fallback) or 'cancelled'. */
-export async function exportPack(): Promise<'saved' | 'copied' | 'cancelled'> {
-  const pack = await api('/layer/export');
+export async function exportPack(paths?: string[]): Promise<'saved' | 'copied' | 'cancelled'> {
+  const pack = await api(paths?.length ? '/layer/export?paths=' + encodeURIComponent(paths.join(',')) : '/layer/export');
   if (pack?.format !== 'thoughts-pack') throw new Error(t('layer.packInvalid'));
   const text = JSON.stringify(pack, null, 2);
   const d = new Date();
-  const name = `thoughts-pack-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
+  const name = `thoughts-${paths?.length ? 'feature-' : ''}pack-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
   if ((window as any).__TAURI_INTERNALS__) {
     // The native window has no download bar: the shell opens the save dialog itself and writes the file.
     try {
@@ -517,15 +764,44 @@ export async function exportPack(): Promise<'saved' | 'copied' | 'cancelled'> {
   return 'saved';
 }
 
-/** Stage a pack for review. It is never applied directly. */
-export async function importPack(file: File) {
+/** The files of the kept layer that can go into a feature pack, grouped for the "choose items" list. */
+export async function packChoices(): Promise<{ path: string; kind: 'plugin' | 'view' | 'workflow' | 'look' | 'layout'; label: string }[]> {
+  const m = await api('/layer');
+  const out: { path: string; kind: 'plugin' | 'view' | 'workflow' | 'look' | 'layout'; label: string }[] = [];
+  for (const p of m.plugins || []) out.push({ path: 'plugins/' + p.name, kind: 'plugin', label: str(p.description, 80) || String(p.name).replace(/\.js$/, '') });
+  for (const v of m.views || []) out.push({ path: 'views/' + v.name, kind: 'view', label: str(v.description, 80) || String(v.name).replace(/\.html$/, '') });
+  try { for (const w of (await api('/workflows')) as any[]) if (w?.file || w?.name) out.push({ path: 'workflows/' + (w.file ?? `${w.name}.json`), kind: 'workflow', label: String(w.name) }); } catch { /* optional */ }
+  if (String(m.css ?? '').trim()) out.push({ path: 'custom.css', kind: 'look', label: 'custom.css' });
+  if (Array.isArray(m.themes) && m.themes.length) out.push({ path: 'themes.json', kind: 'look', label: 'themes.json' });
+  if (m.home) out.push({ path: 'home.json', kind: 'layout', label: 'home.json' });
+  if (m.nav) out.push({ path: 'nav.json', kind: 'layout', label: 'nav.json' });
+  if (m.todos) out.push({ path: 'todos.json', kind: 'layout', label: 'todos.json' });
+  return out;
+}
+
+/** Read a pack file without staging anything, so the user can see what it is first. */
+export async function readPack(file: File): Promise<{ pack: any; name: string; description: string; kind: 'full' | 'feature'; apiVersion: number; unsupported: boolean; files: string[] }> {
   if (file.size > 5 * 1024 * 1024) throw new Error(t('layer.packTooBig'));
   let pack: any;
   try { pack = JSON.parse(await file.text()); } catch { throw new Error(t('layer.packInvalid')); }
-  if (pack?.format !== 'thoughts-pack' || typeof pack.files !== 'object') throw new Error(t('layer.packInvalid'));
+  if (pack?.format !== 'thoughts-pack' || !pack.files || typeof pack.files !== 'object') throw new Error(t('layer.packInvalid'));
+  const apiVersion = Number(pack.apiVersion ?? 1) || 1;
+  return { pack, name: str(pack.name, 80), description: str(pack.description, 400), kind: pack.kind === 'feature' ? 'feature' : 'full', apiVersion, unsupported: apiVersion > API_VERSION, files: Object.keys(pack.files).slice(0, 200) };
+}
+
+/** Stage a pack (already read with `readPack`) for review. It is never applied directly. */
+export async function stagePack(pack: any) {
   await post('/layer/import', { pack });
   dismissed = '';
   await checkPending(true);
 }
 
+/** Stage a pack file for review. It is never applied directly. */
+export async function importPack(file: File) {
+  const r = await readPack(file);
+  if (r.unsupported) throw new Error(t('layer3.packNewer'));
+  await stagePack(r.pack);
+}
+
+export { errDetail as layerErrorText };
 export { missing as isMissingEndpoint };

@@ -1,10 +1,12 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
-  import { onDestroy, onMount } from 'svelte';
-  import { api, del, inTauri, post, reconnect, reloadApp } from '../lib/api';
-  import { app, applyTheme, go, saveSettings, toast } from '../lib/store.svelte';
+  import { onDestroy, onMount, untrack } from 'svelte';
+  import { api, del, inTauri, post, reloadApp } from '../lib/api';
+  import { app, applyTheme, go, saveSettings, setShowCost, toast } from '../lib/store.svelte';
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
-  import { fmtNum, t } from '../lib/i18n';
+  import { fmtMoney, fmtNum, t } from '../lib/i18n';
+  import { failed } from '../lib/errors';
+  import { restartService } from '../lib/shell';
   import ThemePicker from './ThemePicker.svelte';
   import Customise from './Customise.svelte';
 
@@ -15,10 +17,10 @@
   const catIcon: Record<Cat, string> = { general: 'settings', ai: 'ai', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette' };
   // Row labels per category (i18n keys) — used by the search box. `adv` rows live behind the Advanced disclosure.
   const basic: Record<Cat, string[]> = {
-    general: ['language', 'set.name', 'theme', 'mode', 'set.notify'],
+    general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify'],
     ai: ['set.account', 'set.perm', 'set.wrapNag'],
     git: ['set.libraryPath', 'set.backup', 'reorganize'],
-    privacy: ['set.privTitle', 'layer.signalsTitle', 'set.cost'],
+    privacy: ['set.privTitle', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'layer.appUpdates'],
@@ -32,10 +34,17 @@
     daemon: ['set.restart'],
     appLayer: ['set.safeMode'],
   };
-  const perms = ['default', 'acceptEdits', 'plan'] as const;
+  // "Ask before changes" was removed (the app has no way to ask): a stored `default` means read only.
+  const perms = ['acceptEdits', 'plan'] as const;
+  const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
   const cloudWords = ['Mobile Documents', 'Library/CloudStorage', 'Dropbox', 'OneDrive', 'Google Drive', 'iCloud'];
 
-  const fresh = () => { const x = structuredClone($state.snapshot(app.settings)); x.privatePaths ??= []; x.usageSignals ??= true; return x; };
+  const fresh = () => {
+    const x = structuredClone($state.snapshot(app.settings));
+    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null;
+    if (x.ai?.claude && (x.ai.claude.permissionMode == null || x.ai.claude.permissionMode === '' || x.ai.claude.permissionMode === 'default')) x.ai.claude.permissionMode = 'plan';
+    return x;
+  };
   const norm = (x: any) => JSON.stringify(x, (_k, v) => (v === '' || v === undefined ? null : v));
 
   let tab = $state<Cat>((cats as readonly string[]).includes(app.view.id ?? '') ? (app.view.id as Cat) : 'general');
@@ -60,7 +69,14 @@
   const isGit = $derived(String(s.sync.mode).startsWith('git'));
   const syncKind = $derived(isGit ? 'git' : s.sync.mode === 'folder' ? 'folder' : 'none');
   const pm = $derived(s.ai.claude.permissionMode);
-  const permValue = $derived(pm == null || pm === '' ? 'default' : (perms as readonly string[]).includes(pm) ? pm : '');
+  const permValue = $derived(pm == null || pm === '' || pm === 'default' ? 'plan' : (perms as readonly string[]).includes(pm) ? pm : '');
+  /** A settings file written by a newer version is never rewritten: everything here is read-only. */
+  const readOnly = $derived(!!app.status?.settingsNewer);
+  // The look is saved the moment it is chosen (ThemePicker), so it is never part of the unsaved draft.
+  $effect(() => {
+    const th = app.settings?.theme, m = app.settings?.mode;
+    untrack(() => { s.theme = th; s.mode = m; base.theme = th; base.mode = m; });
+  });
   const cost = $derived(app.status?.usage?.monthCostUsd);
   const validRemote = $derived(/^(https?:\/\/|ssh:\/\/|git@)\S+$/.test(remote.url.trim()));
 
@@ -103,11 +119,13 @@
     app.leaveGuard = leaveGuard;
   });
 
+  // Plain headline per action; whatever the background service said goes in the detail.
+  const FAIL: Record<string, string> = { save: 'ui.set.saveFailed', mod: 'ui.set.modFailed', remote: 'ui.set.remoteFailed', token: 'ui.set.keyFailed', login: 'ui.set.loginFailed', reorg: 'ui.set.reorgFailed', search: 'ui.set.searchFailed' };
   /** Runs one action with a loading flag; any failure is shown to the user. */
   async function run(key: string, fn: () => Promise<unknown>) {
     if (busy[key]) return;
     busy[key] = true;
-    try { await fn(); } catch (e: any) { toast(e?.message || t('set.failed'), { kind: 'error' }); }
+    try { await fn(); } catch (e) { failed(t(FAIL[key.split(':')[0]] ?? 'set.failed'), e); }
     finally { busy[key] = false; }
   }
 
@@ -120,6 +138,7 @@
   }
 
   async function save() {
+    if (readOnly) return;
     if (invalid) return toast(t('set.fixFirst'), { kind: 'error' });
     await run('save', async () => {
       await saveSettings(payload());
@@ -128,16 +147,11 @@
     });
   }
 
-  function restorePreview(prev: any) {
-    if (!app.settings) return;
-    app.settings.theme = prev.theme; app.settings.mode = prev.mode; applyTheme();
-  }
-
-  function discard() { s = structuredClone($state.snapshot(base)); restorePreview(base); }
+  function discard() { s = structuredClone($state.snapshot(base)); applyTheme(); }
 
   // Leaving with unsaved edits: navigation waits for this (`app.leaveGuard`, awaited inside `go()`).
   async function leaveGuard(): Promise<boolean> {
-    if (!isDirty()) return true;
+    if (!isDirty() || readOnly) return true;
     const bad = invalid;
     const choice = await choiceDialog({
       title: t('set.leaveTitle'), body: t(bad ? 'layer.leaveInvalid' : 'set.leaveBody'), cancelLabel: t('layer.keepEditing'),
@@ -146,14 +160,18 @@
     if (choice === 'discard') { discard(); return true; }
     if (choice !== 'save') return false;
     try { await saveSettings(payload()); s = fresh(); base = fresh(); toast(t('set.saved'), { kind: 'success' }); return true; }
-    catch (e: any) { toast(t('set.leaveFailed', { error: e?.message ?? '' }), { kind: 'error' }); return false; }
+    catch (e) { failed(t('ui.set.saveFailed'), e); return false; }
   }
   onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; });
 
   function onBeforeUnload(e: BeforeUnloadEvent) { if (isDirty()) { e.preventDefault(); e.returnValue = ''; } }
 
   const resets: Partial<Record<Cat, { list: string[]; apply: () => void }>> = {
-    general: { list: ['theme', 'mode', 'set.notify'], apply: () => { s.theme = 'saudi'; s.mode = 'system'; s.notifications = true; restorePreview(s); } },
+    general: { list: ['theme', 'mode', 'set.notify'], apply: () => {
+      s.notifications = true;
+      // The look applies (and saves) at once, like choosing it in the picker.
+      saveSettings({ theme: 'saudi', mode: 'system' }).catch((e) => failed(t('shell.themeNotSaved'), e));
+    } },
     ai: { list: ['set.perm', 'set.wrapNag', 'set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle'], apply: () => {
       const c = s.ai.claude; c.permissionMode = 'acceptEdits'; c.model = null; c.effort = null; c.binary = null; c.miniWrapModel = null;
       s.idleMinutes = 15; s.wrapNagThreshold = 5;
@@ -224,6 +242,18 @@
     if (r?.chatId) go({ kind: 'chat', id: r.chatId });
   });
 
+  /** Turning a feature off hides it; nothing the user wrote with it is deleted. */
+  async function disableModule(m: any) {
+    const name = (s.language === 'ar' && m.nameAr) || m.name;
+    if (!(await confirmDialog({ title: t('ui.set.modOffTitle', { name }), body: t('ui.set.modOffBody'), confirmLabel: t('ui.set.modOff') }))) return;
+    await run('mod:' + m.id, async () => {
+      await post(`/modules/${m.id}/disable`);
+      await syncServerFields();
+      await loadModules();
+      toast(t('ui.set.modOffDone', { name }), { kind: 'success' });
+    });
+  }
+
   async function reorganize() {
     const instructions = await promptDialog({ title: t('set.reorgTitle'), body: t('set.reorgBody'), placeholder: t('set.reorgPh'), confirmLabel: t('set.reorgStart') });
     if (instructions === null) return;
@@ -235,7 +265,11 @@
     await run('search', async () => { await post('/extensions/search/install'); ext = await api('/extensions'); toast(t('set.searchInstalled')); });
   }
 
-  const restart = () => run('restart', async () => { await reconnect(); toast(t('set.restarted')); });
+  async function restart() {
+    if (busy.restart) return;
+    busy.restart = true;
+    try { await restartService(); } finally { busy.restart = false; }
+  }
 
   async function addPrivate() {
     privErr = '';
@@ -288,6 +322,15 @@
       {/if}
       {#if vis(c, 'set.name')}
         <label for="st-name">{t('set.name')}</label><input id="st-name" dir="auto" bind:value={s.userName} autocomplete="off" />
+      {/if}
+      {#if vis(c, 'ui.set.profession')}
+        <label for="st-prof">{t('ui.set.profession')}</label>
+        <select id="st-prof" bind:value={s.profession} aria-describedby="st-prof-hint">
+          <option value={null}>{t('ui.set.professionNone')}</option>
+          {#each professions as p}<option value={p}>{t('layer.prof.' + p)}</option>{/each}
+          {#if s.profession && !professions.includes(s.profession)}<option value={s.profession}>{s.profession}</option>{/if}
+        </select>
+        <p class="muted sm" id="st-prof-hint">{t('ui.set.professionHint')}</p>
       {/if}
       {#if vis(c, 'theme', 'mode')}<ThemePicker bind:theme={s.theme} bind:mode={s.mode} />{/if}
       {#if vis(c, 'set.notify')}
@@ -413,6 +456,7 @@
             <option value="keychain">{t('set.credKeychain')}</option>
             <option value="file">{t('set.credFile')}</option>
           </select>
+          <p class="muted sm">{t(s.sync.credentialStore === 'file' ? 'ui.set.credFileHint' : 'ui.set.credKeychainHint')}</p>
         {/if}
         {#if isGit && vis(c, 'set.remotes')}
           <h3>{t('set.remotes')}</h3>
@@ -468,16 +512,20 @@
       <div class="card">
         <h3>{t('set.cost')}</h3>
         {#if typeof cost === 'number'}
-          <p class="cost"><bdi>${fmtNum(Math.round(cost * 100) / 100)}</bdi></p>
+          <p class="cost"><bdi>{fmtMoney(cost)}</bdi></p>
         {:else}
           <p class="muted sm">{t('set.costNone')}</p>
         {/if}
         <p class="muted sm">{t('set.costHint')}</p>
+        {#if vis(c, 'ui.set.showCost')}
+          <label class="check"><input type="checkbox" checked={app.showCost} onchange={(e) => setShowCost(e.currentTarget.checked)} aria-describedby="st-cost-hint" /> {t('ui.set.showCost')}</label>
+          <p class="muted sm" id="st-cost-hint">{t('ui.set.showCostHint')}</p>
+        {/if}
       </div>
     {/if}
   {:else if c === 'modules'}
     <div class="card">
-      <p class="muted">{t('set.modulesIntro')}</p>
+      <p class="muted">{t('set.modulesIntro')} {t('ui.set.modKeeps')}</p>
       {#if loading.modules}<p class="muted sm" role="status">{t('set.loading')}</p>
       {:else if loadErr.modules}<p class="err" role="alert">{loadErr.modules} <button type="button" class="btn ghost" onclick={loadModules}>{t('set.retry')}</button></p>
       {:else}
@@ -485,6 +533,7 @@
           <div class="row mod">
             <div class="grow"><b>{(s.language === 'ar' && m.nameAr) || m.name}</b><div class="muted sm">{(s.language === 'ar' && m.descriptionAr) || m.description}</div></div>
             {#if s.modules?.[m.id]}<span class="pill accent">{t('enabled')}</span>
+              {#if m.canDisable !== false}<button type="button" class="btn ghost" disabled={busy['mod:' + m.id]} onclick={() => disableModule(m)}>{t('ui.set.modOff')}</button>{/if}
             {:else}<button type="button" class="btn" disabled={busy['mod:' + m.id]} onclick={() => enableModule(m.id)}>{busy['mod:' + m.id] ? t('set.enabling') : t('enable')}</button>{/if}
           </div>
         {:else}
@@ -496,7 +545,7 @@
     <div class="card">
       <p class="muted">{t('set.daemonIntro')}</p>
       {#if vis(c, 'set.keepRunning')}<label class="check"><input type="checkbox" bind:checked={s.daemon.keepRunning} /> {t('set.keepRunning')}</label>{/if}
-      {#if vis(c, 'set.runAtLogin')}<label class="check"><input type="checkbox" bind:checked={s.daemon.runAtLogin} /> <span>{t('set.runAtLogin')} {#if app.status?.platform !== 'macos'}<span class="muted">{t('set.macOnly')}</span>{/if}</span></label>{/if}
+      {#if vis(c, 'set.runAtLogin')}<label class="check"><input type="checkbox" bind:checked={s.daemon.runAtLogin} /> <span>{t('set.runAtLogin')} {#if app.status?.autostart?.supported === false || app.status?.autostartSupported === false}<span class="muted">{t('set.macOnly')}</span>{/if}</span></label>{/if}
     </div>
     {#if vis(c, ...adv.daemon)}
       <details class="card adv" open={!!q || advOpen.daemon} ontoggle={(e) => { if (!q) advOpen.daemon = e.currentTarget.open; }}>
@@ -532,16 +581,19 @@
     {/each}
   </nav>
   <div class="content">
+    {#if readOnly}
+      <div class="ro card" role="status"><Icon name="lock" size={16} /><span>{t('ui.settingsNewer')}</span></div>
+    {/if}
     {#each shown as c (c)}
       <section aria-labelledby={'st-h-' + c}>
         <h2 class="title" id={'st-h-' + c}>{t('set.cat.' + c)}</h2>
-        {@render section(c)}
+        <fieldset class="lockable" disabled={readOnly}>{@render section(c)}</fieldset>
       </section>
     {:else}
       <p class="muted none" role="status">{t('set.noMatch', { q: query.trim() })}</p>
     {/each}
 
-    {#if dirty}
+    {#if dirty && !readOnly}
       <div class="savebar" role="region" aria-label={t('set.unsaved')}>
         <span class="dot" aria-hidden="true"></span>
         <span class="grow" role="status">{t('set.unsaved')}{#if invalid} — {t('set.fixFirst')}{/if}</span>
@@ -554,6 +606,9 @@
 
 <style>
   .settings { display: grid; grid-template-columns: 220px 1fr; min-height: calc(100vh - 26px); }
+  .lockable { border: 0; padding: 0; margin: 0; min-width: 0; }
+  .ro { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 14px; font-size: 13px; border-color: var(--accent-2); }
+  .ro :global(.icon) { flex: none; margin-top: 2px; color: var(--accent-2); }
   .cats { padding-block: 6px 20px; padding-inline: 16px 10px; border-inline-end: 1px solid var(--hairline); display: flex; flex-direction: column; gap: 2px; }
   .cats h1 { font-size: 20px; margin: 4px 6px 12px; }
   .find { position: relative; margin-bottom: 8px; color: var(--muted); }
@@ -561,9 +616,11 @@
   .find input { padding-inline-start: 30px; font-size: 13px; }
   .cat { font: inherit; color: inherit; background: none; border: 0; text-align: start; cursor: pointer; display: flex; align-items: center; gap: 10px; padding: 5px 6px; border-radius: 7px; font-size: 13px; width: 100%; }
   .cat:hover { background: var(--fill); }
-  .cat.on { background: var(--accent); color: var(--accent-fg); }
-  .ci { width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center; background: var(--tint); color: var(--accent); flex: none; }
-  .cat.on .ci { background: rgba(255,255,255,.22); color: inherit; }
+  /* A navigation list: the current row is tinted, like the sidebar (see "selected" in theme.css). */
+  .cat.on { background: var(--tint); color: var(--on-tint); font-weight: 600; }
+  .ci { width: 24px; height: 24px; border-radius: 6px; display: grid; place-items: center; background: var(--tint); color: var(--on-tint); flex: none; }
+  .cat.on .ci { background: var(--accent); color: var(--accent-fg); }
+  :global([data-theme="contrast"]) .cat.on .ci { background: var(--accent-fg); color: var(--accent); }
   .content { padding: 6px 28px 28px; max-width: 760px; min-width: 0; }
   .title { font-size: 20px; margin: 4px 0 14px; }
   section + section { margin-top: 26px; }
@@ -577,7 +634,7 @@
   .radio input { margin-top: 4px; }
   .blk { display: block; font-weight: 400; }
   .perm { border: 0; padding: 0; margin: 14px 0 0; min-width: 0; }
-  .perm legend { font-size: 12px; font-weight: 500; color: var(--muted); padding: 0; }
+  .perm legend { font-size: var(--fs-xs); font-weight: 500; color: var(--muted); padding: 0; }
   .num { max-width: 120px; }
   .adv > summary { cursor: pointer; font-size: 13px; font-weight: 600; }
   .adv[open] > summary { margin-bottom: 6px; }
@@ -587,12 +644,20 @@
   .mod, .remote { padding: 10px 0; border-bottom: 1px solid var(--hairline); }
   .mod:last-child { border-bottom: 0; }
   .path { overflow-wrap: anywhere; }
-  .err { color: var(--danger); font-size: 12.5px; margin: 4px 0 0; }
-  .note { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; margin: 8px 0; }
+  .err { color: var(--danger); font-size: var(--fs-sm); margin: 4px 0 0; }
+  .note { display: flex; gap: 8px; align-items: flex-start; font-size: var(--fs-sm); margin: 8px 0; }
   .note :global(.icon) { flex: none; margin-top: 3px; color: var(--danger); }
   .cost { font-size: 26px; font-weight: 500; margin: 0 0 4px; }
   .reset { display: flex; justify-content: flex-end; }
   .none { padding: 24px 0; }
-  .sm { font-size: 12px; }
-  @media (max-width: 720px) { .settings { grid-template-columns: 1fr; } .cats { border-inline-end: 0; } .grid2 { grid-template-columns: 1fr; } }
+  .sm { font-size: var(--fs-xs); }
+  /* The window can't be narrower than 920px, so a viewport query never fired: follow the room the view really has. */
+  @container main (max-width: 700px) {
+    .settings { grid-template-columns: 1fr; min-height: 0; }
+    .cats { border-inline-end: 0; border-bottom: 1px solid var(--hairline); flex-direction: row; flex-wrap: wrap; align-items: center; gap: 4px; padding-block-end: 10px; }
+    .cats h1, .find { flex-basis: 100%; }
+    .cat { width: auto; padding-inline-end: 10px; }
+    .content { padding-inline: 16px; }
+    .grid2 { grid-template-columns: 1fr; }
+  }
 </style>

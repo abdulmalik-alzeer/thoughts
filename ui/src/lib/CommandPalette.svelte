@@ -12,10 +12,18 @@
     run: () => void;
   };
 
+  /** Folds text for matching: case, Latin accents, and the Arabic spellings people type interchangeably
+   *  (أ إ آ ٱ → ا, ى → ي, ة → ه, ؤ → و, ئ → ي), without tashkeel or tatweel. */
+  export function fold(text: string): string {
+    return text.normalize('NFKD').replace(/[\u0300-\u036f\u064b-\u065f\u0670\u0640]/g, '')
+      .replace(/[\u0623\u0625\u0622\u0671]/g, '\u0627').replace(/\u0649/g, '\u064a').replace(/\u0629/g, '\u0647')
+      .replace(/\u0624/g, '\u0648').replace(/\u0626/g, '\u064a').toLowerCase();
+  }
+
   /** Fuzzy match: 0 = no match; higher is better. Substring beats scattered letters. */
   export function fuzzy(query: string, text: string): number {
-    const q = query.trim().toLowerCase();
-    const s = text.toLowerCase();
+    const q = fold(query.trim());
+    const s = fold(text);
     if (!q) return 1;
     const at = s.indexOf(q);
     if (at >= 0) return 1000 - Math.min(at, 500) + (at === 0 || /\s/.test(s[at - 1]) ? 200 : 0);
@@ -37,6 +45,7 @@
   import Icon from './Icon.svelte';
   import { t } from './i18n';
   import { trapFocus } from './focus';
+  import { track } from './store.svelte';
 
   let { items, close }: { items: PaletteItem[]; close: () => void } = $props();
 
@@ -66,6 +75,8 @@
   function run(it: PaletteItem | undefined) {
     if (!it) return;
     close();
+    // Learning signal: which command was used (never the title of a chat or note).
+    track('palette.cmd:' + (it.id.includes(':') ? it.id.split(':')[0] : it.id));
     it.run();
   }
 
@@ -118,12 +129,12 @@
   .list { flex: 1; min-height: 0; padding: 6px; }
   .opt { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; cursor: pointer; font-size: 14px; }
   .opt :global(.icon) { flex: none; color: var(--muted); }
-  .opt[aria-selected="true"] { background: var(--tint); }
+  .opt[aria-selected="true"] { background: var(--tint); color: var(--on-tint); }
   :global([data-theme="contrast"]) .opt[aria-selected="true"] { background: var(--accent); color: var(--accent-fg); }
   :global([data-theme="contrast"]) .opt[aria-selected="true"] :global(.icon),
   :global([data-theme="contrast"]) .opt[aria-selected="true"] .grp { color: inherit; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .grp { font-size: 12px; color: var(--muted); flex: none; }
+  .grp { font-size: var(--fs-xs); color: var(--muted); flex: none; }
   .empty { padding: 18px 10px; margin: 0; text-align: center; }
-  .hint { display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--hairline); font-size: 12px; }
+  .hint { display: flex; gap: 16px; padding: 8px 16px; border-top: 1px solid var(--hairline); font-size: var(--fs-xs); }
 </style>

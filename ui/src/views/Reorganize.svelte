@@ -68,7 +68,7 @@
 </div>
 
 <style>
-  .diff { font-size: 12px; max-height: 70vh; }
-  .sm { font-size: 12px; }
+  .diff { font-size: var(--fs-xs); max-height: 70vh; }
+  .sm { font-size: var(--fs-xs); }
   .add { color: var(--ok); } .rem { color: var(--danger); } .hd { color: var(--accent-2); }
 </style>

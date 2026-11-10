@@ -5,8 +5,10 @@
   import { api, on, post } from '../lib/api';
   import { app, toast } from '../lib/store.svelte';
   import { confirmDialog } from '../lib/dialog.svelte';
-  import { t, fmtDate } from '../lib/i18n';
-  import { checkPending, exportPack, importPack, openReview, startCustomise, whenText } from '../lib/layer';
+  import { t, tn, fmtDate } from '../lib/i18n';
+  import { failed } from '../lib/errors';
+  import { trapFocus } from '../lib/focus';
+  import { checkPending, exportPack, layerItems, openReview, packChoices, permText, readPack, stagePack, startCustomise, whenText } from '../lib/layer';
   import { checkAppUpdate } from '../lib/updates';
 
   let { show }: { show: (...keys: string[]) => boolean } = $props();
@@ -21,7 +23,7 @@
   async function run(key: string, failKey: string, fn: () => Promise<unknown>) {
     if (busy[key]) return;
     busy[key] = true;
-    try { await fn(); } catch (e: any) { toast(t(failKey), { kind: 'error', detail: e?.message ?? String(e) }); }
+    try { await fn(); } catch (e) { failed(t(failKey), e); }
     finally { busy[key] = false; }
   }
 
@@ -36,17 +38,52 @@
   });
 
   const ask = () => run('ask', 'layer.askFailed', async () => { if (await startCustomise(text)) text = ''; });
-  const doExport = () => run('export', 'layer.exportFailed', async () => {
-    const r = await exportPack();
+  function exported(r: 'saved' | 'copied' | 'cancelled') {
     if (r === 'saved') toast(t('layer.exported'), { kind: 'success' });
     else if (r === 'copied') toast(t('layer.exportCopied'));
+  }
+  const doExport = () => run('export', 'layer.exportFailed', async () => exported(await exportPack()));
+
+  // A feature pack: the user ticks which add-ons, pages, tasks and files go in.
+  let choices = $state<Awaited<ReturnType<typeof packChoices>> | null>(null);
+  let chosen = $state<Record<string, boolean>>({});
+  const nChosen = $derived(Object.values(chosen).filter(Boolean).length);
+  const chooseExport = () => run('choose', 'layer3.exportListFailed', async () => {
+    const list = await packChoices();
+    if (!list.length) { toast(t('layer3.exportNothing')); return; }
+    chosen = {};
+    choices = list;
   });
+  const exportChosen = () => run('export', 'layer.exportFailed', async () => {
+    const paths = Object.entries(chosen).filter(([, v]) => v).map(([k]) => k);
+    if (!paths.length) return;
+    const r = await exportPack(paths);
+    choices = null;
+    exported(r);
+  });
+
   function pick(e: Event) {
     const el = e.target as HTMLInputElement;
     const f = el.files?.[0];
     el.value = '';
-    if (f) run('import', 'layer.importFailed', () => importPack(f));
+    if (!f) return;
+    run('import', 'layer.importFailed', async () => {
+      const r = await readPack(f);
+      if (r.unsupported) { toast(t('layer3.packNewer'), { kind: 'error' }); return; }
+      // Say what the pack is before anything is staged; the full review still follows.
+      const ok = await confirmDialog({
+        title: r.name ? `${t('layer3.importTitle')} ${r.name}` : t('layer3.importTitle'),
+        body: [r.description, t(r.kind === 'feature' ? 'layer3.importFeature' : 'layer3.importFull'), tn('layer3.importFiles', r.files.length)].filter(Boolean).join('\n\n'),
+        list: r.files.slice(0, 30),
+        note: t('layer3.importNote'),
+        confirmLabel: t('layer3.importGo'),
+      });
+      if (ok) await stagePack(r.pack);
+    });
   }
+
+  const installed = $derived(layerItems());
+  const notRunning = $derived(installed.filter((x) => x.unsupported));
 
   async function allow(w: any) {
     const ok = await confirmDialog({ title: t('layer.wf.allowTitle', { name: w.name }), body: `${whenText(w.trigger)}\n\n${w.prompt ?? ''}`.trim(), note: t('layer.wf.allowNote'), confirmLabel: t('layer.wf.allow') });
@@ -72,9 +109,29 @@
       </div>
     {/if}
     <div class="row gap-top wrap">
-      <button type="button" class="btn" onclick={() => (app.showRollback = true)}><Icon name="rollback" size={15} /> {t('layer.history')}…</button>
+      <button type="button" class="btn" onclick={() => (app.showRollback = true)}><Icon name="rollback" size={15} /> {t('layer3.historyDots')}</button>
       <span class="muted sm grow">{t('layer.historyHint')}</span>
     </div>
+  </div>
+{/if}
+
+{#if show('layer.customise', 'layer.history') && installed.length}
+  <div class="card">
+    <h3>{t('layer3.installedTitle')}</h3>
+    <ul class="inst">
+      {#each installed as x (x.kind + ':' + x.name)}
+        <li>
+          <div class="row wrap"><span class="pill">{t('layer3.kind.' + x.kind)}</span> <bdi class="grow">{x.name}</bdi>{#if x.unsupported}<span class="pill">{t('layer3.notLoadedTitle')}</span>{/if}</div>
+          {#if x.description}<div class="muted sm" dir="auto">{x.description}</div>{/if}
+          {#if x.unsupported}
+            <div class="sm" role="note" dir="auto">{x.message}</div>
+          {:else if x.permissions.length}
+            <div class="muted sm">{x.permissions.map(permText).join(' · ')}{#if x.write.length} — {t('layer3.writeIn')} {#each x.write as w, i}{i ? ' · ' : ''}<bdi>{w}</bdi>{/each}{/if}</div>
+          {/if}
+        </li>
+      {/each}
+    </ul>
+    {#if notRunning.length}<p class="muted sm gap-top">{t('layer3.unsupportedBody')}</p>{/if}
   </div>
 {/if}
 
@@ -83,11 +140,30 @@
     <h3>{t('layer.share')}</h3>
     <p class="muted sm">{t('layer.shareHint')}</p>
     <div class="row wrap">
-      <button type="button" class="btn" disabled={busy.export} onclick={doExport}><Icon name="download" size={15} /> {t('layer.export')}</button>
+      <button type="button" class="btn" disabled={busy.export} onclick={doExport}><Icon name="download" size={15} /> {t('layer3.exportAll')}</button>
+      <button type="button" class="btn" disabled={busy.export || busy.choose} onclick={chooseExport}>{t('layer3.exportSome')}</button>
       <button type="button" class="btn" disabled={busy.import} onclick={() => picker?.click()}><Icon name="upload" size={15} /> {t('layer.import')}</button>
       <input type="file" accept=".json,application/json" hidden bind:this={picker} onchange={pick} />
     </div>
     <p class="muted sm gap-top">{t('layer.importHint')}</p>
+  </div>
+{/if}
+
+{#if choices}
+  <div class="modal-bg no-print" role="presentation" onclick={(e) => e.target === e.currentTarget && (choices = null)}>
+    <div class="modal pick" role="dialog" aria-modal="true" aria-labelledby="pk-title" tabindex="-1" use:trapFocus={{ onEscape: () => (choices = null) }}>
+      <h2 id="pk-title">{t('layer3.exportChoose')}</h2>
+      <p class="muted sm">{t('layer3.exportChooseHint')}</p>
+      <ul class="inst">
+        {#each choices as c (c.path)}
+          <li><label class="ck"><input type="checkbox" bind:checked={chosen[c.path]} /> <span class="pill">{t('layer3.kind.' + c.kind)}</span> <span class="grow" dir="auto">{c.label}</span> <bdi class="muted sm">{c.path}</bdi></label></li>
+        {/each}
+      </ul>
+      <div class="row end">
+        <button type="button" class="btn" onclick={() => (choices = null)}>{t('cancel')}</button>
+        <button type="button" class="btn primary" disabled={!nChosen || busy.export} onclick={exportChosen}><Icon name="download" size={15} /> {t('layer3.exportSelected')}</button>
+      </div>
+    </div>
   </div>
 {/if}
 
@@ -131,10 +207,18 @@
   .card { margin-bottom: 12px; }
   .wrap { flex-wrap: wrap; }
   .gap-top { margin-top: 10px; }
-  .sm { font-size: 12px; }
+  .sm { font-size: var(--fs-xs); }
   .pend { margin-top: 10px; padding: 8px 10px; border-radius: var(--radius); background: var(--fill); font-size: 13px; }
   .pend :global(.icon) { flex: none; color: var(--accent-2); }
   .wf { padding: 10px 0; border-bottom: 1px solid var(--hairline); }
   .wf:last-child { border-bottom: 0; }
-  .err { color: var(--danger); font-size: 12.5px; margin: 4px 0 0; }
+  .inst { list-style: none; margin: 0; padding: 0; }
+  .inst li { padding: 8px 0; border-bottom: 1px solid var(--hairline); display: grid; gap: 2px; font-size: 13px; }
+  .inst li:last-child { border-bottom: 0; }
+  .pick { max-width: 520px; display: grid; gap: 10px; }
+  .pick h2 { margin: 0; font-size: 17px; }
+  .pick p { margin: 0; }
+  .ck { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; font-weight: 400; color: var(--fg); cursor: pointer; min-height: 24px; }
+  .end { justify-content: flex-end; }
+  .err { color: var(--danger); font-size: var(--fs-sm); margin: 4px 0 0; }
 </style>

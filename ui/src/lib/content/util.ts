@@ -2,13 +2,16 @@
 import { libraryBlob } from '../api';
 import { toast } from '../store.svelte';
 import { t, fmtNum, fmtDate } from '../i18n';
+import { failed } from '../errors';
 
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
 export type ToastOpts = { action?: { label: string; run: () => void }; kind?: 'error' | 'info' | 'success'; detail?: string; key?: string; duration?: number };
 /** `toast(msg, opts?)` — the options are ignored by older one-argument versions of the store. */
 export const notify = (msg: string, opts?: ToastOpts) => (toast as (m: string, o?: ToastOpts) => void)(msg, opts);
-export const fail = (e: unknown) => notify(e instanceof Error ? e.message : String(e), { kind: 'error' });
+/** Error toast with a plain headline; the background service's own message is the detail, never the headline.
+ *  Prefer `failed(t('…'), e)` from lib/errors.ts, which names the action that failed. */
+export const fail = (e: unknown, headline?: string) => failed(headline ?? t('ui.failedGeneric'), e);
 
 export async function copyText(text: string): Promise<boolean> {
   try { await navigator.clipboard.writeText(text); return true; } catch { /* fall through */ }

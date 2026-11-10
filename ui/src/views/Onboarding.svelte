@@ -1,15 +1,17 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import { api, post } from '../lib/api';
   import { app, applyTheme, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
+  import { failed } from '../lib/errors';
   import ThemePicker from './ThemePicker.svelte';
   import Logo from '../lib/Logo.svelte';
 
   let { done }: { done: (setupChatId: string | null) => void } = $props();
 
-  const steps = ['welcome', 'ai', 'library', 'modules', 'sync', 'look', 'ready'] as const;
+  // Four steps: Welcome · Assistant · Your notes (folder + backup) · Review (privacy + look).
+  const steps = ['welcome', 'ai', 'library', 'ready'] as const;
   let step = $state(0);
   let busy = $state(false);
   let checking = $state(false);
@@ -35,6 +37,24 @@
   // Start with the safest choice: nothing leaves this computer until the user asks for a backup.
   s.sync.mode = 'none';
   s.libraryPath = app.status?.home ? app.status.home + '/Thoughts' : '~/Thoughts';
+  // First screen in the system's language: Arabic systems start in Arabic (an explicit choice wins on a re-run).
+  const LANG_KEY = 'thoughts.ob.lang';
+  const lsGet = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const picked = lsGet(LANG_KEY);
+  if (picked === 'ar' || picked === 'en') s.language = picked;
+  else if (/^ar\b/i.test(navigator.language || '')) s.language = 'ar';
+  function setLang(l: 'ar' | 'en') { s.language = l; try { localStorage.setItem(LANG_KEY, l); } catch { /* private mode */ } }
+  // Only two ways of working exist: the assistant edits notes, or it only reads.
+  if (s.ai?.claude && s.ai.claude.permissionMode === 'default') s.ai.claude.permissionMode = 'plan';
+
+  // Focus follows the step: each screen's heading is announced when it appears.
+  let bodyEl = $state<HTMLElement | null>(null);
+  let firstStep = true;
+  $effect(() => {
+    step;
+    if (firstStep) { firstStep = false; return; }
+    tick().then(() => bodyEl?.querySelector<HTMLElement>('h1')?.focus());
+  });
 
   const ar = $derived(s.language === 'ar');
   const isGit = $derived(String(s.sync.mode).startsWith('git'));
@@ -50,17 +70,17 @@
     try {
       modules = await api('/modules');
       s.modules = Object.fromEntries(modules.map((m) => [m.id, s.modules?.[m.id] ?? m.defaultOn]));
-    } catch (e: any) { modulesErr = e?.message || t('ob.failed'); }
+    } catch (e: any) { modulesErr = t('ob3.modulesFailed'); }
     finally { modulesLoading = false; }
   }
 
   // Picking a language on the first step switches the whole flow (text and direction) immediately.
   $effect(() => { app.settings.language = s.language; applyTheme(); });
 
-  async function act(key: string, fn: () => Promise<void>) {
+  async function act(key: string, fn: () => Promise<void>, failKey = 'ob.failed') {
     if (working[key]) return;
     working[key] = true;
-    try { await fn(); } catch (e: any) { toast(e?.message || t('ob.failed'), { kind: 'error' }); }
+    try { await fn(); } catch (e) { failed(t(failKey), e); }
     finally { working[key] = false; }
   }
 
@@ -71,8 +91,9 @@
       const st = await api('/status');
       claude = st.claude ?? {};
       git = st.git ?? git;
-      toast(t(git.installed && claude.installed && (claude.loggedIn || useApi) ? 'ob.checkOk' : 'ob.checkStill'));
-    } catch (e: any) { toast(e?.message || t('ob.failed'), { kind: 'error' }); }
+      const ready = step === 1 ? claude.installed && (claude.loggedIn || useApi) : git.installed;
+      toast(t(ready ? 'ob.checkOk' : 'ob.checkStill'));
+    } catch (e) { failed(t('ob3.checkFailed'), e); }
     finally { checking = false; }
   }
 
@@ -81,8 +102,8 @@
     // Windows: the service hands back the download page; Linux: the command for this system.
     if (r?.url) { try { const { openUrl } = await import('@tauri-apps/plugin-opener'); await openUrl(r.url); } catch { window.open(r.url, '_blank', 'noopener'); } }
     if (r?.hint) toast(t('ob.gitInstallToast'), { detail: String(r.hint), duration: 0 }); else toast(t('ob.gitInstallToast'));
-  });
-  const login = () => act('login', async () => { await post('/ai/claude/login'); toast(t('ob.loginToast')); });
+  }, 'ob3.gitInstallFailed');
+  const login = () => act('login', async () => { await post('/ai/claude/login'); toast(t('ob.loginToast')); }, 'ob3.loginFailed');
 
   async function browse() {
     try {
@@ -102,7 +123,6 @@
   /** Why the Next button is disabled on the current step ('' = good to go). */
   const blocker = $derived.by(() => {
     if (step === 1) {
-      if (!git.installed) return t('ob.needGit');
       if (!claude.installed) return t('ob.needClaude');
       if (useApi) {
         if (!validUrl(s.ai.claude.baseUrl)) return t('ob.needApiUrl');
@@ -114,8 +134,9 @@
       if (!p) return t('ob.needFolder');
       if (!/^(~\/|\/|[A-Za-z]:[\\/])/.test(p)) return t('ob.needFullPath');
     }
-    if (step === 3 && modulesLoading) return t('ob.loading');
-    if (step === 4) {
+    if (step === 2) {
+      // Git is only needed for a Git backup; without it the app still works, minus the notes history.
+      if (isGit && !git.installed) return t('ob3.needGitForBackup');
       if (isGit && inCloud) return t('ob.gitCloudClash');
       if (isGit && remoteUrl.trim()) {
         if (!validRemote(remoteUrl)) return t('ob.needRemoteUrl');
@@ -135,38 +156,41 @@
     try {
       const settings = structuredClone($state.snapshot(s));
       if (!useApi) settings.ai.claude.baseUrl = null;
+      if (settings.ai?.claude && !['acceptEdits', 'plan'].includes(settings.ai.claude.permissionMode ?? 'acceptEdits')) settings.ai.claude.permissionMode = 'plan';
+      settings.profession = profession || null;
       const r = await post('/onboarding', {
         settings, libraryMode, seeds: seeds.split('\n').map((x) => x.trim()).filter(Boolean),
         remoteUrl: isGit ? remoteUrl.trim() : '', remoteUsername: isGit ? remoteUser : '', remoteToken: isGit ? remoteToken : '',
         apiToken: useApi ? apiToken.trim() : '',
         profession: profession ? t('layer.prof.' + profession) : '',
       });
-      if (wantSearch) post('/extensions/search/install').catch((e) => toast(t('ob.searchFail', { error: e?.message ?? '' }), { kind: 'error' }));
+      if (wantSearch) post('/extensions/search/install').catch((e) => failed(t('ob3.searchFailed'), e));
       try { app.settings = await api('/settings'); applyTheme(); } catch { /* the app reloads settings on its own */ }
       done(r.setupChatId);
-    } catch (e: any) {
-      toast(e?.message || t('ob.failed'), { kind: 'error' });
+    } catch (e) {
+      failed(t('ob3.finishFailed'), e);
     } finally { busy = false; }
   }
 </script>
 
 <div class="ob">
   <div class="drag" data-tauri-drag-region></div>
+  <p class="prog" role="status">{t('ob3.stepOf', { n: step + 1, total: steps.length })} · <b>{t('ob.step.' + steps[step])}</b></p>
   <ol class="steps" aria-label={t('ob.stepsLabel')}>
     {#each steps as name, i}
       <li class="st" class:on={i === step} class:past={i < step} aria-current={i === step ? 'step' : undefined}>{t('ob.step.' + name)}</li>
     {/each}
   </ol>
 
-  <div class="card body">
+  <div class="card body" bind:this={bodyEl}>
     {#if step === 0}
       <div class="hero-logo"><Logo size={72} /></div>
-      <h1 class="brand">Thoughts</h1>
+      <h1 class="brand" tabindex="-1">Thoughts</h1>
       <p>{t('ob.welcomeBody')}</p>
       <div class="lbl" id="ob-lang">{t('language')}</div>
       <div class="row" role="group" aria-labelledby="ob-lang">
-        <button type="button" class="btn" class:primary={s.language === 'ar'} aria-pressed={s.language === 'ar'} lang="ar" onclick={() => (s.language = 'ar')}>العربية</button>
-        <button type="button" class="btn" class:primary={s.language !== 'ar'} aria-pressed={s.language !== 'ar'} lang="en" onclick={() => (s.language = 'en')}>English</button>
+        <button type="button" class="btn" class:primary={s.language === 'ar'} aria-pressed={s.language === 'ar'} lang="ar" onclick={() => setLang('ar')}>العربية</button>
+        <button type="button" class="btn" class:primary={s.language !== 'ar'} aria-pressed={s.language !== 'ar'} lang="en" onclick={() => setLang('en')}>English</button>
       </div>
       <label for="ob-name">{t('ob.nameLabel')}</label>
       <input id="ob-name" dir="auto" bind:value={s.userName} placeholder={t('ob.namePh')} autocomplete="off" />
@@ -177,38 +201,34 @@
       </select>
       <p class="muted sm">{t('layer.prof.hint')}</p>
     {:else if step === 1}
-      <h1>{t('ob.aiTitle')}</h1>
+      <h1 tabindex="-1">{t('ob.aiTitle')}</h1>
       <p>{t('ob.aiBody')}</p>
-      <p class="muted">{t('ob.aiCost')}</p>
+      <div class="card status">
+        <p class="row"><Icon name="info" size={16} /> <b>{t('ob3.planTitle')}</b></p>
+        <ul class="plain">
+          <li>{t('ob3.planPaid')}</li>
+          <li>{t('ob3.planNoBill')}</li>
+          <li>{t('ob3.planData')}</li>
+        </ul>
+      </div>
 
       <div class="card status">
-        <p><b>{t('ob.toolsTitle')}</b></p>
-        <div class="tool">
-          <span class="mark" class:ok={git.installed}><Icon name={git.installed ? 'check' : 'warning'} size={15} /></span>
-          <div class="grow"><b><bdi>Git</bdi></b><div class="muted sm">{t('ob.gitWhy')}</div></div>
-          {#if git.installed}<span class="pill accent">{t('ob.installed')}</span>
-          {:else}<button type="button" class="btn primary" disabled={working.git} onclick={installGit}>{working.git ? t('ob.opening') : t('ob.install')}</button>{/if}
-        </div>
+        <p><b>{t('ob3.toolTitle')}</b></p>
         <div class="tool">
           <span class="mark" class:ok={claude.installed}><Icon name={claude.installed ? 'check' : 'warning'} size={15} /></span>
           <div class="grow"><b><bdi>Claude Code</bdi></b><div class="muted sm">{t('ob.claudeWhy')}</div></div>
           {#if claude.installed}<span class="pill accent">{t('ob.installed')}</span>
           {:else}<a class="btn primary" href="https://claude.com/claude-code" target="_blank" rel="noreferrer">{t('ob.installClaude')} <Icon name="external" size={13} /></a>{/if}
         </div>
-        {#if !git.installed || !claude.installed}<p class="muted sm">{t('ob.toolsAfter')}</p>{/if}
-      </div>
-
-      {#if claude.installed}
-        <div class="card status">
-          <div class="row">
-            <span class="pill" class:accent={claude.loggedIn}>{t(claude.loggedIn ? 'ob.signedIn' : 'ob.notSignedIn')}</span>
-            <span class="muted sm grow">{t(claude.loggedIn ? 'ob.signedInHint' : 'ob.signInHint')}</span>
+        {#if !claude.installed}<p class="muted sm">{t('ob.toolsAfter')}</p>{/if}
+        {#if claude.installed}
+          <div class="tool">
+            <span class="mark" class:ok={claude.loggedIn || useApi}><Icon name={claude.loggedIn || useApi ? 'check' : 'warning'} size={15} /></span>
+            <div class="grow"><b>{t(claude.loggedIn ? 'ob.signedIn' : 'ob.notSignedIn')}</b><div class="muted sm">{t(claude.loggedIn ? 'ob.signedInHint' : 'ob.signInHint')}</div></div>
+            {#if !claude.loggedIn && !useApi}<button type="button" class="btn primary" disabled={working.login} onclick={login}>{working.login ? t('ob.opening') : t('ob.signIn')}</button>{/if}
           </div>
-          {#if !claude.loggedIn && !useApi}
-            <div class="row gap-top"><button type="button" class="btn primary" disabled={working.login} onclick={login}>{working.login ? t('ob.opening') : t('ob.signIn')}</button></div>
-          {/if}
-        </div>
-      {/if}
+        {/if}
+      </div>
 
       <div class="row gap-top">
         <button type="button" class="btn" disabled={checking} aria-busy={checking} onclick={checkAgain}><Icon name="sync" size={14} class={checking ? 'spin' : ''} /> {checking ? t('ob.checking') : t('ob.checkAgain')}</button>
@@ -222,11 +242,11 @@
           <input id="ob-base" dir="ltr" bind:value={s.ai.claude.baseUrl} placeholder="https://api.anthropic.com" autocomplete="off" />
           <label for="ob-key">{t('ob.apiKey')}</label>
           <input id="ob-key" dir="ltr" type="password" bind:value={apiToken} autocomplete="off" />
-          <p class="muted sm">{t('ob.apiKeyHint')}</p>
+          <p class="muted sm">{t('ob3.apiKeyHint')}</p>
         {/if}
       </details>
     {:else if step === 2}
-      <h1>{t('ob.libTitle')}</h1>
+      <h1 tabindex="-1">{t('ob.libTitle')}</h1>
       <p>{t('ob.libBody')}</p>
       <div class="opts">
         <button type="button" class="opt" class:sel={libraryMode === 'new'} aria-pressed={libraryMode === 'new'} onclick={() => (libraryMode = 'new')}><b>{t('ob.libNew')}</b><span class="muted">{t('ob.libNewHint')}</span></button>
@@ -236,30 +256,12 @@
       <div class="row"><input id="ob-path" class="grow" dir="ltr" bind:value={s.libraryPath} autocomplete="off" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.browse')}</button></div>
       {#if libraryMode === 'new'}
         <label for="ob-seeds">{t('ob.seeds')}</label>
-        <textarea id="ob-seeds" rows="3" dir="auto" bind:value={seeds} placeholder={t('ob.seedsPh')}></textarea>
+        <textarea id="ob-seeds" rows="2" dir="auto" bind:value={seeds} placeholder={t('ob.seedsPh')}></textarea>
       {/if}
-    {:else if step === 3}
-      <h1>{t('ob.modTitle')}</h1>
-      <p class="muted">{t('ob.modBody')}</p>
-      {#if modulesLoading}
-        <p class="muted" role="status">{t('ob.loading')}</p>
-      {:else if modulesErr}
-        <p class="warn" role="alert"><Icon name="warning" size={15} /> <span>{t('ob.modError')} <span dir="auto">{modulesErr}</span></span></p>
-        <button type="button" class="btn" onclick={loadModules}>{t('ob.retry')}</button>
-      {:else}
-        {#each modules as m (m.id)}
-          <label class="mod" class:locked={m.id === 'ideas'}>
-            <input type="checkbox" bind:checked={s.modules[m.id]} disabled={m.id === 'ideas'} />
-            <span class="grow"><b>{modName(m)}</b><span class="muted sm blk">{modDesc(m)}</span></span>
-            {#if m.id === 'ideas'}<span class="pill accent">{t('ob.alwaysOn')}</span>
-            {:else if !s.modules[m.id]}<span class="pill">{t('addLater')}</span>{/if}
-          </label>
-        {/each}
-      {/if}
-    {:else if step === 4}
-      <h1>{t('ob.syncTitle')}</h1>
-      <p>{t('ob.syncBody')}</p>
-      <div class="opts">
+
+      <h2 id="ob-backup">{t('ob3.backupTitle')}</h2>
+      <p class="muted">{t('ob.syncBody')}</p>
+      <div class="opts" role="group" aria-labelledby="ob-backup">
         <button type="button" class="opt" class:sel={s.sync.mode === 'none'} aria-pressed={s.sync.mode === 'none'} onclick={() => (s.sync.mode = 'none')}><b>{t('ob.syncLocal')}</b><span class="muted">{t('ob.syncLocalHint')}</span></button>
         <button type="button" class="opt" class:sel={s.sync.mode === 'folder'} aria-pressed={s.sync.mode === 'folder'} onclick={() => (s.sync.mode = 'folder')}><b>{t('ob.syncFolder')}</b><span class="muted">{t('ob.syncFolderHint')}</span></button>
       </div>
@@ -273,6 +275,19 @@
           {:else}<p class="warn"><Icon name="warning" size={15} /> <span>{t('ob.folderNotCloud')}</span></p>{/if}
           <p class="muted sm">{t('ob.cloudPrivacy')}</p>
         </div>
+      {/if}
+
+      {#if !git.installed}
+        <div class="card status" role="note">
+          <p class="row"><Icon name="info" size={16} /> <b>{t(isGit ? 'ob3.gitNeededTitle' : 'ob3.noHistoryTitle')}</b></p>
+          <p class="muted">{t(isGit ? 'ob3.gitNeededBody' : 'ob3.noHistoryBody')}</p>
+          <div class="row gap-top">
+            <button type="button" class="btn" class:primary={isGit} disabled={working.git} onclick={installGit}>{working.git ? t('ob.opening') : t('ob3.installGit')}</button>
+            <button type="button" class="btn" disabled={checking} aria-busy={checking} onclick={checkAgain}><Icon name="sync" size={14} class={checking ? 'spin' : ''} /> {checking ? t('ob.checking') : t('ob.checkAgain')}</button>
+          </div>
+        </div>
+      {:else}
+        <p class="okline"><Icon name="check" size={15} /> <span>{t('ob3.historyOn')}</span></p>
       {/if}
 
       <details class="adv" open={isGit}>
@@ -303,38 +318,55 @@
             </div>
             <label for="ob-cred">{t('ob.credStore')}</label>
             <select id="ob-cred" bind:value={s.sync.credentialStore}><option value="keychain">{t('ob.credKeychain')}</option><option value="file">{t('ob.credFile')}</option></select>
+            <p class="muted sm">{t(s.sync.credentialStore === 'file' ? 'ob3.credFileNote' : 'ob3.credKeychainNote')}</p>
           {/if}
         {/if}
       </details>
-    {:else if step === 5}
-      <h1>{t('ob.lookTitle')}</h1>
-      <ThemePicker bind:theme={s.theme} bind:mode={s.mode} />
-      <h2>{t('ob.behaviour')}</h2>
-      <label class="check"><input type="checkbox" bind:checked={s.notifications} /> {t('ob.notify')}</label>
-      <label class="check"><input type="checkbox" bind:checked={s.daemon.keepRunning} /> {t('ob.keepRunning')}</label>
-      <label class="check"><input type="checkbox" bind:checked={s.daemon.runAtLogin} /> {t('ob.runAtLogin')}</label>
+
       <details class="adv">
-        <summary>{t('ob.advanced')}</summary>
-        <label class="check"><input type="checkbox" bind:checked={wantSearch} /> {t('ob.wantSearch')}</label>
-        <p class="muted sm">{t('ob.wantSearchHint')}</p>
+        <summary>{t('ob3.featuresAdv')}</summary>
+        <p class="muted sm">{t('ob.modBody')}</p>
+        {#if modulesLoading}
+          <p class="muted" role="status">{t('ob.loading')}</p>
+        {:else if modulesErr}
+          <p class="warn" role="alert"><Icon name="warning" size={15} /> <span>{modulesErr}</span></p>
+          <button type="button" class="btn" onclick={loadModules}>{t('ob3.retry')}</button>
+        {:else}
+          {#each modules as m (m.id)}
+            <label class="mod" class:locked={m.id === 'ideas'}>
+              <input type="checkbox" bind:checked={s.modules[m.id]} disabled={m.id === 'ideas'} />
+              <span class="grow"><b>{modName(m)}</b><span class="muted sm blk">{modDesc(m)}</span></span>
+              {#if m.id === 'ideas'}<span class="pill accent">{t('ob.alwaysOn')}</span>
+              {:else if !s.modules[m.id]}<span class="pill">{t('addLater')}</span>{/if}
+            </label>
+          {/each}
+        {/if}
       </details>
     {:else}
-      <h1>{t('ob.readyTitle')}</h1>
+      <h1 tabindex="-1">{t('ob.readyTitle')}</h1>
       <div class="card status">
         <p class="row"><Icon name="shield" size={16} /> <b>{t('ob.privTitle')}</b></p>
         <ul class="plain">
-          <li>{t('ob.privSent')}</li>
-          <li>{t('ob.privStays')}</li>
-          <li>{t('ob.privFolders')}</li>
+          <li>{t('ob3.privSent')}</li>
+          <li>{t('ob3.privStays')}</li>
+          <li>{t('ob3.privFolders')}</li>
         </ul>
       </div>
       <dl class="sum">
         <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}</dd>
         <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}</dd>
-        <dt>{t('ob.sumModules')}</dt><dd>{modules.filter((m) => s.modules[m.id]).map(modName).join(ar ? '، ' : ', ') || '—'}</dd>
-        <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}</dd>
-        <dt>{t('ob.sumLook')}</dt><dd>{t(s.theme)} · {t(s.mode)}</dd>
+        <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if !git.installed} · {t('ob3.sumNoHistory')}{/if}</dd>
       </dl>
+      <h2>{t('ob.lookTitle')}</h2>
+      <ThemePicker bind:theme={s.theme} bind:mode={s.mode} />
+      <details class="adv">
+        <summary>{t('ob3.moreOptions')}</summary>
+        <label class="check"><input type="checkbox" bind:checked={s.notifications} /> {t('ob.notify')}</label>
+        <label class="check"><input type="checkbox" bind:checked={s.daemon.keepRunning} /> {t('ob.keepRunning')}</label>
+        <label class="check"><input type="checkbox" bind:checked={s.daemon.runAtLogin} /> {t('ob.runAtLogin')}</label>
+        <label class="check"><input type="checkbox" bind:checked={wantSearch} /> {t('ob.wantSearch')}</label>
+        <p class="muted sm">{t('ob.wantSearchHint')}</p>
+      </details>
       <p class="muted">{t('ob.wrapDef')}</p>
       {#if libraryMode === 'new'}<p class="muted">{t('ob.readyNew')}</p>{/if}
     {/if}
@@ -354,7 +386,12 @@
 <style>
   .ob { max-width: 760px; margin: 0 auto; padding: 0 24px 24px; min-height: 100vh; display: flex; flex-direction: column; }
   .drag { height: 34px; }
-  .steps { list-style: none; counter-reset: st; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); margin: 0 0 14px; padding: 0; }
+  .prog { font-size: 13px; color: var(--muted); margin: 0 0 4px; }
+  .prog b { color: var(--fg); }
+  .body h1:focus { outline: none; }
+  .body h1:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 4px; }
+  .check { margin: 6px 0; }
+  .steps { list-style: none; counter-reset: st; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: var(--fs-xs); color: var(--muted); margin: 0 0 14px; padding: 0; }
   .st { counter-increment: st; }
   .st::before { content: counter(st) '. '; }
   .st.on { color: var(--accent); font-weight: 700; }
@@ -362,7 +399,7 @@
   .body { flex: 1; padding: 24px; }
   .brand { font-size: 36px; }
   .hero-logo { margin-bottom: 14px; filter: drop-shadow(0 10px 24px rgba(0,0,0,.25)); }
-  .lbl { font-size: 12px; font-weight: 500; color: var(--muted); margin: 10px 0 4px; }
+  .lbl { font-size: var(--fs-xs); font-weight: 500; color: var(--muted); margin: 10px 0 4px; }
   .opts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
   .opt { font: inherit; color: inherit; text-align: start; cursor: pointer; border: var(--border-w) solid var(--border); border-radius: var(--radius); padding: 12px; display: flex; flex-direction: column; gap: 4px; background: var(--bg); }
   .opt.sel { border-color: var(--accent); outline: 2px solid var(--accent); box-shadow: var(--glow); }
@@ -393,8 +430,8 @@
   .sum dt { color: var(--muted); font-size: 13px; }
   .sum dd { margin: 0; overflow-wrap: anywhere; }
   .nav { padding-top: 14px; }
-  .why { font-size: 12.5px; color: var(--muted); text-align: end; }
-  .sm { font-size: 12px; }
+  .why { font-size: var(--fs-sm); color: var(--muted); text-align: end; }
+  .sm { font-size: var(--fs-xs); }
   :global(.icon.spin) { animation: ob-spin 1s linear infinite; }
   @keyframes ob-spin { to { transform: rotate(360deg); } }
 </style>

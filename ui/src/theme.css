@@ -15,6 +15,14 @@
   --fill: color-mix(in srgb, var(--fg) 6%, transparent);
   --fill-2: color-mix(in srgb, var(--fg) 10%, transparent);
   --tint: color-mix(in srgb, var(--accent) 16%, transparent);
+  /* Text and icons that sit ON --tint. Always pair `background: var(--tint)` with `color: var(--on-tint)`.
+     Darker/lighter than the accent itself so labels stay ≥4.5:1 on the tint in every theme
+     (plain accent was 3.8–4.2:1 in Saudi light and Tech light). High contrast: --tint IS the accent, so --accent-fg. */
+  --on-tint: color-mix(in srgb, var(--accent) 70%, var(--fg));
+  /* Boundary of text boxes, selects and checkable controls: ≥3:1 against page, panel and sidebar. */
+  --control-border: color-mix(in srgb, var(--fg) 55%, var(--bg));
+  /* Small text sizes. Arabic script needs more room: nothing is set below 13px in right-to-left. */
+  --fs-xxs: 11px; --fs-xs: 12px; --fs-sm: 12.5px;
   --glass: color-mix(in srgb, var(--panel) 78%, transparent);
   --sidebar-glass: color-mix(in srgb, var(--sidebar) 70%, transparent);
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.06);
@@ -35,7 +43,7 @@
 
 /* ---------- Saudi ---------- */
 [data-theme="saudi"][data-mode="light"] {
-  --bg: #f6f3ec; --panel: #fffdf9; --panel-2: #efe9dc; --sidebar: #ece6d8; --fg: #14241b; --muted: #59635d;
+  --bg: #f6f3ec; --panel: #fffdf9; --panel-2: #efe9dc; --sidebar: #ece6d8; --fg: #14241b; --muted: #505a54;
   --accent: #006c35; --accent-fg: #ffffff; --accent-2: #7d5d12; --border: #e2dac7;
   --danger: #b3261e; --ok: #006c35; --code-bg: #f1ecdf;
 }
@@ -59,7 +67,7 @@
   --danger: #ff9e9e; --ok: #7dffa1; --code-bg: #141414;
 }
 [data-theme="contrast"] {
-  --border-w: 2px; --hairline: var(--border); --glass: var(--panel); --tint: var(--accent);
+  --border-w: 2px; --hairline: var(--border); --glass: var(--panel); --tint: var(--accent); --on-tint: var(--accent-fg); --control-border: var(--border);
   --fill: var(--panel-2); --fill-2: var(--panel-2); --shadow: none; --shadow-lg: none;
 }
 [data-theme="contrast"] .nav.active, [data-theme="contrast"] .chat.active { color: var(--accent-fg) !important; }
@@ -88,6 +96,9 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 [dir="rtl"] body, [dir="rtl"] { font-family: var(--font-ar); }
+/* Arabic letters join: tightened (negative) tracking breaks the joins, and small sizes are hard to read. */
+[dir="rtl"] { --fs-xxs: 13px; --fs-xs: 13px; --fs-sm: 13px; }
+[dir="rtl"] *, [dir="rtl"] *::before, [dir="rtl"] *::after { letter-spacing: 0 !important; }
 a { color: var(--accent); }
 
 /* Keyboard focus is always visible, in every theme. Never remove it — restyle it if you must. */
@@ -100,7 +111,7 @@ a { color: var(--accent); }
 /* Text for screen readers only. */
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 
-kbd { font-family: var(--mono); font-size: 12px; background: var(--fill); border: 1px solid var(--hairline); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
+kbd { font-family: var(--mono); font-size: var(--fs-xs); background: var(--fill); border: 1px solid var(--hairline); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
 code, pre { font-family: var(--mono); font-size: .92em; }
 pre { background: var(--code-bg); padding: 12px; border-radius: var(--radius); overflow: auto; border: var(--border-w) solid var(--hairline); }
 :not(pre) > code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
@@ -125,14 +136,14 @@ blockquote { margin: 0; padding-inline-start: 12px; border-inline-start: 3px sol
 .btn.ghost:hover { background: var(--fill); }
 .btn:disabled { opacity: .5; cursor: default; }
 input, textarea, select {
-  font: inherit; color: var(--fg); background: var(--fill); border: var(--border-w) solid transparent;
+  font: inherit; color: var(--fg); background: var(--fill); border: var(--border-w) solid var(--control-border);
   border-radius: var(--radius); padding: 7px 10px; width: 100%; transition: box-shadow .15s, background .15s;
 }
 [data-theme="contrast"] input, [data-theme="contrast"] textarea, [data-theme="contrast"] select { border-color: var(--border); background: var(--bg); }
 input:focus, textarea:focus, select:focus { background: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; }
 input[type="checkbox"], input[type="radio"] { width: auto; accent-color: var(--accent); }
-label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); margin: 10px 0 4px; }
+label { display: block; font-size: var(--fs-xs); font-weight: 500; color: var(--muted); margin: 10px 0 4px; }
 .card, .surface {
   position: relative; border-radius: var(--radius-lg); padding: 14px;
   border: 1px solid transparent;
@@ -145,8 +156,8 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); 
 }
 .surface.lit { background: radial-gradient(120% 70% at 50% -10%, var(--spot), transparent 60%) padding-box, var(--surface) padding-box, var(--edge) border-box; }
 .surface.lit:hover { background: radial-gradient(120% 80% at 50% -10%, var(--spot-strong), transparent 65%) padding-box, var(--surface) padding-box, var(--edge-strong) border-box; }
-.eyebrow { font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: .01em; }
-.more { font: inherit; background: none; border: 0; padding: 0; border-radius: 4px; cursor: pointer; font-size: 12.5px; font-weight: 500; color: var(--accent-2); display: inline-flex; align-items: center; gap: 2px; }
+.eyebrow { font-size: var(--fs-xs); font-weight: 500; color: var(--muted); letter-spacing: .01em; }
+.more { font: inherit; background: none; border: 0; padding: 0; border-radius: 4px; cursor: pointer; font-size: var(--fs-sm); font-weight: 500; color: var(--accent-2); display: inline-flex; align-items: center; gap: 2px; }
 .more:hover { text-decoration: underline; text-underline-offset: 3px; }
 .display { font-size: 44px; font-weight: 500; letter-spacing: -.045em; line-height: 1.05; margin: 0; }
 /* Was 75%-opacity muted (2.7–4.7:1). --muted is ≥4.5:1 on every surface of every theme, so use it solid. */
@@ -154,9 +165,24 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); 
 .muted { color: var(--muted); }
 .row { display: flex; gap: 8px; align-items: center; }
 .grow { flex: 1; min-width: 0; }
-.pill { font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 99px; background: var(--fill); color: var(--muted); white-space: nowrap; }
-.pill.accent { background: var(--tint); color: var(--accent); }
+.pill { font-size: var(--fs-xs); font-weight: 500; padding: 1px 8px; border-radius: 99px; background: var(--fill); color: var(--muted); white-space: nowrap; }
+.pill.accent { background: var(--tint); color: var(--on-tint); }
 .scroll { overflow: auto; }
+
+/* ---------- "selected" — one treatment per kind of component ----------
+   1. Navigation lists (sidebar nav and chats, Settings categories, the Docs file tree, search/palette results):
+      the current row is TINTED — `background: var(--tint); color: var(--on-tint); font-weight: 600`.
+   2. Segmented choices and tabs (Todos filter, List/Calendar, History tabs, theme and mode pickers, Docs view/edit):
+      the chosen segment is SOLID — `background: var(--accent); color: var(--accent-fg)` (use .seg / .segb below).
+   3. Filter chips that can be combined or cleared (Ideas status pills): `.pill.accent` (tint + on-tint).
+   Never signal selection by colour alone: also set aria-current / aria-pressed / aria-selected. */
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 99px; background: var(--fill); border: var(--border-w) solid transparent; }
+[data-theme="contrast"] .seg { border-color: var(--border); }
+.segb { font: inherit; font-size: 13px; font-weight: 500; color: var(--muted); background: none; border: 0; border-radius: 99px; padding: 4px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.segb:hover { color: var(--fg); }
+.segb.on, .segb[aria-pressed="true"], .segb[aria-selected="true"] { background: var(--accent); color: var(--accent-fg); }
+/* A view's heading receives focus on navigation (for screen readers); it is not a control, so no ring. */
+.view h1[tabindex="-1"]:focus { outline: none; }
 .page { padding: 20px 28px; max-width: 1100px; }
 .md img { max-width: 100%; }
 .md p { margin: 0 0 10px; }
