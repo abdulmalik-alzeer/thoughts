@@ -147,6 +147,19 @@ fn ensure_daemon() -> Result<thoughtsd::paths::DaemonInfo, String> {
     Err("The Thoughts daemon did not start".into())
 }
 
+/// Save an exported customisation pack to the place the user picked in the save dialog.
+/// JSON packs only, with a size cap, and never over an existing folder.
+#[tauri::command]
+fn save_text_file(path: String, contents: String) -> Result<(), String> {
+    let p = std::path::PathBuf::from(&path);
+    if !p.is_absolute() || p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) != Some("json".into()) {
+        return Err("packs are saved as .json files".into());
+    }
+    if contents.len() > 8 << 20 { return Err("pack is too large".into()); }
+    if p.is_dir() { return Err("that is a folder".into()); }
+    std::fs::write(&p, contents).map_err(|e| e.to_string())
+}
+
 /// Open a document from the library in the user's default app. Only regular files inside the
 /// library, and only document/media types that cannot run code when opened.
 #[tauri::command]
@@ -460,6 +473,7 @@ fn main() {
         )
         .invoke_handler(tauri::generate_handler![
             open_library_file,
+            save_text_file,
             daemon_info,
             restart_daemon,
             set_dock_icon,

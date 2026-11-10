@@ -174,7 +174,9 @@ Writing a good plugin:
 
 A complete static HTML page shown in the sidebar (the file name without `.html` is its title). It
 runs in a sandboxed frame: it cannot reach the app, the user's files or the network on its own. It
-can ask for **read-only** data by message:
+can ask for **read-only** data by message, but only what it declares in `manifest.json` under
+`views` — for example `"views": { "calendar.html": { "permissions": ["todos:read"] } }`. With no entry
+a view gets no data at all:
 
 ```js
 const call = (method, ...args) => new Promise((resolve, reject) => {

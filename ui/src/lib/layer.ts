@@ -8,8 +8,8 @@
 //   origin). From there it cannot read the app's DOM, module state, localStorage or the Tauri bridge,
 //   and the frame's own content-security policy forbids all network access (`connect-src 'none'`).
 //   The daemon token lives only in a private variable of lib/api.ts and is never sent to a frame.
-// * The frame document is a tiny srcdoc page that runs lib/plugin-frame.js (shipped as a static
-//   asset so it passes the desktop app's CSP, which allows no inline scripts; see `frameDoc`). The host then posts the plugin's
+// * The frame document is the static page public/plugin-frame.html, which runs public/plugin-frame.js
+//   and carries its own strict content-security policy (see `frameSrc`). The host then posts the plugin's
 //   source to it; the frame imports it from a blob URL and calls `default(pluginApi)`.
 // * The frame talks to the host only through postMessage RPC: `{id, method, args}` →
 //   `{id, result | error}`. The host identifies the caller by `event.source`, never by anything the
@@ -34,7 +34,6 @@
 import { api, on, post, reloadApp, ApiError } from './api';
 import { app, toast, go, refreshChats, type PendingChange } from './store.svelte';
 import { t, fmtDate } from './i18n';
-import frameUrl from './plugin-frame.js?url';
 
 let styleEl: HTMLStyleElement | null = null;
 
@@ -152,25 +151,10 @@ function relook() {
 }
 
 // ---------- frames ----------
-// The frame runtime is delivered two ways and runs once (it guards itself): inline with a nonce —
-// used where the page has no stricter policy (browser preview) — and as a same-origin static script,
-// which is what passes the desktop app's content-security policy (no inline scripts allowed there).
-let runtime = '';
-const runtimeSrc = () => new URL(frameUrl, document.baseURI).href.replace(/[?#].*$/, '');
-async function ensureRuntime() {
-  if (runtime) return;
-  try { const r = await fetch(runtimeSrc()); if (r.ok) runtime = (await r.text()).replace(/<\/(script)/gi, '<\\/$1'); } catch { /* the <script src> copy is used */ }
-}
-
-function frameDoc(): string {
-  const src = runtimeSrc();
-  const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
-  const csp = `default-src 'none'; script-src 'nonce-${nonce}' ${src} blob:; style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'`;
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${esc(csp)}">` +
-    `<style id="thoughts-theme"></style></head><body><div id="root"></div>` +
-    (runtime ? `<script nonce="${nonce}">${runtime}</script>` : '') + `<script src="${esc(src)}"></script></body></html>`;
-}
+// Each frame loads the static page public/plugin-frame.html (which runs public/plugin-frame.js) from
+// the app's own origin. Because it is a real document rather than srcdoc, it carries its own strict
+// content-security policy instead of inheriting the app's, and it works under the desktop app's policy.
+const frameSrc = () => new URL('plugin-frame.html', document.baseURI).href.replace(/[?#].*$/, '');
 
 function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Frame {
   const el = document.createElement('iframe');
@@ -181,7 +165,7 @@ function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Fra
     ? `border:0;display:block;width:100%;height:${surface.kind === 'widget' ? '80px' : '100%'};background:transparent;color-scheme:normal`
     : 'border:0;width:0;height:0;position:absolute;visibility:hidden';
   if (!surface) { el.tabIndex = -1; el.setAttribute('aria-hidden', 'true'); }
-  el.srcdoc = frameDoc();
+  el.src = frameSrc();
   const f: Frame = { el, plugin: p, surface, events: new Set() };
   frames.add(f);
   p.frames.add(f);
@@ -375,7 +359,6 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
     return;
   }
   const m = await api(opts.preview ? '/layer?preview=1' : '/layer');
-  await ensureRuntime();
   // Reload: remove everything the previous generation of plugins registered.
   unload();
   app.preview = !!opts.preview;
@@ -396,7 +379,9 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
   const list: any[] = m.plugins || [];
   if (boot && (list.length || views.length)) flag.set();
   for (const v of views) {
-    const p = mk(v.name, 'view', v.code, new Set(['library:read', 'todos:read', 'ideas:read']));
+    // Views get nothing by default; like add-ons they must declare read permissions in manifest.json ("views").
+    const READ = ['library:read', 'todos:read', 'ideas:read'];
+    const p = mk(v.name, 'view', v.code, new Set([...permsOf(manifest, `views|${v.name}`, `views|views/${v.name}`)].filter((x) => READ.includes(x))));
     plugins.push(p);
     const id = 'view:' + v.name;
     register(p, 'pluginViews', { id, title: v.name.replace(/\.html$/, ''), icon: 'plugin', plugin: p.name, render: (el: HTMLElement) => mountSurface(p, { kind: 'html', id }, el) });
@@ -482,8 +467,12 @@ export async function revertChange(hash: string) {
 export async function stagedPermissions(): Promise<{ name: string; permissions: string[] }[]> {
   try {
     const m = await api('/layer?preview=1');
-    const decl = m?.manifest?.plugins && typeof m.manifest.plugins === 'object' ? m.manifest.plugins : {};
-    return (m.plugins || []).map((p: any) => ({ name: p.name, permissions: strings(decl[p.name]?.permissions).filter((x) => PERMS.includes(x)) }));
+    // Same lookup the runtime uses (permsOf), so what the review shows is exactly what will be granted.
+    const READ = ['library:read', 'todos:read', 'ideas:read'];
+    return [
+      ...(m.plugins || []).map((p: any) => ({ name: p.name, permissions: [...permsOf(m.manifest, `plugins|${p.name}`, `plugins|plugins/${p.name}`)] })),
+      ...(m.views || []).map((v: any) => ({ name: v.name, permissions: [...permsOf(m.manifest, `views|${v.name}`, `views|views/${v.name}`)].filter((x) => READ.includes(x)) })),
+    ];
   } catch { return []; }
 }
 

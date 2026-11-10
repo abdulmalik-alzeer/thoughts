@@ -231,7 +231,7 @@ pub async fn pending(g: Git<'_>, d: &Dirs, arabic: bool) -> Value {
         let names = files.iter().map(|(p, _)| p.as_str()).take(6).collect::<Vec<_>>().join(", ");
         summary = if arabic { format!("تغييرات على تخصيص التطبيق\n\nالملفات: {names}") } else { format!("Changes to your app customisation\n\nFiles: {names}") };
     }
-    let plugin_changed = files.iter().any(|(p, _)| p.starts_with("plugins/") || p == "manifest.json");
+    let plugin_changed = files.iter().any(|(p, _)| p.starts_with("plugins/") || p.starts_with("views/") || p == "manifest.json");
     // Workflows run on their own later, so the user is shown exactly what each one would be told to do.
     let workflow_changed = files.iter().any(|(p, _)| p.starts_with("workflows/"));
     let workflows: Vec<Value> = files.iter().filter(|(p, s)| p.starts_with("workflows/") && p.ends_with(".json") && *s != "deleted")
