@@ -32,10 +32,13 @@ fn risky_git_key(k: &str) -> bool {
     const SAFE: &[&str] = &["core.repositoryformatversion", "core.bare", "core.filemode", "core.logallrefupdates",
         "core.ignorecase", "core.precomposeunicode", "core.symlinks", "core.autocrlf", "pull.rebase", "init.defaultbranch",
         "user.name", "user.email"];
-    let parts: Vec<&str> = k.split('.').collect();
-    let sub_ok = match (parts.first(), parts.last()) {
-        (Some(&"remote"), Some(l)) if parts.len() >= 3 => ["url", "fetch", "pushurl", "prune"].contains(l),
-        (Some(&"branch"), Some(l)) if parts.len() >= 3 => ["remote", "merge", "rebase"].contains(l),
+    // section = before the first dot, variable = after the last dot; anything between is a subsection
+    // name, which may itself contain dots or '=' and is never interpreted.
+    let (section, var) = match (k.split_once('.'), k.rsplit_once('.')) { (Some((a, _)), Some((_, b))) => (a, b), _ => return true };
+    let has_sub = k.matches('.').count() >= 2;
+    let sub_ok = has_sub && match section {
+        "remote" => ["url", "fetch", "pushurl", "prune"].contains(&var),
+        "branch" => ["remote", "merge", "rebase"].contains(&var),
         _ => false,
     };
     !(SAFE.contains(&k.as_str()) || sub_ok)
@@ -76,11 +79,10 @@ pub fn findings(path: &Path) -> Vec<String> {
                 let cfg = d.join(name);
                 if !cfg.exists() { continue; }
                 match std::process::Command::new(&bin).env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1")
-                    .args(["-c", "core.fsmonitor=false", "config", "--file"]).arg(&cfg).args(["--includes", "--list"]).output()
+                    .args(["-c", "core.fsmonitor=false", "config", "--file"]).arg(&cfg).args(["--includes", "--list", "--null", "--name-only"]).output()
                 {
-                    Ok(o) if o.status.success() => for line in String::from_utf8_lossy(&o.stdout).lines() {
-                        let key = line.split('=').next().unwrap_or("");
-                        if risky_git_key(key) { out.push(format!("git setting {key}")); }
+                    Ok(o) if o.status.success() => for key in String::from_utf8_lossy(&o.stdout).split('\0').filter(|k| !k.is_empty()) {
+                        if risky_git_key(key) { out.push(format!("git setting {}", key.replace('\n', " "))); }
                     },
                     _ => out.push(format!("git {name} that could not be read")),
                 }
@@ -125,8 +127,9 @@ mod tests {
         g(&["init", "-q"]);
         g(&["config", "filter.x.clean", "evil"]);
         g(&["config", "include.path", "/tmp/elsewhere"]);
+        g(&["config", "remote.x=y.uploadpack", "evil"]);
         let f = findings(&d).join("|");
-        for want in ["\"hooks\"", "apiKeyHelper", ".mcp.json", "filter.x.clean", "include.path"] {
+        for want in ["\"hooks\"", "apiKeyHelper", ".mcp.json", "filter.x.clean", "include.path", "uploadpack"] {
             assert!(f.contains(want), "missing {want} in {f}");
         }
     }
