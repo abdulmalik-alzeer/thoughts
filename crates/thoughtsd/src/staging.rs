@@ -9,6 +9,8 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod validate;
+
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Meta {
@@ -21,6 +23,8 @@ pub struct Meta {
     pub library_before: BTreeMap<String, String>,
     pub layer_before: BTreeMap<String, String>,
     pub created: String,
+    /// What the user asked for (first 80 characters), kept for the local usage log.
+    pub request: String,
 }
 
 fn meta_file(d: &Dirs) -> PathBuf { d.home.join("layer-pending.json") }
@@ -32,6 +36,13 @@ pub fn load_meta(d: &Dirs) -> Option<Meta> {
 fn save_meta(d: &Dirs, m: &Meta) -> anyhow::Result<()> {
     crate::paths::write_atomic(&meta_file(d), serde_json::to_string_pretty(m)?.as_bytes(), true)?;
     Ok(())
+}
+
+/// Remember what the user asked for in the request that produced the pending change.
+pub fn set_request(d: &Dirs, text: &str) {
+    let Some(mut m) = load_meta(d) else { return };
+    m.request = text.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect();
+    let _ = save_meta(d, &m);
 }
 
 fn staged(d: &Dirs) -> bool { d.staging.join(".git").exists() }
@@ -189,11 +200,12 @@ pub fn system_prompt(d: &Dirs) -> String {
          1. Read README.md in that folder first. It is the contract: the layer layout, the Plugin API, the rules.\n\
          2. Write ONLY inside that folder. The user's library is readable for context but read-only for you; never write \
          anywhere else, never run git, never touch `.claude/` or the live layer at {layer}.\n\
-         3. Any plugin you add or change must have its permissions declared in manifest.json — the smallest set that works.\n\
+         3. Any plugin you add or change must declare its permissions in its own file beside it (plugins/<name>.json) — the smallest set that works.\n\
          4. Never weaken security, never read or ask for the app's access token, never load code from the internet.\n\
          5. When you are done, write SUMMARY.md in that folder: 2–5 plain sentences for a non-developer, in the user's language, \
          saying what will change and how to try it. No file names unless they help, no jargon. Its first line becomes the title of the change.\n\
-         Nothing you write takes effect until the user previews it and presses Apply, so do not tell them it is already live. \
+         6. The app checks your files before the user sees them (README.md lists the rules). A change with problems cannot be kept, so follow the file shapes exactly.\n\
+         Nothing you write takes effect until the user previews it and presses Keep, so do not tell them it is already live. \
          The user cannot answer interactive tool prompts here — ask questions in plain text, and keep the change small.",
         staging = d.staging.display(), layer = d.layer.display()
     )
@@ -220,7 +232,47 @@ fn read_summary(d: &Dirs) -> String {
     std::fs::read_to_string(p).unwrap_or_default().trim().to_string()
 }
 
-/// `{exists:false}` or `{exists:true, summary, files:[{path,status}], pluginChanged, origin, …}`.
+/// One staged file as it would be applied: `None` content for a deletion.
+struct Staged { path: String, status: &'static str, bytes: Option<Vec<u8>> }
+
+/// Read the staged files (never following links; oversized or odd files are read as empty and
+/// reported by validation instead).
+fn read_staged(d: &Dirs, files: &[(String, &'static str)]) -> Vec<Staged> {
+    let mut total = 0usize;
+    files.iter().take(crate::packs::MAX_FILES * 2).map(|(path, status)| {
+        let src = d.staging.join(path);
+        let bytes = if *status == "deleted" { None } else {
+            let fits = std::fs::symlink_metadata(&src).map_or(false, |m| m.is_file() && m.len() as usize <= crate::packs::MAX_FILE_BYTES && total + m.len() as usize <= crate::packs::MAX_TOTAL_BYTES * 2);
+            let b = if fits { std::fs::read(&src).unwrap_or_default() } else { vec![] };
+            total += b.len();
+            Some(b)
+        };
+        Staged { path: path.clone(), status, bytes }
+    }).collect()
+}
+
+/// A fingerprint of exactly what would be applied: every staged path with its status and content,
+/// in path order. The user's review is bound to it — if staging changes afterwards, apply refuses.
+fn signature_of(staged: &[Staged]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut sorted: Vec<&Staged> = staged.iter().collect();
+    sorted.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut h = Sha256::new();
+    for f in sorted {
+        h.update(f.path.as_bytes());
+        h.update([0u8]);
+        h.update(f.status.as_bytes());
+        h.update([0u8]);
+        match &f.bytes {
+            Some(b) => { h.update((b.len() as u64).to_le_bytes()); h.update(b); }
+            None => h.update([0xffu8; 8]),
+        }
+    }
+    format!("{:x}", h.finalize())
+}
+
+/// `{exists:false}` or `{exists:true, summary, files:[{path,status}], pluginChanged, origin,
+/// problems:[{path,message}], signature, …}`.
 pub async fn pending(g: Git<'_>, d: &Dirs, arabic: bool) -> Value {
     let Some(m) = load_meta(d).filter(|_| staged(d)) else { return json!({"exists": false}) };
     let running = chat_running(g, &m).await;
@@ -236,12 +288,15 @@ pub async fn pending(g: Git<'_>, d: &Dirs, arabic: bool) -> Value {
     let workflow_changed = files.iter().any(|(p, _)| p.starts_with("workflows/"));
     let workflows: Vec<Value> = files.iter().filter(|(p, s)| p.starts_with("workflows/") && p.ends_with(".json") && *s != "deleted")
         .filter_map(|(p, _)| staged_workflow(d, p)).collect();
+    // While the assistant is still writing, half-finished files are not reported as problems.
+    let problems = if running { vec![] } else { validate::problems(&d.staging, &files, arabic) };
     json!({
         "workflowChanged": workflow_changed, "workflows": workflows,
         "exists": true, "summary": summary,
         "files": files.iter().map(|(p, s)| json!({"path": p, "status": s})).collect::<Vec<_>>(),
         "pluginChanged": plugin_changed, "origin": if m.origin.is_empty() { "customize" } else { &m.origin },
         "outsideChanges": m.outside_changes, "ignored": ignored, "chatId": m.chat_id, "running": running,
+        "problems": problems, "signature": signature_of(&read_staged(d, &files)), "request": m.request,
     })
 }
 
@@ -265,32 +320,38 @@ pub fn subject_of(summary: &str) -> String {
     s
 }
 
+/// The error a stale review gets: what is staged is no longer what the user looked at.
+pub fn changed_error(arabic: bool) -> String {
+    format!("CHANGED::{}", if arabic { "تغيّر هذا التعديل بعد أن راجعته. راجعه مرة أخرى ثم أبقِه." } else { "This change was modified after you reviewed it. Review it again, then keep it." })
+}
+
 /// Bring the pending change into the live layer as one history entry, then clear staging.
-pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool) -> anyhow::Result<Value> {
+/// `signature` is the one the user's review showed (`pending().signature`); with `Some`, the
+/// apply goes ahead only if it still describes exactly what is staged.
+pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) -> anyhow::Result<Value> {
     let m = load_meta(d).filter(|_| staged(d)).ok_or_else(|| anyhow::anyhow!("there is no pending change"))?;
     if chat_running(g, &m).await { anyhow::bail!("The assistant is still working on this change. Wait for it to finish, or stop it first."); }
     let p = pending(g, d, arabic).await;
     if p["exists"] != true { anyhow::bail!("there is no pending change"); }
     let (files, _) = changes(g, d).await?;
-    // Read everything first, so a bad file stops the apply before the live layer is touched.
-    let mut writes: Vec<(String, Option<Vec<u8>>)> = vec![];
-    let mut total = 0usize;
-    for (path, status) in &files {
-        if *status == "deleted" { writes.push((path.clone(), None)); continue; }
-        let src = d.staging.join(path);
-        let meta = std::fs::symlink_metadata(&src)?;
-        if !meta.is_file() { anyhow::bail!("{path} is not a regular file"); }
-        if meta.len() as usize > crate::packs::MAX_FILE_BYTES { anyhow::bail!("{path} is too large (limit 512 KB)"); }
-        total += meta.len() as usize;
-        if total > crate::packs::MAX_TOTAL_BYTES { anyhow::bail!("the change is too large (limit 4 MB)"); }
-        writes.push((path.clone(), Some(std::fs::read(&src)?)));
+    // Everything is read once, checked against the review, and those same bytes are what gets
+    // written — so nothing can slip in between the check and the apply.
+    let writes = read_staged(d, &files);
+    if let Some(sig) = signature {
+        if sig != signature_of(&writes) { anyhow::bail!("{}", changed_error(arabic)); }
     }
-    if writes.len() > crate::packs::MAX_FILES { anyhow::bail!("the change touches too many files"); }
+    let problems = validate::problems(&d.staging, &files, arabic);
+    if let Some(first) = problems.first() {
+        let (path, msg) = (first["path"].as_str().unwrap_or_default(), first["message"].as_str().unwrap_or_default());
+        let detail = if path.is_empty() { msg.to_string() } else { format!("{path}: {msg}") };
+        anyhow::bail!("{}", if arabic { format!("لا يمكن إبقاء هذا التغيير قبل إصلاح مشكلاته ({}). أولها: {detail}", problems.len()) }
+            else { format!("This change cannot be kept until its problems are fixed ({}). First: {detail}", problems.len()) });
+    }
     // Hand edits made straight in the live layer get their own entry first, so this one stays clean.
     g.commit_all(&d.layer, "Snapshot of manual changes").await?;
-    for (path, bytes) in &writes {
-        let target = d.layer.join(path);
-        match bytes {
+    for w in &writes {
+        let (path, target) = (&w.path, d.layer.join(&w.path));
+        match &w.bytes {
             None => { let _ = std::fs::remove_file(&target); }
             Some(b) => {
                 if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
@@ -305,7 +366,7 @@ pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool) -> anyhow::Result<Value> 
     g.commit_all(&d.layer, &msg).await?;
     let hash = g.run(&d.layer, &["rev-parse", "HEAD"]).await?.trim().to_string();
     remove(g, d).await;
-    Ok(json!({"ok": true, "hash": hash, "summary": subject, "pluginChanged": p["pluginChanged"]}))
+    Ok(json!({"ok": true, "hash": hash, "summary": subject, "pluginChanged": p["pluginChanged"], "request": m.request, "origin": p["origin"]}))
 }
 
 pub async fn discard(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
@@ -357,7 +418,19 @@ mod tests {
         assert!(!crate::applayer::manifest_of(&d.layer)["css"].as_str().unwrap().contains("--radius"));
         let before = history_in(st, &d.layer).await.len();
 
-        let r = apply(st, &d, false).await.unwrap();
+        // The review is bound to what was staged: a stale or missing-the-point signature is refused.
+        let sig = p["signature"].as_str().unwrap().to_string();
+        assert_eq!(sig.len(), 64);
+        assert_eq!(p["problems"], json!([]));
+        assert_eq!(pending(st, &d, false).await["signature"], sig.as_str(), "stable while nothing changes");
+        std::fs::write(d.staging.join("custom.css"), ":root { --radius: 2px } body { display: none }\n").unwrap();
+        let e = apply(st, &d, false, Some(&sig)).await.unwrap_err().to_string();
+        assert!(e.starts_with("CHANGED::"), "{e}");
+        assert!(apply(st, &d, true, Some("")).await.unwrap_err().to_string().starts_with("CHANGED::"));
+        assert_eq!(history_in(st, &d.layer).await.len(), before, "nothing was applied");
+        std::fs::write(d.staging.join("custom.css"), ":root { --radius: 2px }\n").unwrap();
+
+        let r = apply(st, &d, false, Some(&sig)).await.unwrap();
         assert_eq!(r["summary"], "Show what's due on Home");
         let h = history_in(st, &d.layer).await;
         assert_eq!(h.len(), before + 1, "one history entry");
@@ -367,7 +440,7 @@ mod tests {
         assert!(!d.layer.join("notes.txt").exists() && !d.layer.join("SUMMARY.md").exists() && !d.layer.join(".claude").exists());
         assert!(!d.staging.exists());
         assert_eq!(pending(st, &d, false).await["exists"], false);
-        assert!(apply(st, &d, false).await.is_err());
+        assert!(apply(st, &d, false, None).await.is_err());
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
@@ -425,6 +498,39 @@ mod tests {
         assert_eq!(w["valid"], true);
         let b = ws.iter().find(|w| w["path"] == "workflows/broken.json").unwrap();
         assert_eq!((&b["name"], &b["valid"], &b["prompt"]), (&json!("broken"), &json!(false), &json!("")));
+    }
+
+    #[tokio::test]
+    async fn problems_block_the_apply_until_fixed() {
+        let (st, d) = testutil::layer("problems").await;
+        recreate(st, &d, "customize", None).await.unwrap();
+        set_request(&d, "  Group my todos\nby due date  ");
+        std::fs::write(d.staging.join("todos.json"), r#"{"groupBy":"deadline"}"#).unwrap();
+        std::fs::write(d.staging.join("plugins/hours.js"), "export default () => {}\n").unwrap();
+        std::fs::write(d.staging.join("plugins/hours.json"), r#"{"apiVersion":1,"permissions":["storage","library:write"],"write":["../secrets"]}"#).unwrap();
+        let p = pending(st, &d, false).await;
+        assert_eq!(p["request"], "Group my todos by due date");
+        let probs = p["problems"].as_array().unwrap();
+        assert_eq!(probs.len(), 2, "{probs:?}");
+        assert!(probs.iter().any(|x| x["path"] == "todos.json" && x["message"].as_str().unwrap().contains("groupBy")));
+        assert!(probs.iter().any(|x| x["path"] == "plugins/hours.json"));
+        let sig = p["signature"].as_str().unwrap().to_string();
+        let e = apply(st, &d, false, Some(&sig)).await.unwrap_err().to_string();
+        assert!(e.contains("cannot be kept") && e.contains("(2)"), "{e}");
+        assert!(!d.layer.join("todos.json").exists() && d.staging.exists(), "nothing applied, nothing lost");
+        assert!(pending(st, &d, true).await["problems"][0]["message"].as_str().unwrap().chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)), "Arabic for an Arabic UI");
+        // Fixed: the signature changes with the content, and the new one applies.
+        std::fs::write(d.staging.join("todos.json"), r#"{"groupBy":"due"}"#).unwrap();
+        std::fs::write(d.staging.join("plugins/hours.json"), r#"{"apiVersion":1,"permissions":["storage"]}"#).unwrap();
+        let p = pending(st, &d, false).await;
+        assert_eq!(p["problems"], json!([]));
+        assert_ne!(p["signature"], sig.as_str());
+        let r = apply(st, &d, false, p["signature"].as_str()).await.unwrap();
+        assert_eq!(r["request"], "Group my todos by due date");
+        let m = crate::applayer::manifest_of(&d.layer);
+        assert_eq!(m["todos"]["groupBy"], "due");
+        assert_eq!(m["plugins"][0]["permissions"], json!(["storage"]));
+        std::fs::remove_dir_all(&d.home).unwrap();
     }
 
     #[test]

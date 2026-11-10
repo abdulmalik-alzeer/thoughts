@@ -32,20 +32,58 @@ pub struct Settings {
     pub private_paths: Vec<String>,
     /// Keep the local-only usage log that suggestions are drawn from. Off = nothing is recorded or suggested.
     pub usage_signals: bool,
+    /// What the user does, in their own words (asked at setup). Shapes suggestions and wording.
+    pub profession: Option<String>,
 }
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_EXTENSION_REPO: &str = "https://github.com/thoughts-app/thoughts-search.git";
 /// The only permission modes the app ever passes to the CLI (never `bypassPermissions`).
-pub const PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "plan"];
+pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "plan"];
 
-/// Allow-list for a chat/run permission mode. `None` / empty means "the CLI default".
+/// Allow-list for a chat/run permission mode. `None` / empty means "the CLI default". The old
+/// `default` ("ask before changes") is still accepted from files and clients written before it was
+/// removed, and is always treated as `plan` (see `effective_permission_mode`): the app has no way to
+/// answer the CLI's permission questions, so asking only ever meant silently skipping the change.
 pub fn check_permission_mode(mode: Option<&str>) -> anyhow::Result<()> {
     match mode {
-        None | Some("") => Ok(()),
+        None | Some("") | Some("default") => Ok(()),
         Some(m) if PERMISSION_MODES.contains(&m) => Ok(()),
-        Some(m) => anyhow::bail!("permission mode \"{m}\" is not allowed (use default, acceptEdits or plan)"),
+        Some(m) => anyhow::bail!("permission mode \"{m}\" is not allowed (use acceptEdits or plan)"),
     }
+}
+
+/// The mode actually used for a stored or requested one: `default` becomes `plan`.
+pub fn effective_permission_mode(mode: Option<&str>) -> Option<&str> {
+    match mode {
+        None | Some("") => None,
+        Some("default") => Some("plan"),
+        Some(m) => Some(m),
+    }
+}
+
+fn normalize_permission_mode(mode: &mut Option<String>) {
+    if mode.as_deref() == Some("default") { *mode = Some("plan".into()); }
+}
+
+/// Set once at startup when settings.json was written by a newer version of the app: from then on
+/// nothing saves settings, so the newer file is never rewritten with fields this version drops.
+static READ_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_read_only(on: bool) { READ_ONLY.store(on, std::sync::atomic::Ordering::Relaxed); }
+pub fn read_only() -> bool { READ_ONLY.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// How many damaged settings files are kept beside settings.json.
+pub const KEEP_CORRUPT: usize = 5;
+
+/// The outcome of reading settings.json at startup.
+pub struct Loaded {
+    pub settings: Settings,
+    /// The file was damaged, no usable backup existed, and the app started from defaults.
+    pub reset: bool,
+    /// The file was damaged or missing and the backup copy was put back.
+    pub restored: bool,
+    /// The file comes from a newer version of the app: use it, never rewrite it.
+    pub newer: bool,
 }
 
 /// A value handed to the CLI as a flag argument (model, effort, session id): plain token, never a flag.
@@ -157,6 +195,7 @@ impl Default for Settings {
             search: SearchSettings::default(),
             private_paths: vec![],
             usage_signals: true,
+            profession: None,
         }
     }
 }
@@ -198,43 +237,99 @@ fn parse(text: &str) -> anyhow::Result<Settings> {
     Ok(serde_json::from_value::<Settings>(migrate(v))?.with_defaults())
 }
 
+/// The `schemaVersion` a settings document claims, when it can be read at all.
+fn version_of(text: &str) -> Option<u64> {
+    serde_json::from_str::<serde_json::Value>(text).ok().filter(|v| v.is_object())
+        .map(|v| v.get("schemaVersion").and_then(|x| x.as_u64()).unwrap_or(0))
+}
+
+/// The backup written beside `file` after every successful save.
+pub fn backup_file(file: &std::path::Path) -> std::path::PathBuf {
+    file.with_file_name(format!("{}.bak", file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "settings.json".into())))
+}
+
 impl Settings {
-    /// Read-only load (the app shell uses it too): a missing or unreadable file gives defaults and
-    /// nothing on disk is touched. The daemon itself starts with `load_or_recover`.
+    /// Read-only load (the app shell uses it too): a missing or unreadable file gives the backup,
+    /// or defaults, and nothing on disk is touched. The daemon itself starts with `load_full`.
     pub fn load() -> Self {
-        std::fs::read_to_string(crate::paths::settings_file()).ok()
-            .and_then(|s| parse(&s).ok())
+        let file = crate::paths::settings_file();
+        std::fs::read_to_string(&file).ok().and_then(|s| parse(&s).ok())
+            .or_else(|| std::fs::read_to_string(backup_file(&file)).ok().and_then(|s| parse(&s).ok()))
             .unwrap_or_else(|| Settings::default().with_defaults())
     }
 
-    /// Load `file`. A file that exists but cannot be understood is never silently replaced: it is
-    /// moved aside to `settings.json.corrupt-<timestamp>` and `true` is returned alongside defaults.
+    /// Load `file`, returning the settings and whether the app had to fall back to defaults.
     pub fn load_or_recover(file: &std::path::Path) -> (Self, bool) {
+        let l = Self::load_full(file);
+        (l.settings, l.reset)
+    }
+
+    /// Load `file` for the daemon.
+    /// - A file that exists but cannot be understood is never silently replaced: it is moved aside
+    ///   to `settings.json.corrupt-<timestamp>` (the newest few are kept), and the backup written by
+    ///   the last successful save is put back. Only when the backup is unusable too does the app
+    ///   start from defaults (`reset`).
+    /// - A file from a newer version of the app (`schemaVersion` above ours) is used as far as it
+    ///   can be read and is never moved, migrated or rewritten (`newer`).
+    pub fn load_full(file: &std::path::Path) -> Loaded {
+        let bak = backup_file(file);
+        let from_backup = || std::fs::read_to_string(&bak).ok().and_then(|t| parse(&t).ok());
+        let defaults = || Settings::default().with_defaults();
         let text = match std::fs::read(file) {
             Ok(b) => String::from_utf8_lossy(&b).to_string(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default().with_defaults(), false),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // No settings file: a first run, unless a backup says otherwise (the file was lost).
+                return match from_backup() {
+                    Some(s) => {
+                        crate::log::warn("settings.json was missing; restored it from the backup copy");
+                        crate::log::ok_or_warn("could not put the settings backup back", s.write_to(file));
+                        Loaded { settings: s, reset: false, restored: true, newer: false }
+                    }
+                    None => Loaded { settings: defaults(), reset: false, restored: false, newer: false },
+                };
+            }
             Err(e) => {
                 // Unreadable (permissions, disk): keep the file where it is and say so.
-                crate::log::error(format!("settings could not be read ({e}); starting with defaults"));
-                return (Settings::default().with_defaults(), true);
+                crate::log::error(format!("settings could not be read ({e}); using the backup copy or defaults"));
+                return match from_backup() {
+                    Some(s) => Loaded { settings: s, reset: false, restored: true, newer: false },
+                    None => Loaded { settings: defaults(), reset: true, restored: false, newer: false },
+                };
             }
         };
+        let newer = version_of(&text).map_or(false, |v| v > SCHEMA_VERSION as u64);
         match parse(&text) {
-            Ok(s) => (s, false),
+            Ok(s) => Loaded { settings: s, reset: false, restored: false, newer },
+            Err(e) if newer => {
+                // Written by a newer app in a shape this one cannot read: leave it exactly as it is.
+                crate::log::error(format!("settings were saved by a newer version and could not be read ({e}); they are left untouched"));
+                let (settings, reset) = match from_backup() { Some(s) => (s, false), None => (defaults(), true) };
+                Loaded { settings, reset, restored: false, newer: true }
+            }
             Err(e) => {
-                let aside = file.with_file_name(format!("{}.corrupt-{}",
-                    file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "settings.json".into()),
-                    chrono::Local::now().format("%Y%m%d-%H%M%S")));
+                let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "settings.json".into());
+                let aside = file.with_file_name(format!("{name}.corrupt-{}", chrono::Local::now().format("%Y%m%d-%H%M%S%3f")));
                 match std::fs::rename(file, &aside) {
-                    Ok(()) => crate::log::error(format!("settings file was damaged ({e}); kept as {} and started with defaults", aside.display())),
+                    Ok(()) => crate::log::error(format!("settings file was damaged ({e}); kept as {}", aside.display())),
                     Err(e2) => crate::log::error(format!("settings file was damaged ({e}) and could not be moved aside ({e2})")),
                 }
-                (Settings::default().with_defaults(), true)
+                if let Some(dir) = file.parent() { crate::paths::prune_files(dir, &format!("{name}.corrupt-"), KEEP_CORRUPT); }
+                match from_backup() {
+                    Some(s) => {
+                        crate::log::warn("settings restored from the backup copy");
+                        crate::log::ok_or_warn("could not put the settings backup back", s.write_to(file));
+                        Loaded { settings: s, reset: false, restored: true, newer: false }
+                    }
+                    None => {
+                        crate::log::error("no usable settings backup; started with defaults");
+                        Loaded { settings: defaults(), reset: true, restored: false, newer: false }
+                    }
+                }
             }
         }
     }
 
-    fn with_defaults(mut self) -> Self {
+    pub(crate) fn with_defaults(mut self) -> Self {
         if self.search.file_threshold == 0 {
             self.search.file_threshold = 1500;
         }
@@ -247,12 +342,32 @@ impl Settings {
         if self.wrap_nag_threshold == 0 {
             self.wrap_nag_threshold = 5;
         }
+        if self.idle_minutes == 0 {
+            self.idle_minutes = 15;
+        }
+        normalize_permission_mode(&mut self.ai.claude.permission_mode);
         self
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
+    fn write_to(&self, file: &std::path::Path) -> std::io::Result<()> {
         let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
-        crate::paths::write_atomic(&crate::paths::settings_file(), text.as_bytes(), true)
+        crate::paths::write_atomic(file, text.as_bytes(), true)
+    }
+
+    /// Save to `file`, then keep the same content as `<file>.bak` — the copy `load_full` falls back
+    /// to. The backup is written only after the main file, so it always holds a version that was
+    /// saved whole.
+    pub fn save_to(&self, file: &std::path::Path) -> std::io::Result<()> {
+        self.write_to(file)?;
+        crate::log::ok_or_warn("could not write the settings backup", self.write_to(&backup_file(file)));
+        Ok(())
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        if read_only() {
+            return Err(std::io::Error::other(crate::tr::user_err_in(crate::tr::arabic(), "newer_settings", &[])));
+        }
+        self.save_to(&crate::paths::settings_file())
     }
 
     /// Validate settings sent by a client against the current ones, and put back every
@@ -295,6 +410,13 @@ impl Settings {
             if !private.contains(&clean) { private.push(clean); }
         }
         self.private_paths = private;
+
+        // One line of plain text, or nothing.
+        self.profession = self.profession.take().map(|p| p.chars().filter(|c| !c.is_control()).take(200).collect::<String>().trim().to_string()).filter(|p| !p.is_empty());
+        self.user_name = self.user_name.chars().filter(|c| !c.is_control()).take(120).collect::<String>().trim().to_string();
+        if !["en", "ar"].contains(&self.language.as_str()) { self.language = old.language.clone(); }
+        // Zero is "unset" for these (a client that sent a partial object): fill them like a loaded file.
+        *self = std::mem::take(self).with_defaults();
         Ok(url_changed)
     }
 
@@ -314,6 +436,12 @@ mod tests {
     #[test]
     fn permission_modes_are_allow_listed() {
         for ok in [None, Some(""), Some("default"), Some("acceptEdits"), Some("plan")] { assert!(check_permission_mode(ok).is_ok(), "{ok:?}"); }
+        // "Ask before changes" no longer exists: it is read as "plan" wherever it is still stored.
+        assert!(!PERMISSION_MODES.contains(&"default"));
+        assert_eq!(effective_permission_mode(Some("default")), Some("plan"));
+        assert_eq!(effective_permission_mode(Some("acceptEdits")), Some("acceptEdits"));
+        assert_eq!(effective_permission_mode(Some("")), None);
+        assert_eq!(parse(r#"{"ai":{"claude":{"permissionMode":"default"}}}"#).unwrap().ai.claude.permission_mode.as_deref(), Some("plan"));
         for bad in ["bypassPermissions", "auto", "dontAsk", "Plan", "plan --dangerously-skip-permissions"] {
             assert!(check_permission_mode(Some(bad)).is_err(), "{bad}");
         }
@@ -403,6 +531,89 @@ mod tests {
             std::fs::remove_file(&aside[0]).unwrap();
         }
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_damaged_file_is_replaced_by_the_backup_not_by_defaults() {
+        let d = std::env::temp_dir().join(format!("thoughts-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.json");
+        let mut s = Settings::default();
+        s.onboarded = true;
+        s.language = "ar".into();
+        s.library_path = Some("/Users/sara/Notes".into());
+        s.save_to(&f).unwrap();
+        assert_eq!(std::fs::read(&f).unwrap(), std::fs::read(backup_file(&f)).unwrap());
+        // The main file is cut short by a crash or a full disk.
+        std::fs::write(&f, "{\"language\":").unwrap();
+        let l = Settings::load_full(&f);
+        assert!(l.restored && !l.reset && !l.newer);
+        assert!(l.settings.onboarded, "a good backup must never look like a fresh install");
+        assert_eq!(l.settings.library_path.as_deref(), Some("/Users/sara/Notes"));
+        // The good copy is back in place and the damaged one is kept for inspection.
+        assert!(parse(&std::fs::read_to_string(&f).unwrap()).unwrap().onboarded);
+        let corrupt = |d: &std::path::Path| std::fs::read_dir(d).unwrap().flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("settings.json.corrupt-")).count();
+        assert_eq!(corrupt(&d), 1);
+        // Lost altogether: the backup is put back as well.
+        std::fs::remove_file(&f).unwrap();
+        let l = Settings::load_full(&f);
+        assert!(l.restored && l.settings.onboarded && f.exists());
+        // Both bad: only now does the app start over, and says so.
+        std::fs::write(&f, "garbage").unwrap();
+        std::fs::write(backup_file(&f), "also garbage").unwrap();
+        let l = Settings::load_full(&f);
+        assert!(l.reset && !l.restored && !l.settings.onboarded);
+        // At most KEEP_CORRUPT damaged copies pile up.
+        for i in 0..8 {
+            std::fs::write(d.join(format!("settings.json.corrupt-2020010{i}-000000000")), "x").unwrap();
+        }
+        std::fs::write(&f, "garbage again").unwrap();
+        Settings::load_full(&f);
+        assert_eq!(corrupt(&d), KEEP_CORRUPT);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_file_from_a_newer_app_is_used_but_never_touched() {
+        let d = std::env::temp_dir().join(format!("thoughts-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.json");
+        let newer = r#"{"schemaVersion":99,"onboarded":true,"language":"ar","somethingNew":{"a":1}}"#;
+        std::fs::write(&f, newer).unwrap();
+        let l = Settings::load_full(&f);
+        assert!(l.newer && !l.reset && !l.restored);
+        assert!(l.settings.onboarded && l.settings.language == "ar");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), newer);
+        // Even one this version cannot read at all stays exactly where it is.
+        let unreadable = r#"{"schemaVersion":99,"idleMinutes":{"weekday":15}}"#;
+        std::fs::write(&f, unreadable).unwrap();
+        let l = Settings::load_full(&f);
+        assert!(l.newer);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), unreadable);
+        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 1, "nothing moved aside, no backup written");
+        // The current version is not "newer".
+        std::fs::write(&f, format!(r#"{{"schemaVersion":{SCHEMA_VERSION}}}"#)).unwrap();
+        assert!(!Settings::load_full(&f).newer);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn an_update_fills_unset_values_and_tidies_free_text() {
+        let old = Settings::default().with_defaults();
+        let mut new: Settings = serde_json::from_str(r#"{"libraryPath":"/x","profession":"  Tax accountant\n(freelance)  ","userName":"Sara\u0007"}"#).unwrap();
+        assert_eq!(new.search.file_threshold, 0);
+        new.sanitize_update(&old).unwrap();
+        assert_eq!(new.search.file_threshold, 1500);
+        assert_eq!(new.wrap_nag_threshold, 5);
+        assert_eq!(new.profession.as_deref(), Some("Tax accountant(freelance)"));
+        assert_eq!(new.user_name, "Sara");
+        let mut blank = old.clone();
+        blank.profession = Some("   ".into());
+        blank.ai.claude.permission_mode = Some("default".into());
+        blank.sanitize_update(&old).unwrap();
+        assert_eq!(blank.profession, None);
+        assert_eq!(blank.ai.claude.permission_mode.as_deref(), Some("plan"));
     }
 
     #[test]

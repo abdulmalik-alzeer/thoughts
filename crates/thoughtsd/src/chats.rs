@@ -42,6 +42,8 @@ pub struct RunOptions {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Chat {
+    /// Version of this file's shape, for future migrations.
+    pub schema_version: u32,
     pub id: String,
     pub title: String,
     /// None = the library itself.
@@ -68,10 +70,56 @@ pub struct Chat {
     pub meta: Value,
 }
 
+/// Current shape of a chat file.
+pub const CHAT_SCHEMA_VERSION: u32 = 1;
+
+/// Everything about a chat except its messages: what lists, the wrap logic and background loops
+/// need. Cheap to copy, however long the conversation is.
+#[derive(Clone, Debug)]
+pub struct ChatMeta {
+    pub id: String,
+    pub title: String,
+    pub project_id: Option<String>,
+    pub kind: String,
+    pub provider: String,
+    pub session_id: Option<String>,
+    pub created: DateTime<Utc>,
+    pub updated: DateTime<Utc>,
+    pub options: RunOptions,
+    pub has_mini_wrap: bool,
+    pub wrapped_at: Option<DateTime<Utc>>,
+    pub dirty: bool,
+    pub running: bool,
+    pub interrupted: bool,
+    pub cost_usd: f64,
+    pub meta: Value,
+    pub message_count: usize,
+    /// Has the user said anything in it?
+    pub has_user_message: bool,
+}
+
+impl ChatMeta {
+    /// Chats that count toward the next Wrap.
+    pub fn is_unwrapped(&self) -> bool {
+        self.kind == "chat" && self.has_user_message && self.wrapped_at.map_or(true, |w| self.updated > w)
+    }
+
+    pub fn summary(&self) -> Value {
+        serde_json::json!({
+            "id": self.id, "title": self.title, "projectId": self.project_id,
+            "kind": self.kind, "provider": self.provider, "created": self.created,
+            "updated": self.updated, "running": self.running, "interrupted": self.interrupted,
+            "unwrapped": self.is_unwrapped(), "hasMiniWrap": self.has_mini_wrap,
+            "messageCount": self.message_count,
+        })
+    }
+}
+
 impl Default for Chat {
     fn default() -> Self {
         let now = Utc::now();
         Self {
+            schema_version: CHAT_SCHEMA_VERSION,
             id: uuid::Uuid::new_v4().to_string(),
             title: "New chat".into(),
             project_id: None,
@@ -102,15 +150,19 @@ impl Chat {
             && self.wrapped_at.map_or(true, |w| self.updated > w)
     }
 
-    pub fn summary(&self) -> Value {
-        serde_json::json!({
-            "id": self.id, "title": self.title, "projectId": self.project_id,
-            "kind": self.kind, "provider": self.provider, "created": self.created,
-            "updated": self.updated, "running": self.running, "interrupted": self.interrupted,
-            "unwrapped": self.is_unwrapped(), "hasMiniWrap": self.mini_wrap.is_some(),
-            "messageCount": self.messages.len(),
-        })
+    /// The chat without its messages.
+    pub fn meta_only(&self) -> ChatMeta {
+        ChatMeta {
+            id: self.id.clone(), title: self.title.clone(), project_id: self.project_id.clone(), kind: self.kind.clone(),
+            provider: self.provider.clone(), session_id: self.session_id.clone(), created: self.created, updated: self.updated,
+            options: self.options.clone(), has_mini_wrap: self.mini_wrap.is_some(), wrapped_at: self.wrapped_at,
+            dirty: self.dirty, running: self.running, interrupted: self.interrupted, cost_usd: self.cost_usd,
+            meta: self.meta.clone(), message_count: self.messages.len(),
+            has_user_message: self.messages.iter().any(|m| m.role == "user"),
+        }
     }
+
+    pub fn summary(&self) -> Value { self.meta_only().summary() }
 
     /// Plain-text transcript, newest content kept when truncating.
     pub fn transcript(&self, max_chars: usize) -> String {
@@ -245,7 +297,8 @@ impl ChatStore {
 
     /// Mutate a chat in place. It is saved right away, except while a run is streaming into it,
     /// when saves are spaced `PERSIST_DEBOUNCE` apart (`flush` picks up the rest).
-    pub async fn update<F: FnOnce(&mut Chat)>(&self, id: &str, f: F) -> Option<Chat> {
+    /// Returns the chat's summary data (never a copy of its messages: this runs for every streamed message).
+    pub async fn update<F: FnOnce(&mut Chat)>(&self, id: &str, f: F) -> Option<ChatMeta> {
         let mut w = self.chats.write().await;
         let c = w.get_mut(id)?;
         let was_running = c.running;
@@ -257,7 +310,7 @@ impl ChatStore {
         } else if let Some(d) = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) {
             d.dirty = true;
         }
-        Some(c.clone())
+        Some(c.meta_only())
     }
 
     pub async fn remove(&self, id: &str) {
@@ -267,10 +320,21 @@ impl ChatStore {
         let _ = std::fs::remove_dir_all(crate::paths::attachments_dir().join(id));
     }
 
-    pub async fn list(&self) -> Vec<Chat> {
-        let mut v: Vec<Chat> = self.chats.read().await.values().cloned().collect();
+    /// Every chat, newest first, without messages — safe to call from periodic loops.
+    pub async fn list(&self) -> Vec<ChatMeta> {
+        let mut v: Vec<ChatMeta> = self.chats.read().await.values().map(Chat::meta_only).collect();
         v.sort_by(|a, b| b.updated.cmp(&a.updated));
         v
+    }
+
+    /// One chat without its messages.
+    pub async fn meta(&self, id: &str) -> Option<ChatMeta> {
+        self.chats.read().await.get(id).map(Chat::meta_only)
+    }
+
+    /// Read something out of a chat without copying it.
+    pub async fn with<T>(&self, id: &str, f: impl FnOnce(&Chat) -> T) -> Option<T> {
+        self.chats.read().await.get(id).map(f)
     }
 }
 
@@ -330,6 +394,32 @@ mod tests {
         assert_eq!(on_disk(&d, &id).title, "Renamed");
         s.remove(&id).await;
         assert!(!d.join(format!("{id}.json")).exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn lists_carry_no_messages_and_files_carry_a_version() {
+        let d = dir();
+        // A file written before `schemaVersion` existed still loads, and gets the field on its next save.
+        std::fs::write(d.join("old.json"), r#"{"id":"old","title":"Old","messages":[{"id":"m","role":"user","text":"hi","ts":"2026-01-01T00:00:00Z"}]}"#).unwrap();
+        let s = ChatStore::load_from(&d);
+        let mut c = Chat::default();
+        c.messages.push(Msg::new("user", "x".repeat(10_000)));
+        c.mini_wrap = Some("summary".into());
+        let id = c.id.clone();
+        s.insert(c).await;
+        let list = s.list().await;
+        assert_eq!(list.len(), 2);
+        let m = list.iter().find(|m| m.id == id).unwrap();
+        assert!(m.has_user_message && m.has_mini_wrap && m.message_count == 1 && m.is_unwrapped());
+        assert_eq!(m.summary(), s.get(&id).await.unwrap().summary());
+        assert_eq!(s.meta("old").await.unwrap().message_count, 1);
+        assert_eq!(s.with(&id, |c| c.messages[0].text.len()).await, Some(10_000));
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(d.join(format!("{id}.json"))).unwrap()).unwrap();
+        assert_eq!(raw["schemaVersion"], CHAT_SCHEMA_VERSION);
+        s.update("old", |c| c.title = "Renamed".into()).await.unwrap();
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(d.join("old.json")).unwrap()).unwrap();
+        assert_eq!((raw["schemaVersion"].as_u64(), raw["title"].as_str()), (Some(1), Some("Renamed")));
         std::fs::remove_dir_all(d).unwrap();
     }
 

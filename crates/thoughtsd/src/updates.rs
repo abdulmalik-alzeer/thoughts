@@ -61,11 +61,26 @@ fn write_status(home: &Path, v: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `{from, to, applied:[path], conflicts:[{path}]}` — the outcome of the last app update.
+/// `{from, to, applied:[path], conflicts:[{path, from}], removed:[path], downgrade}` — the outcome
+/// of the last app update. `conflicts` stay listed until the user resolves each one.
 pub fn status(home: &Path) -> Value {
-    std::fs::read_to_string(status_file(home)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    let mut v = std::fs::read_to_string(status_file(home)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .filter(|v| v["conflicts"].is_array())
-        .unwrap_or_else(|| json!({"from": env!("CARGO_PKG_VERSION"), "to": env!("CARGO_PKG_VERSION"), "applied": [], "conflicts": []}))
+        .unwrap_or_else(|| json!({"from": env!("CARGO_PKG_VERSION"), "to": env!("CARGO_PKG_VERSION"), "applied": [], "conflicts": []}));
+    if !v["removed"].is_array() { v["removed"] = json!([]); }
+    if !v["downgrade"].is_boolean() { v["downgrade"] = json!(false); }
+    v
+}
+
+/// Compare two version strings by their numeric parts (`0.10.0` is newer than `0.9.3`).
+pub fn older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Vec<u64> {
+        v.split(|c: char| c == '-' || c == '+').next().unwrap_or("").split('.').map(|p| p.trim().parse().unwrap_or(0)).collect()
+    };
+    let (mut x, mut y) = (parts(a), parts(b));
+    let n = x.len().max(y.len());
+    x.resize(n, 0); y.resize(n, 0);
+    x < y
 }
 
 /// Run on every daemon start.
@@ -79,17 +94,49 @@ pub async fn check(state: &AppState) -> anyhow::Result<()> {
 pub async fn check_with(g: Git<'_>, d: &Dirs, version: &str, shipped: &[(&str, &str)]) -> anyhow::Result<bool> {
     let base: Option<Value> = std::fs::read_to_string(manifest_file(&d.home)).ok().and_then(|t| serde_json::from_str(&t).ok());
     let from = base.as_ref().and_then(|b| b["version"].as_str()).map(String::from);
-    if from.as_deref() == Some(version) { return Ok(false); }
+    if from.as_deref() == Some(version) {
+        // Back on the version the defaults belong to: an earlier "older app" note no longer applies.
+        if status_file(&d.home).exists() {
+            let mut st = status(&d.home);
+            if st["downgrade"] == true {
+                st["downgrade"] = json!(false);
+                st["from"] = json!(version);
+                st["to"] = json!(version);
+                write_status(&d.home, &st)?;
+            }
+        }
+        return Ok(false);
+    }
+    // What the user has not decided yet survives every later update.
+    let had_status = status_file(&d.home).exists();
+    let earlier = status(&d.home);
+    let open: Vec<Value> = if had_status { earlier["conflicts"].as_array().cloned().unwrap_or_default() } else { vec![] };
+    if let Some(f) = from.as_deref().filter(|f| older(version, f)) {
+        // An older app was started on a newer install: touch nothing, remember nothing, just say so.
+        let st = json!({"from": f, "to": version, "applied": [], "conflicts": open, "removed": [], "downgrade": true});
+        if !had_status || earlier != st { write_status(&d.home, &st)?; }
+        return Ok(false);
+    }
     let (mut applied, mut conflicts): (Vec<String>, Vec<Value>) = (vec![], vec![]);
     for (path, new) in shipped {
         let target = d.layer.join(path);
         let current = std::fs::read(&target).ok().map(|b| sha(&b));
+        let new_sha = sha(new.as_bytes());
+        if let Some(c) = open.iter().find(|c| c["path"] == *path) {
+            // Still undecided from an earlier update: the user's file is never replaced under them.
+            // It stays a conflict (against the base it started from) unless it now equals the new default.
+            if current.as_deref() != Some(new_sha.as_str()) {
+                let since = c["from"].as_str().or(earlier["from"].as_str()).unwrap_or_default();
+                conflicts.push(json!({"path": path, "from": since}));
+            }
+            continue;
+        }
         let take = match &base {
             // No record of earlier defaults (first run of this mechanism): only fill in what is missing.
             None => current.is_none(),
-            Some(b) => match classify(b["files"][*path].as_str(), current.as_deref(), &sha(new.as_bytes())) {
+            Some(b) => match classify(b["files"][*path].as_str(), current.as_deref(), &new_sha) {
                 Class::Take => true,
-                Class::Conflict => { conflicts.push(json!({"path": path})); false }
+                Class::Conflict => { conflicts.push(json!({"path": path, "from": from.clone().unwrap_or_default()})); false }
                 Class::Same | Class::Keep => false,
             },
         };
@@ -99,6 +146,9 @@ pub async fn check_with(g: Git<'_>, d: &Dirs, version: &str, shipped: &[(&str, &
             applied.push(path.to_string());
         }
     }
+    // Defaults the new version no longer ships (removed or renamed): the user's copies stay where they are.
+    let removed: Vec<String> = base.as_ref().and_then(|b| b["files"].as_object()).into_iter().flatten().map(|(p, _)| p.clone())
+        .filter(|p| !shipped.iter().any(|(s, _)| s == p) && d.layer.join(p).exists()).collect();
     if !applied.is_empty() {
         let files: Vec<&str> = applied.iter().map(String::as_str).collect();
         let mut add = vec!["add", "--"]; add.extend(&files);
@@ -109,7 +159,7 @@ pub async fn check_with(g: Git<'_>, d: &Dirs, version: &str, shipped: &[(&str, &
     }
     store_base(&d.home, version, shipped)?;
     if let Some(from) = &from {
-        write_status(&d.home, &json!({"from": from, "to": version, "applied": applied, "conflicts": conflicts}))?;
+        write_status(&d.home, &json!({"from": from, "to": version, "applied": applied, "conflicts": conflicts, "removed": removed, "downgrade": false}))?;
     }
     Ok(!applied.is_empty())
 }
@@ -153,7 +203,9 @@ pub fn clear_conflict(home: &Path, path: &str) -> anyhow::Result<()> {
 pub fn merge_prompt(d: &Dirs, shipped: &[(&str, &str)], path: &str) -> anyhow::Result<String> {
     let st = take_conflict(&d.home, path)?;
     let new = shipped_text(path, shipped).ok_or_else(|| anyhow::anyhow!("{path} is not a built-in file"))?;
-    let from = st["from"].as_str().unwrap_or_default().to_string();
+    // A conflict carried over from an earlier update is merged against the base it started from.
+    let from = status(&d.home)["conflicts"].as_array().into_iter().flatten().find(|c| c["path"] == path)
+        .and_then(|c| c["from"].as_str()).or(st["from"].as_str()).unwrap_or_default().to_string();
     let old = std::fs::read_to_string(base_dir(&d.home, &from).join(path)).unwrap_or_default();
     Ok(format!(
         "A new version of the app ships a new built-in `{path}`, and I have also changed my own copy. Merge the two into `{path}` \
@@ -208,7 +260,8 @@ mod tests {
         let s = status(&d.home);
         assert_eq!((s["from"].as_str(), s["to"].as_str()), (Some("1.0.0"), Some("2.0.0")));
         assert_eq!(s["applied"], json!(["home.json"]), "untouched by the user: new default taken");
-        assert_eq!(s["conflicts"], json!([{"path": "custom.css"}]), "changed by both");
+        assert_eq!(s["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]), "changed by both");
+        assert_eq!((&s["removed"], &s["downgrade"]), (&json!([]), &json!(false)));
         assert_eq!(std::fs::read_to_string(d.layer.join("themes.json")).unwrap(), "[{\"id\":\"x\",\"name\":\"X\"}]\n", "changed only by the user: kept");
         assert_eq!(std::fs::read_to_string(d.layer.join("custom.css")).unwrap(), "/* mine */\n");
         assert_eq!(std::fs::read_to_string(d.layer.join("home.json")).unwrap(), "{\"chips\":[]}\n");
@@ -218,7 +271,7 @@ mod tests {
         // Merge prompt carries both built-in versions; resolving clears the conflict.
         let prompt = merge_prompt(&d, v2, "custom.css").unwrap();
         assert!(prompt.contains("/* v1 */") && prompt.contains("/* v2 */"));
-        assert_eq!(status(&d.home)["conflicts"], json!([{"path": "custom.css"}]), "still listed until the merge run has started");
+        assert_eq!(status(&d.home)["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]), "still listed until the merge run has started");
         clear_conflict(&d.home, "custom.css").unwrap();
         assert_eq!(status(&d.home)["conflicts"], json!([]));
         assert!(resolve(st, &d, v2, "custom.css", "new").await.is_err(), "already resolved");
@@ -239,5 +292,71 @@ mod tests {
         assert_eq!(std::fs::read_to_string(d.layer.join("themes.json")).unwrap(), "[]\n");
         assert_eq!(status(&d.home)["conflicts"], json!([]));
         std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn removed_defaults_open_conflicts_and_downgrades() {
+        let (st, d) = testutil::layer("updates2").await;
+        let read = |p: &str| std::fs::read_to_string(d.layer.join(p)).unwrap();
+        let v1: &[(&str, &str)] = &[("custom.css", "/* v1 */\n"), ("home.json", "{}\n"), ("legacy.json", "{\"old\":true}\n"), ("gone.json", "{}\n")];
+        for (p, t) in v1 { std::fs::write(d.layer.join(p), t).unwrap(); }
+        st.commit_all(&d.layer, "v1 defaults").await.unwrap();
+        check_with(st, &d, "1.0.0", v1).await.unwrap();
+
+        // The user edits custom.css and deletes gone.json; v2 changes custom.css and drops both legacy files.
+        std::fs::write(d.layer.join("custom.css"), "/* mine */\n").unwrap();
+        std::fs::remove_file(d.layer.join("gone.json")).unwrap();
+        st.commit_all(&d.layer, "mine").await.unwrap();
+        let v2: &[(&str, &str)] = &[("custom.css", "/* v2 */\n"), ("home.json", "{}\n")];
+        check_with(st, &d, "2.0.0", v2).await.unwrap();
+        let s = status(&d.home);
+        assert_eq!(s["removed"], json!(["legacy.json"]), "reported (the one the user still has), never deleted");
+        assert_eq!(read("legacy.json"), "{\"old\":true}\n");
+        assert_eq!(s["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]));
+
+        // v3 ships yet another custom.css and a new home.json while the conflict is still open.
+        let v3: &[(&str, &str)] = &[("custom.css", "/* v3 */\n"), ("home.json", "{\"chips\":[]}\n")];
+        assert!(check_with(st, &d, "3.0.0", v3).await.unwrap());
+        let s = status(&d.home);
+        assert_eq!(read("custom.css"), "/* mine */\n", "an undecided file is never overwritten");
+        assert_eq!(s["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]), "still open, still against the base it started from");
+        assert_eq!(s["applied"], json!(["home.json"]));
+        let prompt = merge_prompt(&d, v3, "custom.css").unwrap();
+        assert!(prompt.contains("/* v1 */") && prompt.contains("/* v3 */") && !prompt.contains("/* v2 */"));
+
+        // Even if the user's copy happens to equal an older default, an open conflict blocks a silent take.
+        std::fs::write(d.layer.join("custom.css"), "/* v3 */\n").unwrap();
+        st.commit_all(&d.layer, "back to v3 by hand").await.unwrap();
+        let v4: &[(&str, &str)] = &[("custom.css", "/* v4 */\n"), ("home.json", "{\"chips\":[]}\n")];
+        assert!(!check_with(st, &d, "4.0.0", v4).await.unwrap());
+        assert_eq!(read("custom.css"), "/* v3 */\n");
+        assert_eq!(status(&d.home)["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]));
+
+        // Starting an older app changes nothing at all and says so; the open conflict is kept.
+        let before = crate::applayer::history_in(st, &d.layer).await.len();
+        assert!(!check_with(st, &d, "3.5.0", v3).await.unwrap());
+        let s = status(&d.home);
+        assert_eq!((&s["downgrade"], s["from"].as_str(), s["to"].as_str()), (&json!(true), Some("4.0.0"), Some("3.5.0")));
+        assert_eq!(s["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]));
+        assert_eq!(read("home.json"), "{\"chips\":[]}\n");
+        assert_eq!(crate::applayer::history_in(st, &d.layer).await.len(), before);
+        let base: Value = serde_json::from_str(&std::fs::read_to_string(d.home.join("base-manifest.json")).unwrap()).unwrap();
+        assert_eq!(base["version"], "4.0.0", "the record of the newer defaults is kept for when the newer app returns");
+        // Back on the newer app: nothing to do, and the note about the older app is cleared.
+        assert!(!check_with(st, &d, "4.0.0", v4).await.unwrap());
+        assert_eq!(status(&d.home)["downgrade"], false);
+        assert_eq!(status(&d.home)["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]));
+        // Once the user's file equals the new default the conflict resolves itself.
+        std::fs::write(d.layer.join("custom.css"), "/* v5 */\n").unwrap();
+        check_with(st, &d, "5.0.0", &[("custom.css", "/* v5 */\n"), ("home.json", "{\"chips\":[]}\n")]).await.unwrap();
+        let s = status(&d.home);
+        assert_eq!((&s["conflicts"], &s["downgrade"]), (&json!([]), &json!(false)));
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[test]
+    fn version_order() {
+        assert!(older("0.9.3", "0.10.0") && older("1.0.0", "1.0.1") && older("1.2", "1.2.1") && older("0.0.2", "0.0.3-beta"));
+        assert!(!older("1.0.0", "1.0.0") && !older("2.0.0", "1.9.9") && !older("1.0.0-rc1", "1.0.0"));
     }
 }

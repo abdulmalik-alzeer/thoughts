@@ -24,6 +24,7 @@ pub mod staging;
 pub mod state;
 pub mod suggestions;
 pub mod todos;
+pub mod tr;
 pub mod trust;
 pub mod updates;
 pub mod usage;

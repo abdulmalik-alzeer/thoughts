@@ -55,6 +55,29 @@ fn command_line(pid: u32) -> Option<String> {
     (o.status.success() && !s.is_empty()).then_some(s)
 }
 
+/// The program name of a live process on Windows (`claude.exe`, `node.exe`…), from
+/// `tasklist /FI "PID eq N" /FO CSV /NH`, or None when there is no such process.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn image_from_tasklist(csv: &str) -> Option<String> {
+    let line = csv.lines().map(str::trim).find(|l| l.starts_with('"'))?;
+    let name = line.trim_start_matches('"').split('"').next()?.trim().to_lowercase();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Could a Windows process with this program name be one of the assistant runs the daemon starts?
+/// (The native program, or the npm install: `cmd.exe` running `claude.cmd`, which runs `node.exe`.)
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn windows_image_is_assistant(image: &str) -> bool {
+    matches!(image.to_lowercase().as_str(), "claude.exe" | "node.exe" | "cmd.exe")
+}
+
+#[cfg(windows)]
+fn windows_image(pid: u32) -> Option<String> {
+    let o = crate::proc::std_command("tasklist").args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]).output().ok()?;
+    if !o.status.success() { return None; }
+    image_from_tasklist(&String::from_utf8_lossy(&o.stdout))
+}
+
 /// End recorded assistant processes that outlived the previous daemon, then clear the record.
 /// Returns how many were ended.
 pub fn reap_stale(file: &Path) -> usize {
@@ -67,8 +90,25 @@ pub fn reap_stale(file: &Path) -> usize {
         if r.pid <= 1 || r.pid == std::process::id() { continue; }
         let Some(cmd) = command_line(r.pid) else { continue };
         if !looks_like_assistant_run(&cmd) { continue; }
-        let ok = crate::proc::std_command("kill").args(["-TERM", &r.pid.to_string()]).status().map(|s| s.success()).unwrap_or(false);
+        // Runs are started as the leader of their own process group: end the whole group, so the
+        // assistant's own children go too; a run recorded by an older version is ended on its own.
+        let quiet = |args: &[&str]| crate::proc::std_command("kill").args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status().map(|s| s.success()).unwrap_or(false);
+        let ok = quiet(&["-TERM", "--", &format!("-{}", r.pid)]) || quiet(&["-TERM", &r.pid.to_string()]);
         crate::log::warn(format!("ended assistant process {} left over from chat {} ({})", r.pid, r.chat_id, if ok { "ok" } else { "failed" }));
+        if ok { ended += 1; }
+    }
+    // Windows (UNTESTED there): the recorded PID must still belong to a program an assistant run
+    // could be, and must have been started after it was recorded… which `tasklist` cannot tell, so
+    // only the program name is checked; then the whole process tree is ended.
+    #[cfg(windows)]
+    for r in &runs {
+        if r.pid <= 4 || r.pid == std::process::id() { continue; }
+        let Some(image) = windows_image(r.pid) else { continue };
+        if !windows_image_is_assistant(&image) { continue; }
+        let ok = crate::proc::std_command("taskkill").args(["/PID", &r.pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false);
+        crate::log::warn(format!("ended assistant process {} ({image}) left over from chat {} ({})", r.pid, r.chat_id, if ok { "ok" } else { "failed" }));
         if ok { ended += 1; }
     }
     if !runs.is_empty() || file.exists() { let _ = std::fs::remove_file(file); }
@@ -100,6 +140,16 @@ mod tests {
         for other in ["/usr/bin/vim notes.md", "claude", "/Applications/Claude.app/Contents/MacOS/Claude", "sleep 300", ""] {
             assert!(!looks_like_assistant_run(other), "{other}");
         }
+    }
+
+    #[test]
+    fn windows_process_names_are_read_from_tasklist() {
+        assert_eq!(image_from_tasklist("\"claude.exe\",\"4242\",\"Console\",\"1\",\"98,112 K\"\r\n").as_deref(), Some("claude.exe"));
+        assert_eq!(image_from_tasklist("\r\n\"Node.EXE\",\"7\",\"Console\",\"1\",\"1 K\"").as_deref(), Some("node.exe"));
+        assert_eq!(image_from_tasklist("INFO: No tasks are running which match the specified criteria.\r\n"), None);
+        assert_eq!(image_from_tasklist(""), None);
+        for yes in ["claude.exe", "node.exe", "CMD.EXE"] { assert!(windows_image_is_assistant(yes), "{yes}"); }
+        for no in ["explorer.exe", "winword.exe", "git.exe", ""] { assert!(!windows_image_is_assistant(no), "{no}"); }
     }
 
     #[cfg(unix)]

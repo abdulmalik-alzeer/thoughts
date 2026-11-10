@@ -7,6 +7,7 @@ use crate::state::AppState;
 use crate::{packs, staging, suggestions, updates, usage, workflows};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::routing::{get, post};
+use chrono::Local;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -26,6 +27,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/history", get(history))
         .route("/api/layer/rollback", post(rollback))
         .route("/api/layer/revert", post(revert))
+        .route("/api/layer/undo-last", post(undo_last))
+        .route("/api/layer/storage/:plugin", get(storage_get).put(storage_put).layer(DefaultBodyLimit::max(STORAGE_MAX_BYTES + 1024)))
         .route("/api/layer/customize", post(customize))
         .route("/api/layer/pending", get(pending))
         .route("/api/layer/pending/apply", post(pending_apply))
@@ -64,15 +67,40 @@ pub fn start(state: Arc<AppState>) {
 
 async fn arabic(st: &AppState) -> bool { st.settings.read().await.language == "ar" }
 
+/// Note in the local usage log how a customisation ended (unless the user switched that log off).
+async fn record_outcome(st: &AppState, outcome: &str, request: &str) {
+    if !st.settings.read().await.usage_signals { return; }
+    usage::record_outcome(&crate::paths::home(), outcome, request, Local::now());
+}
+
+/// What the user asked for in each kept change (`hash -> request`), so a later undo can be logged
+/// with the same words. Local, small, capped.
+fn requests_file(home: &std::path::Path) -> std::path::PathBuf { home.join("layer-requests.json") }
+
+fn remember_request(home: &std::path::Path, hash: &str, request: &str) {
+    if hash.is_empty() || request.is_empty() { return; }
+    let mut list: Vec<Value> = std::fs::read_to_string(requests_file(home)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    list.push(json!({"hash": hash, "request": request}));
+    let keep = list.len().saturating_sub(200);
+    if let Ok(t) = serde_json::to_string(&list[keep..]) { let _ = crate::paths::write_atomic(&requests_file(home), t.as_bytes(), true); }
+}
+
+fn recall_request(home: &std::path::Path, hash: &str) -> Option<String> {
+    let list: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(requests_file(home)).ok()?).ok()?;
+    list.iter().rev().find(|e| e["hash"].as_str().map_or(false, |h| !hash.is_empty() && (h.starts_with(hash) || hash.starts_with(h))))
+        .and_then(|e| e["request"].as_str().map(String::from))
+}
+
 /// `GET /api/layer` — the live layer; `?preview=1` — the staged one, in the same shape.
-async fn layer(Query(q): Query<HashMap<String, String>>) -> R {
+async fn layer(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let d = Dirs::real();
+    let ar = arabic(&st).await;
     let preview = q.get("preview").map_or(false, |v| v == "1" || v == "true");
     if preview {
         if !d.staging.join(".git").exists() { return Err(anyhow::anyhow!("there is no pending change to preview").into()); }
-        return Ok(Json(applayer::manifest_of(&d.staging)));
+        return Ok(Json(applayer::manifest_lang(&d.staging, ar)));
     }
-    Ok(Json(applayer::manifest_of(&d.layer)))
+    Ok(Json(applayer::manifest_lang(&d.layer, ar)))
 }
 
 async fn history(State(st): S) -> R { Ok(Json(json!(applayer::history(&st).await))) }
@@ -88,8 +116,21 @@ async fn rollback(State(st): S, Json(c): Json<Commit>) -> R {
 
 async fn revert(State(st): S, Json(c): Json<Commit>) -> R {
     let _g = LAYER_LOCK.lock().await;
+    let d = Dirs::real();
+    let subject = applayer::subject_in(Git(Some(&st)), &d.layer, &c.hash).await;
     applayer::revert(&st, &c.hash).await?;
+    record_outcome(&st, "undo", &recall_request(&d.home, &c.hash).unwrap_or(subject)).await;
     ok()
+}
+
+/// `POST /api/layer/undo-last` — undo the most recent change that is still in effect.
+async fn undo_last(State(st): S) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let d = Dirs::real();
+    let (hash, subject) = applayer::undo_last_in(Git(Some(&st)), &d.layer, arabic(&st).await).await?;
+    st.emit(json!({"type": "layer.changed"}));
+    record_outcome(&st, "undo", &recall_request(&d.home, &hash).unwrap_or_else(|| subject.clone())).await;
+    Ok(Json(json!({"ok": true, "hash": hash, "summary": subject})))
 }
 
 #[derive(Deserialize, Default)]
@@ -102,7 +143,9 @@ struct Customize {
 
 async fn customize(State(st): S, Json(c): Json<Customize>) -> R {
     let _g = LAYER_LOCK.lock().await;
+    let request = c.prompt.clone();
     let id = crate::api::start_customize(st.clone(), c.prompt, "customize", None).await?;
+    staging::set_request(&Dirs::real(), &request);
     Ok(Json(json!({"chatId": id})))
 }
 
@@ -121,16 +164,26 @@ fn workflows_to_approve(pending: &Value, approve: bool) -> Vec<String> {
         .filter(|p| p.starts_with("workflows/")).map(String::from).collect()
 }
 
-/// Body (optional): `{approveWorkflows: true}`.
+/// Body: `{signature, approveWorkflows?}`. `signature` is the one `GET /api/layer/pending` gave
+/// for the change the user reviewed; if staging no longer matches it the apply fails with `CHANGED::`.
 async fn pending_apply(State(st): S, body: axum::body::Bytes) -> R {
     let _g = LAYER_LOCK.lock().await;
     let d = Dirs::real();
-    let approve = serde_json::from_slice::<Value>(&body).ok().map_or(false, |v| v["approveWorkflows"] == true);
-    let before = staging::pending(Git(Some(&st)), &d, arabic(&st).await).await;
-    let mut r = staging::apply(Git(Some(&st)), &d, arabic(&st).await).await?;
+    let ar = arabic(&st).await;
+    let body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    let approve = body["approveWorkflows"] == true;
+    // A keep that does not say what was reviewed is treated like a review of something else.
+    let Some(signature) = body["signature"].as_str().filter(|s| !s.is_empty()) else { return Err(anyhow::anyhow!(staging::changed_error(ar)).into()) };
+    let before = staging::pending(Git(Some(&st)), &d, ar).await;
+    let mut r = staging::apply(Git(Some(&st)), &d, ar, Some(signature)).await?;
     let approved = workflows::approve_paths(&d.layer, &d.home, &workflows_to_approve(&before, approve))?;
     if !approved.is_empty() { crate::log::info(format!("workflows approved with a kept change: {}", approved.join(", "))); }
     r["approvedWorkflows"] = json!(approved);
+    if r["origin"] == "customize" {
+        let request = r["request"].as_str().unwrap_or_default().to_string();
+        remember_request(&d.home, r["hash"].as_str().unwrap_or_default(), &request);
+        record_outcome(&st, "keep", &request).await;
+    }
     st.emit(json!({"type": "layer.changed"}));
     st.emit(json!({"type": "layer.pending"}));
     Ok(Json(r))
@@ -138,13 +191,21 @@ async fn pending_apply(State(st): S, body: axum::body::Bytes) -> R {
 
 async fn pending_discard(State(st): S) -> R {
     let _g = LAYER_LOCK.lock().await;
-    staging::discard(Git(Some(&st)), &Dirs::real()).await?;
+    let d = Dirs::real();
+    let meta = staging::load_meta(&d);
+    let had_change = staging::pending(Git(Some(&st)), &d, false).await["exists"] == true;
+    staging::discard(Git(Some(&st)), &d).await?;
+    if let Some(m) = meta.filter(|m| had_change && (m.origin.is_empty() || m.origin == "customize")) { record_outcome(&st, "discard", &m.request).await; }
     st.emit(json!({"type": "layer.pending"}));
     ok()
 }
 
+/// `GET /api/layer/export?name=&description=&paths=a,b` — the whole layer, or with `paths` (files,
+/// or folders ending in `/`) a feature pack of just those.
 async fn export(Query(q): Query<HashMap<String, String>>) -> R {
-    Ok(Json(packs::export(&Dirs::real().layer, q.get("name").map_or("", String::as_str))))
+    let get = |k: &str| q.get(k).map_or("", String::as_str);
+    let paths: Option<Vec<String>> = q.get("paths").filter(|p| !p.trim().is_empty()).map(|p| p.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
+    Ok(Json(packs::export_with(&Dirs::real().layer, get("name"), get("description"), paths.as_deref())?))
 }
 
 #[derive(Deserialize)]
@@ -158,6 +219,56 @@ async fn import(State(st): S, Json(i): Json<Import>) -> R {
     packs::import(Git(Some(&st)), &d, &i.pack, ar).await?;
     st.emit(json!({"type": "layer.pending"}));
     Ok(Json(staging::pending(Git(Some(&st)), &d, ar).await))
+}
+
+// ---------- plugin storage ----------
+
+/// One JSON document per plugin, at most this large.
+pub const STORAGE_MAX_BYTES: usize = 256 * 1024;
+
+/// Plugin names are file names: letters, digits, dot, dash, underscore (never only dots).
+pub fn valid_plugin_name(name: &str) -> bool {
+    (1..=60).contains(&name.len()) && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)) && !name.starts_with('.')
+}
+
+fn storage_file(home: &std::path::Path, plugin: &str) -> anyhow::Result<std::path::PathBuf> {
+    if !valid_plugin_name(plugin) { anyhow::bail!("invalid plugin name"); }
+    Ok(home.join("plugin-data").join(format!("{plugin}.json")))
+}
+
+/// What plugin `plugin` has stored (`{}` when nothing yet, or when its file is damaged).
+pub fn storage_read(home: &std::path::Path, plugin: &str) -> anyhow::Result<Value> {
+    let file = storage_file(home, plugin)?;
+    let stored = std::fs::symlink_metadata(&file).ok().filter(|m| m.is_file() && m.len() as usize <= STORAGE_MAX_BYTES)
+        .and_then(|_| std::fs::read_to_string(&file).ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(Value::is_object);
+    Ok(stored.unwrap_or_else(|| json!({})))
+}
+
+/// Replace plugin `plugin`'s document. Private folder, private file, written atomically.
+pub fn storage_write(home: &std::path::Path, plugin: &str, bytes: &[u8], arabic: bool) -> anyhow::Result<()> {
+    let file = storage_file(home, plugin)?;
+    if bytes.len() > STORAGE_MAX_BYTES {
+        anyhow::bail!("{}", if arabic { "البيانات المحفوظة لهذه الإضافة كبيرة جدًا (الحد الأقصى ٢٥٦ كيلوبايت)." } else { "This add-on is trying to store too much (the limit is 256 KB)." });
+    }
+    let v: Value = serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("storage must be a JSON object"))?;
+    if !v.is_object() { anyhow::bail!("storage must be a JSON object"); }
+    let dir = home.join("plugin-data");
+    crate::paths::create_private_dir(&dir)?;
+    // Never write through a link someone planted in the data folder.
+    if std::fs::symlink_metadata(&file).map_or(false, |m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
+    crate::paths::write_atomic(&file, serde_json::to_string(&v)?.as_bytes(), true)?;
+    Ok(())
+}
+
+/// `GET /api/layer/storage/<plugin>` → the plugin's JSON object (`{}` when empty).
+async fn storage_get(Path(plugin): Path<String>) -> R {
+    Ok(Json(storage_read(&crate::paths::home(), &plugin)?))
+}
+
+/// `PUT /api/layer/storage/<plugin>` with the JSON object as the body → `{ok:true}`.
+async fn storage_put(State(st): S, Path(plugin): Path<String>, body: axum::body::Bytes) -> R {
+    storage_write(&crate::paths::home(), &plugin, &body, arabic(&st).await)?;
+    ok()
 }
 
 async fn workflow_list() -> R {
@@ -208,10 +319,12 @@ async fn suggestion_list(State(st): S) -> R {
         .filter_map(|c| c["prompt"].as_str().map(String::from)).collect();
     let has_weekly = workflows::load(&layer).iter()
         .any(|w| matches!(&w.trigger, workflows::Trigger::Schedule { every, .. } if every == "week"));
+    let nav_hidden: Vec<String> = applayer::manifest_of(&layer)["nav"]["hidden"].as_array().into_iter().flatten()
+        .filter_map(|h| h.as_str().map(String::from)).collect();
     let dismissed = suggestions::dismissed(&home);
     Ok(Json(json!(suggestions::compute(&suggestions::Input {
         events: &events, now, overdue, enabled_views: &enabled, chips: &chips,
-        has_weekly_workflow: has_weekly, dismissed: &dismissed, arabic: s.language == "ar",
+        has_weekly_workflow: has_weekly, dismissed: &dismissed, arabic: s.language == "ar", nav_hidden: &nav_hidden,
     }))))
 }
 
@@ -255,5 +368,49 @@ mod tests {
         assert!(workflows_to_approve(&pending("import"), true).is_empty());
         assert!(workflows_to_approve(&pending("update"), true).is_empty());
         assert!(workflows_to_approve(&json!({"exists": false}), true).is_empty());
+    }
+
+    #[test]
+    fn plugin_storage_is_one_private_json_object_per_plugin() {
+        let home = std::env::temp_dir().join(format!("thoughts-storage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        assert_eq!(storage_read(&home, "hours.js").unwrap(), json!({}), "nothing stored yet");
+        storage_write(&home, "hours.js", br#"{"entries":[{"date":"2026-11-10","client":"Acme","hours":2.5}]}"#, false).unwrap();
+        storage_write(&home, "other", br#"{"x":1}"#, false).unwrap();
+        assert_eq!(storage_read(&home, "hours.js").unwrap()["entries"][0]["hours"], 2.5);
+        assert_eq!(storage_read(&home, "other").unwrap(), json!({"x": 1}), "each plugin has its own document");
+        assert!(home.join("plugin-data/hours.js.json").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(home.join("plugin-data")).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(std::fs::metadata(home.join("plugin-data/hours.js.json")).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Only a JSON object, only up to 256 KB, only for a plain file name.
+        assert!(storage_write(&home, "hours.js", b"[1,2]", false).is_err() && storage_write(&home, "hours.js", b"{oops", false).is_err());
+        let big = format!(r#"{{"x":"{}"}}"#, "a".repeat(STORAGE_MAX_BYTES));
+        assert!(storage_write(&home, "hours.js", big.as_bytes(), true).unwrap_err().to_string().contains("٢٥٦"));
+        assert_eq!(storage_read(&home, "hours.js").unwrap()["entries"][0]["client"], "Acme", "a refused write leaves the old document");
+        for bad in ["", "..", ".hidden", "a/b", "a\\b", "../../settings", "name with space", &"x".repeat(61), "ملف"] {
+            assert!(!valid_plugin_name(bad), "{bad}");
+            assert!(storage_read(&home, bad).is_err() && storage_write(&home, bad, b"{}", false).is_err());
+        }
+        for good in ["hours.js", "client-intake", "a_b.1", &"x".repeat(60)] { assert!(valid_plugin_name(good), "{good}"); }
+        assert!(!home.join("settings.json").exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn remembers_what_was_asked_for_each_kept_change() {
+        let home = std::env::temp_dir().join(format!("thoughts-requests-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        assert_eq!(recall_request(&home, "abc123"), None);
+        remember_request(&home, "abc123def456", "Show overdue todos on Home");
+        remember_request(&home, "ffff0000aaaa", "Group todos by date");
+        remember_request(&home, "", "ignored");
+        assert_eq!(recall_request(&home, "abc123").as_deref(), Some("Show overdue todos on Home"), "a short hash finds it too");
+        assert_eq!(recall_request(&home, "ffff0000aaaa").as_deref(), Some("Group todos by date"));
+        assert_eq!(recall_request(&home, ""), None);
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

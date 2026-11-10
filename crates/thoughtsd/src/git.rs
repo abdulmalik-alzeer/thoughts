@@ -6,7 +6,43 @@ use crate::state::AppState;
 use serde_json::{json, Value};
 use std::path::Path;
 
-pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+/// Longest a git command that only touches this machine may run.
+pub const LOCAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// Longest a git command that talks to a remote may run.
+pub const NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The git subcommand in `args` (skipping leading `-c key=value` pairs).
+fn subcommand<'a>(args: &[&'a str]) -> &'a str {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if *a == "-c" { it.next(); continue; }
+        return a;
+    }
+    ""
+}
+
+/// How long `args` may take: commands that reach a remote get longer than local ones.
+pub fn timeout_for(args: &[&str]) -> std::time::Duration {
+    if matches!(subcommand(args), "push" | "pull" | "fetch" | "clone" | "ls-remote") { NETWORK_TIMEOUT } else { LOCAL_TIMEOUT }
+}
+
+/// `credential.helper` value for the private password file. The value is read by a shell, so the
+/// path is quoted, and written with forward slashes (which Git for Windows needs).
+pub fn credential_helper(file: &Path) -> String {
+    let p = file.to_string_lossy().replace('\\', "/");
+    let mut quoted = String::new();
+    for c in p.chars() {
+        if matches!(c, '"' | '\\' | '$' | '`') { quoted.push('\\'); }
+        quoted.push(c);
+    }
+    format!("store --file=\"{quoted}\"")
+}
+
+/// Run git in `dir` and return its raw output. Hardened against a library's own configuration, never
+/// waits for a terminal, and never runs longer than `timeout_for(args)`: a stalled command is killed
+/// (with any helper it started) and reported as a plain error, so nothing stays locked behind it.
+pub async fn git_raw(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+    if !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &dir.display().to_string())])); }
     let store = state.settings.read().await.sync.credential_store.clone();
     let mut c = crate::proc::command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
     c.current_dir(dir).env("PATH", crate::claude::shell_path()).env("GIT_TERMINAL_PROMPT", "0");
@@ -17,24 +53,38 @@ pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<
     for kv in ["core.fsmonitor=false", &format!("core.hooksPath={no_hooks}"), "core.sshCommand=ssh",
                "core.askPass=", "core.pager=cat", "core.editor=true", "diff.external=",
                "commit.gpgSign=false", "tag.gpgSign=false", "gpg.program=gpg", "protocol.ext.allow=never", "core.gitProxy=",
-               "credential.helper="] {
+               "credential.helper=",
+               // A transfer that crawls below 1 kB/s for 30 seconds is given up on rather than left hanging.
+               "http.lowSpeedLimit=1000", "http.lowSpeedTime=30"] {
         c.args(["-c", kv]);
     }
     // On Linux a machine without a keyring keeps passwords in the private file instead (see `save_credential`).
     let file_fallback = cfg!(target_os = "linux") && crate::paths::git_credentials_file().exists();
     if store == "file" || file_fallback {
-        let f = crate::paths::git_credentials_file();
-        c.args(["-c", &format!("credential.helper=store --file={}", f.display())]);
+        c.args(["-c", &format!("credential.helper={}", credential_helper(&crate::paths::git_credentials_file()))]);
     }
     if store != "file" {
-        if let Ok(exe) = std::env::current_exe() { c.env("GIT_ASKPASS", exe).env("THOUGHTS_ASKPASS", "1"); }
+        if let Ok(exe) = crate::paths::app_exe() { c.env("GIT_ASKPASS", exe).env("THOUGHTS_ASKPASS", "1"); }
     }
     c.args(args).stdin(std::process::Stdio::null());
-    let out = c.output().await?;
+    let limit = timeout_for(args);
+    let out = match crate::proc::output_timeout(&mut c, limit).await {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+            crate::log::error(format!("git {} did not finish within {}s and was stopped", subcommand(args), limit.as_secs()));
+            return Err(crate::tr::err("git.timeout", &[]));
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(crate::tr::err("git.missing", &[])),
+        Err(e) => return Err(e.into()),
+    };
     if !out.status.success() {
         anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(out.stdout)
+}
+
+pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    Ok(String::from_utf8_lossy(&git_raw(state, dir, args).await?).to_string())
 }
 
 /// Like `git`, for commands that create commits (commit, merge, rebase): when this machine has no
@@ -79,7 +129,7 @@ pub async fn current_branch(state: &AppState, dir: &Path) -> anyhow::Result<Stri
     // symbolic-ref also answers in a repository that has no commits yet.
     match git(state, dir, &["symbolic-ref", "--short", "-q", "HEAD"]).await {
         Ok(b) if !b.trim().is_empty() => Ok(b.trim().to_string()),
-        _ => anyhow::bail!("the library is not on a branch"),
+        _ => Err(crate::tr::err("git.not_branch", &[])),
     }
 }
 
@@ -122,7 +172,7 @@ pub async fn status(state: &AppState, dir: &Path) -> Value {
 async fn syncable_branch(state: &AppState, dir: &Path) -> anyhow::Result<String> {
     let branch = current_branch(state, dir).await?;
     if internal_branch(&branch) {
-        anyhow::bail!("the library is on \"{branch}\", which the app keeps for its own use and never syncs");
+        return Err(crate::tr::err("git.internal_branch", &[("branch", &branch)]));
     }
     Ok(branch)
 }
@@ -144,8 +194,9 @@ async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log:
 /// A pull that conflicts is undone and reported as `CONFLICT::<file;file;…>` (see `resolve`).
 pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
     let _g = state.git_lock.lock().await;
+    crate::trust::require_git(dir)?;
     let branch = syncable_branch(state, dir).await?;
-    let committed = commit_all(state, dir, &format!("sync: {}", chrono::Local::now().format("%Y-%m-%d %H:%M"))).await?;
+    let committed = commit_all(state, dir, &subject::sync()).await?;
     let rs = remotes(state, dir).await;
     let mut log = vec![];
     if let Some(primary) = rs.first().and_then(|r| r["name"].as_str()) {
@@ -173,22 +224,24 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
     Ok(json!({"committed": committed, "log": log}))
 }
 
-/// Finish a sync whose pull conflicted. The local state is always kept first as a branch
-/// `backup/<YYYYMMDD-HHMMSS>`; then the remote is merged (a merge, not a rebase, so "mine" really
-/// is the local side) keeping `strategy`'s side wherever the two disagree, and the result is pushed.
-pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Result<Value> {
-    let side = match strategy {
-        "mine" => "ours",
-        "theirs" => "theirs",
-        _ => anyhow::bail!("choose which version to keep: mine or theirs"),
-    };
-    let _g = state.git_lock.lock().await;
-    let branch = syncable_branch(state, dir).await?;
-    let committed = commit_all(state, dir, &format!("sync: {}", chrono::Local::now().format("%Y-%m-%d %H:%M"))).await?;
-    let rs = remotes(state, dir).await;
-    let primary = rs.first().and_then(|r| r["name"].as_str()).ok_or_else(|| anyhow::anyhow!("no backup location is set up for this library"))?.to_string();
-    if head(state, dir).await.is_none() { anyhow::bail!("there is nothing in this library's history yet"); }
+/// How many `backup/…` branches are kept; older ones are removed when a new one is made.
+pub const KEEP_BACKUPS: usize = 10;
 
+/// Delete all but the newest `KEEP_BACKUPS` backup branches (their names are timestamps).
+pub async fn prune_backups(state: &AppState, dir: &Path) -> usize {
+    let out = git(state, dir, &["for-each-ref", "--format=%(refname:short)", "refs/heads/backup/"]).await.unwrap_or_default();
+    let mut names: Vec<&str> = out.lines().map(str::trim).filter(|n| n.starts_with("backup/")).collect();
+    names.sort();
+    let extra = names.len().saturating_sub(KEEP_BACKUPS);
+    let mut removed = 0;
+    for name in names.into_iter().take(extra) {
+        if git(state, dir, &["branch", "-q", "-D", "--", name]).await.is_ok() { removed += 1; }
+    }
+    removed
+}
+
+/// Keep the current local state as a new branch `backup/<YYYYMMDD-HHMMSS>` and return its name.
+async fn make_backup(state: &AppState, dir: &Path) -> anyhow::Result<String> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let mut backup = format!("backup/{stamp}");
     let mut n = 1;
@@ -197,33 +250,77 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
         backup = format!("backup/{stamp}-{n}");
     }
     git(state, dir, &["branch", "--", &backup]).await?;
-    crate::log::info(format!("sync: resolving conflict keeping {strategy}; local state kept as {backup}"));
+    prune_backups(state, dir).await;
+    Ok(backup)
+}
 
-    let mut log = vec![format!("backup {backup}")];
+/// Finish a sync whose pull conflicted: the remote is merged (a merge, not a rebase, so "mine"
+/// really is the local side) keeping `strategy`'s side wherever the two disagree, and the result is
+/// pushed. Whenever the two sides really clash, the local state is first kept as a branch
+/// `backup/<YYYYMMDD-HHMMSS>`; when there is nothing to settle (the call was not needed) no backup
+/// is made and this is an ordinary sync.
+pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Result<Value> {
+    let side = match strategy {
+        "mine" => "ours",
+        "theirs" => "theirs",
+        _ => return Err(crate::tr::err("git.strategy", &[])),
+    };
+    let _g = state.git_lock.lock().await;
+    crate::trust::require_git(dir)?;
+    let branch = syncable_branch(state, dir).await?;
+    let committed = commit_all(state, dir, &subject::sync()).await?;
+    let rs = remotes(state, dir).await;
+    let primary = rs.first().and_then(|r| r["name"].as_str()).ok_or_else(|| crate::tr::err("git.no_remote", &[]))?.to_string();
+    if head(state, dir).await.is_none() { anyhow::bail!("there is nothing in this library's history yet"); }
+
+    let mut log = vec![];
+    let mut backup: Option<String> = None;
     match git(state, dir, &["fetch", "--", &primary, &branch]).await {
         Ok(_) => {
-            if let Err(e) = git_ident(state, dir, &["merge", "--no-edit", "-X", side, "FETCH_HEAD"]).await {
-                // What -X cannot settle (one side deleted or renamed the file): take the chosen side whole.
-                let files = unmerged(state, dir).await;
-                if files.is_empty() {
-                    let _ = git(state, dir, &["merge", "--abort"]).await;
-                    anyhow::bail!("could not combine the two versions: {e}");
+            let ancestor = |a: &'static str, b: &'static str| async move { git(state, dir, &["merge-base", "--is-ancestor", a, b]).await.is_ok() };
+            if ancestor("FETCH_HEAD", "HEAD").await {
+                log.push(format!("{primary}: nothing new"));
+            } else {
+                // Only a real clash needs a safety copy: a fast-forward or a clean merge loses nothing.
+                let clean = ancestor("HEAD", "FETCH_HEAD").await
+                    || git(state, dir, &["merge-tree", "--write-tree", "HEAD", "FETCH_HEAD"]).await.is_ok();
+                if !clean {
+                    let b = make_backup(state, dir).await?;
+                    crate::log::info(format!("sync: resolving conflict keeping {strategy}; local state kept as {b}"));
+                    log.push(format!("backup {b}"));
+                    backup = Some(b);
                 }
-                for f in &files {
-                    if git(state, dir, &["checkout", &format!("--{side}"), "--", f]).await.is_err() {
-                        let _ = git(state, dir, &["rm", "-q", "-f", "--", f]).await;
+                if let Err(e) = git_ident(state, dir, &["merge", "--no-edit", "-X", side, "FETCH_HEAD"]).await {
+                    // What -X cannot settle (one side deleted or renamed the file): take the chosen side whole.
+                    let files = unmerged(state, dir).await;
+                    if files.is_empty() {
+                        let _ = git(state, dir, &["merge", "--abort"]).await;
+                        anyhow::bail!("could not combine the two versions: {e}");
+                    }
+                    // A merge that looked clean but was not (an older git without merge-tree): back up now.
+                    if backup.is_none() {
+                        let _ = git(state, dir, &["merge", "--abort"]).await;
+                        let b = make_backup(state, dir).await?;
+                        log.push(format!("backup {b}"));
+                        backup = Some(b);
+                        let _ = git_ident(state, dir, &["merge", "--no-edit", "-X", side, "FETCH_HEAD"]).await;
+                    }
+                    for f in &files {
+                        if git(state, dir, &["checkout", &format!("--{side}"), "--", f]).await.is_err() {
+                            let _ = git(state, dir, &["rm", "-q", "-f", "--", f]).await;
+                        }
+                    }
+                    let done = async {
+                        git(state, dir, &["add", "-A"]).await?;
+                        git_ident(state, dir, &["commit", "-q", "--no-edit"]).await
+                    }.await;
+                    if let Err(e) = done {
+                        let _ = git(state, dir, &["merge", "--abort"]).await;
+                        anyhow::bail!("could not combine the two versions: {e}");
                     }
                 }
-                let done = async {
-                    git(state, dir, &["add", "-A"]).await?;
-                    git_ident(state, dir, &["commit", "-q", "--no-edit"]).await
-                }.await;
-                if let Err(e) = done {
-                    let _ = git(state, dir, &["merge", "--abort"]).await;
-                    anyhow::bail!("could not combine the two versions: {e}");
-                }
+                log.push(format!("merged {primary} keeping {strategy}"));
             }
-            log.push(format!("merged {primary} keeping {strategy}"));
         }
         Err(e) if e.to_string().contains("couldn't find remote ref") => log.push(format!("{primary}: new branch")),
         Err(e) => anyhow::bail!("pull failed: {e}"),
@@ -231,6 +328,116 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
     push_all(state, dir, &rs, &branch, &mut log).await;
     crate::log::info(format!("sync: {}", log.join(", ")));
     Ok(json!({"committed": committed, "backup": backup, "strategy": strategy, "log": log}))
+}
+
+// ---------- library history ----------
+
+/// Subjects of the commits the daemon itself writes. `commit_kind` reads them back.
+pub mod subject {
+    /// The user's own pending edits, recorded before something else changes the library.
+    pub fn edit(why: &str) -> String { format!("edit: {why}") }
+    pub fn wrap(chats: usize) -> String { format!("wrap: {} — {chats} chat(s)", chrono::Local::now().format("%Y-%m-%d")) }
+    pub fn sync() -> String { format!("sync: {}", chrono::Local::now().format("%Y-%m-%d %H:%M")) }
+    /// Something the assistant did (a chat, a workflow, a feature being added, a reorganize).
+    pub fn assistant(what: &str) -> String {
+        let what: String = what.chars().filter(|c| !c.is_control()).take(80).collect();
+        format!("assistant: {}", what.trim())
+    }
+    pub fn restore(path: &str, short: &str) -> String { format!("restore: {path} (from {short})") }
+    pub fn undo(of: &str) -> String { format!("undo: {of}") }
+}
+
+/// What kind of change a commit is, from the subject line the daemon gave it:
+/// `wrap` | `sync` | `edit` | `assistant` | `other`.
+pub fn commit_kind(subject: &str) -> &'static str {
+    let s = subject.trim();
+    let starts = |prefixes: &[&str]| prefixes.iter().any(|p| s.starts_with(p));
+    if starts(&["wrap: "]) { "wrap" }
+    else if starts(&["sync: ", "Merge ", "sync:"]) { "sync" }
+    else if starts(&["assistant: ", "module: ", "init: ", "reorganize: "]) { "assistant" }
+    else if starts(&["edit: ", "restore: ", "undo: ", "snapshot before "]) { "edit" }
+    else { "other" }
+}
+
+/// A full or abbreviated commit id, and nothing git could read as an option or a range.
+pub fn valid_hash(hash: &str) -> bool {
+    (7..=64).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `[{hash, short, date, subject, kind, files:[path]}]`, newest first; with `path`, only the
+/// changes that touched that file.
+pub async fn history(state: &AppState, dir: &Path, path: Option<&str>, limit: usize) -> anyhow::Result<Vec<Value>> {
+    let n = format!("-{}", limit.clamp(1, 500));
+    let mut args = vec!["log", n.as_str(), "--name-only", "--no-renames", "--format=%x1e%H%x1f%h%x1f%s%x1f%cI"];
+    let spec = path.map(|p| format!(":(top,literal){p}"));
+    if let Some(spec) = &spec { args.push("--"); args.push(spec); }
+    // A repository without commits has no history yet; that is an empty list, not an error.
+    if head(state, dir).await.is_none() { return Ok(vec![]); }
+    let out = git(state, dir, &args).await?;
+    Ok(out.split('\x1e').filter_map(|rec| {
+        let mut lines = rec.lines();
+        let p: Vec<_> = lines.next()?.split('\x1f').collect();
+        if p.len() != 4 { return None; }
+        let files: Vec<&str> = lines.map(str::trim).filter(|l| !l.is_empty()).collect();
+        Some(json!({"hash": p[0], "short": p[1], "subject": p[2], "date": p[3], "kind": commit_kind(p[2]), "files": files}))
+    }).collect())
+}
+
+/// The bytes of library file `rel` as it was at commit `hash`.
+pub async fn file_at(state: &AppState, dir: &Path, rel: &str, hash: &str) -> anyhow::Result<Vec<u8>> {
+    if !valid_hash(hash) { return Err(crate::tr::err("history.bad_entry", &[])); }
+    let rel = rel.trim_start_matches("./").trim_start_matches('/').replace('\\', "/");
+    git_raw(state, dir, &["show", &format!("{hash}:{rel}")]).await.map_err(|e| {
+        if e.downcast_ref::<crate::tr::UserErr>().is_some() { e } else { crate::tr::err("not_found.version", &[]) }
+    })
+}
+
+/// Put one file back as it was at `hash`, as a new history entry. Anything not yet recorded is
+/// recorded first, so the version being replaced can itself be restored.
+pub async fn restore_file(state: &AppState, dir: &Path, rel: &str, hash: &str) -> anyhow::Result<Value> {
+    let _g = state.git_lock.lock().await;
+    crate::trust::require_git(dir)?;
+    let bytes = file_at(state, dir, rel, hash).await?;
+    commit_all(state, dir, &subject::edit(&format!("changes before restoring {rel}"))).await?;
+    let target = crate::library::resolve(dir, rel)?;
+    if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+    crate::paths::write_atomic(&target, &bytes, false)?;
+    let short: String = hash.chars().take(7).collect();
+    let committed = commit_all(state, dir, &subject::restore(rel, &short)).await?;
+    crate::log::info(format!("history: restored a file from {short} (new entry: {committed})"));
+    Ok(json!({"ok": true, "changed": committed, "hash": head(state, dir).await}))
+}
+
+/// Undo one whole change, as a new history entry. Fails with `CONFLICT::<file;file;…>` (and leaves
+/// the library exactly as it was) when later changes build on it.
+pub async fn undo_commit(state: &AppState, dir: &Path, hash: &str) -> anyhow::Result<Value> {
+    if !valid_hash(hash) { return Err(crate::tr::err("history.bad_entry", &[])); }
+    let _g = state.git_lock.lock().await;
+    crate::trust::require_git(dir)?;
+    let commit = format!("{hash}^{{commit}}");
+    let parents = git(state, dir, &["rev-list", "--parents", "-n", "1", "--end-of-options", &commit]).await
+        .map_err(|_| crate::tr::err("history.bad_entry", &[]))?;
+    if parents.split_whitespace().count() > 2 { return Err(crate::tr::err("history.merge", &[])); }
+    let subject = git(state, dir, &["log", "-1", "--format=%s", "--end-of-options", &commit]).await?.trim().to_string();
+    commit_all(state, dir, &subject::edit("changes before undoing an earlier change")).await?;
+    if let Err(e) = git(state, dir, &["revert", "--no-commit", "--end-of-options", hash]).await {
+        let files = unmerged(state, dir).await;
+        let _ = git(state, dir, &["revert", "--abort"]).await;
+        // Everything was recorded just above, so this only clears the half-applied undo.
+        let _ = git(state, dir, &["reset", "-q", "--hard", "HEAD"]).await;
+        crate::log::warn(format!("history: undo of {hash} clashes with later changes in {} file(s): {e}", files.len()));
+        if files.is_empty() { anyhow::bail!("this change could not be undone: {e}"); }
+        return Err(crate::tr::err("conflict", &[("files", &files.join(";"))]));
+    }
+    if git(state, dir, &["diff", "--cached", "--quiet"]).await.is_ok() {
+        let _ = git(state, dir, &["revert", "--quit"]).await;
+        return Err(crate::tr::err("history.nothing", &[]));
+    }
+    let done = git_ident(state, dir, &["commit", "-q", "-m", &subject::undo(&subject)]).await;
+    let _ = git(state, dir, &["revert", "--quit"]).await;
+    done?;
+    crate::log::info(format!("history: undid {hash}"));
+    Ok(json!({"ok": true, "hash": head(state, dir).await}))
 }
 
 /// Paths `git status` reports as untracked (new since the last commit), from `--porcelain -z` output.
@@ -262,6 +469,14 @@ pub async fn rollback_to(state: &AppState, dir: &Path, snapshot: &str) -> anyhow
         args.extend(chunk.iter().map(String::as_str));
         git(state, dir, &args).await?;
     }
+    // Folders that existed only for those files go too (never one that still holds anything).
+    for p in &created {
+        let mut cur = Path::new(p).parent();
+        while let Some(rel) = cur.filter(|r| !r.as_os_str().is_empty()) {
+            if std::fs::remove_dir(dir.join(rel)).is_err() { break; }
+            cur = rel.parent();
+        }
+    }
     Ok(created)
 }
 
@@ -290,14 +505,9 @@ pub async fn save_credential(state: &AppState, host: &str, username: &str, secre
         save_credential_file(&crate::paths::git_credentials_file(), host, username, secret)?;
     } else {
         let v = json!({"username": username, "secret": secret}).to_string();
-        let r = keyring::Entry::new("thoughts-git", host).and_then(|e| e.set_password(&v));
-        #[cfg(target_os = "linux")]
-        if let Err(e) = &r {
-            // No working keyring on this machine: keep it in the private file git reads directly.
-            crate::log::warn(format!("system keyring unavailable ({e}); saving the sync password in a private file instead"));
-            return save_credential_file(&crate::paths::git_credentials_file(), host, username, secret);
-        }
-        r?;
+        // The keyring, or (Linux without one) the private secrets file — the password prompt helper
+        // reads from the same place (see `askpass`).
+        crate::secrets::set("thoughts-git", host, &v)?;
     }
     Ok(())
 }
@@ -474,6 +684,147 @@ mod tests {
         assert_eq!(head(&st, &d).await.unwrap(), snap);
         assert!(rollback_to(&st, &d, "HEAD; rm -rf").await.is_err());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolve_without_a_real_clash_makes_no_backup() {
+        let (root, mine, remote) = diverged();
+        let st = AppState::load().unwrap();
+        // The other device changed notes.md; here only keep.md changed: both merge cleanly.
+        sh(&mine, &["checkout", "-q", "--", "notes.md"]);
+        write(&mine, "keep.md", "changed here\n");
+        let v = resolve(&st, &mine, "mine").await.unwrap();
+        assert!(v["backup"].is_null(), "{v}");
+        assert_eq!(sh(&mine, &["branch", "--list", "backup/*"]), "");
+        assert_eq!(read(&mine, "notes.md"), "their line\n");
+        assert_eq!(read(&mine, "keep.md"), "changed here\n");
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]));
+        // Called again with nothing at all to settle: still no backup.
+        let v = resolve(&st, &mine, "theirs").await.unwrap();
+        assert!(v["backup"].is_null());
+        assert_eq!(sh(&mine, &["branch", "--list", "backup/*"]), "");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_the_newest_backups_are_kept() {
+        let (root, mine, _remote) = diverged();
+        let st = AppState::load().unwrap();
+        for i in 1..=14 { sh(&mine, &["branch", &format!("backup/202601{i:02}-000000")]); }
+        sh(&mine, &["branch", "backups-of-mine"]);
+        assert_eq!(prune_backups(&st, &mine).await, 4);
+        let left = sh(&mine, &["branch", "--list", "backup/*", "--format=%(refname:short)"]);
+        let left: Vec<&str> = left.lines().collect();
+        assert_eq!(left.len(), KEEP_BACKUPS);
+        assert_eq!(left[0], "backup/20260105-000000");
+        assert_eq!(sh(&mine, &["branch", "--list", "backups-of-mine", "--format=%(refname:short)"]), "backups-of-mine");
+        // A real clash adds one and the list stays capped.
+        assert!(sync(&st, &mine).await.unwrap_err().to_string().starts_with("CONFLICT::"));
+        let v = resolve(&st, &mine, "mine").await.unwrap();
+        assert!(v["backup"].as_str().unwrap().starts_with("backup/"));
+        assert_eq!(sh(&mine, &["branch", "--list", "backup/*"]).lines().count(), KEEP_BACKUPS);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_lists_kinds_and_single_files_can_be_restored_or_changes_undone() {
+        let d = dunce::canonicalize(tmp("history")).unwrap();
+        sh(&d, &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Tester"), ("user.email", "tester@example.com")] { sh(&d, &["config", k, v]); }
+        let st = AppState::load().unwrap();
+        assert!(history(&st, &d, None, 50).await.unwrap().is_empty());
+        write(&d, "notes/plan.md", "version one\n");
+        write(&d, "TODO.md", "- [ ] a\n");
+        commit_all(&st, &d, &subject::edit("your changes")).await.unwrap();
+        write(&d, "notes/plan.md", "version two\n");
+        commit_all(&st, &d, &subject::assistant("Plan the launch")).await.unwrap();
+        write(&d, "TODO.md", "- [ ] a\n- [ ] b\n");
+        commit_all(&st, &d, &subject::wrap(2)).await.unwrap();
+        write(&d, "other.md", "x\n");
+        commit_all(&st, &d, &subject::sync()).await.unwrap();
+        sh(&d, &["commit", "-q", "--allow-empty", "-m", "typed by hand"]);
+
+        let all = history(&st, &d, None, 50).await.unwrap();
+        let kinds: Vec<&str> = all.iter().map(|h| h["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["other", "sync", "wrap", "assistant", "edit"]);
+        assert_eq!(all[2]["files"], json!(["TODO.md"]));
+        assert_eq!(all[4]["files"], json!(["TODO.md", "notes/plan.md"]));
+        assert!(all[0]["hash"].as_str().unwrap().len() >= 40 && all[0]["date"].as_str().unwrap().contains('T'));
+        assert_eq!(history(&st, &d, None, 2).await.unwrap().len(), 2);
+        // One file's own history.
+        let plan = history(&st, &d, Some("notes/plan.md"), 50).await.unwrap();
+        assert_eq!(plan.iter().map(|h| h["kind"].as_str().unwrap()).collect::<Vec<_>>(), ["assistant", "edit"]);
+        let first = plan[1]["hash"].as_str().unwrap().to_string();
+        assert_eq!(file_at(&st, &d, "notes/plan.md", &first).await.unwrap(), b"version one\n");
+        assert!(file_at(&st, &d, "notes/missing.md", &first).await.is_err());
+        assert!(file_at(&st, &d, "notes/plan.md", "HEAD~1").await.is_err());
+        assert!(file_at(&st, &d, "notes/plan.md", "--output=/tmp/x").await.is_err());
+
+        // Restore: the old text is back as a new entry; what was not yet recorded is recorded first.
+        write(&d, "notes/plan.md", "version three, not recorded yet\n");
+        let v = restore_file(&st, &d, "notes/plan.md", &first).await.unwrap();
+        assert_eq!(v["changed"], true);
+        assert_eq!(read(&d, "notes/plan.md"), "version one\n");
+        let plan = history(&st, &d, Some("notes/plan.md"), 50).await.unwrap();
+        assert!(plan[0]["subject"].as_str().unwrap().starts_with("restore: notes/plan.md"));
+        assert_eq!(plan[0]["kind"], "edit");
+        let unrecorded = plan[1]["hash"].as_str().unwrap();
+        assert_eq!(file_at(&st, &d, "notes/plan.md", unrecorded).await.unwrap(), b"version three, not recorded yet\n");
+        assert!(restore_file(&st, &d, ".git/config", &first).await.is_err());
+
+        // Undo a whole change: the wrap's task disappears, everything else stays.
+        let wrap = all[2]["hash"].as_str().unwrap();
+        undo_commit(&st, &d, wrap).await.unwrap();
+        assert_eq!(read(&d, "TODO.md"), "- [ ] a\n");
+        assert_eq!(read(&d, "other.md"), "x\n");
+        let newest = &history(&st, &d, None, 1).await.unwrap()[0];
+        assert!(newest["subject"].as_str().unwrap().starts_with("undo: wrap: "));
+        assert!(undo_commit(&st, &d, "not-a-hash").await.is_err());
+        assert!(undo_commit(&st, &d, "0123456789abcdef").await.is_err());
+
+        // A change that later ones build on cannot be undone alone: reported, and nothing is changed.
+        write(&d, "notes/plan.md", "rewritten again\n");
+        commit_all(&st, &d, "later").await.unwrap();
+        let before = sh(&d, &["rev-parse", "HEAD"]);
+        let assistant = all[3]["hash"].as_str().unwrap();
+        let err = undo_commit(&st, &d, assistant).await.unwrap_err().to_string();
+        assert_eq!(err, "CONFLICT::notes/plan.md");
+        assert_eq!(read(&d, "notes/plan.md"), "rewritten again\n");
+        assert_eq!(sh(&d, &["status", "--porcelain"]), "");
+        assert_eq!(sh(&d, &["rev-parse", "HEAD"]), before);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn commit_kinds_timeouts_and_helper_quoting() {
+        for (s, kind) in [("wrap: 2026-11-10 — 3 chat(s)", "wrap"), ("sync: 2026-11-10 09:00", "sync"), ("Merge branch 'main' of github.com:a/b", "sync"),
+                          ("assistant: Plan the launch", "assistant"), ("module: docs", "assistant"), ("init: library configured for Sara", "assistant"),
+                          ("reorganize: proposed structure", "assistant"), ("edit: your changes", "edit"), ("snapshot before wrap", "edit"),
+                          ("restore: a.md (from 1234567)", "edit"), ("undo: wrap: x", "edit"), ("typed by hand", "other"), ("", "other")] {
+            assert_eq!(commit_kind(s), kind, "{s}");
+        }
+        assert_eq!(commit_kind(&subject::assistant("a\nb")), "assistant");
+        assert!(!subject::assistant(&"x".repeat(500)).contains('\n') && subject::assistant(&"x".repeat(500)).len() < 100);
+        for net in [&["push", "-u", "--", "origin", "main"][..], &["-c", "user.name=T", "-c", "user.email=t@x", "pull", "--rebase"], &["fetch", "--", "origin"], &["clone", "--depth", "1"]] {
+            assert_eq!(timeout_for(net), NETWORK_TIMEOUT, "{net:?}");
+        }
+        for local in [&["status", "--porcelain"][..], &["commit", "-q", "-m", "push"], &["log", "-1"], &["-c", "x=y", "merge", "fetch"]] {
+            assert_eq!(timeout_for(local), LOCAL_TIMEOUT, "{local:?}");
+        }
+        assert_eq!(credential_helper(Path::new("/home/a b/.thoughts/git-credentials")), "store --file=\"/home/a b/.thoughts/git-credentials\"");
+        assert_eq!(credential_helper(Path::new(r"C:\Users\Sara Ali\.thoughts\git-credentials")), "store --file=\"C:/Users/Sara Ali/.thoughts/git-credentials\"");
+        assert_eq!(credential_helper(Path::new("/x/$HOME`id`\"")), "store --file=\"/x/\\$HOME\\`id\\`\\\"\"");
+        assert!(valid_hash("0123abc") && !valid_hash("012") && !valid_hash("HEAD") && !valid_hash("-n1") && !valid_hash("abc..def"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_folder_is_a_plain_error() {
+        let st = AppState::load().unwrap();
+        let gone = std::env::temp_dir().join(format!("thoughts-git-gone-{}", uuid::Uuid::new_v4()));
+        let err = git(&st, &gone, &["status"]).await.unwrap_err();
+        let shown = crate::tr::classify_in(false, &err);
+        assert_eq!(shown.status, 404);
+        assert!(shown.message.contains(&gone.display().to_string()) && !shown.message.contains("os error"));
     }
 
     #[test]

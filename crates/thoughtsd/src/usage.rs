@@ -10,12 +10,64 @@ const KEEP_LINES: usize = 6000;
 
 pub fn file(home: &Path) -> PathBuf { home.join("usage-events.jsonl") }
 
-/// Event names are short labels such as `view.todos` or `home.prompt:Plan my week`.
+/// Event names are short labels such as `view.todos`, `home.prompt:Plan my week`, `todo.add`,
+/// `todo.done`, `doc.open`, `search`, `palette.cmd:<id>` or `customize.keep:<request>`. Any label
+/// is stored; the file is capped.
 pub fn clean_event(event: &str) -> anyhow::Result<String> {
     let e = event.trim();
     if e.is_empty() { anyhow::bail!("empty event"); }
     if e.chars().any(char::is_control) { anyhow::bail!("invalid event"); }
     Ok(e.chars().take(120).collect())
+}
+
+/// Record how a customisation ended (`keep`, `discard` or `undo`) with the first 80 characters of
+/// what the user asked for, so later suggestions can learn from it.
+pub fn record_outcome(home: &Path, outcome: &str, request: &str, now: DateTime<Local>) {
+    let request: String = request.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect();
+    let _ = append(home, &format!("customize.{outcome}:{request}"), now);
+}
+
+/// A short plain-text account of the last 30 days, for the monthly tune-up suggestion. It is built
+/// on this machine and goes nowhere unless the user accepts that suggestion.
+pub fn summary(events: &[(DateTime<Local>, String)], now: DateTime<Local>) -> String {
+    use std::collections::BTreeMap;
+    let since = now - chrono::Duration::days(30);
+    let mut counts: BTreeMap<&str, BTreeMap<String, usize>> = BTreeMap::new();
+    let mut requests: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut bump = |group: &'static str, key: &str| *counts.entry(group).or_default().entry(key.chars().take(60).collect()).or_default() += 1;
+    for (t, e) in events.iter().filter(|(t, _)| *t > since && *t <= now) {
+        let _ = t;
+        if let Some(v) = e.strip_prefix("view.") { bump("views", v); }
+        else if let Some(c) = e.strip_prefix("home.chip:") { bump("chips", c.trim()); }
+        else if let Some(c) = e.strip_prefix("palette.cmd:") { bump("commands", c.trim()); }
+        else if e.starts_with("home.prompt:") { bump("other", "requests typed on Home"); }
+        else if e == "todo.add" { bump("other", "todos added"); }
+        else if e == "todo.done" { bump("other", "todos completed"); }
+        else if e == "doc.open" || e.starts_with("doc.open:") { bump("other", "documents opened"); }
+        else if e == "search" || e.starts_with("search:") { bump("other", "searches"); }
+        else if e == "wrap.done" { bump("other", "wraps"); }
+        else if let Some(rest) = e.strip_prefix("customize.") {
+            let (kind, text) = rest.split_once(':').unwrap_or((rest, ""));
+            let key = match kind { "keep" => "kept", "discard" => "discarded", "undo" => "undone", _ => continue };
+            let list = requests.entry(key).or_default();
+            if list.len() < 8 { list.push(text.trim().to_string()); }
+        }
+    }
+    let top = |group: &str, n: usize| -> String {
+        let mut v: Vec<(&String, &usize)> = counts.get(group).into_iter().flatten().collect();
+        v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        if v.is_empty() { return "none".into(); }
+        v.into_iter().take(n).map(|(k, c)| format!("{k} ×{c}")).collect::<Vec<_>>().join(", ")
+    };
+    let asked = |key: &str| -> String {
+        match requests.get(key) {
+            Some(l) if !l.is_empty() => l.iter().map(|r| if r.is_empty() { "\"(no text)\"".to_string() } else { format!("\"{r}\"") }).collect::<Vec<_>>().join("; "),
+            _ => "none".into(),
+        }
+    };
+    format!(
+        "- Pages opened: {}\n- Home buttons used: {}\n- Commands used: {}\n- Other activity: {}\n- Customisations kept: {}\n- Customisations discarded: {}\n- Customisations undone later: {}",
+        top("views", 10), top("chips", 6), top("commands", 6), top("other", 8), asked("kept"), asked("discarded"), asked("undone"))
 }
 
 pub fn append(home: &Path, event: &str, now: DateTime<Local>) -> anyhow::Result<()> {
@@ -62,6 +114,30 @@ mod tests {
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0].1, "view.todos");
         assert_eq!(ev[1].1.len(), 120);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn records_outcomes_and_summarises_the_last_month() {
+        let d = std::env::temp_dir().join(format!("thoughts-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let now = Local::now();
+        for e in ["view.todos", "view.todos", "view.docs", "home.chip:Plan my week", "todo.add", "todo.done", "doc.open", "search", "palette.cmd:new-chat"] {
+            append(&d, e, now - chrono::Duration::hours(1)).unwrap();
+        }
+        append(&d, "view.projects", now - chrono::Duration::days(45)).unwrap();
+        record_outcome(&d, "keep", &format!("Show overdue\ntodos on Home {}", "x".repeat(200)), now);
+        record_outcome(&d, "discard", "Make everything pink", now);
+        record_outcome(&d, "undo", "", now);
+        let ev = read(&d);
+        let kept = &ev.iter().find(|(_, e)| e.starts_with("customize.keep:")).unwrap().1;
+        assert!(kept.starts_with("customize.keep:Show overdue todos on Home x") && kept.chars().count() == "customize.keep:".len() + 80);
+        let s = summary(&ev, now);
+        assert!(s.contains("Pages opened: todos ×2, docs ×1"), "{s}");
+        assert!(!s.contains("projects"), "older than a month");
+        assert!(s.contains("Plan my week ×1") && s.contains("new-chat ×1") && s.contains("todos added ×1") && s.contains("searches ×1"));
+        assert!(s.contains("Customisations discarded: \"Make everything pink\"") && s.contains("undone later: \"(no text)\""));
+        assert!(summary(&[], now).contains("Pages opened: none"));
         std::fs::remove_dir_all(d).unwrap();
     }
 }

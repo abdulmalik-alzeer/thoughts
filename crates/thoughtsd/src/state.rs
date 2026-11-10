@@ -29,6 +29,14 @@ pub struct AppState {
     pub mini_wraps_blocked: AtomicBool,
     /// chat id -> retry state for failed automatic mini-wraps.
     pub mini_wrap_backoff: Mutex<HashMap<String, crate::wraps::Backoff>>,
+    /// settings.json was damaged or missing at startup and the backup copy was put back.
+    pub settings_restored: AtomicBool,
+    /// settings.json was written by a newer version of the app: settings are read-only.
+    pub settings_newer: AtomicBool,
+    /// chat id -> the folder its assistant run is working in, while it runs.
+    pub run_dirs: std::sync::Mutex<HashMap<String, std::path::PathBuf>>,
+    /// Stands in for the assistant program (see `claude::RunHook`). Tests set it; the app never does.
+    pub run_hook: std::sync::Mutex<Option<crate::claude::RunHook>>,
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
@@ -47,7 +55,11 @@ impl AppState {
         let mut interrupted: Vec<(String, String)> = chats.chats.try_read().map(|m| m.values()
             .filter(|c| c.interrupted).map(|c| (c.id.clone(), c.title.clone())).collect()).unwrap_or_default();
         interrupted.sort();
-        let (settings, settings_recovered) = Settings::load_or_recover(&crate::paths::settings_file());
+        let loaded = Settings::load_full(&crate::paths::settings_file());
+        let (settings, settings_recovered) = (loaded.settings, loaded.reset);
+        // Never under test: unit tests share one process and one settings file.
+        if !cfg!(test) { crate::settings::set_read_only(loaded.newer); }
+        crate::tr::set_language(&settings.language);
         let usage: BTreeMap<String, f64> = match std::fs::read_to_string(crate::paths::usage_file()) {
             Ok(t) => serde_json::from_str(&t).unwrap_or_default(),
             // First run with the ledger: start this month from the chats created in it.
@@ -73,7 +85,46 @@ impl AppState {
             settings_recovered: AtomicBool::new(settings_recovered),
             mini_wraps_blocked: AtomicBool::new(false),
             mini_wrap_backoff: Mutex::new(HashMap::new()),
+            settings_restored: AtomicBool::new(loaded.restored),
+            settings_newer: AtomicBool::new(loaded.newer),
+            run_dirs: Default::default(),
+            run_hook: Default::default(),
         })
+    }
+
+    /// A state of its own for a unit test: default settings and an empty chat store in a fresh
+    /// temp folder, so tests running side by side never see each other's chats.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        let (tx, _) = broadcast::channel(1024);
+        let dir = std::env::temp_dir().join(format!("thoughts-test-chats-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let chats = ChatStore::load_from(&dir);
+        let _ = chats.events.set(tx.clone());
+        Self {
+            token: "test-token".into(),
+            settings: RwLock::new(Settings::default().with_defaults()),
+            chats,
+            events: tx,
+            runs: Mutex::new(HashMap::new()),
+            shutdown: Arc::new(Notify::new()),
+            git_lock: Mutex::new(()),
+            interrupted: Mutex::new(vec![]),
+            usage: Mutex::new(BTreeMap::new()),
+            library_lock: Arc::new(Mutex::new(())),
+            settings_recovered: AtomicBool::new(false),
+            mini_wraps_blocked: AtomicBool::new(false),
+            mini_wrap_backoff: Mutex::new(HashMap::new()),
+            settings_restored: AtomicBool::new(false),
+            settings_newer: AtomicBool::new(false),
+            run_dirs: Default::default(),
+            run_hook: Default::default(),
+        }
+    }
+
+    /// Is an assistant run (a chat, a workflow…) working inside `dir` right now?
+    pub fn run_active_in(&self, dir: &std::path::Path) -> bool {
+        self.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).values().any(|d| d == dir)
     }
 
     pub fn emit(&self, v: Value) {

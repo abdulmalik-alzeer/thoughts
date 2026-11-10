@@ -22,5 +22,11 @@ regex = "1"
 walkdir = "2"
 include_dir = "0.7"
 futures = "0.3"
-keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+dunce = "1"
 base64 = "0.22"
+
+# Linux: the kernel keyring alone forgets everything at reboot, so secrets also go to the desktop's
+# Secret Service (GNOME Keyring / KWallet). libdbus is built in, so no system package is needed.
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust", "vendored"] }

@@ -135,29 +135,93 @@ pub async fn ensure_in(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The Plugin API version this app implements. Anything declaring a higher one is not loaded.
+pub const API_VERSION: u64 = 1;
+
+/// Every permission a plugin may declare.
+pub const PERMISSIONS: &[&str] = &["library:read", "library:write", "todos:read", "todos:write", "ideas:read", "ideas:write", "chat:start", "storage"];
+/// What a sandboxed HTML view may declare (views only ever read).
+pub const VIEW_PERMISSIONS: &[&str] = &["library:read", "todos:read", "ideas:read"];
+
+/// A library-relative folder a plugin may write into: relative, no `..`, never `.claude` or `.git`.
+/// Returns the cleaned folder (no trailing slash).
+pub fn clean_write_folder(raw: &str) -> anyhow::Result<String> {
+    let rel = crate::paths::clean_rel(raw)?;
+    if rel.split('/').any(|c| { let c = c.to_lowercase(); c == ".claude" || c == ".git" }) { anyhow::bail!("{raw} is a protected folder"); }
+    Ok(rel)
+}
+
+pub fn unsupported_message(arabic: bool) -> &'static str {
+    if arabic { "صُنع هذا لإصدار أحدث من التطبيق. حدّث التطبيق لاستخدامه." } else { "This was made for a newer version of the app. Update the app to use it." }
+}
+
+/// The declaration of one plugin or view: its own `<stem>.json` beside it, else its entry in
+/// `manifest.json` (`plugins` / `views`), else nothing (no permissions).
+/// → `{permissions, write, apiVersion, description, unsupported, message?}`.
+pub fn resolve_decl(dir: &Path, sub: &str, file: &str, shared: &Value, arabic: bool) -> Value {
+    let stem = Path::new(file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let own_path = dir.join(sub).join(format!("{stem}.json"));
+    let own = std::fs::symlink_metadata(&own_path).ok().filter(|m| m.is_file() && m.len() <= 64 * 1024)
+        .and_then(|_| std::fs::read_to_string(&own_path).ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(Value::is_object);
+    let (decl, version) = match &own {
+        Some(o) => (o.clone(), o["apiVersion"].as_u64().unwrap_or(API_VERSION)),
+        None => (shared[sub][file].clone(), shared["apiVersion"].as_u64().unwrap_or(API_VERSION)),
+    };
+    let allowed = if sub == "views" { VIEW_PERMISSIONS } else { PERMISSIONS };
+    let mut permissions: Vec<&str> = decl["permissions"].as_array().into_iter().flatten().filter_map(Value::as_str)
+        .filter_map(|p| allowed.iter().find(|a| **a == p).copied()).collect();
+    permissions.dedup();
+    let write: Vec<String> = if sub == "views" { vec![] } else {
+        decl["write"].as_array().into_iter().flatten().filter_map(Value::as_str).filter_map(|w| clean_write_folder(w).ok()).take(20).collect()
+    };
+    let unsupported = version > API_VERSION;
+    let mut v = json!({
+        "permissions": permissions, "write": write, "apiVersion": version,
+        "description": decl["description"].as_str().map(|d| d.chars().take(300).collect::<String>()).unwrap_or_default(),
+        "unsupported": unsupported, "source": if own.is_some() { "file" } else if decl.is_object() { "manifest" } else { "none" },
+    });
+    if unsupported { v["message"] = json!(unsupported_message(arabic)); }
+    v
+}
+
 /// What the UI loads: the live layer.
 pub async fn manifest() -> Value { manifest_of(&Dirs::real().layer) }
 
 /// The layer found in `dir` (the live layer, or the staging copy for a preview).
-pub fn manifest_of(dir: &Path) -> Value {
+pub fn manifest_of(dir: &Path) -> Value { manifest_lang(dir, false) }
+
+/// Same, with user-facing messages in the UI language.
+pub fn manifest_lang(dir: &Path, arabic: bool) -> Value {
     let read = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap_or_default();
     let parsed = |p: &str| std::fs::read_to_string(dir.join(p)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+    let object = |p: &str| Some(parsed(p)).filter(Value::is_object).unwrap_or(Value::Null);
+    let shared = parsed("manifest.json");
     let list = |sub: &str, ext: &str| -> Vec<Value> {
         let mut v: Vec<Value> = std::fs::read_dir(dir.join(sub)).into_iter().flatten().flatten()
             .filter(|e| e.path().extension().map_or(false, |x| x == ext) && !e.file_name().to_string_lossy().starts_with('.'))
             .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
-            .map(|e| json!({"name": e.file_name().to_string_lossy(), "code": std::fs::read_to_string(e.path()).unwrap_or_default()}))
+            .map(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                let mut item = resolve_decl(dir, sub, &name, &shared, arabic);
+                // Code made for a newer API is listed but never handed to the UI to run.
+                item["code"] = json!(if item["unsupported"] == true { String::new() } else { std::fs::read_to_string(e.path()).unwrap_or_default() });
+                item["name"] = json!(name);
+                item
+            })
             .collect();
         v.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         v
     };
     json!({
+        "apiVersion": API_VERSION,
         "css": read("custom.css"),
         "themes": serde_json::from_str::<Value>(&read("themes.json")).ok().filter(Value::is_array).unwrap_or(json!([])),
         "plugins": list("plugins", "js"),
         "views": list("views", "html"),
-        "manifest": parsed("manifest.json"),
+        "manifest": shared,
         "home": parsed("home.json"),
+        "todos": object("todos.json"),
+        "nav": object("nav.json"),
         "workflows": crate::workflows::load(dir),
     })
 }
@@ -221,9 +285,40 @@ pub async fn revert_in(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<()>
         let _ = g.run(dir, &["revert", "--quit"]).await;
         anyhow::bail!("This change is already undone.");
     }
-    g.commit_staged(dir, &format!("Undo: {subject}"), &[]).await?;
+    let full = g.run(dir, &["rev-parse", "--verify", "--end-of-options", &commit]).await?.trim().to_string();
+    g.commit_staged(dir, &format!("Undo: {subject}\n\nReverts: {full}"), &[]).await?;
     let _ = g.run(dir, &["revert", "--quit"]).await;
     Ok(())
+}
+
+/// The subject of history entry `hash` (empty when unknown).
+pub async fn subject_in(g: Git<'_>, dir: &Path, hash: &str) -> String {
+    if !valid_hash(hash) { return String::new(); }
+    let commit = format!("{hash}^{{commit}}");
+    g.run(dir, &["log", "-1", "--format=%s", "--end-of-options", &commit]).await.unwrap_or_default().trim().to_string()
+}
+
+/// The newest change the user can still undo: not the starting point, not the app's own
+/// housekeeping (guide and built-in default updates), not an undo, and not already undone.
+pub async fn last_undoable_in(g: Git<'_>, dir: &Path) -> Option<(String, String)> {
+    let out = g.run(dir, &["log", "-200", "--format=%H%x1f%P%x1f%s%x1f%b%x1e"]).await.ok()?;
+    let recs: Vec<Vec<&str>> = out.split('\x1e').map(|r| r.trim_matches(|c| c == '\n' || c == '\r').split('\x1f').collect::<Vec<_>>()).filter(|p| p.len() == 4).collect();
+    let undone: Vec<&str> = recs.iter().flat_map(|p| p[3].lines()).filter_map(|l| l.trim().strip_prefix("Reverts: ")).collect();
+    recs.iter().find(|p| {
+        let (hash, parents, subject) = (p[0], p[1], p[2]);
+        !parents.trim().is_empty() && !undone.contains(&hash) && !p[3].lines().any(|l| l.trim().starts_with("Reverts: "))
+            && subject != "Update customisation guide" && !subject.starts_with("Update built-in defaults")
+    }).map(|p| (p[0].to_string(), p[2].to_string()))
+}
+
+/// Undo the most recent change that is still in effect. Returns `(hash, subject)` of what was undone.
+pub async fn undo_last_in(g: Git<'_>, dir: &Path, arabic: bool) -> anyhow::Result<(String, String)> {
+    snapshot(g, dir).await?;
+    let Some((hash, subject)) = last_undoable_in(g, dir).await else {
+        anyhow::bail!("{}", if arabic { "لا يوجد تغيير للتراجع عنه." } else { "There is no change to undo." });
+    };
+    revert_in(g, dir, &hash).await?;
+    Ok((hash, subject))
 }
 
 #[cfg(test)]
@@ -284,6 +379,65 @@ mod tests {
         rollback_in(st, &d.layer, &first).await.unwrap();
         assert!(!d.layer.join("plugins/a.js").exists());
         assert!(rollback_in(st, &d.layer, "HEAD~1").await.is_err());
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+    #[tokio::test]
+    async fn plugins_with_their_own_manifest_revert_independently() {
+        let (st, d) = testutil::layer("perplugin").await;
+        let add = |n: &str| {
+            std::fs::write(d.layer.join(format!("plugins/{n}.js")), format!("export default () => {{ /* {n} */ }}\n")).unwrap();
+            std::fs::write(d.layer.join(format!("plugins/{n}.json")), r#"{"apiVersion":1,"permissions":["todos:read"]}"#).unwrap();
+        };
+        add("a");
+        st.commit_all(&d.layer, "Add plugin A").await.unwrap();
+        add("b");
+        st.commit_all(&d.layer, "Add plugin B").await.unwrap();
+        let h = history_in(st, &d.layer).await;
+        assert_eq!(h[1]["summary"], "Add plugin A");
+        // No shared manifest is edited by either change, so A comes out cleanly while B stays.
+        revert_in(st, &d.layer, h[1]["hash"].as_str().unwrap()).await.unwrap();
+        assert!(!d.layer.join("plugins/a.js").exists() && !d.layer.join("plugins/a.json").exists());
+        let m = manifest_of(&d.layer);
+        assert_eq!(m["plugins"].as_array().unwrap().len(), 1);
+        assert_eq!(m["plugins"][0]["name"], "b.js");
+        assert_eq!(m["plugins"][0]["permissions"], json!(["todos:read"]));
+        // Undo-last now picks B (A is already undone, and the undo itself is not a change to undo).
+        let (_, subject) = undo_last_in(st, &d.layer, false).await.unwrap();
+        assert_eq!(subject, "Add plugin B");
+        assert!(!d.layer.join("plugins/b.js").exists());
+        assert!(undo_last_in(st, &d.layer, false).await.is_err(), "only the starting point is left");
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolves_permissions_write_folders_and_api_version() {
+        let (_st, d) = testutil::layer("resolve").await;
+        let w = |p: &str, t: &str| std::fs::write(d.layer.join(p), t).unwrap();
+        w("manifest.json", r#"{"apiVersion":1,"plugins":{"old.js":{"permissions":["todos:read","nonsense"]},"own.js":{"permissions":["chat:start"]}},"views":{"cal.html":{"permissions":["todos:read","todos:write"]}}}"#);
+        w("plugins/old.js", "export default () => {}\n");
+        w("plugins/own.js", "export default () => {}\n");
+        w("plugins/own.json", r#"{"apiVersion":1,"permissions":["library:write","storage"],"write":["clients/","../x",".git/hooks","Notes/.Claude"],"description":"Intake"}"#);
+        w("plugins/future.js", "export default () => { secret() }\n");
+        w("plugins/future.json", r#"{"apiVersion":2,"permissions":["storage"]}"#);
+        w("plugins/bare.js", "export default () => {}\n");
+        w("views/cal.html", "<p>cal</p>");
+        w("todos.json", r#"{"groupBy":"due"}"#);
+        w("nav.json", "[1,2]");
+        let m = manifest_lang(&d.layer, true);
+        let p = |n: &str| m["plugins"].as_array().unwrap().iter().find(|x| x["name"] == n).unwrap().clone();
+        assert_eq!(p("old.js")["permissions"], json!(["todos:read"]), "manifest.json is the fallback; unknown permissions are dropped");
+        assert_eq!(p("own.js")["permissions"], json!(["library:write", "storage"]), "the plugin's own file wins");
+        assert_eq!(p("own.js")["write"], json!(["clients"]));
+        assert_eq!(p("own.js")["description"], "Intake");
+        assert_eq!((p("bare.js")["permissions"].clone(), p("bare.js")["apiVersion"].clone()), (json!([]), json!(1)));
+        let f = p("future.js");
+        assert_eq!((f["unsupported"].clone(), f["code"].clone(), f["apiVersion"].clone()), (json!(true), json!(""), json!(2)));
+        assert!(f["message"].as_str().unwrap().contains("أحدث"));
+        assert_eq!(p("own.js")["unsupported"], false);
+        assert_eq!(m["views"][0]["permissions"], json!(["todos:read"]), "views only ever read");
+        assert_eq!(m["todos"]["groupBy"], "due");
+        assert!(m["nav"].is_null(), "not an object: ignored");
+        assert_eq!(m["apiVersion"], 1);
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 }

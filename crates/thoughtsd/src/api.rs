@@ -24,16 +24,82 @@ macro_rules! bail { ($($t:tt)*) => { return Err(anyhow::anyhow!($($t)*).into()) 
 type S = State<Arc<AppState>>;
 type R = Result<Json<Value>, ApiErr>;
 
+#[derive(Debug)]
 pub struct ApiErr(anyhow::Error);
 impl<E: Into<anyhow::Error>> From<E> for ApiErr {
     fn from(e: E) -> Self { ApiErr(e.into()) }
 }
+
+/// What an error response carries for the diagnostics list (see `note_errors`).
+#[derive(Clone)]
+struct ErrNote { code: &'static str, message: String }
+
 impl IntoResponse for ApiErr {
+    /// `{error, code}` with a real HTTP status: 404 not found, 409 conflict / stale, 423 busy,
+    /// 422 not valid, 403 not allowed, 500 unexpected (400 for anything unclassified). The message
+    /// is in the UI language and keeps any machine prefix (`BUSY::`, `STALE::`…) the UI matches on.
     fn into_response(self) -> Response {
-        (StatusCode::BAD_REQUEST, Json(json!({"error": self.0.to_string()}))).into_response()
+        let e = crate::tr::classify(&self.0);
+        if e.status >= 500 { crate::log::error(format!("api: {:#}", self.0)); }
+        let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
+        let mut r = (status, Json(json!({"error": e.message, "code": e.code}))).into_response();
+        r.extensions_mut().insert(ErrNote { code: e.code, message: e.message });
+        r
     }
 }
 fn ok() -> R { Ok(Json(json!({"ok": true}))) }
+
+/// The last few API errors, for the diagnostics report: `{time, method, path, status, code, error}`.
+fn recent_errors() -> &'static std::sync::Mutex<std::collections::VecDeque<Value>> {
+    static E: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<Value>>> = std::sync::OnceLock::new();
+    E.get_or_init(Default::default)
+}
+const KEEP_ERRORS: usize = 40;
+
+/// A user's home folder in a message becomes `~`, and anything credential-like is removed.
+fn scrub(text: &str) -> String {
+    let mut t = crate::log::redact(text);
+    if let Some(h) = dirs::home_dir().map(|h| h.to_string_lossy().to_string()).filter(|h| h.len() > 3) { t = t.replace(&h, "~"); }
+    t.chars().take(300).collect()
+}
+
+fn note_error(method: &str, path: &str, status: u16, code: &str, message: &str) {
+    let mut q = recent_errors().lock().unwrap_or_else(|e| e.into_inner());
+    if q.len() >= KEEP_ERRORS { q.pop_front(); }
+    q.push_back(json!({"time": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(), "method": method, "path": path,
+        "status": status, "code": code, "error": scrub(message)}));
+}
+
+/// Library endpoints that enforce the add-on rules themselves (private folders stay closed; writes
+/// only inside the folders named in `allow=`). A request carrying `scope=plugin` can reach these
+/// and no other library endpoint — so history, restore, undo and the calendar export can never be
+/// used on an add-on's behalf, whatever the page that hosts it sends.
+const PLUGIN_SCOPED: &[&str] = &["/api/library/file", "/api/library/tree", "/api/library/raw", "/api/library/search",
+    "/api/library/new", "/api/library/move", "/api/library/delete", "/api/library/version", "/api/library/ideas"];
+
+fn plugin_scoped(query: &str) -> bool { query.split('&').any(|kv| kv == "scope=plugin") }
+
+/// May a request for `path` with this query string go through? (See `PLUGIN_SCOPED`.)
+fn plugin_scope_allowed(path: &str, query: &str) -> bool {
+    if !plugin_scoped(query) { return true; }
+    let guarded = path.starts_with("/api/library/") || path == "/api/todos/calendar.ics";
+    !guarded || PLUGIN_SCOPED.contains(&path)
+}
+
+async fn plugin_gate(req: Request, next: Next) -> Response {
+    if !plugin_scope_allowed(req.uri().path(), req.uri().query().unwrap_or("")) {
+        return ApiErr(crate::tr::err("plugin.not_allowed", &[("path", req.uri().path())])).into_response();
+    }
+    next.run(req).await
+}
+
+/// Remember failed requests (route only, never the query string) for the diagnostics report.
+async fn note_errors(req: Request, next: Next) -> Response {
+    let (method, path) = (req.method().to_string(), req.uri().path().to_string());
+    let r = next.run(req).await;
+    if let Some(n) = r.extensions().get::<ErrNote>() { note_error(&method, &path, r.status().as_u16(), n.code, &n.message); }
+    r
+}
 
 pub fn router(state: Arc<AppState>) -> Router {
     let api = Router::new()
@@ -46,6 +112,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/onboarding", post(onboarding))
         .route("/api/modules", get(|| async { Json(json!(modules::list())) }))
         .route("/api/modules/:id/enable", post(enable_module))
+        .route("/api/modules/:id/disable", post(disable_module))
         .route("/api/ai/claude/options", get(claude_options))
         .route("/api/ai/claude/token", post(save_ai_token))
         .route("/api/ai/claude/login", post(claude_login))
@@ -53,6 +120,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/trust", post(trust_library))
         // library
         .route("/api/library/ideas", get(ideas))
+        .route("/api/library/ideas/status", post(idea_status))
+        .route("/api/library/new", post(new_file))
+        .route("/api/library/move", post(move_file))
+        .route("/api/library/delete", post(delete_file))
+        .route("/api/library/history", get(library_history))
+        .route("/api/library/version", get(library_version))
+        .route("/api/library/restore", post(library_restore))
+        .route("/api/library/undo", post(library_undo))
         .route("/api/library/tree", get(tree))
         .route("/api/library/file", get(read_file).put(write_file))
         .route("/api/library/raw", get(raw_file))
@@ -60,6 +135,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/search", get(search))
         .route("/api/library/stats", get(stats))
         .route("/api/todos", get(todo_list))
+        .route("/api/todos/calendar.ics", get(todo_calendar))
         .route("/api/todos/:op", post(todo_op))
         // chats
         .route("/api/chats", get(chat_list).post(chat_create))
@@ -71,6 +147,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/wrap", get(wrap_status).post(wrap_start))
         .route("/api/wrap/:id/apply", post(wrap_apply))
         .route("/api/wrap/:id/rollback", post(wrap_rollback))
+        .route("/api/wrap/:id/keep", post(wrap_keep))
         .route("/api/reorganize", post(reorg_start))
         .route("/api/reorganize/:id", get(reorg_diff))
         .route("/api/reorganize/:id/:op", post(reorg_finish))
@@ -89,6 +166,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/extensions", get(extensions))
         .route("/api/extensions/search/:op", post(search_ext))
         .route("/api/events", get(events))
+        .layer(middleware::from_fn(plugin_gate))
+        .layer(middleware::from_fn(note_errors))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         // Outermost: answer CORS preflights before auth, for the app's own origins only.
         .layer(tower_http::cors::CorsLayer::new()
@@ -138,7 +217,7 @@ async fn auth(State(st): S, req: Request, next: Next) -> Response {
 fn check_remote_name(name: &str) -> anyhow::Result<()> {
     let ok = (1..=40).contains(&name.len()) && !name.starts_with('-')
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-    if !ok { bail!("invalid backup name (use letters, digits, dots, dashes; up to 40 characters)"); }
+    if !ok { return Err(crate::tr::err("invalid.remote_name", &[])); }
     Ok(())
 }
 
@@ -146,15 +225,16 @@ fn check_remote_name(name: &str) -> anyhow::Result<()> {
 fn check_host(host: &str) -> anyhow::Result<()> {
     let ok = (1..=253).contains(&host.len()) && !host.starts_with(['-', '.'])
         && host.bytes().all(|b| b.is_ascii_alphanumeric() || b".-:".contains(&b));
-    if !ok { bail!("invalid host name"); }
+    if !ok { return Err(crate::tr::err("invalid.host", &[])); }
     Ok(())
 }
 
 /// Where a library may sync to: `https://…`, `ssh://…` or `git@host:path`. Anything git could read
 /// as an option or as a command transport (`-…`, `ext::…`, `file://…`) is refused.
 fn check_remote_url(url: &str) -> anyhow::Result<()> {
+    let bad = || crate::tr::err("invalid.url", &[]);
     if url.is_empty() || url.len() > 2000 || url.starts_with('-') || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        bail!("invalid sync address");
+        return Err(bad());
     }
     let host = if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("ssh://")) {
         let authority = rest.split('/').next().unwrap_or("");
@@ -162,12 +242,12 @@ fn check_remote_url(url: &str) -> anyhow::Result<()> {
     } else if let Some(rest) = url.strip_prefix("git@") {
         match rest.split_once(':') {
             Some((h, path)) if !path.is_empty() && !h.contains('/') => h,
-            _ => bail!("invalid sync address"),
+            _ => return Err(bad()),
         }
     } else {
-        bail!("the sync address must start with https://, ssh:// or git@");
+        return Err(bad());
     };
-    check_host(host).map_err(|_| anyhow::anyhow!("invalid sync address"))?;
+    check_host(host).map_err(|_| bad())?;
     Ok(())
 }
 
@@ -175,8 +255,53 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
 
+/// The library folder — as a plain error when none is set up, or when the folder is gone (moved,
+/// renamed, on a drive that is not connected) rather than the operating system's own wording.
 async fn lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
-    st.settings.read().await.library().ok_or_else(|| anyhow::anyhow!("no library configured"))
+    let l = st.settings.read().await.library().ok_or_else(|| crate::tr::err("library.none", &[]))?;
+    if !l.is_dir() { return Err(crate::tr::err("library.missing", &[("path", &l.display().to_string())])); }
+    Ok(l)
+}
+
+/// Nothing else may change the library while a wrap or a reorganize is being applied: a wrap that
+/// fails puts the library back exactly as it was, which would erase anything written meanwhile.
+fn library_free(st: &AppState) -> anyhow::Result<()> {
+    if st.library_busy() { return Err(crate::tr::err("busy", &[])); }
+    Ok(())
+}
+
+/// Requests made on behalf of an add-on carry `scope=plugin`: the daemon then keeps private
+/// folders closed and, for writes, only lets through paths under the folders in `allow=a,b`.
+struct Scope { plugin: bool, allow: Vec<String> }
+
+fn scope_of(q: &HashMap<String, String>) -> Scope {
+    Scope {
+        plugin: q.get("scope").map(String::as_str) == Some("plugin"),
+        allow: q.get("allow").map(|a| a.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default(),
+    }
+}
+
+impl Scope {
+    /// May this request read `rel`?
+    async fn check_read(&self, st: &AppState, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
+        if !self.plugin { return Ok(()); }
+        let private = st.settings.read().await.private_paths.clone();
+        if paths::is_private(root, rel, &private) { return Err(crate::tr::err("private", &[("path", rel)])); }
+        Ok(())
+    }
+    /// May this request write, create or delete `rel`?
+    async fn check_write(&self, st: &AppState, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
+        if !self.plugin { return Ok(()); }
+        self.check_read(st, root, rel).await?;
+        library::check_plugin_write(root, rel, &self.allow)
+    }
+}
+
+/// History is available when it is switched on and the library really is a repository.
+async fn history_lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
+    let l = lib(st).await?;
+    if !st.settings.read().await.git_enabled() || !git::is_repo(st, &l).await { return Err(crate::tr::err("no_history", &[])); }
+    Ok(l)
 }
 
 // ---------- status & settings ----------
@@ -190,6 +315,10 @@ async fn status(State(st): S) -> R {
         "interrupted": st.interrupted.lock().await.iter().map(|(id, title)| json!({"chatId": id, "title": title})).collect::<Vec<_>>(),
         "usage": {"monthCostUsd": st.month_cost().await},
         "settingsRecovered": st.settings_recovered.load(std::sync::atomic::Ordering::Relaxed),
+        "settingsRestored": st.settings_restored.load(std::sync::atomic::Ordering::Relaxed),
+        "settingsNewer": st.settings_newer.load(std::sync::atomic::Ordering::Relaxed),
+        "profession": s.profession,
+        "wrapInterrupted": wraps::interrupted_wrap(&st).await,
         "unreadableChats": st.chats.unreadable,
         "busy": st.library_busy(),
         "libraryMissing": s.library().map_or(false, |l| !l.is_dir()),
@@ -201,14 +330,48 @@ async fn status(State(st): S) -> R {
 /// The damaged-settings notice has been shown.
 async fn ack_recovered(State(st): S) -> R {
     st.settings_recovered.store(false, std::sync::atomic::Ordering::Relaxed);
+    st.settings_restored.store(false, std::sync::atomic::Ordering::Relaxed);
     ok()
 }
 
-/// What a user sends when asking for help: app version, system, and the recent log (secrets removed).
-async fn diagnostics() -> R {
+/// Settings as they may be shown to someone helping: choices stay, anything personal (names,
+/// folders, addresses) is reduced to whether it is set, or to a count.
+fn redacted_settings(s: &Settings) -> Value {
+    let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
+    let set = |x: &Value| if x.is_null() || x.as_str().map_or(false, |t| t.is_empty()) { json!(null) } else { json!("(set)") };
+    for key in ["userName", "libraryPath", "profession"] { v[key] = set(&v[key]); }
+    v["projects"] = json!(s.projects.len());
+    v["privatePaths"] = json!(s.private_paths.len());
+    for key in ["binary", "baseUrl"] { v["ai"]["claude"][key] = set(&v["ai"]["claude"][key]); }
+    let default_repo = s.search.extension_repo == crate::settings::DEFAULT_EXTENSION_REPO;
+    v["search"]["extensionRepo"] = json!(if default_repo { "(default)" } else { "(custom)" });
+    v
+}
+
+/// What a user sends when asking for help: app version, system, the assistant's version, how the
+/// library's history stands (counts only, no file names), settings with everything personal
+/// removed, the last few errors, and the recent log (secrets removed).
+async fn diagnostics(State(st): S) -> R {
+    let s = st.settings.read().await.clone();
+    let git_state = match s.library().filter(|l| l.is_dir()) {
+        Some(l) if s.git_enabled() => {
+            let g = git::status(&st, &l).await;
+            json!({"repo": g["repo"], "branch": g["branch"], "ahead": g["ahead"], "behind": g["behind"], "changedFiles": g["dirty"],
+                   "backupLocations": g["remotes"].as_array().map_or(0, |r| r.len())})
+        }
+        Some(_) => json!({"repo": false, "off": true}),
+        None => json!({"repo": false, "libraryMissing": s.library_path.is_some()}),
+    };
+    let errors: Vec<Value> = recent_errors().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "platform": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
+        "assistant": {"installed": claude::binary(&st).await.is_some(), "version": claude::version(&st).await},
+        "gitTool": git_tool_status().await,
+        "git": git_state,
+        "settings": redacted_settings(&s),
+        "errors": errors,
+        "busy": st.library_busy(),
         "log": crate::log::tail(400),
     })))
 }
@@ -219,12 +382,12 @@ async fn git_tool_status() -> Value {
     use crate::proc::command;
     #[cfg(target_os = "macos")]
     {
-        let clt = command("xcode-select").arg("-p").output().await.map(|o| o.status.success()).unwrap_or(false);
+        let clt = crate::proc::output_timeout(command("xcode-select").arg("-p"), std::time::Duration::from_secs(15)).await.map(|o| o.status.success()).unwrap_or(false);
         let brew = ["/opt/homebrew/bin/git", "/usr/local/bin/git"].iter().find(|p| std::path::Path::new(p).exists());
         if !clt && brew.is_none() { return json!({"installed": false}); }
     }
     let git_bin = claude::find_binary(&None, "git").unwrap_or_else(|| "git".into());
-    match command(git_bin).arg("--version").env("PATH", claude::shell_path()).output().await {
+    match crate::proc::output_timeout(command(git_bin).arg("--version").env("PATH", claude::shell_path()).stdin(std::process::Stdio::null()), std::time::Duration::from_secs(20)).await {
         Ok(o) if o.status.success() => json!({"installed": true,
             "version": String::from_utf8_lossy(&o.stdout).trim().trim_start_matches("git version ").to_string()}),
         _ => json!({"installed": false}),
@@ -271,7 +434,7 @@ fn shutdown_forced(body: &[u8]) -> bool {
 async fn shutdown(State(st): S, body: axum::body::Bytes) -> R {
     // Stopping halfway through a wrap or reorganize would leave the library half-changed.
     if st.library_busy() && !shutdown_forced(&body) {
-        bail!("BUSY::Your library is being updated right now. Wait for it to finish, or stop anyway.");
+        return Err(crate::tr::err("busy.shutdown", &[]).into());
     }
     crate::log::info(if st.library_busy() { "shutdown requested (forced while the library was being updated)" } else { "shutdown requested" });
     st.chats.flush(true).await;
@@ -289,7 +452,7 @@ fn cloud_folder(p: &str) -> bool {
 fn validate(s: &Settings) -> anyhow::Result<()> {
     if let Some(p) = &s.library_path {
         if s.git_enabled() && cloud_folder(p) {
-            bail!("This library is inside a cloud-synced folder. Git and iCloud/Dropbox on the same folder corrupt repositories — choose \"Folder sync\" or move the library.");
+            return Err(crate::tr::err("library.cloud", &[]));
         }
     }
     Ok(())
@@ -301,12 +464,25 @@ fn forget_api_token() -> anyhow::Result<()> {
 }
 
 async fn put_settings(State(st): S, Json(mut new): Json<Settings>) -> R {
+    // Settings written by a newer version of the app are never rewritten by this one.
+    if crate::settings::read_only() || st.settings_newer.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(crate::tr::err("newer_settings", &[]).into());
+    }
     validate(&new)?;
     // Hold the write lock across validate + save so two saves cannot interleave.
     let mut cur = st.settings.write().await;
     let old = cur.clone();
     if new.library_path != old.library_path {
-        if let Some(p) = &new.library_path { crate::trust::require(std::path::Path::new(p))?; }
+        if let Some(p) = new.library_path.clone().filter(|p| !p.trim().is_empty()) {
+            // A library can only be pointed at a folder that is really there.
+            let folder = paths::expand_tilde(p.trim())?;
+            if !folder.is_absolute() || !folder.is_dir() { return Err(crate::tr::err("library.no_folder", &[("path", p.trim())]).into()); }
+            new.library_path = Some(folder.to_string_lossy().to_string());
+            if st.library_busy() { return Err(crate::tr::err("busy", &[]).into()); }
+            crate::trust::require(&folder)?;
+        } else {
+            new.library_path = None;
+        }
     }
     // Everything the client sent is validated; server-owned fields are put back.
     let url_changed = new.sanitize_update(&old)?;
@@ -317,6 +493,7 @@ async fn put_settings(State(st): S, Json(mut new): Json<Settings>) -> R {
     }
     if new.daemon.run_at_login != old.daemon.run_at_login { login_item(new.daemon.run_at_login)?; }
     new.save()?;
+    crate::tr::set_language(&new.language);
     *cur = new.clone();
     drop(cur);
     st.emit(json!({"type": "settings.changed"}));
@@ -340,6 +517,16 @@ fn autostart_desktop_entry(exe: &str) -> String {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn windows_run_value(exe: &str) -> String { format!("\"{exe}\" --daemon") }
 
+/// Is this program running from macOS "App Translocation" — a random, read-only copy the system
+/// makes when an app is opened without having been moved out of Downloads?
+fn translocated(exe: &str) -> bool { exe.contains("/AppTranslocation/") }
+
+/// The process id launchd reports for a loaded job (`launchctl print`: a line `pid = 123`).
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn launchd_job_pid(print: &str) -> Option<u32> {
+    print.lines().map(str::trim).find_map(|l| l.strip_prefix("pid = ")).and_then(|p| p.trim().parse().ok())
+}
+
 /// Start the daemon at login: a LaunchAgent on macOS, the per-user Run key on Windows, an XDG
 /// autostart entry on Linux. Anywhere else this is an error rather than a setting that does nothing.
 /// (Windows and Linux are UNTESTED here.)
@@ -348,8 +535,15 @@ fn login_item(enable: bool) -> anyhow::Result<()> {
     {
         let agents = paths::user_home()?.join("Library/LaunchAgents");
         let plist = agents.join("app.thoughts.daemon.plist");
+        // launchd is told right away (not only at the next login), in this user's own session.
+        let domain = crate::proc::std_command("id").arg("-u").output().ok().filter(|o| o.status.success())
+            .map(|o| format!("gui/{}", String::from_utf8_lossy(&o.stdout).trim()));
+        let launchctl = |args: &[&str]| crate::proc::std_output_timeout(crate::proc::std_command("launchctl").args(args), std::time::Duration::from_secs(20));
         if enable {
-            let exe = std::env::current_exe()?;
+            let exe = paths::app_exe()?;
+            // An app opened straight from a download runs from a random read-only copy that will
+            // not exist next time: never record that path.
+            if translocated(&exe.to_string_lossy()) { return Err(crate::tr::err("login_item.translocated", &[])); }
             std::fs::create_dir_all(&agents)?;
             paths::write_atomic(&plist, format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -359,7 +553,23 @@ fn login_item(enable: bool) -> anyhow::Result<()> {
 <key>RunAtLoad</key><true/>
 </dict></plist>
 "#, xml_escape(&exe.to_string_lossy())).as_bytes(), false)?;
+            if let Some(d) = &domain {
+                // Already registered is fine. (It starts a second daemon at once, which sees this one and exits.)
+                match launchctl(&["bootstrap", d, &plist.to_string_lossy()]) {
+                    Ok(o) if !o.status.success() => crate::log::info(format!("launchctl bootstrap: {}", String::from_utf8_lossy(&o.stderr).trim())),
+                    Err(e) => crate::log::warn(format!("launchctl bootstrap could not run: {e}")),
+                    _ => {}
+                }
+            }
         } else {
+            if let Some(d) = &domain {
+                let service = format!("{d}/app.thoughts.daemon");
+                // If launchd started *this* daemon, unloading the job would end it (and every chat
+                // running in it): then only the file is removed, and launchd forgets at logout.
+                let ours = launchctl(&["print", &service]).ok().filter(|o| o.status.success())
+                    .map_or(false, |o| launchd_job_pid(&String::from_utf8_lossy(&o.stdout)) == Some(std::process::id()));
+                if !ours { let _ = launchctl(&["bootout", &service]); }
+            }
             let _ = std::fs::remove_file(plist);
         }
         Ok(())
@@ -368,7 +578,7 @@ fn login_item(enable: bool) -> anyhow::Result<()> {
     {
         const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
         let out = if enable {
-            let exe = std::env::current_exe()?;
+            let exe = paths::app_exe()?;
             crate::proc::std_command("reg").args(["add", KEY, "/v", "Thoughts", "/t", "REG_SZ", "/d", &windows_run_value(&exe.to_string_lossy()), "/f"]).output()?
         } else {
             let o = crate::proc::std_command("reg").args(["delete", KEY, "/v", "Thoughts", "/f"]).output()?;
@@ -386,7 +596,8 @@ fn login_item(enable: bool) -> anyhow::Result<()> {
         let dir = cfg.join("autostart");
         let entry = dir.join("thoughts-daemon.desktop");
         if enable {
-            let exe = std::env::current_exe()?;
+            // Inside an AppImage this is the AppImage file itself, not the temporary mount it runs from.
+            let exe = paths::app_exe()?;
             std::fs::create_dir_all(&dir)?;
             paths::write_atomic(&entry, autostart_desktop_entry(&exe.to_string_lossy()).as_bytes(), false)?;
         } else {
@@ -423,9 +634,11 @@ struct Onboarding {
 
 async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     let mut s = o.settings;
-    let path = s.library_path.clone().filter(|p| !p.trim().is_empty()).ok_or_else(|| anyhow::anyhow!("choose a library folder"))?;
+    if crate::settings::read_only() { return Err(crate::tr::err("newer_settings", &[]).into()); }
+    let path = s.library_path.clone().filter(|p| !p.trim().is_empty()).ok_or_else(|| crate::tr::err("library.choose", &[]))?;
     let path = paths::expand_tilde(path.trim())?;
-    if !path.is_absolute() { bail!("choose a library folder (a full path)"); }
+    if !path.is_absolute() { return Err(crate::tr::err("library.choose", &[]).into()); }
+    if !o.profession.trim().is_empty() { s.profession = Some(o.profession.clone()); }
     s.library_path = Some(path.to_string_lossy().to_string());
     validate(&s)?;
     // Same server-side validation as PUT /api/settings.
@@ -442,8 +655,10 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
             let _ = std::fs::remove_dir_all(path.join(".claude/skills/check-in"));
             let _ = std::fs::remove_dir_all(path.join(".claude/skills/interview-me"));
         }
+    } else if !path.is_dir() {
+        return Err(crate::tr::err("library.no_folder", &[("path", &path.display().to_string())]).into());
     } else if !path.join("CLAUDE.md").exists() && !path.join("INDEX.md").exists() {
-        bail!("{} doesn't look like a Thoughts library (no CLAUDE.md / INDEX.md)", path.display());
+        return Err(crate::tr::err("library.not_thoughts", &[("path", &path.display().to_string())]).into());
     } else {
         crate::trust::require(&path)?;
     }
@@ -463,6 +678,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     if s.daemon.run_at_login { login_item(true)?; }
     s.onboarded = true;
     s.save()?;
+    crate::tr::set_language(&s.language);
     *st.settings.write().await = s.clone();
     applayer::ensure(&st).await?;
 
@@ -504,7 +720,9 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
         // The starter's presets are installed under .claude/ during setup; drop the copy left at the top.
         library::remove_leftover_presets(&path);
         if git_on {
-            crate::log::ok_or_warn("onboarding: first commit failed", git::commit_all(&st, &path, &format!("init: library configured for {}", if name.is_empty() { "me" } else { &name })).await);
+            let first = { let _g = st.git_lock.lock().await;
+                git::commit_all(&st, &path, &git::subject::assistant(&format!("library set up for {}", if name.is_empty() { "me" } else { &name }))).await };
+            crate::log::ok_or_warn("onboarding: first commit failed", first);
             if !git::remotes(&st, &path).await.is_empty() { crate::log::ok_or_warn("onboarding: first sync failed", git::sync(&st, &path).await); }
         }
         st.emit(json!({"type": "library.changed"}));
@@ -523,25 +741,41 @@ fn onboarding_profile_line(profession: &str, language: &str) -> String {
 }
 
 async fn enable_module(State(st): S, Path(id): Path<String>) -> R {
-    let m = modules::get(&id).ok_or_else(|| anyhow::anyhow!("unknown module"))?;
-    // Check trust before switching the module on, so a refusal leaves nothing half-enabled.
-    let path = if m.add_prompt.is_empty() { None } else { let p = lib(&st).await?; crate::trust::require(&p)?; Some(p) };
+    let m = modules::get(&id).ok_or_else(|| crate::tr::err("not_found.module", &[]))?;
+    // Check everything before switching the feature on, so a refusal leaves nothing half-enabled.
+    let path = if m.add_prompt.is_empty() { None } else {
+        let p = lib(&st).await?;
+        library_free(&st)?;
+        crate::trust::require(&p)?;
+        Some(p)
+    };
     { let mut s = st.settings.write().await; s.modules.insert(id.clone(), true); s.save()?; }
+    st.emit(json!({"type": "settings.changed"}));
     let Some(path) = path else { return Ok(Json(json!({"ok": true, "chatId": null}))) };
+    // The feature's routines come from the app itself; the assistant only fits them into the library.
+    crate::log::ok_or_warn("module: could not install its routines", modules::install_skills(&path, m.id));
     let ar = st.settings.read().await.language == "ar";
-    let mut chat = Chat { title: if ar { format!("إضافة وحدة: {}", m.name_ar) } else { format!("Add module: {}", m.name) }, kind: "module".into(), ..Default::default() };
-    chat.messages.push(Msg::new("user", if ar { format!("أضف وحدة «{}».", m.name_ar) } else { format!("Add the {} module.", m.name) }));
+    let mut chat = Chat { title: if ar { format!("تفعيل ميزة: {}", m.name_ar) } else { format!("Add feature: {}", m.name) }, kind: "module".into(), ..Default::default() };
+    chat.messages.push(Msg::new("user", if ar { format!("فعّل ميزة «{}».", m.name_ar) } else { format!("Add the {} feature.", m.name) }));
     let cid = chat.id.clone();
     st.chats.insert(chat).await;
     claude::start_run(st.clone(), RunSpec { chat_id: cid.clone(), prompt: modules::add_prompt(m), cwd: path.clone(), add_dirs: vec![],
         options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, resume: None, append_system: None, extra_deny: vec![] },
         Some(Box::new(move |st: Arc<AppState>, ok| Box::pin(async move {
-            if ok && st.settings.read().await.git_enabled() {
-                crate::log::ok_or_warn("module: commit failed", git::commit_all(&st, &path, &format!("module: {}", m.id)).await);
-            }
+            if ok { claude::record_library(&st, &path, &git::subject::assistant(&format!("added {}", m.name)), true).await; }
             st.emit(json!({"type": "library.changed"}));
         })))).await?;
     Ok(Json(json!({"ok": true, "chatId": cid})))
+}
+
+/// Switch a feature off. Only the switch changes: nothing the feature created in the library —
+/// notes, lists, routines — is touched, and switching it back on finds everything as it was.
+async fn disable_module(State(st): S, Path(id): Path<String>) -> R {
+    let m = modules::get(&id).ok_or_else(|| crate::tr::err("not_found.module", &[]))?;
+    if m.id == "ideas" { return Err(crate::tr::err("module.always_on", &[]).into()); }
+    { let mut s = st.settings.write().await; s.modules.insert(id.clone(), false); s.save()?; }
+    st.emit(json!({"type": "settings.changed"}));
+    ok()
 }
 
 async fn claude_options(State(st): S) -> R { Ok(Json(claude::options(&st).await)) }
@@ -558,7 +792,7 @@ async fn save_ai_token(State(st): S, Json(t): Json<Token>) -> R {
 
 /// Opens Claude Code's browser login flow.
 async fn claude_login(State(st): S) -> R {
-    let bin = claude::binary(&st).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
+    let bin = claude::binary(&st).await.ok_or_else(|| crate::tr::err("assistant.missing", &[]))?;
     let mut c = crate::proc::command(bin);
     c.args(["auth", "login"]).env("PATH", claude::shell_path())
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
@@ -572,10 +806,20 @@ async fn claude_login(State(st): S) -> R {
 
 // ---------- library ----------
 
-async fn ideas(State(st): S) -> R { Ok(Json(json!(library::ideas(&lib(&st).await?)))) }
-/// `?exclude=private` leaves out the user's private folders — used for anything offered to the AI (the @-mention list).
+async fn ideas(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = lib(&st).await?;
+    let mut all = library::ideas(&root);
+    // For an add-on, ideas kept in a private folder do not exist.
+    if scope_of(&q).plugin {
+        let private = st.settings.read().await.private_paths.clone();
+        all.retain(|i| !paths::is_private(&root, i["path"].as_str().unwrap_or_default(), &private));
+    }
+    Ok(Json(json!(all)))
+}
+/// `?exclude=private` leaves out the user's private folders — used for anything offered to the AI
+/// (the @-mention list). Requests made for an add-on (`scope=plugin`) never see them at all.
 async fn private_filter(st: &AppState, q: &HashMap<String, String>) -> Vec<String> {
-    if q.get("exclude").map(String::as_str) == Some("private") { st.settings.read().await.private_paths.clone() } else { vec![] }
+    if q.get("exclude").map(String::as_str) == Some("private") || scope_of(q).plugin { st.settings.read().await.private_paths.clone() } else { vec![] }
 }
 async fn tree(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     Ok(Json(json!(library::tree(&lib(&st).await?, &private_filter(&st, &q).await))))
@@ -583,14 +827,19 @@ async fn tree(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
 async fn stats(State(st): S) -> R { Ok(Json(library::stats(&lib(&st).await?))) }
 
 async fn read_file(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
-    Ok(Json(library::read(&lib(&st).await?, q.get("path").map(String::as_str).unwrap_or(""))?))
+    let root = lib(&st).await?;
+    let rel = q.get("path").map(String::as_str).unwrap_or("");
+    scope_of(&q).check_read(&st, &root, rel).await?;
+    Ok(Json(library::read(&root, rel)?))
 }
 
 /// A library file's bytes with its content type, for showing images, PDFs and other non-text files.
 /// Same path rules as reading a file; 25 MB at most.
 async fn raw_file(State(st): S, Query(q): Query<HashMap<String, String>>) -> Result<Response, ApiErr> {
     let rel = q.get("path").map(String::as_str).unwrap_or("");
-    let (bytes, mime) = library::read_raw(&lib(&st).await?, rel)?;
+    let root = lib(&st).await?;
+    scope_of(&q).check_read(&st, &root, rel).await?;
+    let (bytes, mime) = library::read_raw(&root, rel)?;
     Ok(([
         (header::CONTENT_TYPE, HeaderValue::from_static(mime)),
         (header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")),
@@ -610,10 +859,139 @@ struct WriteFile {
     #[serde(default)]
     base_hash: Option<String>,
 }
-async fn write_file(State(st): S, Json(w): Json<WriteFile>) -> R {
-    let hash = library::write_checked(&lib(&st).await?, &w.path, &w.content, w.base_hash.as_deref())?;
+async fn write_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(w): Json<WriteFile>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st)?;
+    scope_of(&q).check_write(&st, &root, &w.path).await?;
+    let hash = library::write_checked(&root, &w.path, &w.content, w.base_hash.as_deref())?;
     st.emit(json!({"type": "library.changed"}));
     Ok(Json(json!({"ok": true, "hash": hash})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct NewFile { path: String, content: String }
+/// Create a file (never replacing one). `{path, content?}` → `{ok, path, hash}`.
+async fn new_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(n): Json<NewFile>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st)?;
+    let rel = n.path.trim().replace('\\', "/");
+    scope_of(&q).check_write(&st, &root, &rel).await?;
+    let hash = library::create(&root, &rel, &n.content)?;
+    st.emit(json!({"type": "library.changed"}));
+    Ok(Json(json!({"ok": true, "path": rel, "hash": hash})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct MoveFile { from: String, to: String }
+/// Move or rename a file or folder (never onto something that exists). `{from, to}` → `{ok, path}`.
+async fn move_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(m): Json<MoveFile>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st)?;
+    let to = m.to.trim().replace('\\', "/");
+    let scope = scope_of(&q);
+    scope.check_write(&st, &root, &m.from).await?;
+    scope.check_write(&st, &root, &to).await?;
+    library::rename(&root, &m.from, &to)?;
+    st.emit(json!({"type": "library.changed"}));
+    st.emit(json!({"type": "todos.changed"}));
+    Ok(Json(json!({"ok": true, "path": to})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct DeleteFile { path: String }
+/// Delete a file (or an empty folder). When history is on the library is recorded just before and
+/// just after, so the file can be brought back from History. → `{ok, recoverable}`.
+async fn delete_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(d): Json<DeleteFile>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st)?;
+    scope_of(&q).check_write(&st, &root, &d.path).await?;
+    // Fail on a bad or missing path before anything is recorded.
+    let target = library::resolve(&root, &d.path)?;
+    if std::fs::symlink_metadata(&target).is_err() { return Err(crate::tr::err("not_found.file", &[]).into()); }
+    let recoverable = history_lib(&st).await.is_ok() && wraps::interrupted_wrap(&st).await.is_none();
+    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("changes before deleting {}", d.path)), true).await; }
+    library::remove(&root, &d.path)?;
+    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("deleted {}", d.path)), true).await; }
+    st.emit(json!({"type": "library.changed"}));
+    st.emit(json!({"type": "todos.changed"}));
+    Ok(Json(json!({"ok": true, "recoverable": recoverable})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct IdeaStatus { path: String, status: String }
+/// Change an idea's status (`{path: "<area>/<slug>/README.md" or "<area>/<slug>", status}`).
+async fn idea_status(State(st): S, Json(i): Json<IdeaStatus>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st)?;
+    let rel = i.path.trim().trim_matches('/').replace('\\', "/");
+    let rel = if rel.to_lowercase().ends_with(".md") { rel } else { format!("{rel}/README.md") };
+    if !rel.ends_with("/README.md") { return Err(crate::tr::err("invalid.path", &[]).into()); }
+    // Ideas inside a private folder are the user's own business: add-ons work through this endpoint.
+    if paths::is_private(&root, &rel, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", &rel)]).into()); }
+    library::set_idea_status(&root, &rel, &i.status, chrono::Local::now().date_naive())?;
+    st.emit(json!({"type": "library.changed"}));
+    ok()
+}
+
+// ---------- library history ----------
+
+/// `GET /api/library/history?path=&limit=50` → `[{hash, short, date, subject, kind, files}]`, newest first.
+async fn library_history(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = history_lib(&st).await?;
+    let limit = q.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(50).clamp(1, 200);
+    let path = q.get("path").map(|p| p.trim().trim_start_matches("./").trim_matches('/').replace('\\', "/")).filter(|p| !p.is_empty());
+    if let Some(p) = &path { library::resolve(&root, p)?; }
+    Ok(Json(json!(git::history(&st, &root, path.as_deref(), limit).await?)))
+}
+
+/// `GET /api/library/version?path=&hash=` → `{content}`: a file as it was at that point in the history.
+async fn library_version(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = history_lib(&st).await?;
+    let rel = q.get("path").map(String::as_str).unwrap_or("");
+    library::resolve(&root, rel)?;
+    scope_of(&q).check_read(&st, &root, rel).await?;
+    let bytes = git::file_at(&st, &root, rel, q.get("hash").map(String::as_str).unwrap_or("")).await?;
+    if bytes.len() as u64 > library::RAW_MAX_BYTES { return Err(crate::tr::err("too_large.show", &[]).into()); }
+    Ok(Json(json!({"path": rel, "content": String::from_utf8_lossy(&bytes)})))
+}
+
+/// What changing the library's history needs: history on, nothing else changing the library, no
+/// cut-off wrap waiting, no assistant at work in it. The returned guard keeps a wrap from starting meanwhile.
+async fn history_change(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, tokio::sync::OwnedMutexGuard<()>)> {
+    let root = history_lib(st).await?;
+    wraps::require_no_interrupted(st).await?;
+    if st.run_active_in(&root) { return Err(crate::tr::err("busy.run", &[])); }
+    let guard = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    Ok((root, guard))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Restore { path: String, hash: String }
+/// `POST /api/library/restore {path, hash}`: put that version of one file back, as a new history entry.
+async fn library_restore(State(st): S, Json(r): Json<Restore>) -> R {
+    let (root, _guard) = history_change(&st).await?;
+    library::resolve(&root, &r.path)?;
+    let v = git::restore_file(&st, &root, &r.path, &r.hash).await?;
+    st.emit(json!({"type": "library.changed"}));
+    st.emit(json!({"type": "todos.changed"}));
+    Ok(Json(v))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Undo { hash: String }
+/// `POST /api/library/undo {hash}`: undo one whole change, as a new history entry (`CONFLICT::files` if it cannot).
+async fn library_undo(State(st): S, Json(u): Json<Undo>) -> R {
+    let (root, _guard) = history_change(&st).await?;
+    let v = git::undo_commit(&st, &root, &u.hash).await?;
+    st.emit(json!({"type": "library.changed"}));
+    st.emit(json!({"type": "todos.changed"}));
+    Ok(Json(v))
 }
 
 async fn search(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
@@ -628,15 +1006,17 @@ struct ImportReq { files: Vec<ImportFile> }
 /// Copy files chosen by the user into `<library>/imports/` (basename only, never overwriting).
 async fn import_files(State(st): S, Json(req): Json<ImportReq>) -> R {
     let root = lib(&st).await?;
-    if req.files.is_empty() { bail!("no files to import"); }
+    library_free(&st)?;
+    if req.files.is_empty() { return Err(crate::tr::err("import.empty", &[]).into()); }
     // Decode and check everything first, so one bad file doesn't leave a half-finished import.
     let mut decoded = vec![];
     for f in &req.files {
+        let name = library::sanitize_file_name(&f.name);
         let b64 = f.data_base64.rsplit(',').next().unwrap_or("").trim();
-        if b64.len() / 4 * 3 > library::IMPORT_MAX_BYTES + 3 { bail!("{} is larger than 25 MB", library::sanitize_file_name(&f.name)); }
+        if b64.len() / 4 * 3 > library::IMPORT_MAX_BYTES + 3 { return Err(crate::tr::err("too_large", &[("name", &name)]).into()); }
         let bytes = base64::engine::general_purpose::STANDARD.decode(b64)
-            .map_err(|_| anyhow::anyhow!("{} could not be read", library::sanitize_file_name(&f.name)))?;
-        if bytes.len() > library::IMPORT_MAX_BYTES { bail!("{} is larger than 25 MB", library::sanitize_file_name(&f.name)); }
+            .map_err(|_| crate::tr::err("unreadable", &[("name", &name)]))?;
+        if bytes.len() > library::IMPORT_MAX_BYTES { return Err(crate::tr::err("too_large", &[("name", &name)]).into()); }
         decoded.push((&f.name, bytes));
     }
     let mut out = vec![];
@@ -645,21 +1025,49 @@ async fn import_files(State(st): S, Json(req): Json<ImportReq>) -> R {
     Ok(Json(json!({"paths": out})))
 }
 
-async fn todo_list(State(st): S) -> R { Ok(Json(json!(todos::list(&lib(&st).await?)))) }
+async fn todo_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = lib(&st).await?;
+    let mut lists = todos::list(&root);
+    // For an add-on, task lists kept in a private folder do not exist.
+    if scope_of(&q).plugin {
+        let private = st.settings.read().await.private_paths.clone();
+        lists.retain(|l| !paths::is_private(&root, l["file"].as_str().unwrap_or_default(), &private));
+    }
+    Ok(Json(json!(lists)))
+}
+
+/// `GET /api/todos/calendar.ics`: open tasks with a due date as an iCalendar file, for importing
+/// into any calendar app.
+async fn todo_calendar(State(st): S) -> Result<Response, ApiErr> {
+    let root = lib(&st).await?;
+    Ok(([
+        (header::CONTENT_TYPE, HeaderValue::from_static("text/calendar; charset=utf-8")),
+        (header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment; filename=\"thoughts-todos.ics\"")),
+        (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+    ], todos::calendar(&root, chrono::Utc::now())).into_response())
+}
 
 /// Only real todo files, and never one inside a protected folder.
 fn check_todo_file(file: &str) -> anyhow::Result<()> {
-    if !(file == "TODO.md" || file.ends_with("/TODO.md") || file.ends_with("/todo.md")) || library::denied(file) { bail!("not a todo file"); }
+    if !(file == "TODO.md" || file.ends_with("/TODO.md") || file.ends_with("/todo.md")) || library::denied(file) { return Err(crate::tr::err("todo.not_file", &[])); }
     Ok(())
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct TodoOp { file: String, line: usize, text: String, new_text: String }
-async fn todo_op(State(st): S, Path(op): Path<String>, Json(t): Json<TodoOp>) -> R {
+async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<String, String>>, Json(t): Json<TodoOp>) -> R {
     let root = lib(&st).await?;
+    library_free(&st)?;
     let file = if t.file.is_empty() { todos::files(&root).into_iter().next().unwrap_or_else(|| "TODO.md".into()) } else { t.file.clone() };
     check_todo_file(&file)?;
+    if scope_of(&q).plugin {
+        // An add-on names a list plainly (no `.` or `..` steps) and never one in a private folder,
+        // however the folder is spelled or linked.
+        let clean = paths::clean_rel(&file).map_err(|_| crate::tr::err("invalid.path", &[]))?;
+        if clean != file.replace('\\', "/") { return Err(crate::tr::err("invalid.path", &[]).into()); }
+        if paths::is_private(&root, &file, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", &file)]).into()); }
+    }
     match op.as_str() {
         "toggle" => todos::toggle(&root, &file, t.line, &t.text)?,
         "add" => todos::add(&root, &file, &t.text)?,
@@ -674,6 +1082,7 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Json(t): Json<TodoOp>) ->
 // ---------- chats ----------
 
 async fn chat_list(State(st): S) -> R {
+    // Summaries only: no chat's messages are copied to build the list.
     Ok(Json(json!(st.chats.list().await.iter().map(|c| c.summary()).collect::<Vec<_>>())))
 }
 
@@ -690,7 +1099,7 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     c.project_id = n.project_id;
     if let Some(k) = n.kind.filter(|k| k == "chat" || k == "customize") { c.kind = k; }
     c.provider = n.provider.unwrap_or(s.ai.primary.clone());
-    c.options = RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone() };
+    c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone() });
     if c.kind == "customize" { c.title = customize_title(ar).into(); }
     let id = c.id.clone();
     let v = serde_json::to_value(&c)?;
@@ -709,8 +1118,17 @@ fn check_run_options(o: &RunOptions) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// "Ask before changes" (`default`) no longer exists; wherever it still arrives it means `plan`.
+fn normalized(mut o: RunOptions) -> RunOptions {
+    o.permission_mode = crate::settings::effective_permission_mode(o.permission_mode.as_deref()).map(String::from);
+    o
+}
+
+fn no_chat() -> anyhow::Error { crate::tr::err("not_found.chat", &[]) }
+
 async fn chat_get(State(st): S, Path(id): Path<String>) -> R {
-    Ok(Json(serde_json::to_value(st.chats.get(&id).await.ok_or_else(|| anyhow::anyhow!("no such chat"))?)?))
+    // Serialised straight from the store: the chat is not copied first.
+    Ok(Json(st.chats.with(&id, |c| serde_json::to_value(c)).await.ok_or_else(no_chat)??))
 }
 
 async fn chat_delete(State(st): S, Path(id): Path<String>) -> R {
@@ -727,8 +1145,8 @@ async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatc
     let c = st.chats.update(&id, |c| {
         if let Some(t) = p.title { c.title = t; }
         if let Some(pid) = p.project_id { c.project_id = pid; }
-        if let Some(o) = p.options { c.options = o; }
-    }).await.ok_or_else(|| anyhow::anyhow!("no such chat"))?;
+        if let Some(o) = p.options { c.options = normalized(o); }
+    }).await.ok_or_else(no_chat)?;
     st.emit(json!({"type": "chat.updated", "chat": c.summary()}));
     Ok(Json(c.summary()))
 }
@@ -740,8 +1158,8 @@ struct Attachment { name: String, data: String }
 struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<String>, options: Option<RunOptions> }
 
 async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>) -> R {
-    let chat = st.chats.get(&id).await.ok_or_else(|| anyhow::anyhow!("no such chat"))?;
-    if chat.running { bail!("this chat is still running"); }
+    let chat = st.chats.get(&id).await.ok_or_else(no_chat)?;
+    if chat.running { return Err(crate::tr::err("chat.running", &[]).into()); }
     if let Some(o) = &m.options { check_run_options(o)?; }
     if let Some(lib) = st.settings.read().await.library() { crate::trust::require(&lib)?; }
     if chat.provider != "claude" { bail!("Codex support arrives in the next milestone"); }
@@ -752,11 +1170,18 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         // Customising never writes to the live layer: the run works in a staging copy the user applies later.
         ("customize", _) => (crate::staging::prepare_run(&st, &id).await?, library.clone().into_iter().collect()),
         (_, Some(pid)) => {
-            let p = s.projects.iter().find(|p| &p.id == pid).ok_or_else(|| anyhow::anyhow!("project not found"))?;
+            let p = s.projects.iter().find(|p| &p.id == pid).ok_or_else(|| crate::tr::err("not_found.project", &[]))?;
             (std::path::PathBuf::from(&p.path), library.clone().into_iter().collect())
         }
-        _ => (library.clone().ok_or_else(|| anyhow::anyhow!("no library configured"))?, vec![]),
+        _ => (lib(&st).await?, vec![]),
     };
+    // While a wrap or reorganize is changing the library, no other assistant run may write into
+    // it: if the wrap failed, undoing it would erase that work too. (A customise run only reads it.)
+    if let Some(l) = &library {
+        let touches_library = cwd == *l || (chat.kind != "customize" && add_dirs.contains(l));
+        if touches_library && st.library_busy() { return Err(crate::tr::err("busy", &[]).into()); }
+    }
+    if !cwd.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &cwd.display().to_string())]).into()); }
     // Fail on an untrusted folder before anything is saved (the run start checks again).
     let layer = paths::app_layer_dir();
     let staging_dir = paths::app_layer_staging_dir();
@@ -764,10 +1189,10 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     // Referenced files: library-relative only, never protected or private ones.
     let mut mention_paths = vec![];
     if !m.mentions.is_empty() {
-        let l = library.as_ref().ok_or_else(|| anyhow::anyhow!("no library configured"))?;
+        let l = library.as_ref().ok_or_else(|| crate::tr::err("library.none", &[]))?;
         for r in &m.mentions {
             let abs = library::resolve_mention(l, r)?;
-            if paths::is_under(r, &s.private_paths) { bail!("{r} is in a private folder and cannot be shared with the assistant"); }
+            if paths::is_private(l, r, &s.private_paths) { return Err(crate::tr::err("private.mention", &[("path", r)]).into()); }
             mention_paths.push(abs.to_string_lossy().to_string());
         }
     }
@@ -775,7 +1200,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let mut saved = vec![];
     if !m.attachments.is_empty() {
         let dir = paths::attachments_dir().join(&id);
-        if !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { bail!("no such chat"); }
+        if !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { return Err(no_chat().into()); }
         paths::create_private_dir(&dir)?;
         for a in &m.attachments {
             let name = library::sanitize_file_name(&a.name);
@@ -798,7 +1223,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let mut um = Msg::new("user", &m.text);
     um.attachments = saved;
     um.tool = (!m.mentions.is_empty()).then(|| json!({"mentions": m.mentions}));
-    let opts = m.options.unwrap_or(chat.options.clone());
+    let opts = normalized(m.options.unwrap_or(chat.options.clone()));
     let updated = st.chats.update(&id, |c| {
         c.messages.push(um.clone());
         c.dirty = true;
@@ -806,7 +1231,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         c.updated = chrono::Utc::now();
         c.options = opts.clone();
         if first && c.kind == "chat" { c.title = m.text.lines().next().unwrap_or("Chat").chars().take(60).collect(); }
-    }).await.ok_or_else(|| anyhow::anyhow!("no such chat"))?;
+    }).await.ok_or_else(no_chat)?;
     st.emit(json!({"type": "chat.message", "chatId": id, "message": um}));
     st.emit(json!({"type": "chat.updated", "chat": updated.summary()}));
     let append = Some("You are running inside the Thoughts desktop app's chat. The user cannot answer interactive tool prompts or \
@@ -845,6 +1270,8 @@ struct Note { note: String, instructions: String }
 async fn wrap_apply(State(st): S, Path(id): Path<String>, Json(n): Json<Note>) -> R { wraps::apply(st.clone(), &id, &n.note).await?; ok() }
 /// Undo the partial changes of a wrap that was cut off by a restart.
 async fn wrap_rollback(State(st): S, Path(id): Path<String>) -> R { wraps::rollback(&st, &id).await?; ok() }
+/// Keep the partial changes of a wrap that was cut off, as they are (its chats stay to be wrapped again).
+async fn wrap_keep(State(st): S, Path(id): Path<String>) -> R { wraps::keep_partial(&st, &id).await?; ok() }
 async fn reorg_start(State(st): S, Json(n): Json<Note>) -> R { Ok(Json(json!({"chatId": wraps::reorganize_start(st.clone(), &n.instructions).await?}))) }
 async fn reorg_diff(State(st): S, Path(id): Path<String>) -> R { Ok(Json(wraps::reorganize_diff(&st, &id).await?)) }
 async fn reorg_finish(State(st): S, Path((id, op)): Path<(String, String)>) -> R {
@@ -862,26 +1289,33 @@ async fn git_status(State(st): S) -> R {
     v["mode"] = json!(s.sync.mode);
     Ok(Json(v))
 }
+/// What a sync needs before it may touch the library: sync switched on, no wrap or reorganize in
+/// the middle of changing it (`BUSY::`), no cut-off wrap still waiting for a decision
+/// (`WRAP_INTERRUPTED::<chatId>` — syncing would publish the half-applied wrap and take away its
+/// undo), and no assistant at work in it (`BUSY::`).
+async fn sync_guard(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, tokio::sync::OwnedMutexGuard<()>)> {
+    let l = lib(st).await?;
+    if !st.settings.read().await.git_enabled() { return Err(crate::tr::err("git.off", &[])); }
+    let guard = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    wraps::require_no_interrupted(st).await?;
+    if st.run_active_in(&l) { return Err(crate::tr::err("busy.run", &[])); }
+    Ok((l, guard))
+}
+
 async fn git_sync(State(st): S) -> R {
-    let l = lib(&st).await?;
-    if !st.settings.read().await.git_enabled() { bail!("git sync is off for this library"); }
-    // Never sync a half-applied wrap or reorganize.
-    let _busy = st.library_lock.clone().try_lock_owned().map_err(|_| anyhow::anyhow!(LIBRARY_BUSY))?;
+    let (l, _busy) = sync_guard(&st).await?;
     let v = git::sync(&st, &l).await?;
     st.emit(json!({"type": "library.changed"}));
     Ok(Json(v))
 }
 
-const LIBRARY_BUSY: &str = "BUSY::Your library is being updated right now. Try again when that has finished.";
-
 #[derive(Deserialize)]
 struct Resolve { strategy: String }
 /// Finish a sync that reported `CONFLICT::…`, keeping "mine" or "theirs" where the two disagree.
-/// The local version is always kept first as a `backup/<timestamp>` branch.
+/// When the two really clash the local version is kept first as a `backup/<timestamp>` branch
+/// (`backup` in the answer; `null` when there was nothing to settle and no backup was needed).
 async fn git_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
-    let l = lib(&st).await?;
-    if !st.settings.read().await.git_enabled() { bail!("git sync is off for this library"); }
-    let _busy = st.library_lock.clone().try_lock_owned().map_err(|_| anyhow::anyhow!(LIBRARY_BUSY))?;
+    let (l, _busy) = sync_guard(&st).await?;
     let v = git::resolve(&st, &l, &r.strategy).await?;
     st.emit(json!({"type": "library.changed"}));
     Ok(Json(v))
@@ -915,7 +1349,7 @@ struct Cred { host: String, username: String, token: String }
 async fn save_cred(State(st): S, Json(c): Json<Cred>) -> R {
     let host = c.host.trim();
     check_host(host)?;
-    if c.username.chars().any(char::is_control) || c.token.chars().any(char::is_control) { bail!("invalid credential"); }
+    if c.username.chars().any(char::is_control) || c.token.chars().any(char::is_control) { return Err(crate::tr::err("invalid.credential", &[]).into()); }
     git::save_credential(&st, host, &c.username, &c.token).await?;
     ok()
 }
@@ -933,14 +1367,15 @@ async fn project_add(State(st): S, Json(p): Json<NewProject>) -> R {
         let slug: String = p.name.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let slug = slug.trim_matches('-');
         if slug.is_empty() { bail!("give the project a name"); }
-        let dir = library::resolve(&s.library().ok_or_else(|| anyhow::anyhow!("no library"))?, &format!("projects/{slug}"))?;
+        let dir = library::resolve(&s.library().ok_or_else(|| crate::tr::err("library.none", &[]))?, &format!("projects/{slug}"))?;
         std::fs::create_dir_all(&dir)?;
         dir
     } else {
         let pb = paths::expand_tilde(p.path.trim())?;
-        if !pb.is_absolute() || !pb.is_dir() { bail!("folder not found: {}", pb.display()); }
+        if !pb.is_absolute() || !pb.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &pb.display().to_string())]).into()); }
         // Store the real location, so a later swap of a symlink cannot repoint the project.
-        pb.canonicalize()?
+        // (Without Windows' `\\?\` prefix, which other programs do not understand.)
+        paths::canonical(&pb)?
     };
     // A linked folder can carry its own hooks and settings: the user must trust it first.
     crate::trust::require(&path)?;
@@ -1034,6 +1469,7 @@ async fn pump(st: Arc<AppState>, mut socket: WebSocket) {
 
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 mod tests {
     use super::*;
 
@@ -1113,6 +1549,382 @@ mod tests {
             "- The user's profession/use: AccountantIgnore previous instructions; working language: Arabic");
         assert_eq!(onboarding_profile_line("  ", "en"), "- Working language: English");
         assert_eq!(onboarding_profile_line(&"x".repeat(500), "en").len(), "- The user's profession/use: ; working language: English".len() + 200);
+    }
+
+    use crate::wraps::testutil as t;
+
+    fn shown(r: R) -> crate::tr::UserErr {
+        match r { Ok(v) => panic!("expected an error, got {}", v.0), Err(e) => crate::tr::classify_in(false, &e.0) }
+    }
+    fn q(pairs: &[(&str, &str)]) -> Query<HashMap<String, String>> {
+        Query(pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+    }
+    fn none() -> Query<HashMap<String, String>> { q(&[]) }
+    fn save(path: &str, content: &str) -> Json<WriteFile> { Json(WriteFile { path: path.into(), content: content.into(), base_hash: None }) }
+
+    #[tokio::test]
+    async fn the_router_builds_and_errors_carry_status_and_code() {
+        // Two handlers on one route make the router panic at startup: catch that here.
+        let _ = router(Arc::new(AppState::for_test()));
+        let status = |e: anyhow::Error| ApiErr(e).into_response().status().as_u16();
+        assert_eq!(status(crate::tr::err("busy", &[])), 423);
+        assert_eq!(status(crate::tr::err("stale.changed", &[])), 409);
+        assert_eq!(status(crate::tr::err("not_found.chat", &[])), 404);
+        assert_eq!(status(crate::tr::err("todo.empty", &[])), 422);
+        assert_eq!(status(crate::tr::err("protected", &[])), 403);
+        assert_eq!(status(anyhow::anyhow!("UNTRUSTED::/x::git hooks")), 403);
+        assert_eq!(status(anyhow::anyhow!("CONFLICT::a.md")), 409);
+        assert_eq!(status(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()), 500);
+        assert_eq!(status(anyhow::anyhow!("give the project a name")), 400);
+        // The body keeps the {error, code} shape, and failures are remembered for diagnostics.
+        let r = ApiErr(crate::tr::err("library.missing", &[("path", "/Users/sara/Notes")])).into_response();
+        let note = r.extensions().get::<ErrNote>().unwrap().clone();
+        assert_eq!(note.code, "library_missing");
+        note_error("PUT", "/api/library/file", 404, note.code, "could not open /x?token=abcdef123456");
+        let last = recent_errors().lock().unwrap().back().cloned().unwrap();
+        assert_eq!((last["path"].as_str(), last["status"].as_u64(), last["code"].as_str()), (Some("/api/library/file"), Some(404), Some("library_missing")));
+        assert!(!last["error"].as_str().unwrap().contains("abcdef123456"));
+        for _ in 0..KEEP_ERRORS + 10 { note_error("GET", "/x", 400, "error", "m"); }
+        assert_eq!(recent_errors().lock().unwrap().len(), KEEP_ERRORS);
+    }
+
+    #[tokio::test]
+    async fn a_missing_library_is_said_plainly() {
+        let st = Arc::new(AppState::for_test());
+        assert_eq!(shown(todo_list(State(st.clone()), none()).await).code, "no_library");
+        st.settings.write().await.library_path = Some("/nowhere/at/all/Notes".into());
+        let e = shown(todo_list(State(st.clone()), none()).await);
+        assert_eq!((e.status, e.code), (404, "library_missing"));
+        assert!(e.message.contains("/nowhere/at/all/Notes") && !e.message.contains("os error"));
+        let e = shown(write_file(State(st.clone()), none(), save("a.md", "x")).await);
+        assert_eq!(e.code, "library_missing");
+        // Pointing settings at a folder that is not there is refused, and nothing changes.
+        let mut wanted = st.settings.read().await.clone();
+        wanted.library_path = Some("/also/not/there".into());
+        assert_eq!(shown(put_settings(State(st.clone()), Json(wanted)).await).status, 422);
+        assert_eq!(st.settings.read().await.library_path.as_deref(), Some("/nowhere/at/all/Notes"));
+    }
+
+    #[tokio::test]
+    async fn nothing_else_changes_the_library_while_a_wrap_is_being_saved() {
+        let (st, lib) = t::library().await;
+        let chat = t::chat(&st, "plan the shop").await;
+        let other = t::chat(&st, "another conversation").await;
+        let wrap = t::wrap_ready(&st, &[chat.clone()]).await;
+        // The assistant is "working" until the test lets it go, then fails.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (g, lib2, wid) = (gate.clone(), lib.clone(), wrap.clone());
+        t::assistant(&st, move |info| { let (g, lib, wid) = (g.clone(), lib2.clone(), wid.clone()); async move {
+            assert_eq!(info.chat_id, wid, "no other run may start while the wrap holds the library");
+            t::write(&lib, "ideas/shop/README.md", "half rewritten");
+            g.notified().await;
+            false
+        } });
+        let mut rx = st.events.subscribe();
+        wraps::apply(st.clone(), &wrap, "").await.unwrap();
+        assert!(st.library_busy());
+
+        // Every way of changing the library answers BUSY (423) and changes nothing.
+        let busy = |r: R| { let e = shown(r); assert!(e.message.starts_with("BUSY::"), "{}", e.message); assert_eq!((e.status, e.code), (423, "busy")); };
+        busy(write_file(State(st.clone()), none(), save("notes/today.md", "typed during the wrap")).await);
+        busy(todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "new task".into(), ..Default::default() })).await);
+        busy(todo_op(State(st.clone()), Path("toggle".into()), none(), Json(TodoOp { file: "TODO.md".into(), line: 2, text: "call the bank".into(), ..Default::default() })).await);
+        busy(import_files(State(st.clone()), Json(ImportReq { files: vec![ImportFile { name: "a.txt".into(), data_base64: "aGk=".into() }] })).await);
+        busy(new_file(State(st.clone()), none(), Json(NewFile { path: "notes/new.md".into(), content: "x".into() })).await);
+        busy(move_file(State(st.clone()), none(), Json(MoveFile { from: "README.md".into(), to: "READ.md".into() })).await);
+        busy(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "README.md".into() })).await);
+        busy(idea_status(State(st.clone()), Json(IdeaStatus { path: "ideas/shop".into(), status: "active".into() })).await);
+        busy(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
+        busy(library_undo(State(st.clone()), Json(Undo { hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
+        busy(git_sync(State(st.clone())).await);
+        busy(git_resolve(State(st.clone()), Json(Resolve { strategy: "mine".into() })).await);
+        busy(chat_send(State(st.clone()), Path(other.clone()), Json(SendBody { text: "write a note".into(), ..Default::default() })).await);
+        busy(enable_module(State(st.clone()), Path("docs".into())).await);
+        busy(wrap_start(State(st.clone())).await);
+        busy(shutdown(State(st.clone()), axum::body::Bytes::new()).await);
+        // Reading is never blocked.
+        assert!(todo_list(State(st.clone()), none()).await.is_ok());
+        assert!(read_file(State(st.clone()), q(&[("path", "README.md")])).await.is_ok());
+        // The refused message was not added to the other chat.
+        assert_eq!(st.chats.meta(&other).await.unwrap().message_count, 1);
+
+        gate.notify_one();
+        assert_eq!(t::event(&mut rx, &st, "wrap.failed").await["rolledBack"], true);
+        assert_eq!(t::read(&lib, "ideas/shop/README.md"), "---\ntitle: Shop\nstatus: seed\n---\nOriginal idea.\n");
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [ ] call the bank\n");
+        assert!(!lib.join("notes").exists() && !lib.join("imports").exists() && lib.join("README.md").exists());
+        // And afterwards everything works again.
+        write_file(State(st.clone()), none(), save("notes/today.md", "typed after the wrap")).await.unwrap();
+        todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "new task".into(), ..Default::default() })).await.unwrap();
+        assert_eq!(t::read(&lib, "notes/today.md"), "typed after the wrap");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cut_off_wrap_blocks_sync_until_it_is_finished_or_undone() {
+        let (st, lib) = t::library().await;
+        let chat = t::chat(&st, "plan the shop").await;
+        let wrap = t::wrap_ready(&st, &[chat]).await;
+        let snap = t::sh(&lib, &["rev-parse", "HEAD"]);
+        let s = snap.clone();
+        st.chats.update(&wrap, |c| { c.meta["phase"] = json!("applying"); c.meta["snapshot"] = json!(s); }).await;
+        t::write(&lib, "ideas/shop/README.md", "half rewritten");
+        t::write(&lib, "ideas/shop/log.md", "half a log");
+        wraps::recover(&st).await;
+
+        let interrupted = |r: R| { let e = shown(r); assert_eq!((e.message.as_str(), e.status, e.code), (format!("WRAP_INTERRUPTED::{wrap}").as_str(), 409, "wrap_interrupted")); };
+        interrupted(git_sync(State(st.clone())).await);
+        interrupted(git_resolve(State(st.clone()), Json(Resolve { strategy: "mine".into() })).await);
+        interrupted(wrap_start(State(st.clone())).await);
+        interrupted(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: snap.clone() })).await);
+        interrupted(library_undo(State(st.clone()), Json(Undo { hash: snap.clone() })).await);
+        let status = status(State(st.clone())).await.unwrap().0;
+        assert_eq!(status["wrapInterrupted"], wrap.as_str());
+        // Nothing was recorded or published: the undo point is intact.
+        assert_eq!(t::sh(&lib, &["rev-parse", "HEAD"]), snap);
+        // Deleting a file meanwhile works, but records nothing either.
+        let v = delete_file(State(st.clone()), none(), Json(DeleteFile { path: "TODO.md".into() })).await.unwrap().0;
+        assert_eq!(v["recoverable"], false);
+        assert_eq!(t::sh(&lib, &["rev-parse", "HEAD"]), snap);
+
+        wrap_rollback(State(st.clone()), Path(wrap.clone())).await.unwrap();
+        assert_eq!(t::read(&lib, "ideas/shop/README.md"), "---\ntitle: Shop\nstatus: seed\n---\nOriginal idea.\n");
+        assert!(!lib.join("ideas/shop/log.md").exists() && lib.join("TODO.md").exists());
+        // Sync is allowed again (this library has no backup location, so it only records).
+        let v = git_sync(State(st.clone())).await.unwrap().0;
+        assert_eq!(v["committed"], false);
+        assert_eq!(status_of(&st).await["wrapInterrupted"], Value::Null);
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    async fn status_of(st: &Arc<AppState>) -> Value { status(State(st.clone())).await.unwrap().0 }
+
+    #[tokio::test]
+    async fn sync_waits_for_the_assistant_and_its_work_gets_its_own_history_entry() {
+        let (st, lib) = t::library().await;
+        let chat = t::chat(&st, "Tidy my notes").await;
+        st.chats.update(&chat, |c| c.options.permission_mode = Some("acceptEdits".into())).await;
+        // The user edited something by hand before asking.
+        t::write(&lib, "notes/mine.md", "typed by me\n");
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (g, lib2) = (gate.clone(), lib.clone());
+        t::assistant(&st, move |info| { let (g, lib) = (g.clone(), lib2.clone()); async move {
+            // An ordinary chat is kept out of .claude, .mcp.json, .git and the app's own data too.
+            for want in ["Edit(./.claude/**)", "Edit(./.mcp.json)", "Edit(./.git/**)"] { assert!(info.deny.iter().any(|d| d == want), "missing {want}"); }
+            assert!(info.deny.iter().any(|d| d.starts_with("Read(") && d.ends_with("/daemon.json)")));
+            t::write(&lib, "notes/tidy.md", "written by the assistant\n");
+            g.notified().await;
+            true
+        } });
+        let mut rx = st.events.subscribe();
+        chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "go".into(), ..Default::default() })).await.unwrap();
+        for _ in 0..500 { if st.run_active_in(&lib) { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        assert!(st.run_active_in(&lib));
+        let e = shown(git_sync(State(st.clone())).await);
+        assert!(e.message.starts_with("BUSY::") && e.status == 423, "{}", e.message);
+        assert_eq!(shown(library_undo(State(st.clone()), Json(Undo { hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await).code, "busy");
+        assert_eq!(shown(chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "again".into(), ..Default::default() })).await).status, 409);
+        gate.notify_one();
+        t::event(&mut rx, &st, "chat.done").await;
+        assert!(!st.run_active_in(&lib));
+        // History: the user's edit and the assistant's work are separate entries, each with its kind.
+        let h = library_history(State(st.clone()), none()).await.unwrap().0;
+        let top: Vec<(String, String)> = h.as_array().unwrap().iter().take(2)
+            .map(|x| (x["kind"].as_str().unwrap().to_string(), x["files"][0].as_str().unwrap().to_string())).collect();
+        assert_eq!(top, [("assistant".to_string(), "notes/tidy.md".to_string()), ("edit".to_string(), "notes/mine.md".to_string())]);
+        assert!(h[0]["subject"].as_str().unwrap().starts_with("assistant: "));
+        assert!(git_sync(State(st.clone())).await.is_ok());
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_endpoints_restore_undo_and_bring_back_deleted_files() {
+        let (st, lib) = t::library().await;
+        write_file(State(st.clone()), none(), save("notes/plan.md", "first draft\n")).await.unwrap();
+        git_sync(State(st.clone())).await.unwrap();
+        write_file(State(st.clone()), none(), save("notes/plan.md", "second draft\n")).await.unwrap();
+        git_sync(State(st.clone())).await.unwrap();
+        let h = library_history(State(st.clone()), q(&[("path", "notes/plan.md"), ("limit", "10")])).await.unwrap().0;
+        let h = h.as_array().unwrap().clone();
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0]["kind"], "sync");
+        let first = h[1]["hash"].as_str().unwrap().to_string();
+        let v = library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", &first)])).await.unwrap().0;
+        assert_eq!(v["content"], "first draft\n");
+        library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone() })).await.unwrap();
+        assert_eq!(t::read(&lib, "notes/plan.md"), "first draft\n");
+        // Undo that restore as a whole change.
+        let newest = library_history(State(st.clone()), none()).await.unwrap().0[0]["hash"].as_str().unwrap().to_string();
+        library_undo(State(st.clone()), Json(Undo { hash: newest })).await.unwrap();
+        assert_eq!(t::read(&lib, "notes/plan.md"), "second draft\n");
+        // A deleted file — even one never recorded before — can be brought back from history.
+        write_file(State(st.clone()), none(), save("notes/scratch.md", "never synced\n")).await.unwrap();
+        let v = delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/scratch.md".into() })).await.unwrap().0;
+        assert_eq!(v["recoverable"], true);
+        assert!(!lib.join("notes/scratch.md").exists());
+        let h = library_history(State(st.clone()), q(&[("path", "notes/scratch.md")])).await.unwrap().0;
+        assert_eq!(h[0]["subject"], "edit: deleted notes/scratch.md");
+        let before = h[1]["hash"].as_str().unwrap().to_string();
+        library_restore(State(st.clone()), Json(Restore { path: "notes/scratch.md".into(), hash: before })).await.unwrap();
+        assert_eq!(t::read(&lib, "notes/scratch.md"), "never synced\n");
+        // Protected files have no history view; bad entries are refused.
+        assert_eq!(shown(library_version(State(st.clone()), q(&[("path", ".git/config"), ("hash", &first)])).await).status, 403);
+        assert_eq!(shown(library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", "HEAD")])).await).status, 422);
+        assert_eq!(shown(library_version(State(st.clone()), q(&[("path", "notes/never.md"), ("hash", &first)])).await).status, 404);
+        // With history switched off these say so, in a way the UI can recognise.
+        st.settings.write().await.sync.mode = "none".into();
+        for r in [library_history(State(st.clone()), none()).await, library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone() })).await,
+                  library_undo(State(st.clone()), Json(Undo { hash: first.clone() })).await, library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", &first)])).await] {
+            let e = shown(r);
+            assert!(e.message.starts_with("NO_HISTORY::") && e.code == "no_history", "{}", e.message);
+        }
+        // Deleting still works, just without a way back.
+        assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/scratch.md".into() })).await.unwrap().0["recoverable"], false);
+        assert_eq!(shown(git_sync(State(st.clone())).await).code, "sync_off");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_ons_never_reach_private_folders_or_write_outside_their_own() {
+        let (st, lib) = t::library().await;
+        t::write(&lib, "Me/Finances/tax.md", "salary 1\n");
+        t::write(&lib, "Me/Finances/README.md", "---\ntitle: Money\nstatus: seed\n---\n");
+        t::write(&lib, "billing/hours.csv", "h\n");
+        st.settings.write().await.private_paths = vec!["me/finances".into()];
+        let plugin = |extra: &[(&str, &str)]| { let mut v = vec![("scope", "plugin")]; v.extend_from_slice(extra); q(&v) };
+        // Reading: whatever the spelling, a private file is closed to an add-on — and open to the user.
+        for path in ["me/finances/tax.md", "Me/Finances/tax.md", "ME/FINANCES/tax.md", "me/./finances/tax.md"] {
+            let e = shown(read_file(State(st.clone()), plugin(&[("path", path)])).await);
+            assert_eq!((e.status, e.code), (403, "private"), "{path}");
+            assert!(raw_file(State(st.clone()), plugin(&[("path", path)])).await.is_err(), "{path}");
+        }
+        assert!(read_file(State(st.clone()), q(&[("path", "Me/Finances/tax.md")])).await.is_ok());
+        assert!(read_file(State(st.clone()), plugin(&[("path", "billing/hours.csv")])).await.is_ok());
+        let listed = |v: Value| v.as_array().unwrap().iter().map(|x| x["path"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert!(!listed(tree(State(st.clone()), plugin(&[])).await.unwrap().0).iter().any(|p| p.to_lowercase().starts_with("me/finances")));
+        assert!(listed(tree(State(st.clone()), none()).await.unwrap().0).iter().any(|p| p == "Me/Finances/tax.md"));
+        assert!(listed(search(State(st.clone()), plugin(&[("q", "salary")])).await.unwrap().0).is_empty());
+        assert!(!listed(ideas(State(st.clone()), plugin(&[])).await.unwrap().0).iter().any(|p| p.starts_with("Me/")));
+        assert_eq!(shown(library_version(State(st.clone()), plugin(&[("path", "Me/Finances/tax.md"), ("hash", "0123456")])).await).code, "private");
+        // Writing: only text files, only inside the folders it declared.
+        let allow = plugin(&[("allow", "billing/,me/finances")]);
+        write_file(State(st.clone()), plugin(&[("allow", "billing/")]), save("Billing/hours.csv", "h,2\n")).await.unwrap();
+        new_file(State(st.clone()), plugin(&[("allow", "billing")]), Json(NewFile { path: "billing/2026/jan.json".into(), content: "{}".into() })).await.unwrap();
+        for (query, path) in [(plugin(&[("allow", "billing/")]), "README.md"), (plugin(&[]), "billing/hours.csv"), (plugin(&[("allow", "billing/")]), "billing/run.sh"),
+                              (allow, "me/finances/tax.md"), (plugin(&[("allow", "/")]), "notes.md"), (plugin(&[("allow", "billing/")]), "billing/../README.md")] {
+            let e = shown(write_file(State(st.clone()), query, save(path, "changed")).await);
+            assert!([403, 422].contains(&e.status), "{path}: {}", e.message);
+        }
+        assert_eq!(t::read(&lib, "README.md"), "my library\n");
+        assert_eq!(t::read(&lib, "Me/Finances/tax.md"), "salary 1\n");
+        // Deleting and moving follow the same rule.
+        assert_eq!(shown(delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: "README.md".into() })).await).status, 403);
+        assert_eq!(shown(delete_file(State(st.clone()), plugin(&[]), Json(DeleteFile { path: "billing/hours.csv".into() })).await).status, 403);
+        assert_eq!(shown(move_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(MoveFile { from: "billing/hours.csv".into(), to: "hours.csv".into() })).await).status, 403);
+        delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: "billing/hours.csv".into() })).await.unwrap();
+        assert!(lib.join("README.md").exists() && !lib.join("billing/hours.csv").exists());
+        // Tasks: lists in a private folder are invisible to an add-on and cannot be changed by one.
+        t::write(&lib, "Me/Finances/todo.md", "- [ ] pay tax\n");
+        t::write(&lib, "ideas/shop/todo.md", "- [ ] rent a stall\n");
+        let files = |v: Value| v.as_array().unwrap().iter().map(|x| x["file"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(files(todo_list(State(st.clone()), plugin(&[])).await.unwrap().0), ["TODO.md", "ideas/shop/todo.md"]);
+        assert!(files(todo_list(State(st.clone()), none()).await.unwrap().0).contains(&"Me/Finances/todo.md".to_string()));
+        let op = |file: &str, text: &str| Json(TodoOp { file: file.into(), line: 0, text: text.into(), new_text: "changed".into() });
+        for file in ["Me/Finances/todo.md", "me/finances/todo.md", "ME/FINANCES/todo.md", "ideas/../Me/Finances/todo.md", "./me/finances/todo.md", "ideas/./../me/finances/todo.md"] {
+            for action in ["toggle", "edit", "delete", "add"] {
+                let e = shown(todo_op(State(st.clone()), Path(action.into()), plugin(&[]), op(file, "pay tax")).await);
+                assert!([403, 422].contains(&e.status), "{action} {file}: {}", e.message);
+            }
+        }
+        assert_eq!(t::read(&lib, "Me/Finances/todo.md"), "- [ ] pay tax\n");
+        todo_op(State(st.clone()), Path("toggle".into()), plugin(&[]), op("ideas/shop/todo.md", "rent a stall")).await.unwrap();
+        assert_eq!(t::read(&lib, "ideas/shop/todo.md"), "- [x] rent a stall\n");
+        // The user's own app is not restricted.
+        todo_op(State(st.clone()), Path("toggle".into()), none(), op("Me/Finances/todo.md", "pay tax")).await.unwrap();
+        assert_eq!(t::read(&lib, "Me/Finances/todo.md"), "- [x] pay tax\n");
+
+        // Everything else under the library API is closed to a request made for an add-on.
+        for path in ["/api/library/restore", "/api/library/undo", "/api/library/history", "/api/library/import", "/api/library/stats",
+                     "/api/library/trust", "/api/library/ideas/status", "/api/todos/calendar.ics"] {
+            assert!(!plugin_scope_allowed(path, "scope=plugin"), "{path}");
+            assert!(!plugin_scope_allowed(path, "allow=x&scope=plugin&path=a"), "{path}");
+            assert!(plugin_scope_allowed(path, ""), "{path}");
+            assert!(plugin_scope_allowed(path, "path=scope=plugin"), "{path}");
+        }
+        for path in ["/api/library/file", "/api/library/delete", "/api/library/new", "/api/library/move", "/api/library/tree", "/api/todos", "/api/chats"] {
+            assert!(plugin_scope_allowed(path, "scope=plugin"), "{path}");
+        }
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_gate_refuses_plugin_scoped_restore_undo_and_stray_deletes_over_http() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (st, lib) = t::library().await;
+        let head = t::sh(&lib, &["rev-parse", "HEAD"]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = router(st.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let post = |path: &'static str, body: String| async move {
+            let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let req = format!("POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer test-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            s.write_all(req.as_bytes()).await.unwrap();
+            let mut out = String::new();
+            s.read_to_string(&mut out).await.unwrap();
+            out
+        };
+        let restore = json!({"path": "README.md", "hash": head}).to_string();
+        for (path, body) in [("/api/library/restore?scope=plugin", restore.clone()), ("/api/library/undo?scope=plugin&allow=", json!({"hash": head}).to_string()),
+                             ("/api/library/delete?scope=plugin", json!({"path": "README.md"}).to_string()),
+                             ("/api/library/delete?scope=plugin&allow=ideas/", json!({"path": "README.md"}).to_string())] {
+            let r = post(path, body).await;
+            assert!(r.starts_with("HTTP/1.1 403"), "{path}: {r}");
+            assert!(r.contains("\"code\":\"forbidden\""), "{path}: {r}");
+        }
+        assert_eq!(t::sh(&lib, &["rev-parse", "HEAD"]), head);
+        assert!(lib.join("README.md").exists());
+        // Without the scope the same restore goes through, and a bad token still gets nothing.
+        assert!(post("/api/library/restore", restore).await.starts_with("HTTP/1.1 200"));
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn features_switch_off_without_touching_the_library_and_status_reports_the_new_fields() {
+        let (st, lib) = t::library().await;
+        st.settings.write().await.profession = Some("Accountant".into());
+        disable_module(State(st.clone()), Path("docs".into())).await.unwrap();
+        assert_eq!(st.settings.read().await.modules.get("docs"), Some(&false));
+        assert_eq!(shown(disable_module(State(st.clone()), Path("ideas".into())).await).status, 422);
+        assert_eq!(shown(disable_module(State(st.clone()), Path("nope".into())).await).status, 404);
+        assert_eq!(t::sh(&lib, &["status", "--porcelain"]), "");
+        let s = status_of(&st).await;
+        assert_eq!((s["profession"].as_str(), s["settingsNewer"].as_bool(), s["settingsRestored"].as_bool()), (Some("Accountant"), Some(false), Some(false)));
+        // Diagnostics: counts and choices, never names or folders.
+        let d = diagnostics(State(st.clone())).await.unwrap().0;
+        assert_eq!(d["settings"]["libraryPath"], "(set)");
+        assert_eq!(d["settings"]["profession"], "(set)");
+        assert_eq!(d["settings"]["projects"], 0);
+        assert_eq!((d["git"]["branch"].as_str(), d["git"]["changedFiles"].as_u64()), (Some("main"), Some(0)));
+        assert!(d["errors"].is_array() && d["log"].is_string() && d["assistant"]["installed"].is_boolean());
+        assert!(!d.to_string().contains(&lib.display().to_string()));
+        // The calendar export is a real iCalendar file.
+        todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "file the return @due(2026-12-31)".into(), ..Default::default() })).await.unwrap();
+        let r = todo_calendar(State(st.clone())).await.ok().unwrap();
+        assert_eq!(r.headers()[header::CONTENT_TYPE], "text/calendar; charset=utf-8");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn login_item_helpers() {
+        assert!(translocated("/private/var/folders/ab/T/AppTranslocation/1234-ABCD/d/Thoughts.app/Contents/MacOS/thoughts"));
+        assert!(!translocated("/Applications/Thoughts.app/Contents/MacOS/thoughts"));
+        assert_eq!(launchd_job_pid("gui/501/app.thoughts.daemon = {\n\tstate = running\n\tpid = 4242\n}"), Some(4242));
+        assert_eq!(launchd_job_pid("state = not running"), None);
+        let o = |p: &str| normalized(RunOptions { permission_mode: Some(p.into()), ..Default::default() }).permission_mode;
+        assert_eq!(o("default").as_deref(), Some("plan"));
+        assert_eq!(o("acceptEdits").as_deref(), Some("acceptEdits"));
+        assert_eq!(o(""), None);
     }
 
     #[test]

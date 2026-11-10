@@ -226,6 +226,31 @@ async fn save_pack(app: tauri::AppHandle, name: String, contents: String) -> Res
     Ok(true)
 }
 
+/// Save a file the app generated (an exported document, a calendar file). Like `save_pack`, the save
+/// dialog is opened in native code so the destination is always the user's choice; only document
+/// formats that cannot run when opened are allowed.
+#[tauri::command]
+async fn save_file(app: tauri::AppHandle, name: String, contents: String) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    const SAFE: &[&str] = &["html", "ics", "json", "md", "txt", "csv"];
+    if contents.len() > 16 << 20 { return Err("file is too large".into()); }
+    let p = std::path::Path::new(&name);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if !SAFE.contains(&ext.as_str()) { return Err("this kind of file cannot be saved from Thoughts".into()); }
+    let stem: String = p.file_stem().and_then(|e| e.to_str()).unwrap_or("export").chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')).take(80).collect();
+    let file = format!("{}.{ext}", if stem.trim().is_empty() { "export" } else { stem.trim() });
+    let ext2 = ext.clone();
+    let picked = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog().file().set_file_name(&file).add_filter(&ext2.to_uppercase(), &[ext2.as_str()]).blocking_save_file()
+    }).await.map_err(|e| e.to_string())?;
+    let Some(mut path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(false) };
+    // Keep the safe extension even if the user typed another one in the dialog.
+    if path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) != Some(ext.clone()) { path.set_extension(&ext); }
+    std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 /// Open a document from the library in the user's default app. Only regular files inside the
 /// library, and only document/media types that cannot run code when opened.
 #[tauri::command]
@@ -670,6 +695,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             open_library_file,
             save_pack,
+            save_file,
             daemon_info,
             restart_daemon,
             set_dock_icon,

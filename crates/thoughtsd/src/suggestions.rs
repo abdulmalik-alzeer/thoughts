@@ -28,6 +28,8 @@ pub struct Input<'a> {
     pub has_weekly_workflow: bool,
     pub dismissed: &'a [String],
     pub arabic: bool,
+    /// Does the layer already hide this page in `nav.json`? (view ids)
+    pub nav_hidden: &'a [String],
 }
 
 fn file(home: &Path) -> PathBuf { home.join("suggestions.json") }
@@ -115,6 +117,7 @@ pub fn compute(i: &Input) -> Vec<Value> {
             if !i.enabled_views.contains(view) { continue; }
             let key = format!("view.{view}");
             if recent(21).any(|(_, e)| *e == key) { continue; }
+            if i.nav_hidden.iter().any(|h| h == view) { continue; }
             let id = format!("hide-{view}");
             let (title, body) = if i.arabic {
                 (format!("أخفِ «{ar}» من الشريط الجانبي"), format!("لم تفتح «{ar}» منذ ثلاثة أسابيع. إخفاؤها يجعل الشريط الجانبي أبسط، ويمكنك إعادتها متى شئت."))
@@ -122,17 +125,34 @@ pub fn compute(i: &Input) -> Vec<Value> {
                 (format!("Hide {en} from the sidebar"), format!("You have not opened {en} in three weeks. Hiding it keeps the sidebar simpler, and you can bring it back any time."))
             };
             out.push(json!({"id": id, "title": title, "body": body,
-                "prompt": format!("I have not used the {en} page in weeks. Hide it from the sidebar with a small rule in custom.css, and if Home shows a matching section add it to `hidden` in home.json. Do not delete any of my data. In the summary, tell me how to bring it back (History, or switching the module off in Settings).")}));
+                "prompt": format!("I have not used the {en} page in weeks. Hide it from the sidebar by adding \"{view}\" to `hidden` in nav.json (create the file if it is missing and keep whatever is already in it; do not use CSS for this). If Home shows a matching section, add it to `hidden` in home.json too. Do not delete any of my data. In the summary, tell me how to bring it back (History in Settings, or by asking you to show it again).")}));
         }
     }
 
     // (d) Wraps regularly: a weekly review would fit.
     let wraps = |from: i64, to: i64| i.events.iter().filter(|(t, e)| e == "wrap.done" && *t > since(from) && *t <= since(to)).count();
     if !i.has_weekly_workflow && wraps(7, 0) >= 3 && wraps(14, 7) >= 3 {
+        // The working week ends on Thursday where Arabic is the app's language, on Friday elsewhere.
+        let (day_en, at) = if i.arabic { ("Thursday", "15:00") } else { ("Friday", "16:00") };
         out.push(item("weekly-review", i.arabic,
             ("Add a Friday weekly-review workflow", "You wrap up your chats regularly. A weekly review can gather what you decided, what is still open and what is due next week — automatically."),
-            ("أضف مراجعة أسبوعية كل يوم جمعة", "أنت تحفظ خلاصة محادثاتك بانتظام. يمكن لمراجعة أسبوعية أن تجمع لك ما قرّرته وما بقي مفتوحًا وما يستحق الأسبوع القادم، تلقائيًا."),
-            "Add a workflow that runs every Friday at 16:00 and writes a short weekly review into my library: what I decided this week, what is still open, and the todos due next week. Put it where my library's conventions say reviews or logs belong.".into()));
+            ("أضف مراجعة أسبوعية كل يوم خميس", "أنت تحفظ خلاصة محادثاتك بانتظام. يمكن لمراجعة أسبوعية أن تجمع لك ما قرّرته وما بقي مفتوحًا وما يحين موعده في الأسبوع القادم، تلقائيًا."),
+            format!("Add a workflow that runs every {day_en} at {at} and writes a short weekly review into my library: what I decided this week, what is still open, and the todos due next week. Put it where my library's conventions say reviews or logs belong.")));
+    }
+
+    // (e) Once a month, when the app is really in use: one tune-up proposal based on how it was used.
+    let month_events = recent(30).count();
+    let log_two_weeks = i.events.first().map_or(false, |(t, _)| *t <= since(14));
+    if month_events >= 30 && log_two_weeks {
+        let id = format!("tuneup-{}", i.now.format("%Y-%m"));
+        let summary = crate::usage::summary(i.events, i.now);
+        out.push(item(&id, i.arabic,
+            ("Monthly app tune-up", "Let the assistant look at a short summary of how you used the app this month (pages opened, buttons used, changes you kept or discarded — no note contents) and propose one improvement. You review it before anything changes."),
+            ("صيانة شهرية للتطبيق", "دع المساعد يطّلع على ملخص قصير لطريقة استخدامك للتطبيق هذا الشهر (الصفحات التي فتحتها، والأزرار التي استخدمتها، والتغييرات التي أبقيتها أو تجاهلتها، دون محتوى ملاحظاتك) ليقترح تحسينًا واحدًا. ستراجعه قبل أن يتغيّر أي شيء."),
+            format!("This is my monthly app tune-up. Below is a summary of how I used the Thoughts app in the last 30 days; it was gathered on my computer.\n\n{summary}\n\n\
+                Propose and prepare exactly ONE small customisation that would make the app fit how I actually work: for example a Home button for something I type often, hiding a page I never open (nav.json), a different todo grouping (todos.json), a Home widget, or a workflow. \
+                Learn from what I kept and what I discarded or undid: do not repeat a discarded idea. If nothing is clearly worth changing, change nothing and say so in plain words. \
+                In the summary, say which part of my usage led you to this change.")));
     }
 
     out.retain(|s| !i.dismissed.iter().any(|d| s["id"] == d.as_str()));
@@ -148,7 +168,7 @@ mod tests {
     fn now() -> DateTime<Local> { Local.with_ymd_and_hms(2026, 11, 10, 12, 0, 0).unwrap() }
     fn ago(days: i64, e: &str) -> (DateTime<Local>, String) { (now() - Duration::days(days) - Duration::minutes(5), e.to_string()) }
     fn input<'a>(events: &'a [(DateTime<Local>, String)]) -> Input<'a> {
-        Input { events, now: now(), overdue: 0, enabled_views: &[], chips: &[], has_weekly_workflow: false, dismissed: &[], arabic: false }
+        Input { events, now: now(), overdue: 0, enabled_views: &[], chips: &[], has_weekly_workflow: false, dismissed: &[], arabic: false, nav_hidden: &[] }
     }
     fn ids(v: &[Value]) -> Vec<String> { v.iter().map(|s| s["id"].as_str().unwrap().to_string()).collect() }
 
@@ -187,6 +207,10 @@ mod tests {
         let s = compute(&Input { enabled_views: &["todos", "docs"], ..input(&ev) });
         assert_eq!(ids(&s), ["hide-docs"]);
         assert_eq!(s[0]["title"], "Hide Docs from the sidebar");
+        let prompt = s[0]["prompt"].as_str().unwrap();
+        assert!(prompt.contains("\"docs\" to `hidden` in nav.json") && !prompt.contains("custom.css"), "uses the supported setting, not a CSS trick");
+        let hidden = ["docs".to_string()];
+        assert!(compute(&Input { enabled_views: &["todos", "docs"], nav_hidden: &hidden, ..input(&ev) }).is_empty(), "already hidden");
         assert!(compute(&Input { enabled_views: &["todos"], ..input(&ev) }).is_empty(), "docs is switched off");
         let young = vec![ago(3, "view.home")];
         assert!(compute(&Input { enabled_views: &["docs"], ..input(&young) }).is_empty(), "a new install has no history yet");
@@ -198,6 +222,10 @@ mod tests {
         ev.sort_by_key(|e| e.0);
         assert_eq!(ids(&compute(&input(&ev))), ["weekly-review"]);
         assert!(compute(&Input { has_weekly_workflow: true, ..input(&ev) }).is_empty());
+        let en = compute(&input(&ev));
+        assert!(en[0]["title"].as_str().unwrap().contains("Friday") && en[0]["prompt"].as_str().unwrap().contains("every Friday at 16:00"));
+        let ar = compute(&Input { arabic: true, ..input(&ev) });
+        assert!(ar[0]["title"].as_str().unwrap().contains("خميس") && ar[0]["prompt"].as_str().unwrap().contains("every Thursday at 15:00"));
         let one_week: Vec<_> = [1, 2, 3].iter().map(|d| ago(*d, "wrap.done")).collect();
         assert!(compute(&input(&one_week)).is_empty());
         // Everything at once: capped at two, in priority order.
@@ -212,6 +240,27 @@ mod tests {
     }
 
     #[test]
+    fn monthly_tune_up_carries_a_local_usage_summary() {
+        let mut ev: Vec<_> = (0..20).flat_map(|d| [ago(d, "view.todos"), ago(d, "view.todos"), ago(d, "view.todos"), ago(d, "view.docs")]).collect();
+        ev.push(ago(3, "customize.keep:Show overdue todos on Home"));
+        ev.push(ago(2, "customize.discard:Make everything pink"));
+        ev.sort_by_key(|e| e.0);
+        let s = compute(&input(&ev));
+        assert_eq!(ids(&s), ["tuneup-2026-11"]);
+        let prompt = s[0]["prompt"].as_str().unwrap();
+        assert!(prompt.contains("todos ×60, docs ×20") && prompt.contains("\"Make everything pink\"") && prompt.contains("exactly ONE"));
+        assert_eq!(compute(&Input { arabic: true, ..input(&ev) })[0]["title"], "صيانة شهرية للتطبيق");
+        // Dismissed for this month only; quiet installs and brand-new ones are left alone.
+        let d = ["tuneup-2026-11".to_string()];
+        assert!(compute(&Input { dismissed: &d, ..input(&ev) }).is_empty());
+        let next_month = Input { now: now() + Duration::days(21), dismissed: &d, ..input(&ev) };
+        assert_eq!(ids(&compute(&next_month)), ["tuneup-2026-12"]);
+        assert!(compute(&input(&ev[ev.len() - 10..])).is_empty(), "too little activity");
+        let young: Vec<_> = (0..40).map(|_| ago(1, "view.todos")).collect();
+        assert!(compute(&input(&young)).is_empty(), "the log is younger than two weeks");
+    }
+
+    #[test]
     fn dismissals_persist_and_overdue_reads_the_library() {
         let d = std::env::temp_dir().join(format!("thoughts-sugg-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
@@ -219,8 +268,9 @@ mod tests {
         dismiss(&d, "weekly-review").unwrap();
         dismiss(&d, "weekly-review").unwrap();
         dismiss(&d, "chip-0a1b2c3d").unwrap();
+        dismiss(&d, "tuneup-2026-11").unwrap();
         assert!(dismiss(&d, "../x").is_err());
-        assert_eq!(dismissed(&d), ["weekly-review", "chip-0a1b2c3d"]);
+        assert_eq!(dismissed(&d), ["weekly-review", "chip-0a1b2c3d", "tuneup-2026-11"]);
         std::fs::write(d.join("TODO.md"), "- [ ] Late @due(2026-11-01)\n- [x] Done late @due(2026-11-01)\n- [ ] Today @due(2026-11-10)\n- [ ] No date\n- [ ] Also late @due(2025-01-01)\n").unwrap();
         assert_eq!(overdue_todos(&d, NaiveDate::from_ymd_opt(2026, 11, 10).unwrap()), 2);
         std::fs::remove_dir_all(d).unwrap();

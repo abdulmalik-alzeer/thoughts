@@ -70,10 +70,12 @@ fn rewrite<F: FnOnce(&mut Vec<String>) -> anyhow::Result<()>>(root: &Path, file:
         Err(e) => anyhow::bail!("could not read {file}: {e}"),
     };
     let trailing = text.ends_with('\n') || text.is_empty();
+    // A file written on Windows keeps its line endings.
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     f(&mut lines)?;
-    let mut out = lines.join("\n");
-    if trailing { out.push('\n'); }
+    let mut out = lines.join(eol);
+    if trailing { out.push_str(eol); }
     if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
     crate::paths::write_atomic(&p, out.as_bytes(), false)?;
     Ok(())
@@ -83,9 +85,12 @@ fn is_task(l: &str) -> bool {
     l.starts_with("- [ ] ") || l.starts_with("- [x] ") || l.starts_with("- [X] ")
 }
 
+/// The task the client means must still be exactly the one on that line: same line, a task, the
+/// same text. An empty `expect` never matches, so it cannot be used to skip the comparison.
 fn check_line(lines: &[String], line: usize, expect: &str) -> anyhow::Result<()> {
-    let l = lines.get(line).ok_or_else(|| anyhow::anyhow!("todo moved — reload"))?;
-    if !is_task(l) || !l.ends_with(expect) { anyhow::bail!("todo changed on disk — reload"); }
+    let stale = || crate::tr::err("stale.todo", &[]);
+    let l = lines.get(line).ok_or_else(stale)?;
+    if !is_task(l) || expect.trim().is_empty() || l[6..].trim_end() != expect.trim_end() { return Err(stale()); }
     Ok(())
 }
 
@@ -98,11 +103,16 @@ pub fn toggle(root: &Path, file: &str, line: usize, text: &str) -> anyhow::Resul
     })
 }
 
+/// One line of task text: line breaks become spaces.
+fn one_line(text: &str) -> String { text.replace("\r\n", " ").replace(['\n', '\r'], " ").trim().to_string() }
+
 pub fn edit(root: &Path, file: &str, line: usize, old: &str, new: &str) -> anyhow::Result<()> {
+    let new = one_line(new);
+    if new.is_empty() { return Err(crate::tr::err("todo.empty", &[])); }
     rewrite(root, file, |lines| {
         check_line(lines, line, old)?;
         let prefix = lines[line][..6].to_string();
-        lines[line] = format!("{prefix}{}", new.replace('\n', " "));
+        lines[line] = format!("{prefix}{new}");
         Ok(())
     })
 }
@@ -113,8 +123,10 @@ pub fn delete(root: &Path, file: &str, line: usize, text: &str) -> anyhow::Resul
 
 /// New items go at the end of the top group (or the end of the file).
 pub fn add(root: &Path, file: &str, text: &str) -> anyhow::Result<()> {
+    let text = one_line(text);
+    if text.is_empty() { return Err(crate::tr::err("todo.empty", &[])); }
     rewrite(root, file, |lines| {
-        let item = format!("- [ ] {}", text.replace('\n', " "));
+        let item = format!("- [ ] {text}");
         if lines.is_empty() { lines.push("# Todo".into()); lines.push(String::new()); }
         let first_h2 = lines.iter().position(|l| l.starts_with("## "));
         let insert_at = match first_h2 {
@@ -133,9 +145,130 @@ pub fn add(root: &Path, file: &str, text: &str) -> anyhow::Result<()> {
     })
 }
 
+/// Fold one iCalendar content line at 75 bytes (never inside a character), as the format requires.
+fn ics_fold(line: &str) -> String {
+    let mut out = String::new();
+    let mut len = 0;
+    for ch in line.chars() {
+        if len + ch.len_utf8() > 75 { out.push_str("\r\n "); len = 1; }
+        out.push(ch);
+        len += ch.len_utf8();
+    }
+    out
+}
+
+fn ics_escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,").replace(['\r', '\n'], " ")
+}
+
+/// An iCalendar file with one all-day event per open task that has a due date. Each event's UID
+/// is derived from the list and the task's title, so importing the file again updates the same
+/// events rather than adding duplicates — and moving a due date moves the event.
+pub fn calendar(root: &Path, now: chrono::DateTime<chrono::Utc>) -> String {
+    use sha2::{Digest, Sha256};
+    let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let mut lines: Vec<String> = vec!["BEGIN:VCALENDAR".into(), "VERSION:2.0".into(), "PRODID:-//Thoughts//Todos//EN".into(),
+        "CALSCALE:GREGORIAN".into(), "METHOD:PUBLISH".into(), "X-WR-CALNAME:Thoughts".into()];
+    let mut seen = std::collections::HashSet::new();
+    for list in list(root) {
+        let file = list["file"].as_str().unwrap_or_default().to_string();
+        for item in list["items"].as_array().into_iter().flatten() {
+            if item["done"] == true { continue; }
+            let (Some(due), Some(title)) = (item["due"].as_str(), item["title"].as_str()) else { continue };
+            let Ok(day) = chrono::NaiveDate::parse_from_str(due, "%Y-%m-%d") else { continue };
+            let Some(next) = day.succ_opt() else { continue };
+            let mut uid = format!("{:x}", Sha256::digest(format!("{file}\n{title}").as_bytes()))[..32].to_string();
+            // Two identical tasks in one list still need different ids.
+            let mut n = 1;
+            while !seen.insert(uid.clone()) { n += 1; uid = format!("{:x}", Sha256::digest(format!("{file}\n{title}\n{n}").as_bytes()))[..32].to_string(); }
+            lines.push("BEGIN:VEVENT".into());
+            lines.push(format!("UID:{uid}@thoughts.app"));
+            lines.push(format!("DTSTAMP:{stamp}"));
+            lines.push(format!("DTSTART;VALUE=DATE:{}", day.format("%Y%m%d")));
+            lines.push(format!("DTEND;VALUE=DATE:{}", next.format("%Y%m%d")));
+            lines.push(format!("SUMMARY:{}", ics_escape(title)));
+            let group = item["group"].as_str().unwrap_or_default();
+            let place = match (list["idea"].as_str(), group.is_empty()) {
+                (Some(idea), _) => idea.to_string(),
+                (None, false) => group.to_string(),
+                (None, true) => String::new(),
+            };
+            if !place.is_empty() { lines.push(format!("DESCRIPTION:{}", ics_escape(&place))); }
+            lines.push("TRANSP:TRANSPARENT".into());
+            lines.push("END:VEVENT".into());
+        }
+    }
+    lines.push("END:VCALENDAR".into());
+    lines.iter().map(|l| ics_fold(l)).collect::<Vec<_>>().join("\r\n") + "\r\n"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edits_must_name_the_exact_task_and_leave_something() {
+        let d = std::env::temp_dir().join(format!("todo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let original = "# T\n- [ ] call the bank\n- [x] pay rent\n";
+        std::fs::write(d.join("TODO.md"), original).unwrap();
+        // An empty "old text" used to match any line; so did a mere suffix of the real text.
+        for (line, old) in [(1, ""), (1, "  "), (1, "bank"), (1, "pay rent"), (0, "T"), (9, "call the bank")] {
+            assert!(edit(&d, "TODO.md", line, old, "x").is_err(), "{line} {old:?}");
+            assert!(delete(&d, "TODO.md", line, old).is_err(), "{line} {old:?}");
+            assert!(toggle(&d, "TODO.md", line, old).is_err(), "{line} {old:?}");
+        }
+        // An edit that would leave nothing is refused — after the comparison, never instead of it.
+        for blank in ["", "   ", "\n"] { assert!(edit(&d, "TODO.md", 1, "call the bank", blank).is_err()); }
+        assert!(add(&d, "TODO.md", " \n ").is_err());
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), original);
+        edit(&d, "TODO.md", 1, "call the bank", "call the bank\nabout the loan").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# T\n- [ ] call the bank about the loan\n- [x] pay rent\n");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn windows_line_endings_are_kept() {
+        let d = std::env::temp_dir().join(format!("todo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("TODO.md"), "# Todo\r\n\r\n## Now\r\n- [ ] a\r\n").unwrap();
+        add(&d, "TODO.md", "b").unwrap();
+        toggle(&d, "TODO.md", 3, "a").unwrap();
+        edit(&d, "TODO.md", 4, "b", "c").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# Todo\r\n\r\n## Now\r\n- [x] a\r\n- [ ] c\r\n");
+        delete(&d, "TODO.md", 4, "c").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# Todo\r\n\r\n## Now\r\n- [x] a\r\n");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn calendar_lists_open_dated_tasks_as_all_day_events() {
+        let d = std::env::temp_dir().join(format!("todo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(d.join("clients/acme")).unwrap();
+        std::fs::write(d.join("TODO.md"), "## Now\n- [ ] File VAT return; Q3, final @due(2026-12-31)\n- [x] done @due(2026-11-01)\n- [ ] no date\n").unwrap();
+        let long = "راجع عقد التوريد مع الشركة وأرسل الملاحظات إلى المحامي قبل نهاية الأسبوع القادم";
+        std::fs::write(d.join("clients/acme/todo.md"), format!("- [ ] {long} @due(2027-02-28)\n")).unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-10T08:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let ics = calendar(&d, now);
+        assert!(ics.starts_with("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:") && ics.ends_with("END:VCALENDAR\r\n"));
+        assert_eq!(ics.matches("BEGIN:VEVENT").count(), 2);
+        assert_eq!(ics.matches("END:VEVENT").count(), 2);
+        assert!(ics.contains("DTSTART;VALUE=DATE:20261231\r\nDTEND;VALUE=DATE:20270101\r\n"));
+        assert!(ics.contains("DTSTART;VALUE=DATE:20270228\r\nDTEND;VALUE=DATE:20270301\r\n"));
+        assert!(ics.contains("SUMMARY:File VAT return\\; Q3\\, final\r\n"));
+        assert!(ics.contains("DESCRIPTION:Now\r\n") && ics.contains("DESCRIPTION:clients/acme\r\n"));
+        assert!(ics.contains("DTSTAMP:20261110T080000Z"));
+        // Every line ends in CRLF, none is longer than 75 bytes, and long ones continue with a space.
+        for l in ics.split("\r\n") { assert!(l.len() <= 75, "{l}"); assert!(!l.contains('\n')); }
+        let unfolded = ics.replace("\r\n ", "");
+        assert!(unfolded.contains(&format!("SUMMARY:{long}\r\n")));
+        // The same tasks give the same ids every time; a different task gives a different one.
+        let uids = |s: &str| s.replace("\r\n ", "").lines().filter(|l| l.starts_with("UID:")).map(String::from).collect::<Vec<_>>();
+        assert_eq!(uids(&ics), uids(&calendar(&d, now + chrono::Duration::days(3))));
+        assert_eq!(uids(&ics).len(), 2);
+        assert_ne!(uids(&ics)[0], uids(&ics)[1]);
+        std::fs::remove_dir_all(d).unwrap();
+    }
     #[test]
     fn add_toggle() {
         let d = std::env::temp_dir().join(format!("todo-test-{}", uuid::Uuid::new_v4()));

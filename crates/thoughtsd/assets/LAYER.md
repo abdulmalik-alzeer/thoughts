@@ -16,63 +16,120 @@ make them read code.
    language, saying what will change and how to try it ("Open Home — the new box is under your
    chats"). The first line becomes the title of the change in the user's History, so make it a short
    description such as "Show overdue todos on Home". No jargon; file names only when they help.
-3. The app shows the user your summary and the list of changed files. They can **Try it** (a
-   preview), **Apply** it, or **Discard** it. Nothing is live until they apply, so never say it
-   already is.
-4. Every applied change is one History entry the user can undo on its own. "Rollback" restores the
+3. The app **checks your files** (see "Your change will be rejected if…" below), then shows the
+   user your summary and the list of changed files. They can **Try it** (a preview), **Keep** it,
+   or **Discard** it. Nothing is live until they press Keep, so never say it already is. While the
+   check finds problems, Keep is switched off and the user sees the problems in plain words.
+4. Every kept change is one History entry the user can undo on its own. "Rollback" restores the
    whole layer to an earlier day, and Safe mode starts the app with the layer switched off.
 
 Do not run git. Do not create files other than the ones listed below — anything else is ignored
-when the change is applied (hidden files, `README.md`, `CLAUDE.md` and `SUMMARY.md` are never part
+when the change is kept (hidden files, `README.md`, `CLAUDE.md` and `SUMMARY.md` are never part
 of the layer).
 
 ## Rules that are never negotiable
 
 - **Never weaken security.** Do not try to disable the plugin sandbox, permissions, the trust
-  check, or the preview/apply step, and do not help anything get around them.
+  check, or the preview/keep step, and do not help anything get around them.
 - **Never ask for, read, print or store the app's access token** (`daemon.json`), saved API keys,
   or git credentials. Plugins never receive the token and must not look for it.
 - **No code from the internet.** Plugins and views must be self-contained: no remote scripts,
-  styles, fonts, trackers or analytics, and no sending the user's notes anywhere.
-- **Least permission.** A plugin declares exactly the permissions it uses, nothing more.
-- **Do not touch the user's data.** Customising changes how the app looks and behaves. It never
-  deletes, moves or rewrites notes. (A workflow may write to the library — that is its job — but
-  only what its prompt says.)
-- Prefer the simplest tool that works: `home.json` or `custom.css` before a plugin; a plugin before
-  an HTML view.
+  styles, fonts, images, trackers or analytics, and no sending the user's notes anywhere.
+- **Least permission.** A plugin declares exactly the permissions it uses, nothing more, and the
+  narrowest `write` folders that work.
+- **Be careful with the user's data.** Customising changes how the app looks and behaves. A plugin
+  writes to the library only where it declared, only when the user does something (submits a form,
+  drags a card), and never deletes or rewrites notes on its own. (A workflow may write to the
+  library — that is its job — but only what its prompt says.)
+- Prefer the simplest tool that works: a settings file (`home.json`, `nav.json`, `todos.json`) or
+  `custom.css` before a plugin; a plugin before an HTML view.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `manifest.json` | Declares plugins and their permissions |
 | `custom.css` | Style overrides, loaded after the built-in theme |
 | `themes.json` | Extra themes listed in the theme picker |
-| `home.json` | Home screen: quick-start chips, hidden sections, section order |
-| `plugins/*.js` | Plugins (ES modules) using the Plugin API below |
-| `views/*.html` | Static pages shown in the sidebar, in a sandboxed frame |
-| `workflows/*.json` | Jobs the app runs on a schedule or after an event |
+| `home.json` | Home screen: quick-start chips, hidden sections, order of sections and widgets |
+| `nav.json` | Sidebar: hidden pages, order, labels |
+| `todos.json` | Todos page: grouping, sorting, filter |
+| `plugins/<name>.js` | A plugin (ES module) using the Plugin API below |
+| `plugins/<name>.json` | That plugin's declaration: permissions, write folders |
+| `views/<name>.html` | A static page shown in the sidebar, in a sandboxed frame |
+| `views/<name>.json` | That view's declaration (only if it reads data) |
+| `workflows/<name>.json` | A job the app runs on a schedule or after an event |
+| `manifest.json` | Older shared list of plugin permissions — still read, do not add to it |
 
-Limits: at most 200 files, 512 KB per file, 4 MB in total. Text files only.
+Limits: at most 200 files, 512 KB per file, 4 MB in total. Text files only — the layer cannot
+carry images, fonts or any other binary file.
 
-### manifest.json
+### Your change will be rejected if…
+
+The app validates the staged files before the user can keep them. Any of these blocks the change:
+
+- a `.json` file is not valid JSON, or is not the shape described in its section below (wrong
+  type, a value outside the listed choices);
+- `plugins/<name>.json` or `views/<name>.json` exists without its `plugins/<name>.js` /
+  `views/<name>.html` (so keep other JSON data out of the top of `plugins/` and `views/`; put it
+  in a subfolder such as `plugins/data/`), is missing `"apiVersion": 1`, or has an `apiVersion`
+  other than 1;
+- a permission is not one of the names listed under "Permissions";
+- `library:write` is declared without a `write` list, or `write` is given without
+  `library:write`, or a `write` folder is absolute, contains `..`, is empty or `.`, or is or sits
+  inside `.claude` or `.git`;
+- a view declares anything but read permissions, or declares `write`;
+- `nav.json` hides `home`, `settings` or `help`;
+- a workflow has no `prompt`, an unknown trigger, a time that is not `"HH:MM"`, a monthly `day`
+  outside 1–28 / `"last"`, or a `weekday` outside 0–6;
+- a file is larger than 512 KB, is not plain text, or the change has more than 200 files or 4 MB.
+
+The app also test-loads each plugin in a hidden sandbox; a plugin that throws while loading is
+shown to the user as a problem. So: write the exact shapes below, and do not leave half-finished
+files behind.
+
+### plugins/<name>.json — a plugin's declaration
+
+Every plugin that uses a permission has its own small file beside it, with the same name:
+
+`plugins/due-today.json`
 
 ```json
 {
   "apiVersion": 1,
-  "plugins": {
-    "due-today.js": { "permissions": ["todos:read"] }
-  }
+  "permissions": ["todos:read"],
+  "description": "Shows today's todos on Home"
 }
 ```
 
-Keys of `plugins` are file names inside `plugins/`. A plugin that is not listed runs with **no**
-permissions. Whenever you add, rename or remove a plugin, or it starts using another part of the
-API, update this file in the same change. The user is told when a change touches plugins or
+- `apiVersion` — always `1`. (A plugin, view or pack that asks for a higher number is listed as
+  unsupported and not loaded.)
+- `permissions` — see the list below. A plugin with no declaration runs with **no** permissions.
+- `write` — only with `library:write`: the library folders the plugin may write into, relative to
+  the library, e.g. `["clients/"]`. Writes anywhere else are refused by the app.
+- `description` — one plain sentence; the user sees it when reviewing.
+
+Because each plugin has its own file, adding or removing one plugin never touches another, and the
+user can undo one without disturbing the rest. **Do not add new plugins to `manifest.json`.** If a
+plugin you are changing is still declared there, leave that entry alone and give the plugin its
+own file — the plugin's own file wins. When you add, rename or remove a plugin, add, rename or
+remove its `.json` in the same change. The user is told when a change touches plugins or
 permissions.
 
-Permissions: `library:read`, `todos:read`, `todos:write`, `ideas:read`, `chat:start`.
-Everything under `ui.*` and `on(...)` needs none.
+#### Permissions
+
+| Permission | Allows |
+|---|---|
+| `library:read` | `library.list`, `library.read`, `library.search` |
+| `library:write` | `library.write`, `library.remove` — only inside the `write` folders, only `.md`, `.json`, `.csv`, `.txt` |
+| `todos:read` | `todos.list` |
+| `todos:write` | `todos.add`, `todos.setDone`, `todos.edit`, `todos.remove` |
+| `ideas:read` | `ideas.list` |
+| `ideas:write` | `ideas.setStatus` |
+| `chat:start` | `chat.start` |
+| `storage` | `storage.get`, `storage.set` — the plugin's own private document |
+
+Everything under `ui.*` and `on(...)` needs none. Folders the user marked private are never
+listed, read, searched or written, whatever a plugin declares.
 
 ### custom.css
 
@@ -84,8 +141,9 @@ Tokens you may override:
 
 - Colours: `--bg`, `--panel`, `--panel-2`, `--sidebar`, `--fg`, `--muted`, `--accent`,
   `--accent-fg`, `--accent-2`, `--border`, `--danger`, `--ok`, `--code-bg`
-- Shape and type: `--radius`, `--radius-lg`, `--border-w`, `--sidebar-w`, `--font`, `--font-ar`,
-  `--mono`
+- Shape and spacing: `--radius`, `--radius-lg`, `--border-w`, `--sidebar-w`
+- Type: `--font`, `--font-ar`, `--mono` — these may only name fonts that are **already installed
+  on the user's computer** (system fonts). The layer cannot ship or download a font.
 - Depth and surfaces: `--shadow`, `--shadow-lg`, `--hairline`, `--fill`, `--fill-2`, `--tint`,
   `--glass`, `--sidebar-glass`, `--surface`, `--edge`, `--edge-strong`, `--spot`, `--spot-strong`,
   `--aura`, `--glow`, `--grain-o`, `--pattern`
@@ -95,6 +153,18 @@ Scope colour changes to a theme and a mode:
 Built-in themes are `saudi`, `contrast` (high contrast — keep text contrast at 7:1 or better) and
 `tech`; modes are `light` and `dark`. Use logical properties (`margin-inline`, `inset-inline`,
 `text-align: start`) so right-to-left keeps working. Never hide focus outlines.
+
+**Branding — what is and is not possible.** The layer is text only. When a user asks for "our
+logo" or "our company font", say plainly that the app cannot load image or font files, and offer
+what does work:
+
+- their brand **colours** (accent, backgrounds, text) as a theme, in light and dark;
+- their **shape**: corner radius, border width, sidebar width;
+- a **text wordmark** — the firm's name set in an installed font, in the brand colour, as a small
+  plugin Home widget or as a renamed page label in `nav.json`;
+- an installed system font by name in `--font` / `--font-ar`, with sensible fallbacks.
+
+Do not embed images as `data:` URLs or draw a logo out of CSS to get around this.
 
 ### themes.json
 
@@ -109,7 +179,7 @@ each defining at least the thirteen colour tokens above. Keep existing entries.
 {
   "chips": [{ "label": "Plan my week", "prompt": "Plan my week: " }],
   "hidden": ["stats"],
-  "order": ["todos", "upcoming", "chats", "ideas", "projects", "stats"]
+  "order": ["widget:hours-month", "todos", "upcoming", "suggestions", "chats", "ideas", "projects"]
 }
 ```
 
@@ -117,15 +187,53 @@ each defining at least the thirteen colour tokens above. Keep existing entries.
   with a space when the user is meant to finish the sentence.
 - `hidden` — Home sections not to show. Sections: `stats`, `ideas`, `todos`, `chats`, `projects`,
   `upcoming`.
-- `order` — the order of the sections; ones you leave out keep their usual place after the listed
-  ones.
+- `order` — the order of things on Home. Besides the six sections it may name `suggestions` (the
+  box of proposals the app makes) and **`widget:<id>`** — a widget a plugin added with
+  `ui.addHomeWidget({ id })`. That is how you place a widget above or between the built-in
+  sections. Anything you leave out keeps its usual place after the listed ones.
 
 All three keys are optional. Keep what is already there unless the user asked to remove it.
+
+### nav.json
+
+The sidebar. All keys optional; create the file when you first need it.
+
+```json
+{
+  "hidden": ["projects"],
+  "order": ["home", "todos", "chats", "ideas", "docs", "client-intake"],
+  "labels": { "ideas": { "en": "Clients", "ar": "العملاء" } }
+}
+```
+
+- Page ids: `home`, `chats`, `ideas`, `todos`, `docs`, `projects`, `me`, plus the `id` of any page
+  a plugin added with `ui.addView`.
+- `hidden` — pages not shown in the sidebar. `home` can never be hidden, and Settings and Help
+  always stay. Hiding a page deletes nothing; the user's data is untouched.
+- `order` — pages in this order first; the rest follow in their usual order.
+- `labels` — rename a page, e.g. "Ideas" → "Clients" for a lawyer or "Classes" for a teacher.
+  Give both `en` and `ar` when you can (at least one), 40 characters at most.
+
+To hide or rename a page always use `nav.json` — never CSS.
+
+### todos.json
+
+How the Todos page is laid out. All keys optional.
+
+```json
+{ "groupBy": "due", "sort": "due", "filter": "all", "showDone": false }
+```
+
+- `groupBy` — `"list"` (by the file each todo lives in — the default), `"due"` (by date: overdue
+  first, then what is coming up, then todos with no date), `"tag"`, or `"none"` (one flat list).
+- `sort` — `"list"` (the order in the files) or `"due"` (earliest date first).
+- `filter` — what the page shows when it opens: `"all"`, `"soon"` (due soon) or `"overdue"`.
+- `showDone` — `true` to show finished todos too.
 
 ### plugins/*.js — Plugin API v1
 
 A plugin is one ES module with a default export. It receives a single object and nothing else: no
-network access to the app's internals, no token.
+network access, no access to the app's internals, no token.
 
 ```js
 export default function (thoughts) {
@@ -138,25 +246,71 @@ export default function (thoughts) {
 | `thoughts.library.list()` | Promise of the library's files (paths relative to the library) | `library:read` |
 | `thoughts.library.read(path)` | Promise of a file's text | `library:read` |
 | `thoughts.library.search(q)` | Promise of matches: `[{ path, matches: [{ text }] }]` | `library:read` |
+| `thoughts.library.write(path, text)` | Creates or replaces a text file. `path` must be inside one of the plugin's `write` folders and end in `.md`, `.json`, `.csv` or `.txt` | `library:write` |
+| `thoughts.library.remove(path)` | Deletes a file inside the `write` folders (the user can get it back from the library's history) | `library:write` |
 | `thoughts.todos.list()` | Promise of `[{ file, idea, items: [{ title, text, due, done, group, line }] }]`; `due` is `"YYYY-MM-DD"` or `null` | `todos:read` |
 | `thoughts.todos.add(text)` | Adds a todo to the general list; append ` @due(YYYY-MM-DD)` for a due date | `todos:write` |
+| `thoughts.todos.setDone(item, done)` | Ticks (`true`) or unticks (`false`) a todo | `todos:write` |
+| `thoughts.todos.edit(item, text)` | Replaces a todo's text (keep or change its ` @due(…)` suffix) | `todos:write` |
+| `thoughts.todos.remove(item)` | Deletes a todo | `todos:write` |
 | `thoughts.ideas.list()` | Promise of `[{ path, area, slug, title, status, summary, tags, updated }]` | `ideas:read` |
+| `thoughts.ideas.setStatus(path, status)` | Sets an item's status (`path` as given by `ideas.list()`); statuses are `seed`, `active`, `parked`, `done`, `dropped` | `ideas:write` |
+| `thoughts.storage.get()` | Promise of the plugin's own saved object (`{}` the first time) | `storage` |
+| `thoughts.storage.set(obj)` | Saves `obj` (a plain JSON object, at most 256 KB) in place of what was saved before | `storage` |
 | `thoughts.chat.start(prompt)` | Opens a new chat with that prompt | `chat:start` |
 | `thoughts.ui.toast(msg)` | Shows a short message | none |
 | `thoughts.ui.go(view)` | Opens a page: `"home"`, `"todos"`, `"ideas"`, `"docs"`, `"projects"`, `"settings"`, or the `id` of a view you added | none |
 | `thoughts.ui.addView({ id, title, icon?, render(el) })` | Adds a page to the sidebar; `render` fills the element `el` | none |
 | `thoughts.ui.addCommand({ id, title, run })` | Adds a command to the command palette | none |
-| `thoughts.ui.addHomeWidget({ id, title, render(el) })` | Adds a box to the Home screen | none |
+| `thoughts.ui.addHomeWidget({ id, title, render(el) })` | Adds a box to the Home screen (place it with `widget:<id>` in `home.json`) | none |
 | `thoughts.ui.addHomeChip({ id, label, prompt })` | Adds a quick-start chip on Home (prefer `home.json` when it is static) | none |
-| `thoughts.ui.addItemAction({ target, id, label, run(item) })` | Adds an action to each todo (`target: "todo"`) or idea (`target: "idea"`) | none |
+| `thoughts.ui.addItemAction({ target, id, label, run })` | Adds an action to each todo (`target: "todo"`) or idea (`target: "idea"`); see below | none |
 | `thoughts.on(event, cb)` | Calls `cb` when something happens; returns a function that stops listening | none |
 
-Events for `on`: `layer.changed` (customisations were applied or undone), `todos.changed`,
+Events for `on`: `layer.changed` (customisations were kept or undone), `todos.changed`,
 `library.changed`, `wrap.done` (a wrap finished saving chats into the library), `chat.done` (the
 assistant finished answering).
 
 A call the plugin has no permission for is rejected with an error — it does not prompt the user.
-Declare the permission in `manifest.json` instead.
+Declare the permission in the plugin's `.json` instead.
+
+**The `item` in todo calls.** `todos.setDone`, `todos.edit` and `todos.remove` take a todo exactly
+as the app gave it to you — an entry of `items` from `todos.list()` together with its `file`, or
+the `item` an item action received: `{ file, line, text, title, due, done }`. Pass it back
+unchanged; the app uses `file`, `line` and `text` to find the right line. From `todos.list()`, build it as `{ ...item, file: group.file }`.
+
+**Item actions.** `run` is called with one argument, `{ target, item }`:
+
+- `target: "todo"` → `item` is `{ file, line, text, title, due, done }`
+- `target: "idea"` → `item` is `{ path, title, status, area, slug, summary, tags, updated }`
+
+```js
+thoughts.ui.addItemAction({
+  target: 'todo', id: 'tomorrow', label: 'Move to tomorrow',
+  async run({ item }) {
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    const due = d.toLocaleDateString('en-CA');            // YYYY-MM-DD, local
+    await thoughts.todos.edit(item, `${item.title} @due(${due})`);   // needs todos:write
+  },
+});
+thoughts.ui.addItemAction({
+  target: 'idea', id: 'park', label: 'Park this',
+  run: ({ item }) => thoughts.ideas.setStatus(item.path, 'parked'),   // needs ideas:write
+});
+```
+
+**Storage.** `storage` is one JSON object per plugin, kept on this computer outside the library
+(it is not synced and not part of packs). Read it, change it, write the whole object back:
+
+```js
+const data = await thoughts.storage.get();          // {} the first time
+data.entries = [...(data.entries || []), entry];
+await thoughts.storage.set(data);
+```
+
+Use `storage` for the plugin's own settings and small records. Use `library:write` instead when
+the result is something the user should own as a note (a client file, a log) — that lives in
+their library, syncs with it, and the assistant can read it.
 
 Writing a good plugin:
 
@@ -165,6 +319,8 @@ Writing a good plugin:
 - Use the tokens (`var(--panel)`, `var(--fg)`, `var(--muted)`, `var(--accent)`, `var(--radius)`)
   so it matches every theme. Put `dir="auto"` on elements showing the user's own text.
 - Write visible text in the user's language. No emojis as icons.
+- Each page and each Home widget is drawn by its own fresh copy of the plugin: they share **no
+  variables**. Anything two of them must both know goes through `storage` or the library.
 - Everything the plugin adds is removed automatically when the layer reloads; keep no global state.
 - A plugin that throws is switched off and the user is told, so handle empty lists and failed
   calls (`try`/`catch` around `await`).
@@ -174,9 +330,10 @@ Writing a good plugin:
 
 A complete static HTML page shown in the sidebar (the file name without `.html` is its title). It
 runs in a sandboxed frame: it cannot reach the app, the user's files or the network on its own. It
-can ask for **read-only** data by message, but only what it declares in `manifest.json` under
-`views` — for example `"views": { "calendar.html": { "permissions": ["todos:read"] } }`. With no entry
-a view gets no data at all:
+can ask for **read-only** data by message, but only what it declares in its own
+`views/<name>.json` — for example `views/calendar.json`:
+`{ "apiVersion": 1, "permissions": ["todos:read"] }`. With no declaration a view gets no data at
+all, and a view can never write:
 
 ```js
 const call = (method, ...args) => new Promise((resolve, reject) => {
@@ -192,8 +349,9 @@ const call = (method, ...args) => new Promise((resolve, reject) => {
 const todos = await call('todos.list');
 ```
 
-Available methods: `library.list`, `library.read`, `library.search`, `todos.list`, `ideas.list`.
-Prefer a plugin with `ui.addView` when the page needs to do more than display things.
+Available methods: `library.list`, `library.read`, `library.search`, `todos.list`, `ideas.list`
+(permissions `library:read`, `todos:read`, `ideas:read`). Anything that saves, edits or reacts —
+a form, a board, a tracker — must be a plugin with `ui.addView`, not an HTML view.
 
 ### workflows/*.json
 
@@ -207,19 +365,55 @@ One file per workflow:
 }
 ```
 
-- Schedule trigger: `every` is `"day"` or `"week"`; `at` is `"HH:MM"`, 24-hour, the user's local
-  time; `weekday` (weekly only) is 0–6 where **0 is Sunday** and 5 is Friday.
-- Event trigger: `{ "type": "event", "on": "wrap.done" }` (after each wrap) or
-  `{ "type": "event", "on": "app.start" }` (when the app starts).
-- `prompt` is what the assistant is asked to do, inside the user's library, with nobody watching.
-  Make it complete on its own: what to read, what to write and where, and how long the result
-  should be. Follow the conventions in the library's own `CLAUDE.md`.
+Schedule triggers — `at` is always `"HH:MM"`, 24-hour, the user's local time:
 
-The app runs one workflow at a time, never during a wrap, and each run appears as a chat the user
-can read. If the computer was off at the scheduled time the workflow runs once when the app is
-next open. A file with an unknown trigger or a missing prompt is ignored.
+| `every` | Extra field | Runs |
+|---|---|---|
+| `"day"` | — | every day |
+| `"weekdays"` | `days` (optional) | Monday to Friday; or exactly the days in `days`, e.g. `[0, 1, 2, 3, 4]` for Sunday to Thursday |
+| `"week"` | `weekday` | once a week; 0–6 where **0 is Sunday**, 4 is Thursday, 5 is Friday |
+| `"month"` | `day` (required) | once a month, on day `1`–`28`, or `"last"` for the last day of the month |
+
+```json
+{ "type": "schedule", "every": "month", "at": "09:00", "day": "last" }
+{ "type": "schedule", "every": "weekdays", "at": "08:30", "days": [0, 1, 2, 3, 4] }
+```
+
+There is no day 29, 30 or 31: use `"last"` for month-end work. Ask the user which days their
+working week has before using `"weekdays"` (in Saudi Arabia and much of the Gulf it is Sunday to
+Thursday).
+
+Event triggers: `{ "type": "event", "on": "wrap.done" }` (after each wrap) or
+`{ "type": "event", "on": "app.start" }` (when the app starts).
+
+`prompt` is what the assistant is asked to do, inside the user's library, with nobody watching.
+Make it complete on its own: what to read, what to write and where, and how long the result
+should be. Follow the conventions in the library's own `CLAUDE.md`.
+
+What the user can rely on (say it this way in the summary, do not promise more):
+
+- A new or changed workflow runs only after the user has allowed it, in exactly the form they saw.
+- The app runs one workflow at a time, never during a wrap, and each run appears as a chat the
+  user can read.
+- If the computer was off or asleep at the scheduled time, the workflow runs **once** when the
+  app is next open, provided that is within 24 hours of the scheduled time. Older missed runs are
+  skipped, not piled up.
+- A run that fails is tried once more ten minutes later.
+
+## Sharing: packs
+
+The user can export their customisations as a pack file and import someone else's. A pack that
+carries only some files (a "feature pack" — say, one plugin with its declaration and a bit of CSS)
+is **merged** on import: plugin, view and workflow files are added; `home.json`, `nav.json`,
+`todos.json` and `themes.json` are merged key by key with lists combined; the pack's CSS goes into
+`custom.css` inside a block marked `/* pack:<name> */ … /* end pack:<name> */`. Leave those
+marked blocks as they are unless the user asks to change that pack's look, and keep your own CSS
+outside them. A plugin with its own `.json` declaration travels cleanly in a pack — one more
+reason not to use `manifest.json`.
 
 ## Worked examples
+
+Each example is a complete change: every file, and the summary to write.
 
 ### 1. A Home widget listing overdue todos
 
@@ -263,7 +457,11 @@ export default function (thoughts) {
 }
 ```
 
-`manifest.json` gains `"overdue.js": { "permissions": ["todos:read"] }` under `plugins`.
+`plugins/overdue.json`
+
+```json
+{ "apiVersion": 1, "permissions": ["todos:read"], "description": "Lists overdue todos on Home" }
+```
 
 `SUMMARY.md`: "Show overdue todos on Home. A new box called Overdue lists up to seven todos whose
 date has passed, oldest first. Open Home to see it; click an item to jump to Todos."
@@ -304,3 +502,355 @@ each run in your chats."
 
 `SUMMARY.md`: "Add a warm Sand theme. It comes in a light and a dark version. To try it, open the
 theme picker and choose Sand; your current theme stays as it is until you switch."
+
+### 4. A client-intake form that saves a new note
+
+A page with a form; submitting it writes one markdown file into `clients/`.
+
+`plugins/client-intake.json`
+
+```json
+{
+  "apiVersion": 1,
+  "permissions": ["library:read", "library:write"],
+  "write": ["clients/"],
+  "description": "A form that saves each new client as a note in the clients folder"
+}
+```
+
+`plugins/client-intake.js`
+
+```js
+export default function (thoughts) {
+  const FIELDS = [
+    { key: 'name', label: 'Client name', required: true },
+    { key: 'contact', label: 'Phone or email' },
+    { key: 'matter', label: 'What they need', long: true },
+  ];
+
+  // A safe file name: letters and digits (any language) joined by dashes.
+  const slug = (s) => s.trim().toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 60);
+
+  thoughts.ui.addView({
+    id: 'client-intake',
+    title: 'New client',
+    render(el) {
+      const form = document.createElement('form');
+      form.style.cssText = 'display:grid;gap:12px;max-inline-size:520px;padding:16px';
+      const inputs = {};
+      for (const f of FIELDS) {
+        const label = document.createElement('label');
+        label.style.cssText = 'display:grid;gap:4px;color:var(--fg)';
+        label.append(f.label);
+        const input = document.createElement(f.long ? 'textarea' : 'input');
+        input.dir = 'auto';
+        input.required = !!f.required;
+        if (f.long) input.rows = 4;
+        input.style.cssText = 'font:inherit;color:var(--fg);background:var(--panel);border:var(--border-w,1px) solid var(--border);border-radius:var(--radius);padding:8px';
+        label.append(input);
+        form.append(label);
+        inputs[f.key] = input;
+      }
+      const save = document.createElement('button');
+      save.type = 'submit';
+      save.textContent = 'Save client';
+      save.style.cssText = 'font:inherit;justify-self:start;padding:8px 16px;border:0;border-radius:var(--radius);background:var(--accent);color:var(--accent-fg);cursor:pointer';
+      form.append(save);
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const name = inputs.name.value.trim();
+        const base = slug(name);
+        if (!base) { thoughts.ui.toast('Please enter the client name.'); return; }
+        save.disabled = true;
+        try {
+          // Never overwrite an existing client: pick a free file name.
+          const existing = new Set((await thoughts.library.list()).map((f) => (typeof f === 'string' ? f : f.path)));
+          let path = `clients/${base}.md`;
+          for (let n = 2; existing.has(path); n++) path = `clients/${base}-${n}.md`;
+          const today = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local
+          const text = [
+            `# ${name}`,
+            '',
+            `- Added: ${today}`,
+            `- Contact: ${inputs.contact.value.trim() || '—'}`,
+            '',
+            '## What they need',
+            '',
+            inputs.matter.value.trim() || '—',
+            '',
+          ].join('\n');
+          await thoughts.library.write(path, text);
+          form.reset();
+          thoughts.ui.toast(`Saved ${name}.`);
+        } catch (err) {
+          thoughts.ui.toast('Could not save the client. Nothing was changed.');
+        } finally {
+          save.disabled = false;
+        }
+      });
+      el.replaceChildren(form);
+    },
+  });
+}
+```
+
+`SUMMARY.md`: "Add a New client form. A new page called New client appears in the sidebar. Fill in
+the name, contact and what they need, press Save client, and a note for that client is created in
+your clients folder. It never overwrites an existing client. This add-on may write only inside the
+clients folder."
+
+### 5. A board you can drag: items by status
+
+Columns for each status; dragging a card to another column (or choosing from the card's menu, for
+keyboard users) changes that item's status.
+
+`plugins/status-board.json`
+
+```json
+{
+  "apiVersion": 1,
+  "permissions": ["ideas:read", "ideas:write"],
+  "description": "A board of your items by status; drag a card to change its status"
+}
+```
+
+`plugins/status-board.js`
+
+```js
+export default function (thoughts) {
+  const COLUMNS = [
+    { status: 'seed', title: 'New' },
+    { status: 'active', title: 'In progress' },
+    { status: 'parked', title: 'On hold' },
+    { status: 'done', title: 'Done' },
+  ];
+
+  thoughts.ui.addView({
+    id: 'status-board',
+    title: 'Board',
+    async render(el) {
+      const board = document.createElement('div');
+      board.style.cssText = `display:grid;grid-template-columns:repeat(${COLUMNS.length},minmax(180px,1fr));gap:12px;padding:16px;align-items:start;overflow-x:auto`;
+      el.replaceChildren(board);
+
+      const move = async (path, status) => {
+        try {
+          await thoughts.ideas.setStatus(path, status);
+        } catch (err) {
+          thoughts.ui.toast('Could not move that item.');
+        }
+        await draw();
+      };
+
+      const card = (idea) => {
+        const box = document.createElement('div');
+        box.draggable = true;
+        box.style.cssText = 'display:grid;gap:6px;padding:8px;background:var(--panel);border:var(--border-w,1px) solid var(--border);border-radius:var(--radius);cursor:grab';
+        box.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('text/plain', idea.path);
+          e.dataTransfer.effectAllowed = 'move';
+        });
+        const title = document.createElement('div');
+        title.dir = 'auto';
+        title.textContent = idea.title;
+        // The same move without a mouse.
+        const pick = document.createElement('select');
+        pick.setAttribute('aria-label', `Status of ${idea.title}`);
+        pick.style.cssText = 'font:inherit;color:var(--fg);background:var(--panel-2);border:var(--border-w,1px) solid var(--border);border-radius:var(--radius)';
+        for (const c of COLUMNS) {
+          const o = document.createElement('option');
+          o.value = c.status;
+          o.textContent = c.title;
+          o.selected = c.status === idea.status;
+          pick.append(o);
+        }
+        pick.addEventListener('change', () => move(idea.path, pick.value));
+        box.append(title, pick);
+        return box;
+      };
+
+      async function draw() {
+        let ideas = [];
+        try { ideas = await thoughts.ideas.list(); } catch { /* show empty columns */ }
+        board.replaceChildren();
+        for (const c of COLUMNS) {
+          const col = document.createElement('section');
+          col.style.cssText = 'display:grid;gap:8px;align-content:start;min-block-size:120px;padding:8px;background:var(--panel-2);border-radius:var(--radius-lg, var(--radius))';
+          const h = document.createElement('h3');
+          const mine = ideas.filter((i) => i.status === c.status);
+          h.textContent = `${c.title} (${mine.length})`;
+          h.style.cssText = 'margin:0;font-size:0.9em;color:var(--muted)';
+          col.append(h, ...mine.map(card));
+          col.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; });
+          col.addEventListener('drop', (e) => {
+            e.preventDefault();
+            const path = e.dataTransfer.getData('text/plain');
+            const idea = ideas.find((i) => i.path === path);
+            if (idea && idea.status !== c.status) move(path, c.status);
+          });
+          board.append(col);
+        }
+      }
+
+      await draw();
+      thoughts.on('library.changed', draw);
+    },
+  });
+}
+```
+
+Items whose status is not one of the columns (here `dropped`) are simply not shown. Rename the
+column titles to the user's own words ("Enquiry", "Open matter", "Waiting", "Closed") — the
+`status` values stay as they are.
+
+`SUMMARY.md`: "Add a Board page. A new page called Board shows your items in four columns: New, In
+progress, On hold and Done. Drag a card to another column to change its status, or use the menu on
+the card. Nothing else about the item changes."
+
+### 6. A billable-hours tracker with a monthly total on Home
+
+Entries are kept in the plugin's own `storage`; a page adds and lists them and a Home widget shows
+this month's total. The page and the widget share nothing but `storage`.
+
+`plugins/hours.json`
+
+```json
+{ "apiVersion": 1, "permissions": ["storage"], "description": "Tracks billable hours and shows this month's total on Home" }
+```
+
+`plugins/hours.js`
+
+```js
+export default function (thoughts) {
+  const today = () => new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD, local
+  const load = async () => {
+    try {
+      const data = await thoughts.storage.get();
+      return Array.isArray(data.entries) ? data.entries : [];
+    } catch { return []; }
+  };
+  const monthTotal = (entries) => {
+    const month = today().slice(0, 7);
+    return entries.filter((e) => e.date.startsWith(month)).reduce((sum, e) => sum + e.hours, 0);
+  };
+  const fmt = (n) => (Math.round(n * 100) / 100).toString();
+
+  thoughts.ui.addHomeWidget({
+    id: 'hours-month',
+    title: 'Billable hours this month',
+    async render(el) {
+      const total = document.createElement('button');
+      total.style.cssText = 'font:inherit;font-size:1.6em;color:var(--fg);background:none;border:0;padding:0;cursor:pointer';
+      total.textContent = `${fmt(monthTotal(await load()))} h`;
+      total.setAttribute('aria-label', `${total.textContent} — open the hours page`);
+      total.onclick = () => thoughts.ui.go('hours');
+      el.replaceChildren(total);
+    },
+  });
+
+  thoughts.ui.addView({
+    id: 'hours',
+    title: 'Hours',
+    async render(el) {
+      let entries = await load();
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:grid;gap:16px;max-inline-size:640px;padding:16px';
+      const field = 'font:inherit;color:var(--fg);background:var(--panel);border:var(--border-w,1px) solid var(--border);border-radius:var(--radius);padding:8px';
+
+      const form = document.createElement('form');
+      form.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:end';
+      const date = Object.assign(document.createElement('input'), { type: 'date', value: today(), required: true });
+      const client = Object.assign(document.createElement('input'), { type: 'text', placeholder: 'Client', required: true, dir: 'auto' });
+      const hours = Object.assign(document.createElement('input'), { type: 'number', min: '0.25', max: '24', step: '0.25', placeholder: 'Hours', required: true });
+      date.setAttribute('aria-label', 'Date');
+      client.setAttribute('aria-label', 'Client');
+      hours.setAttribute('aria-label', 'Hours');
+      for (const i of [date, client, hours]) i.style.cssText = field;
+      const add = document.createElement('button');
+      add.type = 'submit';
+      add.textContent = 'Add';
+      add.style.cssText = 'font:inherit;padding:8px 16px;border:0;border-radius:var(--radius);background:var(--accent);color:var(--accent-fg);cursor:pointer';
+      form.append(date, client, hours, add);
+
+      const total = document.createElement('p');
+      total.style.cssText = 'margin:0;color:var(--muted)';
+      const list = document.createElement('div');
+      list.style.cssText = 'display:grid;gap:4px';
+
+      const save = async (next) => {
+        try {
+          await thoughts.storage.set({ entries: next });
+          entries = next;
+        } catch (err) {
+          thoughts.ui.toast('Could not save. Your earlier entries are unchanged.');
+        }
+        draw();
+      };
+
+      function draw() {
+        total.textContent = `This month: ${fmt(monthTotal(entries))} h`;
+        list.replaceChildren();
+        const sorted = [...entries].sort((a, b) => b.date.localeCompare(a.date));
+        if (!sorted.length) {
+          const empty = document.createElement('p');
+          empty.textContent = 'No hours yet. Add your first entry above.';
+          empty.style.color = 'var(--muted)';
+          list.append(empty);
+        }
+        for (const e of sorted.slice(0, 200)) {
+          const row = document.createElement('div');
+          row.style.cssText = 'display:flex;gap:12px;align-items:center;padding:6px 0;border-block-end:var(--border-w,1px) solid var(--border)';
+          const text = document.createElement('span');
+          text.dir = 'auto';
+          text.style.flex = '1';
+          text.textContent = `${e.date} · ${e.client} · ${fmt(e.hours)} h`;
+          const del = document.createElement('button');
+          del.textContent = 'Remove';
+          del.setAttribute('aria-label', `Remove ${fmt(e.hours)} h for ${e.client} on ${e.date}`);
+          del.style.cssText = 'font:inherit;color:var(--danger);background:none;border:0;cursor:pointer';
+          del.onclick = () => save(entries.filter((x) => x.id !== e.id));
+          row.append(text, del);
+          list.append(row);
+        }
+      }
+
+      form.addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        const h = Number(hours.value);
+        if (!client.value.trim() || !(h > 0)) return;
+        const entry = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, date: date.value || today(), client: client.value.trim(), hours: h };
+        client.value = '';
+        hours.value = '';
+        save([...entries, entry]);
+      });
+
+      wrap.append(form, total, list);
+      el.replaceChildren(wrap);
+      draw();
+    },
+  });
+}
+```
+
+`home.json` gains `"widget:hours-month"` at the front of `order` (keeping what is already there),
+so the total sits at the top of Home.
+
+`SUMMARY.md`: "Track billable hours. A new page called Hours lets you add the date, client and
+hours worked, and lists your entries. Home now shows your total for this month at the top; click
+it to open the page. The entries are kept on this computer, not in your notes."
+
+### 7. Group todos by due date
+
+No plugin needed — one settings file.
+
+`todos.json`
+
+```json
+{ "groupBy": "due", "sort": "due", "filter": "all", "showDone": false }
+```
+
+If `todos.json` already exists, change only the keys the user asked about and keep the rest.
+
+`SUMMARY.md`: "Group your todos by date. The Todos page now groups todos by when they are due
+instead of one list per file, with overdue ones first. Open Todos to see it."

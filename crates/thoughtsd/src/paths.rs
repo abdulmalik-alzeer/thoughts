@@ -47,10 +47,10 @@ pub fn app_layer_staging_dir() -> PathBuf { home().join("app-layer-staging") }
 /// caller protects separately). Known names are always listed, even before they exist, and anything
 /// else found in the folder is added, so a new state file is protected by default.
 pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
-    const FILES: &[&str] = &["daemon.json", "daemon.lock", "settings.json", "git-credentials", "trusted.json", "secrets.json",
+    const FILES: &[&str] = &["daemon.json", "daemon.lock", "settings.json", "settings.json.bak", "git-credentials", "trusted.json", "secrets.json",
         "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "workflows-approved.json",
-        "workflows-state.json", "suggestions.json", "base-manifest.json"];
-    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree"];
+        "workflows-state.json", "suggestions.json", "base-manifest.json", "layer-requests.json"];
+    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "run-tmp", "plugin-data"];
     const OPEN: &[&str] = &["app-layer-staging", "app-layer"];
     let mut files: Vec<PathBuf> = FILES.iter().map(|f| home.join(f)).collect();
     let mut dirs: Vec<PathBuf> = DIRS.iter().map(|d| home.join(d)).collect();
@@ -65,6 +65,69 @@ pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         }
     }
     (files, dirs)
+}
+
+/// Short-lived files handed to the assistant program on systems where they cannot be passed as arguments.
+pub fn run_tmp_dir() -> PathBuf { home().join("run-tmp") }
+
+/// The program to start for the daemon, autostart entries and git's password prompt. Inside an
+/// AppImage the running binary lives in a mount that disappears when the app quits, so the AppImage
+/// file itself (`$APPIMAGE`) is what must be recorded.
+pub fn app_exe() -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if let Some(p) = std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_absolute() && p.is_file()) { return Ok(p); }
+    std::env::current_exe()
+}
+
+/// A path as programs and people expect to see it: canonical, but without Windows' `\\?\` prefix.
+pub fn canonical(p: &Path) -> std::io::Result<PathBuf> { dunce::canonicalize(p) }
+
+/// The real location of `p` even when its last components do not exist yet: the deepest existing
+/// ancestor is resolved (symlinks, true letter case) and the rest is appended.
+pub fn canonical_lenient(p: &Path) -> PathBuf {
+    let mut rest: Vec<std::ffi::OsString> = vec![];
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(real) = dunce::canonicalize(&cur) {
+            let mut out = real;
+            for c in rest.iter().rev() { out.push(c); }
+            return out;
+        }
+        match (cur.file_name().map(|n| n.to_os_string()), cur.parent().map(Path::to_path_buf)) {
+            (Some(name), Some(parent)) => { rest.push(name); cur = parent; }
+            _ => return p.to_path_buf(),
+        }
+    }
+}
+
+/// Is `p` equal to, or inside, `dir`? Both are resolved to their real locations first and compared
+/// without regard to letter case, so `Me/Finances`, a symlink to it, or `me/finances/../finances`
+/// are all the same folder (volumes on macOS and Windows ignore case; being strict everywhere only
+/// ever protects more).
+pub fn inside_ci(p: &Path, dir: &Path) -> bool {
+    let norm = |x: &Path| canonical_lenient(x).to_string_lossy().replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let (p, dir) = (norm(p), norm(dir));
+    p == dir || p.starts_with(&format!("{dir}/"))
+}
+
+/// Is library-relative `rel` inside one of the private folders, judged on real paths (see `inside_ci`)
+/// as well as on the names as written?
+pub fn is_private(root: &Path, rel: &str, private: &[String]) -> bool {
+    if private.is_empty() { return false; }
+    if is_under(rel, private) { return true; }
+    let target = root.join(rel.trim_start_matches(['/', '\\']));
+    private.iter().any(|d| inside_ci(&target, &root.join(d)))
+}
+
+/// Keep only the `keep` newest files in `dir` whose name starts with `prefix` (newest by name, which
+/// for timestamped names is newest by time). Returns how many were removed.
+pub fn prune_files(dir: &Path, prefix: &str, keep: usize) -> usize {
+    let mut names: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| n.starts_with(prefix)).collect();
+    names.sort();
+    let extra = names.len().saturating_sub(keep);
+    names.iter().take(extra).filter(|n| std::fs::remove_file(dir.join(n)).is_ok()).count()
 }
 
 /// Where Reorganize works, so the library's own folder never leaves the user's branch.
@@ -109,7 +172,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> std::io::Result
     use std::io::Write;
     // A library file that is a symlink keeps being one: write through to its target.
     let target = match std::fs::symlink_metadata(path) {
-        Ok(m) if m.file_type().is_symlink() && !private => std::fs::canonicalize(path)?,
+        Ok(m) if m.file_type().is_symlink() && !private => dunce::canonicalize(path)?,
         _ => path.to_path_buf(),
     };
     let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
@@ -196,13 +259,13 @@ pub fn safe_join(root: &Path, rel: &str) -> anyhow::Result<PathBuf> {
         }
     }
     // Every component that is a symlink (dangling ones included) must resolve inside root.
-    let real_root = root.canonicalize()?;
+    let real_root = dunce::canonicalize(root)?;
     let mut cur = root.to_path_buf();
     for comp in out.strip_prefix(root)?.components() {
         cur.push(comp);
         match std::fs::symlink_metadata(&cur) {
             Ok(m) if m.file_type().is_symlink() => {
-                let target = cur.canonicalize().map_err(|_| anyhow::anyhow!("broken symlink in path"))?;
+                let target = dunce::canonicalize(&cur).map_err(|_| anyhow::anyhow!("broken symlink in path"))?;
                 if !target.starts_with(&real_root) { anyhow::bail!("path escapes the library"); }
             }
             Ok(_) => {}
@@ -242,6 +305,39 @@ mod tests {
         assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         // No temp files left behind.
         assert_eq!(std::fs::read_dir(d.join("sub")).unwrap().count(), 1);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn private_folders_match_whatever_the_spelling() {
+        let d = std::env::temp_dir().join(format!("pv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(d.join("lib/me/finances")).unwrap();
+        std::fs::create_dir_all(d.join("lib/ideas")).unwrap();
+        std::fs::write(d.join("lib/me/finances/tax.md"), "x").unwrap();
+        let lib = d.join("lib");
+        std::os::unix::fs::symlink(lib.join("me/finances"), lib.join("ideas/money")).unwrap();
+        let private = vec!["me/finances".to_string()];
+        for hidden in ["me/finances/tax.md", "ME/Finances/tax.md", "me/finances", "me/./finances/new.md", "ideas/money/tax.md", "ideas/money", "me/finances/not/yet/there.md"] {
+            assert!(is_private(&lib, hidden, &private), "{hidden}");
+        }
+        for open in ["me/profile.md", "ideas/a.md", "me/finances-old/x.md", "me"] { assert!(!is_private(&lib, open, &private), "{open}"); }
+        assert!(!is_private(&lib, "me/finances/tax.md", &[]));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn old_files_are_pruned_by_name() {
+        let d = std::env::temp_dir().join(format!("pr-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        for i in 1..=8 { std::fs::write(d.join(format!("settings.json.corrupt-2026010{i}-000000")), "x").unwrap(); }
+        std::fs::write(d.join("settings.json"), "{}").unwrap();
+        assert_eq!(prune_files(&d, "settings.json.corrupt-", 5), 3);
+        let mut left: Vec<String> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        left.sort();
+        assert_eq!(left.len(), 6);
+        assert_eq!(left[0], "settings.json");
+        assert_eq!(left[1], "settings.json.corrupt-20260104-000000");
+        assert_eq!(prune_files(&d, "settings.json.corrupt-", 5), 0);
         std::fs::remove_dir_all(d).unwrap();
     }
 

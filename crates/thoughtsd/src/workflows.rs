@@ -5,7 +5,7 @@
 use crate::chats::{Chat, Msg, RunOptions};
 use crate::claude::{self, RunSpec};
 use crate::state::AppState;
-use chrono::{Datelike, Local, NaiveDateTime, NaiveTime};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
@@ -15,8 +15,15 @@ use std::sync::Arc;
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Trigger {
-    /// `every`: "day" | "week"; `at`: "HH:MM" local time; `weekday`: 0 (Sunday) – 6 (Saturday), weekly only.
-    Schedule { every: String, at: String, #[serde(default, skip_serializing_if = "Option::is_none")] weekday: Option<u32> },
+    /// `every`: "day" | "week" | "weekdays" | "month"; `at`: "HH:MM" local time;
+    /// `weekday`: 0 (Sunday) – 6 (Saturday), weekly only; `day`: 1–28 or "last", monthly only;
+    /// `days`: which weekdays count for "weekdays" (default Monday–Friday).
+    Schedule {
+        every: String, at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")] weekday: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] day: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")] days: Option<Vec<u32>>,
+    },
     /// `on`: "wrap.done" | "app.start"
     Event { on: String },
 }
@@ -33,14 +40,44 @@ fn parse_at(at: &str) -> Option<NaiveTime> {
     NaiveTime::parse_from_str(at, "%H:%M").ok()
 }
 
+/// Day of the month a monthly schedule fires on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MonthDay { On(u32), Last }
+
+fn month_day(day: &Option<Value>) -> Option<MonthDay> {
+    match day.as_ref()? {
+        Value::String(s) if s == "last" => Some(MonthDay::Last),
+        v => v.as_u64().filter(|d| (1..=28).contains(d)).map(|d| MonthDay::On(d as u32)),
+    }
+}
+
+/// Does a schedule fire on `day`? `None` for a schedule the runner does not understand.
+fn fits(trigger: &Trigger, day: NaiveDate) -> Option<bool> {
+    let Trigger::Schedule { every, weekday, day: month, days, .. } = trigger else { return None };
+    let wd = day.weekday().num_days_from_sunday();
+    Some(match every.as_str() {
+        "day" => true,
+        "week" => wd == weekday.unwrap_or(0),
+        "weekdays" => match days { Some(d) => d.contains(&wd), None => (1..=5).contains(&wd) },
+        "month" => match month_day(month)? {
+            MonthDay::On(n) => day.day() == n,
+            // The last day of a month is the one whose tomorrow is the 1st.
+            MonthDay::Last => day.succ_opt().map_or(true, |t| t.day() == 1),
+        },
+        _ => return None,
+    })
+}
+
 /// Is this definition one the runner understands?
 pub fn valid(w: &Workflow) -> bool {
     if w.name.trim().is_empty() || w.name.chars().count() > 80 || w.name.chars().any(char::is_control) { return false; }
     if w.prompt.trim().is_empty() || w.prompt.len() > 20_000 { return false; }
     match &w.trigger {
-        Trigger::Schedule { every, at, weekday } => parse_at(at).is_some() && match every.as_str() {
+        Trigger::Schedule { every, at, weekday, day, days } => parse_at(at).is_some() && match every.as_str() {
             "day" => true,
             "week" => weekday.map_or(true, |d| d <= 6),
+            "weekdays" => days.as_ref().map_or(true, |d| !d.is_empty() && d.len() <= 7 && d.iter().all(|x| *x <= 6)),
+            "month" => month_day(day).is_some(),
             _ => false,
         },
         Trigger::Event { on } => on == "wrap.done" || on == "app.start",
@@ -158,22 +195,35 @@ fn prune_approved(layer: &Path, home: &Path) {
 
 /// The first time a schedule fires strictly after `after` (local wall-clock time). `None` for event triggers.
 pub fn next_run(trigger: &Trigger, after: NaiveDateTime) -> Option<NaiveDateTime> {
-    let Trigger::Schedule { every, at, weekday } = trigger else { return None };
+    let Trigger::Schedule { at, .. } = trigger else { return None };
     let time = parse_at(at)?;
     let mut day = after.date();
-    // At most eight days ahead covers every daily and weekly case.
-    for _ in 0..9 {
-        let fits = match every.as_str() {
-            "day" => true,
-            "week" => day.weekday().num_days_from_sunday() == weekday.unwrap_or(0),
-            _ => return None,
-        };
+    // Two months ahead covers every case, including a monthly schedule seen just after it fired.
+    for _ in 0..63 {
         let candidate = day.and_time(time);
-        if fits && candidate > after { return Some(candidate); }
+        if fits(trigger, day)? && candidate > after { return Some(candidate); }
         day = day.succ_opt()?;
     }
     None
 }
+
+/// The last time a schedule fired at or before `now`. `None` for event triggers.
+pub fn prev_run(trigger: &Trigger, now: NaiveDateTime) -> Option<NaiveDateTime> {
+    let Trigger::Schedule { at, .. } = trigger else { return None };
+    let time = parse_at(at)?;
+    let mut day = now.date();
+    for _ in 0..63 {
+        let candidate = day.and_time(time);
+        if fits(trigger, day)? && candidate <= now { return Some(candidate); }
+        day = day.pred_opt()?;
+    }
+    None
+}
+
+/// A run missed while the app was closed or the computer slept is caught up only this long after its time.
+pub const CATCH_UP_HOURS: i64 = 24;
+/// A failed run is tried once more after this many minutes.
+pub const RETRY_MINUTES: i64 = 10;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default, rename_all = "camelCase")]
@@ -182,6 +232,12 @@ pub struct Seen {
     /// When the runner first met this workflow: a schedule counts from here, so a new workflow
     /// never fires for a time that had already passed when it was created.
     pub first_seen: Option<NaiveDateTime>,
+    /// The chat of the run that is in progress (or was, when the daemon last looked).
+    pub chat_id: Option<String>,
+    /// A failed run is tried again at this time…
+    pub retry_at: Option<NaiveDateTime>,
+    /// …but only once per run.
+    pub retried: bool,
 }
 
 pub type State = BTreeMap<String, Seen>;
@@ -196,15 +252,46 @@ fn save_state(home: &Path, s: &State) {
     if let Ok(t) = serde_json::to_string_pretty(s) { let _ = crate::paths::write_atomic(&state_file(home), t.as_bytes(), true); }
 }
 
-/// When `w` should next run given what the runner remembers about it.
-pub fn due_at(w: &Workflow, seen: Option<&Seen>, now: NaiveDateTime) -> Option<NaiveDateTime> {
-    let base = seen.and_then(|s| s.last_run.or(s.first_seen)).unwrap_or(now);
-    next_run(&w.trigger, base)
+/// The scheduled time `w` has to run for right now, if any: the latest time its schedule fired,
+/// when that is after its last run (or after the runner first met it) and no more than a day ago.
+/// However long the app was closed this is at most one run — older missed times are skipped.
+pub fn missed(w: &Workflow, seen: Option<&Seen>, now: NaiveDateTime) -> Option<NaiveDateTime> {
+    let base = seen.and_then(|s| s.last_run.or(s.first_seen))?;
+    let slot = prev_run(&w.trigger, now)?;
+    (slot > base && now - slot <= Duration::hours(CATCH_UP_HOURS)).then_some(slot)
 }
 
-/// Names of schedule workflows that are due at `now`. A machine that was off for a week runs each once.
+/// When `w` should next run given what the runner remembers about it.
+pub fn due_at(w: &Workflow, seen: Option<&Seen>, now: NaiveDateTime) -> Option<NaiveDateTime> {
+    if let Some(t) = seen.and_then(|s| s.retry_at) { return Some(t); }
+    missed(w, seen, now).or_else(|| next_run(&w.trigger, now))
+}
+
+/// Names of schedule workflows that are due at `now`, and of failed ones whose retry time has come.
 pub fn due(workflows: &[Workflow], state: &State, now: NaiveDateTime) -> Vec<String> {
-    workflows.iter().filter(|w| due_at(w, state.get(&w.name), now).map_or(false, |t| t <= now)).map(|w| w.name.clone()).collect()
+    workflows.iter().filter(|w| {
+        let seen = state.get(&w.name);
+        missed(w, seen, now).is_some() || seen.and_then(|s| s.retry_at).map_or(false, |t| t <= now)
+    }).map(|w| w.name.clone()).collect()
+}
+
+/// A run of `seen`'s workflow ended. A failure earns one retry; a success (or a second failure) clears it.
+pub fn note_result(seen: &mut Seen, ok: bool, now: NaiveDateTime) {
+    seen.chat_id = None;
+    if !ok && !seen.retried {
+        seen.retried = true;
+        seen.retry_at = Some(now + Duration::minutes(RETRY_MINUTES));
+    } else {
+        seen.retry_at = None;
+    }
+}
+
+/// A run of `seen`'s workflow is starting at `now`. A retry keeps its mark, so it is not retried again.
+pub fn note_start(seen: &mut Seen, now: NaiveDateTime) {
+    let retry = seen.retry_at.map_or(false, |t| t <= now);
+    seen.retried = retry;
+    seen.retry_at = None;
+    seen.last_run = Some(now);
 }
 
 fn local_iso(t: NaiveDateTime) -> Value {
@@ -232,7 +319,7 @@ async fn busy(state: &AppState) -> bool {
     state.library_busy() || state.chats.list().await.iter().any(|c| c.running && (c.kind == "workflow" || c.kind == "wrap" || c.kind == "reorganize"))
 }
 
-async fn start(state: &Arc<AppState>, w: &Workflow) -> anyhow::Result<()> {
+async fn start(state: &Arc<AppState>, w: &Workflow) -> anyhow::Result<String> {
     let lib = state.settings.read().await.library().ok_or_else(|| anyhow::anyhow!("no library configured"))?;
     let mut chat = Chat { kind: "workflow".into(), title: w.name.clone(), ..Default::default() };
     chat.options = RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() };
@@ -250,7 +337,12 @@ async fn start(state: &Arc<AppState>, w: &Workflow) -> anyhow::Result<()> {
         claude::push(state, &id, Msg::new("error", e.to_string())).await;
         return Err(e);
     }
-    Ok(())
+    Ok(id)
+}
+
+/// Did the user stop this run themselves? (Then it is not a failure to retry.)
+async fn stopped_by_user(state: &AppState, chat_id: &str) -> bool {
+    state.chats.get(chat_id).await.map_or(true, |c| c.messages.last().map_or(false, |m| m.role == "system"))
 }
 
 /// The runner: checks schedules twice a minute, listens for event triggers, starts one workflow at a time.
@@ -260,6 +352,8 @@ pub async fn run_loop(state: Arc<AppState>) {
     let mut rx = state.events.subscribe();
     let mut queue: VecDeque<String> = approved_workflows(&layer, &home).into_iter()
         .filter(|w| w.trigger == Trigger::Event { on: "app.start".into() }).map(|w| w.name).collect();
+    // Runs that ended since the last pass: (chat id, finished without an error).
+    let mut finished: Vec<(String, bool)> = vec![];
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
     loop {
         tokio::select! {
@@ -269,6 +363,12 @@ pub async fn run_loop(state: Arc<AppState>) {
                     for w in approved_workflows(&layer, &home) {
                         if w.trigger == (Trigger::Event { on: "wrap.done".into() }) && !queue.contains(&w.name) { queue.push_back(w.name); }
                     }
+                }
+                Ok(e) if e["type"] == "chat.done" => {
+                    let Some(id) = e["chatId"].as_str() else { continue };
+                    finished.push((id.to_string(), e["ok"] == true));
+                    if finished.len() > 200 { finished.remove(0); }
+                    continue;
                 }
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => return,
@@ -287,14 +387,37 @@ pub async fn run_loop(state: Arc<AppState>) {
         let before = st.len();
         st.retain(|name, _| workflows.iter().any(|w| &w.name == name));
         changed |= st.len() != before;
+        // Settle the runs that ended: a failed one gets a single retry ten minutes later.
+        for (name, seen) in st.iter_mut() {
+            let Some(chat) = seen.chat_id.clone() else { continue };
+            let result = match finished.iter().find(|(id, _)| *id == chat) {
+                Some((_, ok)) => Some(*ok),
+                // No word of it and it is not running: the daemon restarted under it. Not retried blindly.
+                None if !state.chats.get(&chat).await.map_or(false, |c| c.running) => Some(true),
+                None => None,
+            };
+            let Some(ok) = result else { continue };
+            let failed = !ok && !stopped_by_user(&state, &chat).await;
+            note_result(seen, !failed, now);
+            if seen.retry_at.is_some() { crate::log::warn(format!("workflow \"{name}\" failed; it will be tried once more in {RETRY_MINUTES} minutes")); }
+            changed = true;
+        }
+        finished.clear();
         for name in due(&workflows, &st, now) { if !queue.contains(&name) { queue.push_back(name); } }
         queue.retain(|name| workflows.iter().any(|w| &w.name == name));
         if !queue.is_empty() && !busy(&state).await {
             if let Some(w) = queue.pop_front().and_then(|name| workflows.iter().find(|w| w.name == name)) {
                 // Recorded before the run, so a workflow that fails is not retried in a loop.
-                st.entry(w.name.clone()).or_default().last_run = Some(now);
+                let seen = st.entry(w.name.clone()).or_default();
+                note_start(seen, now);
                 changed = true;
-                if let Err(e) = start(&state, w).await { crate::log::warn(format!("workflow \"{}\" could not start: {e}", w.name)); }
+                match start(&state, w).await {
+                    Ok(id) => seen.chat_id = Some(id),
+                    Err(e) => {
+                        crate::log::warn(format!("workflow \"{}\" could not start: {e}", w.name));
+                        note_result(seen, false, now);
+                    }
+                }
             }
         }
         if changed { save_state(&home, &st); }
@@ -307,8 +430,11 @@ mod tests {
     use chrono::NaiveDate;
 
     fn at(y: i32, m: u32, d: u32, h: u32, min: u32) -> NaiveDateTime { NaiveDate::from_ymd_opt(y, m, d).unwrap().and_hms_opt(h, min, 0).unwrap() }
-    fn daily(t: &str) -> Trigger { Trigger::Schedule { every: "day".into(), at: t.into(), weekday: None } }
-    fn weekly(t: &str, wd: u32) -> Trigger { Trigger::Schedule { every: "week".into(), at: t.into(), weekday: Some(wd) } }
+    fn sched(every: &str, t: &str, weekday: Option<u32>, day: Option<Value>, days: Option<Vec<u32>>) -> Trigger { Trigger::Schedule { every: every.into(), at: t.into(), weekday, day, days } }
+    fn daily(t: &str) -> Trigger { sched("day", t, None, None, None) }
+    fn weekly(t: &str, wd: u32) -> Trigger { sched("week", t, Some(wd), None, None) }
+    fn monthly(t: &str, day: Value) -> Trigger { sched("month", t, None, Some(day), None) }
+    fn wf(trigger: Trigger) -> Workflow { Workflow { name: "W".into(), trigger, prompt: "x".into() } }
 
     #[test]
     fn next_run_daily_and_weekly() {
@@ -330,14 +456,108 @@ mod tests {
         let mut st = State::new();
         // Unknown workflow: never due immediately.
         assert!(due(&ws, &st, at(2026, 11, 10, 12, 0)).is_empty());
-        st.insert("Morning".into(), Seen { first_seen: Some(at(2026, 11, 10, 12, 0)), last_run: None });
+        st.insert("Morning".into(), Seen { first_seen: Some(at(2026, 11, 10, 12, 0)), ..Default::default() });
         assert!(due(&ws, &st, at(2026, 11, 10, 18, 0)).is_empty(), "09:00 had already passed when it was created");
         assert_eq!(due(&ws, &st, at(2026, 11, 11, 9, 0)), ["Morning"]);
-        // After a week off it runs once, then waits for tomorrow.
+        // After a week off it runs once (for today's 09:00, an hour ago), then waits for tomorrow.
         assert_eq!(due(&ws, &st, at(2026, 11, 18, 10, 0)), ["Morning"]);
-        st.get_mut("Morning").unwrap().last_run = Some(at(2026, 11, 18, 10, 0));
+        note_start(st.get_mut("Morning").unwrap(), at(2026, 11, 18, 10, 0));
         assert!(due(&ws, &st, at(2026, 11, 18, 23, 0)).is_empty());
         assert_eq!(due_at(&w, st.get("Morning"), at(2026, 11, 18, 23, 0)), Some(at(2026, 11, 19, 9, 0)));
+    }
+
+    #[test]
+    fn month_and_weekday_schedules() {
+        // Day of the month.
+        assert_eq!(next_run(&monthly("08:00", json!(1)), at(2026, 11, 10, 8, 0)), Some(at(2026, 12, 1, 8, 0)));
+        assert_eq!(next_run(&monthly("08:00", json!(1)), at(2026, 12, 1, 8, 0)), Some(at(2027, 1, 1, 8, 0)), "strictly after, across the year");
+        assert_eq!(next_run(&monthly("08:00", json!(28)), at(2026, 2, 1, 0, 0)), Some(at(2026, 2, 28, 8, 0)));
+        assert_eq!(next_run(&monthly("08:00", json!(10)), at(2026, 11, 10, 7, 59)), Some(at(2026, 11, 10, 8, 0)));
+        // "last" follows the length of each month, leap years included.
+        let last = monthly("18:00", json!("last"));
+        assert_eq!(next_run(&last, at(2026, 2, 1, 0, 0)), Some(at(2026, 2, 28, 18, 0)));
+        assert_eq!(next_run(&last, at(2028, 2, 1, 0, 0)), Some(at(2028, 2, 29, 18, 0)), "leap year");
+        assert_eq!(next_run(&last, at(2026, 4, 30, 18, 0)), Some(at(2026, 5, 31, 18, 0)), "30-day month, then a 31-day one");
+        assert_eq!(next_run(&last, at(2026, 12, 31, 17, 0)), Some(at(2026, 12, 31, 18, 0)));
+        assert_eq!(next_run(&last, at(2026, 12, 31, 18, 0)), Some(at(2027, 1, 31, 18, 0)));
+        assert_eq!(prev_run(&last, at(2026, 3, 1, 9, 0)), Some(at(2026, 2, 28, 18, 0)));
+        assert_eq!(prev_run(&monthly("08:00", json!(1)), at(2026, 11, 10, 8, 0)), Some(at(2026, 11, 1, 8, 0)));
+        // Weekdays: Monday–Friday unless the file lists its own days. 2026-11-13 is a Friday.
+        let wd = sched("weekdays", "07:30", None, None, None);
+        assert_eq!(next_run(&wd, at(2026, 11, 13, 7, 30)), Some(at(2026, 11, 16, 7, 30)), "skips the weekend");
+        assert_eq!(next_run(&wd, at(2026, 11, 12, 9, 0)), Some(at(2026, 11, 13, 7, 30)));
+        let sun_thu = sched("weekdays", "07:30", None, None, Some(vec![0, 1, 2, 3, 4]));
+        assert_eq!(next_run(&sun_thu, at(2026, 11, 12, 7, 30)), Some(at(2026, 11, 15, 7, 30)), "Thursday → Sunday");
+        assert_eq!(prev_run(&wd, at(2026, 11, 15, 12, 0)), Some(at(2026, 11, 13, 7, 30)));
+        // What the runner accepts.
+        for ok in [monthly("08:00", json!(1)), monthly("08:00", json!(28)), last.clone(), wd.clone(), sun_thu.clone()] { assert!(valid(&wf(ok))); }
+        for bad in [monthly("08:00", json!(0)), monthly("08:00", json!(29)), monthly("08:00", json!(31)), monthly("08:00", json!("first")), monthly("08:00", json!(1.5)),
+                    sched("month", "08:00", None, None, None), sched("weekdays", "07:30", None, None, Some(vec![])), sched("weekdays", "07:30", None, None, Some(vec![7])),
+                    sched("year", "08:00", None, None, None)] {
+            assert!(!valid(&wf(bad.clone())), "{bad:?}");
+        }
+        let parsed: Workflow = serde_json::from_str(r#"{"name":"Invoices","trigger":{"type":"schedule","every":"month","at":"09:00","day":"last"},"prompt":"x"}"#).unwrap();
+        assert!(valid(&parsed));
+        assert_eq!(serde_json::to_value(&parsed.trigger).unwrap(), json!({"type": "schedule", "every": "month", "at": "09:00", "day": "last"}));
+    }
+
+    #[test]
+    fn a_missed_run_is_caught_up_once_within_a_day() {
+        let seen = |first: NaiveDateTime, last: Option<NaiveDateTime>| Seen { first_seen: Some(first), last_run: last, ..Default::default() };
+        // Daily at 09:00, last run on the 10th. The laptop sleeps through the 11th to 14th.
+        let w = wf(daily("09:00"));
+        let s = seen(at(2026, 11, 1, 0, 0), Some(at(2026, 11, 10, 9, 0)));
+        assert_eq!(missed(&w, Some(&s), at(2026, 11, 14, 13, 0)), Some(at(2026, 11, 14, 9, 0)), "one catch-up, for the latest time only");
+        // Monthly on the last day at 18:00.
+        let m = wf(monthly("18:00", json!("last")));
+        let s = seen(at(2026, 1, 15, 0, 0), Some(at(2026, 1, 31, 18, 0)));
+        assert_eq!(missed(&m, Some(&s), at(2026, 2, 28, 17, 59)), None, "not yet");
+        assert_eq!(missed(&m, Some(&s), at(2026, 2, 28, 18, 0)), Some(at(2026, 2, 28, 18, 0)));
+        assert_eq!(missed(&m, Some(&s), at(2026, 3, 1, 17, 0)), Some(at(2026, 2, 28, 18, 0)), "opened the next morning: still within a day");
+        assert_eq!(missed(&m, Some(&s), at(2026, 3, 1, 18, 1)), None, "more than a day late: skipped");
+        assert_eq!(due_at(&m, Some(&s), at(2026, 3, 1, 18, 1)), Some(at(2026, 3, 31, 18, 0)), "waits for the next month end");
+        // Once it has run for that time it is not due again.
+        let ran = seen(at(2026, 1, 15, 0, 0), Some(at(2026, 3, 1, 17, 0)));
+        assert_eq!(missed(&m, Some(&ran), at(2026, 3, 1, 17, 30)), None);
+        // Weekdays: Friday's run missed, opened on Saturday morning → caught up; on Sunday → skipped.
+        let wd = wf(sched("weekdays", "17:00", None, None, None));
+        let s = seen(at(2026, 11, 1, 0, 0), Some(at(2026, 11, 12, 17, 0)));
+        assert!(missed(&wd, Some(&s), at(2026, 11, 14, 10, 0)).is_some());
+        assert!(missed(&wd, Some(&s), at(2026, 11, 15, 10, 0)).is_none());
+        // A workflow the runner has never met, or an event one, is never "missed".
+        assert_eq!(missed(&w, None, at(2026, 11, 14, 13, 0)), None);
+        assert_eq!(missed(&wf(Trigger::Event { on: "app.start".into() }), Some(&s), at(2026, 11, 14, 13, 0)), None);
+    }
+
+    #[test]
+    fn a_failed_run_is_retried_once_after_ten_minutes() {
+        let w = wf(daily("09:00"));
+        let mut st = State::new();
+        st.insert("W".into(), Seen { first_seen: Some(at(2026, 11, 1, 0, 0)), ..Default::default() });
+        let t0 = at(2026, 11, 10, 9, 0);
+        assert_eq!(due(&[w.clone()], &st, t0), ["W"]);
+        let seen = st.get_mut("W").unwrap();
+        note_start(seen, t0);
+        seen.chat_id = Some("c1".into());
+        note_result(seen, false, at(2026, 11, 10, 9, 2));
+        assert_eq!((seen.retry_at, seen.retried, seen.chat_id.clone()), (Some(at(2026, 11, 10, 9, 12)), true, None));
+        assert!(due(&[w.clone()], &st, at(2026, 11, 10, 9, 11)).is_empty(), "not before ten minutes have passed");
+        assert_eq!(due_at(&w, st.get("W"), at(2026, 11, 10, 9, 11)), Some(at(2026, 11, 10, 9, 12)));
+        assert_eq!(due(&[w.clone()], &st, at(2026, 11, 10, 9, 12)), ["W"]);
+        // The retry fails too: no third attempt, the next run is tomorrow's.
+        let seen = st.get_mut("W").unwrap();
+        note_start(seen, at(2026, 11, 10, 9, 12));
+        assert!(seen.retried && seen.retry_at.is_none());
+        note_result(seen, false, at(2026, 11, 10, 9, 14));
+        assert_eq!(seen.retry_at, None);
+        assert!(due(&[w.clone()], &st, at(2026, 11, 10, 12, 0)).is_empty());
+        assert_eq!(due_at(&w, st.get("W"), at(2026, 11, 10, 12, 0)), Some(at(2026, 11, 11, 9, 0)));
+        // Tomorrow's run starts with a clean slate and, if it fails, earns its own retry.
+        let seen = st.get_mut("W").unwrap();
+        note_start(seen, at(2026, 11, 11, 9, 0));
+        assert!(!seen.retried);
+        note_result(seen, true, at(2026, 11, 11, 9, 5));
+        assert_eq!(seen.retry_at, None);
     }
 
     #[test]
