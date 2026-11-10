@@ -2,8 +2,8 @@
 
 <h1 align="center">Thoughts</h1>
 
-<p align="center"><b>Your second brain, on your Mac.</b><br>
-Talk things through with AI. Thoughts keeps what matters: ideas, notes and todos, organized and yours.</p>
+<p align="center"><b>For people who already think with Claude and want that thinking kept.</b><br>
+Talk things through with AI. Thoughts keeps what matters: ideas, notes and todos, in plain files you own.</p>
 
 <p align="center"><a href="README.ar.md">العربية</a></p>
 
@@ -27,24 +27,33 @@ See [Making Thoughts your own](docs/CUSTOMISING.md).
   ideas and todos. You see what will be saved before it's saved.
 - **Pick up anywhere.** The home screen shows what you were working on, what's open, and what's
   waiting to be wrapped.
-- **Yours, in plain files.** Everything is ordinary text files in a folder on your Mac. No lock-in,
-  no proprietary database. Sync it with iCloud, Dropbox or git, or keep it local.
-- **Who it's for.** Today, Thoughts fits best if you already think with Claude and want that
-  thinking kept instead of lost in old chats. It is being shaped for professionals: setup asks
-  what you do (accounting, law, consulting, teaching, research, building a product) and arranges
-  your library around clients, matters, classes or projects, with meeting notes and due dates.
-  Turn modules on and off, and pick from three themes in Day and Night.
-- **English and Arabic.** Full right-to-left support, and the assistant writes your notes in the
-  language you work in.
+- **Yours, in plain files.** Everything is ordinary text files in a folder on your computer. No
+  lock-in, no proprietary database. Sync it with iCloud, Dropbox or git, or keep it local.
+- **Nothing lost for good.** With history turned on, you can undo a Wrap or restore an earlier
+  version of any document. See [History and undo](docs/HISTORY.md).
+- **Who it's for.** People who already think with Claude and want that thinking kept instead of
+  lost in old chats. You need to be comfortable installing Claude Code and paying for a Claude
+  plan; Thoughts does not remove that step yet.
+- **Profession templates.** Setup asks what you do (accounting, law, consulting, teaching,
+  research, building a product) and arranges your library around clients, matters, classes or
+  projects, with meeting notes and due dates. These are starting templates to adapt, not finished
+  products for those professions.
+- **English and Arabic.** Full right-to-left support, Arabic starter templates, and the assistant
+  writes your notes in the language you work in.
 
 ## Get started
 
-1. Install [Claude Code](https://claude.com/claude-code) and sign in once (this needs a paid
-   Claude plan or an API key). Thoughts sets up the rest.
-2. Download the latest **Thoughts .dmg** from Releases and drag it into Applications.
+1. Install [Claude Code](https://claude.com/claude-code) and sign in once. This needs a Claude
+   plan that includes Claude Code, or an API key; see [what it costs to run](docs/COST.md).
+2. Get the **Thoughts .dmg** (see below) and drag it into Applications.
 3. Open Thoughts. A short setup creates your library and walks you through the basics.
 
-Requires a Mac with Apple Silicon (M1 or later).
+### Where it runs today
+
+Thoughts runs on **macOS**. The build available today is for **Apple Silicon** Macs (M1 or later)
+and is shared privately while the app is in early testing; it is not signed yet, so macOS asks you
+to confirm the first launch. Intel Macs can [build from source](docs/DEVELOPMENT.md). Windows and
+Linux versions are in progress and have not been released.
 
 ## Updates
 
@@ -57,7 +66,30 @@ assistant merge the two.
 
 Your files stay on your computer. Thoughts talks to the AI only when you chat, and syncs only
 where you tell it to. There is no analytics or tracking. You can mark folders the assistant must
-never open. The details, in plain language: [docs/PRIVACY.md](docs/PRIVACY.md).
+not read. The details in plain language, including what to check before using it with
+confidential client data: [docs/PRIVACY.md](docs/PRIVACY.md).
+
+## More to read
+
+- [Making Thoughts your own](docs/CUSTOMISING.md): what you can ask the app to become.
+- [History and undo](docs/HISTORY.md): undo a Wrap, restore an earlier version of a document.
+- [What it costs to run](docs/COST.md): what you need, and what the "estimated cost" figure means.
+- [Privacy](docs/PRIVACY.md).
+
+## Uninstall
+
+Quit Thoughts completely first (from its menu, not only by closing the window). Then remove three
+things:
+
+1. **The app** itself, from Applications.
+2. **The data folder** `.thoughts` in your home folder (`~/.thoughts`): chats, settings,
+   customisations and logs.
+3. **The login item**: the entry that starts Thoughts' background service when you log in. On a
+   Mac, remove Thoughts under System Settings → General → Login Items.
+
+**Your library folder is never touched.** It stays where you put it, readable with any text
+editor, until you delete it yourself. Saved passwords and synced copies are covered in
+[Privacy → Deleting everything](docs/PRIVACY.md#deleting-everything).
 
 ---
 

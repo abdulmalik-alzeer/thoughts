@@ -5,9 +5,15 @@ first time; after that the [checklist](#release-checklist) is enough.
 
 **Where things stand today**
 
-- macOS is the only platform that has been built and run. Windows and Linux builds are wired up
-  in CI but **have never been tested on a real machine**. Treat the first Windows/Linux
-  installers as experiments.
+- macOS is the only platform that has been built and run. What people have today is an
+  **Apple Silicon build made by hand and shared privately**. The release workflow is set up to
+  produce a universal `.dmg` (Apple Silicon + Intel), but no release has been published from it
+  and the Intel half has never been run. The README states the user-facing version of this in
+  its "Where it runs today" section; change the two together.
+- Windows and Linux builds are wired up in CI but **have never been tested on a real machine**.
+  Treat the first Windows/Linux installers as experiments, and run the
+  [first-run test plan](#first-run-test-plan) before giving one to anybody.
+- See [Known unverified](#known-unverified) for the full list of things nobody has checked.
 - Nothing is signed yet. No signing certificate, no notarisation, no updater key exists. The
   release workflow works without them and produces unsigned installers.
 - The in-app updater is built in but switched off until an updater key is configured (below).
@@ -20,7 +26,7 @@ Pushing a git tag that starts with `v` (for example `v0.0.2`) runs
 
 | Platform | What you get |
 |---|---|
-| macOS | A universal `.dmg` (Apple Silicon + Intel) |
+| macOS | A universal `.dmg` (Apple Silicon + Intel). Not yet published; see above |
 | Windows | An `.exe` installer (NSIS, installs for the current user, no admin prompt) |
 | Linux | A `.deb` and an `.AppImage` |
 
@@ -65,7 +71,8 @@ stops it and starts its own. Any chat that was mid-answer at that moment is cut 
    fail without stopping the others.
 6. Open the draft release on GitHub. Check that every expected file is attached (and
    `latest.json` if the updater is configured).
-7. Download and try each installer by hand (see [What stays manual](#what-stays-manual)).
+7. Download each installer and run the [first-run test plan](#first-run-test-plan) for its
+   platform. Do not publish a platform that has not passed it.
 8. Write the release notes, then press **Publish release**.
 
 To build a macOS installer by hand instead (unsigned, for this Mac's processor only):
@@ -203,6 +210,146 @@ Things to know:
 - An unsigned macOS app can be updated, but macOS will complain again about each new copy.
   Sort out Apple signing before relying on the updater for Mac users.
 
+## What a release must not break
+
+A short list of behaviours the app's safety rests on. The details are in
+[DEVELOPMENT.md](DEVELOPMENT.md#trust-model); the test plan below exercises each one.
+
+- **Deny rules on every run.** Chat, Wrap, workflow, Reorganize and customise runs all get the
+  generated deny rules for `.claude/`, `.mcp.json`, `.git/`, the app's data folder and the user's
+  private folders.
+- **Trust check.** A library the app did not create is checked for anything that can run a
+  program, and its `.claude/**/*.md` files are compared byte-for-byte with the embedded starter.
+  `starter/.claude/settings.json` is compared as exact JSON. A release that changes any starter
+  skill or that settings file changes the baseline: libraries created by older versions will ask
+  for trust once after updating. Say so in the release notes.
+- **Plugin scope enforced by the daemon.** Private folders and the per-plugin write folders are
+  checked in the daemon for every `scope=plugin` call, not in the UI.
+- **Per-plugin manifests** (`plugins/<name>.json`, `views/<name>.json`) and the `apiVersion`
+  check: a plugin or pack for a newer API is listed as unsupported, not loaded.
+- **Apply signature.** Keep applies exactly the staged content the user reviewed, or fails with
+  `CHANGED::`.
+- **Library history.** Undo and restore create new history entries and never rewrite history;
+  sync is refused while a Wrap is running or interrupted.
+- **Line endings.** The plugin runtime is identified by a hash. `.gitattributes` keeps the
+  hashed files LF on every platform; a Windows checkout with CRLF would produce a different hash.
+
+## First-run test plan
+
+Run this on a clean user account (no `~/.thoughts`, no previous install) for every platform in
+the release, then once more as an upgrade over the previous version. Write down the platform,
+OS version and result of each line in the release notes draft.
+
+### Every platform
+
+1. Install from the downloaded file exactly as a user would. Note every warning the system shows.
+2. First launch: onboarding completes; a library is created from the starter kit in an empty
+   folder. Check that `START-HERE.md`, `START-HERE.ar.md`, `presets/` and `presets/ar/` arrived.
+3. Onboarding detects Claude Code and git, including the "not installed" and "not signed in"
+   messages when they are missing.
+4. Send one chat message; the answer streams. Setup (the init skill) runs once in English and
+   once in Arabic on a second library: Arabic folder names are created and readable, and the
+   welcome pages and the init skill are removed afterwards.
+5. Press **Wrap**, review, save. Open **History**: the Wrap is listed. Undo it; restore one
+   document to an earlier version.
+6. With history turned off, History shows the "no history" message and nothing crashes.
+7. Mark a folder private. Ask the assistant to read a file in it: refused. Open a customisation
+   that reads the library: it cannot list that folder, including with different letter case.
+8. Customise: request a small add-on. The review shows a summary and permissions; **Try it**
+   changes nothing after closing; **Keep** applies; **Customise → History** undoes it. Check that
+   the add-on's frame renders its styles (see Known unverified).
+9. Export a feature pack, discard the add-on, import the pack: it arrives as a review and merges.
+10. Create an automatic task for one minute ahead; it asks for approval, runs once, and appears
+    as a chat.
+11. Add a todo due today: it shows in the Calendar view and a notification appears. Export the
+    calendar file and open it in the system calendar.
+12. Sync to a test location: first upload, a change from a second copy, and a conflict (both
+    resolutions). A backup branch exists afterwards.
+13. Save a sync password with the default store, quit, reboot, sync again without re-entering
+    it. Repeat with the "file" option and check the file's permissions.
+14. Open a folder with a hook in `.claude/settings.json`, and one with an edited skill: both ask
+    for trust and run nothing before the answer.
+15. Close the window: the app stays in the tray or menu bar and a running chat continues. Reopen
+    from the tray. **Quit Thoughts completely**: no process is left.
+16. Log out and back in: the background service starts once (login item), not twice.
+17. Switch the interface to Arabic: layout mirrors, native menus are in Arabic, error messages
+    from the background service are in Arabic.
+18. Damage `~/.thoughts/settings.json` by hand: the app restores from its backup and says so.
+19. Updater, when configured: an older build is offered the new one, verifies it and restarts
+    into it. When not configured: "updates are not configured in this build".
+20. Uninstall following the README; confirm the app, `~/.thoughts` and the login item are gone
+    and the library folder is untouched.
+
+### macOS
+
+- Apple Silicon and Intel separately (the universal build has two halves; test both).
+- Gatekeeper on a downloaded copy: unsigned (right-click → Open) today; after signing,
+  `spctl -a -vv` reports a notarised Developer ID.
+- Keychain prompt on first password save, and no repeated prompts after an update.
+- The LaunchAgent `app.thoughts.daemon.plist` is created, points at the installed app (not a
+  translocated or `.dmg` path), and is replaced correctly on upgrade.
+- The translucent window, the Recovery menu and "Undo last app change" in the native menu.
+- Printing a document from the command palette prints the document, not a blank page.
+
+### Windows
+
+- SmartScreen on the installer; per-user install with no admin prompt; Start menu entry;
+  uninstall from Settings → Apps.
+- No console window flashes when the background service, git or the assistant starts.
+- The assistant starts when Claude Code was installed through npm (the `claude.cmd` shim) and a
+  prompt containing several lines and quotation marks arrives intact.
+- A library path with spaces and non-ASCII characters (an Arabic user name) works; long paths
+  and `\\?\` prefixes from canonical paths do not break private-folder or trust checks.
+- Sync password is stored in Credential Manager and the git credential helper is found when the
+  install path contains spaces.
+- The plugin runtime hash matches (the file was checked out with LF; see `.gitattributes`).
+- Autostart entry is created once and removed by the uninstaller, or documented as manual.
+- Single instance: launching a second time focuses the first window.
+- Tray icon, native menus (File · Edit · Window · Recovery · Help), and window state on a
+  high-DPI and a second display.
+
+### Linux
+
+- `.deb` on a current Ubuntu LTS and the `.AppImage` on one other distribution.
+- A desktop without a secret service (no keyring): the password falls back to the private file,
+  with owner-only permissions, and the app says nothing misleading about a keychain. With a
+  keyring: the password survives a reboot.
+- AppImage: the autostart entry and the background service must not point at a temporary mount
+  path under `/tmp`; check after moving the AppImage file and after a reboot.
+- `.deb` installs are not offered an in-app update they cannot apply.
+- Tray icon on GNOME (needs an extension) and KDE; behaviour when no tray exists (closing the
+  window must not leave an unreachable background app).
+- Native menu items that the platform does not support are absent, not dead.
+- WebKitGTK rendering: fonts for Arabic, right-to-left layout, and the add-on frames.
+
+## Known unverified
+
+Things written or configured but never observed working. Each stays here until someone has
+seen it work and noted the version and date.
+
+- **Windows has never been run.** Compiles in CI; nothing else is known. Specific risks from the
+  review: the `claude.cmd` shim and multi-line arguments, `\\?\` paths, the credential helper
+  path with spaces, console windows, autostart.
+- **Linux has never been run.** Compiles in CI. Specific risks: secrets lost on reboot with some
+  keyring backends, AppImage paths under `/tmp` used for autostart and the background service,
+  unsupported native menu items, `.deb` installs being offered updates.
+- **The Intel half of the universal macOS build has never been run.**
+- **Signing has never been exercised.** No Apple certificate, notarisation, Windows certificate
+  or updater key exists. The signing and notarisation steps in the workflow, the updater's
+  signature check, `latest.json` generation and an actual in-app update have never run.
+- **Plugin frames under the bundled CSP.** In bundled builds Tauri adds a nonce to `<style>` in
+  HTML assets, which may block inline styles inside add-on and view frames. This cannot be seen
+  in `tauri dev`; it needs a look in an installed build (test plan step 8).
+- **The release workflow end to end.** Draft creation from three parallel jobs, the npm and
+  crate Tauri versions agreeing, and artefact names have not been confirmed on a real tag since
+  the last changes.
+- **Uninstall clean-up.** Nothing removes the login item or `~/.thoughts` automatically on any
+  platform; the README steps are manual.
+- **Notifications for due dates** on Windows and Linux, and with macOS notification permission
+  denied.
+- **Standard native menu items** (Undo, Copy, Quit and so on) appearing in Arabic when the
+  interface is Arabic.
+
 ## All secrets and variables in one place
 
 | Name | Kind | Needed for |
@@ -224,9 +371,8 @@ Things to know:
 ## What stays manual
 
 - Bumping the version, tagging, writing release notes and pressing **Publish**.
-- Trying each installer on a real machine before publishing. At minimum: install over the
-  previous version, open the app, send one chat message, close the window, reopen from the
-  tray icon, choose **Quit Thoughts completely** and confirm nothing is left running.
+- Trying each installer on a real machine before publishing, using the
+  [first-run test plan](#first-run-test-plan).
 - Windows and Linux in particular. The window settings, menus, tray icon, single-instance
   behaviour, the hidden-console flags for the background service, and the installers were
   written on a Mac and have not been run on those systems.

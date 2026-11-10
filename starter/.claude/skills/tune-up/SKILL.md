@@ -30,7 +30,7 @@ Do not open private folders. Do not read note bodies unless a specific question 
 - **Dates and follow-through** — many overdue or undated todos → suggest a weekly review, or fewer, clearer todos.
 - **Language** — notes drifting between languages against the user's wishes → agree on one.
 - **Privacy** — confidential details that leaked into general notes, or folders that should probably be marked private → point them out and offer to tidy.
-- **Changed circumstances** — a new role, a new kind of client, a new term → the matching preset in `.claude/presets/` may have useful pieces; read only that one.
+- **Changed circumstances** — a new role, a new kind of client, a new term → the matching preset in `.claude/presets/` (`.claude/presets/ar/` when the library is in Arabic) may have useful pieces; read only that one.
 
 ## Propose
 

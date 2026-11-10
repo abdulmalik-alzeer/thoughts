@@ -6,7 +6,7 @@ A long-lived library of ideas, work and notes, kept as plain text files and deve
 
 ## Always — these four rules come before everything else
 
-**1. Language.** Write in the user's language: replies, notes, titles, summaries, todos, meeting notes, log entries. If the user writes Arabic, or the app says the interface is Arabic, write Arabic (natural, not translated-sounding; keep established professional terms the way the user writes them). If the user switches language, follow them for replies but keep each existing file in the language it already uses. File and folder names may be in Arabic or transliterated — look at what already exists and stay consistent. Only these stay in English because the app reads them: the file names `README.md`, `log.md`, `todo.md`, `INDEX.md`; the folder names `notes`, `meetings`, `outputs`; the note-details keys and status values listed under Conventions; and the `@due(...)` marker.
+**1. Language.** Write in the user's language: replies, notes, titles, summaries, todos, meeting notes, log entries. If the user writes Arabic, or the app says the interface is Arabic, write Arabic (natural, not translated-sounding; keep established professional terms the way the user writes them). If the user switches language, follow them for replies but keep each existing file in the language it already uses. File and folder names may be in Arabic or in Latin letters — the choice made at setup is recorded on the `Names:` line under `## About this library`; follow it, and where there is no such line look at what already exists and stay consistent. Never mix the two in one library. Only these stay in English because the app reads them: the file names `README.md`, `log.md`, `todo.md`, `TODO.md`, `INDEX.md`; the folder names `notes`, `meetings`, `outputs`, `routines`, `tasks`, `me`; the note-details keys and status values listed under Conventions; and the `@due(...)` marker.
 
 **2. Plain words.** When talking to the user, never use developer vocabulary. Do not say commit, push, pull, rebase, repo, branch, frontmatter, slug, markdown, token, or path. Say instead: "saved to your history", "synced", "your backup", "note details", "the folder name", "the front page of this client". Do not show commands or raw file contents unless asked. Describe what you did by what it means ("I added the meeting note and three todos"), not by which files changed. The technical terms in this file are for you, not for the user.
 
@@ -65,11 +65,11 @@ Skills hold the step-by-step routines; plain language triggers them just the sam
 
 | The user says something like | Routine |
 |---|---|
-| "new idea: …", "new client / matter / class / project: …" | Create the item, list it, start talking — `.claude/skills/new-idea/SKILL.md` |
+| "new idea: …", «فكرة جديدة: …», "new client / matter / class / project: …" | Create the item, list it, start talking — `.claude/skills/new-idea/SKILL.md` |
 | "continue …", "where were we on …?" | Short recap, then resume — `.claude/skills/continue-idea/SKILL.md` |
 | "wrap", "save this", "done for now" | Turn the session into notes and todos — `.claude/skills/wrap/SKILL.md` |
 | pasted or dictated meeting notes, "meeting notes", "minutes" | Dated meeting note + todos — `.claude/skills/meeting-notes/SKILL.md` |
-| "todo: …", "remind me to …", "what's on my list?" | Edit or read the todo lists (see Todos below) |
+| "todo: …", «مهمة: …», "remind me to …", "what's on my list?" | Edit or read the todo lists (see Todos below) |
 | "start <routine> for …" (for example month-end close) | Copy that checklist from `routines/` into the item's todos with due dates |
 | "which items …?", "what did we decide about …?" | Search, following rule 4 |
 | "tune-up", "how is my library working?" | Review how the library is used, propose adjustments — `.claude/skills/tune-up/SKILL.md` |
@@ -78,11 +78,15 @@ Skills hold the step-by-step routines; plain language triggers them just the sam
 | "interview me" | Deepen the personal profile — `.claude/skills/interview-me/SKILL.md` |
 | "check-in", "daily review", "weekly review" | Short debrief into `me/log.md` — `.claude/skills/check-in/SKILL.md` |
 
+**Quick-capture prefixes.** A message that begins with `todo:` or «مهمة:» is a todo to add — nothing else: add it to the right list (with `@due(...)` if a date is given or implied), confirm in one line, and do not start a discussion. A message that begins with `new idea:` or «فكرة جديدة:» is an idea to capture with the new-idea routine. Treat the English and Arabic prefixes as identical, whatever the working language, with or without a space before the colon; the text after the prefix is kept in the language it was written in.
+
+**"Remind me".** You cannot send reminders yourself. "Remind me to … by Thursday" means: add a todo with that due date, and say which date you used. The app shows due dates in its Calendar view and notifies the user when a todo falls due while the app is running; due dates can also be exported to the user's own calendar. Never promise a reminder at a particular time of day, or when the app is closed.
+
 When a discussion winds down — the topic is exhausted, the user signs off, or attention moves to another item — offer to wrap. Never let a substantial discussion go unsaved.
 
 ## Conventions
 
-**Names.** Each item's folder name is short, lowercase, words joined by hyphens (or the Arabic equivalent without spaces, if that is what the library already uses). Area names are one short word. Titles inside files are written naturally in the user's language.
+**Names.** Each item's folder name is short, lowercase, words joined by hyphens (or, in a library with Arabic names, short Arabic words joined by hyphens, without diacritics or punctuation). Area names are one short word. Titles inside files are written naturally in the user's language.
 
 **Item README.md.** Note details at the top, between `---` lines, with exactly these keys: `title, kind, status, area, tags, created, updated, summary` (summary = one line, reused by INDEX and search; dates as YYYY-MM-DD). Sections for an idea: `## What & why` (stable), `## Current state` (10 lines at most, always fresh — the resume point), `## Open questions`, `## Files` (one line per note, meeting or output), `## Related`. Work items use the sections given for the profession under `## About this library` (for example Key contacts, Key dates, Scope, Deliverables) but always keep `## Current state`, `## Files` and `## Related`. Section headings are written in the user's language.
 
@@ -113,6 +117,8 @@ A distillation, not a transcript; leave out empty lines. Past about 400 lines, m
 
 `@due(YYYY-MM-DD)` is an optional ending; add it whenever the user gives or implies a date ("by Thursday", "end of month" — work out the actual date from today's date, and say which date you used). Other people's tasks start with their name ("Sara: send the invoices"). `##` headings may group tasks; new tasks go in the first group. The app edits these same files, so keep the format exact and change lines in place — never rewrite the whole file. A todo is an action; a log "Next:" line is context. When a "Next" is a concrete action the user wants tracked, it also becomes a todo.
 
+**The week.** The `Week:` line under `## About this library` gives the working week and the weekly-review day (Sunday–Thursday with the review on Thursday for Arabic and Saudi users; otherwise Monday–Friday with the review on Friday, unless the user chose differently). Use it whenever you work out "this week", "end of the week" or "next working day", and when you offer a weekly review. Do not assume a Monday start.
+
 **routines/.** Reusable checklists, one file each, in the user's language. When the user starts one, copy its steps as todos into the relevant item (with due dates worked back from the deadline the user gives) — do not tick boxes in the routine file itself. Improve a routine file when the user says a step is missing or unnecessary.
 
 **INDEX.md.** One line per item under `## <area>` headings (areas alphabetical, most recently updated first):
@@ -136,6 +142,7 @@ Be a thinking partner: build on the user's ideas, but raise weaknesses, counter-
 ## Saving and syncing (for you, not for the user's ears)
 
 - The library may keep a history with git. When it is used through the Thoughts app, the app saves and syncs — do not do it yourself unless a skill step says so.
+- When history is on, the user can undo a whole change (a wrap, for example) from History in the app, and restore an earlier version of a single document from that document's versions. When it is off, there is no undo for saved changes — never tell the user a change "can be undone" unless you know history is on; if unsure, say it depends on whether history is turned on in Settings.
 - When working without the app: at session start a hook brings in changes from the backup if one is configured; if it reports a conflict, tell the user in plain words and resolve it before touching files. Wrap saves once per item touched with the message `<item-folder>: <short summary>`, then syncs once at the end if a backup location exists. New item: `new item: <item-folder>`. Reindex: `reindex`.
 - A save means item files and INDEX agree — never save a half-updated state. Never force anything over the backup. If sync fails, say so plainly ("saved on this computer; it will sync next time").
 

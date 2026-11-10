@@ -2,7 +2,8 @@
 
 ## Build from source
 
-For Intel Macs, or if you'd rather build it yourself. It takes about 10 minutes the first time,
+For Intel Macs, or if you'd rather build it yourself. The steps below are for macOS, the only
+platform the app has been run on (see [RELEASING.md](RELEASING.md#known-unverified)). It takes about 10 minutes the first time,
 mostly waiting.
 
 ### 1. Requirements
@@ -69,8 +70,12 @@ Thoughts.app
   the **app layer** (`~/.thoughts/app-layer`).
 - Your **library** is just a folder. It works without the app: open it in any editor or run
   `claude` inside it. New libraries are copied from `starter/` (embedded in the binary):
-  `CLAUDE.md` rules, skills in `.claude/skills/`, and profession presets in `presets/` that the
-  init skill applies once and then moves to `.claude/presets/`.
+  `CLAUDE.md` rules, skills in `.claude/skills/`, and profession presets in `presets/` (English)
+  and `presets/ar/` (Arabic) that the init skill applies once and then moves to
+  `.claude/presets/`. `library.rs` embeds the whole `starter/` folder with `include_dir!` and
+  extracts all of it, so a file added under `starter/` is copied into new libraries without a
+  code change. `START-HERE.md` and `START-HERE.ar.md` are both copied; the init skill deletes
+  both when setup finishes.
 
 ### Trust model
 
@@ -82,32 +87,104 @@ Thoughts.app
   findings plus the bytes of every file they can come from), so any later change asks again.
 - The starter's own SessionStart hook is recognised by exact JSON equality with
   `starter/.claude/settings.json`. Changing that file changes what is treated as known-safe.
-- Skills and presets are markdown only. Nothing in the starter adds executable content.
+- Markdown under `.claude/` (skills, commands, agents, and the presets once the init skill has
+  moved them to `.claude/presets/`) is standing instruction for the assistant, so it is part of
+  the check: each `.claude/**/*.md` file is compared byte-for-byte with the starter's version. A
+  file that differs or has no starter counterpart is a finding, and its bytes are part of the
+  fingerprint. Editing a starter skill therefore changes the baseline for every library, and a
+  library whose skills the tune-up routine has adjusted asks for trust again. The fingerprint is
+  always computed, including when nothing is found.
+- Skills and presets are markdown only, with no `allowed-tools` or hooks in skill frontmatter.
+  Nothing in the starter adds executable content.
+- Reorganize works in a copy of the library; that copy is trust-checked like any other folder and
+  is never trusted automatically.
+
+### Deny rules on every run
+
+Every assistant run the daemon starts gets the same generated deny rules through `--settings`:
+chat, Wrap, mini-wrap, workflow, Reorganize and customise. They block the assistant's file tools
+from writing `.claude/`, `.mcp.json`, `.git/` and the app's data folder (`~/.thoughts`), and from
+reading or writing the user's private paths. Customise runs additionally make the library
+read-only. Earlier versions applied these rules to customise runs only.
+
+`permissionMode` is allow-listed to `acceptEdits` and `plan`. `default` is still read from old
+settings files and treated as `plan`, because there is no approve/deny UI.
+
+### Library busy and history
+
+- While a Wrap or a Reorganize apply holds the library, every library mutation (file writes, todo
+  operations, import, new/move/delete, restore), sync, and chat sends that work in the library
+  return `BUSY::<message>`. While a Wrap is `interrupted`, sync and new Wraps return
+  `WRAP_INTERRUPTED::<chatId>` until the user finishes or undoes it. Sync is also refused while a
+  chat or workflow run is active in the library.
+- **Library history** is git-backed. `GET /api/library/history` lists changes with a `kind`
+  (`wrap`, `sync`, `edit`, `assistant`, `other`); `GET /api/library/version` returns one file at
+  one change; `POST /api/library/restore` puts one file back and `POST /api/library/undo` reverts
+  one whole change. Both create a new commit; undo returns `CONFLICT::<files>` when it cannot.
+  With git off they return `NO_HISTORY::<message>`. User-facing description:
+  [HISTORY.md](HISTORY.md).
+- Git calls have a timeout, so a stalled call no longer locks the library until restart.
 
 ### Private paths
 
 - `privatePaths` in settings is a list of library-relative folders the assistant must never read.
-  The daemon enforces it when it starts a run (read-deny rules passed to the assistant, and the
+  The daemon enforces it when it starts any run (deny rules passed to the assistant, and the
   list stated in the system prompt); the starter `CLAUDE.md` repeats it as a behavioural rule.
+- **Plugin scope is enforced by the daemon, not the UI.** The UI host adds `scope=plugin` to every
+  library call it makes for a plugin or view. With that scope the daemon checks private folders
+  itself, case-insensitively and on canonical paths, and for writes requires the path to fall
+  under the `allow=<prefix>,…` list, which the host fills from the plugin's declared `write`
+  folders. Writes are limited to `.md`, `.json`, `.csv` and `.txt`.
+- The deny rules cover the assistant's file tools. They are not a sandbox: a shell command the
+  assistant is permitted to run is not filtered by them. PRIVACY.md says this in plain words;
+  keep the two in step.
 - Private folders are still part of the library on disk and are still synced.
 
 ### App layer and updates
 
-- The app layer is a git repo of the user's customisations (CSS, themes, plugins, views).
-  A requested change is staged, shown as a preview with a plain-language summary, and committed
-  only when the user keeps it. Every applied change can be rolled back; the native Recovery menu
-  sits outside the layer and cannot be removed by it.
-- Customisations can be exported and imported as a single pack file; an imported pack goes
-  through the same preview.
+- The app layer is a git repo of the user's customisations (CSS, themes, plugins, views,
+  workflows, and the declarative `home.json`, `nav.json` and `todos.json`). A requested change is
+  prepared in a staging worktree, shown as a review with a plain-language summary, and committed
+  only when the user keeps it. Every applied change can be undone on its own (`revert`,
+  `undo-last`) or the whole layer rolled back; the native Recovery menu sits outside the layer
+  and cannot be removed by it.
+- **Per-plugin manifests.** Each plugin or view declares itself in a file beside it,
+  `plugins/<name>.json` or `views/<name>.json`:
+  `{"apiVersion":1,"permissions":[…],"write":["folder/"],"description":"…"}`. Entries in the
+  shared `manifest.json` remain a fallback. Separate files mean undoing one plugin's change no
+  longer conflicts with another's. A plugin, view or pack declaring an `apiVersion` above 1 is
+  listed as `unsupported` and not loaded.
+- **Validation before review.** Staging validates every JSON file, manifest, workflow and path;
+  problems come back on the pending object as `problems:[{path, message}]` and Keep is disabled
+  while any exist. The UI also dry-loads each staged plugin in a hidden sandbox frame.
+- **Apply signature.** `GET /api/layer/pending` returns a `signature`, a hash of the staged
+  content. `POST /api/layer/pending/apply {signature}` fails with `CHANGED::` when the staged
+  content no longer matches what the user reviewed.
+- **Packs.** A full pack carries the whole layer; a feature pack (`export?paths=…`) carries a
+  subset and is merged on import: files added, `home.json`/`nav.json`/`todos.json` merged
+  key-wise, CSS placed in a marked `/* pack:<name> */` block. Any import is staged and reviewed,
+  never applied directly.
+- **Workflows** run as chats of kind `workflow`, one at a time, never during a Wrap, only after
+  the user has approved each one. Schedules: day, week, weekdays, month (day 1–28 or last).
+- **Learning** is local only: usage events and keep/discard/undo outcomes in
+  `~/.thoughts/usage-events.jsonl`, used for suggestions and the monthly tune-up.
 - **Updates** replace the app itself and never touch the library. The app checks for a new
   version and tells the user; it does not install silently. Each release ships a hash manifest;
   customised files are compared three ways (original, yours, new). Only files changed on both
   sides ask the user: keep mine, use new, or let the assistant merge (previewed like any change).
+  Defaults removed or renamed upstream are reported and left in place, an unresolved conflict is
+  never overwritten by a later update, and a downgrade changes nothing.
 
 ### User-facing docs
 
-[PRIVACY.md](PRIVACY.md) and [CUSTOMISING.md](CUSTOMISING.md) describe this behaviour for end
-users. Keep them true when the behaviour changes.
+[PRIVACY.md](PRIVACY.md), [CUSTOMISING.md](CUSTOMISING.md), [HISTORY.md](HISTORY.md) and
+[COST.md](COST.md) describe this behaviour for end users, with Arabic versions in `docs/ar/`.
+Keep both languages true when the behaviour changes. The Arabic glossary (Wrap «تلخيص وحفظ»,
+History «السجل», Keep / Discard / Try it «اعتماد / تجاهل / تجربة», add-on «إضافة», pack «حزمة»,
+automatic task «مهمة تلقائية») must match the UI strings.
+
+The first-run test plan for each platform and the list of things nobody has verified yet are in
+[RELEASING.md](RELEASING.md#first-run-test-plan).
 
 ## Uninstall
 
@@ -115,8 +192,11 @@ users. Keep them true when the behaviour changes.
 rm -rf /Applications/Thoughts.app ~/.thoughts ~/Library/LaunchAgents/app.thoughts.daemon.plist
 ```
 
-Your library folder is never touched. Delete it yourself if you want it gone. Saved git
-credentials are under "thoughts-git" in Keychain Access.
+That is the macOS form: the app, the data folder and the login item (LaunchAgent). Your library
+folder is never touched. Delete it yourself if you want it gone. Saved credentials are under
+"thoughts-git" and "thoughts-ai" in Keychain Access. On Windows and Linux the same three things
+apply (the installed app, `~/.thoughts`, the autostart entry); nothing removes them automatically
+yet.
 
 ## Commands & layout
 
@@ -130,17 +210,16 @@ npx vite build             # UI build check
 src-tauri/         Tauri shell — one binary: GUI · --daemon · git credential helper
 crates/thoughtsd/  the daemon (axum): chats, Claude runner, library, todos, git, wraps, app layer
 ui/                Svelte 5 frontend
-starter/           starter kit for new libraries (embedded): rules, skills, profession presets
-updates/           update manifests (embedded)
+starter/           starter kit for new libraries (embedded): rules, skills, profession presets (en + ar)
+docs/              user docs (English, Arabic in docs/ar/), this file, RELEASING.md, the review
 ```
 
 ## Roadmap
 
-- Professional setup end to end: onboarding asks profession and working language and passes
-  them to the init skill (presets exist in `starter/presets/`)
-- Due dates, meeting notes and outputs as first-class views
-- Signed and notarized releases; Intel, Windows and Linux downloads
-- Approving tool permissions from inside the chat
+- Signed and notarized releases; Intel, Windows and Linux downloads (built in CI, never run)
+- Approving tool permissions from inside the chat (until then "ask before changes" is not offered)
+- Reminders when the app is not running
+- Previews for PDF, Word and Excel files
 - Codex as a second assistant (switch per chat; history carries over)
 - Optional semantic-search extension for very large libraries
 
