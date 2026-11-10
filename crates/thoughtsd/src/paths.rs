@@ -2,11 +2,24 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// `~/.thoughts`, overridable with `THOUGHTS_HOME`.
+#[cfg(not(test))]
 pub fn home() -> PathBuf {
     if let Ok(h) = std::env::var("THOUGHTS_HOME") {
         return PathBuf::from(h);
     }
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".thoughts")
+}
+
+/// Under test the home is always a throwaway temp folder (one per test process), so no test can
+/// ever read or write the real `~/.thoughts`.
+#[cfg(test)]
+pub fn home() -> PathBuf {
+    static H: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    H.get_or_init(|| {
+        let d = std::env::temp_dir().join(format!("thoughts-test-home-{}", uuid::Uuid::new_v4()));
+        for sub in ["chats", "attachments", "extensions", "logs"] { std::fs::create_dir_all(d.join(sub)).unwrap(); }
+        d
+    }).clone()
 }
 
 pub fn chats_dir() -> PathBuf { home().join("chats") }
@@ -17,6 +30,27 @@ pub fn settings_file() -> PathBuf { home().join("settings.json") }
 pub fn daemon_file() -> PathBuf { home().join("daemon.json") }
 pub fn git_credentials_file() -> PathBuf { home().join("git-credentials") }
 pub fn usage_file() -> PathBuf { home().join("usage.json") }
+pub fn logs_dir() -> PathBuf { home().join("logs") }
+/// PIDs of assistant processes started by this daemon (cleaned up after a crash).
+pub fn runs_file() -> PathBuf { home().join("runs.json") }
+/// Held exclusively for the daemon's lifetime so two daemons can never run.
+pub fn lock_file() -> PathBuf { home().join("daemon.lock") }
+/// Fallback secret store (0600) for systems without a working keyring.
+pub fn secrets_file() -> PathBuf { home().join("secrets.json") }
+pub fn trusted_file() -> PathBuf { home().join("trusted.json") }
+/// The staging copy of the customisation layer (a git worktree of the app layer).
+pub fn app_layer_staging_dir() -> PathBuf { home().join("app-layer-staging") }
+
+/// Everything under the app's home (`home`) that an assistant run must never read: credentials,
+/// the daemon's token, settings, and the user's saved conversations. Files first, then folders.
+pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let files = ["daemon.json", "settings.json", "git-credentials", "trusted.json", "secrets.json", "runs.json", "usage.json", "layer-pending.json"];
+    let dirs = ["chats", "attachments", "logs"];
+    (files.iter().map(|f| home.join(f)).collect(), dirs.iter().map(|d| home.join(d)).collect())
+}
+
+/// Where Reorganize works, so the library's own folder never leaves the user's branch.
+pub fn reorganize_worktree() -> PathBuf { home().join("reorganize-worktree") }
 
 /// The OS user's home folder, as an error rather than a panic when it cannot be determined.
 pub fn user_home() -> anyhow::Result<PathBuf> {
@@ -45,7 +79,7 @@ pub fn create_private_dir(d: &Path) -> std::io::Result<()> {
 }
 
 pub fn ensure_dirs() -> std::io::Result<()> {
-    for d in [home(), chats_dir(), attachments_dir(), extensions_dir()] {
+    for d in [home(), chats_dir(), attachments_dir(), extensions_dir(), logs_dir()] {
         create_private_dir(&d)?;
     }
     Ok(())

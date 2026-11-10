@@ -30,6 +30,8 @@ pub struct Settings {
     pub search: SearchSettings,
     /// Library-relative folders the AI must never read.
     pub private_paths: Vec<String>,
+    /// Keep the local-only usage log that suggestions are drawn from. Off = nothing is recorded or suggested.
+    pub usage_signals: bool,
 }
 
 pub const SCHEMA_VERSION: u32 = 1;
@@ -154,6 +156,7 @@ impl Default for Settings {
             last_wrap: None,
             search: SearchSettings::default(),
             private_paths: vec![],
+            usage_signals: true,
         }
     }
 }
@@ -170,13 +173,65 @@ impl Default for SyncSettings {
     }
 }
 
+/// One step per schema version: `MIGRATIONS[n]` turns a version-`n` file into version `n + 1`.
+/// Steps work on the raw JSON so they can rename or reshape fields the current struct no longer has.
+const MIGRATIONS: &[fn(&mut serde_json::Value)] = &[
+    // v0 -> v1: files written before `schemaVersion` existed. Nothing to reshape.
+    |_v| {},
+];
+
+/// Bring a settings document up to `SCHEMA_VERSION`. Files from a newer app are left as they are.
+pub fn migrate(mut v: serde_json::Value) -> serde_json::Value {
+    if !v.is_object() { return v; }
+    let mut ver = v.get("schemaVersion").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+    while ver < MIGRATIONS.len() {
+        MIGRATIONS[ver](&mut v);
+        ver += 1;
+        v["schemaVersion"] = serde_json::json!(ver);
+    }
+    v
+}
+
+fn parse(text: &str) -> anyhow::Result<Settings> {
+    let v: serde_json::Value = serde_json::from_str(text)?;
+    if !v.is_object() { anyhow::bail!("not a settings object"); }
+    Ok(serde_json::from_value::<Settings>(migrate(v))?.with_defaults())
+}
+
 impl Settings {
+    /// Read-only load (the app shell uses it too): a missing or unreadable file gives defaults and
+    /// nothing on disk is touched. The daemon itself starts with `load_or_recover`.
     pub fn load() -> Self {
-        std::fs::read_to_string(crate::paths::settings_file())
-            .ok()
-            .and_then(|s| serde_json::from_str::<Settings>(&s).ok())
-            .unwrap_or_default()
-            .with_defaults()
+        std::fs::read_to_string(crate::paths::settings_file()).ok()
+            .and_then(|s| parse(&s).ok())
+            .unwrap_or_else(|| Settings::default().with_defaults())
+    }
+
+    /// Load `file`. A file that exists but cannot be understood is never silently replaced: it is
+    /// moved aside to `settings.json.corrupt-<timestamp>` and `true` is returned alongside defaults.
+    pub fn load_or_recover(file: &std::path::Path) -> (Self, bool) {
+        let text = match std::fs::read(file) {
+            Ok(b) => String::from_utf8_lossy(&b).to_string(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Settings::default().with_defaults(), false),
+            Err(e) => {
+                // Unreadable (permissions, disk): keep the file where it is and say so.
+                crate::log::error(format!("settings could not be read ({e}); starting with defaults"));
+                return (Settings::default().with_defaults(), true);
+            }
+        };
+        match parse(&text) {
+            Ok(s) => (s, false),
+            Err(e) => {
+                let aside = file.with_file_name(format!("{}.corrupt-{}",
+                    file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "settings.json".into()),
+                    chrono::Local::now().format("%Y%m%d-%H%M%S")));
+                match std::fs::rename(file, &aside) {
+                    Ok(()) => crate::log::error(format!("settings file was damaged ({e}); kept as {} and started with defaults", aside.display())),
+                    Err(e2) => crate::log::error(format!("settings file was damaged ({e}) and could not be moved aside ({e2})")),
+                }
+                (Settings::default().with_defaults(), true)
+            }
+        }
     }
 
     fn with_defaults(mut self) -> Self {
@@ -325,9 +380,50 @@ mod tests {
     }
 
     #[test]
+    fn damaged_settings_are_moved_aside_not_overwritten() {
+        let d = std::env::temp_dir().join(format!("thoughts-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.json");
+        // Missing: defaults, nothing recovered.
+        assert!(!Settings::load_or_recover(&f).1);
+        // Healthy.
+        std::fs::write(&f, r#"{"language":"ar","onboarded":true}"#).unwrap();
+        let (s, recovered) = Settings::load_or_recover(&f);
+        assert!(!recovered && s.onboarded && s.language == "ar" && s.search.file_threshold == 1500);
+        // Damaged: kept under a new name, byte for byte.
+        for bad in ["{\"language\":\"ar\",", "[1,2]", "{\"idleMinutes\":\"soon\"}"] {
+            std::fs::write(&f, bad).unwrap();
+            let (s, recovered) = Settings::load_or_recover(&f);
+            assert!(recovered && !s.onboarded);
+            assert!(!f.exists());
+            let aside: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| e.path())
+                .filter(|p| p.file_name().unwrap().to_string_lossy().starts_with("settings.json.corrupt-")).collect();
+            assert_eq!(aside.len(), 1);
+            assert_eq!(std::fs::read_to_string(&aside[0]).unwrap(), bad);
+            std::fs::remove_file(&aside[0]).unwrap();
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn migrations_run_from_the_files_version() {
+        assert_eq!(MIGRATIONS.len() as u32, SCHEMA_VERSION);
+        let v = migrate(serde_json::json!({"language": "ar"}));
+        assert_eq!(v["schemaVersion"], SCHEMA_VERSION);
+        assert_eq!(v["language"], "ar");
+        // Already current, or written by a newer app: untouched.
+        assert_eq!(migrate(serde_json::json!({"schemaVersion": SCHEMA_VERSION}))["schemaVersion"], SCHEMA_VERSION);
+        assert_eq!(migrate(serde_json::json!({"schemaVersion": 99}))["schemaVersion"], 99);
+        assert_eq!(parse(r#"{"userName":"Sara"}"#).unwrap().user_name, "Sara");
+        assert!(parse("nonsense").is_err());
+    }
+
+    #[test]
     fn old_settings_files_get_new_fields() {
         let s: Settings = serde_json::from_str(r#"{"language":"ar"}"#).unwrap();
         assert_eq!(s.schema_version, SCHEMA_VERSION);
         assert!(s.private_paths.is_empty());
+        assert!(s.usage_signals, "on unless the user turns it off");
+        assert!(!serde_json::from_str::<Settings>(r#"{"usageSignals":false}"#).unwrap().usage_signals);
     }
 }

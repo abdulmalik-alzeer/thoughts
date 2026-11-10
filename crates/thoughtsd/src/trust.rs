@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 const STARTER_SETTINGS: &str = include_str!("../../../starter/.claude/settings.json");
 
-fn store() -> PathBuf { crate::paths::home().join("trusted.json") }
+fn store() -> PathBuf { crate::paths::trusted_file() }
 
 fn canon(p: &Path) -> String { std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().to_string() }
 
@@ -21,7 +21,7 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
     let mut h = Sha256::new();
     h.update(f.join("\n"));
     let mut files: Vec<PathBuf> = [".claude/settings.json", ".claude/settings.local.json", ".mcp.json"].iter().map(|x| path.join(x)).collect();
-    let git = |arg: &str| std::process::Command::new(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()))
+    let git = |arg: &str| crate::proc::std_command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()))
         .current_dir(path).env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["-c", "core.fsmonitor=false", "rev-parse", arg]).output().ok().filter(|o| o.status.success())
         .map(|o| { let p = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()); if p.is_absolute() { p } else { path.join(p) } });
@@ -52,7 +52,7 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
         files.push(d.join("config")); files.push(d.join("config.worktree"));
         // Files pulled in through include.path / includeIf.
         for name in ["config", "config.worktree"] {
-            if let Ok(o) = std::process::Command::new(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()))
+            if let Ok(o) = crate::proc::std_command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()))
                 .env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1")
                 .args(["-c", "core.fsmonitor=false", "config", "--file"]).arg(d.join(name))
                 .args(["--includes", "--list", "--show-origin", "--null"]).output()
@@ -132,7 +132,7 @@ pub fn findings(path: &Path) -> Vec<String> {
     // Git: resolve both the worktree gitdir and the common dir with the same git the app uses; fail closed.
     if path.join(".git").exists() {
         let bin = crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into());
-        let rev = |arg: &str| std::process::Command::new(&bin).current_dir(path).env("PATH", crate::claude::shell_path())
+        let rev = |arg: &str| crate::proc::std_command(&bin).current_dir(path).env("PATH", crate::claude::shell_path())
             .env("GIT_CONFIG_NOSYSTEM", "1").args(["-c", "core.fsmonitor=false", "rev-parse", arg]).output().ok()
             .filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
         let (Some(gd), Some(common)) = (rev("--absolute-git-dir"), rev("--git-common-dir")) else {
@@ -147,7 +147,7 @@ pub fn findings(path: &Path) -> Vec<String> {
             for name in ["config", "config.worktree"] {
                 let cfg = d.join(name);
                 if !cfg.exists() { continue; }
-                match std::process::Command::new(&bin).env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1")
+                match crate::proc::std_command(&bin).env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1")
                     .args(["-c", "core.fsmonitor=false", "config", "--file"]).arg(&cfg).args(["--includes", "--list", "--null", "--name-only"]).output()
                 {
                     Ok(o) if o.status.success() => for key in String::from_utf8_lossy(&o.stdout).split('\0').filter(|k| !k.is_empty()) {

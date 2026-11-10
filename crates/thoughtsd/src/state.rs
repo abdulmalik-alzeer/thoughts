@@ -2,6 +2,7 @@ use crate::{chats::ChatStore, settings::Settings};
 use rand::Rng;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 
@@ -19,25 +20,18 @@ pub struct AppState {
     pub interrupted: Mutex<Vec<(String, String)>>,
     /// AI spend per calendar month ("YYYY-MM" -> USD), kept in `usage.json`.
     pub usage: Mutex<BTreeMap<String, f64>>,
+    /// Held while a wrap or reorganize is changing the library (apply through commit), so nothing
+    /// else syncs or shuts the daemon down halfway.
+    pub library_lock: Arc<Mutex<()>>,
+    /// settings.json was damaged at startup and has been moved aside.
+    pub settings_recovered: AtomicBool,
+    /// Automatic mini-wraps are paused after a sign-in or network failure, until any run succeeds.
+    pub mini_wraps_blocked: AtomicBool,
+    /// chat id -> retry state for failed automatic mini-wraps.
+    pub mini_wrap_backoff: Mutex<HashMap<String, crate::wraps::Backoff>>,
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
-
-/// Chat files still marked `running` belong to runs that died with the previous daemon.
-fn find_interrupted(dir: &std::path::Path) -> Vec<(String, String)> {
-    let mut out = vec![];
-    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        if e.path().extension().map_or(true, |x| x != "json") { continue; }
-        let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&text) else { continue };
-        if v["running"] == true {
-            if let Some(id) = v["id"].as_str() {
-                out.push((id.to_string(), v["title"].as_str().unwrap_or_default().to_string()));
-            }
-        }
-    }
-    out
-}
 
 impl AppState {
     pub fn load() -> anyhow::Result<Self> {
@@ -47,12 +41,13 @@ impl AppState {
             .map(char::from)
             .collect();
         let (tx, _) = broadcast::channel(1024);
-        let interrupted = find_interrupted(&crate::paths::chats_dir());
         let chats = ChatStore::load()?;
-        // Write the cleared `running` flag back so the next restart doesn't report these again.
-        for (id, _) in &interrupted {
-            if let Some(c) = chats.chats.try_read().ok().and_then(|m| m.get(id).cloned()) { ChatStore::persist(&c); }
-        }
+        let _ = chats.events.set(tx.clone());
+        // Runs cut off by a restart stay listed (the flag is saved in the chat) until acknowledged.
+        let mut interrupted: Vec<(String, String)> = chats.chats.try_read().map(|m| m.values()
+            .filter(|c| c.interrupted).map(|c| (c.id.clone(), c.title.clone())).collect()).unwrap_or_default();
+        interrupted.sort();
+        let (settings, settings_recovered) = Settings::load_or_recover(&crate::paths::settings_file());
         let usage: BTreeMap<String, f64> = match std::fs::read_to_string(crate::paths::usage_file()) {
             Ok(t) => serde_json::from_str(&t).unwrap_or_default(),
             // First run with the ledger: start this month from the chats created in it.
@@ -66,7 +61,7 @@ impl AppState {
         };
         Ok(Self {
             token,
-            settings: RwLock::new(Settings::load()),
+            settings: RwLock::new(settings),
             chats,
             events: tx,
             runs: Mutex::new(HashMap::new()),
@@ -74,6 +69,10 @@ impl AppState {
             git_lock: Mutex::new(()),
             interrupted: Mutex::new(interrupted),
             usage: Mutex::new(usage),
+            library_lock: Arc::new(Mutex::new(())),
+            settings_recovered: AtomicBool::new(settings_recovered),
+            mini_wraps_blocked: AtomicBool::new(false),
+            mini_wrap_backoff: Mutex::new(HashMap::new()),
         })
     }
 
@@ -96,21 +95,24 @@ impl AppState {
         self.usage.lock().await.get(&month_key()).copied().unwrap_or(0.0)
     }
 
+    /// Is a wrap or reorganize changing the library right now?
+    pub fn library_busy(&self) -> bool { self.library_lock.try_lock().is_err() }
+
+    /// Forget that a chat's run was cut off (the user has seen it, or the chat is running again).
+    pub async fn ack_interrupted(&self, chat_id: &str) {
+        self.interrupted.lock().await.retain(|(c, _)| c != chat_id);
+        if self.chats.get(chat_id).await.map_or(false, |c| c.interrupted) {
+            if let Some(ch) = self.chats.update(chat_id, |c| c.interrupted = false).await {
+                self.emit(serde_json::json!({"type": "chat.updated", "chat": ch.summary()}));
+            }
+        }
+    }
+
+    /// A run finished successfully: sign-in and network evidently work again.
+    pub fn note_run_ok(&self) { self.mini_wraps_blocked.store(false, Ordering::Relaxed); }
+
     pub fn notify(&self, title: &str, body: &str) {
         self.emit(serde_json::json!({"type": "notify", "title": title, "body": body}));
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn finds_chats_cut_off_mid_run() {
-        let d = std::env::temp_dir().join(format!("thoughts-state-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&d).unwrap();
-        std::fs::write(d.join("a.json"), r#"{"id":"a","title":"Plan trip","running":true}"#).unwrap();
-        std::fs::write(d.join("b.json"), r#"{"id":"b","title":"Done","running":false}"#).unwrap();
-        std::fs::write(d.join("c.json.tmp"), r#"{"id":"c","running":true}"#).unwrap();
-        assert_eq!(super::find_interrupted(&d), [("a".to_string(), "Plan trip".to_string())]);
-        std::fs::remove_dir_all(d).unwrap();
-    }
-}

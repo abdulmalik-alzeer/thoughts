@@ -22,9 +22,9 @@ pub const MODULES: &[Module] = &[
     Module { id: "todos", name: "Todos & tasks", name_ar: "المهام", default_on: true,
         description: "A root TODO.md plus a todo.md per idea, editable from the app.",
         description_ar: "قائمة مهام عامة، وقائمة خاصة بكل فكرة، تعدّلها مباشرة من التطبيق.",
-        add_prompt: "Add a todos module: create tasks/TODO.md with ## Now / ## Next / ## Later / ## Done headings (if missing), add a Todos paragraph to CLAUDE.md Conventions (top-level GFM task lines, per-idea <area>/<slug>/todo.md created lazily, new items into the top group) and a todo trigger row in the rituals table." },
+        add_prompt: "Add a todos module: create tasks/TODO.md with ## Now / ## Next / ## Later / ## Done headings (if missing), add a Todos paragraph to CLAUDE.md Conventions (top-level GFM task lines; a task may end with ` @due(YYYY-MM-DD)` — add it whenever the user gives or implies a date, working out the actual date; other people's tasks start with their name; per-item todo.md next to the item's README, created lazily; new items into the top group; change lines in place, never rewrite the file) and a todo trigger row in the rituals table." },
     Module { id: "docs", name: "Docs / wiki", name_ar: "المستندات", default_on: true,
-        description: "Long-lived reference docs in docs/, linked from ideas.",
+        description: "Long-lived reference docs in docs/, linked from ideas and work items.",
         description_ar: "مستندات مرجعية تبقى معك طويلًا في مجلد docs/، مع روابط إليها من أفكارك.",
         add_prompt: "Add a docs (wiki) module: create docs/README.md as the wiki front door with a file map, and add a Docs convention to CLAUDE.md (one topic per file, light frontmatter title/updated/summary, rewrite rather than append)." },
     Module { id: "me", name: "Personal profile (me/)", name_ar: "الملف الشخصي", default_on: false,
@@ -38,7 +38,7 @@ pub const MODULES: &[Module] = &[
     Module { id: "learning", name: "Learning program", name_ar: "برنامج التعلم", default_on: false,
         description: "Study topics with levels L0–L5, adaptive quizzes and weekly plans.",
         description_ar: "موضوعات تدرسها بمستويات من L0 إلى L5، مع اختبارات تتكيّف مع مستواك وخطط أسبوعية.",
-        add_prompt: "Add a learning module: create learning/learning-program/ as an idea (README with method summary, notes/method.md describing levels L0-L5, quiz-history and knowledge-graph per topic, weekly plans in notes/plans/), add quiz and plan-week skills under .claude/skills/, rituals rows, and a Learning paragraph in CLAUDE.md Conventions. Add its INDEX.md line." },
+        add_prompt: "Add a learning module: create learning/learning-program/ as an item (README with `kind: project` in its note details and a method summary, notes/method.md describing levels L0-L5, quiz-history and knowledge-graph per topic, weekly plans in notes/plans/), add quiz and plan-week skills under .claude/skills/, rituals rows, and a Learning paragraph in CLAUDE.md Conventions. Add its INDEX.md line." },
     Module { id: "builds", name: "Projects", name_ar: "المشاريع", default_on: true,
         description: "Link any folder (client files, a report, a code repo) as a project; chats run inside it.",
         description_ar: "اربط أي مجلد (ملفات عميل، تقرير، مشروع برمجي) كمشروع، وستعمل المحادثات داخله.",
@@ -61,7 +61,10 @@ pub fn add_prompt(m: &Module) -> String {
     format!(
         "The user just enabled the **{}** module in the Thoughts app. Integrate it into this library \
          *as it exists now* — read CLAUDE.md and INDEX.md first and fit the new pieces to the existing \
-         structure and conventions rather than pasting a template.\n\n{}\n\n\
+         structure and conventions rather than pasting a template. Follow the conventions already in CLAUDE.md: \
+         items can be ideas or work items (a README's note details carry `kind:` — idea, client, matter, project, or the \
+         user's own word), todos are task lines that may end with ` @due(YYYY-MM-DD)`, and everything is written in the \
+         user's language while the file names and keys the app reads stay as they are.\n\n{}\n\n\
          When done, summarise in 3 lines what you added and how the user triggers it.",
         m.name, m.add_prompt
     )

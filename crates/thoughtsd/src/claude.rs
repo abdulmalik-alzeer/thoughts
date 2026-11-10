@@ -9,6 +9,9 @@ use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
+/// How long a one-shot completion (mini-wrap, title) may take before it is abandoned.
+pub const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// PATH from the user's login shell — GUI apps on macOS start with a bare PATH.
 pub fn shell_path() -> &'static str {
     static P: OnceLock<String> = OnceLock::new();
@@ -18,7 +21,7 @@ pub fn shell_path() -> &'static str {
         #[cfg(unix)]
         {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            if let Ok(o) = std::process::Command::new(shell).args(["-lc", "printf %s \"$PATH\""]).output() {
+            if let Ok(o) = crate::proc::std_command(shell).args(["-lc", "printf %s \"$PATH\""]).output() {
                 parts.extend(String::from_utf8_lossy(&o.stdout).split(':').map(String::from));
             }
         }
@@ -28,8 +31,17 @@ pub fn shell_path() -> &'static str {
                 parts.push(h.join(d).to_string_lossy().into());
             }
         }
+        #[cfg(not(windows))]
         for d in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
             parts.push(d.into());
+        }
+        // Where npm, the native installer and Git for Windows put their programs. UNTESTED on Windows.
+        #[cfg(windows)]
+        for (var, subs) in [("APPDATA", &["npm"][..]), ("LOCALAPPDATA", &["Programs\\claude", "Programs\\Git\\cmd", "Microsoft\\WinGet\\Links", "AnthropicClaude"][..]),
+                            ("ProgramFiles", &["Git\\cmd", "nodejs"][..])] {
+            if let Ok(base) = std::env::var(var) {
+                for sub in subs { parts.push(Path::new(&base).join(sub).to_string_lossy().into()); }
+            }
         }
         let mut seen = std::collections::HashSet::new();
         parts.retain(|p| !p.is_empty() && seen.insert(p.clone()));
@@ -43,9 +55,10 @@ pub fn find_binary(custom: &Option<String>, name: &str) -> Option<PathBuf> {
         return (p.is_absolute() && p.is_file()).then_some(p);
     }
     let sep = if cfg!(windows) { ';' } else { ':' };
+    let cands = candidates(name, cfg!(windows), &std::env::var("PATHEXT").unwrap_or_default());
     for dir in shell_path().split(sep) {
-        for cand in [name.to_string(), format!("{name}.exe"), format!("{name}.cmd")] {
-            let p = Path::new(dir).join(&cand);
+        for cand in &cands {
+            let p = Path::new(dir).join(cand);
             if p.is_file() {
                 return Some(p);
             }
@@ -54,13 +67,28 @@ pub fn find_binary(custom: &Option<String>, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// File names to look for when searching for program `name`. On Windows a real `.exe` wins over
+/// the `.cmd` shim npm installs, then anything else PATHEXT lists; the bare name (a shell script
+/// there) is never used. Elsewhere the bare name comes first, as always.
+pub fn candidates(name: &str, windows: bool, pathext: &str) -> Vec<String> {
+    let mut out: Vec<String> = if windows { vec![format!("{name}.exe"), format!("{name}.cmd")] }
+        else { vec![name.to_string(), format!("{name}.exe"), format!("{name}.cmd")] };
+    if windows {
+        for ext in pathext.split(';').map(|e| e.trim().to_lowercase()).filter(|e| e.starts_with('.') && e.len() > 1) {
+            let c = format!("{name}{ext}");
+            if !out.contains(&c) { out.push(c); }
+        }
+    }
+    out
+}
+
 pub async fn binary(state: &AppState) -> Option<PathBuf> {
     let custom = state.settings.read().await.ai.claude.binary.clone();
     find_binary(&custom, "claude")
 }
 
 fn cmd(bin: &Path) -> Command {
-    let mut c = Command::new(bin);
+    let mut c = crate::proc::command(bin);
     c.env("PATH", shell_path());
     c.stdin(std::process::Stdio::null());
     c.kill_on_drop(true);
@@ -143,7 +171,7 @@ async fn provider_env(state: &AppState, c: &mut Command) {
         c.env("ANTHROPIC_BASE_URL", url);
         // The token belongs to the address it was saved for: `has_api_token` is cleared whenever the address changes.
         if !s.has_api_token { return; }
-        if let Ok(tok) = keyring::Entry::new("thoughts-ai", "claude").and_then(|e| e.get_password()) {
+        if let Some(tok) = crate::secrets::get("thoughts-ai", "claude") {
             c.env("ANTHROPIC_AUTH_TOKEN", tok);
         }
     }
@@ -157,6 +185,8 @@ pub struct RunSpec {
     pub options: RunOptions,
     pub resume: Option<String>,
     pub append_system: Option<String>,
+    /// Extra permission deny rules for this run (e.g. `Edit(//path/**)`), merged with the private-folder rules.
+    pub extra_deny: Vec<String>,
 }
 
 /// What every run is told about the user's language.
@@ -194,9 +224,36 @@ pub fn private_deny_settings(library: Option<&Path>, cwd: &Path, private: &[Stri
                 deny.push(format!("{tool}({p}/**)"));
             }
         }
+        // BEST-EFFORT ONLY: Read/Edit rules do not cover the shell, so also refuse commands that
+        // name a private folder. A command that reaches it indirectly (a variable, a glob from the
+        // parent folder, a script) is not caught — private folders are a guard against accidents,
+        // not a sandbox.
+        match library {
+            Some(lib) => {
+                deny.push(format!("Bash(*{}*)", lib.join(&rel).to_string_lossy().replace('\\', "/")));
+                if lib == cwd { for pat in bash_relative_patterns(&rel) { deny.push(pat); } }
+            }
+            None => for pat in bash_relative_patterns(&rel) { deny.push(pat); },
+        }
     }
     if deny.is_empty() { return Ok(None); }
     Ok(Some(json!({"permissions": {"deny": deny}}).to_string()))
+}
+
+/// Shell command shapes that mention library-relative folder `rel` from inside the library.
+fn bash_relative_patterns(rel: &str) -> Vec<String> {
+    vec![format!("Bash(*./{rel}/*)"), format!("Bash(* ./{rel})"), format!("Bash(* {rel}/*)"), format!("Bash(* {rel})")]
+}
+
+/// Combine two `--settings` deny documents into one.
+fn merge_deny(a: Option<String>, b: Option<String>) -> Option<String> {
+    let rules = |s: &Option<String>| -> Vec<Value> {
+        s.as_deref().and_then(|t| serde_json::from_str::<Value>(t).ok())
+            .and_then(|v| v["permissions"]["deny"].as_array().cloned()).unwrap_or_default()
+    };
+    let mut all = rules(&a);
+    for r in rules(&b) { if !all.contains(&r) { all.push(r); } }
+    if all.is_empty() { None } else { Some(json!({"permissions": {"deny": all}}).to_string()) }
 }
 
 /// Start a streaming run in the background. Events go out on the broadcast
@@ -213,11 +270,20 @@ pub async fn start_run(
     crate::settings::check_cli_value("session", spec.resume.as_deref())?;
     let settings = state.settings.read().await.clone();
     // Nothing runs in a folder the user has not trusted. The app layer is the app's own folder.
-    let layer = crate::paths::app_layer_dir();
+    // Its staging copy likewise: the app creates it, strips any settings from it, and runs there
+    // only under the deny rules in `extra_deny`.
+    let (layer, staging) = (crate::paths::app_layer_dir(), crate::paths::app_layer_staging_dir());
     for dir in std::iter::once(&spec.cwd).chain(spec.add_dirs.iter()) {
-        if *dir != layer { crate::trust::require(dir)?; }
+        if *dir != layer && *dir != staging { crate::trust::require(dir)?; }
     }
-    let deny = private_deny_settings(settings.library().as_deref(), &spec.cwd, &settings.private_paths)?;
+    let mut deny = private_deny_settings(settings.library().as_deref(), &spec.cwd, &settings.private_paths)?;
+    // Reorganize works in a second checkout of the library: private folders are off-limits there too.
+    if spec.cwd == crate::paths::reorganize_worktree() {
+        deny = merge_deny(deny, private_deny_settings(Some(&spec.cwd), &spec.cwd, &settings.private_paths)?);
+    }
+    if !spec.extra_deny.is_empty() {
+        deny = merge_deny(deny, Some(json!({"permissions": {"deny": spec.extra_deny}}).to_string()));
+    }
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
     c.current_dir(&spec.cwd)
@@ -236,10 +302,16 @@ pub async fn start_run(
     c.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = c.spawn()?;
+    let mut child = c.spawn().map_err(|e| { crate::log::error(format!("run {}: could not start the assistant: {e}", spec.chat_id)); e })?;
     let (Some(mut stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
         anyhow::bail!("could not connect to the assistant process");
     };
+    // Remember the process, so a daemon that dies uncleanly can be cleaned up after.
+    let pid = child.id();
+    crate::runs::record(pid, &spec.chat_id);
+    let started = std::time::Instant::now();
+    crate::log::info(format!("run {} started (pid {}, mode {}, in {})", spec.chat_id, pid.unwrap_or(0),
+        spec.options.permission_mode.as_deref().unwrap_or("default"), spec.cwd.display()));
     let prompt = spec.prompt.clone();
     tokio::spawn(async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
@@ -249,7 +321,7 @@ pub async fn start_run(
     let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
     state.runs.lock().await.insert(spec.chat_id.clone(), kill_tx);
     let id = spec.chat_id.clone();
-    state.interrupted.lock().await.retain(|(c, _)| c != &id);
+    state.ack_interrupted(&id).await;
     let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };
     if let Some(ch) = state.chats.update(&id, |c| c.running = true).await {
         state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
@@ -284,12 +356,23 @@ pub async fn start_run(
                 }
             }
         }
-        let _ = child.wait().await;
+        let exit = child.wait().await;
+        crate::runs::forget(pid);
         let stderr_text = err_task.await.unwrap_or_default();
         if !got_result && !stderr_text.trim().is_empty() {
             push(&state, &id, Msg::new("error", stderr_text.trim())).await;
         }
         state.runs.lock().await.remove(&id);
+        let secs = started.elapsed().as_secs();
+        if ok {
+            state.note_run_ok();
+            crate::log::info(format!("run {id} finished ok in {secs}s"));
+        } else {
+            let status = exit.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
+            let first: String = stderr_text.lines().next().unwrap_or("").chars().take(300).collect();
+            crate::log::warn(format!("run {id} did not finish ({status}, {secs}s{}){}", if got_result { ", assistant reported an error" } else { ", no result" },
+                if first.is_empty() { String::new() } else { format!(": {first}") }));
+        }
         if let Some(ch) = state.chats.update(&id, |c| { c.running = false; c.updated = chrono::Utc::now(); }).await {
             state.emit(json!({"type": "chat.done", "chatId": id, "ok": ok, "title": ch.title, "chat": ch.summary()}));
         }
@@ -403,15 +486,29 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> 
     provider_env(state, &mut c).await;
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = c.spawn()?;
+    let pid = child.id();
+    crate::runs::record(pid, "one-shot");
     let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("could not connect to the assistant process"))?;
-    stdin.write_all(prompt.as_bytes()).await?;
-    drop(stdin);
-    let out = child.wait_with_output().await?;
+    // The child is killed when this future is dropped (`kill_on_drop`), so a timeout leaves nothing behind.
+    let out = tokio::time::timeout(COMPLETE_TIMEOUT, async {
+        stdin.write_all(prompt.as_bytes()).await?;
+        drop(stdin);
+        child.wait_with_output().await
+    }).await;
+    crate::runs::forget(pid);
+    let out = match out {
+        Ok(r) => r?,
+        Err(_) => {
+            crate::log::warn(format!("one-shot completion timed out after {}s", COMPLETE_TIMEOUT.as_secs()));
+            anyhow::bail!("the assistant timed out (no answer within {} seconds)", COMPLETE_TIMEOUT.as_secs())
+        }
+    };
     let v: Value = serde_json::from_slice(&out.stdout)
         .map_err(|_| anyhow::anyhow!("claude: {}", String::from_utf8_lossy(&out.stderr)))?;
     if v["is_error"].as_bool().unwrap_or(false) {
         anyhow::bail!("{}", v["result"].as_str().unwrap_or("error"));
     }
+    state.note_run_ok();
     Ok(v["result"].as_str().unwrap_or("").trim().to_string())
 }
 
@@ -438,8 +535,31 @@ mod tests {
         // Running elsewhere (a project, the app layer): only the absolute form applies.
         let v = private_deny_settings(Some(lib), Path::new("/home/u/proj"), &["me".into()]).unwrap().unwrap();
         assert!(v.contains("Read(//home/u/Library/me/**)") && !v.contains("./me"));
+        // Best-effort shell rules: the absolute path always, relative shapes only inside the library.
+        assert!(v.contains("Bash(*/home/u/Library/me*)") && !v.contains("Bash(* me"));
+        let v = private_deny_settings(Some(lib), lib, &["me/finances".into()]).unwrap().unwrap();
+        for want in ["Bash(*/home/u/Library/me/finances*)", "Bash(*./me/finances/*)", "Bash(* me/finances/*)", "Bash(* me/finances)"] { assert!(v.contains(want), "missing {want}"); }
         assert!(private_deny_settings(Some(lib), lib, &["../etc".into()]).is_err());
         assert!(private_deny_settings(Some(lib), lib, &["/etc".into()]).is_err());
+    }
+
+    #[test]
+    fn deny_rules_merge_without_duplicates() {
+        let a = Some(json!({"permissions": {"deny": ["Read(./me)", "Edit(./me)"]}}).to_string());
+        let b = Some(json!({"permissions": {"deny": ["Read(./me)", "Read(//wt/me)"]}}).to_string());
+        let v: Value = serde_json::from_str(&merge_deny(a.clone(), b).unwrap()).unwrap();
+        assert_eq!(v["permissions"]["deny"], json!(["Read(./me)", "Edit(./me)", "Read(//wt/me)"]));
+        assert_eq!(merge_deny(a.clone(), None), a);
+        assert_eq!(merge_deny(None, None), None);
+    }
+
+    #[test]
+    fn program_names_per_platform() {
+        // Unchanged outside Windows: the bare name first.
+        assert_eq!(candidates("claude", false, ".COM;.EXE"), ["claude", "claude.exe", "claude.cmd"]);
+        // Windows: a real program before the npm shim, then PATHEXT; never the bare shell script.
+        assert_eq!(candidates("claude", true, ".COM;.EXE;.BAT;.CMD;;junk"), ["claude.exe", "claude.cmd", "claude.com", "claude.bat"]);
+        assert_eq!(candidates("git", true, ""), ["git.exe", "git.cmd"]);
     }
 
     #[test]

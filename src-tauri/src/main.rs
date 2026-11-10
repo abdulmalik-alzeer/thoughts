@@ -131,6 +131,26 @@ fn ensure_daemon() -> Result<thoughtsd::paths::DaemonInfo, String> {
     Err("The Thoughts daemon did not start".into())
 }
 
+/// Open a document from the library in the user's default app. Only regular files inside the
+/// library, and only document/media types that cannot run code when opened.
+#[tauri::command]
+fn open_library_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    const SAFE: &[&str] = &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "tsv", "txt", "md", "rtf", "odt",
+        "ods", "odp", "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "mp3", "m4a", "wav", "mp4", "mov", "epub"];
+    let lib = thoughtsd::settings::Settings::load().library().ok_or("no library")?;
+    let root = std::fs::canonicalize(&lib).map_err(|e| e.to_string())?;
+    let rel = std::path::Path::new(&path);
+    if rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
+        return Err("invalid path".into());
+    }
+    let full = std::fs::canonicalize(root.join(rel)).map_err(|e| e.to_string())?;
+    if !full.starts_with(&root) || !full.is_file() { return Err("not a file in the library".into()); }
+    let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    if !SAFE.contains(&ext.as_str()) { return Err("this file type can't be opened from Thoughts".into()); }
+    app.opener().open_path(full.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn daemon_info() -> Result<Value, String> {
     let i = tauri::async_runtime::spawn_blocking(ensure_daemon).await.map_err(|e| e.to_string())??;
@@ -423,6 +443,7 @@ fn main() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
+            open_library_file,
             daemon_info,
             restart_daemon,
             set_dock_icon,

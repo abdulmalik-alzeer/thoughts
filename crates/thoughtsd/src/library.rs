@@ -149,18 +149,86 @@ pub fn tree(root: &Path, exclude: &[String]) -> Vec<Value> {
     out
 }
 
+/// Content fingerprint the editor sends back when saving, so a save never silently overwrites
+/// a file that changed on disk in the meantime.
+pub fn content_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 pub fn read(root: &Path, rel: &str) -> anyhow::Result<Value> {
     let p = resolve(root, rel)?;
     let text = std::fs::read_to_string(&p)?;
     let (fm, body) = frontmatter(&text);
-    Ok(json!({"path": rel, "content": text, "frontmatter": fm, "body": body}))
+    Ok(json!({"path": rel, "content": text, "frontmatter": fm, "body": body, "hash": content_hash(text.as_bytes())}))
 }
 
 pub fn write(root: &Path, rel: &str, content: &str) -> anyhow::Result<()> {
+    write_checked(root, rel, content, None).map(|_| ())
+}
+
+/// Save a file atomically. With `base_hash` (the `hash` the editor got when it loaded the file)
+/// the save fails with a `STALE::` error if the file on disk is no longer that version.
+/// Returns the new content's hash.
+pub fn write_checked(root: &Path, rel: &str, content: &str, base_hash: Option<&str>) -> anyhow::Result<String> {
     let p = resolve(root, rel)?;
+    if let Some(base) = base_hash.filter(|b| !b.is_empty()) {
+        let current = match std::fs::read(&p) {
+            Ok(b) => Some(content_hash(&b)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        match current.as_deref() {
+            Some(h) if h == base => {}
+            Some(_) => anyhow::bail!("STALE::This file was changed somewhere else after you opened it. Reload it to see the latest version before saving."),
+            None => anyhow::bail!("STALE::This file was moved or deleted after you opened it."),
+        }
+    }
     if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
     crate::paths::write_atomic(&p, content.as_bytes(), false)?;
-    Ok(())
+    Ok(content_hash(content.as_bytes()))
+}
+
+/// Largest file `read_raw` serves.
+pub const RAW_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+/// Content type for a file name. Anything a browser could run as a page (HTML, XML) is served as text.
+pub fn mime_for(name: &str) -> &'static str {
+    match name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).as_deref() {
+        Some("png") => "image/png", Some("jpg" | "jpeg") => "image/jpeg", Some("gif") => "image/gif",
+        Some("webp") => "image/webp", Some("svg") => "image/svg+xml", Some("bmp") => "image/bmp",
+        Some("ico") => "image/x-icon", Some("avif") => "image/avif", Some("heic") => "image/heic",
+        Some("pdf") => "application/pdf", Some("json") => "application/json",
+        Some("csv") => "text/csv; charset=utf-8", Some("md" | "markdown") => "text/markdown; charset=utf-8",
+        Some("txt" | "log" | "html" | "htm" | "xml" | "yaml" | "yml" | "toml" | "js" | "ts" | "css") => "text/plain; charset=utf-8",
+        Some("mp3") => "audio/mpeg", Some("m4a") => "audio/mp4", Some("wav") => "audio/wav", Some("ogg") => "audio/ogg",
+        Some("mp4") => "video/mp4", Some("mov") => "video/quicktime", Some("webm") => "video/webm",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
+/// A library file's bytes and content type. Same path rules as `read` (deny-list, no escapes).
+pub fn read_raw(root: &Path, rel: &str) -> anyhow::Result<(Vec<u8>, &'static str)> {
+    let p = resolve(root, rel)?;
+    let meta = std::fs::metadata(&p)?;
+    if !meta.is_file() { anyhow::bail!("not a file"); }
+    if meta.len() > RAW_MAX_BYTES { anyhow::bail!("this file is larger than 25 MB and cannot be shown in the app"); }
+    Ok((std::fs::read(&p)?, mime_for(rel)))
+}
+
+/// After a new library has been set up: the starter's root `presets/` folder is only kept when it
+/// has not already been installed under `.claude/presets/`.
+pub fn remove_leftover_presets(root: &Path) -> bool {
+    let (left, installed) = (root.join("presets"), root.join(".claude/presets"));
+    if !installed.is_dir() || !left.is_dir() || std::fs::symlink_metadata(&left).map_or(true, |m| m.file_type().is_symlink()) { return false; }
+    match std::fs::remove_dir_all(&left) {
+        Ok(()) => true,
+        Err(e) => { crate::log::warn(format!("could not remove the leftover presets folder: {e}")); false }
+    }
 }
 
 pub fn search(root: &Path, q: &str, limit: usize, exclude: &[String]) -> Vec<Value> {
@@ -248,6 +316,61 @@ mod tests {
         assert_eq!(read(&d, "notes/a.md").unwrap()["content"], "hello");
         assert!(resolve_mention(&d, "notes/a.md").is_ok());
         for bad in ["/etc/passwd", "../x", "notes/../../x", "~/x", ".git/config", ""] { assert!(resolve_mention(&d, bad).is_err(), "{bad}"); }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn stale_saves_are_refused() {
+        let d = tmp();
+        write(&d, "notes/a.md", "v1").unwrap();
+        let loaded = read(&d, "notes/a.md").unwrap()["hash"].as_str().unwrap().to_string();
+        assert_eq!(loaded, content_hash(b"v1"));
+        // Saving what was loaded works and gives the next base.
+        let next = write_checked(&d, "notes/a.md", "v2", Some(&loaded)).unwrap();
+        assert_eq!(next, content_hash(b"v2"));
+        // Something else (the assistant, a sync) changes the file: the old base is refused.
+        std::fs::write(d.join("notes/a.md"), "changed elsewhere").unwrap();
+        let err = write_checked(&d, "notes/a.md", "v3", Some(&next)).unwrap_err().to_string();
+        assert!(err.starts_with("STALE::"), "{err}");
+        assert_eq!(std::fs::read_to_string(d.join("notes/a.md")).unwrap(), "changed elsewhere");
+        // Deleted underneath the editor.
+        std::fs::remove_file(d.join("notes/a.md")).unwrap();
+        assert!(write_checked(&d, "notes/a.md", "v3", Some(&next)).unwrap_err().to_string().starts_with("STALE::"));
+        // No base hash: plain save, as before (new files, older clients).
+        write_checked(&d, "notes/a.md", "v4", None).unwrap();
+        write_checked(&d, "notes/b.md", "new", Some("")).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("notes/a.md")).unwrap(), "v4");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn raw_files_follow_the_same_path_rules() {
+        let d = tmp();
+        std::fs::create_dir_all(d.join("imports")).unwrap();
+        std::fs::create_dir_all(d.join(".git")).unwrap();
+        std::fs::write(d.join("imports/scan.PNG"), [0x89, b'P', b'N', b'G']).unwrap();
+        std::fs::write(d.join(".git/config"), "x").unwrap();
+        let (bytes, mime) = read_raw(&d, "imports/scan.PNG").unwrap();
+        assert_eq!((bytes.as_slice(), mime), (&[0x89, b'P', b'N', b'G'][..], "image/png"));
+        assert!(read_raw(&d, ".git/config").is_err());
+        assert!(read_raw(&d, "../outside.png").is_err());
+        assert!(read_raw(&d, "imports").is_err());
+        assert!(read_raw(&d, "imports/missing.pdf").is_err());
+        assert_eq!(mime_for("report.pdf"), "application/pdf");
+        assert_eq!(mime_for("page.html"), "text/plain; charset=utf-8");
+        assert_eq!(mime_for("no-extension"), "application/octet-stream");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn leftover_presets_are_removed_only_when_installed() {
+        let d = tmp();
+        std::fs::create_dir_all(d.join("presets/accountant")).unwrap();
+        assert!(!remove_leftover_presets(&d));
+        assert!(d.join("presets").exists());
+        std::fs::create_dir_all(d.join(".claude/presets")).unwrap();
+        assert!(remove_leftover_presets(&d));
+        assert!(!d.join("presets").exists() && d.join(".claude/presets").exists());
         std::fs::remove_dir_all(d).unwrap();
     }
 
