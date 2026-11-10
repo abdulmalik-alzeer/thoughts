@@ -36,6 +36,20 @@ ships until you open the draft and press **Publish**.
 `.github/workflows/ci.yml` runs on every push and pull request: daemon tests, the UI build and
 a compile check on macOS, plus compile checks on Windows and Linux.
 
+## Pipeline notes
+
+- **Job order:** `tests` (the CI workflow) → `create-release` (one draft) → `build` per platform, one
+  at a time so the platforms never race on the draft or on `latest.json`. Serial builds are slower.
+- **Pinned actions:** every third-party action is pinned to a full commit SHA with the tag in a
+  comment; Dependabot (`.github/dependabot.yml`) proposes updates.
+- **Clippy** runs but is advisory for now (it reports existing warnings).
+- **Content-security policy:** `connect-src` and `img-src` keep `http://127.0.0.1:*` because the
+  background service picks a random port; the token-protected service is the real boundary.
+  `dangerousDisableAssetCspModification` is set for `style-src` only, because Tauri would otherwise
+  add a nonce to styles in every HTML asset, which blocks inline styles inside the sandboxed add-on
+  frames. Script hashing stays on: the add-on runtime relies on it.
+- **Linux `.deb`** installs update through the package manager; only the AppImage self-updates.
+
 ## The version number
 
 The version is written in two places and both must match:

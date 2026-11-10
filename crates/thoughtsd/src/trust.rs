@@ -70,10 +70,15 @@ fn markdown_risks(text: &str) -> Vec<&'static str> {
     let (fm, body) = crate::library::frontmatter(text);
     if let Some(obj) = fm.as_object() {
         for k in obj.keys() {
-            match k.to_lowercase().replace('_', "-").as_str() {
-                "allowed-tools" | "tools" | "permissions" | "permission-mode" | "disallowed-tools" => out.push("grants itself tools"),
+            // Fail closed: compare on letters and digits only (so `Allowed Tools`, `allowedTools`
+            // and `allowed.tools` are one key), and treat any key outside a short list of
+            // descriptive ones as something the user must look at.
+            let norm: String = k.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+            match norm.as_str() {
+                "name" | "description" | "model" | "color" | "argumenthint" | "version" | "license" | "title" | "summary" | "tags" => {}
+                "allowedtools" | "tools" | "permissions" | "permissionmode" | "disallowedtools" | "mcp" | "mcpservers" => out.push("grants itself tools"),
                 "hooks" => out.push("runs programs through hooks"),
-                _ => {}
+                _ => out.push("has settings Thoughts does not recognise"),
             }
         }
     } else if text.trim_start().starts_with("---") {

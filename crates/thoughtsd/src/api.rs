@@ -945,6 +945,11 @@ async fn library_history(State(st): S, Query(q): Query<HashMap<String, String>>)
     let limit = q.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(50).clamp(1, 200);
     let path = q.get("path").map(|p| p.trim().trim_start_matches("./").trim_matches('/').replace('\\', "/")).filter(|p| !p.is_empty());
     if let Some(p) = &path { library::resolve(&root, p)?; }
+    // Edits made in the app are only recorded when something saves a point in history; do that now
+    // (unless a save is already in progress) so History and Versions always include the latest edits.
+    if !st.library_busy() {
+        claude::record_library(&st, &root, &git::subject::edit("your changes"), true).await;
+    }
     Ok(Json(json!(git::history(&st, &root, path.as_deref(), limit).await?)))
 }
 

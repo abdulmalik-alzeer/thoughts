@@ -91,7 +91,7 @@
             <li>
               <button class="v" class:active={sel?.hash === v.hash} aria-current={sel?.hash === v.hash ? 'true' : undefined} onclick={() => show(v)}>
                 <span class="row"><span class="grow when">{when(v.date)}</span><span class="pill">{kindLabel(v.kind)}</span></span>
-                {#if v.subject}<span class="subj" dir="auto">{v.subject}</span>{/if}
+                {#if v.subject}<span class="subj" dir="auto">{v.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize):\s*/i, '')}</span>{/if}
               </button>
             </li>
           {/each}

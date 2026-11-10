@@ -87,6 +87,10 @@ things:
 3. **The login item**: the entry that starts Thoughts' background service when you log in. On a
    Mac, remove Thoughts under System Settings → General → Login Items.
 
+If you have the source, `sh scripts/uninstall-macos.sh` (or `uninstall-linux.sh`) does steps 2 and 3
+for you; add `--purge` to also remove the data folder. On Windows the uninstaller removes the login
+entry and offers to delete the data folder.
+
 **Your library folder is never touched.** It stays where you put it, readable with any text
 editor, until you delete it yourself. Saved passwords and synced copies are covered in
 [Privacy → Deleting everything](docs/PRIVACY.md#deleting-everything).

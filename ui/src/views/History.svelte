@@ -112,7 +112,7 @@
                     <span class="pill">{kindLabel(e.kind)}</span>
                     <span class="muted sm">{time(e)}</span>
                   </div>
-                  <div class="subj" dir="auto">{e.subject}</div>
+                  <div class="subj" dir="auto">{e.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize):\s*/i, '')}</div>
                   {#if e.files?.length}
                     <div class="files">
                       {#each (open[e.hash] ? e.files : e.files.slice(0, 4)) as f (f)}
