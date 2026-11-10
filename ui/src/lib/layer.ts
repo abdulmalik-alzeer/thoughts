@@ -240,7 +240,7 @@ const str = (v: any, max: number) => String(v ?? '').slice(0, max);
 const isPrivate = (path: string) => { const p = String(path).toLowerCase(); return ((app.settings?.privatePaths ?? []) as string[]).some((x) => { const b = String(x).replace(/\/+$/, '').toLowerCase(); return !!b && (p === b || p.startsWith(b + '/')); }); };
 function cleanPath(v: any): string {
   const p = String(v ?? '').replace(/\\/g, '/').replace(/^\.?\/+/, '');
-  if (!p || p.split('/').some((s) => s === '..' || s === '') || /^([A-Za-z]:|~)/.test(p)) throw new Error('Invalid path');
+  if (!p || p.split('/').some((s) => s === '..' || s === '.' || s === '') || /^([A-Za-z]:|~)/.test(p)) throw new Error('Invalid path');
   if (isPrivate(p)) throw new Error('That file is private');
   return p;
 }
@@ -317,21 +317,21 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
       const want = a.length < 2 ? true : !!a[1];
       // The daemon toggles; when the plugin told us the current state, do nothing if it already matches.
       if (typeof it?.done === 'boolean' && it.done === want) return { ok: true };
-      await post('/todos/toggle', ref);
+      await post('/todos/toggle?scope=plugin', ref);
       return { ok: true };
     }
     case 'todos.edit': {
       const text = str(a[1], 500).replace(/\s*\n\s*/g, ' ').trim();
       if (!text) throw new Error('todos.edit(item, text): text is empty');
-      await post('/todos/edit', { ...todoRef(a[0]), new_text: text });
+      await post('/todos/edit?scope=plugin', { ...todoRef(a[0]), new_text: text });
       return { ok: true };
     }
-    case 'todos.remove': await post('/todos/delete', todoRef(a[0])); return { ok: true };
+    case 'todos.remove': await post('/todos/delete?scope=plugin', todoRef(a[0])); return { ok: true };
     case 'ideas.setStatus': {
       const path = cleanPath(typeof a[0] === 'string' ? a[0] : a[0]?.item?.path ?? a[0]?.path);
       const status = str(a[1], 20).toLowerCase();
       if (!STATUSES.includes(status)) throw new Error(`ideas.setStatus: status must be one of ${STATUSES.join(', ')}`);
-      await post('/library/ideas/status', { path, status });
+      await post('/library/ideas/status?scope=plugin', { path, status });
       return { ok: true };
     }
     case 'storage.get': {
@@ -345,14 +345,14 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
       return { ok: true };
     }
     // Each item also carries its list's `file`, so it can be passed straight to setDone/edit/remove.
-    case 'todos.list': return ((await api('/todos')) as any[]).filter((l) => !isPrivate(l.file)).map((l) => plain({ ...l, items: (Array.isArray(l.items) ? l.items : []).map((it: any) => ({ ...it, file: l.file })) }));
+    case 'todos.list': return ((await api('/todos?scope=plugin')) as any[]).filter((l) => !isPrivate(l.file)).map((l) => plain({ ...l, items: (Array.isArray(l.items) ? l.items : []).map((it: any) => ({ ...it, file: l.file })) }));
     case 'todos.add': {
       const text = str(a[0], 500).replace(/\s*\n\s*/g, ' ').trim();
       if (!text) throw new Error('todos.add(text): text is empty');
-      await post('/todos/add', { file: 'TODO.md', text });
+      await post('/todos/add?scope=plugin', { file: 'TODO.md', text });
       return { ok: true };
     }
-    case 'ideas.list': return ((await api('/library/ideas')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
+    case 'ideas.list': return ((await api('/library/ideas?scope=plugin')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
     case 'chat.start': {
       const prompt = str(a[0], 8000).trim();
       if (!prompt) throw new Error('chat.start(prompt): prompt is empty');
