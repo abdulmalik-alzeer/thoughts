@@ -1,0 +1,213 @@
+// Runtime that runs INSIDE every sandboxed plugin / HTML-view frame (see the notes at the top of layer.ts).
+// The frame has an opaque origin, no network and no access to the app window; the only way out is the
+// postMessage RPC below: {id, method, args} -> {id, result | error}. Plain classic script on purpose:
+// it is shipped as-is (imported with ?url) and loaded by <script src> from the frame document.
+(function () {
+  'use strict';
+  if (window.__thoughtsFrame) return; // delivered twice (inline + src), runs once
+  window.__thoughtsFrame = true;
+  var host = window.parent;
+  var seq = 0, cbSeq = 0;
+  var pending = new Map();    // rpc id -> {resolve, reject}
+  var callbacks = new Map();  // handle -> function (commands, item actions)
+  var listeners = new Map();  // event -> Set<callback>
+  var renderers = new Map();  // "view:<id>" | "widget:<id>" -> render(el)
+  var surface = null;         // {kind, id} when this frame exists only to draw one view / widget
+  var rendered = false;
+  var noop = function () {};
+
+  function send(m) { host.postMessage(m, '*'); }
+
+  function call(method, args) {
+    return new Promise(function (resolve, reject) {
+      var id = 't' + (++seq);
+      pending.set(id, { resolve: resolve, reject: reject });
+      send({ id: id, method: method, args: args || [] });
+    });
+  }
+
+  function crash(e) {
+    try { console.error(e); } catch (_) { /* ignore */ }
+    send({ type: 'failed', error: String((e && e.message) || e), code: e && e.code });
+  }
+  function warn(e) { try { console.warn('[thoughts]', (e && e.message) || e); } catch (_) { /* ignore */ } }
+
+  /** Run plugin code so that a throw (or a rejected promise) is reported instead of lost. */
+  function guard(fn) {
+    return function () {
+      try {
+        var r = fn.apply(null, arguments);
+        if (r && typeof r.then === 'function') r.catch(crash);
+        return r;
+      } catch (e) { crash(e); }
+    };
+  }
+
+  function need(o, keys, what) {
+    if (!o || typeof o !== 'object') throw new TypeError(what + ' needs an object');
+    keys.forEach(function (k) {
+      var fn = k === 'render' || k === 'run';
+      if (fn ? typeof o[k] !== 'function' : typeof o[k] !== 'string' || !o[k]) throw new TypeError(what + ': "' + k + '" is missing');
+    });
+  }
+
+  function maybeRender(key) {
+    if (!surface || rendered || key !== surface.kind + ':' + surface.id) return;
+    rendered = true;
+    guard(renderers.get(key))(document.getElementById('root'));
+  }
+
+  function addSurface(kind, method, spec, what) {
+    need(spec, ['id', 'title', 'render'], what);
+    var key = kind + ':' + spec.id;
+    renderers.set(key, spec.render);
+    if (surface) { maybeRender(key); return noop; }
+    call(method, [{ id: spec.id, title: spec.title, icon: spec.icon }]).catch(warn);
+    return function () { renderers.delete(key); call('ui.remove', [kind, spec.id]).catch(noop); };
+  }
+
+  function on(event, cb) {
+    if (typeof event !== 'string' || typeof cb !== 'function') throw new TypeError('on(event, callback)');
+    var set = listeners.get(event);
+    if (!set) { set = new Set(); listeners.set(event, set); call('on', [event]).catch(warn); }
+    var g = guard(cb);
+    set.add(g);
+    return function () { set.delete(g); if (!set.size) { listeners.delete(event); call('off', [event]).catch(noop); } };
+  }
+
+  var data = {
+    library: {
+      list: function () { return call('library.list'); },
+      read: function (path) { return call('library.read', [path]); },
+      search: function (q) { return call('library.search', [q]); },
+    },
+    todos: { list: function () { return call('todos.list'); } },
+    ideas: { list: function () { return call('ideas.list'); } },
+  };
+
+  /** Plugin API v1 — the only object a plugin receives. */
+  function pluginApi() {
+    return {
+      version: 1,
+      library: data.library,
+      todos: { list: data.todos.list, add: function (text) { return call('todos.add', [text]); } },
+      ideas: data.ideas,
+      chat: { start: function (prompt) { return call('chat.start', [prompt]); } },
+      ui: {
+        toast: function (msg, opts) { call('ui.toast', [String(msg), opts && { kind: opts.kind }]).catch(noop); },
+        go: function (view) { call('ui.go', [view]).catch(warn); },
+        addView: function (v) { return addSurface('view', 'ui.addView', v, 'addView'); },
+        addHomeWidget: function (w) { return addSurface('widget', 'ui.addHomeWidget', w, 'addHomeWidget'); },
+        addCommand: function (c) {
+          need(c, ['id', 'title', 'run'], 'addCommand');
+          if (surface) return noop;
+          var h = ++cbSeq;
+          callbacks.set(h, guard(c.run));
+          call('ui.addCommand', [{ id: c.id, title: c.title, icon: c.icon, cb: h }]).catch(warn);
+          return function () { callbacks.delete(h); call('ui.remove', ['command', c.id]).catch(noop); };
+        },
+        addHomeChip: function (c) {
+          need(c, ['id', 'label', 'prompt'], 'addHomeChip');
+          if (surface) return noop;
+          call('ui.addHomeChip', [{ id: c.id, label: c.label, prompt: c.prompt }]).catch(warn);
+          return function () { call('ui.remove', ['chip', c.id]).catch(noop); };
+        },
+        addItemAction: function (a) {
+          need(a, ['target', 'id', 'label', 'run'], 'addItemAction');
+          if (surface) return noop;
+          var h = ++cbSeq;
+          callbacks.set(h, guard(a.run));
+          call('ui.addItemAction', [{ target: a.target, id: a.id, label: a.label, cb: h }]).catch(warn);
+          return function () { callbacks.delete(h); call('ui.remove', ['action', a.id]).catch(noop); };
+        },
+      },
+      on: on,
+    };
+  }
+
+  function look(m) {
+    var root = document.documentElement;
+    if (m.lang) root.lang = m.lang;
+    if (m.dir) root.dir = m.dir;
+    if (m.theme) root.dataset.theme = m.theme;
+    if (m.mode) { root.dataset.mode = m.mode; root.style.colorScheme = m.mode === 'dark' ? 'dark' : 'light'; }
+    var s = document.getElementById('thoughts-theme');
+    if (s && typeof m.css === 'string') s.textContent = m.css;
+  }
+
+  /** An HTML view: its markup becomes the page; inline scripts are re-created from blob URLs so they
+   *  run under the app's content-security policy. Scripts loaded from the network are dropped. */
+  function runHtml(html) {
+    var doc = new DOMParser().parseFromString(String(html), 'text/html');
+    var scripts = Array.prototype.slice.call(doc.querySelectorAll('script'));
+    scripts.forEach(function (s) { s.remove(); });
+    Array.prototype.forEach.call(doc.head.querySelectorAll('style'), function (n) { document.head.appendChild(document.importNode(n, true)); });
+    if (doc.title) document.title = doc.title;
+    var body = document.importNode(doc.body, true);
+    document.body.replaceChildren.apply(document.body, Array.prototype.slice.call(body.childNodes));
+    return scripts.reduce(function (chain, old) {
+      return chain.then(function () {
+        if (old.src) { warn('scripts from the network are not loaded: ' + old.getAttribute('src')); return; }
+        return new Promise(function (resolve) {
+          var url = URL.createObjectURL(new Blob([old.textContent || ''], { type: 'text/javascript' }));
+          var s = document.createElement('script');
+          if (old.type) s.type = old.type;
+          s.onload = s.onerror = function () { URL.revokeObjectURL(url); resolve(); };
+          s.src = url;
+          document.body.appendChild(s);
+        });
+      });
+    }, Promise.resolve());
+  }
+
+  function init(m) {
+    look(m);
+    surface = m.surface || null;
+    if (m.kind === 'view') {
+      // Read-only subset of the same bridge. The raw protocol works too: parent.postMessage({id, method, args}, '*').
+      window.thoughts = { version: 1, library: data.library, todos: data.todos, ideas: data.ideas, on: on };
+      runHtml(m.code).then(function () { send({ type: 'loaded' }); }, crash);
+      return;
+    }
+    var url = URL.createObjectURL(new Blob([String(m.code)], { type: 'text/javascript' }));
+    import(url).then(function (mod) {
+      return typeof mod.default === 'function' ? mod.default(pluginApi()) : undefined;
+    }).then(function () {
+      if (surface && !rendered) throw new Error('This add-on no longer provides "' + surface.id + '".');
+      send({ type: 'loaded' });
+    }).catch(crash).finally(function () { URL.revokeObjectURL(url); });
+  }
+
+  window.addEventListener('message', function (e) {
+    if (e.source !== host) return;
+    var m = e.data;
+    if (!m || typeof m !== 'object') return;
+    if (m.type === 'init') return init(m);
+    if (m.type === 'look') return look(m);
+    if (m.type === 'event') {
+      var set = listeners.get(m.event);
+      if (set) set.forEach(function (cb) { cb(m.payload); });
+      return;
+    }
+    if (m.type === 'invoke') {
+      var fn = callbacks.get(m.cb);
+      if (fn) fn.apply(null, m.args || []);
+      return;
+    }
+    var p = pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    if ('error' in m) { var err = new Error(m.error); err.code = m.code; p.reject(err); } else p.resolve(m.result);
+  });
+
+  // Widgets grow with their content: tell the host how tall the page is.
+  if (typeof ResizeObserver === 'function') {
+    var last = 0;
+    new ResizeObserver(function () {
+      var h = Math.ceil(document.body.getBoundingClientRect().height);
+      if (h !== last) { last = h; send({ type: 'size', height: h }); }
+    }).observe(document.body);
+  }
+
+  send({ type: 'ready' });
+})();

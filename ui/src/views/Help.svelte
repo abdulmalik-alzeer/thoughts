@@ -31,7 +31,7 @@
       toast(full ? t('shell.help.diagCopied') : t('shell.help.diagBasic'), { kind: 'success' });
     } catch {
       // Clipboard blocked: show it so it can be selected and copied by hand.
-      toast(t('shell.help.diagManual'), { detail: text, duration: 0 });
+      toast(t('shell.help.diagManual'), { kind: 'error', detail: text, duration: 0 });
     } finally { copying = false; }
   }
 </script>
@@ -49,6 +49,20 @@
       {/each}
     </dl>
     <button class="btn" onclick={() => command('tour')}><Icon name="book" size={15} /> {t('shell.pal.tour')}</button>
+  </section>
+
+  <section aria-labelledby="h-cust">
+    <h2 id="h-cust" class="row"><Icon name="palette" size={18} /> {t('layer.customise')}</h2>
+    <p>{t('layer.help.body')}</p>
+    <dl>
+      <dt>{t('layer.help.reviewT')}</dt><dd>{t('layer.help.review')}</dd>
+      <dt>{t('layer.history')}</dt><dd>{t('layer.help.history')}</dd>
+      <dt>{t('layer.share')}</dt><dd>{t('layer.help.share')}</dd>
+    </dl>
+    <div class="row wrap">
+      <button class="btn primary" onclick={() => command('customise')}><Icon name="palette" size={15} /> {t('layer.customise')}</button>
+      <button class="btn" onclick={() => command('history')}><Icon name="rollback" size={15} /> {t('layer.history')}</button>
+    </div>
   </section>
 
   <section aria-labelledby="h-keys">

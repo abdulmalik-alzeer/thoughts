@@ -20,7 +20,7 @@
       const { open } = await import('@tauri-apps/plugin-dialog');
       const p = await open({ directory: true });
       if (typeof p === 'string') { path = p; if (!name) name = p.split(/[\\/]/).filter(Boolean).pop() || ''; }
-    } catch { toast(t('proj.browseFail')); }
+    } catch { toast(t('proj.browseFail'), { kind: 'error' }); }
   }
 
   async function add() {
@@ -30,8 +30,8 @@
       await post('/projects', { name: name.trim(), path: path.trim(), inside_library: inside });
       name = ''; path = ''; inside = false;
       await reload();
-      toast(t('proj.linked'));
-    } catch (e: any) { toast(e?.message || t('proj.failed')); }
+      toast(t('proj.linked'), { kind: 'success' });
+    } catch (e: any) { toast(e?.message || t('proj.failed'), { kind: 'error' }); }
     finally { adding = false; }
   }
 
@@ -40,7 +40,7 @@
     if (!ok) return;
     removing[p.id] = true;
     try { await del(`/projects/${p.id}`); await reload(); }
-    catch (e: any) { toast(e?.message || t('proj.failed')); }
+    catch (e: any) { toast(e?.message || t('proj.failed'), { kind: 'error' }); }
     finally { removing[p.id] = false; }
   }
 </script>

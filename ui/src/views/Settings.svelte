@@ -1,11 +1,12 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
   import { onDestroy, onMount } from 'svelte';
-  import { api, del, inTauri, post, reconnect } from '../lib/api';
+  import { api, del, inTauri, post, reconnect, reloadApp } from '../lib/api';
   import { app, applyTheme, go, saveSettings, toast } from '../lib/store.svelte';
-  import { confirmDialog, promptDialog } from '../lib/dialog.svelte';
+  import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { fmtNum, t } from '../lib/i18n';
   import ThemePicker from './ThemePicker.svelte';
+  import Customise from './Customise.svelte';
 
   let { reload }: { reload: () => Promise<void> } = $props();
 
@@ -17,10 +18,10 @@
     general: ['language', 'set.name', 'theme', 'mode', 'set.notify'],
     ai: ['set.account', 'set.perm', 'set.wrapNag'],
     git: ['set.libraryPath', 'set.backup', 'reorganize'],
-    privacy: ['set.privTitle', 'set.cost'],
+    privacy: ['set.privTitle', 'layer.signalsTitle', 'set.cost'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
-    appLayer: ['customize', 'rollback', 'updates'],
+    appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'layer.appUpdates'],
   };
   const adv: Record<Cat, string[]> = {
     general: [],
@@ -34,10 +35,10 @@
   const perms = ['default', 'acceptEdits', 'plan'] as const;
   const cloudWords = ['Mobile Documents', 'Library/CloudStorage', 'Dropbox', 'OneDrive', 'Google Drive', 'iCloud'];
 
-  const fresh = () => { const x = structuredClone($state.snapshot(app.settings)); x.privatePaths ??= []; return x; };
+  const fresh = () => { const x = structuredClone($state.snapshot(app.settings)); x.privatePaths ??= []; x.usageSignals ??= true; return x; };
   const norm = (x: any) => JSON.stringify(x, (_k, v) => (v === '' || v === undefined ? null : v));
 
-  let tab = $state<Cat>('general');
+  let tab = $state<Cat>((cats as readonly string[]).includes(app.view.id ?? '') ? (app.view.id as Cat) : 'general');
   let query = $state('');
   let s = $state<any>(fresh());
   let base = $state<any>(fresh()); // last saved state; `s` is the draft
@@ -45,15 +46,12 @@
   let claude = $state<any>(app.status?.claude ?? {});
   let gitStatus = $state<any>({});
   let modules = $state<any[]>([]);
-  let updates = $state<any[]>([]);
   let loadErr = $state<Record<string, string>>({});
-  let loading = $state<Record<string, boolean>>({ modules: true, updates: true });
+  let loading = $state<Record<string, boolean>>({ modules: true });
   let busy = $state<Record<string, boolean>>({});
-  let picked = $state<Record<string, boolean>>({});
   let ext = $state<any>(null);
   let apiToken = $state('');
   let remote = $state({ name: '', url: '', username: '', token: '' });
-  let customizeText = $state('');
   let privErr = $state('');
   let advOpen = $state<Record<string, boolean>>({});
 
@@ -96,20 +94,20 @@
     finally { loading[key] = false; }
   }
   const loadModules = () => load('modules', '/modules', (m) => (modules = m));
-  const loadUpdates = () => load('updates', '/updates', (u) => (updates = u));
   const loadGit = () => load('git', '/git', (g) => (gitStatus = g));
 
   onMount(() => {
     api('/ai/claude/options').then((o) => (opts = o)).catch(() => {});
     api('/extensions').then((e) => (ext = e)).catch(() => {});
-    loadGit(); loadModules(); loadUpdates();
+    loadGit(); loadModules();
+    app.leaveGuard = leaveGuard;
   });
 
   /** Runs one action with a loading flag; any failure is shown to the user. */
   async function run(key: string, fn: () => Promise<unknown>) {
     if (busy[key]) return;
     busy[key] = true;
-    try { await fn(); } catch (e: any) { toast(e?.message || t('set.failed')); }
+    try { await fn(); } catch (e: any) { toast(e?.message || t('set.failed'), { kind: 'error' }); }
     finally { busy[key] = false; }
   }
 
@@ -122,11 +120,11 @@
   }
 
   async function save() {
-    if (invalid) return toast(t('set.fixFirst'));
+    if (invalid) return toast(t('set.fixFirst'), { kind: 'error' });
     await run('save', async () => {
       await saveSettings(payload());
       s = fresh(); base = fresh();
-      toast(t('set.saved'));
+      toast(t('set.saved'), { kind: 'success' });
     });
   }
 
@@ -137,16 +135,20 @@
 
   function discard() { s = structuredClone($state.snapshot(base)); restorePreview(base); }
 
-  // Leaving the view with unsaved edits: this component cannot veto navigation, so it asks right after instead.
-  onDestroy(() => {
-    if (!isDirty()) return;
-    const draft = payload(), prev = $state.snapshot(base), bad = invalid;
-    confirmDialog({ title: t('set.leaveTitle'), body: t(bad ? 'set.leaveInvalid' : 'set.leaveBody'), confirmLabel: t('save'), cancelLabel: t('set.discard') }).then(async (ok) => {
-      if (!ok) return restorePreview(prev);
-      try { await saveSettings(draft); toast(t('set.saved')); }
-      catch (e: any) { restorePreview(prev); toast(t('set.leaveFailed', { error: e?.message ?? '' })); }
+  // Leaving with unsaved edits: navigation waits for this (`app.leaveGuard`, awaited inside `go()`).
+  async function leaveGuard(): Promise<boolean> {
+    if (!isDirty()) return true;
+    const bad = invalid;
+    const choice = await choiceDialog({
+      title: t('set.leaveTitle'), body: t(bad ? 'layer.leaveInvalid' : 'set.leaveBody'), cancelLabel: t('layer.keepEditing'),
+      choices: [{ id: 'discard', label: t('set.discard'), danger: true }, ...(bad ? [] : [{ id: 'save', label: t('save'), primary: true }])],
     });
-  });
+    if (choice === 'discard') { discard(); return true; }
+    if (choice !== 'save') return false;
+    try { await saveSettings(payload()); s = fresh(); base = fresh(); toast(t('set.saved'), { kind: 'success' }); return true; }
+    catch (e: any) { toast(t('set.leaveFailed', { error: e?.message ?? '' }), { kind: 'error' }); return false; }
+  }
+  onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; });
 
   function onBeforeUnload(e: BeforeUnloadEvent) { if (isDirty()) { e.preventDefault(); e.returnValue = ''; } }
 
@@ -195,7 +197,7 @@
       const { open } = await import('@tauri-apps/plugin-dialog');
       const p = await open({ directory: true, defaultPath: s.libraryPath || undefined });
       if (typeof p === 'string') s.libraryPath = p;
-    } catch { toast(t('set.browseFail')); }
+    } catch { toast(t('set.browseFail'), { kind: 'error' }); }
   }
 
   function setSyncKind(k: string) { s.sync.mode = k === 'git' ? (isGit ? s.sync.mode : 'git-manual') : k; }
@@ -220,21 +222,6 @@
     const r = await post(`/modules/${id}/enable`);
     await syncServerFields();
     if (r?.chatId) go({ kind: 'chat', id: r.chatId });
-  });
-
-  const customize = () => run('customize', async () => {
-    if (!customizeText.trim()) return;
-    const r = await post('/layer/customize', { text: customizeText.trim() });
-    customizeText = '';
-    go({ kind: 'chat', id: r.chatId });
-  });
-
-  const pickedOf = (pack: string) => Object.entries(picked).filter(([k, v]) => v && k.startsWith(pack + ':')).map(([k]) => k.slice(pack.length + 1));
-  const applyUpdate = (pack: string) => run('upd:' + pack, async () => {
-    const items = pickedOf(pack);
-    if (!items.length) return toast(t('set.pickOne'));
-    const r = await post('/updates/apply', { pack, items });
-    go({ kind: 'chat', id: r.chatId });
   });
 
   async function reorganize() {
@@ -470,6 +457,13 @@
         <div class="row gap-top"><button type="button" class="btn" onclick={addPrivate}><Icon name="plus" size={14} /> {t('set.privAdd')}</button></div>
       </div>
     {/if}
+    {#if vis(c, 'layer.signalsTitle')}
+      <div class="card">
+        <h3>{t('layer.signalsTitle')}</h3>
+        <p class="muted sm" id="st-signals-hint">{t('layer.signalsBody')}</p>
+        <label class="check"><input type="checkbox" bind:checked={s.usageSignals} aria-describedby="st-signals-hint" /> {t('layer.signalsToggle')}</label>
+      </div>
+    {/if}
     {#if vis(c, 'set.cost')}
       <div class="card">
         <h3>{t('set.cost')}</h3>
@@ -512,40 +506,12 @@
       </details>
     {/if}
   {:else if c === 'appLayer'}
-    {#if vis(c, 'customize', 'rollback')}
-      <div class="card">
-        <h3>{t('customize')}</h3>
-        <p class="muted sm">{t('set.customizeHint')}</p>
-        <form class="row wrap" onsubmit={(e) => { e.preventDefault(); customize(); }}>
-          <input class="grow" dir="auto" bind:value={customizeText} aria-label={t('customize')} placeholder={t('set.customizePh')} />
-          <button type="submit" class="btn primary" disabled={!customizeText.trim() || busy.customize}>{busy.customize ? t('set.starting') : t('set.customizeGo')}</button>
-        </form>
-        <div class="row gap-top"><button type="button" class="btn" onclick={() => (app.showRollback = true)}><Icon name="rollback" size={15} /> {t('rollback')}…</button></div>
-      </div>
-    {/if}
-    {#if vis(c, 'updates')}
-      <div class="card">
-        <h3>{t('updates')}</h3>
-        <p class="muted sm">{t('set.updatesHint')}</p>
-        {#if loading.updates}<p class="muted sm" role="status">{t('set.loading')}</p>
-        {:else if loadErr.updates}<p class="err" role="alert">{loadErr.updates} <button type="button" class="btn ghost" onclick={loadUpdates}>{t('set.retry')}</button></p>
-        {:else}
-          {#each updates as u (u.id)}
-            <div class="upd"><b dir="auto">{u.title}</b>
-              {#each u.items as it (it.id)}<label class="check"><input type="checkbox" bind:checked={picked[u.id + ':' + it.id]} /> <span dir="auto"><b>{it.title}</b> — {it.description}</span></label>{/each}
-              <button type="button" class="btn" disabled={!pickedOf(u.id).length || busy['upd:' + u.id]} onclick={() => applyUpdate(u.id)}>{busy['upd:' + u.id] ? t('set.starting') : t('set.applyUpdate')}</button>
-            </div>
-          {:else}
-            <p class="muted sm">{t('set.noUpdates')}</p>
-          {/each}
-        {/if}
-      </div>
-    {/if}
+    <Customise show={(...keys) => vis(c, ...keys)} />
     {#if vis(c, ...adv.appLayer)}
       <details class="card adv" open={!!q || advOpen.appLayer} ontoggle={(e) => { if (!q) advOpen.appLayer = e.currentTarget.open; }}>
         <summary>{t('set.advanced')}</summary>
         <p class="muted sm">{t('set.safeHint')}</p>
-        <button type="button" class="btn" onclick={() => location.replace(location.pathname + '?safe=1')}>{t('set.safeMode')}</button>
+        <button type="button" class="btn" onclick={() => reloadApp('safe=1')}>{t('set.safeMode')}</button>
       </details>
     {/if}
   {/if}
@@ -621,7 +587,6 @@
   .mod, .remote { padding: 10px 0; border-bottom: 1px solid var(--hairline); }
   .mod:last-child { border-bottom: 0; }
   .path { overflow-wrap: anywhere; }
-  .upd { padding: 8px 0; }
   .err { color: var(--danger); font-size: 12.5px; margin: 4px 0 0; }
   .note { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; margin: 8px 0; }
   .note :global(.icon) { flex: none; margin-top: 3px; color: var(--danger); }

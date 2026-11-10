@@ -3,10 +3,11 @@
   import { onMount } from 'svelte';
   import { api, post } from '../lib/api';
   import { app, toast } from '../lib/store.svelte';
-  import { t, fmtDate } from '../lib/i18n';
+  import { t, tn, fmtDate } from '../lib/i18n';
   import { trapFocus } from '../lib/focus';
   import { confirmDialog } from '../lib/dialog.svelte';
-  import { clearLayerBootFlag, retryLayer } from '../lib/layer';
+  import { clearLayerBootFlag, retryLayer, revertChange } from '../lib/layer';
+  import { reloadApp } from '../lib/api';
 
   let history = $state<any[]>([]);
   let loading = $state(true);
@@ -33,8 +34,21 @@
     try {
       await post('/layer/rollback', { hash: h.hash });
       clearLayerBootFlag();
-      location.replace(location.pathname);
+      reloadApp();
     } catch (e: any) { toast(t('shell.rb.failed'), { kind: 'error', detail: e.message }); busy = false; }
+  }
+
+  /** Undo one change and keep everything made after it. */
+  async function undo(h: any) {
+    const ok = await confirmDialog({ title: t('layer.undoTitle'), body: t('layer.undoBody'), list: [String(h.summary ?? h.subject ?? '')], confirmLabel: t('layer.undoThis') });
+    if (!ok) return;
+    busy = true;
+    try {
+      await revertChange(h.hash);
+      toast(t('layer.undone'), { kind: 'success', key: 'layer' });
+      await load();
+    } catch (e: any) { toast(t('layer.undoFailed'), { kind: 'error', detail: e.message }); }
+    finally { busy = false; }
   }
 </script>
 
@@ -46,7 +60,7 @@
       {#if app.safeMode}
         <button class="btn" onclick={retryLayer}><Icon name="retry" size={15} /> {t('shell.safe.leave')}</button>
       {:else}
-        <button class="btn" onclick={() => location.replace(location.pathname + '?safe=1')}><Icon name="shield" size={15} /> {t('shell.rb.safeMode')}</button>
+        <button class="btn" onclick={() => reloadApp('safe=1')}><Icon name="shield" size={15} /> {t('shell.rb.safeMode')}</button>
       {/if}
     </p>
     {#if loading}
@@ -59,9 +73,21 @@
     {:else}
       <ul class="hist">
         {#each history as h, i (h.hash)}
-          <li class="row item">
-            <span class="grow"><span dir="auto">{h.subject}</span><br /><span class="muted sm">{fmtDate(h.date, { dateStyle: 'medium', timeStyle: 'short' })} · <code dir="ltr">{h.short}</code></span></span>
-            {#if i === 0}<span class="pill accent">{t('shell.rb.current')}</span>{:else}<button class="btn" disabled={busy} onclick={() => restore(h)}>{t('shell.rb.restore')}</button>{/if}
+          <li class="item">
+            <div class="row top">
+              <span class="grow"><b dir="auto">{h.summary ?? h.subject}</b><br /><span class="muted sm">{fmtDate(h.date, { dateStyle: 'medium', timeStyle: 'short' })}</span></span>
+              {#if i === 0}<span class="pill accent">{t('shell.rb.current')}</span>{/if}
+            </div>
+            {#if h.files?.length}
+              <details class="sm">
+                <summary class="muted">{tn('layer.filesChanged', h.files.length)}</summary>
+                <ul class="fl">{#each h.files as f}<li><bdi>{f}</bdi></li>{/each}</ul>
+              </details>
+            {/if}
+            <div class="row wrap acts">
+              <button class="btn" disabled={busy} onclick={() => undo(h)}><Icon name="undo" size={14} /> {t('layer.undoThis')}</button>
+              {#if i > 0}<button class="btn ghost" disabled={busy} onclick={() => restore(h)}>{t('layer.goBackHere')}</button>{/if}
+            </div>
           </li>
         {/each}
       </ul>
@@ -71,7 +97,11 @@
 
 <style>
   .hist { list-style: none; margin: 0; padding: 0; }
-  .item { padding: 8px 0; border-bottom: var(--border-w) solid var(--border); }
+  .item { padding: 10px 0; border-bottom: var(--border-w) solid var(--border); display: grid; gap: 6px; }
+  .top { align-items: flex-start; }
+  .fl { margin: 4px 0 0; padding-inline-start: 18px; font-family: var(--mono); overflow-wrap: anywhere; }
+  summary { cursor: pointer; }
+  .acts { gap: 6px; }
   .sm { font-size: 12px; }
   .wrap { flex-wrap: wrap; }
 </style>

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, on, post } from '../lib/api';
-  import { app, go, refreshChats } from '../lib/store.svelte';
+  import { app, go, refreshChats, toast, track } from '../lib/store.svelte';
+  import { startCustomise } from '../lib/layer';
   import { t, tn, ago, fmtDate, fmtNum } from '../lib/i18n';
   import { dueLabel, dueState, fail, normTodo } from '../lib/content/util';
   import Icon from '../lib/Icon.svelte';
@@ -21,7 +22,59 @@
     if (td.status === 'fulfilled') lists = td.value;
     if (st.status === 'fulfilled') files = st.value.markdownFiles;
   }
-  onMount(() => { load(); return on((e) => { if (['todos.changed', 'library.changed', 'chat.done'].includes(e.type)) load(); }); });
+  // ----- suggestions ("learns how you work"): local heuristics from the background service, at most two -----
+  let suggestions = $state<any[]>([]);
+  let sugBusy = $state('');
+  const signalsOn = $derived(app.settings?.usageSignals !== false);
+  async function loadSuggestions() {
+    if (!signalsOn) { suggestions = []; return; }
+    try { const r = await api('/suggestions'); suggestions = (Array.isArray(r) ? r : []).slice(0, 2); } catch { suggestions = []; }
+  }
+  const dismissSuggestion = (id: string) => post(`/suggestions/${encodeURIComponent(id)}/dismiss`);
+  async function notNow(sg: any) {
+    suggestions = suggestions.filter((x) => x.id !== sg.id);
+    try { await dismissSuggestion(sg.id); } catch (e) { fail(e); }
+  }
+  async function setUp(sg: any) {
+    if (sugBusy) return;
+    sugBusy = sg.id;
+    try {
+      await startCustomise(sg.prompt);
+      suggestions = suggestions.filter((x) => x.id !== sg.id);
+      dismissSuggestion(sg.id).catch(() => {});
+    } catch (e: any) { toast(t('layer.askFailed'), { kind: 'error', detail: e?.message ?? String(e) }); }
+    finally { sugBusy = ''; }
+  }
+
+  // ----- layout from home.json: hidden sections and their order -----
+  const SECTIONS = ['stats', 'ideas', 'upcoming', 'todos', 'chats', 'projects'];
+  const layout = $derived.by(() => {
+    const hidden = new Set(app.home.hidden);
+    const order = [...new Set([...app.home.order.filter((k) => SECTIONS.includes(k)), ...SECTIONS])].filter((k) => !hidden.has(k));
+    // Todos and chats share a row when they are neighbours.
+    const rows: string[][] = [];
+    for (let i = 0; i < order.length; i++) {
+      const a = order[i], b = order[i + 1];
+      if ((a === 'todos' && b === 'chats') || (a === 'chats' && b === 'todos')) { rows.push([a, b]); i++; } else rows.push([a]);
+    }
+    return rows;
+  });
+
+  /** Mounts a plugin's widget frame into the slot. */
+  function plug(el: HTMLElement, w: { render: (el: HTMLElement) => any }) {
+    let cleanup: any;
+    try { cleanup = w.render(el); } catch (e) { console.error(e); }
+    return { destroy() { try { if (typeof cleanup === 'function') cleanup(); } catch { /* frame already gone */ } } };
+  }
+
+  function useChip(c: { label: string; prompt: string }) {
+    track('home.chip:' + c.label);
+    // A prompt ending in a space is a sentence for the user to finish.
+    if (/\s$/.test(c.prompt) && !ask.trim()) { ask = c.prompt; askEl?.focus(); return; }
+    submit(/\s$/.test(c.prompt) || !ask.trim() ? c.prompt : c.prompt + '\n\n', false);
+  }
+
+  onMount(() => { load(); loadSuggestions(); return on((e) => { if (['todos.changed', 'library.changed', 'chat.done'].includes(e.type)) load(); }); });
 
   const hour = new Date().getHours();
   const greeting = $derived(t(hour < 12 ? 'goodMorning' : hour < 18 ? 'goodAfternoon' : 'goodEvening'));
@@ -35,9 +88,10 @@
   const statusLabel = (s: string) => { const k = `idea.status.${s}`; const x = t(k); return x === k ? s : x; };
   const recentChats = $derived(app.chats.filter((c) => c.kind === 'chat').slice(0, 5));
 
-  async function submit(prefix = '') {
+  async function submit(prefix = '', typed = true) {
     const text = (prefix + ask).trim();
     if (!text) return askEl?.focus();
+    if (typed && !prefix) track('home.prompt:' + text.split(/\s+/).slice(0, 3).join(' '));
     try {
       const c = await post('/chats', {});
       await post(`/chats/${c.id}/send`, { text });
@@ -57,26 +111,7 @@
   }
 </script>
 
-<div class="home">
-  <section class="hero">
-    <div class="lead">
-      <div class="eyebrow">{today}</div>
-      <h1 class="display">{greeting}{app.settings?.userName ? `, ${app.settings.userName}` : ''}.</h1>
-      <p class="sub">{t('heroSub')}</p>
-      <div class="ask surface">
-        <textarea bind:this={askEl} bind:value={ask} onkeydown={keydown} rows="2" placeholder={t('askPlaceholder')} aria-label={t('askPlaceholder')} dir="auto"></textarea>
-        <div class="row">
-          <button class="chip" onclick={() => submit('new idea: ')}><Icon name="ideas" size={14} />{t('home.captureIdea')}</button>
-          <button class="chip" onclick={() => submit('todo: ')}><Icon name="todos" size={14} />{t('addTodoChip')}</button>
-          {#if app.settings?.modules?.checkin}<button class="chip" onclick={() => submit('check-in')}><Icon name="calendar" size={14} />{t('checkIn')}</button>{/if}
-          <span class="grow"></span>
-          <button class="btn primary round" onclick={() => submit()} disabled={!ask.trim()} aria-label={t('send')}><Icon name="send" size={16} stroke={2.25} /></button>
-        </div>
-      </div>
-    </div>
-    <div class="art"><Emblem size={250} /></div>
-  </section>
-
+{#snippet statsS()}
   <section class="stats">
     <button class="stat" onclick={() => go({ kind: 'ideas' })}><b>{fmtNum(active.length)}</b><span>{t('activeIdeas')}</span></button>
     <button class="stat" onclick={() => go({ kind: 'todos' })}><b>{fmtNum(openTodos.length)}</b><span>{t('openTodos')}</span></button>
@@ -84,7 +119,9 @@
       <b>{fmtNum(app.wrap.count)}</b><span>{app.wrap.count ? t('toWrapAction') : t('allSaved')}</span></button>
     <button class="stat" onclick={() => go({ kind: 'docs' })}><b>{fmtNum(files)}</b><span>{t('notesInLibrary')}</span></button>
   </section>
+{/snippet}
 
+{#snippet ideasS()}
   <section class="block">
     <div class="bh">
       <div><h2>{t('continueWhere')}</h2><p class="muted">{t('continueSub')}</p></div>
@@ -103,7 +140,9 @@
       {/each}
     </div>
   </section>
+{/snippet}
 
+{#snippet upcomingS()}
   {#if upcoming.length}
     <section class="block up">
       <div class="surface panel">
@@ -121,8 +160,10 @@
       </div>
     </section>
   {/if}
+{/snippet}
 
-  <section class="cols">
+{#snippet panel(k: string)}
+  {#if k === 'todos'}
     <div class="surface panel">
       <div class="ph"><h2>{t('todos')}</h2><button class="more" onclick={() => go({ kind: 'todos' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
       {#each openTodos.slice(0, 7) as it (it.file + it.line)}
@@ -135,6 +176,7 @@
         <div class="empty"><Icon name="check" size={20} /><span>{t('nothingOpen')}</span></div>
       {/each}
     </div>
+  {:else}
     <div class="surface panel">
       <div class="ph"><h2>{t('recentChats')}</h2><button class="more" onclick={() => newChat()}><Icon name="plus" size={14} /> {t('newChat')}</button></div>
       {#each recentChats as c (c.id)}
@@ -148,8 +190,10 @@
         <div class="empty"><Icon name="chats" size={20} /><span>{t('noChats')}</span></div>
       {/each}
     </div>
-  </section>
+  {/if}
+{/snippet}
 
+{#snippet projectsS()}
   {#if app.settings?.modules?.builds !== false}
     <section class="block">
       <div class="bh">
@@ -168,6 +212,69 @@
       </div>
     </section>
   {/if}
+{/snippet}
+
+<div class="home">
+  <section class="hero">
+    <div class="lead">
+      <div class="eyebrow">{today}</div>
+      <h1 class="display">{greeting}{app.settings?.userName ? `, ${app.settings.userName}` : ''}.</h1>
+      <p class="sub">{t('heroSub')}</p>
+      <div class="ask surface">
+        <textarea bind:this={askEl} bind:value={ask} onkeydown={keydown} rows="2" placeholder={t('askPlaceholder')} aria-label={t('askPlaceholder')} dir="auto"></textarea>
+        <div class="row chips">
+          <button class="chip" onclick={() => { track('home.chip:new idea'); submit('new idea: '); }}><Icon name="ideas" size={14} />{t('home.captureIdea')}</button>
+          <button class="chip" onclick={() => { track('home.chip:todo'); submit('todo: '); }}><Icon name="todos" size={14} />{t('addTodoChip')}</button>
+          {#if app.settings?.modules?.checkin}<button class="chip" onclick={() => { track('home.chip:check-in'); submit('check-in'); }}><Icon name="calendar" size={14} />{t('checkIn')}</button>{/if}
+          {#each [...app.home.chips, ...app.homeChips] as c, i (i + ':' + c.label)}
+            <button class="chip" dir="auto" title={c.prompt} onclick={() => useChip(c)}>{c.label}</button>
+          {/each}
+          <span class="grow"></span>
+          <button class="btn primary round" onclick={() => submit()} disabled={!ask.trim()} aria-label={t('send')}><Icon name="send" size={16} stroke={2.25} /></button>
+        </div>
+      </div>
+    </div>
+    <div class="art"><Emblem size={250} /></div>
+  </section>
+
+  {#if suggestions.length}
+    <section class="sugs" aria-label={t('layer.sug.label')}>
+      {#each suggestions as sg (sg.id)}
+        <div class="sug surface">
+          <span class="sgi"><Icon name="wrap" size={16} /></span>
+          <div class="grow">
+            <b dir="auto">{sg.title}</b>
+            <p class="muted" dir="auto">{sg.body}</p>
+          </div>
+          <div class="row sga">
+            <button class="btn ghost" disabled={sugBusy === sg.id} onclick={() => notNow(sg)}>{t('layer.sug.notNow')}</button>
+            <button class="btn primary" disabled={!!sugBusy} aria-busy={sugBusy === sg.id} onclick={() => setUp(sg)}>{t('layer.sug.setUp')}</button>
+          </div>
+        </div>
+      {/each}
+    </section>
+  {/if}
+
+  {#each layout as row (row.join('+'))}
+    {#if row.length === 2}
+      <section class="cols">{#each row as k (k)}{@render panel(k)}{/each}</section>
+    {:else if row[0] === 'todos' || row[0] === 'chats'}
+      <section class="cols one">{@render panel(row[0])}</section>
+    {:else if row[0] === 'stats'}{@render statsS()}
+    {:else if row[0] === 'ideas'}{@render ideasS()}
+    {:else if row[0] === 'upcoming'}{@render upcomingS()}
+    {:else if row[0] === 'projects'}{@render projectsS()}
+    {/if}
+  {/each}
+
+  {#each app.homeWidgets as w (w.plugin + ':' + w.id)}
+    <section class="block widget">
+      <div class="surface panel">
+        <div class="ph"><h2 dir="auto">{w.title}</h2></div>
+        <div class="wslot" use:plug={w}></div>
+      </div>
+    </section>
+  {/each}
 </div>
 
 <style>
@@ -209,6 +316,17 @@
   .clamp { position: relative; font-size: 12px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
   .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 44px; }
+  .cols.one { grid-template-columns: 1fr; }
+  .chips { flex-wrap: wrap; }
+  .sugs { display: grid; gap: 10px; margin-top: 20px; }
+  .sug { display: flex; align-items: center; gap: 12px; padding: 12px 14px; flex-wrap: wrap; }
+  .sug > * { position: relative; }
+  .sug .grow { min-width: 220px; }
+  .sug p { margin: 2px 0 0; font-size: 13px; }
+  .sgi { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--tint); color: var(--accent); flex: none; }
+  .sga { gap: 6px; }
+  .widget { margin-top: 28px; }
+  .wslot { position: relative; padding: 4px 10px 10px; }
   .panel { padding: 6px; min-width: 0; overflow: hidden; }
   .ph { position: relative; display: flex; align-items: center; padding: 10px 10px 8px; }
   .ph h2 { margin: 0; font-size: 15px; flex: 1; }

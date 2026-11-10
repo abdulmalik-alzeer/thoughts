@@ -29,6 +29,8 @@
   let useApi = $state(false);
   let apiToken = $state('');
   let wantSearch = $state(false);
+  let profession = $state('');
+  const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
 
   // Start with the safest choice: nothing leaves this computer until the user asks for a backup.
   s.sync.mode = 'none';
@@ -58,7 +60,7 @@
   async function act(key: string, fn: () => Promise<void>) {
     if (working[key]) return;
     working[key] = true;
-    try { await fn(); } catch (e: any) { toast(e?.message || t('ob.failed')); }
+    try { await fn(); } catch (e: any) { toast(e?.message || t('ob.failed'), { kind: 'error' }); }
     finally { working[key] = false; }
   }
 
@@ -70,11 +72,16 @@
       claude = st.claude ?? {};
       git = st.git ?? git;
       toast(t(git.installed && claude.installed && (claude.loggedIn || useApi) ? 'ob.checkOk' : 'ob.checkStill'));
-    } catch (e: any) { toast(e?.message || t('ob.failed')); }
+    } catch (e: any) { toast(e?.message || t('ob.failed'), { kind: 'error' }); }
     finally { checking = false; }
   }
 
-  const installGit = () => act('git', async () => { await post('/git/install'); toast(t('ob.gitInstallToast')); });
+  const installGit = () => act('git', async () => {
+    const r = await post('/git/install');
+    // Windows: the service hands back the download page; Linux: the command for this system.
+    if (r?.url) { try { const { openUrl } = await import('@tauri-apps/plugin-opener'); await openUrl(r.url); } catch { window.open(r.url, '_blank', 'noopener'); } }
+    if (r?.hint) toast(t('ob.gitInstallToast'), { detail: String(r.hint), duration: 0 }); else toast(t('ob.gitInstallToast'));
+  });
   const login = () => act('login', async () => { await post('/ai/claude/login'); toast(t('ob.loginToast')); });
 
   async function browse() {
@@ -82,7 +89,7 @@
       const { open } = await import('@tauri-apps/plugin-dialog');
       const p = await open({ directory: true });
       if (typeof p === 'string') s.libraryPath = libraryMode === 'new' ? p.replace(/\/+$/, '') + '/Thoughts' : p;
-    } catch { toast(t('ob.browseFail')); }
+    } catch { toast(t('ob.browseFail'), { kind: 'error' }); }
   }
 
   function setUseApi(on: boolean) {
@@ -132,12 +139,13 @@
         settings, libraryMode, seeds: seeds.split('\n').map((x) => x.trim()).filter(Boolean),
         remoteUrl: isGit ? remoteUrl.trim() : '', remoteUsername: isGit ? remoteUser : '', remoteToken: isGit ? remoteToken : '',
         apiToken: useApi ? apiToken.trim() : '',
+        profession: profession ? t('layer.prof.' + profession) : '',
       });
-      if (wantSearch) post('/extensions/search/install').catch((e) => toast(t('ob.searchFail', { error: e?.message ?? '' })));
+      if (wantSearch) post('/extensions/search/install').catch((e) => toast(t('ob.searchFail', { error: e?.message ?? '' }), { kind: 'error' }));
       try { app.settings = await api('/settings'); applyTheme(); } catch { /* the app reloads settings on its own */ }
       done(r.setupChatId);
     } catch (e: any) {
-      toast(e?.message || t('ob.failed'));
+      toast(e?.message || t('ob.failed'), { kind: 'error' });
     } finally { busy = false; }
   }
 </script>
@@ -162,6 +170,12 @@
       </div>
       <label for="ob-name">{t('ob.nameLabel')}</label>
       <input id="ob-name" dir="auto" bind:value={s.userName} placeholder={t('ob.namePh')} autocomplete="off" />
+      <label for="ob-prof">{t('layer.prof.label')}</label>
+      <select id="ob-prof" bind:value={profession}>
+        <option value="">{t('layer.prof.choose')}</option>
+        {#each professions as p}<option value={p}>{t('layer.prof.' + p)}</option>{/each}
+      </select>
+      <p class="muted sm">{t('layer.prof.hint')}</p>
     {:else if step === 1}
       <h1>{t('ob.aiTitle')}</h1>
       <p>{t('ob.aiBody')}</p>

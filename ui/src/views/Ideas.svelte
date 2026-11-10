@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
+  import ItemActions from '../lib/ItemActions.svelte';
   import { onMount } from 'svelte';
   import { api, on, post } from '../lib/api';
   import { go, refreshChats } from '../lib/store.svelte';
@@ -81,12 +82,15 @@
       <h2 dir="auto">{area}</h2>
       <div class="grid">
         {#each shown.filter((i) => i.area === area) as i (i.path)}
+          <div class="cell">
           <button class="idea surface lit" onclick={() => go({ kind: 'docs', path: i.path })}>
             <div class="row"><b class="grow" dir="auto">{i.title}</b>{#if i.status}<span class="pill st-{i.status}">{statusLabel(i.status)}</span>{/if}</div>
             <p class="muted" dir="auto">{i.summary}</p>
             <div class="row sm muted"><span class="grow">{when(i.updated)}</span>{#if i.level}<span class="pill"><bdi>{i.level}</bdi></span>{/if}
               {#if i.openTodos}<span class="row" style="gap:4px" title={tn('idea.openTodos', i.openTodos)}><Icon name="todos" size={13} /> <span aria-hidden="true">{fmtNum(i.openTodos)}</span><span class="sr">{tn('idea.openTodos', i.openTodos)}</span></span>{/if}</div>
           </button>
+          <span class="ia"><ItemActions target="idea" name={i.title} item={{ path: i.path, area: i.area, slug: i.slug, title: i.title, status: i.status, summary: i.summary, tags: i.tags, updated: i.updated }} /></span>
+          </div>
         {/each}
       </div>
     {/each}
@@ -101,6 +105,8 @@
   .pill { font-size: 12px; }
   .pill.st-active { background: var(--tint); color: var(--accent); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+  .cell { position: relative; display: grid; }
+  .ia { position: absolute; inset-block-end: 8px; inset-inline-end: 8px; }
   .idea { font: inherit; color: inherit; text-align: start; box-sizing: border-box; cursor: pointer; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; transition: transform .2s; }
   .idea > * { position: relative; }
   .idea:hover { transform: translateY(-2px); }

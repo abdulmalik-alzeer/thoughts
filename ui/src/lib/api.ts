@@ -1,4 +1,8 @@
 // Client for the thoughtsd daemon (HTTP + WebSocket on 127.0.0.1).
+//
+// The daemon token lives ONLY in the module-private `info` below. It is never written to
+// localStorage / sessionStorage / `window.*` / the DOM, and in browser-preview mode `?token=` is
+// removed from the address bar as soon as it has been read. Nothing in this module returns it.
 
 type Info = { port: number; token: string };
 let info: Info | null = null;
@@ -7,28 +11,59 @@ let ws: WebSocket | null = null;
 
 export const inTauri = () => typeof (window as any).__TAURI_INTERNALS__ !== 'undefined';
 
-export async function connect(): Promise<Info> {
+export async function connect(): Promise<void> {
   if (inTauri()) {
     const { invoke } = await import('@tauri-apps/api/core');
-    info = await invoke<Info>('daemon_info');
+    const i = await invoke<Info>('daemon_info');
+    info = { port: i.port, token: i.token };
   } else {
-    // Browser dev mode: http://localhost:1420/?port=…&token=…
+    // Browser preview mode: http://localhost:1420/?port=…&token=… (read once, then stripped from the URL).
     const q = new URLSearchParams(location.search);
-    const saved = JSON.parse(localStorage.getItem('thoughts.dev') || 'null');
-    info = q.get('port') ? { port: +q.get('port')!, token: q.get('token')! } : saved;
+    try { localStorage.removeItem('thoughts.dev'); } catch { /* older builds kept the token here */ }
+    if (q.get('port') && q.get('token')) {
+      info = { port: +q.get('port')!, token: q.get('token')! };
+      q.delete('port'); q.delete('token');
+      const rest = q.toString();
+      try { history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash); } catch { /* ignore */ }
+    }
     if (!info) throw new Error('Open with ?port=&token= from ~/.thoughts/daemon.json');
-    localStorage.setItem('thoughts.dev', JSON.stringify(info));
   }
   openSocket();
-  return info;
 }
 
 export async function reconnect() {
   if (inTauri()) {
     const { invoke } = await import('@tauri-apps/api/core');
-    info = await invoke<Info>('restart_daemon');
+    try {
+      const i = await invoke<Info>('restart_daemon');
+      info = { port: i.port, token: i.token };
+    } catch (e: any) { throw new Error(await friendly(String(e?.message ?? e))); }
     openSocket();
   }
+}
+
+/** Reload the window (`query` e.g. `?safe=1`). In browser-preview mode the connection details ride
+ *  along in the URL for the reload only — they are stripped again on boot. */
+export function reloadApp(query = '') {
+  const q = new URLSearchParams(query);
+  if (!inTauri() && info) { q.set('port', String(info.port)); q.set('token', info.token); }
+  const s = q.toString();
+  location.replace(location.pathname + (s ? '?' + s : ''));
+}
+
+/** Machine-readable daemon errors that have one plain-language meaning everywhere. */
+async function friendly(msg: string): Promise<string> {
+  if (/(^|\s)BUSY::/.test(msg)) { const { t } = await import('./i18n'); return t('layer.busy'); }
+  return msg;
+}
+
+/** Fetch a library file's bytes (`GET /api/library/raw?path=`). Null when missing or unsupported. */
+export async function libraryBlob(path: string): Promise<Blob | null> {
+  try {
+    if (!info) await connect();
+    const r = await fetch(`http://127.0.0.1:${info!.port}/api/library/raw?path=${encodeURIComponent(path)}`, { headers: { Authorization: `Bearer ${info!.token}` } });
+    return r.ok ? await r.blob() : null;
+  } catch { return null; }
 }
 
 let online = true;
@@ -111,7 +146,7 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
       await api('/library/trust', { method: 'POST', body: { path: m[1] } });
       return api<T>(path, opts);
     }
-    throw new ApiError(msg, r.status);
+    throw new ApiError(await friendly(msg), r.status);
   }
   return data as T;
 }

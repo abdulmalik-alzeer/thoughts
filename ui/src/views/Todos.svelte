@@ -4,6 +4,7 @@
   import { go } from '../lib/store.svelte';
   import { t, fmtNum } from '../lib/i18n';
   import Icon from '../lib/Icon.svelte';
+  import ItemActions from '../lib/ItemActions.svelte';
   import { dueLabel, dueState, fail, isoDay, normTodo, notify, prettyName, withDue } from '../lib/content/util';
 
   type Filter = 'all' | 'soon' | 'overdue';
@@ -182,6 +183,7 @@
                   {/if}
                   <span class="acts">
                     {#if !it.due}<button class="ib" onclick={() => (dueFor = dueFor === k ? null : k)} aria-expanded={dueFor === k} aria-label={t('todo.setDue')} title={t('todo.setDue')}><Icon name="calendar" size={14} /></button>{/if}
+                    <ItemActions target="todo" name={it.title} item={{ file: l.file, idea: l.idea ?? null, line: it.line, text: it.text, title: it.title, due: it.due, done: it.done, group: it.group ?? null }} />
                     <button class="ib" onclick={() => startEdit(l, it)} aria-label={t('todo.editItem', { title: it.title })} title={t('edit')}><Icon name="edit" size={14} /></button>
                     <button class="ib" onclick={() => remove(l, it)} aria-label={t('todo.deleteItem', { title: it.title })} title={t('delete')}><Icon name="trash" size={14} /></button>
                   </span>
@@ -230,7 +232,7 @@
   .line { min-height: 30px; }
   .item.done .txt { text-decoration: line-through; color: var(--muted); }
   .txt { cursor: text; overflow-wrap: anywhere; }
-  .acts { display: inline-flex; gap: 2px; opacity: .35; transition: opacity .15s; }
+  .acts { display: inline-flex; align-items: center; gap: 2px; opacity: .35; transition: opacity .15s; }
   .item:hover .acts, .acts:focus-within { opacity: 1; }
   @media (hover: none) { .acts { opacity: 1; } }
   .ib { font: inherit; color: var(--muted); background: none; border: 0; border-radius: 7px; padding: 5px; cursor: pointer; display: grid; place-items: center; }

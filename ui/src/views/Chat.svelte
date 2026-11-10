@@ -1,11 +1,12 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
   import { onMount, tick } from 'svelte';
-  import { api, del, on, patch, post } from '../lib/api';
+  import { api, del, on, patch, post, ApiError } from '../lib/api';
   import { md, mdClick } from '../lib/md';
   import { app, go, refreshChats } from '../lib/store.svelte';
   import { t, lang } from '../lib/i18n';
   import { confirmDialog, promptDialog } from '../lib/dialog.svelte';
+  import { openReview } from '../lib/layer';
   import { MAX_FILE_BYTES, copyText, fail, fmtSize, isImageName, notify, readAsDataURL } from '../lib/content/util';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
@@ -40,11 +41,13 @@
       c.options ??= {};
       chat = c;
       loadState = 'ok';
+      // Seen: the "cut off" marker stays on screen for this visit but no longer follows the chat around.
+      if (c.interrupted && initial) post(`/chats/${id}/ack-interrupted`).catch(() => {});
       await scrollDown(initial);
     } catch (e: any) {
       if (chat && !initial) return fail(e); // keep what is on screen; a refresh failed
       loadError = e?.message ?? String(e);
-      loadState = /not found|no such|404/i.test(loadError) ? 'missing' : 'error';
+      loadState = e instanceof ApiError && e.status === 404 ? 'missing' : 'error';
     }
   }
 
@@ -64,7 +67,7 @@
   onMount(() => {
     load(true);
     api('/ai/claude/options').then((o) => (opts = { models: [], efforts: [], permissionModes: [], ...o })).catch(() => {});
-    api('/library/tree').then((x: any[]) => (tree = x.map((f) => f.path).filter((p) => p.endsWith('.md')))).catch(() => {});
+    api('/library/tree?exclude=private').then((x: any[]) => (tree = x.map((f) => f.path).filter((p) => p.endsWith('.md')))).catch(() => {});
     return on((e) => {
       if (e.type === 'resync') { load(); return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
@@ -93,7 +96,13 @@
     chat.running = true;
     stick = true;
     try { await post(`/chats/${id}/send`, body); return true; }
-    catch (e: any) { fail(e); chat.running = false; return false; }
+    catch (e: any) {
+      // The service refuses files in private folders (or ones that no longer exist) as mentions.
+      if (e instanceof ApiError && e.status === 400 && body.mentions?.length) notify(t('layer.mentionRejected'), { kind: 'error', detail: e.message });
+      else fail(e);
+      chat.running = false;
+      return false;
+    }
   }
 
   async function send() {
@@ -119,7 +128,8 @@
   }
 
   async function copyMsg(s: string) {
-    notify(t((await copyText(s)) ? 'chat.copied' : 'chat.copyFailed'));
+    const ok = await copyText(s);
+    notify(t(ok ? 'chat.copied' : 'chat.copyFailed'), { kind: ok ? 'info' : 'error' });
   }
 
   function keydown(e: KeyboardEvent) {
@@ -223,6 +233,17 @@
     catch (e) { fail(e); }
   }
 
+  let undoing = $state(false);
+  async function undoPartialWrap() {
+    if (undoing) return;
+    if (!(await confirmDialog({ title: t('layer.wrap.undoTitle'), body: t('layer.wrap.undoBody'), confirmLabel: t('layer.wrap.undo') }))) return;
+    undoing = true;
+    try { await post(`/wrap/${id}/rollback`); notify(t('layer.wrap.undone'), { kind: 'success' }); await load(); }
+    catch (e) { fail(e); }
+    finally { undoing = false; }
+  }
+  const phase = $derived(chat?.meta?.phase as string | undefined);
+
   const resultFor = $derived.by(() => {
     const map: Record<string, any> = {};
     for (const m of chat?.messages ?? []) if (m.role === 'tool_result' && m.tool?.toolUseId) map[m.tool.toolUseId] = m;
@@ -278,7 +299,13 @@
     </header>
 
     {#if chat.kind === 'customize'}
-      <div class="banner">{t('chat.customizeBanner')}</div>
+      <div class="banner row">
+        <span class="grow">{t('layer.chatBanner')}</span>
+        {#if app.pending?.exists && !app.pending.running}<button class="btn primary" onclick={openReview}>{t('layer.review')}</button>{/if}
+      </div>
+    {/if}
+    {#if chat.interrupted}
+      <div class="banner row" role="status"><Icon name="warning" size={14} /> <span class="grow">{t('layer.chat.interrupted')}</span></div>
     {/if}
 
     <div class="msgs-wrap">
@@ -356,6 +383,17 @@
         <input class="grow" placeholder={t('chat.wrapNotePlaceholder')} aria-label={t('chat.wrapNotePlaceholder')} bind:value={note} dir="auto" />
         <button class="btn primary" onclick={applyWrap}><Icon name="check" size={15} /> {t('chat.approveApply')}</button>
       </div>
+    {/if}
+    {#if chat.kind === 'wrap' && !chat.running && phase === 'failed'}
+      <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t(chat.meta?.rolledBack === false ? 'layer.wrap.failedKept' : 'layer.wrap.failedRolledBack')}</span>
+        {#if chat.meta?.rolledBack === false && chat.meta?.canRollback}<button class="btn" disabled={undoing} onclick={undoPartialWrap}><Icon name="undo" size={14} /> {t('layer.wrap.undo')}</button>{/if}</div>
+    {/if}
+    {#if chat.kind === 'wrap' && !chat.running && phase === 'interrupted'}
+      <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t('layer.wrap.interrupted')}</span>
+        {#if chat.meta?.canRollback}<button class="btn" disabled={undoing} onclick={undoPartialWrap}><Icon name="undo" size={14} /> {t('layer.wrap.undo')}</button>{/if}</div>
+    {/if}
+    {#if chat.kind === 'reorganize' && !chat.running && (phase === 'interrupted' || phase === 'failed')}
+      <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t(phase === 'failed' ? 'layer.reorg.failed' : 'layer.reorg.interrupted')}</span></div>
     {/if}
     {#if chat.kind === 'reorganize' && !chat.running && chat.meta?.phase === 'review'}
       <div class="approve card row"><span class="grow">{t('chat.reorgReady')}</span>

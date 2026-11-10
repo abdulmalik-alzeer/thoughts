@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { api, connect, on, post } from './lib/api';
+  import { api, connect, on, post, reloadApp } from './lib/api';
   import { app, applyTheme, cachedLook, command, go, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast } from './lib/store.svelte';
-  import { loadLayer, layerBooted, retryLayer } from './lib/layer';
+  import { loadLayer, layerBooted, retryLayer, checkPending, discardPending, keepPending, openReview, stopPreview } from './lib/layer';
+  import { checkAppUpdate, checkLayerUpdates } from './lib/updates';
   import { t, tn, ago, fmtDate, fmtNum } from './lib/i18n';
-  import { matchShortcut, keys, tip } from './lib/shortcuts';
+  import { matchShortcut, keys, tip, isMac } from './lib/shortcuts';
   import { choiceDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
   import Chat from './views/Chat.svelte';
@@ -14,6 +15,7 @@
   import Projects from './views/Projects.svelte';
   import Settings from './views/Settings.svelte';
   import Rollback from './views/Rollback.svelte';
+  import Review from './views/Review.svelte';
   import WrapNag from './views/WrapNag.svelte';
   import PluginView from './views/PluginView.svelte';
   import Reorganize from './views/Reorganize.svelte';
@@ -44,6 +46,8 @@
       app.ready = true;
       // The app is up: a later start no longer needs to suspect the customisations.
       setTimeout(layerBooted, 2500);
+      statusNotices();
+      if (app.settings.onboarded) { checkAppUpdate(false); checkLayerUpdates(); }
     } catch (e: any) {
       // Settings never loaded, so fall back to the language and theme used last time.
       if (!app.settings) { const look = cachedLook(); if (look?.language) app.settings = { ...look, onboarded: false }; }
@@ -57,6 +61,8 @@
       loadLayer().catch((e) => toast(t('shell.layerFailed'), { kind: 'error', detail: e.message })),
     ]);
     checkLibrary();
+    // A change staged earlier (or by an import / app update) is still waiting for a decision.
+    checkPending(true);
     try {
       const ext = await api('/extensions');
       if (ext.search.suggest) toast(t('shell.searchExtHint'), { action: { label: t('settings'), run: () => go({ kind: 'settings' }) } });
@@ -70,12 +76,33 @@
   // Is there a library, and is its folder still there?
   async function checkLibrary() {
     if (!app.status?.library || app.status?.libraryMissing) { libraryGone = true; return; }
+    if (app.status.libraryMissing === false) { libraryGone = false; return; }
+    // Older background service without `libraryMissing`: work it out from the error text.
     try { await api('/library/stats'); libraryGone = false; }
     catch (e: any) { if (/no library|no such file|not found|os error 2|does not exist/i.test(e.message || '')) libraryGone = true; }
   }
 
   async function refreshStatus() {
     try { app.status = await api('/status'); checkLibrary(); } catch { /* offline */ }
+  }
+
+  // Things the background service had to repair on start: say so once, in plain words.
+  let noticed = false;
+  function statusNotices() {
+    if (noticed || !app.status) return;
+    noticed = true;
+    if (app.status.settingsRecovered) { toast(t('layer.settingsRecovered'), { kind: 'error', key: 'recovered', duration: 0 }); post('/status/ack-recovered').catch(() => {}); }
+    const n = Number(app.status.unreadableChats) || 0;
+    if (n > 0) toast(tn('layer.unreadableChats', n), { kind: 'error', key: 'unreadable', duration: 0 });
+  }
+
+  const layerError = (err: any) => toast(t('shell.layerFailed'), { kind: 'error', detail: err.message });
+  let previewBusy = $state(false);
+  async function previewAct(fn: () => Promise<void>, failKey: string) {
+    if (previewBusy) return;
+    previewBusy = true;
+    try { await fn(); } catch (e: any) { toast(t(failKey), { kind: 'error', detail: e?.message ?? String(e) }); }
+    finally { previewBusy = false; }
   }
 
   // Links in rendered markdown (chats, docs, plugins) must never navigate the app window.
@@ -109,7 +136,12 @@
         }
         if (e.type === 'chat.done' && app.settings?.notifications && !document.hasFocus()) notify('Thoughts', t('shell.chatFinished', { title: e.title || t('shell.aChat') }));
         if (e.type === 'notify') { toast(`${e.title}: ${e.body}`); if (app.settings?.notifications && !document.hasFocus()) notify(e.title, e.body); }
-        if (e.type === 'layer.changed') loadLayer().catch((err) => toast(t('shell.layerFailed'), { kind: 'error', detail: err.message }));
+        if (e.type === 'layer.changed') loadLayer().catch(layerError);
+        if (e.type === 'layer.pending' || e.type === 'chat.done') checkPending(true);
+        if (e.type === 'chat.persistError') toast(t('layer.chat.persistError'), { kind: 'error', key: 'persist:' + e.chatId, detail: e.error ? String(e.error) : undefined });
+        if (e.type === 'wrap.failed') { toast(t(e.rolledBack === false ? 'layer.wrap.failedKept' : 'layer.wrap.failedRolledBack'), { kind: 'error', key: 'wrap', action: e.chatId ? { label: t('layer.details'), run: () => go({ kind: 'chat', id: e.chatId }) } : undefined }); refreshWrap().catch(() => {}); }
+        if (e.type === 'wrap.done') refreshWrap().catch(() => {});
+        if (e.type === 'reorganize.ready' && e.chatId && app.view.id !== e.chatId) toast(t(e.ok === false ? 'layer.reorg.failed' : 'layer.reorg.ready'), { kind: e.ok === false ? 'error' : 'info', action: { label: t('layer.details'), run: () => go(e.ok === false ? { kind: 'chat', id: e.chatId } : { kind: 'reorganize', id: e.chatId }) } });
         if (e.type === 'settings.changed') { app.settings = await api('/settings'); applyTheme(); loadProjects(); refreshStatus(); }
         if (e.type === 'library.changed') ideas = [];
         if (e.type === 'resync') { refreshChats().catch(() => {}); refreshWrap().catch(() => {}); refreshStatus(); }
@@ -119,9 +151,14 @@
     (async () => {
       if ((window as any).__TAURI_INTERNALS__) {
         const { listen } = await import('@tauri-apps/api/event');
-        document.documentElement.classList.add('native');
+        const root = document.documentElement;
+        root.classList.add('native');
+        // Older shells don't tag the platform; the translucent window styles are macOS-only.
+        if (!/\bos-/.test(root.className)) root.classList.add(isMac ? 'os-macos' : /Win/i.test(navigator.userAgent) ? 'os-windows' : 'os-linux');
         listen('recovery', () => (app.showRollback = true));
         listen('open-settings', () => command('settings'));
+        listen('open-help', () => command('help'));
+        listen('check-updates', () => checkAppUpdate(true));
       }
     })();
     window.addEventListener('thoughts:command', onCommand);
@@ -212,6 +249,10 @@
     'wrap.start': () => startWrap(),
     'sync': () => sync(),
     'rollback': () => (app.showRollback = true),
+    'history': () => (app.showRollback = true),
+    'customise': () => go({ kind: 'settings', id: 'appLayer' }),
+    'review': () => openReview(),
+    'updates.check': () => checkAppUpdate(true),
     'settings': () => go({ kind: 'settings' }),
     'help': () => go({ kind: 'help' }),
     'tour': () => (showTour = true),
@@ -241,6 +282,7 @@
     if (app.showPalette) { app.showPalette = false; return true; }
     if (showTour) { showTour = false; return true; }
     if (app.showWrapNag) { app.showWrapNag = false; return true; }
+    if (app.showReview) { app.showReview = false; return true; }
     if (app.showRollback) { app.showRollback = false; return true; }
     if (searchOpen) { searchOpen = false; return true; }
     return false;
@@ -252,7 +294,7 @@
     if (!id) return;
     if (id === 'escape') { if (closeTop()) e.preventDefault(); return; }
     if (!app.ready || !app.settings?.onboarded) return;
-    const modal = !!dialogs.current || app.showRollback || app.showWrapNag || showTour;
+    const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour;
     if (modal || (app.showPalette && id !== 'palette')) return;
     if (id.startsWith('nav.')) {
       const k = nav[+id.slice(4) - 1];
@@ -376,7 +418,10 @@
     add('help', t('shell.help'), g.go, 'help', { keywords: 'help shortcuts privacy cost مساعدة اختصارات خصوصية' });
     add('wrap.start', t('shell.pal.wrap'), g.act, 'wrap', { keywords: 'wrap save حفظ تلخيص' });
     if (syncOn) add('sync', t('shell.pal.sync'), g.act, 'sync', { keywords: 'sync backup مزامنة' });
-    add('rollback', t('shell.rb.title'), g.act, 'rollback', { keywords: 'rollback undo restore استعادة' });
+    add('customise', t('layer.customise'), g.act, 'palette', { keywords: 'customise customize personalise change app add-on plugin theme تخصيص تعديل إضافة' });
+    if (app.pending?.exists) add('review', t('layer.reviewTitle'), g.act, 'eye', { keywords: 'review pending change مراجعة' });
+    add('rollback', t('shell.rb.title'), g.act, 'rollback', { keywords: 'history rollback undo restore السجل استعادة تراجع' });
+    add('updates.check', t('layer.upd.check'), g.act, 'download', { keywords: 'update version تحديث' });
     add('search.focus', t('shell.pal.search'), g.act, 'search');
     add('sidebar.toggle', app.sidebarCollapsed ? t('shell.sidebarShow') : t('shell.sidebarHide'), g.act, 'sidebar');
     add('tour', t('shell.pal.tour'), g.act, 'book');
@@ -402,7 +447,7 @@
       <h1>{t('shell.down.title')}</h1>
       <p>{t('shell.down.body')}</p>
       <p class="muted sm"><bdi>{app.error}</bdi></p>
-      <button class="btn primary" onclick={() => location.reload()}><Icon name="retry" size={15} /> {t('shell.retry')}</button>
+      <button class="btn primary" onclick={() => reloadApp()}><Icon name="retry" size={15} /> {t('shell.retry')}</button>
     </div>
   </div>
 {:else if !app.ready}
@@ -481,7 +526,7 @@
             {#each interrupted as r (r.chatId)}
               <div class="row run">
                 <button class="link grow ell" onclick={() => go({ kind: 'chat', id: r.chatId })}><bdi>{r.title || t('shell.aChat')}</bdi></button>
-                <button class="iconbtn sm" aria-label={t('shell.dismissNamed', { name: r.title || t('shell.aChat') })} title={t('shell.dismiss')} onclick={() => (dismissedRuns = [...dismissedRuns, r.chatId])}><Icon name="close" size={13} /></button>
+                <button class="iconbtn sm" aria-label={t('shell.dismissNamed', { name: r.title || t('shell.aChat') })} title={t('shell.dismiss')} onclick={() => { dismissedRuns = [...dismissedRuns, r.chatId]; post(`/chats/${r.chatId}/ack-interrupted`).catch(() => {}); }}><Icon name="close" size={13} /></button>
               </div>
             {/each}
           </div>
@@ -498,6 +543,7 @@
             <button class="chat" class:active={app.view.id === c.id} aria-current={app.view.id === c.id ? 'page' : undefined} title={c.title} onclick={() => go({ kind: 'chat', id: c.id })}>
               <span class="dot" class:run={c.running} class:unw={c.unwrapped} title={dotLabel(c) || undefined}></span>
               <span class="grow ell"><bdi>{c.title}</bdi></span>
+              {#if c.interrupted}<span class="cut" title={t('layer.chat.interrupted')}><Icon name="warning" size={12} /><span class="sr-only">({t('layer.chat.interruptedShort')})</span></span>{/if}
               {#if dotLabel(c)}<span class="sr-only">({dotLabel(c)})</span>{/if}
             </button>
           {/each}
@@ -514,6 +560,7 @@
       </div>
 
       <div class="foot">
+        {#if (app.wrap as any).miniWrapsPaused}<div class="notice" role="status"><Icon name="offline" size={15} /><span class="grow">{t('layer.wrap.paused')}</span></div>{/if}
         <button class="btn primary wide" onclick={() => command('wrap.start')} disabled={!app.wrap.count}
           title={app.wrap.count ? tip(tn('shell.chatsToWrap', app.wrap.count), 'wrap.start') : t('shell.nothingToWrap')}>
           <Icon name="wrap" size={15} /> {t('wrap')}
@@ -546,6 +593,16 @@
           <span class="grow">{app.safeReason === 'crash' ? t('shell.safe.crash') : t('shell.safe.manual')}</span>
           {#if app.safeReason === 'crash'}<button class="btn" onclick={() => command('rollback')}><Icon name="rollback" size={14} /> {t('shell.openRollback')}</button>{/if}
           <button class="btn" onclick={retryLayer}><Icon name="retry" size={14} /> {app.safeReason === 'crash' ? t('shell.safe.retry') : t('shell.safe.leave')}</button>
+        </div>
+      {/if}
+      {#if app.preview}
+        <div class="safe prev no-print" role="status">
+          <Icon name="eye" size={16} />
+          <span class="grow">{t('layer.previewBanner')}</span>
+          <button class="btn primary" disabled={previewBusy} onclick={() => previewAct(() => keepPending(), 'layer.keepFailed')}>{t('layer.keep')}</button>
+          <button class="btn" disabled={previewBusy} onclick={() => previewAct(discardPending, 'layer.discardFailed')}>{t('layer.discard')}</button>
+          <button class="btn" disabled={previewBusy} onclick={() => previewAct(stopPreview, 'shell.layerFailed')}>{t('layer.stopPreview')}</button>
+          <button class="btn ghost" disabled={previewBusy} onclick={openReview}>{t('layer.details')}</button>
         </div>
       {/if}
       {#key `${app.view.kind}:${app.view.id ?? ''}:${app.view.path ?? ''}`}<div class="view">
@@ -597,6 +654,7 @@
 {/if}
 
 {#if app.showRollback}<Rollback />{/if}
+{#if app.showReview && app.pending}<Review />{/if}
 {#if app.showWrapNag}<WrapNag {startWrap} />{/if}
 {#if showTour}<Tour close={() => (showTour = false)} />{/if}
 {#if app.showPalette}<CommandPalette items={paletteItems} close={() => (app.showPalette = false)} />{/if}
@@ -618,10 +676,11 @@
   }
   .drag { height: 30px; flex: none; }
   .main { position: relative; overflow: auto; min-width: 0; background: var(--aura), var(--bg); background-repeat: no-repeat; }
-  :global(html.native) .sidebar { background: color-mix(in srgb, var(--sidebar) 40%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :global(html.native.os-macos) .sidebar { background: color-mix(in srgb, var(--sidebar) 40%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :global(html.native:not(.os-macos)) .sidebar { background: var(--sidebar); -webkit-backdrop-filter: none; backdrop-filter: none; }
   .main .drag.top { position: sticky; top: 0; height: 26px; z-index: 5; }
   .expand { position: absolute; top: 2px; inset-inline-start: 10px; background: var(--glass); }
-  :global(html.native[dir="ltr"]) .expand { inset-inline-start: 78px; }
+  :global(html.native.os-macos[dir="ltr"]) .expand { inset-inline-start: 78px; }
   .brand { font-weight: 700; font-size: 15px; padding: 2px 6px 12px; letter-spacing: -.01em; gap: 8px; }
   .brand .iconbtn { margin-inline-end: -4px; }
 
@@ -670,6 +729,8 @@
   .notice { display: flex; gap: 8px; align-items: flex-start; font-size: 12px; padding: 8px; margin-bottom: 8px; border-radius: var(--radius); background: var(--fill); border: var(--border-w) solid var(--hairline); }
   .notice > :global(.icon) { flex: none; margin-top: 2px; color: var(--accent-2); }
   .run { gap: 2px; }
+  .cut { flex: none; color: var(--accent-2); display: inline-flex; }
+  .foot .notice { margin-bottom: 0; }
   .link { font: inherit; font-weight: 600; color: var(--accent); background: none; border: 0; padding: 2px 0; text-align: start; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 
   .chats { flex: 1; min-height: 0; border-top: 1px solid var(--hairline); padding-top: 6px; }
@@ -696,6 +757,8 @@
   .safe { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 4px 28px 0; padding: 10px 14px; border-radius: var(--radius-lg); background: var(--panel); border: var(--border-w) solid var(--accent-2); font-size: 13px; }
   .safe > :global(.icon) { flex: none; color: var(--accent-2); }
   .safe .grow { min-width: 220px; }
+  .prev { position: sticky; top: 30px; z-index: 6; border-color: var(--accent); box-shadow: var(--shadow); }
+  .prev > :global(.icon) { color: var(--accent); }
   .missing { display: grid; place-items: center; min-height: 70vh; max-width: none; }
   .missing .card { max-width: 520px; display: grid; gap: 10px; justify-items: start; padding: 24px; }
   .missing h1, .missing p { margin: 0; }

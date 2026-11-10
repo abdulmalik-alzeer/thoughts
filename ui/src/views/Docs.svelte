@@ -4,8 +4,8 @@
   import { api, inTauri, on, post, put } from '../lib/api';
   import { md, mdClick, resolveLink } from '../lib/md';
   import { app, go, refreshChats } from '../lib/store.svelte';
-  import { t, tn, fmtDate } from '../lib/i18n';
-  import { trapFocus } from '../lib/focus';
+  import { t, tn, fmtDate, fmtNum } from '../lib/i18n';
+  import { choiceDialog } from '../lib/dialog.svelte';
   import { MAX_FILE_BYTES, copyText, fail, fmtSize, isImageName, notify, prettyName, rawBlobUrl, readAsDataURL } from '../lib/content/util';
 
   let { path }: { path?: string } = $props();
@@ -28,7 +28,7 @@
   let importing = $state(false);
   let dragging = $state(false);
   let dragDepth = 0;
-  let unsaved = $state<{ resolve: (v: 'save' | 'discard' | 'keep') => void } | null>(null);
+  let canOpenExternal = $state(true);
   let article = $state<HTMLElement>();
   let picker = $state<HTMLInputElement>();
 
@@ -42,7 +42,8 @@
   function readPref() { try { return localStorage.getItem('thoughts.docs.preview') !== '0'; } catch { return true; } }
   function togglePreview() { preview = !preview; try { localStorage.setItem('thoughts.docs.preview', preview ? '1' : '0'); } catch { /* private mode */ } }
 
-  // Unsaved text is mirrored to sessionStorage so that leaving the view (or a crash) never loses it.
+  // Safety net only: unsaved text is mirrored to sessionStorage so a crash or forced reload never loses it.
+  // Leaving normally goes through `leaveOk` (Save / Discard / Keep editing), wired to `app.leaveGuard`.
   const stashKey = (p: string) => `thoughts.draft:${p}`;
   const stashGet = (p: string) => { try { return sessionStorage.getItem(stashKey(p)); } catch { return null; } };
   const stashDrop = (p: string) => { try { sessionStorage.removeItem(stashKey(p)); } catch { /* ignore */ } };
@@ -67,6 +68,7 @@
   onMount(async () => {
     window.addEventListener('beforeunload', beforeUnload);
     window.addEventListener('keydown', onKey);
+    app.leaveGuard = leaveOk;
     off = on((e) => { if (e.type === 'library.changed' || e.type === 'resync') loadTree(); });
     await loadTree();
     if (treeError) return;
@@ -79,14 +81,17 @@
     window.removeEventListener('keydown', onKey);
     off?.();
     if (imgUrl) URL.revokeObjectURL(imgUrl);
-    if (dirty) notify(t('docs.draftKept', { name: prettyName(current) }), { kind: 'info', action: { label: t('docs.reopen'), run: () => go({ kind: 'docs', path: current }) } });
+    dropInline();
+    if (app.leaveGuard === leaveOk) app.leaveGuard = null;
   });
 
   /** Resolves true when it is safe to replace what is on screen. */
   async function leaveOk(): Promise<boolean> {
     if (!dirty) return true;
-    const choice = await new Promise<'save' | 'discard' | 'keep'>((resolve) => { unsaved = { resolve }; });
-    unsaved = null;
+    const choice = await choiceDialog({
+      title: t('docs.unsavedTitle'), body: t('docs.unsavedBody'), list: [current], cancelLabel: t('docs.keepEditing'),
+      choices: [{ id: 'discard', label: t('docs.discard'), danger: true }, { id: 'save', label: t('save'), primary: true }],
+    });
     if (choice === 'save') return save();
     if (choice === 'discard') { stashDrop(current); editing = false; return true; }
     return false;
@@ -124,12 +129,24 @@
     editing = false;
   }
 
-  async function save(): Promise<boolean> {
+  async function reloadTheirs() {
+    const p = current;
+    const d = await api(`/library/file?path=${encodeURIComponent(p)}`);
+    if (current !== p) return;
+    stashDrop(p);
+    doc = d;
+    editing = false;
+    notify(t('layer.docs.reloaded'));
+  }
+
+  /** `force` saves over whatever is on disk (the user chose "Overwrite with mine"). */
+  async function save(force: boolean | Event = false): Promise<boolean> {
+    force = force === true;
     if (saving) return false;
     saving = true;
     try {
-      await put('/library/file', { path: current, content: draft });
-      doc = { ...doc, content: draft };
+      const r = await put('/library/file', { path: current, content: draft, ...(force || !doc?.hash ? {} : { baseHash: doc.hash }) });
+      doc = { ...doc, content: draft, hash: r?.hash ?? doc.hash };
       stashDrop(current);
       editing = false;
       notify(t('docs.saved'));
@@ -137,10 +154,44 @@
       api(`/library/file?path=${encodeURIComponent(current)}`).then((d) => { if (d.path === current && !editing) doc = d; }).catch(() => {});
       return true;
     } catch (e: any) {
-      notify(t('docs.saveFailed', { error: e?.message ?? String(e) }), { kind: 'error' });
+      const msg: string = e?.message ?? String(e);
+      if (!msg.startsWith('STALE::')) { notify(t('docs.saveFailed', { error: msg }), { kind: 'error' }); return false; }
+      // The file changed on disk after it was opened here (a sync, the assistant, another app).
+      saving = false;
+      const choice = await choiceDialog({
+        title: t('layer.docs.staleTitle'), body: t('layer.docs.staleBody'), list: [current], cancelLabel: t('docs.keepEditing'),
+        choices: [{ id: 'mine', label: t('layer.docs.overwrite'), danger: true }, { id: 'theirs', label: t('layer.docs.reload'), primary: true }],
+      });
+      if (choice === 'mine') return save(true);
+      if (choice === 'theirs') { try { await reloadTheirs(); } catch (err) { fail(err); } }
       return false;
     } finally { saving = false; }
   }
+
+  // Pictures inside a note are library files: fetch their bytes (the page itself cannot load them) and swap them in.
+  let inlineUrls: string[] = [];
+  function dropInline() { for (const u of inlineUrls.splice(0)) URL.revokeObjectURL(u); }
+  $effect(() => {
+    const el = article, p = current;
+    void doc?.content;
+    dropInline();
+    if (!el || !p || editing) return;
+    tick().then(() => {
+      for (const img of Array.from(el.querySelectorAll('img'))) {
+        const src = img.getAttribute('src') || '';
+        if (!src || /^([a-z][a-z0-9+.-]*:|\/\/|#)/i.test(src)) continue;
+        let rel = src;
+        try { rel = decodeURIComponent(src); } catch { /* keep as written */ }
+        img.removeAttribute('src');
+        rawBlobUrl(resolveLink(p, rel)).then((u) => {
+          if (!u) return; // missing file, or a background service without /library/raw
+          if (current !== p || !img.isConnected) { URL.revokeObjectURL(u); return; }
+          inlineUrls.push(u);
+          img.src = u;
+        });
+      }
+    });
+  });
 
   function clickLink(e: MouseEvent) {
     if (mdClick(e)) return;
@@ -164,8 +215,13 @@
   }
 
   async function openExternal() {
-    try { const { openPath } = await import('@tauri-apps/plugin-opener'); await openPath(absPath); }
-    catch { notify(t('docs.openFailed'), { kind: 'error' }); }
+    try { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_library_file', { path: current }); }
+    catch (e: any) {
+      const msg = String(e?.message ?? e);
+      // An older shell without the command: stop offering the button.
+      if (/not found|unknown command|not allowed|no such command/i.test(msg) && !/library/i.test(msg)) canOpenExternal = false;
+      notify(t('docs.openFailed'), { kind: 'error', detail: msg });
+    }
   }
   async function reveal() {
     try { const { revealItemInDir } = await import('@tauri-apps/plugin-opener'); await revealItemInDir(absPath); }
@@ -173,7 +229,8 @@
   }
   async function copyDoc() {
     const text = article?.innerText?.trim() || doc?.body || doc?.content || '';
-    notify(t((await copyText(text)) ? 'docs.copied' : 'docs.copyFailed'));
+    const ok = await copyText(text);
+    notify(t(ok ? 'docs.copied' : 'docs.copyFailed'), { kind: ok ? 'info' : 'error' });
   }
 
   /** Prints only the document: a copy of the rendered article is placed at the top of <body> for the print pass. */
@@ -267,7 +324,7 @@
         {/each}
       {:else}
         <button class="dir" onclick={() => (open[k] = !open[k])} aria-expanded={!!(open[k] || filter)}>
-          <Icon name={open[k] || filter ? 'down' : 'right'} size={13} class={open[k] || filter ? '' : 'flip-rtl'} /> <bdi>{k}</bdi> <span class="count muted">{list.length}</span></button>
+          <Icon name={open[k] || filter ? 'down' : 'right'} size={13} class={open[k] || filter ? '' : 'flip-rtl'} /> <bdi>{k}</bdi> <span class="count muted">{fmtNum(list.length)}</span></button>
         {#if open[k] || filter}
           {#each list as f (f.path)}
             <button class="f in" class:active={current === f.path} aria-current={current === f.path ? 'page' : undefined} onclick={() => openFile(f.path)} title={f.path}>
@@ -338,7 +395,7 @@
           </div>
           {#if !isImageName(current) && !doc.plain}<p class="muted">{t('docs.notPreviewable')}</p>{/if}
           <div class="row wrapr">
-            {#if desktop && absPath}<button class="btn primary" onclick={openExternal}><Icon name="external" size={14} /> {t('docs.openDefault')}</button>{/if}
+            {#if desktop && canOpenExternal}<button class="btn primary" onclick={openExternal}><Icon name="external" size={14} /> {t('docs.openDefault')}</button>{/if}
             <button class="btn" onclick={discuss}><Icon name="chat" size={14} /> {t('docs.discussAssistant')}</button>
           </div>
         </div>
@@ -368,21 +425,6 @@
 
   {#if dragging}<div class="dropzone" aria-hidden="true"><Icon name="upload" size={28} /><span>{t('docs.dropHere')}</span></div>{/if}
 </div>
-
-{#if unsaved}
-  <div class="modal-bg" role="presentation">
-    <div class="modal unsaved" role="dialog" aria-modal="true" aria-labelledby="unsaved-title" tabindex="-1" use:trapFocus={{ onEscape: () => unsaved?.resolve('keep') }}>
-      <h2 id="unsaved-title">{t('docs.unsavedTitle')}</h2>
-      <p class="muted">{t('docs.unsavedBody')} <bdi>{current}</bdi></p>
-      <div class="row end">
-        <button class="btn" onclick={() => unsaved?.resolve('keep')}>{t('docs.keepEditing')}</button>
-        <button class="btn danger" onclick={() => unsaved?.resolve('discard')}>{t('docs.discard')}</button>
-        <!-- svelte-ignore a11y_autofocus -->
-        <button class="btn primary" autofocus onclick={() => unsaved?.resolve('save')}>{t('save')}</button>
-      </div>
-    </div>
-  </div>
-{/if}
 
 <style>
   .docs { position: relative; display: grid; grid-template-columns: 280px minmax(0, 1fr); height: calc(100vh - 26px); }
@@ -445,10 +487,6 @@
 
   .dropzone { position: absolute; inset: 8px; z-index: 10; pointer-events: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-weight: 500; color: var(--accent); border: 2px dashed var(--accent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--bg) 88%, transparent); }
 
-  .unsaved { max-width: 460px; display: grid; gap: 12px; }
-  .unsaved h2 { margin: 0; font-size: 17px; }
-  .unsaved p { margin: 0; overflow-wrap: anywhere; }
-  .end { justify-content: flex-end; flex-wrap: wrap; }
   .sm { font-size: 12px; }
 
   /* Printing: only the copy of the document made by printDoc() is laid out. */

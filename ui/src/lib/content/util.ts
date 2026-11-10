@@ -1,11 +1,11 @@
 // Small helpers shared by the content views (Chat, Docs, Todos, Ideas, Home).
-import { inTauri } from '../api';
+import { libraryBlob } from '../api';
 import { toast } from '../store.svelte';
 import { t, fmtNum, fmtDate } from '../i18n';
 
 export const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
-export type ToastOpts = { action?: { label: string; run: () => void }; kind?: 'error' | 'info' };
+export type ToastOpts = { action?: { label: string; run: () => void }; kind?: 'error' | 'info' | 'success'; detail?: string; key?: string; duration?: number };
 /** `toast(msg, opts?)` — the options are ignored by older one-argument versions of the store. */
 export const notify = (msg: string, opts?: ToastOpts) => (toast as (m: string, o?: ToastOpts) => void)(msg, opts);
 export const fail = (e: unknown) => notify(e instanceof Error ? e.message : String(e), { kind: 'error' });
@@ -79,17 +79,8 @@ export function normTodo<T extends { text: string; due?: string | null; title?: 
 // ---- library files ----
 /** Fetches a library file as a blob URL (needs the daemon's `GET /api/library/raw?path=`). Null when unavailable. */
 export async function rawBlobUrl(path: string): Promise<string | null> {
-  try {
-    let info: { port: number; token: string } | null;
-    if (inTauri()) {
-      const { invoke } = await import('@tauri-apps/api/core');
-      info = await invoke('daemon_info');
-    } else info = JSON.parse(localStorage.getItem('thoughts.dev') || 'null');
-    if (!info) return null;
-    const r = await fetch(`http://127.0.0.1:${info.port}/api/library/raw?path=${encodeURIComponent(path)}`, { headers: { Authorization: `Bearer ${info.token}` } });
-    if (!r.ok) return null;
-    return URL.createObjectURL(await r.blob());
-  } catch { return null; }
+  const b = await libraryBlob(path);
+  return b ? URL.createObjectURL(b) : null;
 }
 
 /** "notes/my-first_note.md" → "My first note" */

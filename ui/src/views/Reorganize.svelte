@@ -3,7 +3,7 @@
   import { api, post } from '../lib/api';
   import { go, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
-  import { confirmDialog } from '../lib/dialog.svelte';
+  import { choiceDialog, confirmDialog } from '../lib/dialog.svelte';
   import Icon from '../lib/Icon.svelte';
   let { id }: { id?: string } = $props();
   let d = $state<any>(null);
@@ -26,7 +26,20 @@
       await post(`/reorganize/${id}/${op}`);
       toast(op === 'merge' ? t('shell.reorg.kept') : t('shell.reorg.discarded'), { kind: 'success' });
       go({ kind: 'docs' });
-    } catch (e: any) { toast(t('shell.reorg.failed'), { kind: 'error', detail: e.message }); busy = false; }
+    } catch (e: any) {
+      busy = false;
+      const m = /REORG_CONFLICT::(.*)/s.exec(e.message || '');
+      if (!m) { toast(t('shell.reorg.failed'), { kind: 'error', detail: e.message }); return; }
+      // Notes were edited after the reorganize started, so it can no longer be applied cleanly.
+      const choice = await choiceDialog({
+        title: t('layer.reorg.conflictTitle'), body: t('layer.reorg.conflictBody'), list: m[1].split(';').map((f) => f.trim()).filter(Boolean),
+        cancelLabel: t('layer.reorg.keepLater'), choices: [{ id: 'discard', label: t('shell.reorg.discard'), danger: true }],
+      });
+      if (choice !== 'discard') return;
+      busy = true;
+      try { await post(`/reorganize/${id}/discard`); toast(t('shell.reorg.discarded'), { kind: 'success' }); go({ kind: 'docs' }); }
+      catch (err: any) { toast(t('shell.reorg.failed'), { kind: 'error', detail: err.message }); busy = false; }
+    }
   }
   const lines = $derived((d?.diff || '').split('\n'));
   const phase = $derived.by(() => { const k = 'shell.reorg.phase.' + d?.phase; const s = t(k); return s === k ? d?.phase : s; });

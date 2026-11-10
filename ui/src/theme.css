@@ -167,8 +167,9 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); 
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.25); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); display: grid; place-items: center; z-index: 50; }
 .modal { background: var(--glass); -webkit-backdrop-filter: blur(40px) saturate(180%); backdrop-filter: blur(40px) saturate(180%); border: 1px solid var(--hairline); border-radius: 16px; padding: 22px; width: min(720px, 92vw); max-height: 86vh; overflow: auto; box-shadow: var(--shadow-lg); }
 
-/* Native macOS window: the sidebar sits on real vibrancy, so the page itself is transparent. */
-html.native:has(.shell), html.native:has(.shell) body { background: transparent; }
+/* Native macOS window only: the sidebar sits on real vibrancy, so the page itself is transparent.
+   Windows and Linux keep the opaque theme background. */
+html.native.os-macos:has(.shell), html.native.os-macos:has(.shell) body { background: transparent; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--fill-2); border-radius: 10px; border: 3px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
