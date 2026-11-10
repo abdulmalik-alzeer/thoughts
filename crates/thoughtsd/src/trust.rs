@@ -28,11 +28,16 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
     // Every non-markdown file under .claude/ (scripts a hook could call); skills' .md edits don't re-prompt.
     // Symlinks are never followed (their target string is hashed instead); depth and count are capped.
     fn walk(d: &Path, depth: usize, out: &mut Vec<PathBuf>, links: &mut Vec<String>) {
-        if depth > 8 || out.len() > 2000 { links.push("limit".into()); return; }
+        // Over the cap: mix in a fresh value so this folder can never match a stored trust.
+        if depth > 8 || out.len() > 2000 { links.push(format!("limit:{:?}", std::time::SystemTime::now())); return; }
         if let Ok(rd) = std::fs::read_dir(d) { for e in rd.flatten() {
             let p = e.path();
             let Ok(ft) = e.file_type() else { continue };
-            if ft.is_symlink() { links.push(format!("{}->{}", p.display(), std::fs::read_link(&p).map(|t| t.display().to_string()).unwrap_or_default())); }
+            if ft.is_symlink() {
+                links.push(format!("{}->{}", p.display(), std::fs::read_link(&p).map(|t| t.display().to_string()).unwrap_or_default()));
+                // Also hash what it resolves to when that is a regular file.
+                if std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false) { out.push(p) }
+            }
             else if ft.is_dir() { walk(&p, depth + 1, out, links) }
             else if ft.is_file() && p.extension().map_or(true, |x| x != "md") { out.push(p) }
         } }
@@ -61,9 +66,9 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
     }
     for p in files {
         h.update(p.to_string_lossy().as_bytes()); h.update([0]);
-        // Hash at most 4 MB per file; don't follow a symlinked top-level file either.
-        if std::fs::symlink_metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
-            if let Ok(f) = std::fs::File::open(&p) { use std::io::Read; let mut b = vec![]; let _ = f.take(4 << 20).read_to_end(&mut b); h.update(&b); }
+        // Whole file, streamed (bounded memory); symlinks are resolved to the regular file they point at.
+        if std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false) {
+            if let Ok(mut f) = std::fs::File::open(&p) { let _ = std::io::copy(&mut f, &mut h); }
         }
         h.update([0xff]);
     }
