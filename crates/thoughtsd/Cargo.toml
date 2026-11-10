@@ -6,6 +6,7 @@ license.workspace = true
 description = "Thoughts session daemon: owns AI sessions, library, git and wraps"
 
 [dependencies]
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["cors"] }

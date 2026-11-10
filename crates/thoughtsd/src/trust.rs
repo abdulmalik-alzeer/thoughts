@@ -14,11 +14,34 @@ fn canon(p: &Path) -> String { std::fs::canonicalize(p).unwrap_or_else(|_| p.to_
 fn load() -> std::collections::BTreeMap<String, String> {
     std::fs::read_to_string(store()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
-fn fingerprint(f: &[String]) -> String { f.join("\n") }
+/// Hash of the findings *and the bytes of every file they could come from*, so editing a trusted
+/// hook, config or MCP file asks again.
+fn fingerprint(path: &Path, f: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(f.join("\n"));
+    let mut files: Vec<PathBuf> = [".claude/settings.json", ".claude/settings.local.json", ".mcp.json"].iter().map(|x| path.join(x)).collect();
+    let git = |arg: &str| std::process::Command::new(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()))
+        .current_dir(path).env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["-c", "core.fsmonitor=false", "rev-parse", arg]).output().ok().filter(|o| o.status.success())
+        .map(|o| { let p = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()); if p.is_absolute() { p } else { path.join(p) } });
+    for d in [git("--absolute-git-dir"), git("--git-common-dir")].into_iter().flatten() {
+        files.push(d.join("config")); files.push(d.join("config.worktree"));
+        if let Ok(rd) = std::fs::read_dir(d.join("hooks")) {
+            let mut hooks: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect(); hooks.sort(); files.extend(hooks);
+        }
+    }
+    for p in files {
+        h.update(p.to_string_lossy().as_bytes()); h.update([0]);
+        if let Ok(b) = std::fs::read(&p) { h.update(&b); }
+        h.update([0xff]);
+    }
+    format!("{:x}", h.finalize())
+}
 
 pub fn trust(p: &Path) -> anyhow::Result<()> {
     let mut m = load();
-    m.insert(canon(p), fingerprint(&findings(p)));
+    m.insert(canon(p), fingerprint(p, &findings(p)));
     std::fs::write(store(), serde_json::to_string_pretty(&m)?)?;
     Ok(())
 }
@@ -96,7 +119,7 @@ pub fn findings(path: &Path) -> Vec<String> {
 /// Fail with a machine-readable UNTRUSTED error when `path` needs the user's trust first.
 pub fn require(path: &Path) -> anyhow::Result<()> {
     let f = findings(path);
-    if f.is_empty() || load().get(&canon(path)) == Some(&fingerprint(&f)) { return Ok(()); }
+    if f.is_empty() || load().get(&canon(path)) == Some(&fingerprint(path, &f)) { return Ok(()); }
     anyhow::bail!("UNTRUSTED::{}::{}", path.display(), f.join("; "))
 }
 

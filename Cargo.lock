@@ -4230,6 +4230,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
  "tokio",
  "tower-http 0.5.2",
  "uuid",
