@@ -947,8 +947,13 @@ async fn library_history(State(st): S, Query(q): Query<HashMap<String, String>>)
     if let Some(p) = &path { library::resolve(&root, p)?; }
     // Edits made in the app are only recorded when something saves a point in history; do that now
     // (unless a save is already in progress) so History and Versions always include the latest edits.
-    if !st.library_busy() {
-        claude::record_library(&st, &root, &git::subject::edit("your changes"), true).await;
+    // Never while the assistant is working in the library (its half-written files would be recorded
+    // as the user's edits) and never while a save holds the library; record_library also skips an
+    // interrupted wrap. The library lock is held for the length of the commit.
+    if !st.run_active_in(&root) {
+        if let Ok(_guard) = st.library_lock.clone().try_lock_owned() {
+            claude::record_library_locked(&st, &root, &git::subject::edit("your changes")).await;
+        }
     }
     Ok(Json(json!(git::history(&st, &root, path.as_deref(), limit).await?)))
 }

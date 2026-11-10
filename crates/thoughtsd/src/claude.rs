@@ -397,6 +397,16 @@ pub(crate) async fn record_library(state: &AppState, lib: &Path, subject: &str, 
     crate::log::ok_or_warn("history: could not record the library", crate::git::commit_all(state, lib, subject).await);
 }
 
+/// Like `record_library`, for a caller that already holds the library lock.
+pub(crate) async fn record_library_locked(state: &AppState, lib: &Path, subject: &str) {
+    if !state.settings.read().await.git_enabled() { return; }
+    if crate::wraps::interrupted_wrap(state).await.is_some() { return; }
+    let _g = state.git_lock.lock().await;
+    if !lib.join(".git").exists() || !crate::git::is_repo(state, lib).await { return; }
+    if let Err(e) = crate::trust::require_git(lib) { crate::log::warn(format!("history: not recording ({e})")); return; }
+    crate::log::ok_or_warn("history: could not record the library", crate::git::commit_all(state, lib, subject).await);
+}
+
 /// Everything that happens once a run is over, however it ended.
 async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathBuf>, on_done: Option<OnDone>) {
     state.runs.lock().await.remove(&id);
