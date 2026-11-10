@@ -4,9 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs this first and only builds when it passes.
+  workflow_call:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -16,17 +18,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Full check on macOS (the platform the app ships on today).
-  macos:
-    runs-on: macos-latest
+  # Daemon tests, UI build and a shell compile check on every platform the app ships on.
+  # Windows and Linux have not been release-tested by a person yet: these jobs are what keeps
+  # them honest.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-22.04, windows-latest]
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Linux system packages (Tauri, keyring)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
+            libdbus-1-dev pkg-config git
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: npm ci
       - name: Daemon tests
         run: cargo test -p thoughtsd
@@ -35,31 +53,34 @@ jobs:
       - name: Check the desktop shell
         run: cargo check -p thoughts
 
-  # Windows and Linux are not release-tested yet: keep them compiling.
-  cross:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-latest]
-    runs-on: ${{ matrix.os }}
+  # Type and template checks for the UI.
+  ui-check:
+    name: UI check (svelte-check)
+    runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - name: Linux system packages (Tauri)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check the daemon
-        run: cargo check -p thoughtsd
       - run: npm ci
-      - name: Build the UI
-        run: npx vite build
-      - name: Check the desktop shell
-        run: cargo check -p thoughts
+      - run: npm run check
+
+  # Lints. NOT blocking yet: `cargo clippy -p thoughtsd -- -D warnings` does not pass today.
+  # Remove `continue-on-error` once it does.
+  clippy:
+    name: Clippy (not blocking)
+    runs-on: ubuntu-22.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Linux system packages (keyring)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo clippy -p thoughtsd -- -D warnings

@@ -5,6 +5,9 @@ name: Release
 # Every signing step is skipped when its secrets are missing, so this also works with
 # no secrets at all (unsigned builds). See docs/RELEASING.md.
 #
+# Order: tests (the whole CI workflow) -> one job creates the draft release -> the platform
+# builds upload into that release by id, one platform at a time.
+#
 # Secrets (Settings -> Secrets and variables -> Actions -> Secrets):
 #   macOS signing       APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY
 #   macOS notarisation  APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
@@ -12,18 +15,71 @@ name: Release
 #   Updater             TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 # Variables (same page -> Variables):
 #   UPDATER_PUBKEY      the updater PUBLIC key (not secret)
+#
+# Secrets are handed only to the step that uses them (`env:` on that step). Nothing secret is
+# written to GITHUB_ENV or to a file that later steps can read.
 
 on:
   push:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  # No installers are built from a commit whose tests fail.
+  tests:
+    uses: ./.github/workflows/ci.yml
+
+  # Creates the draft release ONCE (or finds it when the workflow is re-run), so the platform
+  # jobs never race to create it.
+  create-release:
+    needs: tests
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    outputs:
+      release-id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Tag must match the version in Cargo.toml
+        run: |
+          version=$(grep -A3 '^\[workspace.package\]' Cargo.toml | grep '^version' | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+      - name: Create (or find) the draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # Drafts are not reachable by tag through the API, so look through the release list.
+          find_id() { gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq "[.[] | select(.tag_name == \"$TAG\")][0].id // empty"; }
+          id=$(find_id)
+          if [ -z "$id" ]; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
+              --title "Thoughts $TAG" \
+              --notes "See the assets below to download and install this version."
+            id=$(find_id)
+          fi
+          if [ -z "$id" ]; then echo "Could not create or find the release for $TAG" >&2; exit 1; fi
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: create-release
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
+      # One platform at a time: each job merges its entry into the release's latest.json
+      # (the updater manifest). In parallel they would overwrite each other's entries.
+      max-parallel: 1
       matrix:
         include:
           - name: macOS (universal)
@@ -41,69 +97,31 @@ jobs:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Tag must match the version in Cargo.toml
-        shell: bash
-        run: |
-          version=$(grep -A3 '^\[workspace.package\]' Cargo.toml | grep '^version' | cut -d'"' -f2)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match Cargo.toml version $version" >&2
-            exit 1
-          fi
-
-      - name: Linux system packages (Tauri)
+      - name: Linux system packages (Tauri, keyring)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
+            libdbus-1-dev pkg-config
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.rust-targets }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: npm ci
 
-      # --- macOS: Developer ID signing + notarisation (only when the secrets exist) ---
-      # Tauri signs when APPLE_CERTIFICATE + APPLE_SIGNING_IDENTITY are set and notarises
-      # when APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID are set. They are exported only when
-      # non-empty, because an empty variable would make the build try to sign and fail.
-      - name: macOS signing and notarisation
-        if: runner.os == 'macOS'
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          put() { printf '%s<<__EOV__\n%s\n__EOV__\n' "$1" "$2" >> "$GITHUB_ENV"; }
-          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
-            put APPLE_CERTIFICATE "$APPLE_CERTIFICATE"
-            put APPLE_CERTIFICATE_PASSWORD "$APPLE_CERTIFICATE_PASSWORD"
-            put APPLE_SIGNING_IDENTITY "$APPLE_SIGNING_IDENTITY"
-            echo "macOS signing: on"
-            if [ -n "$APPLE_ID" ] && [ -n "$APPLE_PASSWORD" ] && [ -n "$APPLE_TEAM_ID" ]; then
-              put APPLE_ID "$APPLE_ID"
-              put APPLE_PASSWORD "$APPLE_PASSWORD"
-              put APPLE_TEAM_ID "$APPLE_TEAM_ID"
-              echo "macOS notarisation: on"
-            else
-              echo "macOS notarisation: off (APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID missing)"
-            fi
-          else
-            echo "macOS signing: off (unsigned build)"
-          fi
-
-      # --- Windows: sign with a .pfx certificate (only when the secrets exist) ---
+      # --- Windows: import the .pfx certificate (only when the secret exists) ---
+      # The thumbprint is not secret; it is passed on as a step output.
       - name: Windows signing certificate
+        id: wincert
         if: runner.os == 'Windows'
         shell: pwsh
         env:
@@ -112,43 +130,61 @@ jobs:
         run: |
           if (-not $env:WINDOWS_CERTIFICATE) { Write-Host "Windows signing: off (unsigned build)"; exit 0 }
           $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
-          Remove-Item $pfx
-          "WINDOWS_CERTIFICATE_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          try {
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $pw = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $pw
+          } finally {
+            if (Test-Path $pfx) { Remove-Item $pfx }
+          }
+          "thumbprint=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Windows signing: on"
 
-      # --- Updater: only when both the public key (variable) and private key (secret) exist ---
-      - name: Updater signing key
+      # --- Updater: on only when both the public key (variable) and the private key (secret) exist.
+      # This step only answers yes/no; the private key itself goes to the build step alone.
+      - name: Is the updater configured?
+        id: updater
         shell: bash
         env:
           UPDATER_PUBKEY: ${{ vars.UPDATER_PUBKEY }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          HAS_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
         run: |
-          put() { printf '%s<<__EOV__\n%s\n__EOV__\n' "$1" "$2" >> "$GITHUB_ENV"; }
-          if [ -n "$UPDATER_PUBKEY" ] && [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            put UPDATER_PUBKEY "$UPDATER_PUBKEY"
-            put UPDATER_ENDPOINT "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/latest.json"
-            put TAURI_SIGNING_PRIVATE_KEY "$TAURI_SIGNING_PRIVATE_KEY"
-            put TAURI_SIGNING_PRIVATE_KEY_PASSWORD "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          if [ -n "$UPDATER_PUBKEY" ] && [ "$HAS_PRIVATE_KEY" = "true" ]; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
             echo "Updater: on"
           else
+            echo "on=false" >> "$GITHUB_OUTPUT"
             echo "Updater: off (this build will say updates are not configured)"
           fi
 
+      # Public values only (see scripts/release-config.mjs).
       - name: Write release config
+        shell: bash
+        env:
+          UPDATER_PUBKEY: ${{ steps.updater.outputs.on == 'true' && vars.UPDATER_PUBKEY || '' }}
+          UPDATER_ENDPOINT: ${{ steps.updater.outputs.on == 'true' && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.wincert.outputs.thumbprint }}
         run: node scripts/release-config.mjs
 
-      - name: Build and upload to a draft release
-        uses: tauri-apps/tauri-action@v0.5.20
+      # The only step that sees the signing secrets. scripts/tauri-ci.mjs drops the ones that are
+      # empty or incomplete before starting the Tauri CLI (an empty variable would make the build
+      # try to sign and fail), so the same step works with all, some or none of them.
+      #
+      # Every third-party action is pinned to a full commit SHA (this one receives the signing
+      # secrets); .github/dependabot.yml proposes updates. Inputs checked against action-v1.0.0.
+      - name: Build and upload to the draft release
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.updater.outputs.on == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.updater.outputs.on == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: Thoughts ${{ github.ref_name }}
-          releaseBody: See the assets below to download and install this version.
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release-id }}
+          tauriScript: node scripts/tauri-ci.mjs
           args: --config src-tauri/release.conf.json ${{ matrix.args }}

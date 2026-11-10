@@ -8,7 +8,13 @@ import { fileURLToPath } from 'node:url';
 
 export function genPluginFrame() {
   const dir = fileURLToPath(new URL('../ui/public/', import.meta.url));
-  const runtime = readFileSync(dir + 'plugin-frame.js', 'utf8').replace(/<\/(script)/gi, '<\\/$1');
+  // Line endings are normalised to LF first: the browser hashes the script text after its HTML
+  // parser has turned CRLF into LF, so a CRLF checkout (Windows) would otherwise produce a hash
+  // that never matches. A leading BOM is dropped for the same reason.
+  const runtime = readFileSync(dir + 'plugin-frame.js', 'utf8')
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n?/g, '\n')
+    .replace(/<\/(script)/gi, '<\\/$1');
   const hash = createHash('sha256').update(runtime, 'utf8').digest('base64');
   const csp = `default-src 'none'; script-src 'sha256-${hash}' blob:; ` +
     `style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'`;
