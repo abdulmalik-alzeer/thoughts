@@ -123,6 +123,16 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        // The app window only ever shows the app itself; any attempt to navigate elsewhere is refused.
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("nav-guard")
+                .on_navigation(|_, url| {
+                    matches!(url.scheme(), "tauri" | "asset" | "about" | "blob" | "data")
+                        || matches!(url.host_str(), Some("tauri.localhost") | Some("localhost") | Some("127.0.0.1"))
+                            && (url.host_str() != Some("127.0.0.1") || cfg!(debug_assertions))
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![daemon_info, restart_daemon, set_dock_icon])
         .setup(|app| {
             // The Recovery menu lives in the native shell, outside the app layer,

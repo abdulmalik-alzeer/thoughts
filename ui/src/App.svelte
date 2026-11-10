@@ -47,6 +47,20 @@
 
   async function loadProjects() { projects = await api('/projects'); }
 
+  // Links in rendered markdown (chats, docs, plugins) must never navigate the app window.
+  // Safe external links open in the default browser; everything else is dropped.
+  function guardLinks(e: MouseEvent) {
+    if (e.defaultPrevented) return;
+    const a = (e.target as HTMLElement)?.closest?.('a');
+    if (!a) return;
+    const href = a.getAttribute('href') || '';
+    if (href.startsWith('#')) return;
+    e.preventDefault();
+    if (/^(https?:|mailto:)/i.test(href)) {
+      import('@tauri-apps/plugin-opener').then((o) => o.openUrl(href)).catch(() => window.open(href, '_blank', 'noopener'));
+    }
+  }
+
   onMount(() => {
     boot();
     const off = on(async (e) => {
@@ -126,6 +140,8 @@
     ...(app.settings?.modules?.builds !== false ? ['projects'] : []),
   ] as const);
 </script>
+
+<svelte:window onclick={guardLinks} />
 
 {#if app.error}
   <div class="center">

@@ -11,6 +11,10 @@ pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<
     let store = state.settings.read().await.sync.credential_store.clone();
     let mut c = Command::new(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
     c.current_dir(dir).env("PATH", crate::claude::shell_path()).env("GIT_TERMINAL_PROMPT", "0");
+    // Never run code a library's own git config could smuggle in (hooks, fsmonitor, ssh command).
+    #[cfg(windows)] let no_hooks = "NUL";
+    #[cfg(not(windows))] let no_hooks = "/dev/null";
+    c.args(["-c", "core.fsmonitor=false", "-c", &format!("core.hooksPath={no_hooks}"), "-c", "core.sshCommand=ssh"]);
     if store == "file" {
         let f = crate::paths::git_credentials_file();
         c.args(["-c", "credential.helper=", "-c", &format!("credential.helper=store --file={}", f.display())]);

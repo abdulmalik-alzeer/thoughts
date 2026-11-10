@@ -56,19 +56,26 @@
     step === 2 ? !!s.libraryPath : true
   );
 
-  async function finish() {
+  async function finish(trusted = false) {
     busy = true;
     try {
       const r = await post('/onboarding', {
         settings: s, libraryMode, seeds: seeds.split('\n').map((x) => x.trim()).filter(Boolean),
-        remoteUrl, remoteUsername: remoteUser, remoteToken, apiToken: useApi ? apiToken : '',
+        remoteUrl, remoteUsername: remoteUser, remoteToken, apiToken: useApi ? apiToken : '', trusted,
       });
       if (wantSearch) post('/extensions/search/install').catch((e) => toast('Search extension: ' + e.message));
       app.settings = await api('/settings');
       applyTheme();
       done(r.setupChatId);
     } catch (e: any) {
-      toast(e.message);
+      const m = String(e.message || '');
+      if (m.includes('UNTRUSTED:')) {
+        const what = m.split('UNTRUSTED:')[1];
+        busy = false;
+        if (confirm(`This library contains settings that can run programs on your computer:\n\n• ${what.split('; ').join('\n• ')}\n\nOnly continue if you made this library or trust whoever did.`)) return finish(true);
+        return;
+      }
+      toast(m);
     } finally { busy = false; }
   }
 </script>
@@ -184,7 +191,7 @@
     {#if step < steps.length - 1}
       <button class="btn primary" disabled={!canNext} onclick={() => step++}>{t('next')}</button>
     {:else}
-      <button class="btn primary" disabled={busy} onclick={finish}>{busy ? '…' : t('finish')}</button>
+      <button class="btn primary" disabled={busy} onclick={() => finish()}>{busy ? '…' : t('finish')}</button>
     {/if}
   </div>
 </div>

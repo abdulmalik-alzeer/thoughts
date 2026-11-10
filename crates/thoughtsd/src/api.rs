@@ -211,6 +211,24 @@ struct Onboarding {
     remote_username: String,
     remote_token: String,
     api_token: String,
+    trusted: bool,
+}
+
+/// Things in an existing library that could run code on this machine when the app or the AI works in it.
+fn foreign_config(path: &std::path::Path) -> Vec<String> {
+    let mut found = vec![];
+    for f in [".claude/settings.json", ".claude/settings.local.json"] {
+        if std::fs::read_to_string(path.join(f)).map(|t| t.contains("\"hooks\"")).unwrap_or(false) { found.push(format!("Claude hooks in {f}")); }
+    }
+    if let Ok(rd) = std::fs::read_dir(path.join(".git/hooks")) {
+        if rd.flatten().any(|e| !e.file_name().to_string_lossy().ends_with(".sample")) { found.push("git hooks in .git/hooks".into()); }
+    }
+    if let Ok(cfg) = std::fs::read_to_string(path.join(".git/config")) {
+        for k in ["fsmonitor", "sshcommand", "hookspath", "[filter", "textconv"] {
+            if cfg.to_lowercase().contains(k) { found.push(format!("custom git setting ({k}) in .git/config")); }
+        }
+    }
+    found
 }
 
 async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
@@ -230,6 +248,9 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
         }
     } else if !path.join("CLAUDE.md").exists() && !path.join("INDEX.md").exists() {
         bail!("{} doesn't look like a Thoughts library (no CLAUDE.md / INDEX.md)", path.display());
+    } else if !o.trusted {
+        let f = foreign_config(&path);
+        if !f.is_empty() { bail!("UNTRUSTED:{}", f.join("; ")); }
     }
     if s.git_enabled() {
         git::init(&st, &path).await?;
