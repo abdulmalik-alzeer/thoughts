@@ -506,6 +506,10 @@ mod tests {
             // A link out of the allowed folder does not widen it.
             std::fs::create_dir_all(d.join("me")).unwrap();
             std::os::unix::fs::symlink(d.join("me"), d.join("Billing/alias")).unwrap();
+            assert!(check_plugin_write(&d, "Billing/alias/profile.md", &allow).is_err());
+            // The lower-case spelling reaches the same link only where names ignore case (macOS);
+            // on a case-sensitive disk it is simply a new, separate folder inside the allowed one.
+            #[cfg(target_os = "macos")]
             assert!(check_plugin_write(&d, "billing/alias/profile.md", &allow).is_err());
         }
         std::fs::remove_dir_all(d).unwrap();

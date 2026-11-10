@@ -58,6 +58,12 @@ pub async fn git_raw(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Res
                "http.lowSpeedLimit=1000", "http.lowSpeedTime=30"] {
         c.args(["-c", kv]);
     }
+    // Git for Windows turns line-ending conversion on in its system settings, which this command
+    // ignores (see above). Without the line below a library that was cloned with that conversion
+    // would look entirely changed here. "input" compares and saves with plain line endings and
+    // never rewrites the files on disk.
+    #[cfg(windows)]
+    c.args(["-c", "core.autocrlf=input"]);
     // On Linux a machine without a keyring keeps passwords in the private file instead (see `save_credential`).
     let file_fallback = cfg!(target_os = "linux") && crate::paths::git_credentials_file().exists();
     if store == "file" || file_fallback {
