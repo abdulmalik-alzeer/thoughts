@@ -47,6 +47,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/claude/token", post(save_ai_token))
         .route("/api/ai/claude/login", post(claude_login))
         .route("/api/git/install", post(git_install))
+        .route("/api/library/trust", post(trust_library))
         // library
         .route("/api/library/ideas", get(ideas))
         .route("/api/library/tree", get(tree))
@@ -134,6 +135,14 @@ async fn git_tool_status() -> Value {
     }
 }
 
+#[derive(Deserialize)]
+struct TrustReq { path: String }
+/// Record the user's explicit decision to trust a library folder that contains runnable settings.
+async fn trust_library(Json(t): Json<TrustReq>) -> R {
+    crate::trust::trust(std::path::Path::new(&t.path))?;
+    ok()
+}
+
 /// Starts the OS installer for git (Apple's command-line tools on macOS).
 async fn git_install() -> R {
     #[cfg(target_os = "macos")]
@@ -165,6 +174,9 @@ fn validate(s: &Settings) -> anyhow::Result<()> {
 async fn put_settings(State(st): S, Json(mut new): Json<Settings>) -> R {
     validate(&new)?;
     let old = st.settings.read().await.clone();
+    if new.library_path != old.library_path {
+        if let Some(p) = &new.library_path { crate::trust::require(std::path::Path::new(p))?; }
+    }
     // Server-owned fields the UI may not overwrite.
     new.last_wrap = old.last_wrap;
     new.ai.claude.has_api_token = old.ai.claude.has_api_token;
@@ -211,25 +223,6 @@ struct Onboarding {
     remote_username: String,
     remote_token: String,
     api_token: String,
-    trusted: bool,
-}
-
-/// Things in an existing library that could run code on this machine when the app or the AI works in it.
-fn foreign_config(path: &std::path::Path) -> Vec<String> {
-    let mut found = vec![];
-    for f in [".claude/settings.json", ".claude/settings.local.json"] {
-        if std::fs::read_to_string(path.join(f)).map(|t| t.contains("\"hooks\"")).unwrap_or(false) { found.push(format!("Claude hooks in {f}")); }
-    }
-    if let Ok(rd) = std::fs::read_dir(path.join(".git/hooks")) {
-        if rd.flatten().any(|e| !e.file_name().to_string_lossy().ends_with(".sample")) { found.push("git hooks in .git/hooks".into()); }
-    }
-    if let Ok(cfg) = std::fs::read_to_string(path.join(".git/config")) {
-        for k in ["fsmonitor", "sshcommand", "hookspath", "[filter", "textconv", "[include", "[includeif",
-                  "gpg", "program", "helper", "askpass", "external", "[merge", "pager", "editor", "[alias", "[diff"] {
-            if cfg.to_lowercase().contains(k) { found.push(format!("custom git setting ({k}) in .git/config")); }
-        }
-    }
-    found
 }
 
 async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
@@ -249,9 +242,8 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
         }
     } else if !path.join("CLAUDE.md").exists() && !path.join("INDEX.md").exists() {
         bail!("{} doesn't look like a Thoughts library (no CLAUDE.md / INDEX.md)", path.display());
-    } else if !o.trusted {
-        let f = foreign_config(&path);
-        if !f.is_empty() { bail!("UNTRUSTED:{}", f.join("; ")); }
+    } else {
+        crate::trust::require(&path)?;
     }
     if s.git_enabled() {
         git::init(&st, &path).await?;

@@ -58,7 +58,18 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
   });
   const text = await r.text();
   const data = text ? JSON.parse(text) : null;
-  if (!r.ok) throw new Error(data?.error || r.statusText);
+  if (!r.ok) {
+    const msg: string = data?.error || r.statusText;
+    // The daemon refuses to work in a library that can run programs until the user trusts it.
+    const m = msg.match(/UNTRUSTED::(.*?)::(.*)/s);
+    if (m && path !== '/library/trust') {
+      const ok = confirm(`This library contains settings that can run programs on your computer:\n\n• ${m[2].split('; ').join('\n• ')}\n\nOnly continue if you made this library or trust whoever did.`);
+      if (!ok) throw new Error('Library not opened.');
+      await api('/library/trust', { method: 'POST', body: { path: m[1] } });
+      return api<T>(path, opts);
+    }
+    throw new Error(msg);
+  }
   return data as T;
 }
 

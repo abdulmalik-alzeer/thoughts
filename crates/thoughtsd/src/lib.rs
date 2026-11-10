@@ -16,6 +16,7 @@ pub mod paths;
 pub mod settings;
 pub mod state;
 pub mod todos;
+pub mod trust;
 pub mod updates;
 pub mod wraps;
 
