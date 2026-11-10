@@ -35,7 +35,7 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
             let Ok(ft) = e.file_type() else { continue };
             if ft.is_symlink() {
                 links.push(format!("{}->{}", p.display(), std::fs::read_link(&p).map(|t| t.display().to_string()).unwrap_or_default()));
-                // Also hash what it resolves to, but only a regular file inside the library.
+                // Also hash what it resolves to when that is a regular file.
                 out.push(p)
             }
             else if ft.is_dir() { walk(&p, depth + 1, out, links) }
@@ -46,7 +46,6 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
     walk(&path.join(".claude"), 0, &mut extra, &mut links);
     extra.sort(); links.sort(); files.extend(extra);
     h.update(links.join("\n"));
-    let root = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let git_dirs: Vec<PathBuf> = [git("--absolute-git-dir"), git("--git-common-dir")].into_iter().flatten()
         .filter_map(|d| std::fs::canonicalize(d).ok()).collect();
     for d in git_dirs.clone() {
@@ -69,11 +68,10 @@ fn fingerprint(path: &Path, f: &[String]) -> String {
     }
     for p in files {
         h.update(p.to_string_lossy().as_bytes()); h.update([0]);
-        // Whole file, streamed, up to 16 MB; bigger files can never match a stored trust. Symlinks are
-        // read only when they resolve to a regular file inside the library (never /dev, /proc, …).
+        // Whole file, streamed, up to 16 MB; bigger files can never match a stored trust.
         let real = std::fs::canonicalize(&p).ok();
-        let inside = real.as_ref().map_or(false, |r| r.starts_with(&root) || git_dirs.iter().any(|g| r.starts_with(g)));
-        if inside && real.as_ref().and_then(|r| std::fs::metadata(r).ok()).map_or(false, |m| m.is_file()) {
+        // Regular files only (never devices or pipes), wherever they live; the byte cap bounds the read.
+        if real.as_ref().and_then(|r| std::fs::metadata(r).ok()).map_or(false, |m| m.is_file()) {
             const LIMIT: u64 = 16 << 20;
             if let Ok(f) = std::fs::File::open(real.unwrap()) {
                 use std::io::Read;
