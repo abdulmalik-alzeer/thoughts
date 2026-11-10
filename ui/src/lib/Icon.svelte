@@ -4,7 +4,8 @@
     History, Sparkles, Plus, Paperclip, Trash2, ArrowUp, Square, Wrench, Brain, TriangleAlert, Check,
     ChevronRight, ChevronDown, Sun, Moon, SunMoon, Search, ArrowRight, ArrowDown, MessageCircle, Folder,
     Puzzle, Bot, GitBranch, Server, Palette, LayoutGrid, X, Inbox, CalendarDays, Clock, BookOpen, Shield,
-    Download, Pencil, ExternalLink,
+    Download, Pencil, ExternalLink, CircleQuestionMark, Copy, RotateCw, Printer, Upload, Eye, Lock, Bell, Keyboard,
+    PanelLeft, Undo2, Funnel, Info, WifiOff, ChevronLeft, Command,
   } from '@lucide/svelte';
 
   // One place for every icon the app uses. Plugins can pass any of these names.
@@ -16,7 +17,9 @@
     system: SunMoon, search: Search, arrow: ArrowRight, arrowDown: ArrowDown, folder: Folder, plugin: Puzzle,
     ai: Bot, git: GitBranch, daemon: Server, palette: Palette, modules: LayoutGrid, close: X, inbox: Inbox,
     calendar: CalendarDays, clock: Clock, book: BookOpen, shield: Shield, download: Download, edit: Pencil,
-    external: ExternalLink,
+    external: ExternalLink, help: CircleQuestionMark, copy: Copy, retry: RotateCw, print: Printer, upload: Upload,
+    eye: Eye, lock: Lock, bell: Bell, keyboard: Keyboard, sidebar: PanelLeft, undo: Undo2, filter: Funnel, info: Info,
+    offline: WifiOff, left: ChevronLeft, command: Command,
   };
 </script>
 

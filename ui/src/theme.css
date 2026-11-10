@@ -35,8 +35,8 @@
 
 /* ---------- Saudi ---------- */
 [data-theme="saudi"][data-mode="light"] {
-  --bg: #f6f3ec; --panel: #fffdf9; --panel-2: #efe9dc; --sidebar: #ece6d8; --fg: #14241b; --muted: #66706a;
-  --accent: #006c35; --accent-fg: #ffffff; --accent-2: #9a7425; --border: #e2dac7;
+  --bg: #f6f3ec; --panel: #fffdf9; --panel-2: #efe9dc; --sidebar: #ece6d8; --fg: #14241b; --muted: #59635d;
+  --accent: #006c35; --accent-fg: #ffffff; --accent-2: #7d5d12; --border: #e2dac7;
   --danger: #b3261e; --ok: #006c35; --code-bg: #f1ecdf;
 }
 [data-theme="saudi"][data-mode="dark"] {
@@ -63,7 +63,7 @@
   --fill: var(--panel-2); --fill-2: var(--panel-2); --shadow: none; --shadow-lg: none;
 }
 [data-theme="contrast"] .nav.active, [data-theme="contrast"] .chat.active { color: var(--accent-fg) !important; }
-[data-theme="contrast"] :focus-visible { outline: 3px solid var(--accent) !important; outline-offset: 2px; }
+[data-theme="contrast"] :focus-visible { outline-width: 3px !important; }
 [data-theme="contrast"] a { text-decoration: underline; }
 
 /* ---------- High tech ---------- */
@@ -89,6 +89,18 @@ body {
 }
 [dir="rtl"] body, [dir="rtl"] { font-family: var(--font-ar); }
 a { color: var(--accent); }
+
+/* Keyboard focus is always visible, in every theme. Never remove it — restyle it if you must. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn.primary:focus-visible { outline-offset: 3px; }
+
+/* Directional icons (chevrons, arrows) point the other way in right-to-left languages. */
+[dir="rtl"] .flip-rtl { transform: scaleX(-1); }
+
+/* Text for screen readers only. */
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+
+kbd { font-family: var(--mono); font-size: 12px; background: var(--fill); border: 1px solid var(--hairline); border-radius: 5px; padding: 1px 6px; white-space: nowrap; }
 code, pre { font-family: var(--mono); font-size: .92em; }
 pre { background: var(--code-bg); padding: 12px; border-radius: var(--radius); overflow: auto; border: var(--border-w) solid var(--hairline); }
 :not(pre) > code { background: var(--code-bg); padding: 1px 5px; border-radius: 4px; }
@@ -117,7 +129,8 @@ input, textarea, select {
   border-radius: var(--radius); padding: 7px 10px; width: 100%; transition: box-shadow .15s, background .15s;
 }
 [data-theme="contrast"] input, [data-theme="contrast"] textarea, [data-theme="contrast"] select { border-color: var(--border); background: var(--bg); }
-input:focus, textarea:focus, select:focus { outline: none; background: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+input:focus, textarea:focus, select:focus { background: var(--bg); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline-offset: 0; }
 input[type="checkbox"], input[type="radio"] { width: auto; accent-color: var(--accent); }
 label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); margin: 10px 0 4px; }
 .card, .surface {
@@ -133,14 +146,15 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); 
 .surface.lit { background: radial-gradient(120% 70% at 50% -10%, var(--spot), transparent 60%) padding-box, var(--surface) padding-box, var(--edge) border-box; }
 .surface.lit:hover { background: radial-gradient(120% 80% at 50% -10%, var(--spot-strong), transparent 65%) padding-box, var(--surface) padding-box, var(--edge-strong) border-box; }
 .eyebrow { font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: .01em; }
-.more { all: unset; cursor: pointer; font-size: 12.5px; font-weight: 500; color: var(--accent-2); display: inline-flex; align-items: center; gap: 2px; }
+.more { font: inherit; background: none; border: 0; padding: 0; border-radius: 4px; cursor: pointer; font-size: 12.5px; font-weight: 500; color: var(--accent-2); display: inline-flex; align-items: center; gap: 2px; }
 .more:hover { text-decoration: underline; text-underline-offset: 3px; }
 .display { font-size: 44px; font-weight: 500; letter-spacing: -.045em; line-height: 1.05; margin: 0; }
-.muted-2 { color: color-mix(in srgb, var(--muted) 75%, transparent); }
+/* Was 75%-opacity muted (2.7–4.7:1). --muted is ≥4.5:1 on every surface of every theme, so use it solid. */
+.muted-2 { color: var(--muted); }
 .muted { color: var(--muted); }
 .row { display: flex; gap: 8px; align-items: center; }
 .grow { flex: 1; min-width: 0; }
-.pill { font-size: 11px; font-weight: 500; padding: 1px 8px; border-radius: 99px; background: var(--fill); color: var(--muted); white-space: nowrap; }
+.pill { font-size: 12px; font-weight: 500; padding: 1px 8px; border-radius: 99px; background: var(--fill); color: var(--muted); white-space: nowrap; }
 .pill.accent { background: var(--tint); color: var(--accent); }
 .scroll { overflow: auto; }
 .page { padding: 20px 28px; max-width: 1100px; }
@@ -149,6 +163,7 @@ label { display: block; font-size: 12px; font-weight: 500; color: var(--muted); 
 .md ul, .md ol { padding-inline-start: 22px; margin: 0 0 10px; }
 .toast-wrap { position: fixed; bottom: 18px; inset-inline-end: 18px; display: flex; flex-direction: column; gap: 8px; z-index: 100; }
 .toast { background: var(--glass); -webkit-backdrop-filter: blur(24px) saturate(180%); backdrop-filter: blur(24px) saturate(180%); border: 1px solid var(--hairline); padding: 10px 14px; border-radius: var(--radius-lg); box-shadow: var(--shadow-lg); max-width: 380px; }
+.modal-bg.top { z-index: 90; }
 .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.25); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); display: grid; place-items: center; z-index: 50; }
 .modal { background: var(--glass); -webkit-backdrop-filter: blur(40px) saturate(180%); backdrop-filter: blur(40px) saturate(180%); border: 1px solid var(--hairline); border-radius: 16px; padding: 22px; width: min(720px, 92vw); max-height: 86vh; overflow: auto; box-shadow: var(--shadow-lg); }
 
@@ -178,4 +193,21 @@ html.native:has(.shell), html.native:has(.shell) body { background: transparent;
 .nav, .chat, .cat, .iconbtn { transition: background .18s ease, color .18s ease; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; transition-duration: 1ms !important; }
+}
+
+/* ---------- skeleton (loading placeholders) ---------- */
+.skel { border-radius: 6px; background: linear-gradient(90deg, var(--fill) 25%, var(--fill-2) 50%, var(--fill) 75%); background-size: 200% 100%; animation: skel 1.4s linear infinite; }
+@keyframes skel { to { background-position: -200% 0; } }
+
+/* ---------- print ---------- */
+/* Add class="no-print" to anything that should not appear on paper (the shell does this for the
+   sidebar, banners, toasts and dialogs) so a content view can call window.print() and get a clean page. */
+@media print {
+  .no-print { display: none !important; }
+  html, body { height: auto; background: #fff; }
+  .shell { display: block !important; height: auto !important; }
+  .main { overflow: visible !important; background: none !important; }
+  .view, .page > *, .home > section { animation: none !important; }
+  .page { max-width: none; padding: 0; }
+  pre { white-space: pre-wrap; overflow: visible; max-height: none !important; }
 }
