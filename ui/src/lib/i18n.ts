@@ -45,18 +45,42 @@ const ar: Partial<Record<keyof typeof en, string>> = {
   wrapNagBody: 'لديك {n} محادثات لم تُحفظ في مكتبتك بعد. الحفظ يلخصها في أفكارك وملاحظاتك ومهامك ثم يثبتها — حتى لا يضيع شيء فكرت فيه.',
 };
 
-export type Key = keyof typeof en;
+// Extra dictionaries live in ./i18n/<area>.ts, each `export default { en: {...}, ar: {...} }`.
+// They are merged here so separate areas of the app can add strings without touching this file.
+const extra = import.meta.glob('./i18n/*.ts', { eager: true }) as Record<string, { default: { en: Record<string, string>; ar?: Record<string, string> } }>;
+const EN: Record<string, string> = { ...en };
+const AR: Record<string, string> = { ...(ar as Record<string, string>) };
+for (const m of Object.values(extra)) { Object.assign(EN, m.default.en); Object.assign(AR, m.default.ar ?? {}); }
+
+export type Key = keyof typeof en | (string & {});
+export const lang = () => (app.settings?.language === 'ar' ? 'ar' : 'en');
 
 export function t(k: Key, vars: Record<string, string | number> = {}): string {
-  let s = (app.settings?.language === 'ar' ? ar[k] : undefined) ?? en[k] ?? k;
-  for (const [n, v] of Object.entries(vars)) s = s.replace(`{${n}}`, String(v));
+  let s = (lang() === 'ar' ? AR[k] : undefined) ?? EN[k] ?? k;
+  for (const [n, v] of Object.entries(vars)) s = s.replaceAll(`{${n}}`, String(v));
   return s;
+}
+
+/** Plural-aware string: looks up `${k}_${category}` (zero|one|two|few|many|other per Intl.PluralRules)
+ *  and falls back to `${k}_other`, then `k`. `{n}` is replaced with the locale-formatted number. */
+export function tn(k: string, n: number, vars: Record<string, string | number> = {}): string {
+  const cat = new Intl.PluralRules(lang()).select(n);
+  const dict = lang() === 'ar' ? AR : EN;
+  const key = [`${k}_${cat}`, `${k}_other`, k].find((x) => dict[x] ?? EN[x]) ?? k;
+  return t(key, { n: fmtNum(n), ...vars });
+}
+
+/** Numbers and dates always go through these so digits/calendars stay consistent per language. */
+export const fmtNum = (n: number) => new Intl.NumberFormat(lang() === 'ar' ? 'ar-SA-u-nu-latn' : 'en').format(n);
+export function fmtDate(d: string | number | Date, opts: Intl.DateTimeFormatOptions = { dateStyle: 'medium' }): string {
+  return new Intl.DateTimeFormat(lang() === 'ar' ? 'ar-SA-u-ca-gregory-nu-latn' : 'en', opts).format(new Date(d));
 }
 
 export function ago(when: string | number): string {
   const m = Math.max(0, Math.round((Date.now() - new Date(when).getTime()) / 60000));
   if (m < 1) return t('justNow');
-  if (m < 60) return t('minutesAgo', { n: m });
-  if (m < 60 * 24) return t('hoursAgo', { n: Math.round(m / 60) });
-  return t('daysAgo', { n: Math.round(m / 1440) });
+  const rtf = new Intl.RelativeTimeFormat(lang() === 'ar' ? 'ar-SA-u-nu-latn' : 'en', { numeric: 'always', style: lang() === 'ar' ? 'long' : 'narrow' });
+  if (m < 60) return rtf.format(-m, 'minute');
+  if (m < 60 * 24) return rtf.format(-Math.round(m / 60), 'hour');
+  return rtf.format(-Math.round(m / 1440), 'day');
 }

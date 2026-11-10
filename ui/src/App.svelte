@@ -19,6 +19,7 @@
   import Home from './views/Home.svelte';
   import Icon from './lib/Icon.svelte';
   import Logo from './lib/Logo.svelte';
+  import Dialogs from './lib/Dialogs.svelte';
 
   let projects = $state<any[]>([]);
   let showTour = $state(false);
@@ -142,6 +143,7 @@
 </script>
 
 <svelte:window onclick={guardLinks} />
+<Dialogs />
 
 {#if app.error}
   <div class="center">

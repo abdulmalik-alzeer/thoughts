@@ -63,7 +63,9 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
     // The daemon refuses to work in a library that can run programs until the user trusts it.
     const m = msg.match(/UNTRUSTED::(.*?)::(.*)/s);
     if (m && path !== '/library/trust') {
-      const ok = confirm(`This library contains settings that can run programs on your computer:\n\n• ${m[2].split('; ').join('\n• ')}\n\nOnly continue if you made this library or trust whoever did.`);
+      const { confirmDialog } = await import('./dialog.svelte');
+      const { t } = await import('./i18n');
+      const ok = await confirmDialog({ title: t('trustTitle'), body: t('trustBody'), list: m[2].split('; '), confirmLabel: t('trustConfirm'), danger: true });
       if (!ok) throw new Error('Library not opened.');
       await api('/library/trust', { method: 'POST', body: { path: m[1] } });
       return api<T>(path, opts);
