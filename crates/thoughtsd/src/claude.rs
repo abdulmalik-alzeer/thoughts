@@ -123,17 +123,75 @@ pub async fn version(state: &AppState) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
 }
 
-/// `{installed, version, loggedIn, auth}`
+/// How long a "signed in" answer from the CLI is trusted before a chat asks it again.
+const AUTH_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// What `claude auth status --json` prints, or `Null` when it cannot be asked. Never hangs.
+async fn auth_status(bin: &Path) -> Value {
+    let mut c = cmd(bin);
+    c.args(["auth", "status", "--json"]);
+    crate::proc::output_timeout(&mut c, std::time::Duration::from_secs(15)).await.ok()
+        .and_then(|o| serde_json::from_slice(&o.stdout).ok()).unwrap_or(Value::Null)
+}
+
+/// `{installed, version, loggedIn, authFailed, auth}`. `loggedIn` is what the CLI says, unless the
+/// last run was refused for lack of a valid sign-in (`authFailed`): the CLI only looks at what is
+/// stored on this machine, so an expired or revoked sign-in still reads as "logged in" there.
 pub async fn status(state: &AppState) -> Value {
     let Some(bin) = binary(state).await else {
         return json!({"installed": false});
     };
     let version = version(state).await;
-    let auth: Value = cmd(&bin).args(["auth", "status", "--json"]).output().await.ok()
-        .and_then(|o| serde_json::from_slice(&o.stdout).ok()).unwrap_or(Value::Null);
+    let auth = auth_status(&bin).await;
     let has_token = state.settings.read().await.ai.claude.has_api_token;
-    let logged_in = auth.get("loggedIn").and_then(Value::as_bool).unwrap_or(false) || has_token;
-    json!({"installed": true, "path": bin, "version": version, "loggedIn": logged_in, "auth": auth})
+    let failed = state.auth_failed.load(std::sync::atomic::Ordering::Relaxed);
+    let logged_in = (auth.get("loggedIn").and_then(Value::as_bool).unwrap_or(false) || has_token) && !failed;
+    json!({"installed": true, "path": bin, "version": version, "loggedIn": logged_in, "authFailed": failed, "auth": auth})
+}
+
+/// Does this error text from the CLI mean "not signed in" (never signed in, expired, revoked, bad key)?
+pub fn is_auth_failure(text: &str) -> bool {
+    let t = text.to_lowercase();
+    ["not logged in", "please run /login", "run /login", "invalid api key", "invalid x-api-key", "authentication_error",
+     "authentication_failed", "oauth token", "invalid bearer token", "invalid authentication credentials"].iter().any(|k| t.contains(k))
+}
+
+/// Is the app using its own provider address or key (then the Claude account sign-in is beside the point)?
+async fn own_provider(state: &AppState) -> bool {
+    let c = state.settings.read().await.ai.claude.clone();
+    c.has_api_token || c.base_url.as_deref().map_or(false, |u| !u.trim().is_empty())
+}
+
+/// The sentence shown when a run is refused for lack of a sign-in, in the user's language.
+pub fn signed_out_text() -> String {
+    crate::tr::user_err_in(crate::tr::arabic(), "assistant.signed_out", &[]).message.trim_start_matches("SIGNED_OUT::").to_string()
+}
+
+/// Ask before a chat message is sent, so a missing sign-in is said plainly up front instead of
+/// surfacing as a failed answer. A "yes" is remembered for `AUTH_TTL`; "cannot tell" lets the run go.
+pub async fn require_signed_in(state: &AppState) -> anyhow::Result<()> {
+    if state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).is_some() || own_provider(state).await { return Ok(()); }
+    let fresh = state.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()).map_or(false, |at| at.elapsed() < AUTH_TTL);
+    if fresh { return Ok(()); }
+    let bin = binary(state).await.ok_or_else(|| crate::tr::err("assistant.missing", &[]))?;
+    match auth_status(&bin).await.get("loggedIn").and_then(Value::as_bool) {
+        Some(true) => { *state.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::time::Instant::now()); Ok(()) }
+        Some(false) => {
+            crate::log::warn("chat not started: the assistant is not signed in");
+            state.emit(json!({"type": "auth.changed", "loggedIn": false}));
+            Err(crate::tr::err("assistant.signed_out", &[]))
+        }
+        None => Ok(()),
+    }
+}
+
+/// A run failed with `text`. When that means "not signed in", remember it (so the app says so
+/// everywhere) and return the plain sentence to show instead of the CLI's own.
+async fn auth_failure(state: &AppState, text: &str) -> Option<String> {
+    if !is_auth_failure(text) || own_provider(state).await { return None; }
+    crate::log::warn("the assistant refused a run: not signed in, or the sign-in has expired");
+    state.note_auth_failed();
+    Some(signed_out_text())
 }
 
 /// Pull the choices for a flag out of `claude --help`, so the UI never ships a
@@ -145,7 +203,8 @@ pub async fn options(state: &AppState) -> Value {
     json!({
         "models": quoted(&flag_block(&help, "--model")),
         "efforts": paren_list(&flag_block(&help, "--effort")),
-        // Only the modes the daemon accepts, in a stable order — never bypassPermissions.
+        // Only the modes the daemon accepts, in a stable order. The last one (bypassPermissions) is
+        // only switched on after the user confirmed it.
         "permissionModes": crate::settings::PERMISSION_MODES,
     })
 }
@@ -460,6 +519,11 @@ pub async fn start_run(
         crate::trust::require(dir)?;
     }
     let kind = state.chats.with(&spec.chat_id, |c| c.kind.clone()).await.unwrap_or_default();
+    // Skipping every permission check is something the user switches on for a chat of their own —
+    // never a wrap, a workflow, a customise run or anything else the app starts itself.
+    if spec.options.permission_mode.as_deref() == Some(crate::settings::BYPASS) && kind != "chat" {
+        return Err(crate::tr::err("bypass.chat_only", &[]));
+    }
     let mut deny = private_deny_settings(library.as_deref(), &spec.cwd, &settings.private_paths)?;
     // Reorganize works in a second checkout of the library: private folders are off-limits there too.
     if spec.cwd == reorg {
@@ -600,7 +664,7 @@ pub async fn start_run(
         for f in &temp_files { let _ = std::fs::remove_file(f); }
         let stderr_text = err_task.await.unwrap_or_default();
         if !got_result && !stderr_text.trim().is_empty() {
-            push(&state, &id, Msg::new("error", stderr_text.trim())).await;
+            push(&state, &id, error_msg(&state, stderr_text.trim()).await).await;
         }
         let secs = started.elapsed().as_secs();
         if ok {
@@ -695,11 +759,24 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
                 state.chats.update(id, |c| {
                     if c.messages.last().map_or(false, |m| m.role == "assistant" && m.text.trim() == txt.trim()) { c.messages.pop(); }
                 }).await;
-                push(state, id, Msg::new("error", txt)).await;
+                push(state, id, error_msg(state, &txt).await).await;
             }
             Some(!is_err)
         }
         _ => None,
+    }
+}
+
+/// The chat message for a failed run. A missing or expired sign-in is said in plain words and
+/// marked (`tool.code = "signedOut"`) so the chat can offer to sign in; the CLI's text is kept as detail.
+async fn error_msg(state: &AppState, text: &str) -> Msg {
+    match auth_failure(state, text).await {
+        Some(plain) => {
+            let mut m = Msg::new("error", plain);
+            m.tool = Some(json!({"code": "signedOut", "detail": text.chars().take(600).collect::<String>()}));
+            m
+        }
+        None => Msg::new("error", text),
     }
 }
 
@@ -743,7 +820,9 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> 
     let v: Value = serde_json::from_slice(&out.stdout)
         .map_err(|_| anyhow::anyhow!("claude: {}", String::from_utf8_lossy(&out.stderr)))?;
     if v["is_error"].as_bool().unwrap_or(false) {
-        anyhow::bail!("{}", v["result"].as_str().unwrap_or("error"));
+        let text = v["result"].as_str().unwrap_or("error");
+        auth_failure(state, text).await;
+        anyhow::bail!("{text}");
     }
     state.note_run_ok();
     Ok(v["result"].as_str().unwrap_or("").trim().to_string())
@@ -867,6 +946,36 @@ mod tests {
         // Windows: a real program before the npm shim, then PATHEXT; never the bare shell script.
         assert_eq!(candidates("claude", true, ".COM;.EXE;.BAT;.CMD;;junk"), ["claude.exe", "claude.cmd", "claude.com", "claude.bat"]);
         assert_eq!(candidates("git", true, ""), ["git.exe", "git.cmd"]);
+    }
+
+    #[test]
+    fn sign_in_failures_are_told_apart_from_other_errors() {
+        for auth in ["Invalid API key · Please run /login", "Not logged in · Please run /login", "OAuth token has expired. Please run /login",
+                     r#"API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#] {
+            assert!(is_auth_failure(auth), "{auth}");
+        }
+        for other in ["Credit balance is too low", "API Error: 529 Overloaded", "Run ended: error_max_turns", "permission denied: Edit(./.git/config)", ""] {
+            assert!(!is_auth_failure(other), "{other}");
+        }
+        assert!(!signed_out_text().contains("::") && signed_out_text().contains("Sign in"));
+    }
+
+    #[tokio::test]
+    async fn a_refused_run_marks_the_app_signed_out_until_a_run_works() {
+        let st = AppState::for_test();
+        let m = error_msg(&st, "Invalid API key · Please run /login").await;
+        assert_eq!(m.tool.as_ref().unwrap()["code"], "signedOut");
+        assert!(m.text.contains("not signed in"));
+        assert!(st.auth_failed.load(std::sync::atomic::Ordering::Relaxed));
+        st.note_run_ok();
+        assert!(!st.auth_failed.load(std::sync::atomic::Ordering::Relaxed));
+        // Any other failure is shown as it is and changes nothing.
+        let m = error_msg(&st, "API Error: 529 Overloaded").await;
+        assert!(m.tool.is_none() && m.text.contains("529"));
+        assert!(!st.auth_failed.load(std::sync::atomic::Ordering::Relaxed));
+        // With the user's own provider key, a refusal is about that key, not the Claude account.
+        st.settings.write().await.ai.claude.has_api_token = true;
+        assert!(error_msg(&st, "Invalid API key").await.tool.is_none());
     }
 
     #[test]

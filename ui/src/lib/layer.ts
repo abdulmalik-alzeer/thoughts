@@ -614,7 +614,7 @@ export function closeReview() { dismissed = sig(app.pending); app.showReview = f
 export async function startCustomise(prompt: string): Promise<string | null> {
   const text = prompt.trim();
   if (!text) return null;
-  const r = await post('/layer/customize', { prompt: text, text });
+  const r = await post('/layer/customize', { prompt: text });
   dismissed = '';
   refreshChats().catch(() => {});
   if (r?.chatId) go({ kind: 'chat', id: r.chatId });

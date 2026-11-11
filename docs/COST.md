@@ -46,7 +46,7 @@ After a run, the assistant reports how much text was processed, and Thoughts sho
 - **Wrap more often.** Wrap saves what matters from a conversation into your library. Then start a fresh chat: the assistant picks up from the short saved notes instead of carrying a long conversation along.
 - **One topic per chat.** A new subject is cheaper in a new chat.
 - **Browse in the app, not through the assistant.** Opening a note, searching, ticking todos and looking at the calendar use nothing.
-- **Use Read only mode when you only want answers.** In Read only mode the assistant looks things up and replies but does not make changes, which keeps runs short.
+- **Use Plan mode when you only want answers.** In Plan mode the assistant looks things up and replies but does not make changes, which keeps runs short.
 - **Point at the thing.** "In the Acme engagement, what did we decide about fees?" lets the assistant open one item instead of searching the library.
 - **Be deliberate about automatic tasks.** A daily task runs every day whether or not you read the result. Weekly is often enough.
 - **Mark large folders you never discuss as private**, so the assistant does not spend time in them. See [Privacy](PRIVACY.md#private-folders).

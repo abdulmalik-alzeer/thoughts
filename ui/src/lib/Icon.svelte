@@ -5,11 +5,12 @@
     ChevronRight, ChevronDown, Sun, Moon, SunMoon, Search, ArrowRight, ArrowDown, MessageCircle, Folder,
     Puzzle, Bot, GitBranch, Server, Palette, LayoutGrid, X, Inbox, CalendarDays, Clock, BookOpen, Shield,
     Download, Pencil, ExternalLink, CircleQuestionMark, Copy, RotateCw, Printer, Upload, Eye, Lock, Bell, Keyboard,
-    PanelLeft, Undo2, Funnel, Info, WifiOff, ChevronLeft, Command,
+    PanelLeft, Undo2, Funnel, Info, WifiOff, ChevronLeft, Command, Accessibility, ZoomIn, ZoomOut,
   } from '@lucide/svelte';
 
   // One place for every icon the app uses. Plugins can pass any of these names.
   export const icons: Record<string, any> = {
+    accessibility: Accessibility, zoomIn: ZoomIn, zoomOut: ZoomOut,
     home: House, chats: MessageSquare, chat: MessageCircle, ideas: Lightbulb, todos: ListChecks, docs: FileText,
     projects: FolderKanban, me: CircleUser, settings: Settings, sync: RefreshCw, rollback: History, wrap: Sparkles,
     plus: Plus, attach: Paperclip, trash: Trash2, send: ArrowUp, stop: Square, tool: Wrench, thinking: Brain,

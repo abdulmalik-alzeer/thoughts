@@ -92,6 +92,15 @@ export const app = $state({
   showWrapNag: false,
 });
 
+/** The release this window was built from. */
+export const APP_VERSION: string = __APP_VERSION__;
+/** The version to show: the window's, plus the background service's when it is a different one
+ *  (an older service kept running after an update). */
+export function versionLabel(): string {
+  const svc = app.status?.version;
+  return svc && svc !== APP_VERSION ? `${APP_VERSION} · ${svc}` : APP_VERSION;
+}
+
 let toastSeq = 0;
 
 /** Show a toast. Returns its id (pass to `dismissToast`). */
@@ -144,9 +153,62 @@ export async function refreshWrap() {
   if (app.wrap.count > app.wrap.threshold && prev <= app.wrap.threshold && prev !== 0) app.showWrapNag = true;
 }
 
-export async function saveSettings(patch: Record<string, any> = {}) {
-  app.settings = await put('/settings', { ...app.settings, ...patch });
+/** Save settings. `query` carries a one-off confirmation (`?confirm=bypassPermissions`). */
+export async function saveSettings(patch: Record<string, any> = {}, query = '') {
+  app.settings = await put('/settings' + query, { ...app.settings, ...patch });
   applyTheme();
+}
+
+// ---------- accessibility (Settings › Accessibility) ----------
+export type A11y = { zoom: number; reduceMotion: boolean; underlineLinks: boolean; strongFocus: boolean; textSpacing: boolean };
+export const A11Y_DEFAULTS: A11y = { zoom: 100, reduceMotion: false, underlineLinks: false, strongFocus: false, textSpacing: false };
+/** The sizes Zoom in / Zoom out step through, in percent. */
+export const ZOOM_STEPS = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
+const withDefaults = (a?: Partial<A11y> | null): A11y => ({ ...A11Y_DEFAULTS, ...(a ?? {}) });
+/** The accessibility preferences in force (saved settings, with defaults filled in). */
+export const a11y = (): A11y => withDefaults(app.settings?.accessibility);
+
+let zoomNow = 1;
+/** Size the whole window: the webview's own zoom inside the app (the page reflows, like a browser's
+ *  zoom), CSS zoom when running in a plain browser or when the shell refuses. */
+async function applyZoom(percent: number) {
+  const z = Math.min(200, Math.max(50, Math.round(Number(percent) || 100))) / 100;
+  if (z === zoomNow) return;
+  zoomNow = z;
+  if (inTauri()) {
+    try {
+      const { getCurrentWebview } = await import('@tauri-apps/api/webview');
+      await getCurrentWebview().setZoom(z);
+      return;
+    } catch { /* an older shell without the permission: fall back to CSS */ }
+  }
+  (document.documentElement.style as any).zoom = z === 1 ? '' : String(z);
+}
+
+function paintA11y(a: A11y) {
+  const d = document.documentElement.dataset;
+  const flag = (k: string, on: boolean, v: string) => { if (on) d[k] = v; else delete d[k]; };
+  flag('motion', a.reduceMotion, 'reduce');
+  flag('links', a.underlineLinks, 'underline');
+  flag('focus', a.strongFocus, 'strong');
+  flag('spacing', a.textSpacing, 'wide');
+  applyZoom(a.zoom).catch(() => {});
+}
+
+/** Change accessibility preferences: applied at once and saved straight away, like the theme. */
+export async function setA11y(patch: Partial<A11y>) {
+  const next = { ...a11y(), ...patch };
+  paintA11y(next);
+  try { await saveSettings({ accessibility: next }); }
+  catch (e) { applyTheme(); throw e; }
+}
+
+/** Zoom one step in (1) or out (-1), or back to actual size (0). Resolves the new percentage. */
+export async function zoomStep(dir: -1 | 0 | 1): Promise<number> {
+  const cur = a11y().zoom;
+  const next = dir === 0 ? 100 : dir > 0 ? ZOOM_STEPS.find((z) => z > cur) ?? cur : [...ZOOM_STEPS].reverse().find((z) => z < cur) ?? cur;
+  if (next !== cur) await setA11y({ zoom: next });
+  return next;
 }
 
 /** Local-only usage signal (`POST /api/usage`) that feeds suggestions. Fire-and-forget: never blocks,
@@ -156,7 +218,7 @@ export function track(event: string) {
   try { post('/usage', { event: String(event).slice(0, 120) }).catch(() => {}); } catch { /* ignore */ }
 }
 
-type Look = { theme?: string; mode?: string; language?: string };
+type Look = { theme?: string; mode?: string; language?: string; accessibility?: Partial<A11y> | null };
 
 function paint(s: Look) {
   const dark = s.mode === 'dark' || (s.mode === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
@@ -165,6 +227,7 @@ function paint(s: Look) {
   root.dataset.mode = dark ? 'dark' : 'light';
   root.lang = s.language || 'en';
   root.dir = s.language === 'ar' ? 'rtl' : 'ltr';
+  paintA11y(withDefaults(s.accessibility));
 }
 
 /** The look last applied, remembered so the next start (and the "can't connect" screen)
@@ -184,7 +247,7 @@ export function applyTheme() {
     import('@tauri-apps/api/core').then(({ invoke }) => invoke('refresh_menu')).catch(() => {});
   }
   menuLang = s.language;
-  ls.set('thoughts.look', JSON.stringify({ theme: s.theme, mode: s.mode, language: s.language }));
+  ls.set('thoughts.look', JSON.stringify({ theme: s.theme, mode: s.mode, language: s.language, accessibility: s.accessibility ?? null }));
   requestAnimationFrame(() => syncDockIcon().catch(() => {}));
 }
 

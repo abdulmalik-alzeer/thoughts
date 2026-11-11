@@ -3,6 +3,7 @@
 import { ApiError, codeOf } from './api';
 import { go, toast, type ToastOpts } from './store.svelte';
 import { t } from './i18n';
+import { signIn } from './auth';
 
 const msgOf = (e: unknown) => (e instanceof Error ? e.message : String(e ?? ''));
 
@@ -30,6 +31,7 @@ export function failed(headline: string, e: unknown, opts: ToastOpts = {}): void
     toast(t('err.noHistory'), { kind: 'error', key: 'no-history', action: { label: t('settings'), run: () => go({ kind: 'settings', id: 'git' }) } });
     return;
   }
+  if (code === 'SIGNED_OUT') { toast(detail || t('auth.banner'), { kind: 'error', key: 'auth', action: { label: t('auth.signIn'), run: signIn } }); return; }
   if (code === 'NEWER_SETTINGS') { toast(t('err.newerSettings'), { kind: 'error', key: 'newer-settings' }); return; }
   toast(headline, { kind: 'error', detail: detail && detail !== headline ? detail : undefined, ...opts });
 }

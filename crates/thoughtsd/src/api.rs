@@ -116,6 +116,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/claude/options", get(claude_options))
         .route("/api/ai/claude/token", post(save_ai_token))
         .route("/api/ai/claude/login", post(claude_login))
+        .route("/api/ai/claude/recheck", post(claude_recheck))
         .route("/api/git/install", post(git_install))
         .route("/api/library/trust", post(trust_library))
         // library
@@ -463,7 +464,7 @@ fn forget_api_token() -> anyhow::Result<()> {
     crate::secrets::delete("thoughts-ai", "claude")
 }
 
-async fn put_settings(State(st): S, Json(mut new): Json<Settings>) -> R {
+async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Json(mut new): Json<Settings>) -> R {
     // Settings written by a newer version of the app are never rewritten by this one.
     if crate::settings::read_only() || st.settings_newer.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(crate::tr::err("newer_settings", &[]).into());
@@ -486,6 +487,11 @@ async fn put_settings(State(st): S, Json(mut new): Json<Settings>) -> R {
     }
     // Everything the client sent is validated; server-owned fields are put back.
     let url_changed = new.sanitize_update(&old)?;
+    // Making "bypass permissions" the default for new chats needs the user's yes (the dialog in Settings).
+    if crate::settings::bypass_needs_confirm(old.ai.claude.permission_mode.as_deref(), new.ai.claude.permission_mode.as_deref())
+        && q.get("confirm").map(String::as_str) != Some(crate::settings::BYPASS_CONFIRM) {
+        return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
+    }
     if url_changed && old.ai.claude.has_api_token {
         // A token saved for one provider address must never reach another. The run code also
         // refuses to send it while `hasApiToken` is false, so a keychain hiccup here is not a leak.
@@ -787,6 +793,7 @@ async fn save_ai_token(State(st): S, Json(t): Json<Token>) -> R {
     if t.token.is_empty() { crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token()); s.ai.claude.has_api_token = false; }
     else { crate::secrets::set("thoughts-ai", "claude", &t.token)?; s.ai.claude.has_api_token = true; }
     s.save()?;
+    st.forget_auth();
     ok()
 }
 
@@ -799,9 +806,16 @@ async fn claude_login(State(st): S) -> R {
     let mut child = c.spawn()?;
     tokio::spawn(async move {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(600), child.wait()).await;
+        st.forget_auth();
         st.emit(json!({"type": "auth.changed"}));
     });
     ok()
+}
+
+/// "Check again": forget what the last failed run said about the sign-in and ask the CLI afresh.
+async fn claude_recheck(State(st): S) -> R {
+    st.forget_auth();
+    Ok(Json(claude::status(&st).await))
 }
 
 // ---------- library ----------
@@ -1110,7 +1124,11 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     if let Some(k) = n.kind.filter(|k| k == "chat" || k == "customize") { c.kind = k; }
     c.provider = n.provider.unwrap_or(s.ai.primary.clone());
     c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone() });
-    if c.kind == "customize" { c.title = customize_title(ar).into(); }
+    if c.kind == "customize" {
+        c.title = customize_title(ar).into();
+        // The default for chats may be "bypass permissions"; a customise run never is.
+        if c.options.permission_mode.as_deref() == Some(crate::settings::BYPASS) { c.options.permission_mode = Some("acceptEdits".into()); }
+    }
     let id = c.id.clone();
     let v = serde_json::to_value(&c)?;
     st.chats.insert(c).await;
@@ -1125,6 +1143,15 @@ fn check_run_options(o: &RunOptions) -> anyhow::Result<()> {
     crate::settings::check_permission_mode(o.permission_mode.as_deref())?;
     crate::settings::check_cli_value("model", o.model.as_deref())?;
     crate::settings::check_cli_value("effort", o.effort.as_deref())?;
+    Ok(())
+}
+
+/// "Bypass permissions" is for ordinary chats only, and switching it on needs the user's yes
+/// (`confirmed`: the client showed the warning and the user agreed). Staying on it does not.
+fn check_bypass(kind: &str, current: Option<&str>, wanted: Option<&str>, confirmed: bool) -> anyhow::Result<()> {
+    if wanted != Some(crate::settings::BYPASS) { return Ok(()); }
+    if kind != "chat" { return Err(crate::tr::err("bypass.chat_only", &[])); }
+    if crate::settings::bypass_needs_confirm(current, wanted) && !confirmed { return Err(crate::tr::err("bypass.unconfirmed", &[])); }
     Ok(())
 }
 
@@ -1149,9 +1176,13 @@ async fn chat_delete(State(st): S, Path(id): Path<String>) -> R {
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct ChatPatch { title: Option<String>, project_id: Option<Option<String>>, options: Option<RunOptions> }
+struct ChatPatch { title: Option<String>, project_id: Option<Option<String>>, options: Option<RunOptions>, confirm_bypass: bool }
 async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatch>) -> R {
-    if let Some(o) = &p.options { check_run_options(o)?; }
+    if let Some(o) = &p.options {
+        check_run_options(o)?;
+        let (kind, current) = st.chats.with(&id, |c| (c.kind.clone(), c.options.permission_mode.clone())).await.ok_or_else(no_chat)?;
+        check_bypass(&kind, current.as_deref(), o.permission_mode.as_deref(), p.confirm_bypass)?;
+    }
     let c = st.chats.update(&id, |c| {
         if let Some(t) = p.title { c.title = t; }
         if let Some(pid) = p.project_id { c.project_id = pid; }
@@ -1165,14 +1196,19 @@ async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatc
 struct Attachment { name: String, data: String }
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<String>, options: Option<RunOptions> }
+struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<String>, options: Option<RunOptions>, confirm_bypass: bool }
 
 async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>) -> R {
     let chat = st.chats.get(&id).await.ok_or_else(no_chat)?;
     if chat.running { return Err(crate::tr::err("chat.running", &[]).into()); }
-    if let Some(o) = &m.options { check_run_options(o)?; }
+    if let Some(o) = &m.options {
+        check_run_options(o)?;
+        check_bypass(&chat.kind, chat.options.permission_mode.as_deref(), o.permission_mode.as_deref(), m.confirm_bypass)?;
+    }
     if let Some(lib) = st.settings.read().await.library() { crate::trust::require(&lib)?; }
     if chat.provider != "claude" { bail!("Codex support arrives in the next milestone"); }
+    // Say "not signed in" before the message is saved, not as a failed answer afterwards.
+    claude::require_signed_in(&st).await?;
     let s = st.settings.read().await.clone();
     let library = s.library();
     // Where the session runs: a project folder, the app layer, or the library.
@@ -1611,7 +1647,7 @@ mod tests {
         // Pointing settings at a folder that is not there is refused, and nothing changes.
         let mut wanted = st.settings.read().await.clone();
         wanted.library_path = Some("/also/not/there".into());
-        assert_eq!(shown(put_settings(State(st.clone()), Json(wanted)).await).status, 422);
+        assert_eq!(shown(put_settings(State(st.clone()), none(), Json(wanted)).await).status, 422);
         assert_eq!(st.settings.read().await.library_path.as_deref(), Some("/nowhere/at/all/Notes"));
     }
 
@@ -1940,8 +1976,43 @@ mod tests {
     #[test]
     fn run_options_are_allow_listed() {
         let o = |p: &str| RunOptions { permission_mode: Some(p.into()), ..Default::default() };
-        for ok in ["default", "acceptEdits", "plan", ""] { assert!(check_run_options(&o(ok)).is_ok(), "{ok}"); }
-        for bad in ["bypassPermissions", "auto", "dontAsk"] { assert!(check_run_options(&o(bad)).is_err(), "{bad}"); }
+        for ok in ["default", "acceptEdits", "plan", "bypassPermissions", ""] { assert!(check_run_options(&o(ok)).is_ok(), "{ok}"); }
+        for bad in ["auto", "dontAsk", "manual"] { assert!(check_run_options(&o(bad)).is_err(), "{bad}"); }
         assert!(check_run_options(&RunOptions { model: Some("--settings".into()), ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn bypassing_permissions_needs_a_yes_and_an_ordinary_chat() {
+        let b = Some("bypassPermissions");
+        // Switching it on: only with the user's confirmation.
+        assert_eq!(shown(check_bypass("chat", Some("plan"), b, false).map(|_| Json(json!({}))).map_err(ApiErr)).code, "confirm_needed");
+        assert!(check_bypass("chat", Some("plan"), b, true).is_ok());
+        assert!(check_bypass("chat", None, b, true).is_ok());
+        // Already on (saving the model or effort of such a chat): nothing to confirm again.
+        assert!(check_bypass("chat", b, b, false).is_ok());
+        // Never for what the app runs itself, confirmed or not.
+        for kind in ["customize", "wrap", "workflow", "setup", "module", "reorganize"] {
+            assert_eq!(shown(check_bypass(kind, None, b, true).map(|_| Json(json!({}))).map_err(ApiErr)).status, 403, "{kind}");
+        }
+        // Every other mode passes untouched.
+        for m in [None, Some("plan"), Some("acceptEdits")] { assert!(check_bypass("wrap", b, m, false).is_ok()); }
+    }
+
+    #[tokio::test]
+    async fn bypass_is_confirmed_at_every_door() {
+        let st = Arc::new(AppState::for_test());
+        let chat = Chat::default();
+        let id = chat.id.clone();
+        st.chats.insert(chat).await;
+        let patch = |confirm: bool| ChatPatch { options: Some(RunOptions { permission_mode: Some("bypassPermissions".into()), ..Default::default() }), confirm_bypass: confirm, ..Default::default() };
+        assert_eq!(shown(chat_patch(State(st.clone()), Path(id.clone()), Json(patch(false))).await).code, "confirm_needed");
+        assert!(st.chats.get(&id).await.unwrap().options.permission_mode.is_none());
+        chat_patch(State(st.clone()), Path(id.clone()), Json(patch(true))).await.unwrap();
+        assert_eq!(st.chats.get(&id).await.unwrap().options.permission_mode.as_deref(), Some("bypassPermissions"));
+        // A customise chat can never be switched to it.
+        let custom = Chat { kind: "customize".into(), ..Default::default() };
+        let cid = custom.id.clone();
+        st.chats.insert(custom).await;
+        assert_eq!(shown(chat_patch(State(st.clone()), Path(cid), Json(patch(true))).await).status, 403);
     }
 }

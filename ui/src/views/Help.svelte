@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
   import { api } from '../lib/api';
-  import { app, command, toast } from '../lib/store.svelte';
+  import { app, command, toast, APP_VERSION } from '../lib/store.svelte';
   import { t, fmtMoney } from '../lib/i18n';
   import { shortcuts, keys } from '../lib/shortcuts';
 
@@ -136,7 +136,7 @@
       <button class="btn primary" disabled={copying} onclick={copyDiagnostics}><Icon name="copy" size={15} /> {t('shell.help.diag')}</button>
       <button class="btn" onclick={() => command('rollback')}><Icon name="rollback" size={15} /> {t('shell.rb.title')}</button>
     </div>
-    <p class="muted sm">{t('shell.help.version', { v: app.status?.version ?? '—' })}</p>
+    <p class="muted sm">{t('shell.help.version', { v: APP_VERSION })}{#if app.status?.version && app.status.version !== APP_VERSION} — {t('ver.mismatch', { app: APP_VERSION, service: app.status.version })}{/if}</p>
   </section>
 </div>
 

@@ -16,6 +16,7 @@
   import { app, costVisible, go, refreshChats } from '../lib/store.svelte';
   import { t, tn, fmtMoney } from '../lib/i18n';
   import { failed } from '../lib/errors';
+  import { signIn } from '../lib/auth';
   import { normalizeCapture } from '../lib/capture';
   import { confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { openReview } from '../lib/layer';
@@ -101,6 +102,7 @@
       // "Ask before changes" no longer exists: an older chat that stored it is read-only.
       if (c.options.permissionMode === 'default') c.options.permissionMode = 'plan';
       chat = c;
+      savedPerm = c.options.permissionMode ?? null;
       loadState = 'ok';
       // Seen: the "cut off" marker stays on screen for this visit but no longer follows the chat around.
       if (c.interrupted && initial) post(`/chats/${id}/ack-interrupted`).catch(() => {});
@@ -297,8 +299,27 @@
     input?.focus();
   }
 
-  async function saveOpts() {
-    try { await patch(`/chats/${id}`, { options: chat.options }); } catch (e) { failed(t('chat3.optionsFailed'), e); }
+  async function saveOpts(confirmBypass = false): Promise<boolean> {
+    try { await patch(`/chats/${id}`, { options: chat.options, confirmBypass }); return true; }
+    catch (e) { failed(t('chat3.optionsFailed'), e); return false; }
+  }
+
+  // The permission mode as the service has it. "Bypass permissions" is only switched on after the
+  // user agreed to the warning (the service refuses it otherwise).
+  const BYPASS = 'bypassPermissions';
+  let savedPerm: string | null = null;
+  async function permChanged() {
+    const want = chat.options.permissionMode ?? null;
+    const turnsOn = want === BYPASS && savedPerm !== BYPASS;
+    if (turnsOn) {
+      const yes = await confirmDialog({
+        title: t('perm.bypass.title'), body: `${t('perm.bypass.body')}\n\n${t('perm.bypass.chat')}`,
+        note: t('perm.bypass.note'), confirmLabel: t('perm.bypass.confirm'), danger: true,
+      });
+      if (!yes) { chat.options.permissionMode = savedPerm; return; }
+    }
+    if (await saveOpts(turnsOn)) savedPerm = want;
+    else chat.options.permissionMode = savedPerm;
   }
 
   async function moveTo(pid: string) {
@@ -352,8 +373,8 @@
   /** Translated label when we have one, the raw value otherwise (models, future modes). */
   const label = (prefix: string, v: string) => { const k = `${prefix}.${v}`; const s = t(k); return s === k ? v : s; };
   const usd = fmtMoney;
-  // Only two choices remain: the assistant may edit notes, or it may only read.
-  const permModes = $derived((opts.permissionModes as string[]).filter((m) => m === 'acceptEdits' || m === 'plan'));
+  // Claude Code's modes, as far as the service allows them. Bypass is for ordinary chats only.
+  const permModes = $derived((opts.permissionModes as string[]).filter((m) => m === 'acceptEdits' || m === 'plan' || (m === BYPASS && chat?.kind === 'chat')));
 </script>
 
 {#if loadState === 'loading'}
@@ -456,6 +477,9 @@
           {:else if m.role === 'error'}
             <div class="msg err" role="alert">
               <div class="errline"><Icon name="warning" size={14} /> <span dir="auto">{m.text}</span></div>
+              {#if m.tool?.code === 'signedOut' && m.id === lastAnswerId}
+                <button class="act show" onclick={signIn}><Icon name="external" size={14} /><span>{t('auth.signIn')}</span></button>
+              {/if}
               {#if m.id === lastAnswerId && !chat.running && lastUser && canCompose}
                 <button class="act show" onclick={retry}><Icon name="retry" size={14} /><span>{t('chat.tryAgain')}</span></button>
               {/if}
@@ -537,19 +561,20 @@
           aria-controls={mentionHits.length ? 'mention-list' : undefined} aria-activedescendant={mentionHits.length ? `mention-${mentionIdx}` : undefined}></textarea>
         <div class="row controls">
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
-          <select bind:value={chat.options.model} onchange={saveOpts} title={t('model')} aria-label={t('model')}>
+          <select bind:value={chat.options.model} onchange={() => saveOpts()} title={t('model')} aria-label={t('model')}>
             <option value={null}>{t('model')}: {t('default')}</option>
             {#each opts.models as m}<option value={m}>{m}</option>{/each}
             {#if chat.options.model && !opts.models.includes(chat.options.model)}<option value={chat.options.model}>{chat.options.model}</option>{/if}
           </select>
           {#if opts.efforts.length}
-            <select bind:value={chat.options.effort} onchange={saveOpts} title={t('effort')} aria-label={t('effort')}>
+            <select bind:value={chat.options.effort} onchange={() => saveOpts()} title={t('effort')} aria-label={t('effort')}>
               <option value={null}>{t('effort')}: {t('default')}</option>
               {#each opts.efforts as m}<option value={m}>{label('chat.effort', m)}</option>{/each}
             </select>
           {/if}
           {#if permModes.length}
-            <select bind:value={chat.options.permissionMode} onchange={saveOpts} title={t('chat.permissionTip')} aria-label={t('permission')}>
+            <select bind:value={chat.options.permissionMode} onchange={permChanged} class:bypass={chat.options.permissionMode === BYPASS}
+              title={chat.options.permissionMode === BYPASS ? t('perm.bypass.on') : t('chat.permissionTip')} aria-label={t('permission')}>
               <option value={null}>{t('permission')}: {t('default')}</option>
               {#each permModes as m}<option value={m}>{label('chat3.perm', m)}</option>{/each}
             </select>
@@ -644,6 +669,7 @@
   .composer:focus-within { box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
   .controls { flex-wrap: wrap; }
   .controls select { width: auto; font-size: var(--fs-xs); padding: 4px 6px; }
+  .controls select.bypass { color: var(--danger); border-color: var(--danger); font-weight: 600; }
   .controls label { position: relative; margin: 0; color: var(--fg); font-size: 14px; }
   .controls label:focus-within { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
 

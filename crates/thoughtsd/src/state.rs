@@ -37,6 +37,12 @@ pub struct AppState {
     pub run_dirs: std::sync::Mutex<HashMap<String, std::path::PathBuf>>,
     /// Stands in for the assistant program (see `claude::RunHook`). Tests set it; the app never does.
     pub run_hook: std::sync::Mutex<Option<crate::claude::RunHook>>,
+    /// The assistant's last run was refused for lack of a valid sign-in, whatever the CLI's own
+    /// status says (a sign-in that expired still reads as "logged in" there). Cleared by any run
+    /// that works, a fresh sign-in, or "check again".
+    pub auth_failed: AtomicBool,
+    /// When the CLI last said "signed in", so a chat does not ask it again before every message.
+    pub auth_ok_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
@@ -89,6 +95,8 @@ impl AppState {
             settings_newer: AtomicBool::new(loaded.newer),
             run_dirs: Default::default(),
             run_hook: Default::default(),
+            auth_failed: AtomicBool::new(false),
+            auth_ok_at: Default::default(),
         })
     }
 
@@ -119,6 +127,8 @@ impl AppState {
             settings_newer: AtomicBool::new(false),
             run_dirs: Default::default(),
             run_hook: Default::default(),
+            auth_failed: AtomicBool::new(false),
+            auth_ok_at: Default::default(),
         }
     }
 
@@ -160,7 +170,22 @@ impl AppState {
     }
 
     /// A run finished successfully: sign-in and network evidently work again.
-    pub fn note_run_ok(&self) { self.mini_wraps_blocked.store(false, Ordering::Relaxed); }
+    pub fn note_run_ok(&self) {
+        self.mini_wraps_blocked.store(false, Ordering::Relaxed);
+        if self.auth_failed.swap(false, Ordering::Relaxed) { self.emit(serde_json::json!({"type": "auth.changed", "loggedIn": true})); }
+    }
+
+    /// A run was refused because the assistant is not (or no longer) signed in.
+    pub fn note_auth_failed(&self) {
+        *self.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        if !self.auth_failed.swap(true, Ordering::Relaxed) { self.emit(serde_json::json!({"type": "auth.changed", "loggedIn": false})); }
+    }
+
+    /// Forget what is remembered about the sign-in, so the next look asks the CLI afresh.
+    pub fn forget_auth(&self) {
+        self.auth_failed.store(false, Ordering::Relaxed);
+        *self.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 
     pub fn notify(&self, title: &str, body: &str) {
         self.emit(serde_json::json!({"type": "notify", "title": title, "body": body}));

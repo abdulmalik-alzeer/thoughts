@@ -2,7 +2,9 @@
   import Icon from '../lib/Icon.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { api, del, inTauri, post, reloadApp } from '../lib/api';
-  import { app, applyTheme, go, saveSettings, setShowCost, toast } from '../lib/store.svelte';
+  import { a11y, app, applyTheme, go, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
+  import { recheckSignIn } from '../lib/auth';
+  import { isolatedKeys, tip } from '../lib/shortcuts';
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { fmtMoney, fmtNum, t } from '../lib/i18n';
   import { failed } from '../lib/errors';
@@ -12,12 +14,13 @@
 
   let { reload }: { reload: () => Promise<void> } = $props();
 
-  const cats = ['general', 'ai', 'git', 'privacy', 'modules', 'daemon', 'appLayer'] as const;
+  const cats = ['general', 'accessibility', 'ai', 'git', 'privacy', 'modules', 'daemon', 'appLayer'] as const;
   type Cat = (typeof cats)[number];
-  const catIcon: Record<Cat, string> = { general: 'settings', ai: 'ai', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette' };
+  const catIcon: Record<Cat, string> = { general: 'settings', accessibility: 'accessibility', ai: 'ai', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette' };
   // Row labels per category (i18n keys) — used by the search box. `adv` rows live behind the Advanced disclosure.
   const basic: Record<Cat, string[]> = {
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify'],
+    accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag'],
     git: ['set.libraryPath', 'set.backup', 'reorganize'],
     privacy: ['set.privTitle', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
@@ -27,6 +30,7 @@
   };
   const adv: Record<Cat, string[]> = {
     general: [],
+    accessibility: [],
     ai: ['set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle', 'set.provider', 'set.baseUrl', 'set.apiKey'],
     git: ['set.gitWhen', 'set.credStore', 'set.remotes', 'set.searchExt'],
     privacy: [],
@@ -34,8 +38,10 @@
     daemon: ['set.restart'],
     appLayer: ['set.safeMode'],
   };
-  // "Ask before changes" was removed (the app has no way to ask): a stored `default` means read only.
-  const perms = ['acceptEdits', 'plan'] as const;
+  // Claude Code's own mode names. "Ask before changes" (`default`) was removed — the app has no way
+  // to answer the questions — so a stored `default` means plan mode. Bypass is confirmed in a dialog.
+  const BYPASS = 'bypassPermissions';
+  const perms = ['acceptEdits', 'plan', BYPASS] as const;
   const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
   const cloudWords = ['Mobile Documents', 'Library/CloudStorage', 'Dropbox', 'OneDrive', 'Google Drive', 'iCloud'];
 
@@ -73,10 +79,15 @@
   /** A settings file written by a newer version is never rewritten: everything here is read-only. */
   const readOnly = $derived(!!app.status?.settingsNewer);
   // The look is saved the moment it is chosen (ThemePicker), so it is never part of the unsaved draft.
+  // The same goes for the accessibility preferences (zoom changes from the keyboard too).
   $effect(() => {
-    const th = app.settings?.theme, m = app.settings?.mode;
-    untrack(() => { s.theme = th; s.mode = m; base.theme = th; base.mode = m; });
+    const th = app.settings?.theme, m = app.settings?.mode, ax = JSON.stringify(app.settings?.accessibility ?? null);
+    untrack(() => { s.theme = th; s.mode = m; base.theme = th; base.mode = m; s.accessibility = JSON.parse(ax); base.accessibility = JSON.parse(ax); });
   });
+  const ax = $derived(a11y());
+  const zoomChoices = $derived([...new Set([...ZOOM_STEPS, ax.zoom])].sort((a, b) => a - b));
+  const setAx = (patch: Partial<A11y>) => { setA11y(patch).catch((e) => failed(t('a11y.saveFailed'), e)); };
+  const stepZoom = (d: -1 | 1) => { zoomStep(d).catch((e) => failed(t('a11y.saveFailed'), e)); };
   const cost = $derived(app.status?.usage?.monthCostUsd);
   const validRemote = $derived(/^(https?:\/\/|ssh:\/\/|git@)\S+$/.test(remote.url.trim()));
 
@@ -137,17 +148,39 @@
     return x;
   }
 
+  // ----- bypass permissions: never switched on without the warning -----
+  /** True once the user agreed to the warning for the draft that is being edited. */
+  let bypassOk = false;
+  const turnsBypassOn = () => s.ai.claude.permissionMode === BYPASS && app.settings?.ai?.claude?.permissionMode !== BYPASS;
+  const askBypass = () => confirmDialog({
+    title: t('perm.bypass.title'), body: `${t('perm.bypass.body')}\n\n${t('perm.bypass.bodyDefault')}`,
+    note: t('perm.bypass.note'), confirmLabel: t('perm.bypass.confirm'), danger: true,
+  });
+  /** A click on a permission radio. Choosing bypass waits for the dialog; the radio only moves on a yes. */
+  async function pickPerm(p: string, e: MouseEvent) {
+    if (p !== BYPASS || permValue === BYPASS) { s.ai.claude.permissionMode = p; return; }
+    e.preventDefault();
+    if (!(await askBypass())) return;
+    bypassOk = true;
+    s.ai.claude.permissionMode = BYPASS;
+  }
+  /** Write the draft. The service refuses to switch bypass on without the confirmation sent here. */
+  async function persist() {
+    const confirm = turnsBypassOn();
+    await saveSettings(payload(), confirm ? `?confirm=${BYPASS}` : '');
+    bypassOk = false;
+    s = fresh(); base = fresh();
+    toast(t('set.saved'), { kind: 'success' });
+  }
+
   async function save() {
     if (readOnly) return;
     if (invalid) return toast(t('set.fixFirst'), { kind: 'error' });
-    await run('save', async () => {
-      await saveSettings(payload());
-      s = fresh(); base = fresh();
-      toast(t('set.saved'), { kind: 'success' });
-    });
+    if (turnsBypassOn() && !bypassOk) { if (!(await askBypass())) return; bypassOk = true; }
+    await run('save', persist);
   }
 
-  function discard() { s = structuredClone($state.snapshot(base)); applyTheme(); }
+  function discard() { s = structuredClone($state.snapshot(base)); bypassOk = false; applyTheme(); }
 
   // Leaving with unsaved edits: navigation waits for this (`app.leaveGuard`, awaited inside `go()`).
   async function leaveGuard(): Promise<boolean> {
@@ -159,7 +192,8 @@
     });
     if (choice === 'discard') { discard(); return true; }
     if (choice !== 'save') return false;
-    try { await saveSettings(payload()); s = fresh(); base = fresh(); toast(t('set.saved'), { kind: 'success' }); return true; }
+    if (turnsBypassOn() && !bypassOk) { if (!(await askBypass())) return false; bypassOk = true; }
+    try { await persist(); return true; }
     catch (e) { failed(t('ui.set.saveFailed'), e); return false; }
   }
   onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; });
@@ -172,6 +206,7 @@
       // The look applies (and saves) at once, like choosing it in the picker.
       saveSettings({ theme: 'saudi', mode: 'system' }).catch((e) => failed(t('shell.themeNotSaved'), e));
     } },
+    accessibility: { list: basic.accessibility, apply: () => setAx({ ...A11Y_DEFAULTS }) },
     ai: { list: ['set.perm', 'set.wrapNag', 'set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle'], apply: () => {
       const c = s.ai.claude; c.permissionMode = 'acceptEdits'; c.model = null; c.effort = null; c.binary = null; c.miniWrapModel = null;
       s.idleMinutes = 15; s.wrapNagThreshold = 5;
@@ -193,7 +228,9 @@
     base.modules = structuredClone($state.snapshot(app.settings.modules));
   }
 
-  const refreshClaude = () => run('claude', async () => { claude = (await api('/status')).claude ?? {}; });
+  // "Check again" also forgets what a failed run said about the sign-in, and asks the CLI afresh.
+  const refreshClaude = () => run('claude', async () => { await recheckSignIn(); claude = app.status?.claude ?? {}; });
+  $effect(() => { const c = app.status?.claude; if (c) untrack(() => (claude = c)); });
   const signIn = () => run('login', async () => { await post('/ai/claude/login'); toast(t('set.loginToast')); });
 
   const saveToken = () => run('token', async () => {
@@ -337,6 +374,30 @@
         <label class="check"><input type="checkbox" bind:checked={s.notifications} /> {t('set.notify')}</label>
       {/if}
     </div>
+  {:else if c === 'accessibility'}
+    <div class="card">
+      {#if vis(c, 'a11y.zoom')}
+        <label for="st-zoom">{t('a11y.zoom')}</label>
+        <div class="row wrap">
+          <button type="button" class="btn" disabled={ax.zoom <= ZOOM_STEPS[0]} onclick={() => stepZoom(-1)} aria-label={t('a11y.zoomOut')} title={tip(t('a11y.zoomOut'), 'zoom.out')}><Icon name="zoomOut" size={15} /></button>
+          <select id="st-zoom" class="num" value={ax.zoom} onchange={(e) => setAx({ zoom: +e.currentTarget.value })} aria-describedby="st-zoom-hint">
+            {#each zoomChoices as z}<option value={z}>{fmtNum(z)}%</option>{/each}
+          </select>
+          <button type="button" class="btn" disabled={ax.zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]} onclick={() => stepZoom(1)} aria-label={t('a11y.zoomIn')} title={tip(t('a11y.zoomIn'), 'zoom.in')}><Icon name="zoomIn" size={15} /></button>
+          <button type="button" class="btn ghost" disabled={ax.zoom === 100} onclick={() => setAx({ zoom: 100 })}>{t('a11y.zoomReset')}</button>
+        </div>
+        <p class="muted sm" id="st-zoom-hint">{t('a11y.zoomHint', { in: isolatedKeys('zoom.in'), out: isolatedKeys('zoom.out'), reset: isolatedKeys('zoom.reset') })}</p>
+      {/if}
+      {#each [['a11y.motion', 'reduceMotion'], ['a11y.links', 'underlineLinks'], ['a11y.focus', 'strongFocus'], ['a11y.spacing', 'textSpacing']] as [key, field]}
+        {#if vis(c, key)}
+          <label class="check ax"><input type="checkbox" checked={!!ax[field as keyof A11y]} onchange={(e) => setAx({ [field]: e.currentTarget.checked } as Partial<A11y>)} aria-describedby={'st-' + field + '-hint'} /> {t(key)}</label>
+          <p class="muted sm axhint" id={'st-' + field + '-hint'}>{t(key + 'Hint')}</p>
+        {/if}
+      {/each}
+      {#if !q}
+        <p class="muted sm row wrap gap-top"><span>{t('a11y.contrast')}</span> <button type="button" class="btn ghost" onclick={() => (tab = 'general')}>{t('a11y.contrastOpen')}</button></p>
+      {/if}
+    </div>
   {:else if c === 'ai'}
     <div class="card">
       {#if vis(c, 'set.account')}
@@ -358,8 +419,8 @@
           <legend>{t('set.perm')}</legend>
           {#each perms as p}
             <label class="radio">
-              <input type="radio" name="st-perm" value={p} checked={permValue === p} onchange={() => (s.ai.claude.permissionMode = p)} />
-              <span><b>{t('set.perm.' + p)}</b><span class="muted sm blk">{t('set.perm.' + p + '.hint')}</span></span>
+              <input type="radio" name="st-perm" value={p} checked={permValue === p} onclick={(e) => pickPerm(p, e)} />
+              <span><b class:danger-text={p === BYPASS}>{t('set.perm.' + p)}</b><span class="muted sm blk">{t('set.perm.' + p + '.hint')}</span></span>
             </label>
           {/each}
         </fieldset>
@@ -633,6 +694,9 @@
   .radio { align-items: flex-start; margin: 8px 0; cursor: pointer; }
   .radio input { margin-top: 4px; }
   .blk { display: block; font-weight: 400; }
+  .danger-text { color: var(--danger); }
+  .ax { margin-top: 14px; }
+  .axhint { margin: 2px 0 0; padding-inline-start: 24px; }
   .perm { border: 0; padding: 0; margin: 14px 0 0; min-width: 0; }
   .perm legend { font-size: var(--fs-xs); font-weight: 500; color: var(--muted); padding: 0; }
   .num { max-width: 120px; }

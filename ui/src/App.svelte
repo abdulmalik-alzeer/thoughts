@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { api, connect, daemonStale, on, post, reconnect, reloadApp } from './lib/api';
-  import { app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track } from './lib/store.svelte';
+  import { app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
+  import { recheckSignIn, signIn } from './lib/auth';
   import { loadLayer, layerBooted, retryLayer, checkPending, openReview, undoLastLayer } from './lib/layer';
   import { failed } from './lib/errors';
   import { navLabel } from './lib/terms';
@@ -91,8 +92,35 @@
     catch (e: any) { if (/no library|no such file|not found|os error 2|does not exist/i.test(e.message || '')) libraryGone = true; }
   }
 
+  let statusAt = Date.now();
   async function refreshStatus() {
+    statusAt = Date.now();
     try { app.status = await api('/status'); checkLibrary(); } catch { /* offline */ }
+  }
+
+  // ---------- sign-in to Claude ----------
+  // Known up front, not when a message fails: the status says so at start, the service says so the
+  // moment a run is refused (`auth.changed`), and coming back to the window looks again (the user
+  // may have signed in or out in a terminal meanwhile).
+  const signedOut = $derived(!!app.settings?.onboarded && app.status?.claude?.installed === true && app.status.claude.loggedIn === false);
+  let authBusy = $state(false);
+  async function authChanged() {
+    const was = signedOut;
+    await refreshStatus();
+    if (was && !signedOut) toast(t('auth.signedIn'), { kind: 'success', key: 'auth' });
+  }
+  async function checkSignIn() {
+    if (authBusy) return;
+    authBusy = true;
+    try { toast(t((await recheckSignIn()) ? 'auth.signedIn' : 'auth.stillOut'), { key: 'auth' }); }
+    catch (e: any) { toast(t('set.failed'), { kind: 'error', key: 'auth', detail: e?.message }); }
+    finally { authBusy = false; }
+  }
+  function onFocus() { if (app.ready && app.online && Date.now() - statusAt > 60_000) refreshStatus(); }
+
+  async function zoom(dir: -1 | 0 | 1) {
+    try { toast(t('a11y.zoomNow', { n: await zoomStep(dir) }), { key: 'zoom', duration: 1500 }); }
+    catch (e: any) { toast(t('a11y.saveFailed'), { kind: 'error', key: 'zoom', detail: e?.message }); }
   }
 
   // Things the background service had to repair on start: say so once, in plain words.
@@ -146,6 +174,7 @@
         if (e.type === 'wrap.done') refreshWrap().catch(() => {});
         if (e.type === 'reorganize.ready' && e.chatId && app.view.id !== e.chatId) toast(t(e.ok === false ? 'layer.reorg.failed' : 'layer.reorg.ready'), { kind: e.ok === false ? 'error' : 'info', action: { label: t('layer.details'), run: () => go(e.ok === false ? { kind: 'chat', id: e.chatId } : { kind: 'reorganize', id: e.chatId }) } });
         if (e.type === 'settings.changed') { app.settings = await api('/settings'); applyTheme(); loadProjects(); refreshStatus(); }
+        if (e.type === 'auth.changed') authChanged();
         if (e.type === 'library.changed') ideas = [];
         if (e.type === 'resync') { refreshChats().catch(() => {}); refreshWrap().catch(() => {}); refreshStatus(); }
       } catch { /* a refresh failed; the connection banner covers the offline case */ }
@@ -295,6 +324,10 @@
     'palette': () => openPalette(!app.showPalette),
     'sidebar.toggle': () => setSidebarCollapsed(!app.sidebarCollapsed),
     'search.focus': () => focusSearch(),
+    'zoom.in': () => zoom(1),
+    'zoom.out': () => zoom(-1),
+    'zoom.reset': () => zoom(0),
+    'settings.accessibility': () => go({ kind: 'settings', id: 'accessibility' }),
   };
 
   // Every shell action goes through the `thoughts:command` window event, so views and plugins can
@@ -500,6 +533,10 @@
     add('sidebar.toggle', app.sidebarCollapsed ? t('shell.sidebarShow') : t('shell.sidebarHide'), g.act, 'sidebar');
     add('tour', t('shell.pal.tour'), g.act, 'book');
     add('print', t('shell.pal.print'), g.act, 'print');
+    add('zoom.in', t('a11y.zoomIn'), g.look, 'zoomIn', { keywords: 'zoom bigger larger text size تكبير' });
+    add('zoom.out', t('a11y.zoomOut'), g.look, 'zoomOut', { keywords: 'zoom smaller text size تصغير' });
+    add('zoom.reset', t('a11y.zoomReset'), g.look, 'zoomOut', { keywords: 'zoom reset 100 actual size الحجم' });
+    add('settings.accessibility', t('a11y.open'), g.look, 'accessibility', { keywords: 'accessibility a11y motion contrast focus تسهيلات' });
     for (const [id, name] of [['saudi', t('saudi')], ['contrast', t('contrast')], ['tech', t('tech')], ...app.customThemes.map((c) => [c.id, c.name])])
       add('theme.' + id, t('shell.pal.theme', { name }), g.look, 'palette', { keywords: 'theme سمة' });
     for (const [m, icon] of [['light', 'sun'], ['dark', 'moon'], ['system', 'system']])
@@ -511,7 +548,7 @@
   });
 </script>
 
-<svelte:window onclick={guardLinks} onkeydown={onKey} />
+<svelte:window onclick={guardLinks} onkeydown={onKey} onfocus={onFocus} />
 <Dialogs />
 
 {#if app.error}
@@ -644,6 +681,9 @@
           <span class="grow"></span>
           <button class="iconbtn" class:on={app.view.kind === 'settings'} onclick={() => command('settings')} aria-label={t('settings')} title={tip(t('settings'), 'settings')} aria-current={app.view.kind === 'settings' ? 'page' : undefined}><Icon name="settings" /></button>
         </div>
+        <button class="ver" onclick={() => command('help')} title={app.status?.version && app.status.version !== APP_VERSION ? t('ver.mismatch', { app: APP_VERSION, service: app.status.version }) : t('shell.help.version', { v: APP_VERSION })}>
+          <bdi>Thoughts v{versionLabel()}</bdi>
+        </button>
       </div>
     </aside>
     {:else}
@@ -685,6 +725,14 @@
       {/if}
       {#if !app.online}
         <div class="banner no-print" role="status"><Icon name="offline" size={15} /> {t('shell.reconnecting')}</div>
+      {/if}
+      {#if signedOut && app.online}
+        <div class="safe no-print" role="alert">
+          <Icon name="warning" size={16} />
+          <span class="grow">{t(app.status.claude.authFailed ? 'auth.bannerExpired' : 'auth.banner')}</span>
+          <button class="btn primary" onclick={signIn}><Icon name="external" size={14} /> {t('auth.signIn')}</button>
+          <button class="btn" disabled={authBusy} aria-busy={authBusy} onclick={checkSignIn}><Icon name="retry" size={14} /> {t('auth.check')}</button>
+        </div>
       {/if}
       {#if app.safeMode}
         <div class="safe no-print" role={app.safeReason === 'crash' ? 'alert' : 'status'}>
@@ -842,6 +890,8 @@
   :global([data-theme="contrast"]) .chat.active .dot { background: currentColor; }
   :global([data-theme="contrast"]) .chat.active .dot.run { background: transparent; border-color: currentColor; }
   @keyframes pulse { to { opacity: .3; } }
+  .ver { font: inherit; font-size: 11px; color: var(--muted); background: none; border: 0; padding: 0 4px; text-align: start; cursor: pointer; font-variant-numeric: tabular-nums; }
+  .ver:hover { color: var(--fg); }
   .foot { display: flex; flex-direction: column; gap: 6px; padding-top: 10px; border-top: 1px solid var(--hairline); }
   .wide { justify-content: center; }
   .sm { font-size: var(--fs-xs); }

@@ -44,8 +44,8 @@ export default {
     'chat.permissionTip': 'How much the assistant may do without asking',
     'chat.sendTip': 'Send (Enter)', 'chat.stopTip': 'Stop (Esc)',
     'chat.kind.wrap': 'Wrap', 'chat.kind.setup': 'Setup', 'chat.kind.customize': 'Customisation', 'chat.kind.reorganize': 'Reorganize', 'chat.kind.chat': 'Chat',
-    'chat.perm.default': 'Ask before changes', 'chat.perm.acceptEdits': 'Edit files freely', 'chat.perm.plan': 'Plan only, no changes',
-    'chat.effort.low': 'Quick', 'chat.effort.medium': 'Balanced', 'chat.effort.high': 'Thorough', 'chat.effort.xhigh': 'Very thorough', 'chat.effort.max': 'Maximum',
+    'chat.perm.default': 'Ask before changes', 'chat.perm.acceptEdits': 'Accept edits', 'chat.perm.plan': 'Plan mode', 'chat.perm.bypassPermissions': 'Bypass permissions',
+    'chat.effort.low': 'Low', 'chat.effort.medium': 'Medium', 'chat.effort.high': 'High', 'chat.effort.xhigh': 'xHigh', 'chat.effort.max': 'Max',
 
     // ---- docs ----
     'docs.filesLabel': 'Files in your library',
@@ -157,8 +157,8 @@ export default {
     'chat.permissionTip': 'ما يُسمح للمساعد بفعله دون أن يستأذنك',
     'chat.sendTip': 'إرسال (Enter)', 'chat.stopTip': 'إيقاف (Esc)',
     'chat.kind.wrap': 'تلخيص وحفظ', 'chat.kind.setup': 'إعداد', 'chat.kind.customize': 'تخصيص', 'chat.kind.reorganize': 'إعادة تنظيم', 'chat.kind.chat': 'محادثة',
-    'chat.perm.default': 'يستأذن قبل أي تغيير', 'chat.perm.acceptEdits': 'يعدّل الملفات مباشرة', 'chat.perm.plan': 'يخطّط فقط دون تغيير',
-    'chat.effort.low': 'سريع', 'chat.effort.medium': 'متوازن', 'chat.effort.high': 'متأنٍّ', 'chat.effort.xhigh': 'متأنٍّ جداً', 'chat.effort.max': 'الأقصى',
+    'chat.perm.default': 'يستأذن قبل أي تغيير', 'chat.perm.acceptEdits': 'قبول التعديلات', 'chat.perm.plan': 'وضع التخطيط', 'chat.perm.bypassPermissions': 'تجاوز الأذونات',
+    'chat.effort.low': 'منخفض', 'chat.effort.medium': 'متوسط', 'chat.effort.high': 'مرتفع', 'chat.effort.xhigh': 'مرتفع جداً', 'chat.effort.max': 'الأقصى',
 
     'docs.filesLabel': 'ملفات مكتبتك',
     'docs.filter': 'ابحث في الملفات…', 'docs.clearFilter': 'مسح البحث', 'docs.noFilterMatches': 'لا توجد ملفات مطابقة.',

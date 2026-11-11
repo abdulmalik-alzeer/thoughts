@@ -8,6 +8,7 @@
 //   wrap.start            sync            rollback    settings    help    tour    print
 //   palette               sidebar.toggle  theme.<id>  mode.<light|dark|system>
 //   back / forward        through the views visited this session   history (notes history)
+//   zoom.in / zoom.out / zoom.reset   size of everything in the window (Settings › Accessibility)
 //   plugin:<command id>   a command registered by a plugin was run
 
 export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent);
@@ -40,6 +41,12 @@ export const shortcuts: Shortcut[] = [
   { id: 'settings', label: 'shell.sc.settings', code: 'Comma', key: ',', mod: true },
   { id: 'back', label: 'ui.sc.back', code: 'BracketLeft', key: '[', mod: true },
   { id: 'forward', label: 'ui.sc.forward', code: 'BracketRight', key: ']', mod: true },
+  { id: 'zoom.in', label: 'a11y.sc.zoomIn', code: 'Equal', key: '+', mod: true },
+  { id: 'zoom.in', label: 'a11y.sc.zoomIn', code: 'Equal', key: '+', mod: true, shift: true, hidden: true },
+  { id: 'zoom.in', label: 'a11y.sc.zoomIn', code: 'NumpadAdd', key: '+', mod: true, hidden: true },
+  { id: 'zoom.out', label: 'a11y.sc.zoomOut', code: 'Minus', key: '-', mod: true },
+  { id: 'zoom.out', label: 'a11y.sc.zoomOut', code: 'NumpadSubtract', key: '-', mod: true, hidden: true },
+  { id: 'zoom.reset', label: 'a11y.sc.zoomReset', code: 'Digit0', key: '0', mod: true },
   { id: 'escape', label: 'shell.sc.escape', code: 'Escape', key: 'Esc' },
 ];
 
@@ -68,6 +75,12 @@ export function keys(idOrShortcut: string | Shortcut): string {
   if (!s) return '';
   if (isMac) return (s.mod ? '⌘' : '') + (s.shift ? '⇧' : '') + s.key;
   return [s.mod ? 'Ctrl' : '', s.shift ? 'Shift' : '', s.key].filter(Boolean).join('+');
+}
+
+/** The keys for a command, isolated so they read correctly inside Arabic text. Empty when it has none. */
+export function isolatedKeys(id: string): string {
+  const k = keys(id);
+  return k ? `⁦${k}⁩` : '';
 }
 
 /** "Label (⌘N)" for tooltips. The keys are isolated so they read correctly inside Arabic text. */

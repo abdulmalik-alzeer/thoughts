@@ -217,6 +217,15 @@ const TABLE: &[Entry] = &[
     e("assistant.missing", "assistant_missing", 409, "",
         "The assistant (Claude Code) is not installed, or could not be found.",
         "المساعد (Claude Code) غير مثبّت، أو تعذّر العثور عليه."),
+    e("assistant.signed_out", "signed_out", 409, "SIGNED_OUT::",
+        "The assistant is not signed in to Claude, or the sign-in has expired. Sign in, then send your message again.",
+        "المساعد غير مسجّل الدخول إلى Claude، أو انتهت صلاحية تسجيل الدخول. سجّل الدخول ثم أرسل رسالتك مرة أخرى."),
+    e("bypass.unconfirmed", "confirm_needed", 409, "",
+        "Bypassing permissions must be confirmed first. Choose it again and confirm the warning.",
+        "تجاوز الأذونات يحتاج إلى تأكيدك أولاً. اختره مرة أخرى ووافق على التحذير."),
+    e("bypass.chat_only", "forbidden", 403, "",
+        "Bypassing permissions is only available in ordinary chats.",
+        "تجاوز الأذونات متاح في المحادثات العادية فقط."),
     e("reorganize.untrusted", "forbidden", 403, "",
         "Your library's saved history contains assistant settings that differ from the ones in the folder ({files}). Reorganize was not started.",
         "السجلّ المحفوظ لمكتبتك يحوي إعدادات للمساعد تختلف عمّا في المجلد ({files}). لم تبدأ إعادة التنظيم."),
@@ -267,6 +276,7 @@ const PREFIXES: &[(&str, u16, &str)] = &[
     ("BUSY::", 423, "busy"), ("WRAP_INTERRUPTED::", 409, "wrap_interrupted"), ("CONFLICT::", 409, "conflict"),
     ("REORG_CONFLICT::", 409, "conflict"), ("STALE::", 409, "stale"), ("UNTRUSTED::", 403, "untrusted"),
     ("NO_HISTORY::", 409, "no_history"), ("NEWER_SETTINGS::", 409, "newer_settings"), ("CHANGED::", 409, "changed"),
+    ("SIGNED_OUT::", 409, "signed_out"),
 ];
 
 fn has_arabic(s: &str) -> bool { s.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)) }

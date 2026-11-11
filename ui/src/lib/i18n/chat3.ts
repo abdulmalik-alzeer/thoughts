@@ -1,8 +1,8 @@
 // Chat composer strings added in round 3.
 export default {
   en: {
-    'chat3.perm.acceptEdits': 'Let the assistant edit your notes',
-    'chat3.perm.plan': 'Read only',
+    'chat3.perm.acceptEdits': 'Accept edits',
+    'chat3.perm.plan': 'Plan mode',
     'chat3.taskDone': 'Done', 'chat3.taskOpen': 'Not done',
     'chat3.mentioned': 'Files mentioned in this message',
     'chat3.removeMention': 'Remove the mention of {path}',
@@ -31,8 +31,8 @@ export default {
     'chat3.wrapChoose': 'Finish saving it, or undo the part that was saved. Sync and new wraps wait until you choose.',
   },
   ar: {
-    'chat3.perm.acceptEdits': 'السماح للمساعد بتعديل ملاحظاتك',
-    'chat3.perm.plan': 'قراءة فقط',
+    'chat3.perm.acceptEdits': 'قبول التعديلات',
+    'chat3.perm.plan': 'وضع التخطيط',
     'chat3.taskDone': 'منجزة', 'chat3.taskOpen': 'غير منجزة',
     'chat3.mentioned': 'الملفات المشار إليها في هذه الرسالة',
     'chat3.removeMention': 'إزالة الإشارة إلى {path}',

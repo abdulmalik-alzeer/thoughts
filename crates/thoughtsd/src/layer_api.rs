@@ -136,15 +136,20 @@ async fn undo_last(State(st): S) -> R {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct Customize {
-    /// `text` is the older name of the same field.
-    #[serde(alias = "text")]
     prompt: String,
+    /// The older name of the same field. It is a field of its own, not a serde alias: a client that
+    /// sends both names in one request would otherwise be refused with "duplicate field `prompt`".
+    text: String,
+}
+
+impl Customize {
+    fn request(self) -> String { if self.prompt.trim().is_empty() { self.text } else { self.prompt } }
 }
 
 async fn customize(State(st): S, Json(c): Json<Customize>) -> R {
     let _g = LAYER_LOCK.lock().await;
-    let request = c.prompt.clone();
-    let id = crate::api::start_customize(st.clone(), c.prompt, "customize", None).await?;
+    let request = c.request();
+    let id = crate::api::start_customize(st.clone(), request.clone(), "customize", None).await?;
     staging::set_request(&Dirs::real(), &request);
     Ok(Json(json!({"chatId": id})))
 }
@@ -356,6 +361,16 @@ async fn update_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_customise_request_may_carry_both_names_of_its_text() {
+        let both: Customize = serde_json::from_str(r#"{"prompt":"make it green","text":"make it green"}"#).unwrap();
+        assert_eq!(both.request(), "make it green");
+        let old: Customize = serde_json::from_str(r#"{"text":"older client"}"#).unwrap();
+        assert_eq!(old.request(), "older client");
+        let new: Customize = serde_json::from_str(r#"{"prompt":"newer client"}"#).unwrap();
+        assert_eq!(new.request(), "newer client");
+    }
 
     #[test]
     fn only_a_reviewed_customisation_can_approve_workflows() {

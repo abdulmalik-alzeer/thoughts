@@ -34,12 +34,46 @@ pub struct Settings {
     pub usage_signals: bool,
     /// What the user does, in their own words (asked at setup). Shapes suggestions and wording.
     pub profession: Option<String>,
+    pub accessibility: Accessibility,
+}
+
+/// How the window is shown, for people who need it larger, calmer or clearer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Accessibility {
+    /// Size of everything in the window, in percent (`ZOOM_MIN`..=`ZOOM_MAX`).
+    pub zoom: u16,
+    /// Switch animations off even when the system does not ask for it.
+    pub reduce_motion: bool,
+    pub underline_links: bool,
+    /// A thicker keyboard-focus outline.
+    pub strong_focus: bool,
+    /// More room between lines, words and letters.
+    pub text_spacing: bool,
+}
+
+pub const ZOOM_MIN: u16 = 50;
+pub const ZOOM_MAX: u16 = 200;
+
+impl Default for Accessibility {
+    fn default() -> Self { Self { zoom: 100, reduce_motion: false, underline_links: false, strong_focus: false, text_spacing: false } }
 }
 
 pub const SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_EXTENSION_REPO: &str = "https://github.com/thoughts-app/thoughts-search.git";
-/// The only permission modes the app ever passes to the CLI (never `bypassPermissions`).
-pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "plan"];
+/// The only permission modes the app ever passes to the CLI, under the names Claude Code gives them.
+/// `bypassPermissions` is special: it is only ever switched on after the user confirmed it in a
+/// dialog (see `bypass_needs_confirm`), and only for ordinary chats.
+pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "plan", BYPASS];
+/// Claude Code's "skip all permission checks" mode.
+pub const BYPASS: &str = "bypassPermissions";
+/// What a client sends along (`?confirm=…` on settings, `confirmBypass` on a chat) once the user said yes.
+pub const BYPASS_CONFIRM: &str = BYPASS;
+
+/// Does going from `old` to `new` switch "bypass permissions" on? That step needs the user's yes.
+pub fn bypass_needs_confirm(old: Option<&str>, new: Option<&str>) -> bool {
+    new == Some(BYPASS) && old != Some(BYPASS)
+}
 
 /// Allow-list for a chat/run permission mode. `None` / empty means "the CLI default". The old
 /// `default` ("ask before changes") is still accepted from files and clients written before it was
@@ -49,7 +83,7 @@ pub fn check_permission_mode(mode: Option<&str>) -> anyhow::Result<()> {
     match mode {
         None | Some("") | Some("default") => Ok(()),
         Some(m) if PERMISSION_MODES.contains(&m) => Ok(()),
-        Some(m) => anyhow::bail!("permission mode \"{m}\" is not allowed (use acceptEdits or plan)"),
+        Some(m) => anyhow::bail!("permission mode \"{m}\" is not allowed (use acceptEdits, plan or bypassPermissions)"),
     }
 }
 
@@ -196,6 +230,7 @@ impl Default for Settings {
             private_paths: vec![],
             usage_signals: true,
             profession: None,
+            accessibility: Accessibility::default(),
         }
     }
 }
@@ -346,6 +381,8 @@ impl Settings {
             self.idle_minutes = 15;
         }
         normalize_permission_mode(&mut self.ai.claude.permission_mode);
+        let z = &mut self.accessibility.zoom;
+        *z = if *z == 0 { 100 } else { (*z).clamp(ZOOM_MIN, ZOOM_MAX) };
         self
     }
 
@@ -435,16 +472,19 @@ mod tests {
 
     #[test]
     fn permission_modes_are_allow_listed() {
-        for ok in [None, Some(""), Some("default"), Some("acceptEdits"), Some("plan")] { assert!(check_permission_mode(ok).is_ok(), "{ok:?}"); }
+        for ok in [None, Some(""), Some("default"), Some("acceptEdits"), Some("plan"), Some("bypassPermissions")] { assert!(check_permission_mode(ok).is_ok(), "{ok:?}"); }
         // "Ask before changes" no longer exists: it is read as "plan" wherever it is still stored.
         assert!(!PERMISSION_MODES.contains(&"default"));
         assert_eq!(effective_permission_mode(Some("default")), Some("plan"));
         assert_eq!(effective_permission_mode(Some("acceptEdits")), Some("acceptEdits"));
         assert_eq!(effective_permission_mode(Some("")), None);
         assert_eq!(parse(r#"{"ai":{"claude":{"permissionMode":"default"}}}"#).unwrap().ai.claude.permission_mode.as_deref(), Some("plan"));
-        for bad in ["bypassPermissions", "auto", "dontAsk", "Plan", "plan --dangerously-skip-permissions"] {
+        for bad in ["auto", "dontAsk", "manual", "Plan", "bypasspermissions", "plan --dangerously-skip-permissions"] {
             assert!(check_permission_mode(Some(bad)).is_err(), "{bad}");
         }
+        // Switching "bypass permissions" on is the one step that needs the user's yes; staying on it does not.
+        assert!(bypass_needs_confirm(Some("plan"), Some(BYPASS)) && bypass_needs_confirm(None, Some(BYPASS)));
+        assert!(!bypass_needs_confirm(Some(BYPASS), Some(BYPASS)) && !bypass_needs_confirm(Some(BYPASS), Some("plan")));
         assert!(check_cli_value("model", Some("claude-opus-4[1m]")).is_ok());
         assert!(check_cli_value("model", Some("--dangerously-skip-permissions")).is_err());
         assert!(check_cli_value("model", Some("a b")).is_err());
@@ -486,7 +526,7 @@ mod tests {
 
         let bad = |f: &dyn Fn(&mut Settings)| { let mut n = old.clone(); f(&mut n); n.sanitize_update(&old).is_err() };
         assert!(bad(&|n| n.ai.claude.base_url = Some("http://evil.example.com".into())));
-        assert!(bad(&|n| n.ai.claude.permission_mode = Some("bypassPermissions".into())));
+        assert!(bad(&|n| n.ai.claude.permission_mode = Some("dontAsk".into())));
         assert!(bad(&|n| n.search.extension_repo = "ssh://evil/repo".into()));
         assert!(bad(&|n| n.search.extension_repo = "--upload-pack=evil".into()));
         assert!(bad(&|n| n.private_paths = vec!["../outside".into()]));
@@ -636,5 +676,17 @@ mod tests {
         assert!(s.private_paths.is_empty());
         assert!(s.usage_signals, "on unless the user turns it off");
         assert!(!serde_json::from_str::<Settings>(r#"{"usageSignals":false}"#).unwrap().usage_signals);
+        assert_eq!(s.accessibility, Accessibility::default());
+    }
+
+    #[test]
+    fn zoom_stays_in_range() {
+        let z = |json: &str| parse(json).unwrap().accessibility.zoom;
+        assert_eq!(z(r#"{}"#), 100);
+        assert_eq!(z(r#"{"accessibility":{"zoom":0}}"#), 100);
+        assert_eq!(z(r#"{"accessibility":{"zoom":20}}"#), ZOOM_MIN);
+        assert_eq!(z(r#"{"accessibility":{"zoom":900}}"#), ZOOM_MAX);
+        assert_eq!(z(r#"{"accessibility":{"zoom":125,"reduceMotion":true}}"#), 125);
+        assert!(parse(r#"{"accessibility":{"reduceMotion":true}}"#).unwrap().accessibility.reduce_motion);
     }
 }

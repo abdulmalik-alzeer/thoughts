@@ -5,6 +5,10 @@
   `tools/thoughts-workstation/notes/decisions.md`.
 - The UI talks only to the daemon API. Tauri commands are just `daemon_info` and `restart_daemon`.
 - Never hard-code model, effort or permission lists: they come from `claude --help` (`claude.rs`).
+  Effort levels and permission modes are shown under Claude Code's own names.
+- `bypassPermissions` is only for ordinary chats (`kind == "chat"`) and is only switched on after the
+  user confirmed the warning dialog; the daemon refuses the switch without that confirmation
+  (`check_bypass` in `api.rs`, `?confirm=` on `PUT /api/settings`). Runs the app starts itself never use it.
 - Library writes must respect the library's conventions: todos are edited line by line in place,
   and frontmatter is preserved.
 - Anything the user can customise belongs in the app layer, never in core. The Recovery menu and
