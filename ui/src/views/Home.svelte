@@ -17,6 +17,10 @@
   let lists = $state<any[]>([]);
   let files = $state(0);
   let ask = $state('');
+  // True from the moment a chip put its own text in the box until the box is empty again: such a
+  // message is not one the user wrote from scratch, so it never counts as `byUser`.
+  let chipFilled = false;
+  $effect(() => { if (!ask.trim()) chipFilled = false; });
   let askEl: HTMLTextAreaElement;
 
   // Nothing is shown as "0" until it has really been counted: placeholders while loading, a notice when it failed.
@@ -103,7 +107,7 @@
   function useChip(c: { label: string; prompt: string }) {
     track('home.chip:' + c.label);
     // A prompt ending in a space is a sentence for the user to finish.
-    if (/\s$/.test(c.prompt) && !ask.trim()) { ask = c.prompt; askEl?.focus(); return; }
+    if (/\s$/.test(c.prompt) && !ask.trim()) { ask = c.prompt; chipFilled = true; askEl?.focus(); return; }
     submit(/\s$/.test(c.prompt) || !ask.trim() ? c.prompt : c.prompt + '\n\n', false);
   }
 
@@ -129,7 +133,7 @@
     if (typed && !prefix) track('home.prompt:' + text.split(/\s+/).slice(0, 3).join(' '));
     try {
       // Only what the user typed themselves counts as a chat they started (see `inherited_mode` in the service).
-      const c = await post('/chats', { byUser: typed && !prefix });
+      const c = await post('/chats', { byUser: typed && !prefix && !chipFilled });
       await post(`/chats/${c.id}/send`, { text });
       ask = '';
       await refreshChats();
