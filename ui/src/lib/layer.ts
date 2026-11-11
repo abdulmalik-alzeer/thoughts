@@ -358,6 +358,7 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
       if (!prompt) throw new Error('chat.start(prompt): prompt is empty');
       if (Date.now() - p.lastChat < 5000) throw new Error('chat.start: wait a few seconds between chats');
       p.lastChat = Date.now();
+      // Never `byUser`: an add-on's prompt must not inherit a "bypass permissions" default.
       const c = await post('/chats', {});
       await post(`/chats/${c.id}/send`, { text: prompt });
       refreshChats().catch(() => {});

@@ -233,7 +233,7 @@
   // ---------- actions ----------
   async function newChat(projectId: string | null = null) {
     try {
-      const c = await post('/chats', { projectId });
+      const c = await post('/chats', { projectId, byUser: true });
       await refreshChats();
       go({ kind: 'chat', id: c.id });
     } catch (e: any) { toast(t('shell.newChatFailed'), { kind: 'error', detail: e.message }); }

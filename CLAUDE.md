@@ -8,7 +8,8 @@
   Effort levels and permission modes are shown under Claude Code's own names.
 - `bypassPermissions` is only for ordinary chats (`kind == "chat"`) and is only switched on after the
   user confirmed the warning dialog; the daemon refuses the switch without that confirmation
-  (`check_bypass` in `api.rs`, `?confirm=` on `PUT /api/settings`). Runs the app starts itself never use it.
+  (`check_bypass` in `api.rs`, `?confirm=` on `PUT /api/settings`). Runs the app starts itself never use it,
+  and a bypass default in settings is only inherited by chats the user starts by hand (`byUser`).
 - Library writes must respect the library's conventions: todos are edited line by line in place,
   and frontmatter is preserved.
 - Anything the user can customise belongs in the app layer, never in core. The Recovery menu and

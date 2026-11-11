@@ -1112,7 +1112,12 @@ async fn chat_list(State(st): S) -> R {
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct NewChat { title: Option<String>, project_id: Option<String>, kind: Option<String>, provider: Option<String> }
+struct NewChat {
+    title: Option<String>, project_id: Option<String>, kind: Option<String>, provider: Option<String>,
+    /// The user started this chat by hand (New chat, or typing into the Home box) — not an add-on,
+    /// a suggestion chip or any other part of the app starting one with a prompt of its own.
+    by_user: bool,
+}
 async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     let s = st.settings.read().await.clone();
     crate::settings::check_permission_mode(s.ai.claude.permission_mode.as_deref())?;
@@ -1124,11 +1129,8 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     if let Some(k) = n.kind.filter(|k| k == "chat" || k == "customize") { c.kind = k; }
     c.provider = n.provider.unwrap_or(s.ai.primary.clone());
     c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone() });
-    if c.kind == "customize" {
-        c.title = customize_title(ar).into();
-        // The default for chats may be "bypass permissions"; a customise run never is.
-        if c.options.permission_mode.as_deref() == Some(crate::settings::BYPASS) { c.options.permission_mode = Some("acceptEdits".into()); }
-    }
+    if c.kind == "customize" { c.title = customize_title(ar).into(); }
+    c.options.permission_mode = inherited_mode(c.options.permission_mode.take(), &c.kind, n.by_user);
     let id = c.id.clone();
     let v = serde_json::to_value(&c)?;
     st.chats.insert(c).await;
@@ -1144,6 +1146,15 @@ fn check_run_options(o: &RunOptions) -> anyhow::Result<()> {
     crate::settings::check_cli_value("model", o.model.as_deref())?;
     crate::settings::check_cli_value("effort", o.effort.as_deref())?;
     Ok(())
+}
+
+/// The permission mode a new chat takes from the settings. "Bypass permissions" as the default is
+/// only inherited by an ordinary chat the user started by hand; a chat started for them — by an
+/// add-on (`chat.start`), a chip, a customise run — gets "accept edits" instead, so a prompt the user
+/// did not write never runs with every check switched off.
+fn inherited_mode(default: Option<String>, kind: &str, by_user: bool) -> Option<String> {
+    if default.as_deref() == Some(crate::settings::BYPASS) && !(by_user && kind == "chat") { return Some("acceptEdits".into()); }
+    default
 }
 
 /// "Bypass permissions" is for ordinary chats only, and switching it on needs the user's yes
@@ -1979,6 +1990,29 @@ mod tests {
         for ok in ["default", "acceptEdits", "plan", "bypassPermissions", ""] { assert!(check_run_options(&o(ok)).is_ok(), "{ok}"); }
         for bad in ["auto", "dontAsk", "manual"] { assert!(check_run_options(&o(bad)).is_err(), "{bad}"); }
         assert!(check_run_options(&RunOptions { model: Some("--settings".into()), ..Default::default() }).is_err());
+    }
+
+    #[test]
+    fn a_bypass_default_is_only_inherited_by_chats_the_user_starts() {
+        let b = || Some("bypassPermissions".to_string());
+        assert_eq!(inherited_mode(b(), "chat", true), b());
+        // An add-on's chat.start, a chip, or any other caller that does not say "by the user".
+        assert_eq!(inherited_mode(b(), "chat", false).as_deref(), Some("acceptEdits"));
+        assert_eq!(inherited_mode(b(), "customize", true).as_deref(), Some("acceptEdits"));
+        for m in [None, Some("plan".to_string()), Some("acceptEdits".to_string())] { assert_eq!(inherited_mode(m.clone(), "chat", false), m); }
+    }
+
+    #[tokio::test]
+    async fn a_chat_started_for_the_user_never_gets_the_bypass_default() {
+        let st = Arc::new(AppState::for_test());
+        st.settings.write().await.ai.claude.permission_mode = Some("bypassPermissions".into());
+        let mode = |v: Json<Value>| v.0["options"]["permissionMode"].as_str().map(String::from);
+        let made = chat_create(State(st.clone()), Json(NewChat::default())).await.unwrap();
+        assert_eq!(mode(made).as_deref(), Some("acceptEdits"));
+        let made = chat_create(State(st.clone()), Json(NewChat { by_user: true, ..Default::default() })).await.unwrap();
+        assert_eq!(mode(made).as_deref(), Some("bypassPermissions"));
+        let made = chat_create(State(st.clone()), Json(NewChat { by_user: true, kind: Some("customize".into()), ..Default::default() })).await.unwrap();
+        assert_eq!(mode(made).as_deref(), Some("acceptEdits"));
     }
 
     #[test]

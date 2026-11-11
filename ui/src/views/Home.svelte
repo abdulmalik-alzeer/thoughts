@@ -128,7 +128,8 @@
     if (captureKind(text) === 'todo') track('todo.add');
     if (typed && !prefix) track('home.prompt:' + text.split(/\s+/).slice(0, 3).join(' '));
     try {
-      const c = await post('/chats', {});
+      // Only what the user typed themselves counts as a chat they started (see `inherited_mode` in the service).
+      const c = await post('/chats', { byUser: typed && !prefix });
       await post(`/chats/${c.id}/send`, { text });
       ask = '';
       await refreshChats();
