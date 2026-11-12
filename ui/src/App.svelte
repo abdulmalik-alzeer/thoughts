@@ -39,6 +39,7 @@
   import Help from './views/Help.svelte';
   import History from './views/History.svelte';
   import PreviewBanner from './views/PreviewBanner.svelte';
+  import SetupWaiting from './views/SetupWaiting.svelte';
   import Icon from './lib/Icon.svelte';
   import Logo from './lib/Logo.svelte';
   import Dialogs from './lib/Dialogs.svelte';
@@ -867,6 +868,7 @@
       {/if}
       <UsageBanner />
       <WrapWaiting />
+      <SetupWaiting />
       {#if app.safeMode}
         <div class="safe no-print" role={app.safeReason === 'crash' ? 'alert' : 'status'}>
           <Icon name="shield" size={16} />

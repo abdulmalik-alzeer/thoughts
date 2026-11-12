@@ -8,6 +8,8 @@
   import { cloudFor } from '../lib/cloud.svelte';
   import ThemePicker from './ThemePicker.svelte';
   import Logo from '../lib/Logo.svelte';
+  import AssistantGuide from './AssistantGuide.svelte';
+  import { fmtSize } from '../lib/content/util';
 
   let { done }: { done: (setupChatId: string | null) => void } = $props();
 
@@ -37,6 +39,16 @@
   let folder = $state<{ path: string; state: string } | null>(null);
   let probe = $state<'idle' | 'busy' | 'failed'>('idle');
   const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
+  // The assistant can be connected later (FEAT-08): the library is made now, its setup waits.
+  let later = $state(false);
+  // "I already have one" on a folder of notes (FEAT-09): use it where it is (with the user's yes to
+  // what is added), or keep it as it is and bring a copy into a new library.
+  let adoptChoice = $state<'' | 'adopt' | 'copy'>('');
+  let adoptYes = $state(false);
+  let adoptPlan = $state<{ path: string; v?: any; err?: string } | null>(null);
+  // A folder of notes whose copy comes into the new library, and what is in it.
+  let importFrom = $state('');
+  let bring = $state<{ path: string; v?: any; err?: string } | null>(null);
 
   // Start with the safest choice: nothing leaves this computer until the user asks for a backup.
   // The history of changes is a separate switch, and it starts on.
@@ -87,6 +99,58 @@
     }, 300);
     return () => clearTimeout(timer);
   });
+  // What adding Thoughts' files to the chosen folder of notes would add (asked when that is the choice).
+  const adoptFor = $derived(libraryMode === 'existing' && here === 'files' ? typedPath : '');
+  // (Which folder was asked about is kept outside the reactive state, so an answer never asks again.)
+  let adoptAsked = '';
+  $effect(() => {
+    const p = adoptFor;
+    if (!p || adoptChoice !== 'adopt') { adoptAsked = ''; return; }
+    if (adoptAsked === p) return;
+    adoptAsked = p;
+    adoptPlan = { path: p };
+    adoptYes = false;
+    post('/onboarding/adopt', { path: p })
+      .then((v) => { if (adoptAsked === p) adoptPlan = { path: p, v }; })
+      .catch((e: any) => { if (adoptAsked === p) adoptPlan = { path: p, err: e?.message || t('sb.adopt.failed') }; });
+  });
+  // What a copy of the chosen folder of notes would bring into the new library.
+  let bringAsked = '';
+  $effect(() => {
+    const p = importFrom.trim();
+    if (!p || libraryMode !== 'new') { bringAsked = ''; bring = null; return; }
+    if (bringAsked === p) return;
+    bringAsked = p;
+    bring = { path: p };
+    post('/library/import-folder/preview', { path: p })
+      .then((v) => { if (bringAsked === p) bring = { path: p, v }; })
+      .catch((e: any) => { if (bringAsked === p) bring = { path: p, err: e?.message || t('sb.imp.previewFailed') }; });
+  });
+  const adopting = $derived(!!adoptFor && adoptChoice === 'adopt');
+  const bringing = $derived(libraryMode === 'new' && !!importFrom.trim());
+  /** The assistant is not connected and the user chose to connect it later. */
+  const assistantReady = $derived(!!claude.installed && (!!claude.loggedIn || useApi));
+  const waitsForAssistant = $derived(later && !assistantReady);
+
+  async function pickNotes() {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const p = await open({ directory: true });
+      if (typeof p === 'string') importFrom = p;
+    } catch { toast(t('sb.bring.needPick'), { kind: 'error' }); }
+  }
+  /** Keep the folder of notes as it is: a new library, with a copy of those notes brought in. */
+  function copyInstead() {
+    const from = typedPath;
+    adoptChoice = 'copy';
+    libraryMode = 'new';
+    importFrom = from;
+    const home = app.status?.home ? String(app.status.home) : '~';
+    const fresh = home + '/Thoughts';
+    s.libraryPath = from.replace(/[\\/]+$/, '') === fresh ? fresh + ' library' : fresh;
+    toast(t('sb.adopt.switched'));
+  }
+
   const validUrl = (u: string) => /^https?:\/\/\S+$/.test((u ?? '').trim());
   const validRemote = (u: string) => /^(https?:\/\/|ssh:\/\/|git@)\S+$/.test(u.trim());
 
@@ -130,7 +194,6 @@
     if (r?.url) { try { const { openUrl } = await import('@tauri-apps/plugin-opener'); await openUrl(r.url); } catch { window.open(r.url, '_blank', 'noopener'); } }
     if (r?.hint) toast(t('ob.gitInstallToast'), { detail: String(r.hint), duration: 0 }); else toast(t('ob.gitInstallToast'));
   }, 'ob3.gitInstallFailed');
-  const login = () => act('login', async () => { await post('/ai/claude/login'); toast(t('ob.loginToast')); }, 'ob3.loginFailed');
 
   async function browse() {
     try {
@@ -162,7 +225,7 @@
 
   /** Why the Next button is disabled on the current step ('' = good to go). */
   const blocker = $derived.by(() => {
-    if (step === 1) {
+    if (step === 1 && !later) {
       if (!claude.installed) return t('ob.needClaude');
       if (useApi) {
         if (!validUrl(s.ai.claude.baseUrl)) return t('ob.needApiUrl');
@@ -181,7 +244,16 @@
       } else {
         if (here === 'missing') return t('sa.folder.missing');
         if (here === 'starter') return t('sa.folder.needSetUp');
-        if (here === 'files' || here === 'empty' || here === 'notFolder') return t('sa.folder.notLibrary');
+        if (here === 'files') {
+          if (adoptChoice !== 'adopt') return t('sb.adopt.needChoice');
+          if (!adoptPlan?.v) return adoptPlan?.err || t('sb.adopt.looking');
+          if (!adoptYes) return t('sb.adopt.needYes');
+        }
+        if (here === 'empty' || here === 'notFolder') return t('sa.folder.notLibrary');
+      }
+      if (bringing) {
+        if (!bring?.v && !bring?.err) return t('sb.bring.busy');
+        if (bring?.err || bring?.v?.tooBig || !bring?.v?.files) return t('sb.bring.bad');
       }
     }
     if (step === 2) {
@@ -216,9 +288,13 @@
         remoteUrl: isGit ? remoteUrl.trim() : '', remoteUsername: isGit ? remoteUser : '', remoteToken: isGit ? remoteToken : '',
         apiToken: useApi ? apiToken.trim() : '',
         profession: own || (profession ? t('layer.prof.' + profession) : ''),
+        assistantLater: waitsForAssistant,
+        adopt: adopting && adoptYes,
+        importFrom: bringing ? importFrom.trim() : '',
       });
       try { app.settings = await api('/settings'); applyTheme(); } catch { /* the app reloads settings on its own */ }
-      done(r.setupChatId);
+      // A setup that waits for the assistant is offered again once one is connected; start at Home.
+      done(r.waiting ? null : r.setupChatId);
     } catch (e) {
       failed(t('ob3.finishFailed'), e);
     } finally { busy = false; }
@@ -279,27 +355,8 @@
         </ul>
       </div>
 
-      <div class="card status">
-        <p><b>{t('ob3.toolTitle')}</b></p>
-        <div class="tool">
-          <span class="mark" class:ok={claude.installed}><Icon name={claude.installed ? 'check' : 'warning'} size={15} /></span>
-          <div class="grow"><b><bdi>Claude Code</bdi></b><div class="muted sm">{t('ob.claudeWhy')}</div></div>
-          {#if claude.installed}<span class="pill accent">{t('ob.installed')}</span>
-          {:else}<a class="btn primary" href="https://claude.com/claude-code" target="_blank" rel="noreferrer">{t('ob.installClaude')} <Icon name="external" size={13} /></a>{/if}
-        </div>
-        {#if !claude.installed}<p class="muted sm">{t('ob.toolsAfter')}</p>{/if}
-        {#if claude.installed}
-          <div class="tool">
-            <span class="mark" class:ok={claude.loggedIn || useApi}><Icon name={claude.loggedIn || useApi ? 'check' : 'warning'} size={15} /></span>
-            <div class="grow"><b>{t(claude.loggedIn ? 'ob.signedIn' : 'ob.notSignedIn')}</b><div class="muted sm">{t(claude.loggedIn ? 'ob.signedInHint' : 'ob.signInHint')}</div></div>
-            {#if !claude.loggedIn && !useApi}<button type="button" class="btn primary" disabled={working.login} onclick={login}>{working.login ? t('ob.opening') : t('ob.signIn')}</button>{/if}
-          </div>
-        {/if}
-      </div>
-
-      <div class="row gap-top">
-        <button type="button" class="btn" disabled={checking} aria-busy={checking} onclick={checkAgain}><Icon name="sync" size={14} class={checking ? 'spin' : ''} /> {checking ? t('ob.checking') : t('ob.checkAgain')}</button>
-      </div>
+      <h2>{t('sb.guide.title')}</h2>
+      <AssistantGuide bind:claude keyInstead={useApi} />
 
       <details class="adv" open={useApi}>
         <summary>{t('ob.advApi')}</summary>
@@ -312,6 +369,15 @@
           <p class="muted sm">{t('ob3.apiKeyHint')}</p>
         {/if}
       </details>
+
+      {#if !assistantReady}
+        <div class="card status later" class:sel={later}>
+          <p class="row"><Icon name="eye" size={16} /> <b>{t('sb.later.title')}</b></p>
+          <p class="muted">{t('sb.later.body')}</p>
+          {#if later}<p class="okline" role="status"><Icon name="check" size={15} /> <span>{t('sb.later.chosen')}</span></p>
+          {:else}<div class="row gap-top"><button type="button" class="btn" onclick={() => { later = true; step++; }}>{t('sb.later.button')}</button></div>{/if}
+        </div>
+      {/if}
     {:else if step === 2}
       <h1 tabindex="-1">{t('ob.libTitle')}</h1>
       <p>{t('ob.libBody')}</p>
@@ -343,12 +409,59 @@
             <div class="row gap-top"><button type="button" class="btn primary" onclick={() => (libraryMode = 'new')}>{t('sa.folder.setUp')}</button></div>
           </div>
         {:else if here === 'missing'}<p class="warn"><Icon name="warning" size={15} /> <span>{t('sa.folder.missing')}</span></p>
+        {:else if here === 'files'}
+          <div class="card status">
+            <p class="row"><Icon name="info" size={16} /> <b>{t('sb.adopt.title')}</b></p>
+            <div class="opts" role="group" aria-label={t('sb.adopt.title')}>
+              <button type="button" class="opt" class:sel={adoptChoice === 'adopt'} aria-pressed={adoptChoice === 'adopt'} onclick={() => (adoptChoice = 'adopt')}><b>{t('sb.adopt.useTitle')}</b><span class="muted">{t('sb.adopt.useHint')}</span></button>
+              <button type="button" class="opt" aria-pressed="false" onclick={copyInstead}><b>{t('sb.adopt.copyTitle')}</b><span class="muted">{t('sb.adopt.copyHint')}</span></button>
+            </div>
+            {#if adoptChoice === 'adopt'}
+              {#if adoptPlan?.err}<p class="warn" role="alert"><Icon name="warning" size={15} /> <span>{adoptPlan.err}</span></p>
+              {:else if !adoptPlan?.v}<p class="muted sm">{t('sb.adopt.looking')}</p>
+              {:else}
+                <p>{t('sb.adopt.what')}</p>
+                <ul class="plain">
+                  {#each adoptPlan.v.adds ?? [] as a}
+                    <li>{t('sb.adopt.' + a.what, { n: a.files ?? 0 })} <code class="muted sm"><bdi>{a.path}</bdi></code></li>
+                  {/each}
+                </ul>
+                <p class="muted sm">{t('sb.adopt.counts', { notes: adoptPlan.v.notes ?? 0, total: adoptPlan.v.total ?? 0, size: fmtSize(Number(adoptPlan.v.bytes) || 0) })}</p>
+                {#if !adoptPlan.v.notes}<p class="warn"><Icon name="warning" size={15} /> <span>{t('sb.adopt.noNotes')}</span></p>{/if}
+                <p class="muted sm">{t(historyOn ? 'sb.adopt.unchanged' : 'sb.adopt.unchangedNoHistory')}</p>
+                <label class="check"><input type="checkbox" bind:checked={adoptYes} /> {t('sb.adopt.yes')}</label>
+              {/if}
+            {/if}
+          </div>
         {:else if here}<p class="warn"><Icon name="warning" size={15} /> <span>{t('sa.folder.notLibrary')}</span></p>
         {/if}
       </div>
       {#if libraryMode === 'new'}
         <label for="ob-seeds">{t('ob.seeds')}</label>
         <textarea id="ob-seeds" rows="2" dir="auto" bind:value={seeds} placeholder={t('ob.seedsPh')}></textarea>
+
+        <h2 id="ob-bring">{t('sb.bring.label')}</h2>
+        <p class="muted sm">{t('sb.bring.hint')}</p>
+        {#if bringing}
+          <div class="card status" aria-labelledby="ob-bring">
+            <p class="row"><Icon name="folder" size={16} /> <b class="grow path">{t('sb.bring.from', { path: importFrom.trim() })}</b></p>
+            {#if bring?.err}<p class="warn" role="alert"><Icon name="warning" size={15} /> <span>{bring.err}</span></p>
+            {:else if !bring?.v}<p class="muted sm" role="status">{t('sb.imp.looking')}</p>
+            {:else if bring.v.tooBig}<p class="warn" role="alert"><Icon name="warning" size={15} /> <span>{t('sb.imp.tooBig')}</span></p>
+            {:else if !bring.v.files}<p class="warn" role="alert"><Icon name="warning" size={15} /> <span>{t('sb.imp.empty')}</span></p>
+            {:else}
+              <p class="muted sm">{t('sb.imp.counts', { notes: bring.v.notes ?? 0, other: bring.v.other ?? 0, size: fmtSize(Number(bring.v.bytes) || 0) })}</p>
+              {#if bring.v.leftCount}<p class="muted sm">{t('sb.imp.leftTitle')} {Object.entries(bring.v.leftBy ?? {}).filter(([, n]) => Number(n) > 0).map(([w, n]) => t('sb.imp.left.' + w, { n: Number(n) })).join(' · ')}</p>{/if}
+              <p class="muted sm">{t(historyOn ? 'sb.imp.undo' : 'sb.imp.noUndo')}</p>
+            {/if}
+            <div class="row gap-top">
+              <button type="button" class="btn" onclick={pickNotes}><Icon name="folder" size={14} /> {t('sb.bring.change')}</button>
+              <button type="button" class="btn ghost" onclick={() => (importFrom = '')}>{t('sb.bring.remove')}</button>
+            </div>
+          </div>
+        {:else}
+          <div class="row"><button type="button" class="btn" onclick={pickNotes}><Icon name="upload" size={14} /> {t('sb.bring.pick')}</button></div>
+        {/if}
       {/if}
 
       <h2 id="ob-history">{t('hista.historyTitle')}</h2>
@@ -452,8 +565,9 @@
         </ul>
       </div>
       <dl class="sum">
-        <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}</dd>
-        <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}</dd>
+        <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}{#if adopting} · {t('sb.adopt.sum')}{/if}</dd>
+        {#if bringing}<dt>{t('sb.bring.sum')}</dt><dd><code><bdi>{importFrom.trim()}</bdi></code></dd>{/if}
+        <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}{#if waitsForAssistant} · {t('sb.later.sum')}{/if}</dd>
         <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if s.sync.mode === 'folder' && !inCloud} · {t('sa.sum.notCloud')}{/if}</dd>
         <dt>{t('hista.historyTitle')}</dt><dd>{t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</dd>
       </dl>
@@ -466,7 +580,8 @@
         <label class="check"><input type="checkbox" bind:checked={s.daemon.runAtLogin} /> {t('ob.runAtLogin')}</label>
       </details>
       <p class="muted">{t('ob.wrapDef')}</p>
-      {#if libraryMode === 'new'}<p class="muted">{t('ob.readyNew')}</p>{/if}
+      {#if waitsForAssistant && (libraryMode === 'new' || adopting)}<p class="muted">{t(adopting ? 'sb.later.readyAdopt' : 'sb.later.readyNew')}</p>
+      {:else if libraryMode === 'new'}<p class="muted">{t('ob.readyNew')}</p>{/if}
     {/if}
   </div>
 
@@ -506,10 +621,6 @@
   .opt:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }
   .status { background: var(--bg); margin-top: 10px; }
   .status p { margin: 0 0 6px; }
-  .tool { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--hairline); }
-  .mark { width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; background: var(--fill); color: var(--danger); flex: none; }
-  .mark.ok { color: var(--ok); }
-  a.btn { text-decoration: none; }
   .gap-top { margin-top: 10px; }
   .row.top { align-items: flex-start; }
   .check { display: flex; gap: 8px; align-items: center; color: var(--fg); font-size: 13px; }
@@ -524,6 +635,7 @@
   .okline :global(.icon) { color: var(--ok); }
   .warn.box { border: var(--border-w) solid var(--danger); border-radius: var(--radius); padding: 10px 12px; background: color-mix(in srgb, var(--danger) 7%, transparent); }
   .path { overflow-wrap: anywhere; }
+  .later.sel { border-color: var(--accent); }
   .plain { margin: 6px 0 0; padding-inline-start: 20px; }
   .plain li { margin-bottom: 4px; }
   .sum { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 16px 0; }

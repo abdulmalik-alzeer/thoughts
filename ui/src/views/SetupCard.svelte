@@ -4,7 +4,7 @@
   import { onMount } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import { on, post } from '../lib/api';
-  import { command, go } from '../lib/store.svelte';
+  import { app, command, go } from '../lib/store.svelte';
   import { failed } from '../lib/errors';
   import { t } from '../lib/i18n';
 
@@ -26,13 +26,16 @@
   // The hand-over: shown until the user says something in this chat.
   const ready = $derived(!!chat?.meta?.setup && phase === 'done' && !chat?.running && (chat?.messages?.length ?? 0) <= Number(chat?.meta?.doneAt ?? 0));
   const first = $derived(chat?.meta?.first?.path ? (chat.meta.first as { path: string; title: string }) : null);
+  // Made without an assistant: setup waits until one is connected, then is offered here (FEAT-08).
+  const waiting = $derived(chat?.kind === 'setup' && !chat?.running && phase === 'waiting');
+  const connected = $derived(!!app.status?.claude?.installed && !!app.status?.claude?.loggedIn);
 
   let starting = $state(false);
   async function again() {
     if (starting) return;
     starting = true;
     try { await post(`/onboarding/setup/${chat.id}`); reload(); }
-    catch (e) { failed(t('sa.fail.failed'), e); }
+    catch (e) { failed(t(waiting ? 'sb.wait.failed' : 'sa.fail.failed'), e); }
     finally { starting = false; }
   }
 
@@ -52,6 +55,19 @@
       <!-- Stopping keeps everything: the card then offers to run setup again. -->
       <button type="button" class="btn danger" onclick={stop} title={t('chata.stopRun')}><Icon name="stop" size={13} /> {t('stop')}</button>
     </div>
+  </div>
+{:else if waiting}
+  <div class="setup card" role="status">
+    <span class="ic"><Icon name="ai" size={18} /></span>
+    <div class="grow">
+      <b>{t(connected ? 'sb.wait.readyTitle' : 'sb.wait.title')}</b>
+      <p class="muted">{t(connected ? 'sb.wait.readyBody' : 'sb.wait.body')}</p>
+    </div>
+    {#if connected}
+      <button type="button" class="btn primary" disabled={starting} aria-busy={starting} onclick={again}><Icon name="ai" size={14} /> {starting ? t('sb.wait.starting') : t('sb.wait.run')}</button>
+    {:else}
+      <button type="button" class="btn primary" onclick={() => go({ kind: 'settings', id: 'ai' })}>{t('sb.wait.connect')}</button>
+    {/if}
   </div>
 {:else if notFinished}
   <div class="setup card bad" role="alert">

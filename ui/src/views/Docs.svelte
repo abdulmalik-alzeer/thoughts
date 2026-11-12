@@ -21,6 +21,7 @@
   import Backlinks from './docs/Backlinks.svelte';
   import DocxPreview from './docs/DocxPreview.svelte';
   import { docDir, toDocx } from '../lib/content/docx';
+  import ImportNotes from './ImportNotes.svelte';
 
   let { path }: { path?: string } = $props();
 
@@ -55,6 +56,14 @@
   let canOpenExternal = $state(true);
   let article = $state<HTMLElement>();
   let picker = $state<HTMLInputElement>();
+  // Import: single files (flat, as before), or a whole folder of notes with its folders kept (FEAT-09).
+  let showImportNotes = $state(false);
+  async function bringIn() {
+    const c = await choiceDialog({ title: t('sb.imp.choose'), body: t('sb.imp.chooseBody'),
+      choices: [{ id: 'files', label: t('sb.imp.files') }, { id: 'folder', label: t('sb.imp.folder'), primary: true }] });
+    if (c === 'files') picker?.click(); else if (c === 'folder') showImportNotes = true;
+  }
+  async function broughtIn(into: string) { await loadTree(); setOpen(into, true); }
   /** The note's source instead of its formatted view (hidden text made visible). */
   let showSource = $state(false);
   /** The file as it is now on disk, when it changed elsewhere while being edited ({gone} when it disappeared). */
@@ -940,7 +949,7 @@
       </div>
       <div class="row">
         <button class="btn grow tb" onclick={createNew}><Icon name="plus" size={14} /> {t('docs3.new')}</button>
-        <button class="btn grow tb" onclick={() => picker?.click()} disabled={importing} title={t('docs.importTip')}><Icon name="upload" size={14} /> {t(importing ? 'docs.importing' : 'docs.import')}</button>
+        <button class="btn grow tb" onclick={bringIn} disabled={importing} title={t('docs.importTip')}><Icon name="upload" size={14} /> {t(importing ? 'docs.importing' : 'docs.import')}</button>
       </div>
       <input type="file" multiple hidden bind:this={picker} onchange={pick} />
     </div>
@@ -981,7 +990,7 @@
         <p class="muted">{t('docs.emptyBody')}</p>
         <div class="row wrapr">
           <button class="btn primary" onclick={() => newDoc('')}><Icon name="plus" size={14} /> {t('docs3.newDoc')}</button>
-          <button class="btn" onclick={() => picker?.click()} disabled={importing}><Icon name="upload" size={14} /> {t('docs.import')}</button>
+          <button class="btn" onclick={bringIn} disabled={importing}><Icon name="upload" size={14} /> {t('docs.import')}</button>
           <button class="btn" onclick={() => go({ kind: 'home' })}>{t('docs.emptyAsk')}</button>
         </div>
       </div>
@@ -1099,6 +1108,8 @@
   <Versions path={current} close={() => (showVersions = false)}
     restored={() => { stashDrop(current); editing = false; notify(t('docs3.restoredVersion'), { kind: 'success' }); openFile(current, true); }} />
 {/if}
+
+{#if showImportNotes}<ImportNotes close={() => (showImportNotes = false)} done={broughtIn} />{/if}
 
 <style>
   .docs-c { container-type: inline-size; container-name: docs; }

@@ -22,6 +22,7 @@
   import Customise from './Customise.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
   import Maintenance from './Maintenance.svelte';
+  import AssistantGuide from './AssistantGuide.svelte';
   import { checkAppUpdate } from '../lib/updates';
 
   let { reload }: { reload: () => Promise<void> } = $props();
@@ -624,6 +625,8 @@
         </div>
         {#if (app.wrap as any)?.summariesFailing}<p class="err sm" role="status">{t('runc.sumFail')}</p>{/if}
         <p class="muted sm">{t(provKind === 'incomplete' ? 'runa.acct.incompleteHint' : provKind === 'account' ? 'set.accountHint' : 'runa.acct.keyHint')}</p>
+        <!-- Not installed, or not signed in: the steps to get there, checked as they happen (FEAT-07). -->
+        {#if !claude.installed || (provKind === 'account' && !claude.loggedIn)}<AssistantGuide bind:claude keyInstead={provKind === 'anthropicKey' || provKind === 'service'} />{/if}
       {/if}
       {#if vis(c, 'set.perm')}
         <fieldset class="perm" aria-describedby={errors.permission ? 'st-err-permission' : undefined}>
