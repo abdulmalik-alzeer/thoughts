@@ -118,17 +118,21 @@ fn themes(b: &Value, a: &Value) -> Vec<Value> {
 fn item(area: &str, name: &str, before: Option<&Value>, after: Option<&Value>, compare_code: bool) -> Option<Value> {
     let perms = |v: &Value| strs(&v["permissions"]);
     let write = |v: &Value| strs(&v["write"]);
+    // The folders it may read in; none listed = the whole library (but private folders).
+    let read = |v: &Value| strs(&v["read"]);
     let desc = |v: &Value| v["description"].as_str().map(line).unwrap_or_default();
     match (before, after) {
         (None, Some(y)) => Some(json!({"area": area, "op": "added", "name": line(name), "description": desc(y),
-            "permissions": perms(y), "write": write(y), "unsupported": y["unsupported"] == true})),
+            "permissions": perms(y), "write": write(y), "read": read(y), "unsupported": y["unsupported"] == true})),
         (Some(x), None) => Some(json!({"area": area, "op": "removed", "name": line(name), "description": desc(x)})),
         (Some(x), Some(y)) => {
             let code = compare_code && x["code"] != y["code"];
-            let same = perms(x) == perms(y) && write(x) == write(y) && desc(x) == desc(y) && x["apiVersion"] == y["apiVersion"] && !code;
+            let same = perms(x) == perms(y) && write(x) == write(y) && read(x) == read(y) && desc(x) == desc(y) && x["apiVersion"] == y["apiVersion"] && !code;
             if same { return None; }
             Some(json!({"area": area, "op": "changed", "name": line(name), "description": desc(y),
-                "permissions": perms(y), "write": write(y), "unsupported": y["unsupported"] == true,
+                "permissions": perms(y), "write": write(y), "read": read(y), "unsupported": y["unsupported"] == true,
+                // Reading is the other way round: a list that appears narrows it, one that goes widens it.
+                "readChanged": read(x) != read(y), "readBefore": read(x),
                 "gained": gained(&perms(x), &perms(y)), "lost": gained(&perms(y), &perms(x)),
                 "writeGained": gained(&write(x), &write(y)), "writeLost": gained(&write(y), &write(x)),
                 "code": code, "descriptionChanged": desc(x) != desc(y)}))
@@ -146,7 +150,7 @@ fn manifest(b: &Value, a: &Value) -> Vec<Value> {
         let (mb, ma) = (b[sub].as_object().unwrap_or(&empty), a[sub].as_object().unwrap_or(&empty));
         let names: BTreeSet<&String> = mb.keys().chain(ma.keys()).collect();
         for name in names {
-            let decl = |v: Option<&Value>| v.map(|d| json!({"permissions": d["permissions"], "write": d["write"], "description": d["description"], "apiVersion": d["apiVersion"]}));
+            let decl = |v: Option<&Value>| v.map(|d| json!({"permissions": d["permissions"], "write": d["write"], "read": d["read"], "description": d["description"], "apiVersion": d["apiVersion"]}));
             if let Some(e) = item(area, name, decl(mb.get(name)).as_ref(), decl(ma.get(name)).as_ref(), false) { out.push(e); }
         }
     }
@@ -209,7 +213,7 @@ pub fn describe(before: &Path, after: &Path, files: &[(String, &str)]) -> Value 
                 }
                 None => if let Some(y) = y {
                     installed.push(json!({"area": area, "name": line(&name), "description": y["description"].as_str().map(line).unwrap_or_default(),
-                        "permissions": strs(&y["permissions"]), "write": strs(&y["write"])}));
+                        "permissions": strs(&y["permissions"]), "write": strs(&y["write"]), "read": strs(&y["read"])}));
                 },
             }
         }
@@ -322,10 +326,24 @@ mod tests {
         assert!(e.iter().any(|x| x["area"] == "file" && x["path"] == "plugins/lib/data.json" && x["op"] == "added"), "nothing goes unmentioned");
         assert_eq!(e.len(), 5, "{e:?}");
         // The add-on nobody touched is listed apart, with what it may do.
-        assert_eq!(r["installed"], json!([{"area": "addon", "name": "calm.js", "description": "Quiet list", "permissions": ["todos:read"], "write": []}]));
+        assert_eq!(r["installed"], json!([{"area": "addon", "name": "calm.js", "description": "Quiet list", "permissions": ["todos:read"], "write": [], "read": []}]));
         // A colours-only change in a layer with add-ons mentions no add-on at all.
         let only = describe(&b, &b, &[("custom.css".into(), "modified")]);
         assert!(only["effects"].as_array().unwrap().iter().all(|x| x["area"] != "addon" && x["area"] != "page"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_folders_an_add_on_reads_are_part_of_what_it_may_do() {
+        let b = r#"{"apiVersion":1,"plugins":{"a.js":{"permissions":["library:read"]},"b.js":{"permissions":["library:read"],"read":["clients"]}}}"#;
+        let a = r#"{"apiVersion":1,"plugins":{"a.js":{"permissions":["library:read"],"read":["clients"]},"b.js":{"permissions":["library:read"]},"c.js":{"permissions":["ideas:read"],"read":["work/clients"]}}}"#;
+        let f = fx("manifest.json", Some(b), Some(a));
+        let by = |n: &str| f.iter().find(|x| x["name"] == n).unwrap().clone();
+        // Narrowed: now only clients/. Widened: from clients/ to the whole library. New: with its folders.
+        assert_eq!((by("a.js")["op"].clone(), by("a.js")["readChanged"].clone(), by("a.js")["read"].clone(), by("a.js")["readBefore"].clone()), (json!("changed"), json!(true), json!(["clients"]), json!([])));
+        assert_eq!((by("b.js")["read"].clone(), by("b.js")["readBefore"].clone(), by("b.js")["gained"].clone()), (json!([]), json!(["clients"]), json!([])));
+        assert_eq!((by("c.js")["op"].clone(), by("c.js")["read"].clone()), (json!("added"), json!(["work/clients"])));
+        // The same list is no change.
+        assert!(fx("manifest.json", Some(a), Some(a)).is_empty());
     }
 }

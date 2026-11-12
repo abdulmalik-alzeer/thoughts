@@ -86,6 +86,8 @@ The app validates the staged files before the user can keep them. Any of these b
 - `library:write` is declared without a `write` list, or `write` is given without
   `library:write` or `ideas:write`, or a `write` folder is absolute, contains `..`, is empty or `.`, or is or sits
   inside `.claude` or `.git`;
+- `read` is given without `library:read`, `todos:read` or `ideas:read`, is empty, or names a folder
+  that could not be a `write` folder either (same rules as above);
 - a view declares anything but read permissions, or declares `write`;
 - `nav.json` hides `home`, `settings` or `help`;
 - a workflow has no `prompt`, an unknown trigger, a time that is not `"HH:MM"`, a monthly `day`
@@ -129,6 +131,14 @@ Every plugin that uses a permission has its own small file beside it, with the s
 - `write` — only with `library:write` or `ideas:write`: the library folders the plugin may write
   into (or whose items' status it may change), relative to the library, e.g. `["clients/"]`.
   Anything elsewhere is refused by the app.
+- `read` — optional, with `library:read`, `todos:read` or `ideas:read`: the only library folders
+  the plugin may read in, e.g. `["clients/"]`. Then `library.list`, `library.read`,
+  `library.search`, `todos.list` and `ideas.list` give it nothing outside them (a link inside such
+  a folder that leads elsewhere does not count). Left out, it reads the whole library except
+  private folders. **Give `read` whenever a plugin only needs some folders** — a client-intake form
+  has no reason to read the journal — and the user sees the folders in the review. (The general
+  todo list sits at the top of the library, so a plugin with `read` folders does not see it;
+  `todos.add` can still add to it.)
 - `description` — one plain sentence; the user sees it when reviewing.
 
 Because each plugin has its own file, adding or removing one plugin never touches another, and the
@@ -142,7 +152,7 @@ permissions.
 
 | Permission | Allows |
 |---|---|
-| `library:read` | `library.list`, `library.read`, `library.search` |
+| `library:read` | `library.list`, `library.read`, `library.search` (only inside the `read` folders, when given) |
 | `library:write` | `library.write`, `library.remove` — only inside the `write` folders, only `.md`, `.json`, `.csv`, `.txt` |
 | `todos:read` | `todos.list` |
 | `todos:write` | `todos.add`, `todos.setDone`, `todos.edit`, `todos.remove` |
@@ -150,9 +160,14 @@ permissions.
 | `ideas:write` | `ideas.setStatus` — only for items inside the folders declared in `write` (none declared: no item) |
 | `chat:start` | `chat.start` |
 | `storage` | `storage.get`, `storage.set` — the plugin's own private document |
+| `files:save` | `ui.saveFile` — hand the user a `.csv`, `.txt`, `.md` or `.json` file in the app's save dialog |
+| `notify` | `ui.notify` — a short notice under the plugin's name, also a system notification while the app is in the background |
+| `assistant:ask` | `assistant.ask` — a question for the assistant, whose answer comes back as text |
 
-Everything under `ui.*` and `on(...)` needs none. Folders the user marked private are never
-listed, read, searched or written, whatever a plugin declares.
+Every other call under `ui.*` and `on(...)` needs none. Folders the user marked private are never
+listed, read, searched or written, whatever a plugin declares. The app checks every permission
+itself, from the plugin's own declaration, for every call; asking for one in the code changes
+nothing.
 
 ### custom.css
 
@@ -301,7 +316,7 @@ export default function (thoughts) {
 | `thoughts.library.write(path, text)` | Creates or replaces a text file. `path` must be inside one of the plugin's `write` folders and end in `.md`, `.json`, `.csv` or `.txt` | `library:write` |
 | `thoughts.library.remove(path)` | Deletes a file inside the `write` folders (the user can get it back from the library's history) | `library:write` |
 | `thoughts.todos.list()` | Promise of `[{ file, idea, items: [{ title, text, due, done, group, line }] }]`; `due` is `"YYYY-MM-DD"` or `null` | `todos:read` |
-| `thoughts.todos.add(text)` | Adds a todo to the general list; append ` @due(YYYY-MM-DD)` for a due date | `todos:write` |
+| `thoughts.todos.add(text, where?)` | Adds a todo; append ` @due(YYYY-MM-DD)` for a due date. Without `where`, to the general list. `where` = `{ list, group }`: `list` is a list from `todos.list()` (or its `file`, e.g. `"clients/acme/todo.md"`) that already exists and the plugin can see; `group` one of that list's `groups`. Add-ons never start a new list or group | `todos:write` |
 | `thoughts.todos.setDone(item, done)` | Ticks (`true`) or unticks (`false`) a todo | `todos:write` |
 | `thoughts.todos.edit(item, text)` | Replaces a todo's text (keep or change its ` @due(…)` suffix) | `todos:write` |
 | `thoughts.todos.remove(item)` | Deletes a todo | `todos:write` |
@@ -310,7 +325,12 @@ export default function (thoughts) {
 | `thoughts.storage.get()` | Promise of the plugin's own saved object (`{}` the first time) | `storage` |
 | `thoughts.storage.set(obj)` | Saves `obj` (a plain JSON object, at most 256 KB) in place of what was saved before | `storage` |
 | `thoughts.chat.start(prompt)` | Opens a new chat with that prompt. Only right after the user pressed something of this plugin (a button in its page or widget, one of its commands or item actions), a few seconds apart, at most 20 an hour | `chat:start` |
+| `thoughts.assistant.ask(question)` | Promise of the assistant's answer, as plain text, shown wherever the plugin wants it ("summarise this client"). The assistant has no tools and sees **only the question**: put in it the text it needs (what the plugin read). Only right after the user pressed something of this plugin, one question at a time, at most 20 an hour and 100 a day, never once the month's spending limit is reached; it costs money like a chat. Up to 40,000 characters | `assistant:ask` |
 | `thoughts.ui.toast(msg)` | Shows a short message, under the plugin's name (at most three in ten seconds) | none |
+| `thoughts.ui.confirm(text, { confirm?, danger? })` | Promise of `true` (the user said yes) or `false`. The app asks in its own dialog, under the plugin's name; `confirm` is the yes button's label, `danger: true` for something that deletes. Only right after the user pressed something of this plugin. Use it instead of `confirm()`, which add-ons cannot call | none |
+| `thoughts.ui.notify(text)` | A short notice under the plugin's name: in the app, and as a system notification while the app is in the background and the user has notifications on ("Timer finished"). At most one every 20 seconds and 10 an hour | `notify` |
+| `thoughts.ui.saveFile(name, text)` | Opens the save dialog for a file named `name` (`.csv`, `.txt`, `.md` or `.json`, 5 MB at most); the user chooses where. Promise of `{ saved }`. In a `.csv`, a cell that starts with `=`, `+`, `-` or `@` and is not a number is saved with a `'` in front (so no spreadsheet runs it as a formula); in a `.md`, pictures become links and HTML tags are written as text. Only right after the user pressed something of this plugin | `files:save` |
+| `thoughts.ui.print()` | Prints the plugin's page as it is, whole (only from a page, not a Home widget). Only right after the user pressed something of this plugin | none |
 | `thoughts.ui.go(view)` | Opens a page: `"home"`, `"todos"`, `"ideas"`, `"docs"`, `"projects"`, `"settings"`, or the `id` of a view you added. Only right after the user pressed something of this plugin | none |
 | `thoughts.ui.addView({ id, title, icon?, render(el) })` | Adds a page to the sidebar; `render` fills the element `el` | none |
 | `thoughts.ui.addCommand({ id, title, run })` | Adds a command to the command palette | none |
@@ -386,6 +406,14 @@ Writing a good plugin:
   commands carry the plugin's name. Do not imitate the app's own messages or settings.
 - Never wait for something in a loop (`while (!ready) {}`): code that does not give control back
   freezes the app. Use `await` and events.
+- The app's keyboard shortcuts (Cmd/Ctrl with a key, Escape) keep working while the user is in the
+  plugin's page or widget. A key the plugin handles itself (Escape to close its own menu, Ctrl+Enter
+  to save its form): call `event.preventDefault()` in its `keydown` listener and the app leaves it alone.
+- **Try it.** While the user tries a change, the plugin runs as it will once kept, but nothing is
+  saved: what it writes to the library, removes, saves in `storage` or sets as an item's status is
+  kept aside and read back to it until the preview ends; todo changes are answered as done. The user
+  is told each time what would have been saved and where. `chat.start` and `assistant.ask` are
+  refused while trying (error `code: "preview"`). So a form or a board can be tried end to end.
 
 ### views/*.html
 
@@ -393,8 +421,8 @@ A complete static HTML page shown in the sidebar (the file name without `.html` 
 runs in a sandboxed frame: it cannot reach the app, the user's files or the network on its own. It
 can ask for **read-only** data by message, but only what it declares in its own
 `views/<name>.json` — for example `views/calendar.json`:
-`{ "apiVersion": 1, "permissions": ["todos:read"] }`. With no declaration a view gets no data at
-all, and a view can never write:
+`{ "apiVersion": 1, "permissions": ["todos:read"] }` (a `read` list of folders narrows it, as for a
+plugin). With no declaration a view gets no data at all, and a view can never write:
 
 ```js
 const call = (method, ...args) => new Promise((resolve, reject) => {
@@ -577,6 +605,7 @@ A page with a form; submitting it writes one markdown file into `clients/`.
   "apiVersion": 1,
   "permissions": ["library:read", "library:write"],
   "write": ["clients/"],
+  "read": ["clients/"],
   "description": "A form that saves each new client as a note in the clients folder"
 }
 ```

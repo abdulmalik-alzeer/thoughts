@@ -165,9 +165,12 @@ pub async fn ensure_in(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
 pub const API_VERSION: u64 = 1;
 
 /// Every permission a plugin may declare.
-pub const PERMISSIONS: &[&str] = &["library:read", "library:write", "todos:read", "todos:write", "ideas:read", "ideas:write", "chat:start", "storage"];
+pub const PERMISSIONS: &[&str] = &["library:read", "library:write", "todos:read", "todos:write", "ideas:read", "ideas:write", "chat:start", "storage",
+    "files:save", "notify", "assistant:ask"];
 /// What a sandboxed HTML view may declare (views only ever read).
 pub const VIEW_PERMISSIONS: &[&str] = &["library:read", "todos:read", "ideas:read"];
+/// The permissions that read the library. A `read` list narrows all three to its folders.
+pub const READ_PERMISSIONS: &[&str] = &["library:read", "todos:read", "ideas:read"];
 
 /// A library-relative folder a plugin may write into: relative, no `..`, never `.claude` or `.git`.
 /// Returns the cleaned folder (no trailing slash).
@@ -225,9 +228,13 @@ pub fn resolve_decl(dir: &Path, sub: &str, file: &str, shared: &Value, arabic: b
     let write: Vec<String> = if sub == "views" { vec![] } else {
         decl["write"].as_array().into_iter().flatten().filter_map(Value::as_str).filter_map(|w| clean_write_folder(w).ok()).take(20).collect()
     };
+    // The only folders it may read in (empty: the whole library but private folders). A folder that
+    // cannot be one is dropped; when nothing is left of a list that was given, it reads nothing.
+    let read: Option<Vec<String>> = decl["read"].as_array().map(|l| l.iter().filter_map(Value::as_str).filter_map(|w| clean_write_folder(w).ok()).take(20).collect());
+    let reads_nothing = read.as_ref().map_or(false, Vec::is_empty);
     let unsupported = version > API_VERSION;
     let mut v = json!({
-        "permissions": permissions, "write": write, "apiVersion": version,
+        "permissions": permissions, "write": write, "read": read.unwrap_or_default(), "readsNothing": reads_nothing, "apiVersion": version,
         "description": decl["description"].as_str().map(|d| show_hidden(&d.chars().take(300).collect::<String>(), false)).unwrap_or_default(),
         "unsupported": unsupported, "source": if own.is_some() { "file" } else if decl.is_object() { "manifest" } else { "none" },
     });
@@ -1223,6 +1230,8 @@ mod tests {
         w("plugins/future.js", "export default () => { secret() }\n");
         w("plugins/future.json", r#"{"apiVersion":2,"permissions":["storage"]}"#);
         w("plugins/bare.js", "export default () => {}\n");
+        w("plugins/reader.js", "export default () => {}\n");
+        w("plugins/reader.json", r#"{"apiVersion":1,"permissions":["library:read"],"read":["clients/","../x"]}"#);
         w("views/cal.html", "<p>cal</p>");
         w("todos.json", r#"{"groupBy":"due"}"#);
         w("nav.json", "[1,2]");
@@ -1233,6 +1242,9 @@ mod tests {
         assert_eq!(p("own.js")["write"], json!(["clients"]));
         assert_eq!(p("own.js")["description"], "Intake");
         assert_eq!((p("bare.js")["permissions"].clone(), p("bare.js")["apiVersion"].clone()), (json!([]), json!(1)));
+        // `read`: cleaned like `write`; none listed is the whole library.
+        assert_eq!((p("reader.js")["read"].clone(), p("reader.js")["readsNothing"].clone()), (json!(["clients"]), json!(false)));
+        assert_eq!((p("bare.js")["read"].clone(), p("bare.js")["readsNothing"].clone()), (json!([]), json!(false)));
         let f = p("future.js");
         assert_eq!((f["unsupported"].clone(), f["code"].clone(), f["apiVersion"].clone()), (json!(true), json!(""), json!(2)));
         assert!(f["message"].as_str().unwrap().contains("أحدث"));

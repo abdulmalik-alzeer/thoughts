@@ -182,6 +182,17 @@ pub fn check_plugin_write(root: &Path, rel: &str, allow: &[String]) -> anyhow::R
     Ok(())
 }
 
+/// Is library-relative `rel` inside one of `dirs` (library-relative folders, as an add-on declared
+/// them in `read`)? Both as written and where it really is, whatever the letter case: a link inside
+/// such a folder that leads elsewhere is not inside it.
+pub fn inside_folders(root: &Path, rel: &str, dirs: &[String]) -> bool {
+    let rel = rel.trim().replace('\\', "/");
+    let rel = rel.trim_start_matches("./").trim_start_matches('/');
+    if rel.is_empty() || rel.split('/').any(|c| c == "..") || Path::new(rel).is_absolute() { return false; }
+    let dirs: Vec<String> = dirs.iter().filter_map(|d| crate::paths::clean_rel(d).ok()).collect();
+    crate::paths::is_under(rel, &dirs) && dirs.iter().any(|d| crate::paths::inside_ci(&root.join(rel), &root.join(d)))
+}
+
 /// Like `resolve`, for paths handed to the AI: must also be plainly relative.
 pub fn resolve_mention(root: &Path, rel: &str) -> anyhow::Result<std::path::PathBuf> {
     if rel.trim().is_empty() || rel.starts_with(['/', '\\', '~']) || Path::new(rel).is_absolute() || rel.contains(['\n', '\r']) {

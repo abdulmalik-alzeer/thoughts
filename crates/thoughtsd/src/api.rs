@@ -239,6 +239,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/:id", delete(project_remove))
         // app layer & updates & extensions
         .merge(crate::layer_api::routes())
+        .merge(crate::addons::routes())
         .merge(crate::routines::routes())
         .merge(crate::inbox::routes())
         .merge(crate::tokens::routes())
@@ -420,7 +421,10 @@ async fn library_edit(st: &AppState) -> anyhow::Result<tokio::sync::OwnedRwLockR
 
 /// Requests made on behalf of an add-on carry `scope=plugin`: the daemon then keeps private
 /// folders closed and, for writes, only lets through paths under the folders in `allow=a,b`.
-struct Scope { plugin: bool, allow: Vec<String> }
+/// With `plugin=<file>` (and `kind=view`, `preview=1` for a page or a change being tried) it also
+/// reads that add-on's own declaration: `read` = the only folders it may read in (`None` = the
+/// whole library but private folders; see `addons::reads`).
+struct Scope { plugin: bool, allow: Vec<String>, read: Option<Vec<String>> }
 
 /// The folders of `allow=`: `a,b`, or — so that a folder name may itself contain a comma — a JSON
 /// list (`["Smith, Jones/","b/"]`). A value that starts with `[` but is not such a list is read the
@@ -432,24 +436,40 @@ fn allow_list(raw: &str) -> Vec<String> {
 }
 
 fn scope_of(q: &HashMap<String, String>) -> Scope {
+    let plugin = q.get("scope").map(String::as_str) == Some("plugin");
     Scope {
-        plugin: q.get("scope").map(String::as_str) == Some("plugin"),
+        plugin,
         allow: q.get("allow").map(|a| allow_list(a)).unwrap_or_default(),
+        read: if plugin { crate::addons::reads(q) } else { None },
     }
 }
 
 impl Scope {
-    /// May this request read `rel`?
-    async fn check_read(&self, st: &AppState, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
+    /// Is `rel` outside the user's private folders (always true for the user's own requests)?
+    async fn check_private(&self, st: &AppState, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
         if !self.plugin { return Ok(()); }
         let private = st.settings.read().await.private_paths.clone();
         if paths::is_private(root, rel, &private) { return Err(crate::tr::err("private", &[("path", rel)])); }
         Ok(())
     }
+    /// May this request read `rel`?
+    async fn check_read(&self, st: &AppState, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
+        self.check_private(st, root, rel).await?;
+        if !self.may_read(root, rel) { return Err(crate::tr::err("plugin.not_readable", &[("path", rel)])); }
+        Ok(())
+    }
+    /// Is `rel` inside the folders this add-on may read in (by name and by real location)?
+    fn may_read(&self, root: &std::path::Path, rel: &str) -> bool {
+        self.read.as_ref().map_or(true, |dirs| library::inside_folders(root, rel, dirs))
+    }
+    /// Keep only the entries of `list` whose `key` (a library path) this add-on may read.
+    fn keep_readable(&self, root: &std::path::Path, list: &mut Vec<Value>, key: &str) {
+        if self.read.is_some() { list.retain(|x| self.may_read(root, x[key].as_str().unwrap_or_default())); }
+    }
     /// May this request write, create or delete `rel`?
     async fn check_write(&self, st: &AppState, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
         if !self.plugin { return Ok(()); }
-        self.check_read(st, root, rel).await?;
+        self.check_private(st, root, rel).await?;
         library::check_plugin_write(root, rel, &self.allow)
     }
 }
@@ -1532,10 +1552,12 @@ async fn claude_recheck(State(st): S) -> R {
 async fn ideas(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = lib(&st).await?;
     let mut all = library::ideas(&root);
-    // For an add-on, ideas kept in a private folder do not exist.
-    if scope_of(&q).plugin {
+    // For an add-on, ideas kept in a private folder do not exist, nor those outside the folders it reads.
+    let scope = scope_of(&q);
+    if scope.plugin {
         let private = st.settings.read().await.private_paths.clone();
         all.retain(|i| !paths::is_private(&root, i["path"].as_str().unwrap_or_default(), &private));
+        scope.keep_readable(&root, &mut all, "path");
     }
     Ok(Json(json!(all)))
 }
@@ -1545,7 +1567,10 @@ async fn private_filter(st: &AppState, q: &HashMap<String, String>) -> Vec<Strin
     if q.get("exclude").map(String::as_str) == Some("private") || scope_of(q).plugin { st.settings.read().await.private_paths.clone() } else { vec![] }
 }
 async fn tree(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
-    Ok(Json(json!(library::tree(&lib(&st).await?, &private_filter(&st, &q).await))))
+    let root = lib(&st).await?;
+    let mut list = library::tree(&root, &private_filter(&st, &q).await);
+    scope_of(&q).keep_readable(&root, &mut list, "path");
+    Ok(Json(json!(list)))
 }
 async fn stats(State(st): S) -> R { Ok(Json(library::stats(&lib(&st).await?))) }
 /// What the chat's @-list offers (see `mentions::list`): never anything in a private folder.
@@ -1908,7 +1933,13 @@ async fn history_repair(State(st): S, Json(r): Json<RepairReq>) -> R {
 async fn search(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let (root, exclude) = (lib(&st).await?, private_filter(&st, &q).await);
     let text = q.get("q").cloned().unwrap_or_default();
-    Ok(Json(json!(tokio::task::spawn_blocking(move || library::search(&root, &text, 60, &exclude)).await.unwrap_or_default())))
+    let scope = scope_of(&q);
+    // An add-on limited to some folders gets its 60 from inside them.
+    let limit = if scope.read.is_some() { 1000 } else { 60 };
+    let (base, mut found) = (root.clone(), tokio::task::spawn_blocking(move || library::search(&root, &text, limit, &exclude)).await.unwrap_or_default());
+    scope.keep_readable(&base, &mut found, "path");
+    found.truncate(60);
+    Ok(Json(json!(found)))
 }
 
 /// `GET /api/search?q=…[&limit=][&exclude=private]`: library files and ordinary chats containing every
@@ -1998,10 +2029,12 @@ async fn add_picture(State(st): S, Json(req): Json<PictureReq>) -> R {
 async fn todo_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = lib(&st).await?;
     let mut lists = todos::list(&root);
-    // For an add-on, task lists kept in a private folder do not exist.
-    if scope_of(&q).plugin {
+    // For an add-on, task lists kept in a private folder do not exist, nor those outside the folders it reads.
+    let scope = scope_of(&q);
+    if scope.plugin {
         let private = st.settings.read().await.private_paths.clone();
         lists.retain(|l| !paths::is_private(&root, l["file"].as_str().unwrap_or_default(), &private));
+        scope.keep_readable(&root, &mut lists, "file");
     }
     Ok(Json(json!(lists)))
 }
@@ -2105,6 +2138,23 @@ fn check_todo_file(file: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Where an add-on may add a todo (FEAT-47): the general list, or a list it names that already
+/// exists and that it can see (`todos.list()` gives it: outside private folders, checked by the
+/// caller, and inside its `read` folders); with a group, only one that list already has. An add-on
+/// never starts a list or a group of its own.
+fn plugin_may_add_to(scope: &Scope, root: &std::path::Path, t: &TodoOp) -> anyhow::Result<()> {
+    let named = !t.file.is_empty();
+    let file = if named { t.file.replace('\\', "/") } else { todos::general(root) };
+    if named && (!todos::files(root).contains(&file) || !scope.may_read(root, &file)) {
+        return Err(crate::tr::err("todo.no_list", &[("file", &file)]));
+    }
+    if let Some(g) = t.group.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+        let text = library::resolve(root, &file).ok().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+        if !todos::groups(&text).iter().any(|x| x == g) { return Err(crate::tr::err("todo.no_group", &[("group", g)])); }
+    }
+    Ok(())
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct TodoOp {
@@ -2127,7 +2177,8 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<S
     let _edit = library_edit(&st).await?;
     let file = if t.file.is_empty() { todos::general(&root) } else { t.file.clone() };
     let to_file = if t.to_file.is_empty() { file.clone() } else { t.to_file.clone() };
-    let plugin = scope_of(&q).plugin;
+    let scope = scope_of(&q);
+    let plugin = scope.plugin;
     for f in [&file, &to_file] {
         check_todo_file(f)?;
         if plugin {
@@ -2138,6 +2189,7 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<S
             if paths::is_private(&root, f, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", f)]).into()); }
         }
     }
+    if plugin && op == "add" { plugin_may_add_to(&scope, &root, &t)?; }
     let group = t.group.as_deref();
     let today = chrono::Local::now().date_naive();
     let out = match op.as_str() {
@@ -3760,6 +3812,85 @@ mod tests {
         idea_status(State(st.clone()), none(), set("Me/Finances")).await.unwrap();
         assert!(t::read(&lib, "Me/Finances/README.md").contains("status: active"));
         for name in [&with, &without] {
+            let _ = std::fs::remove_file(plugins.join(name));
+            let _ = std::fs::remove_file(plugins.join(name.replace(".js", ".json")));
+        }
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    /// FEAT-44, FEAT-47: an add-on that lists `read` folders sees nothing of the library outside
+    /// them — files, search, ideas, todo lists — by name or through a link, and adds todos only to
+    /// lists it can see that already exist.
+    #[tokio::test]
+    async fn an_add_on_with_read_folders_sees_only_them_and_adds_todos_only_to_lists_there() {
+        let (st, lib) = t::library().await;
+        let idea = |title: &str| format!("---\ntitle: {title}\nstatus: seed\n---\nAbout the invoice.\n");
+        t::write(&lib, "clients/acme/README.md", &idea("Acme"));
+        t::write(&lib, "clients/acme/todo.md", "# Todo\n\n## Next\n\n- [ ] send the invoice\n");
+        t::write(&lib, "clients/notes.md", "invoice sent\n");
+        t::write(&lib, "journal/day/README.md", &idea("Day"));
+        t::write(&lib, "journal/day/todo.md", "# Todo\n\n- [ ] write about the invoice\n");
+        t::write(&lib, "journal/today.md", "the invoice worried me\n");
+        let plugins = crate::applayer::Dirs::real().layer.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let (narrow, wide) = (format!("intake-{tag}.js"), format!("wide-{tag}.js"));
+        for (name, extra) in [(&narrow, r#","read":["Clients/"]"#), (&wide, "")] {
+            std::fs::write(plugins.join(name), "export default () => {}\n").unwrap();
+            std::fs::write(plugins.join(name.replace(".js", ".json")), format!(r#"{{"apiVersion":1,"permissions":["library:read","todos:read","todos:write","ideas:read"]{extra}}}"#)).unwrap();
+        }
+        let as_addon = |name: &str, more: &[(&str, &str)]| { let mut v = vec![("scope", "plugin"), ("plugin", name)]; v.extend_from_slice(more); q(&v) };
+        let paths = |v: Value, key: &str| -> Vec<String> { v.as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect() };
+
+        // Files, by name: inside the folder (any letter case) yes, elsewhere no.
+        assert!(read_file(State(st.clone()), as_addon(&narrow, &[("path", "clients/notes.md")])).await.is_ok());
+        let e = shown(read_file(State(st.clone()), as_addon(&narrow, &[("path", "journal/today.md")])).await);
+        assert_eq!((e.status, e.code), (403, "forbidden"), "{}", e.message);
+        assert!(shown(read_file(State(st.clone()), as_addon(&narrow, &[("path", "README.md")])).await).message.contains("only read the folders"));
+        // The list, search, ideas and todo lists hold only what is inside it.
+        let files = paths(tree(State(st.clone()), as_addon(&narrow, &[])).await.unwrap().0, "path");
+        assert!(!files.is_empty() && files.iter().all(|p| p.starts_with("clients/")), "{files:?}");
+        let found = paths(search(State(st.clone()), as_addon(&narrow, &[("q", "invoice")])).await.unwrap().0, "path");
+        assert!(!found.is_empty() && found.iter().all(|p| p.starts_with("clients/")), "{found:?}");
+        assert_eq!(paths(ideas(State(st.clone()), as_addon(&narrow, &[])).await.unwrap().0, "path"), ["clients/acme/README.md"]);
+        assert_eq!(paths(todo_list(State(st.clone()), as_addon(&narrow, &[])).await.unwrap().0, "file"), ["clients/acme/todo.md"]);
+        // Through a link inside the folder that leads out of it: refused, and not listed.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(lib.join("journal"), lib.join("clients/diary")).unwrap();
+            std::os::unix::fs::symlink(lib.join("journal/today.md"), lib.join("clients/today.md")).unwrap();
+            for path in ["clients/diary/today.md", "clients/today.md"] {
+                assert_eq!(shown(read_file(State(st.clone()), as_addon(&narrow, &[("path", path)])).await).status, 403, "{path}");
+            }
+            let files = paths(tree(State(st.clone()), as_addon(&narrow, &[])).await.unwrap().0, "path");
+            assert!(files.iter().all(|p| !p.contains("diary") && p != "clients/today.md"), "{files:?}");
+        }
+        // Without a `read` list: the whole library as before. Not in the layer at all: nothing.
+        assert!(read_file(State(st.clone()), as_addon(&wide, &[("path", "journal/today.md")])).await.is_ok());
+        assert_eq!(todo_list(State(st.clone()), as_addon(&wide, &[])).await.unwrap().0.as_array().unwrap().len(), 3);
+        assert!(tree(State(st.clone()), as_addon("missing.js", &[])).await.unwrap().0.as_array().unwrap().is_empty());
+        assert_eq!(shown(read_file(State(st.clone()), as_addon("missing.js", &[("path", "clients/notes.md")])).await).status, 403);
+        // A request that names no add-on keeps the rules from before (private folders only).
+        assert!(read_file(State(st.clone()), q(&[("scope", "plugin"), ("path", "journal/today.md")])).await.is_ok());
+
+        // FEAT-47: a todo goes to a list it names only when that list exists and it can see it.
+        let add = |file: &str, group: Option<&str>| Json(TodoOp { file: file.into(), text: "call back".into(), group: group.map(String::from), ..Default::default() });
+        todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add("clients/acme/todo.md", None)).await.unwrap();
+        todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add("clients/acme/todo.md", Some("Next"))).await.unwrap();
+        assert!(t::read(&lib, "clients/acme/todo.md").matches("- [ ] call back").count() == 2);
+        for (file, group, code) in [("journal/day/todo.md", None, "validation"), ("clients/new/todo.md", None, "validation"),
+                                    ("clients/acme/todo.md", Some("Someday"), "validation"), ("clients/notes.md", None, "validation")] {
+            let e = shown(todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add(file, group)).await);
+            assert_eq!(e.code, code, "{file} {group:?}: {}", e.message);
+        }
+        assert!(!lib.join("clients/new").exists());
+        assert!(!t::read(&lib, "journal/day/todo.md").contains("call back") && !t::read(&lib, "clients/acme/todo.md").contains("## Someday"));
+        // The general list (named by nobody) stays open to any add-on that may add todos; another
+        // add-on may add to the journal's list, which it can see.
+        todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add("", None)).await.unwrap();
+        assert!(t::read(&lib, "TODO.md").contains("- [ ] call back"));
+        todo_op(State(st.clone()), Path("add".into()), as_addon(&wide, &[]), add("journal/day/todo.md", None)).await.unwrap();
+        for name in [&narrow, &wide] {
             let _ = std::fs::remove_file(plugins.join(name));
             let _ = std::fs::remove_file(plugins.join(name.replace(".js", ".json")));
         }

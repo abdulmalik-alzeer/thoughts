@@ -1,7 +1,7 @@
 //! Validation of a staged change before the user reviews it. Every problem is a plain sentence in
 //! the UI language about one file; while any exist the change cannot be kept.
 
-use crate::applayer::{clean_write_folder, API_VERSION, PERMISSIONS, VIEW_PERMISSIONS};
+use crate::applayer::{clean_write_folder, API_VERSION, PERMISSIONS, READ_PERMISSIONS, VIEW_PERMISSIONS};
 use crate::packs::{MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES};
 use serde_json::{json, Map, Value};
 use std::path::Path;
@@ -254,6 +254,31 @@ fn declaration(out: &mut Out, path: &str, o: &Map<String, Value>, view: bool, ow
                 }
             }
         },
+    }
+    // `read` narrows what it reads (files, todos, ideas) to these folders. Left out, it reads the
+    // whole library except private folders.
+    if let Some(r) = o.get("read") {
+        let reads = strings(o.get("permissions").unwrap_or(&Value::Null)).map_or(false, |l| l.iter().any(|p| READ_PERMISSIONS.contains(p)));
+        match strings(r) {
+            None => out.add(path, "`read` must be a list of folder names.", "يجب أن يكون `read` قائمة بأسماء مجلدات."),
+            Some(list) => {
+                if !reads {
+                    out.add(path, "`read` folders only work together with `library:read`, `todos:read` or `ideas:read`.",
+                        "قائمة `read` لا تعمل إلا مع الصلاحية `library:read` أو `todos:read` أو `ideas:read`.");
+                }
+                if list.is_empty() {
+                    out.add(path, "`read` is empty: name at least one folder, or leave `read` out to read the whole library.",
+                        "قائمة `read` فارغة: حدّد مجلدًا واحدًا على الأقل، أو احذف `read` لتقرأ المكتبة كلها.");
+                }
+                if list.len() > 20 { out.add(path, "`read` lists too many folders (at most 20).", "قائمة `read` طويلة جدًا (٢٠ مجلدًا على الأكثر)."); }
+                for folder in list {
+                    if clean_write_folder(folder).is_err() {
+                        out.add(path, format!("`{folder}` is not a folder an add-on may read. Use a folder inside the library such as `clients/` — no `..`, no absolute paths, never `.claude` or `.git`."),
+                            format!("لا يمكن للإضافة القراءة من `{folder}`. استخدم مجلدًا داخل المكتبة مثل `clients/`، دون `..` ودون مسارات مطلقة، وليس `.claude` أو `.git`."));
+                    }
+                }
+            }
+        }
     }
     if o.get("description").map_or(false, |d| !d.is_string()) {
         out.add(path, "`description` must be text.", "يجب أن يكون `description` نصًّا.");
@@ -614,6 +639,18 @@ mod tests {
         let view = check(&[("views/v.html", ""), ("views/v.json", r#"{"apiVersion":1,"permissions":["todos:write","storage"],"write":["x"]}"#)], false);
         assert_eq!(view.len(), 3, "{view:?}");
         assert!(view[0].1.contains("A view can only read"));
+        // `read` (FEAT-44): folders, with a reading permission, never empty; pages may list them too.
+        assert!(with_js(r#"{"apiVersion":1,"permissions":["library:read","todos:read"],"read":["clients/","work/clients"]}"#).is_empty());
+        assert!(with_js(r#"{"apiVersion":1,"permissions":["storage"],"read":["clients"]}"#)[0].contains("only work together"));
+        assert!(with_js(r#"{"apiVersion":1,"permissions":["library:read"],"read":[]}"#)[0].contains("is empty"));
+        assert!(with_js(r#"{"apiVersion":1,"permissions":["library:read"],"read":"clients"}"#)[0].contains("list of folder names"));
+        for bad in ["../x", "/etc", ".git", "notes/.claude"] {
+            assert!(with_js(&json!({"apiVersion": 1, "permissions": ["ideas:read"], "read": [bad]}).to_string())[0].contains("may read"), "{bad}");
+        }
+        assert!(check(&[("views/v.html", ""), ("views/v.json", r#"{"apiVersion":1,"permissions":["todos:read"],"read":["clients"]}"#)], false).is_empty());
+        // The new abilities are permissions like any other.
+        assert!(with_js(r#"{"apiVersion":1,"permissions":["files:save","notify","assistant:ask"]}"#).is_empty());
+        assert!(check(&[("views/v.html", ""), ("views/v.json", r#"{"apiVersion":1,"permissions":["notify"]}"#)], false)[0].1.contains("A view can only read"));
         // The shared manifest: same rules per entry, version required.
         assert!(one("manifest.json", r#"{"plugins":{}}"#)[0].contains("`apiVersion` is missing"));
         assert!(one("manifest.json", r#"{"apiVersion":3}"#)[0].contains("newer version"));

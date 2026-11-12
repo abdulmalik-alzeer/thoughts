@@ -4,6 +4,7 @@
 //! and bearer token (written to `~/.thoughts/daemon.json`). It owns every AI
 //! session process, so chats survive app restarts and updates.
 
+pub mod addons;
 pub mod api;
 pub mod applayer;
 pub mod approvals;
