@@ -2,9 +2,10 @@
   import { onMount } from 'svelte';
   import { api, post } from '../lib/api';
   import { go, toast } from '../lib/store.svelte';
-  import { t } from '../lib/i18n';
+  import { t, tn } from '../lib/i18n';
   import { choiceDialog, confirmDialog } from '../lib/dialog.svelte';
   import Icon from '../lib/Icon.svelte';
+  import DocChanges from '../lib/DocChanges.svelte';
   let { id }: { id?: string } = $props();
   let d = $state<any>(null);
   let failed = $state('');
@@ -41,24 +42,37 @@
       catch (err: any) { toast(t('shell.reorg.failed'), { kind: 'error', detail: err.message }); busy = false; }
     }
   }
-  const lines = $derived((d?.diff || '').split('\n'));
   const phase = $derived.by(() => { const k = 'shell.reorg.phase.' + d?.phase; const s = t(k); return s === k ? d?.phase : s; });
+  // Stopped or failed before it finished: what it left is incomplete, so it can only be discarded.
+  const unfinished = $derived(d?.ok === false);
+  const open = $derived(d?.phase === 'review');
+  // "3 moved, 2 new, 1 changed": only the kinds there are.
+  const summary = $derived.by(() => {
+    const c = d?.counts ?? {};
+    return (['moved', 'added', 'edited', 'deleted'] as const).filter((k) => c[k] > 0).map((k) => tn('wrapb.reorg.count.' + k, c[k])).join(t('wrapb.listSep'));
+  });
 </script>
 
 <div class="page">
   <h1>{t('shell.reorg.title')}</h1>
   {#if d}
     <p class="muted">{t('shell.reorg.intro')}</p>
+    {#if unfinished && open}
+      <p class="warn card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t('wrapb.reorg.unfinished')}</span></p>
+    {/if}
     <div class="row"><span class="pill">{phase}</span><span class="grow"></span>
-      <button class="btn" disabled={busy} onclick={() => finish('discard')}>{t('shell.reorg.discard')}</button>
-      <button class="btn primary" disabled={busy} onclick={() => finish('merge')}>{t('shell.reorg.keep')}</button></div>
-    <h2>{t('shell.reorg.summary')}</h2>
-    <pre dir="ltr">{d.stat}</pre>
+      {#if open}
+        <button class="btn" class:primary={unfinished} disabled={busy} onclick={() => finish('discard')}>{t('shell.reorg.discard')}</button>
+        {#if !unfinished}<button class="btn primary" disabled={busy} onclick={() => finish('merge')}>{t('shell.reorg.keep')}</button>{/if}
+      {/if}
+    </div>
     <h2>{t('shell.reorg.changes')}</h2>
-    <p class="muted sm">{t('shell.reorg.legend')}</p>
-    <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-    <pre class="diff" dir="ltr" tabindex="0" aria-label={t('shell.reorg.changes')}>{#each lines as l}<span class:add={l.startsWith('+')} class:rem={l.startsWith('-')} class:hd={l.startsWith('@@') || l.startsWith('diff')}>{l}
-</span>{/each}</pre>
+    {#if d.total}
+      <p class="muted sm">{tn('wrapb.reorg.total', d.total)}{summary ? ' — ' + summary : ''}</p>
+      <DocChanges files={d.files ?? []} />
+    {:else}
+      <p class="muted">{t('wrapb.reorg.none')}</p>
+    {/if}
   {:else if failed}
     <p class="muted" role="alert">{t('shell.reorg.loadFailed')} <bdi>{failed}</bdi></p>
     <button class="btn" onclick={load}><Icon name="retry" size={15} /> {t('shell.retry')}</button>
@@ -68,7 +82,7 @@
 </div>
 
 <style>
-  .diff { font-size: var(--fs-xs); max-height: 70vh; }
-  .sm { font-size: var(--fs-xs); }
-  .add { color: var(--ok); } .rem { color: var(--danger); } .hd { color: var(--accent-2); }
+  .sm { font-size: var(--fs-sm); }
+  .warn { gap: 8px; align-items: flex-start; margin: 0 0 12px; }
+  .warn :global(.icon) { flex: none; margin-top: 2px; color: var(--danger); }
 </style>

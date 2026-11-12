@@ -776,7 +776,7 @@
     {#if !canCompose && chat.running && chat.kind !== 'setup'}
       <div class="runbar card row" role="status">
         <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
-        <span class="grow">{t(chat.kind === 'wrap' ? (phase === 'applying' ? 'chata.run.wrapApply' : 'chata.run.wrapPreview') : chat.kind === 'reorganize' ? 'chata.run.reorganize' : 'chata.run.setup')}</span>
+        <span class="grow">{t(chat.kind === 'wrap' ? (phase === 'applying' ? (chat.meta?.inCopy ? 'wrapb.run.writing' : 'chata.run.wrapApply') : 'chata.run.wrapPreview') : chat.kind === 'reorganize' ? 'chata.run.reorganize' : 'chata.run.setup')}</span>
         <button class="btn danger" onclick={stop} title={t('chata.stopRun')}><Icon name="stop" size={13} /> {t('stop')}</button>
       </div>
     {/if}

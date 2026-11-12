@@ -1177,7 +1177,7 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
     let history_on = state.settings.read().await.git_enabled();
     let git_on = history_on && crate::git::ready(&state, &lib).await;
     let ar = is_ar(&state).await;
-    if git_on && !finishing && w.meta["direct"] != true && apply_in_copy(&state, &w, &lib, note, ar).await? { return Ok(()); }
+    if git_on && !finishing && w.meta["direct"] != true && apply_in_copy(&state, &w, &lib, note, ar, approval_review_shown(ar, note)).await? { return Ok(()); }
     // In the library itself. A chat or workflow still writing in it would be caught up in the
     // wrap's all-or-nothing undo.
     if state.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
@@ -1415,7 +1415,7 @@ async fn close_copy(state: &AppState, lib: &Path, wrap_id: &str) {
 
 /// Approve a plan where the library keeps a history: the assistant writes into a working copy.
 /// Returns false when no copy can be made here (the caller writes in the library itself).
-async fn apply_in_copy(state: &Arc<AppState>, w: &ChatMeta, lib: &Path, note: &str, ar: bool) -> anyhow::Result<bool> {
+async fn apply_in_copy(state: &Arc<AppState>, w: &ChatMeta, lib: &Path, note: &str, ar: bool, shown: String) -> anyhow::Result<bool> {
     let Some(prompt) = apply_prompt(&w.meta, note, ar, true) else { return Ok(false) };
     if state.library_busy() { return Err(busy()); }
     let (dir, branch) = (copy_dir(&w.id)?, copy_branch(&w.id));
@@ -1432,7 +1432,7 @@ async fn apply_in_copy(state: &Arc<AppState>, w: &ChatMeta, lib: &Path, note: &s
     let copy = json!({"dir": dir, "branch": branch, "base": base, "ready": false});
     let n2 = note.to_string();
     state.chats.update(&w.id, |c| { c.meta["phase"] = json!("applying"); c.meta["inCopy"] = json!(true); c.meta["copy"] = copy; c.meta["approvalNote"] = json!(n2); }).await;
-    claude::push(state, &w.id, Msg::new("user", approval_review_shown(ar, note))).await;
+    claude::push(state, &w.id, Msg::new("user", shown)).await;
     changed(state, &w.id).await;
     crate::log::info(format!("wrap {}: writing {} chat(s) into a working copy", w.id, w.meta["chatIds"].as_array().map_or(0, Vec::len)));
     let spec = RunSpec { chat_id: w.id.clone(), prompt, cwd: dir, add_dirs: vec![],
@@ -1517,11 +1517,23 @@ fn after_copy_run(wid: String, lib: PathBuf, ar: bool) -> Done {
     }))
 }
 
-/// Ask for a change to the changes waiting for review. The assistant continues in the same working
-/// copy; the person looks at everything again before it is kept.
+/// Ask for a change to the changes waiting for review: the assistant continues in the same working
+/// copy, and the person looks at everything again before it is kept. Without a note, the changes
+/// are written again from scratch on the library as it is now (after keeping them clashed with
+/// edits made meanwhile).
 async fn rework(state: &Arc<AppState>, w: &ChatMeta, lib: &Path, note: &str) -> anyhow::Result<()> {
-    if note.is_empty() { return Err(crate::tr::err("wrap.note_needed", &[])); }
     let ar = is_ar(state).await;
+    if note.is_empty() {
+        if state.library_busy() { return Err(busy()); }
+        crate::log::info(format!("wrap {}: writing the changes again on the library as it is now", w.id));
+        close_copy(state, lib, &w.id).await;
+        set_phase(state, &w.id, "preview").await;
+        let w = state.chats.meta(&w.id).await.ok_or_else(|| crate::tr::err("not_found.wrap", &[]))?;
+        let shown = tr(ar, "Write the changes again on my library as it is now.", "اكتب التغييرات من جديد على مكتبتي كما هي الآن.").to_string();
+        // No copy can be made any more: the plan waits to be approved again.
+        apply_in_copy(state, &w, lib, w.meta["approvalNote"].as_str().unwrap_or_default(), ar, shown).await?;
+        return Ok(());
+    }
     let dir = w.meta["copy"]["dir"].as_str().map(PathBuf::from).filter(|d| is_copy(d) && d.is_dir()).ok_or_else(|| crate::tr::err("wrap.closed", &[]))?;
     let fresh = apply_prompt(&w.meta, w.meta["approvalNote"].as_str().unwrap_or_default(), ar, true).map(|p| format!("{p}\n\nYour earlier changes for this plan are already in this folder, and the user has looked at them. \
         Check them, keep what still fits, and make this change the user asked for: {note}")).ok_or_else(|| crate::tr::err("wrap.closed", &[]))?;
@@ -2888,7 +2900,6 @@ mod tests {
         apply(st.clone(), &wrap, "").await.unwrap();
         t::event(&mut rx, &st, "wrap.review").await;
         // "Change this": the assistant goes on in the same copy, and the person looks again.
-        assert_eq!(crate::tr::classify_in(false, &apply(st.clone(), &wrap, "  ").await.unwrap_err()).message, crate::tr::text_in(false, "wrap.note_needed", &[]));
         // The assistant's session from writing the changes (it belongs to the copy's folder).
         st.chats.update(&wrap, |c| c.meta["copySession"] = json!("copy-session")).await;
         let st2 = st.clone();
@@ -2917,6 +2928,18 @@ mod tests {
         assert_eq!(t::phase(&st, &wrap).await, "review");
         assert_eq!(changes(&st, &wrap).await.unwrap()["total"], 3);
         assert!(st.chats.meta(&chat).await.unwrap().is_unwrapped());
+        // "Write them again": a fresh copy of the library as it is now, the plan as approved.
+        t::assistant(&st, |info| async move {
+            assert!(is_copy(&info.cwd) && info.prompt.contains("APPROVED PLAN:\nthe plan"), "{}", info.prompt);
+            assert_eq!(t::read(&info.cwd, "TODO.md"), "# Todo\n\n- [ ] call the bank\n- [ ] pay the rent\n");
+            assert!(!info.cwd.join("ideas/shop/notes/hours.md").exists());
+            t::write(&info.cwd, "TODO.md", "# Todo\n\n- [ ] call the bank\n- [ ] pay the rent\n- [ ] order the sign\n");
+            true
+        });
+        apply(st.clone(), &wrap, "").await.unwrap();
+        t::event(&mut rx, &st, "wrap.review").await;
+        assert_eq!(st.chats.meta(&wrap).await.unwrap().meta["reviewCount"], 1);
+        assert_eq!(st.chats.with(&wrap, |c| c.messages.iter().rev().find(|m| m.role == "user").unwrap().text.clone()).await.unwrap(), "Write the changes again on my library as it is now.");
         // Discarded: the copy and its branch go, the library stays as the person left it.
         discard(&st, &wrap).await.unwrap();
         assert_eq!(t::phase(&st, &wrap).await, "discarded");

@@ -29,6 +29,11 @@ export function failed(headline: string, e: unknown, opts: ToastOpts = {}): void
     toast(t('wrapa.waiting'), { kind: 'error', key: 'wrap-interrupted', action: chatId ? { label: t('err.openWrap'), run: () => go({ kind: 'chat', id: chatId }) } : undefined });
     return;
   }
+  if (code === 'WRAP_REVIEW') {
+    // A Wrap's changes wait to be looked at: it is kept or discarded before another one starts.
+    toast(t('wrapb.waiting'), { kind: 'info', key: 'wrap', action: detail ? { label: t('wrapb.look'), run: () => go({ kind: 'chat', id: detail }) } : undefined });
+    return;
+  }
   if (code === 'NO_HISTORY') {
     toast(t('err.noHistory'), { kind: 'error', key: 'no-history', action: { label: t('settings'), run: () => go({ kind: 'settings', id: 'git' }) } });
     return;
