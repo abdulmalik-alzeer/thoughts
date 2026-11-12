@@ -37,6 +37,7 @@
   import RecentMessages from './lib/RecentMessages.svelte';
   import { crashText, reportError } from './lib/crash';
   import CommandPalette, { type PaletteItem } from './lib/CommandPalette.svelte';
+  import { workflowNotice } from './lib/automatic';
 
   let projects = $state<any[]>([]);
   let showTour = $state(false);
@@ -226,6 +227,7 @@
           await refreshWrap();
         }
         if (e.type === 'chat.done' && app.settings?.notifications && !document.hasFocus()) notify('Thoughts', t('shell.chatFinished', { title: e.title || t('shell.aChat') }));
+        if (e.type === 'workflow.result') workflowNotice(e, notify);
         if (e.type === 'notify') { toast(`${e.title}: ${e.body}`); if (app.settings?.notifications && !document.hasFocus()) notify(e.title, e.body); }
         if (e.type === 'layer.changed') loadLayer().catch(layerError);
         if (e.type === 'layer.pending' || e.type === 'chat.done') checkPending(true);

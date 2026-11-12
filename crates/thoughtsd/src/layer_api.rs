@@ -38,6 +38,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/workflows", get(workflow_list))
         .route("/api/workflows/approve", post(workflow_approve))
         .route("/api/workflows/disable", post(workflow_disable))
+        .route("/api/workflows/run", post(workflow_run))
+        .route("/api/workflows/limits", post(workflow_limits))
         .route("/api/usage", post(usage_event))
         .route("/api/suggestions", get(suggestion_list))
         .route("/api/suggestions/:id/dismiss", post(suggestion_dismiss))
@@ -276,25 +278,59 @@ async fn storage_put(State(st): S, Path(plugin): Path<String>, body: axum::body:
     ok()
 }
 
-async fn workflow_list() -> R {
-    Ok(Json(json!(workflows::status(&crate::paths::app_layer_dir(), &crate::paths::home(), chrono::Local::now().naive_local()))))
+/// Each automatic task with what it does, how it last ended and its limits. `budgetSupported`:
+/// whether the installed assistant can be held to a spending limit (read from its own help).
+async fn workflow_list(State(st): S) -> R {
+    let mut list = workflows::status(&crate::paths::app_layer_dir(), &crate::paths::home(), chrono::Local::now().naive_local());
+    let budget = crate::claude::has_flag(&st, "--max-budget-usd").await;
+    for w in &mut list {
+        w["budgetSupported"] = json!(budget);
+        // A past run links to its chat only while that chat still exists.
+        for key in ["last", "history"] {
+            let rows: Vec<&mut Value> = match w.get_mut(key) { Some(Value::Array(a)) => a.iter_mut().collect(), Some(v) if v.is_object() => vec![v], _ => vec![] };
+            for r in rows {
+                let exists = match r["chatId"].as_str() { Some(id) => st.chats.with(id, |_| ()).await.is_some(), None => false };
+                r["chatExists"] = json!(exists);
+            }
+        }
+    }
+    Ok(Json(json!(list)))
 }
 
-#[derive(Deserialize)]
-struct WorkflowName { name: String }
+/// Which task: its file (its identity) and, for approve and run, the content hash the user was shown.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct WorkflowRef { file: String, hash: String }
 
-/// Allow a workflow to run on its own, in exactly its current form.
-async fn workflow_approve(State(st): S, Json(w): Json<WorkflowName>) -> R {
-    workflows::approve(&crate::paths::app_layer_dir(), &crate::paths::home(), &w.name)?;
-    crate::log::info(format!("workflow \"{}\" approved", w.name));
+/// Allow the task the user was shown to run on its own, in exactly that form.
+async fn workflow_approve(State(st): S, Json(w): Json<WorkflowRef>) -> R {
+    let l = workflows::approve(&crate::paths::app_layer_dir(), &crate::paths::home(), &w.file, &w.hash)?;
+    crate::log::info(format!("workflow \"{}\" ({}) approved", l.workflow.name, l.file));
     st.emit(json!({"type": "workflows.changed"}));
     ok()
 }
 
 /// Stop a workflow from running. Its file stays; approving it again turns it back on.
-async fn workflow_disable(State(st): S, Json(w): Json<WorkflowName>) -> R {
-    workflows::disable(&crate::paths::app_layer_dir(), &crate::paths::home(), &w.name)?;
-    crate::log::info(format!("workflow \"{}\" disabled", w.name));
+async fn workflow_disable(State(st): S, Json(w): Json<WorkflowRef>) -> R {
+    let l = workflows::disable(&crate::paths::app_layer_dir(), &crate::paths::home(), &w.file)?;
+    crate::log::info(format!("workflow \"{}\" ({}) disabled", l.workflow.name, l.file));
+    st.emit(json!({"type": "workflows.changed"}));
+    ok()
+}
+
+/// "Run now": once, as a chat the user can watch. → `{chatId}`
+async fn workflow_run(State(st): S, Json(w): Json<WorkflowRef>) -> R {
+    let id = workflows::run_now(&st, &w.file, &w.hash).await?;
+    st.emit(json!({"type": "workflows.changed"}));
+    Ok(Json(json!({"chatId": id})))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowLimits { file: String, minutes: u32, budget_usd: f64 }
+
+async fn workflow_limits(State(st): S, Json(w): Json<WorkflowLimits>) -> R {
+    workflows::set_limits(&w.file, w.minutes, w.budget_usd).await?;
     st.emit(json!({"type": "workflows.changed"}));
     ok()
 }

@@ -37,6 +37,9 @@ pub struct RunOptions {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    /// Spending ceiling for one run (automatic tasks). Set by the app only: never stored, never read from a client.
+    #[serde(skip)]
+    pub max_budget_usd: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

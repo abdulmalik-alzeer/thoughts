@@ -209,6 +209,27 @@ pub async fn options(state: &AppState) -> Value {
     })
 }
 
+/// Does the installed assistant program accept `flag`? Read from its own `--help` (remembered for
+/// an hour per program), never assumed.
+pub async fn has_flag(state: &AppState, flag: &str) -> bool {
+    static HELP: std::sync::Mutex<Option<(PathBuf, std::time::Instant, String)>> = std::sync::Mutex::new(None);
+    let Some(bin) = binary(state).await else { return false };
+    let cached = HELP.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        .filter(|(b, at, _)| *b == bin && at.elapsed() < std::time::Duration::from_secs(3600)).map(|(_, _, h)| h);
+    let help = match cached {
+        Some(h) => h,
+        None => {
+            let mut c = cmd(&bin);
+            c.arg("--help");
+            let h = crate::proc::output_timeout(&mut c, std::time::Duration::from_secs(15)).await.ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+            if !h.is_empty() { *HELP.lock().unwrap_or_else(|e| e.into_inner()) = Some((bin, std::time::Instant::now(), h.clone())); }
+            h
+        }
+    };
+    !flag_block(&help, flag).is_empty()
+}
+
 /// The help text belonging to one flag: its line plus indented continuation lines.
 pub fn flag_block(help: &str, flag: &str) -> String {
     let mut out = String::new();
@@ -594,6 +615,10 @@ pub async fn start_run(
     if let Some(m) = spec.options.model.as_ref().filter(|s| !s.is_empty()) { c.args(["--model", m]); }
     if let Some(e) = spec.options.effort.as_ref().filter(|s| !s.is_empty()) { c.args(["--effort", e]); }
     if let Some(p) = &mode { c.args(["--permission-mode", p]); }
+    if let Some(b) = spec.options.max_budget_usd.filter(|b| b.is_finite() && *b > 0.0) {
+        if has_flag(&state, "--max-budget-usd").await { c.args(["--max-budget-usd", &format!("{b:.2}")]); }
+        else { crate::log::warn(format!("run {}: this version of the assistant cannot limit spending; only the time limit applies", spec.chat_id)); }
+    }
     for d in &spec.add_dirs { c.arg("--add-dir").arg(d); }
     if via_files { c.arg("--append-system-prompt-file").arg(as_file("system.txt", &sys)?); } else { c.args(["--append-system-prompt", &sys]); }
     provider_env(&state, &mut c).await;
@@ -837,6 +862,9 @@ mod tests {
         assert_eq!(paren_list(&flag_block(HELP, "--effort")), ["low", "medium", "high", "xhigh", "max"]);
         assert_eq!(paren_list(&flag_block(HELP, "--permission-mode")), ["acceptEdits", "auto", "plan"]);
         assert_eq!(quoted(&flag_block(HELP, "--model")), ["fable", "opus", "sonnet"]);
+        // A flag is used only when the installed program lists it.
+        assert!(flag_block(HELP, "--max-budget-usd").is_empty());
+        assert!(!flag_block("  --max-budget-usd <amount>   Maximum dollar amount\n", "--max-budget-usd").is_empty());
     }
 
     #[test]

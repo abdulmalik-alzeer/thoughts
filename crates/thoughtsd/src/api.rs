@@ -1279,7 +1279,7 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     c.project_id = n.project_id;
     if let Some(k) = n.kind.filter(|k| k == "chat" || k == "customize") { c.kind = k; }
     c.provider = n.provider.unwrap_or(s.ai.primary.clone());
-    c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone() });
+    c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() });
     if c.kind == "customize" { c.title = customize_title(ar).into(); }
     c.options.permission_mode = inherited_mode(c.options.permission_mode.take(), &c.kind, n.by_user);
     let id = c.id.clone();

@@ -85,6 +85,7 @@ pub fn valid(w: &Workflow) -> bool {
 }
 
 /// A valid workflow together with the file it came from and that file's content hash.
+/// The file is the workflow's identity (the name is only what it is called); the hash is its content.
 #[derive(Clone, Debug)]
 pub struct Loaded {
     /// File name inside `workflows/`, e.g. `weekly-review.json`.
@@ -92,6 +93,8 @@ pub struct Loaded {
     /// sha256 of the file's bytes: approval is given to exactly this content.
     pub hash: String,
     pub workflow: Workflow,
+    /// Another workflow file uses the same name: the list says so, so the two can be told apart.
+    pub duplicate_name: bool,
 }
 
 pub fn content_hash(bytes: &[u8]) -> String {
@@ -99,7 +102,8 @@ pub fn content_hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// Valid workflows in `<layer>/workflows/*.json`, by name (first file wins on a duplicate name).
+/// Valid workflows in `<layer>/workflows/*.json`, in file order. Two files may carry the same
+/// name: neither hides the other (each is its own workflow, approved on its own).
 pub fn load_files(layer: &Path) -> Vec<Loaded> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(layer.join("workflows")).into_iter().flatten().flatten().map(|e| e.path())
         .filter(|p| p.extension().map_or(false, |x| x == "json") && p.is_file()).collect();
@@ -113,8 +117,10 @@ pub fn load_files(layer: &Path) -> Vec<Loaded> {
         }
         let Ok(w) = serde_json::from_value::<Workflow>(v) else { continue };
         let Some(file) = f.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
-        if valid(&w) && !out.iter().any(|x| x.workflow.name == w.name) { out.push(Loaded { file, hash: content_hash(&bytes), workflow: w }); }
+        if valid(&w) { out.push(Loaded { file, hash: content_hash(&bytes), workflow: w, duplicate_name: false }); }
     }
+    let names: Vec<String> = out.iter().map(|l| l.workflow.name.clone()).collect();
+    for l in &mut out { l.duplicate_name = names.iter().filter(|n| **n == l.workflow.name).count() > 1; }
     out
 }
 
@@ -140,30 +146,39 @@ fn save_approved(home: &Path, a: &Approved) -> anyhow::Result<()> {
 fn is_approved(a: &Approved, l: &Loaded) -> bool { a.get(&l.file) == Some(&l.hash) }
 
 /// The workflows the runner may start: valid, and approved in their current form.
-pub fn approved_workflows(layer: &Path, home: &Path) -> Vec<Workflow> {
+pub fn approved_workflows(layer: &Path, home: &Path) -> Vec<Loaded> {
     let a = load_approved(home);
-    load_files(layer).into_iter().filter(|l| is_approved(&a, l)).map(|l| l.workflow).collect()
+    load_files(layer).into_iter().filter(|l| is_approved(&a, l)).collect()
 }
 
-fn find(layer: &Path, name: &str) -> anyhow::Result<Loaded> {
-    load_files(layer).into_iter().find(|l| l.workflow.name == name || l.file == name)
-        .ok_or_else(|| anyhow::anyhow!("no such workflow"))
+/// The workflow in file `file` — looked up by its file only, never by its name.
+fn find(layer: &Path, file: &str) -> anyhow::Result<Loaded> {
+    load_files(layer).into_iter().find(|l| l.file == file).ok_or_else(|| crate::tr::err("workflow.gone", &[]))
 }
 
-/// The user allows workflow `name` (as it is right now) to run on its own.
-pub fn approve(layer: &Path, home: &Path, name: &str) -> anyhow::Result<()> {
-    let l = find(layer, name)?;
+/// The workflow the user was shown: file `file` with exactly the content `hash`. Anything else —
+/// another file, or this file changed since the list was read — is refused, so they look again.
+fn find_seen(layer: &Path, file: &str, hash: &str) -> anyhow::Result<Loaded> {
+    let l = find(layer, file)?;
+    if hash.is_empty() || l.hash != hash { return Err(crate::tr::err("workflow.changed", &[])); }
+    Ok(l)
+}
+
+/// The user allows the workflow they were shown (file `file`, content `hash`) to run on its own.
+pub fn approve(layer: &Path, home: &Path, file: &str, hash: &str) -> anyhow::Result<Loaded> {
+    let l = find_seen(layer, file, hash)?;
     let mut a = load_approved(home);
-    a.insert(l.file, l.hash);
-    save_approved(home, &a)
+    a.insert(l.file.clone(), l.hash.clone());
+    save_approved(home, &a)?;
+    Ok(l)
 }
 
-/// Stop workflow `name` from running (its file stays; approving it again re-enables it).
-pub fn disable(layer: &Path, home: &Path, name: &str) -> anyhow::Result<()> {
-    let l = find(layer, name)?;
+/// Stop the workflow in file `file` from running (its file stays; approving it again re-enables it).
+pub fn disable(layer: &Path, home: &Path, file: &str) -> anyhow::Result<Loaded> {
+    let l = find(layer, file)?;
     let mut a = load_approved(home);
     if a.remove(&l.file).is_some() { save_approved(home, &a)?; }
-    Ok(())
+    Ok(l)
 }
 
 /// Approve the workflows among `paths` (layer-relative, e.g. `workflows/x.json`) as they now are in
@@ -220,17 +235,47 @@ pub fn prev_run(trigger: &Trigger, now: NaiveDateTime) -> Option<NaiveDateTime> 
     None
 }
 
-/// A run missed while the app was closed or the computer slept is caught up only this long after its time.
-pub const CATCH_UP_HOURS: i64 = 24;
+/// A run missed while the app was closed or the computer slept is caught up only this long after
+/// its time: a day for daily ones; longer for weekly and monthly ones, so a Friday review or a
+/// month-end task missed over a weekend still runs on Monday.
+pub fn catch_up(trigger: &Trigger) -> Duration {
+    match trigger {
+        Trigger::Schedule { every, .. } if every == "week" => Duration::days(3),
+        Trigger::Schedule { every, .. } if every == "month" => Duration::days(5),
+        _ => Duration::hours(24),
+    }
+}
 /// A failed run is tried once more after this many minutes.
 pub const RETRY_MINUTES: i64 = 10;
+/// Limits every run gets unless the user set others: how long it may take, and how much it may spend.
+pub const DEFAULT_MINUTES: u32 = 20;
+pub const DEFAULT_BUDGET_USD: f64 = 2.0;
+pub const MAX_MINUTES: u32 = 240;
+pub const MIN_BUDGET_USD: f64 = 0.1;
+pub const MAX_BUDGET_USD: f64 = 100.0;
+/// How many past runs are remembered per workflow.
+pub const HISTORY: usize = 10;
+
+/// How one run ended.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RunResult {
+    pub started: Option<NaiveDateTime>,
+    pub ended: Option<NaiveDateTime>,
+    /// "ok" | "failed" | "stopped" (by the user) | "timeLimit" | "spendLimit" | "interrupted" | "notStarted"
+    pub outcome: String,
+    pub chat_id: Option<String>,
+    /// Started by hand ("Run now"), not by its schedule or event.
+    pub manual: bool,
+    pub cost_usd: f64,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Seen {
     pub last_run: Option<NaiveDateTime>,
-    /// When the runner first met this workflow: a schedule counts from here, so a new workflow
-    /// never fires for a time that had already passed when it was created.
+    /// When the runner first met this workflow in its approved form: a schedule counts from here, so
+    /// a workflow never fires for a time that had already passed when it was allowed.
     pub first_seen: Option<NaiveDateTime>,
     /// The chat of the run that is in progress (or was, when the daemon last looked).
     pub chat_id: Option<String>,
@@ -238,8 +283,28 @@ pub struct Seen {
     pub retry_at: Option<NaiveDateTime>,
     /// …but only once per run.
     pub retried: bool,
+    /// The approved content `first_seen` counts from; a new approval starts the count again.
+    /// Empty while the workflow is not approved.
+    pub approved_hash: Option<String>,
+    /// When the run in progress started (for its time limit).
+    pub started_at: Option<NaiveDateTime>,
+    /// The run in progress was started by hand.
+    pub manual: bool,
+    /// The latest scheduled time that was missed for good (too long ago to catch up).
+    pub skipped: Option<NaiveDateTime>,
+    /// Past runs, newest first.
+    pub results: Vec<RunResult>,
+    /// The user's own limits for this workflow (the defaults when unset).
+    pub minutes: Option<u32>,
+    pub budget_usd: Option<f64>,
 }
 
+impl Seen {
+    pub fn minutes(&self) -> u32 { self.minutes.unwrap_or(DEFAULT_MINUTES) }
+    pub fn budget(&self) -> f64 { self.budget_usd.unwrap_or(DEFAULT_BUDGET_USD) }
+}
+
+/// What the runner remembers, by workflow file.
 pub type State = BTreeMap<String, Seen>;
 
 fn state_file(home: &Path) -> PathBuf { home.join("workflows-state.json") }
@@ -252,13 +317,37 @@ fn save_state(home: &Path, s: &State) {
     if let Ok(t) = serde_json::to_string_pretty(s) { let _ = crate::paths::write_atomic(&state_file(home), t.as_bytes(), true); }
 }
 
+/// Older versions remembered workflows by name. Move such entries to the file that carries the
+/// name (the first one, as the old runner did). Returns whether anything moved.
+pub fn migrate(st: &mut State, loaded: &[Loaded]) -> bool {
+    let mut moved = false;
+    for l in loaded {
+        if st.contains_key(&l.file) || loaded.iter().any(|x| x.file == l.workflow.name) { continue; }
+        if loaded.iter().find(|x| x.workflow.name == l.workflow.name).map(|x| &x.file) != Some(&l.file) { continue; }
+        if let Some(s) = st.remove(&l.workflow.name) { st.insert(l.file.clone(), s); moved = true; }
+    }
+    moved
+}
+
+fn base(seen: &Seen) -> Option<NaiveDateTime> {
+    match (seen.last_run, seen.first_seen) { (Some(a), Some(b)) => Some(a.max(b)), (a, b) => a.or(b) }
+}
+
 /// The scheduled time `w` has to run for right now, if any: the latest time its schedule fired,
-/// when that is after its last run (or after the runner first met it) and no more than a day ago.
+/// when that is after its last run (and after it was allowed) and recent enough to catch up.
 /// However long the app was closed this is at most one run — older missed times are skipped.
 pub fn missed(w: &Workflow, seen: Option<&Seen>, now: NaiveDateTime) -> Option<NaiveDateTime> {
-    let base = seen.and_then(|s| s.last_run.or(s.first_seen))?;
+    let base = base(seen?)?;
     let slot = prev_run(&w.trigger, now)?;
-    (slot > base && now - slot <= Duration::hours(CATCH_UP_HOURS)).then_some(slot)
+    (slot > base && now - slot <= catch_up(&w.trigger)).then_some(slot)
+}
+
+/// A scheduled time that passed while the app was closed and is now too long ago to catch up, and
+/// that the user has not been told about yet.
+pub fn newly_skipped(w: &Workflow, seen: &Seen, now: NaiveDateTime) -> Option<NaiveDateTime> {
+    let base = base(seen)?;
+    let slot = prev_run(&w.trigger, now)?;
+    (slot > base && now - slot > catch_up(&w.trigger) && seen.skipped != Some(slot) && seen.chat_id.is_none()).then_some(slot)
 }
 
 /// When `w` should next run given what the runner remembers about it.
@@ -267,15 +356,16 @@ pub fn due_at(w: &Workflow, seen: Option<&Seen>, now: NaiveDateTime) -> Option<N
     missed(w, seen, now).or_else(|| next_run(&w.trigger, now))
 }
 
-/// Names of schedule workflows that are due at `now`, and of failed ones whose retry time has come.
-pub fn due(workflows: &[Workflow], state: &State, now: NaiveDateTime) -> Vec<String> {
-    workflows.iter().filter(|w| {
-        let seen = state.get(&w.name);
-        missed(w, seen, now).is_some() || seen.and_then(|s| s.retry_at).map_or(false, |t| t <= now)
-    }).map(|w| w.name.clone()).collect()
+/// Files of schedule workflows that are due at `now`, and of failed ones whose retry time has come.
+pub fn due(workflows: &[Loaded], state: &State, now: NaiveDateTime) -> Vec<String> {
+    workflows.iter().filter(|l| {
+        let seen = state.get(&l.file);
+        if seen.map_or(false, |s| s.chat_id.is_some()) { return false; }
+        missed(&l.workflow, seen, now).is_some() || seen.and_then(|s| s.retry_at).map_or(false, |t| t <= now)
+    }).map(|l| l.file.clone()).collect()
 }
 
-/// A run of `seen`'s workflow ended. A failure earns one retry; a success (or a second failure) clears it.
+/// A scheduled run of `seen`'s workflow ended. A failure earns one retry; a success (or a second failure) clears it.
 pub fn note_result(seen: &mut Seen, ok: bool, now: NaiveDateTime) {
     seen.chat_id = None;
     if !ok && !seen.retried {
@@ -286,40 +376,115 @@ pub fn note_result(seen: &mut Seen, ok: bool, now: NaiveDateTime) {
     }
 }
 
-/// A run of `seen`'s workflow is starting at `now`. A retry keeps its mark, so it is not retried again.
+/// A scheduled run of `seen`'s workflow is starting at `now`. A retry keeps its mark, so it is not retried again.
 pub fn note_start(seen: &mut Seen, now: NaiveDateTime) {
     let retry = seen.retry_at.map_or(false, |t| t <= now);
     seen.retried = retry;
     seen.retry_at = None;
     seen.last_run = Some(now);
+    seen.started_at = Some(now);
+    seen.manual = false;
+}
+
+/// A run started by hand: it neither counts as the scheduled run nor touches the retry.
+pub fn note_manual_start(seen: &mut Seen, chat_id: &str, now: NaiveDateTime) {
+    seen.chat_id = Some(chat_id.to_string());
+    seen.started_at = Some(now);
+    seen.manual = true;
+}
+
+/// How a run ended, from what is known about it. `limit` is set when the runner stopped it for
+/// running too long; `error` is the last error the chat shows.
+pub fn outcome(ok: bool, by_user: bool, limit: bool, interrupted: bool, spent: f64, budget: f64, error: &str) -> &'static str {
+    if limit { return "timeLimit"; }
+    if ok { return "ok"; }
+    if error.to_lowercase().contains("budget") || (budget > 0.0 && spent >= budget) { return "spendLimit"; }
+    if interrupted { return "interrupted"; }
+    if by_user { return "stopped"; }
+    "failed"
+}
+
+/// Record how the run in progress ended. Only a scheduled run that simply failed is retried.
+pub fn settle(seen: &mut Seen, outcome: &str, cost: f64, now: NaiveDateTime) {
+    let chat_id = seen.chat_id.take();
+    let manual = std::mem::take(&mut seen.manual);
+    let started = seen.started_at.take();
+    if !manual { note_result(seen, !matches!(outcome, "failed" | "notStarted"), now); }
+    record(seen, RunResult { started, ended: Some(now), outcome: outcome.into(), chat_id, manual, cost_usd: cost });
+}
+
+fn record(seen: &mut Seen, r: RunResult) {
+    seen.results.insert(0, r);
+    seen.results.truncate(HISTORY);
+}
+
+/// Has the run in progress gone past its time limit?
+pub fn over_time(seen: &Seen, now: NaiveDateTime) -> bool {
+    seen.chat_id.is_some() && seen.started_at.map_or(false, |t| now - t >= Duration::minutes(seen.minutes() as i64))
+}
+
+/// The user's limits for one workflow: 1–240 minutes, $0.10–$100.
+pub fn check_limits(minutes: u32, budget: f64) -> anyhow::Result<()> {
+    if !(1..=MAX_MINUTES).contains(&minutes) || !budget.is_finite() || !(MIN_BUDGET_USD..=MAX_BUDGET_USD).contains(&budget) {
+        return Err(crate::tr::err("workflow.limits", &[]));
+    }
+    Ok(())
 }
 
 fn local_iso(t: NaiveDateTime) -> Value {
     json!(t.and_local_timezone(Local).earliest().map(|d| d.to_rfc3339()))
 }
 
-/// `[{name, file, trigger, prompt, approved, lastRun, nextRun}]` — `nextRun` only for approved ones.
+fn result_json(r: &RunResult) -> Value {
+    json!({"started": r.started.map(local_iso), "ended": r.ended.map(local_iso), "outcome": r.outcome, "chatId": r.chat_id, "manual": r.manual, "costUsd": r.cost_usd})
+}
+
+/// One entry per workflow file: what it is (`name, file, hash, trigger, prompt, duplicateName`),
+/// whether it may run (`approved`), what happened (`lastRun, last, history, running, chatId,
+/// skipped, retryAt`), what comes next (`nextRun`, approved ones only) and its `limits`.
+/// `hash` is what an approve or "run now" must send back.
 pub fn status(layer: &Path, home: &Path, now: NaiveDateTime) -> Vec<Value> {
-    let state = load_state(home);
+    let mut state = load_state(home);
+    let loaded = load_files(layer);
+    migrate(&mut state, &loaded);
     let approved = load_approved(home);
-    load_files(layer).iter().map(|l| {
+    loaded.iter().map(|l| {
         let w = &l.workflow;
-        let seen = state.get(&w.name);
+        let seen = state.get(&l.file);
         let ok = is_approved(&approved, l);
+        let last = seen.and_then(|s| s.results.first());
+        // A skip is news only until something ran after it.
+        let skipped = seen.and_then(|s| s.skipped).filter(|t| seen.and_then(|s| s.last_run).map_or(true, |r| r < *t));
         json!({
-            "name": w.name, "file": l.file, "trigger": w.trigger, "prompt": w.prompt, "approved": ok,
-            "lastRun": seen.and_then(|s| s.last_run).map(local_iso),
+            "name": w.name, "file": l.file, "hash": l.hash, "trigger": w.trigger, "prompt": w.prompt, "approved": ok,
+            "duplicateName": l.duplicate_name,
+            "lastRun": seen.and_then(|s| s.last_run.or(last.and_then(|r| r.started))).map(local_iso),
             "nextRun": if ok { due_at(w, seen, now).map(local_iso) } else { None },
+            "running": seen.map_or(false, |s| s.chat_id.is_some()),
+            "chatId": seen.and_then(|s| s.chat_id.clone()),
+            "last": last.map(result_json),
+            "history": seen.map(|s| s.results.iter().map(result_json).collect::<Vec<_>>()).unwrap_or_default(),
+            "skipped": skipped.map(local_iso),
+            "retryAt": if ok { seen.and_then(|s| s.retry_at).map(local_iso) } else { None },
+            "limits": {"minutes": seen.map_or(DEFAULT_MINUTES, Seen::minutes), "budgetUsd": seen.map_or(DEFAULT_BUDGET_USD, Seen::budget)},
         })
     }).collect()
 }
+
+/// One pass of the runner (or one "run now" / limits change) at a time, so the state file has one writer.
+static PASS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Runs the runner stopped for going past their time limit (chat ids), until they are settled.
+static LIMITED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn limited(chat: &str) -> bool { LIMITED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|c| c == chat) }
 
 /// Something that must not be interrupted, or another workflow, is running.
 async fn busy(state: &AppState) -> bool {
     state.library_busy() || state.chats.list().await.iter().any(|c| c.running && (c.kind == "workflow" || c.kind == "wrap" || c.kind == "reorganize"))
 }
 
-async fn start(state: &Arc<AppState>, w: &Workflow) -> anyhow::Result<String> {
+async fn start(state: &Arc<AppState>, w: &Workflow, budget: f64) -> anyhow::Result<String> {
     let lib = state.settings.read().await.library().ok_or_else(|| anyhow::anyhow!("no library configured"))?;
     let mut chat = Chat { kind: "workflow".into(), title: w.name.clone(), ..Default::default() };
     chat.options = RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() };
@@ -328,7 +493,8 @@ async fn start(state: &Arc<AppState>, w: &Workflow) -> anyhow::Result<String> {
     state.chats.insert(chat).await;
     let spec = RunSpec {
         chat_id: id.clone(), prompt: w.prompt.clone(), cwd: lib, add_dirs: vec![],
-        options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, resume: None,
+        // The spending limit is passed on only when the installed assistant supports it (`claude::start_run`).
+        options: RunOptions { permission_mode: Some("acceptEdits".into()), max_budget_usd: Some(budget), ..Default::default() }, resume: None,
         append_system: Some(format!("This is the automated workflow \"{}\" that the user set up in the Thoughts app. Nobody is watching it run: \
             do not ask questions, do the work described, do not run git, and end with a short plain-language summary of what you did.", w.name)),
         extra_deny: vec![],
@@ -345,13 +511,62 @@ async fn stopped_by_user(state: &AppState, chat_id: &str) -> bool {
     state.chats.get(chat_id).await.map_or(true, |c| c.messages.last().map_or(false, |m| m.role == "system"))
 }
 
+/// Tell the app how a run it did not start by hand ended (or that one was skipped), so the user hears of it.
+fn announce(state: &AppState, l: &Loaded, outcome: &str, chat_id: Option<&str>, retry: bool, at: Option<NaiveDateTime>) {
+    state.emit(json!({"type": "workflow.result", "file": l.file, "hash": l.hash, "name": l.workflow.name, "outcome": outcome,
+        "chatId": chat_id, "retry": retry, "at": at.map(local_iso)}));
+}
+
+fn money(usd: f64) -> String { format!("${usd:.2}") }
+
+/// "Run now": start the workflow the user was shown (file `file`, content `hash`) once, as a chat
+/// they can watch — allowed or not, since they asked for it. Same limits and rules as an
+/// unattended run. Returns the chat id.
+pub async fn run_now(state: &Arc<AppState>, file: &str, hash: &str) -> anyhow::Result<String> {
+    let _g = PASS.lock().await;
+    let (layer, home) = (crate::paths::app_layer_dir(), crate::paths::home());
+    let l = find_seen(&layer, file, hash)?;
+    let mut st = load_state(&home);
+    migrate(&mut st, &load_files(&layer));
+    if busy(state).await || st.get(&l.file).map_or(false, |s| s.chat_id.is_some()) { return Err(crate::tr::err("workflow.busy", &[])); }
+    let budget = st.get(&l.file).map_or(DEFAULT_BUDGET_USD, Seen::budget);
+    let id = start(state, &l.workflow, budget).await?;
+    note_manual_start(st.entry(l.file.clone()).or_default(), &id, Local::now().naive_local());
+    save_state(&home, &st);
+    crate::log::info(format!("workflow \"{}\" ({}) started by hand", l.workflow.name, l.file));
+    Ok(id)
+}
+
+/// The user's time and spending limits for the workflow in file `file`.
+pub async fn set_limits(file: &str, minutes: u32, budget: f64) -> anyhow::Result<()> {
+    check_limits(minutes, budget)?;
+    let _g = PASS.lock().await;
+    let (layer, home) = (crate::paths::app_layer_dir(), crate::paths::home());
+    let l = find(&layer, file)?;
+    let mut st = load_state(&home);
+    migrate(&mut st, &load_files(&layer));
+    let seen = st.entry(l.file).or_default();
+    seen.minutes = Some(minutes);
+    seen.budget_usd = Some((budget * 100.0).round() / 100.0);
+    save_state(&home, &st);
+    Ok(())
+}
+
+/// What a finished run's chat says about it: (its error text, cost, cut off by a restart, ended in an error).
+async fn chat_facts(state: &AppState, chat: &str) -> (String, f64, bool, bool) {
+    state.chats.with(chat, |c| {
+        let error = c.messages.iter().rev().take(3).find(|m| m.role == "error").map(|m| m.text.clone()).unwrap_or_default();
+        (error, c.cost_usd, c.interrupted, c.messages.last().map_or(false, |m| m.role == "error"))
+    }).await.unwrap_or_default()
+}
+
 /// The runner: checks schedules twice a minute, listens for event triggers, starts one workflow at a time.
 pub async fn run_loop(state: Arc<AppState>) {
     let layer = crate::paths::app_layer_dir();
     let home = crate::paths::home();
     let mut rx = state.events.subscribe();
     let mut queue: VecDeque<String> = approved_workflows(&layer, &home).into_iter()
-        .filter(|w| w.trigger == Trigger::Event { on: "app.start".into() }).map(|w| w.name).collect();
+        .filter(|l| l.workflow.trigger == Trigger::Event { on: "app.start".into() }).map(|l| l.file).collect();
     // Runs that ended since the last pass: (chat id, finished without an error).
     let mut finished: Vec<(String, bool)> = vec![];
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -360,8 +575,8 @@ pub async fn run_loop(state: Arc<AppState>) {
             _ = tick.tick() => {}
             ev = rx.recv() => match ev {
                 Ok(e) if e["type"] == "wrap.done" => {
-                    for w in approved_workflows(&layer, &home) {
-                        if w.trigger == (Trigger::Event { on: "wrap.done".into() }) && !queue.contains(&w.name) { queue.push_back(w.name); }
+                    for l in approved_workflows(&layer, &home) {
+                        if l.workflow.trigger == (Trigger::Event { on: "wrap.done".into() }) && !queue.contains(&l.file) { queue.push_back(l.file); }
                     }
                 }
                 Ok(e) if e["type"] == "chat.done" => {
@@ -374,53 +589,98 @@ pub async fn run_loop(state: Arc<AppState>) {
                 Err(_) => return,
             },
         }
+        let _g = PASS.lock().await;
         // Only workflows the user approved, in exactly the form they approved, are ever started.
         prune_approved(&layer, &home);
-        let workflows = approved_workflows(&layer, &home);
+        let loaded = load_files(&layer);
+        let approved_list = load_approved(&home);
+        let workflows: Vec<Loaded> = loaded.iter().filter(|l| is_approved(&approved_list, l)).cloned().collect();
         let now = Local::now().naive_local();
         let mut st = load_state(&home);
-        let mut changed = false;
-        for w in &workflows {
-            let seen = st.entry(w.name.clone()).or_default();
-            if seen.first_seen.is_none() { seen.first_seen = Some(now); changed = true; }
+        let mut changed = migrate(&mut st, &loaded);
+        for l in &loaded {
+            let ok = is_approved(&approved_list, l);
+            let seen = st.entry(l.file.clone()).or_default();
+            // A new approval starts the schedule's count from now. (`None`: nothing recorded yet,
+            // as in an older version's state — its first meeting, if any, is kept. `""`: not approved.)
+            if ok && seen.approved_hash.as_deref() != Some(l.hash.as_str()) {
+                if seen.approved_hash.is_some() || seen.first_seen.is_none() { seen.first_seen = Some(now); seen.retry_at = None; }
+                seen.approved_hash = Some(l.hash.clone());
+                changed = true;
+            } else if !ok && seen.approved_hash.as_deref().map_or(true, |h| !h.is_empty()) {
+                seen.approved_hash = Some(String::new());
+                seen.retry_at = None;
+                changed = true;
+            }
         }
         let before = st.len();
-        st.retain(|name, _| workflows.iter().any(|w| &w.name == name));
+        st.retain(|file, s| s.chat_id.is_some() || loaded.iter().any(|l| &l.file == file));
         changed |= st.len() != before;
-        // Settle the runs that ended: a failed one gets a single retry ten minutes later.
-        for (name, seen) in st.iter_mut() {
+        // Settle the runs that ended, and stop the ones that went past their time limit.
+        for (file, seen) in st.iter_mut() {
             let Some(chat) = seen.chat_id.clone() else { continue };
-            let result = match finished.iter().find(|(id, _)| *id == chat) {
-                Some((_, ok)) => Some(*ok),
-                // No word of it and it is not running: the daemon restarted under it. Not retried blindly.
-                None if !state.chats.get(&chat).await.map_or(false, |c| c.running) => Some(true),
-                None => None,
-            };
-            let Some(ok) = result else { continue };
-            let failed = !ok && !stopped_by_user(&state, &chat).await;
-            note_result(seen, !failed, now);
-            if seen.retry_at.is_some() { crate::log::warn(format!("workflow \"{name}\" failed; it will be tried once more in {RETRY_MINUTES} minutes")); }
+            let running = state.chats.with(&chat, |c| c.running).await.unwrap_or(false);
+            if running {
+                if over_time(seen, now) && !limited(&chat) {
+                    LIMITED.lock().unwrap_or_else(|e| e.into_inner()).push(chat.clone());
+                    crate::log::warn(format!("workflow {file}: stopped after its time limit of {} minutes", seen.minutes()));
+                    claude::push(&state, &chat, Msg::new("error", crate::tr::text("workflow.time_limit", &[("minutes", &seen.minutes().to_string())]))).await;
+                    if let Some(k) = state.runs.lock().await.remove(&chat) { let _ = k.send(()); }
+                }
+                continue;
+            }
+            let (error, cost, interrupted, ends_in_error) = chat_facts(&state, &chat).await;
+            // No word of it and it is not running: the daemon restarted under it, or the event was missed.
+            let ok = finished.iter().find(|(id, _)| *id == chat).map_or(!ends_in_error && !interrupted, |(_, ok)| *ok);
+            let by_limit = { let mut l = LIMITED.lock().unwrap_or_else(|e| e.into_inner()); let was = l.iter().any(|c| *c == chat); l.retain(|c| *c != chat); was };
+            let by_user = !ok && stopped_by_user(&state, &chat).await;
+            let out = outcome(ok, by_user, by_limit, interrupted, cost, seen.budget(), &error);
+            if out == "spendLimit" {
+                claude::push(&state, &chat, Msg::new("error", crate::tr::text("workflow.spend_limit", &[("amount", &money(seen.budget()))]))).await;
+            }
+            let manual = seen.manual;
+            settle(seen, out, cost, now);
+            if out == "failed" && seen.retry_at.is_some() { crate::log::warn(format!("workflow {file} failed; it will be tried once more in {RETRY_MINUTES} minutes")); }
+            else if out != "ok" { crate::log::warn(format!("workflow {file} ended: {out}")); }
+            if out != "ok" && out != "stopped" && !manual {
+                if let Some(l) = loaded.iter().find(|l| &l.file == file) { announce(&state, l, out, Some(&chat), seen.retry_at.is_some(), Some(now)); }
+            }
             changed = true;
         }
         finished.clear();
-        for name in due(&workflows, &st, now) { if !queue.contains(&name) { queue.push_back(name); } }
-        queue.retain(|name| workflows.iter().any(|w| &w.name == name));
+        // Scheduled times missed for good: say so once, so a skipped month-end task is not invisible.
+        for l in &workflows {
+            let Some(seen) = st.get_mut(&l.file) else { continue };
+            if let Some(slot) = newly_skipped(&l.workflow, seen, now) {
+                seen.skipped = Some(slot);
+                changed = true;
+                crate::log::warn(format!("workflow {}: the run of {slot} was missed and is too late to catch up", l.file));
+                announce(&state, l, "skipped", None, false, Some(slot));
+            }
+        }
+        for file in due(&workflows, &st, now) { if !queue.contains(&file) { queue.push_back(file); } }
+        queue.retain(|file| workflows.iter().any(|l| &l.file == file));
         if !queue.is_empty() && !busy(&state).await {
-            if let Some(w) = queue.pop_front().and_then(|name| workflows.iter().find(|w| w.name == name)) {
+            if let Some(l) = queue.pop_front().and_then(|file| workflows.iter().find(|l| l.file == file)) {
                 // Recorded before the run, so a workflow that fails is not retried in a loop.
-                let seen = st.entry(w.name.clone()).or_default();
+                let seen = st.entry(l.file.clone()).or_default();
                 note_start(seen, now);
                 changed = true;
-                match start(&state, w).await {
+                match start(&state, &l.workflow, seen.budget()).await {
                     Ok(id) => seen.chat_id = Some(id),
                     Err(e) => {
-                        crate::log::warn(format!("workflow \"{}\" could not start: {e}", w.name));
-                        note_result(seen, false, now);
+                        crate::log::warn(format!("workflow \"{}\" could not start: {e}", l.workflow.name));
+                        seen.chat_id = None;
+                        settle(seen, "notStarted", 0.0, now);
+                        announce(&state, l, "notStarted", None, seen.retry_at.is_some(), Some(now));
                     }
                 }
             }
         }
-        if changed { save_state(&home, &st); }
+        if changed {
+            save_state(&home, &st);
+            state.emit(json!({"type": "workflows.changed"}));
+        }
     }
 }
 
@@ -435,6 +695,8 @@ mod tests {
     fn weekly(t: &str, wd: u32) -> Trigger { sched("week", t, Some(wd), None, None) }
     fn monthly(t: &str, day: Value) -> Trigger { sched("month", t, None, Some(day), None) }
     fn wf(trigger: Trigger) -> Workflow { Workflow { name: "W".into(), trigger, prompt: "x".into() } }
+    /// A loaded workflow whose file name is its name, so state keys read naturally in tests.
+    fn ld(w: &Workflow) -> Loaded { Loaded { file: w.name.clone(), hash: "h".into(), workflow: w.clone(), duplicate_name: false } }
 
     #[test]
     fn next_run_daily_and_weekly() {
@@ -452,7 +714,7 @@ mod tests {
     #[test]
     fn due_counts_from_last_run_or_first_seen() {
         let w = Workflow { name: "Morning".into(), trigger: daily("09:00"), prompt: "x".into() };
-        let ws = [w.clone()];
+        let ws = [ld(&w)];
         let mut st = State::new();
         // Unknown workflow: never due immediately.
         assert!(due(&ws, &st, at(2026, 11, 10, 12, 0)).is_empty());
@@ -513,9 +775,20 @@ mod tests {
         let s = seen(at(2026, 1, 15, 0, 0), Some(at(2026, 1, 31, 18, 0)));
         assert_eq!(missed(&m, Some(&s), at(2026, 2, 28, 17, 59)), None, "not yet");
         assert_eq!(missed(&m, Some(&s), at(2026, 2, 28, 18, 0)), Some(at(2026, 2, 28, 18, 0)));
-        assert_eq!(missed(&m, Some(&s), at(2026, 3, 1, 17, 0)), Some(at(2026, 2, 28, 18, 0)), "opened the next morning: still within a day");
-        assert_eq!(missed(&m, Some(&s), at(2026, 3, 1, 18, 1)), None, "more than a day late: skipped");
-        assert_eq!(due_at(&m, Some(&s), at(2026, 3, 1, 18, 1)), Some(at(2026, 3, 31, 18, 0)), "waits for the next month end");
+        assert_eq!(missed(&m, Some(&s), at(2026, 3, 1, 17, 0)), Some(at(2026, 2, 28, 18, 0)), "opened the next morning");
+        assert_eq!(missed(&m, Some(&s), at(2026, 3, 2, 9, 0)), Some(at(2026, 2, 28, 18, 0)), "a month end missed over a weekend still runs on Monday");
+        assert_eq!(newly_skipped(&m.clone(), &s, at(2026, 3, 2, 9, 0)), None, "…so it is not skipped");
+        assert_eq!(missed(&m, Some(&s), at(2026, 3, 5, 18, 1)), None, "more than five days late: skipped");
+        assert_eq!(newly_skipped(&m, &s, at(2026, 3, 5, 18, 1)), Some(at(2026, 2, 28, 18, 0)), "and the user is told");
+        let told = Seen { skipped: Some(at(2026, 2, 28, 18, 0)), ..s.clone() };
+        assert_eq!(newly_skipped(&m, &told, at(2026, 3, 6, 9, 0)), None, "only once");
+        assert_eq!(due_at(&m, Some(&s), at(2026, 3, 5, 18, 1)), Some(at(2026, 3, 31, 18, 0)), "waits for the next month end");
+        // Weekly: Friday's review, opened on Monday morning, still runs; a week later it is skipped.
+        let fri = wf(weekly("16:00", 5));
+        let s5 = seen(at(2026, 11, 1, 0, 0), Some(at(2026, 11, 6, 16, 0)));
+        assert_eq!(missed(&fri, Some(&s5), at(2026, 11, 16, 9, 0)), Some(at(2026, 11, 13, 16, 0)));
+        assert_eq!(missed(&fri, Some(&s5), at(2026, 11, 17, 9, 0)), None);
+        assert!(newly_skipped(&fri, &s5, at(2026, 11, 17, 9, 0)).is_some());
         // Once it has run for that time it is not due again.
         let ran = seen(at(2026, 1, 15, 0, 0), Some(at(2026, 3, 1, 17, 0)));
         assert_eq!(missed(&m, Some(&ran), at(2026, 3, 1, 17, 30)), None);
@@ -524,6 +797,9 @@ mod tests {
         let s = seen(at(2026, 11, 1, 0, 0), Some(at(2026, 11, 12, 17, 0)));
         assert!(missed(&wd, Some(&s), at(2026, 11, 14, 10, 0)).is_some());
         assert!(missed(&wd, Some(&s), at(2026, 11, 15, 10, 0)).is_none());
+        // A run in progress is never reported as skipped.
+        let busy = Seen { chat_id: Some("c".into()), ..s.clone() };
+        assert!(newly_skipped(&wd, &s, at(2026, 11, 15, 10, 0)).is_some() && newly_skipped(&wd, &busy, at(2026, 11, 15, 10, 0)).is_none());
         // A workflow the runner has never met, or an event one, is never "missed".
         assert_eq!(missed(&w, None, at(2026, 11, 14, 13, 0)), None);
         assert_eq!(missed(&wf(Trigger::Event { on: "app.start".into() }), Some(&s), at(2026, 11, 14, 13, 0)), None);
@@ -535,22 +811,22 @@ mod tests {
         let mut st = State::new();
         st.insert("W".into(), Seen { first_seen: Some(at(2026, 11, 1, 0, 0)), ..Default::default() });
         let t0 = at(2026, 11, 10, 9, 0);
-        assert_eq!(due(&[w.clone()], &st, t0), ["W"]);
+        assert_eq!(due(&[ld(&w)], &st, t0), ["W"]);
         let seen = st.get_mut("W").unwrap();
         note_start(seen, t0);
         seen.chat_id = Some("c1".into());
         note_result(seen, false, at(2026, 11, 10, 9, 2));
         assert_eq!((seen.retry_at, seen.retried, seen.chat_id.clone()), (Some(at(2026, 11, 10, 9, 12)), true, None));
-        assert!(due(&[w.clone()], &st, at(2026, 11, 10, 9, 11)).is_empty(), "not before ten minutes have passed");
+        assert!(due(&[ld(&w)], &st, at(2026, 11, 10, 9, 11)).is_empty(), "not before ten minutes have passed");
         assert_eq!(due_at(&w, st.get("W"), at(2026, 11, 10, 9, 11)), Some(at(2026, 11, 10, 9, 12)));
-        assert_eq!(due(&[w.clone()], &st, at(2026, 11, 10, 9, 12)), ["W"]);
+        assert_eq!(due(&[ld(&w)], &st, at(2026, 11, 10, 9, 12)), ["W"]);
         // The retry fails too: no third attempt, the next run is tomorrow's.
         let seen = st.get_mut("W").unwrap();
         note_start(seen, at(2026, 11, 10, 9, 12));
         assert!(seen.retried && seen.retry_at.is_none());
         note_result(seen, false, at(2026, 11, 10, 9, 14));
         assert_eq!(seen.retry_at, None);
-        assert!(due(&[w.clone()], &st, at(2026, 11, 10, 12, 0)).is_empty());
+        assert!(due(&[ld(&w)], &st, at(2026, 11, 10, 12, 0)).is_empty());
         assert_eq!(due_at(&w, st.get("W"), at(2026, 11, 10, 12, 0)), Some(at(2026, 11, 11, 9, 0)));
         // Tomorrow's run starts with a clean slate and, if it fails, earns its own retry.
         let seen = st.get_mut("W").unwrap();
@@ -560,38 +836,50 @@ mod tests {
         assert_eq!(seen.retry_at, None);
     }
 
-    #[test]
-    fn only_approved_content_runs() {
-        let d = std::env::temp_dir().join(format!("thoughts-wf-approve-{}", uuid::Uuid::new_v4()));
+    fn tmp(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let d = std::env::temp_dir().join(format!("thoughts-wf-{name}-{}", uuid::Uuid::new_v4()));
         let (layer, home) = (d.join("layer"), d.join("home"));
         std::fs::create_dir_all(layer.join("workflows")).unwrap();
         std::fs::create_dir_all(&home).unwrap();
+        (d, layer, home)
+    }
+    fn hash_of(layer: &Path, file: &str) -> String { load_files(layer).into_iter().find(|l| l.file == file).unwrap().hash }
+
+    #[test]
+    fn only_approved_content_runs() {
+        let (d, layer, home) = tmp("approve");
         let file = layer.join("workflows/weekly.json");
         let body = |prompt: &str| format!(r#"{{"name":"Weekly review","trigger":{{"type":"event","on":"wrap.done"}},"prompt":"{prompt}"}}"#);
         std::fs::write(&file, body("Review my week.")).unwrap();
         std::fs::write(layer.join("workflows/other.json"), r#"{"trigger":{"type":"event","on":"app.start"},"prompt":"Tidy."}"#).unwrap();
-        let names = || approved_workflows(&layer, &home).into_iter().map(|w| w.name).collect::<Vec<_>>();
-        let flag = |name: &str| status(&layer, &home, at(2026, 11, 10, 8, 0)).into_iter().find(|s| s["name"] == name).unwrap()["approved"].clone();
+        let names = || approved_workflows(&layer, &home).into_iter().map(|l| l.workflow.name).collect::<Vec<_>>();
+        let flag = |file: &str| status(&layer, &home, at(2026, 11, 10, 8, 0)).into_iter().find(|s| s["file"] == file).unwrap()["approved"].clone();
 
         // Nothing runs until the user says so.
         assert!(names().is_empty());
-        assert_eq!(flag("Weekly review"), false);
-        approve(&layer, &home, "Weekly review").unwrap();
+        assert_eq!(flag("weekly.json"), false);
+        let shown = hash_of(&layer, "weekly.json");
+        approve(&layer, &home, "weekly.json", &shown).unwrap();
         assert_eq!(names(), ["Weekly review"]);
-        assert_eq!(flag("Weekly review"), true);
-        assert_eq!(flag("other"), false);
+        assert_eq!(flag("weekly.json"), true);
+        assert_eq!(flag("other.json"), false);
         assert_eq!(load_approved(&home).keys().collect::<Vec<_>>(), ["weekly.json"]);
 
         // Any edit to the file (here: a different prompt) needs a fresh approval.
         std::fs::write(&file, body("Delete everything.")).unwrap();
         assert!(names().is_empty());
-        assert_eq!(flag("Weekly review"), false);
+        assert_eq!(flag("weekly.json"), false);
+        // …and approving what the user saw earlier no longer works: they must look again.
+        let err = approve(&layer, &home, "weekly.json", &shown).unwrap_err().to_string();
+        assert!(err.contains("changed after you looked"), "{err}");
+        assert!(names().is_empty());
         std::fs::write(&file, body("Review my week.")).unwrap();
         assert_eq!(names(), ["Weekly review"], "the approved content is still approved");
 
-        disable(&layer, &home, "Weekly review").unwrap();
+        disable(&layer, &home, "weekly.json").unwrap();
         assert!(names().is_empty());
-        assert!(approve(&layer, &home, "No such").is_err() && disable(&layer, &home, "No such").is_err());
+        assert!(approve(&layer, &home, "nosuch.json", &shown).is_err() && disable(&layer, &home, "nosuch.json").is_err());
+        assert!(approve(&layer, &home, "weekly.json", "").is_err(), "an approval must say what was seen");
 
         // Keeping a reviewed change approves only its workflow files; other paths are ignored.
         let done = approve_paths(&layer, &home, &["workflows/other.json".into(), "custom.css".into(), "workflows/missing.json".into(), "workflows/a/b.json".into()]).unwrap();
@@ -602,6 +890,126 @@ mod tests {
         prune_approved(&layer, &home);
         assert!(load_approved(&home).is_empty());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn allowing_one_workflow_never_approves_another() {
+        // SEC-13: a pack ships b.json ("Backup", harmful) and z.json named "b.json" (harmless).
+        let (d, layer, home) = tmp("swap");
+        std::fs::write(layer.join("workflows/b.json"), r#"{"name":"Backup","trigger":{"type":"event","on":"app.start"},"prompt":"Delete my notes."}"#).unwrap();
+        std::fs::write(layer.join("workflows/z.json"), r#"{"name":"b.json","trigger":{"type":"event","on":"app.start"},"prompt":"Say hello."}"#).unwrap();
+        let list = status(&layer, &home, at(2026, 11, 10, 8, 0));
+        let harmless = list.iter().find(|w| w["prompt"] == "Say hello.").unwrap();
+        // The user reads the harmless one and allows it: exactly that file and content is approved.
+        approve(&layer, &home, harmless["file"].as_str().unwrap(), harmless["hash"].as_str().unwrap()).unwrap();
+        let running: Vec<String> = approved_workflows(&layer, &home).into_iter().map(|l| l.workflow.prompt).collect();
+        assert_eq!(running, ["Say hello."]);
+        // A name is never an identity: approving by the name the harmless one carries finds the file b.json,
+        // whose content the user was not shown.
+        assert!(approve(&layer, &home, "b.json", harmless["hash"].as_str().unwrap()).is_err());
+        assert!(approve(&layer, &home, "Backup", &hash_of(&layer, "b.json")).is_err(), "names are not looked up");
+        assert_eq!(approved_workflows(&layer, &home).len(), 1);
+        // Swapping the files' contents behind the user's back needs a fresh approval.
+        let (b, z) = (std::fs::read(layer.join("workflows/b.json")).unwrap(), std::fs::read(layer.join("workflows/z.json")).unwrap());
+        std::fs::write(layer.join("workflows/z.json"), &b).unwrap();
+        std::fs::write(layer.join("workflows/b.json"), &z).unwrap();
+        assert!(approved_workflows(&layer, &home).is_empty());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_new_file_with_the_same_name_does_not_take_over() {
+        // A pack adds a-review.json named like an approved workflow, sorting before it.
+        let (d, layer, home) = tmp("shadow");
+        std::fs::write(layer.join("workflows/weekly.json"), r#"{"name":"Weekly review","trigger":{"type":"event","on":"wrap.done"},"prompt":"Review my week."}"#).unwrap();
+        approve(&layer, &home, "weekly.json", &hash_of(&layer, "weekly.json")).unwrap();
+        let mut st = State::new();
+        st.insert("weekly.json".into(), Seen { last_run: Some(at(2026, 11, 9, 8, 0)), ..Default::default() });
+        save_state(&home, &st);
+        std::fs::write(layer.join("workflows/a-review.json"), r#"{"name":"Weekly review","trigger":{"type":"event","on":"wrap.done"},"prompt":"Send my notes away."}"#).unwrap();
+        // The approved one keeps running, and keeps its own history; the newcomer is listed apart, not approved.
+        assert_eq!(approved_workflows(&layer, &home).into_iter().map(|l| l.file).collect::<Vec<_>>(), ["weekly.json"]);
+        let list = status(&layer, &home, at(2026, 11, 10, 8, 0));
+        assert_eq!(list.len(), 2);
+        let get = |f: &str| list.iter().find(|w| w["file"] == f).unwrap().clone();
+        assert_eq!((get("weekly.json")["approved"].clone(), get("a-review.json")["approved"].clone()), (json!(true), json!(false)));
+        assert!(get("weekly.json")["duplicateName"] == true && get("a-review.json")["duplicateName"] == true);
+        assert!(get("weekly.json")["lastRun"].is_string() && get("a-review.json")["lastRun"].is_null());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn old_state_by_name_moves_to_the_file() {
+        let w = |file: &str, name: &str| Loaded { file: file.into(), hash: "h".into(), duplicate_name: false,
+            workflow: Workflow { name: name.into(), trigger: daily("09:00"), prompt: "x".into() } };
+        let loaded = [w("a.json", "Morning"), w("b.json", "Morning"), w("c.json", "Evening")];
+        let mut st = State::new();
+        st.insert("Morning".into(), Seen { last_run: Some(at(2026, 11, 9, 9, 0)), ..Default::default() });
+        st.insert("c.json".into(), Seen::default());
+        assert!(migrate(&mut st, &loaded));
+        assert_eq!(st.keys().collect::<Vec<_>>(), ["a.json", "c.json"], "to the file the old runner used (the first)");
+        assert!(st["a.json"].last_run.is_some());
+        assert!(!migrate(&mut st, &loaded), "nothing more to move");
+    }
+
+    #[test]
+    fn how_a_run_ended() {
+        // (ok, stopped by the user, stopped at its time limit, cut off by a restart, spent, budget, error)
+        assert_eq!(outcome(true, false, false, false, 0.5, 2.0, ""), "ok");
+        assert_eq!(outcome(false, false, false, false, 0.5, 2.0, "API Error: 500"), "failed");
+        assert_eq!(outcome(false, true, false, false, 0.5, 2.0, ""), "stopped");
+        assert_eq!(outcome(false, true, true, false, 0.5, 2.0, ""), "timeLimit", "the runner's stop is not the user's");
+        assert_eq!(outcome(false, false, false, false, 0.4, 2.0, "Run ended: error_max_budget_usd"), "spendLimit");
+        assert_eq!(outcome(false, false, false, false, 2.01, 2.0, "Run ended: error"), "spendLimit");
+        assert_eq!(outcome(false, false, false, true, 0.1, 2.0, ""), "interrupted");
+        // Only a scheduled run that simply failed (or could not start) is retried.
+        let now = at(2026, 11, 10, 9, 0);
+        for (out, retried) in [("failed", true), ("notStarted", true), ("timeLimit", false), ("spendLimit", false), ("stopped", false), ("interrupted", false), ("ok", false)] {
+            let mut s = Seen::default();
+            note_start(&mut s, now);
+            s.chat_id = Some("c".into());
+            settle(&mut s, out, 0.3, at(2026, 11, 10, 9, 5));
+            assert_eq!(s.retry_at.is_some(), retried, "{out}");
+            assert_eq!(s.chat_id, None);
+            assert_eq!(s.results[0], RunResult { started: Some(now), ended: Some(at(2026, 11, 10, 9, 5)), outcome: out.into(), chat_id: Some("c".into()), manual: false, cost_usd: 0.3 });
+        }
+    }
+
+    #[test]
+    fn run_now_is_apart_from_the_schedule() {
+        let w = wf(daily("09:00"));
+        let mut st = State::new();
+        st.insert("W".into(), Seen { first_seen: Some(at(2026, 11, 1, 0, 0)), last_run: Some(at(2026, 11, 9, 9, 0)), ..Default::default() });
+        let s = st.get_mut("W").unwrap();
+        note_manual_start(s, "m1", at(2026, 11, 10, 8, 0));
+        // While it runs, the scheduled run waits (one run of a workflow at a time)…
+        assert!(due(&[ld(&w)], &st, at(2026, 11, 10, 9, 0)).is_empty());
+        let s = st.get_mut("W").unwrap();
+        settle(s, "failed", 0.1, at(2026, 11, 10, 9, 1));
+        // …and a failed run by hand is not retried, nor does it count as today's scheduled run.
+        assert_eq!((s.retry_at, s.last_run, s.manual), (None, Some(at(2026, 11, 9, 9, 0)), false));
+        assert!(s.results[0].manual);
+        assert_eq!(due(&[ld(&w)], &st, at(2026, 11, 10, 9, 2)), ["W"]);
+    }
+
+    #[test]
+    fn limits_time_and_spending() {
+        let mut s = Seen::default();
+        assert_eq!((s.minutes(), s.budget()), (DEFAULT_MINUTES, DEFAULT_BUDGET_USD));
+        let t0 = at(2026, 11, 10, 9, 0);
+        note_start(&mut s, t0);
+        assert!(!over_time(&s, t0 + Duration::minutes(30)), "nothing is running");
+        s.chat_id = Some("c".into());
+        assert!(!over_time(&s, t0 + Duration::minutes(19)));
+        assert!(over_time(&s, t0 + Duration::minutes(20)));
+        s.minutes = Some(45);
+        assert!(!over_time(&s, t0 + Duration::minutes(44)) && over_time(&s, t0 + Duration::minutes(45)));
+        assert!(check_limits(1, 0.1).is_ok() && check_limits(240, 100.0).is_ok());
+        for (m, b) in [(0, 1.0), (241, 1.0), (10, 0.05), (10, 101.0), (10, f64::NAN), (10, f64::INFINITY)] { assert!(check_limits(m, b).is_err(), "{m} {b}"); }
+        // Only the last few runs are remembered.
+        for i in 0..15 { record(&mut s, RunResult { outcome: format!("r{i}"), ..Default::default() }); }
+        assert_eq!(s.results.len(), HISTORY);
+        assert_eq!(s.results[0].outcome, "r14");
     }
 
     #[test]
@@ -616,15 +1024,18 @@ mod tests {
         w("e-dup.json", r#"{"name":"Weekly review","trigger":{"type":"event","on":"app.start"},"prompt":"x"}"#);
         w("f-empty.json", r#"{"name":"Empty","trigger":{"type":"event","on":"app.start"},"prompt":" "}"#);
         w("notes.txt", "not a workflow");
-        let ws = load(&d);
-        assert_eq!(ws.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), ["Weekly review", "b-after-wrap"]);
+        let ws = load_files(&d);
+        assert_eq!(ws.iter().map(|l| (l.file.as_str(), l.workflow.name.as_str(), l.duplicate_name)).collect::<Vec<_>>(),
+            [("a-weekly.json", "Weekly review", true), ("b-after-wrap.json", "b-after-wrap", false), ("e-dup.json", "Weekly review", true)]);
         // Not approved yet: listed, but with no next run.
         assert!(status(&d, &d, at(2026, 11, 10, 8, 0))[0]["nextRun"].is_null());
-        approve(&d, &d, "Weekly review").unwrap();
+        approve(&d, &d, "a-weekly.json", &hash_of(&d, "a-weekly.json")).unwrap();
         let s = status(&d, &d, at(2026, 11, 10, 8, 0));
         assert_eq!(s[0]["trigger"]["weekday"], 5);
         assert!(s[0]["nextRun"].as_str().unwrap().starts_with("2026-11-13T16:00"));
         assert!(s[0]["lastRun"].is_null() && s[1]["nextRun"].is_null());
+        assert_eq!(s[0]["limits"], json!({"minutes": DEFAULT_MINUTES, "budgetUsd": DEFAULT_BUDGET_USD}));
+        assert!(s[0]["last"].is_null() && s[0]["history"] == json!([]) && s[0]["running"] == false);
         std::fs::remove_dir_all(d).unwrap();
     }
 }
