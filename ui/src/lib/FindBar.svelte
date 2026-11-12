@@ -10,7 +10,7 @@
   import { foldMap, registerFind, takeFind } from './search';
   import { isMac } from './shortcuts';
 
-  let { root, editor, where = '', anchors = '' }: {
+  let { root, editor, where = '', anchors = '', bottom = false }: {
     /** The element whose text is searched. */
     root: () => HTMLElement | null | undefined;
     /** While editing: the text box to search instead. */
@@ -19,6 +19,8 @@
     where?: string;
     /** Selector for the messages (in order), so a result can land on its message. */
     anchors?: string;
+    /** Sit at the bottom instead of the top (where the top holds a toolbar). */
+    bottom?: boolean;
   } = $props();
 
   let open = $state(false);
@@ -153,9 +155,7 @@
       if (!ed) return;
       const [a, b] = spans[cur];
       ed.setSelectionRange(a, b);
-      const line = ed.value.slice(0, a).split('\n').length - 1;
-      const lh = parseFloat(getComputedStyle(ed).lineHeight) || 20;
-      ed.scrollTop = Math.max(0, line * lh - ed.clientHeight / 3);
+      ed.scrollTop = Math.max(0, offsetIn(ed, a) - ed.clientHeight / 3);
       return;
     }
     const r = ranges[cur];
@@ -166,6 +166,24 @@
       if (rect.top < b.top + 70 || rect.bottom > b.bottom - 20) sc.scrollTop += rect.top - b.top - b.height / 3;
     } else if (rect.top < 70 || rect.bottom > innerHeight - 20) window.scrollBy(0, rect.top - innerHeight / 3);
     requestAnimationFrame(paint);
+  }
+
+  /** How far down the text box character `at` sits, wrapped lines included (measured on a hidden copy). */
+  function offsetIn(ed: HTMLTextAreaElement, at: number): number {
+    const cs = getComputedStyle(ed);
+    const m = document.createElement('div');
+    for (const k of ['fontFamily', 'fontSize', 'fontWeight', 'lineHeight', 'letterSpacing', 'wordSpacing', 'tabSize', 'paddingTop',
+      'paddingRight', 'paddingBottom', 'paddingLeft', 'direction'] as const) {
+      (m.style as any)[k] = (cs as any)[k];
+    }
+    Object.assign(m.style, { position: 'absolute', visibility: 'hidden', top: '0', left: '-9999px', whiteSpace: 'pre-wrap', overflowWrap: 'break-word',
+      boxSizing: 'content-box', height: 'auto',
+      width: ed.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0) + 'px' });
+    m.textContent = ed.value.slice(0, at) + '\u200b';
+    document.body.appendChild(m);
+    const h = m.scrollHeight - (parseFloat(cs.lineHeight) || 20);
+    m.remove();
+    return h;
   }
 
   /** The first match at or below the top of what is on screen. */
@@ -225,7 +243,7 @@
     if (!open) before = document.activeElement as HTMLElement | null;
     open = true;
     ensureStyle();
-    tick().then(() => { input?.focus(); input?.select(); watch(); editor?.()?.addEventListener('input', onEditorInput); refresh(false); });
+    tick().then(() => { input?.focus({ preventScroll: true }); input?.select(); watch(); editor?.()?.addEventListener('input', onEditorInput); refresh(false); });
     return true;
   }
 
@@ -251,6 +269,22 @@
     else if (e.key === 'ArrowDown' && !e.shiftKey) { e.preventDefault(); step(1); }
     else if (e.key === 'ArrowUp' && !e.shiftKey) { e.preventDefault(); step(-1); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }
+  }
+
+  /** The bottom bar is pinned to the window, so it lives at the end of the page (an ancestor that is a
+   *  size container would otherwise pin it to itself). */
+  function portal(node: HTMLElement, on: boolean) {
+    if (on) document.body.appendChild(node);
+    return { destroy() { if (on) node.remove(); } };
+  }
+
+  /** Escape also closes the bar when the focus is elsewhere on the page (not in another field or dialog). */
+  function onWindowKey(e: KeyboardEvent) {
+    if (!open || e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
+    const el = e.target as HTMLElement | null;
+    if (el?.closest?.('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return;
+    e.preventDefault();
+    close();
   }
 
   function onScroll() { if (open && !canHighlight && cur >= 0) requestAnimationFrame(paint); }
@@ -291,6 +325,7 @@
     unregister = registerFind({ open: openBar });
     window.addEventListener('scroll', onScroll, true);
     window.addEventListener('resize', onScroll);
+    window.addEventListener('keydown', onWindowKey, true);
   });
   // The view can stay on screen while what it shows changes (Docs follows the route): check each time.
   $effect(() => { const w = where; untrack(() => pickUp(w)); });
@@ -302,13 +337,14 @@
     editor?.()?.removeEventListener('input', onEditorInput);
     window.removeEventListener('scroll', onScroll, true);
     window.removeEventListener('resize', onScroll);
+    window.removeEventListener('keydown', onWindowKey, true);
     if (canHighlight) { (CSS as any).highlights.delete('thoughts-find'); (CSS as any).highlights.delete('thoughts-find-current'); }
   });
 </script>
 
 <span bind:this={anchorEl} hidden></span>
 {#if open}
-  <div class="find-bar no-print" role="search" aria-label={t('srch.findLabel')} bind:this={barEl}>
+  <div class="find-bar no-print" class:bottom role="search" aria-label={t('srch.findLabel')} bind:this={barEl} use:portal={bottom}>
     <Icon name="search" size={14} />
     <input bind:this={input} bind:value={query} oninput={onInput} onkeydown={onKey} dir="auto"
       placeholder={t('srch.findPh')} aria-label={t('srch.findPh')} autocomplete="off" spellcheck="false" />
@@ -324,6 +360,7 @@
   .find-bar { position: absolute; top: 8px; inset-inline-end: 16px; z-index: 9; display: flex; align-items: center; gap: 4px;
     padding: 4px 4px 4px 10px; padding-inline: 10px 4px; background: var(--panel); border: var(--border-w, 1px) solid var(--hairline);
     border-radius: 10px; box-shadow: var(--shadow-lg); color: var(--muted); max-width: calc(100% - 32px); }
+  .find-bar.bottom { position: fixed; top: auto; bottom: 20px; inset-inline-end: 24px; max-width: calc(100vw - 48px); }
   .find-bar input { width: 200px; min-width: 0; flex: 1; background: transparent; border: 0; box-shadow: none; padding: 4px 2px; font-size: 14px; color: var(--fg); }
   .count { font-size: var(--fs-xs); white-space: nowrap; min-width: 4.5em; text-align: center; font-variant-numeric: tabular-nums; }
   .fb { font: inherit; background: none; border: 0; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 6px; color: var(--fg); cursor: pointer; flex: none; }

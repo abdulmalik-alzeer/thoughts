@@ -859,7 +859,7 @@
     {/if}
   </aside>
 
-  <FindBar root={() => article} editor={() => (editing ? treeEl?.parentElement?.querySelector<HTMLTextAreaElement>('textarea.editor') : null)} where={'doc:' + (path ?? '')} />
+  <FindBar root={() => article} editor={() => (editing ? treeEl?.parentElement?.querySelector<HTMLTextAreaElement>('textarea.editor') : null)} where={'doc:' + (path ?? '')} bottom />
   <section class="view scroll">
     <div class="narrowbar no-print">
       <button class="btn" bind:this={treeBtn} onclick={showTree} aria-expanded={treeOpen}><Icon name="folder" size={14} /> {t('docs3.files')}</button>
