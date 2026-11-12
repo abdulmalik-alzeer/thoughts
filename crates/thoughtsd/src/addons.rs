@@ -41,8 +41,13 @@ pub fn decl_in(dir: &std::path::Path, name: &str, view: bool) -> Option<Value> {
     Some(applayer::resolve_decl(dir, sub, name, &shared, false)).filter(|d| d["unsupported"] != true)
 }
 
-/// The layer an add-on of this request runs from: the kept one, or the staged one while it is tried.
-fn layer_dir(d: &Dirs, preview: bool) -> &std::path::Path { if preview { &d.staging } else { &d.layer } }
+/// The declaration of add-on `name` in the layer it runs from — the kept one, or the staged one
+/// while a change is tried — unless the person switched it off (it is then not running at all).
+pub fn decl_for(d: &Dirs, preview: bool, name: &str, view: bool) -> Option<Value> {
+    let path = format!("{}/{name}", if view { "views" } else { "plugins" });
+    if applayer::switched_off(&d.layer).contains(&path) { return None; }
+    decl_in(if preview { &d.staging } else { &d.layer }, name, view)
+}
 
 /// The folders an add-on may read in, from its declaration (`decl_in`): `None` = no limit (it lists
 /// no `read` folders: the whole library but private folders); `Some(list)` = only inside those;
@@ -60,13 +65,13 @@ pub fn reads(q: &HashMap<String, String>) -> Option<Vec<String>> {
     let name = q.get("plugin")?;
     let view = q.get("kind").map(String::as_str) == Some("view");
     let preview = q.get("preview").map_or(false, |v| v == "1");
-    reads_of(decl_in(layer_dir(&Dirs::real(), preview), name, view).as_ref())
+    reads_of(decl_for(&Dirs::real(), preview, name, view).as_ref())
 }
 
 /// Add-on `name`'s declaration when it grants `perm`; otherwise the plain "was not given
 /// permission" refusal.
-fn granted(dir: &std::path::Path, name: &str, perm: &str) -> anyhow::Result<Value> {
-    decl_in(dir, name, false)
+fn granted(d: &Dirs, preview: bool, name: &str, perm: &str) -> anyhow::Result<Value> {
+    decl_for(d, preview, name, false)
         .filter(|d| d["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == perm)))
         .ok_or_else(|| crate::tr::err("addon.permission", &[("name", &short(name))]))
 }
@@ -144,7 +149,7 @@ async fn ask(State(st): S, Json(r): Json<AskReq>) -> R {
 pub async fn ask_in(st: &AppState, d: &Dirs, plugin: &str, preview: bool, question: &str) -> anyhow::Result<String> {
     // Never for a change that is only being tried: it was not kept, and a question costs money.
     if preview { return Err(crate::tr::err("addon.permission", &[("name", &short(plugin))])); }
-    granted(&d.layer, plugin, "assistant:ask")?;
+    granted(d, false, plugin, "assistant:ask")?;
     let name = short(plugin);
     let question = question.trim();
     if question.is_empty() { return Err(crate::tr::err("addon.ask_empty", &[])); }
@@ -192,7 +197,7 @@ async fn notify(State(st): S, Json(r): Json<NotifyReq>) -> R {
 
 /// The notification's `(title, body)` after every check, noted as sent.
 pub fn notice(d: &Dirs, plugin: &str, preview: bool, text: &str, now: i64) -> anyhow::Result<(String, String)> {
-    granted(layer_dir(d, preview), plugin, "notify")?;
+    granted(d, preview, plugin, "notify")?;
     let name = short(plugin);
     let body = one_line(text, 200);
     if body.is_empty() { return Err(crate::tr::err("addon.notify_empty", &[])); }
@@ -217,7 +222,7 @@ struct FileReq { plugin: String, preview: bool, name: String, content: String }
 /// will offer it in the save dialog (the person picks where; nothing is saved here). Only an add-on
 /// that declares `files:save`; see `clean_file` for what is changed in it.
 async fn file(Json(r): Json<FileReq>) -> R {
-    granted(layer_dir(&Dirs::real(), r.preview), &r.plugin, "files:save")?;
+    granted(&Dirs::real(), r.preview, &r.plugin, "files:save")?;
     let (name, content) = clean_file(&r.name, &r.content)?;
     Ok(Json(json!({"name": name, "content": content})))
 }
@@ -330,6 +335,10 @@ mod tests {
         for (n, view) in [("gone.js", false), ("../intake.js", false), ("intake.js", true), ("cal.html", false), ("intake.json", false)] {
             assert_eq!(of(&d.layer, n, view), Some(vec![]), "{n}");
         }
+        // Switched off by the person: not running, so it reads nothing (kept or tried).
+        put(&d.layer, "addons.json", r#"{"off":["plugins/all.js"]}"#);
+        assert_eq!(reads_of(decl_for(&d, false, "all.js", false).as_ref()), Some(vec![]));
+        assert_eq!(reads_of(decl_for(&d, false, "intake.js", false).as_ref()), Some(vec!["clients".to_string()]));
         // Made for a newer app: never runs, reads nothing.
         put(&d.layer, "plugins/new.js", "export default () => {}\n");
         put(&d.layer, "plugins/new.json", r#"{"apiVersion":2,"permissions":["library:read"]}"#);

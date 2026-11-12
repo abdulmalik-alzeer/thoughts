@@ -1752,8 +1752,10 @@ async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
         let plugin = q.get("plugin").map(String::as_str).unwrap_or("");
         plugin_may_set_status(&crate::applayer::Dirs::real().layer, plugin, &root, &rel)?;
         // Ideas inside a private folder are the user's own business: never changed for an add-on (the
-        // user's own Ideas page can change them). And only inside the folders the add-on may write in.
+        // user's own Ideas page can change them). And only inside the folders the add-on may write in,
+        // and may read in when it lists those.
         scope.check_write(&st, &root, &rel).await?;
+        if !scope.may_read(&root, &rel) { return Err(crate::tr::err("plugin.not_readable", &[("path", &rel)]).into()); }
     }
     let today = chrono::Local::now().date_naive();
     library::set_idea_status(&root, &rel, &i.status, today)?;
@@ -2241,6 +2243,9 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<S
             let clean = paths::clean_rel(f).map_err(|_| crate::tr::err("invalid.path", &[]))?;
             if clean != f.replace('\\', "/") { return Err(crate::tr::err("invalid.path", &[]).into()); }
             if paths::is_private(&root, f, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", f)]).into()); }
+            // An add-on limited to some folders changes only lists inside them, whatever the change
+            // (a list it cannot see is one it may not tick, reword, delete in or move to either).
+            if !scope.may_read(&root, f) { return Err(crate::tr::err("plugin.not_readable", &[("path", f)]).into()); }
         }
     }
     if plugin && op == "add" { plugin_may_add_to(&scope, &root, &t)?; }
@@ -3995,18 +4000,48 @@ mod tests {
         todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add("clients/acme/todo.md", None)).await.unwrap();
         todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add("clients/acme/todo.md", Some("Next"))).await.unwrap();
         assert!(t::read(&lib, "clients/acme/todo.md").matches("- [ ] call back").count() == 2);
-        for (file, group, code) in [("journal/day/todo.md", None, "validation"), ("clients/new/todo.md", None, "validation"),
+        for (file, group, code) in [("journal/day/todo.md", None, "forbidden"), ("clients/new/todo.md", None, "validation"),
                                     ("clients/acme/todo.md", Some("Someday"), "validation"), ("clients/notes.md", None, "validation")] {
             let e = shown(todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add(file, group)).await);
             assert_eq!(e.code, code, "{file} {group:?}: {}", e.message);
         }
         assert!(!lib.join("clients/new").exists());
         assert!(!t::read(&lib, "journal/day/todo.md").contains("call back") && !t::read(&lib, "clients/acme/todo.md").contains("## Someday"));
-        // The general list (named by nobody) stays open to any add-on that may add todos; another
-        // add-on may add to the journal's list, which it can see.
-        todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add("", None)).await.unwrap();
-        assert!(t::read(&lib, "TODO.md").contains("- [ ] call back"));
+        // The general list sits outside its folders, so it is closed to this add-on too; an add-on
+        // without a `read` list may add to it, and to the journal's list.
+        assert_eq!(shown(todo_op(State(st.clone()), Path("add".into()), as_addon(&narrow, &[]), add("", None)).await).code, "forbidden");
+        assert!(!t::read(&lib, "TODO.md").contains("call back"));
+        todo_op(State(st.clone()), Path("add".into()), as_addon(&wide, &[]), add("", None)).await.unwrap();
         todo_op(State(st.clone()), Path("add".into()), as_addon(&wide, &[]), add("journal/day/todo.md", None)).await.unwrap();
+        // Every other change to a todo, and a move, stays inside its folders as well (by name or through a link).
+        let journal = t::read(&lib, "journal/day/todo.md");
+        let at = |file: &str, line: usize, text: &str, more: TodoOp| Json(TodoOp { file: file.into(), line, text: text.into(), ..more });
+        for (op, body) in [
+            ("toggle", at("journal/day/todo.md", 2, "write about the invoice", TodoOp::default())),
+            ("edit", at("journal/day/todo.md", 2, "write about the invoice", TodoOp { new_text: "changed".into(), ..Default::default() })),
+            ("delete", at("journal/day/todo.md", 2, "write about the invoice", TodoOp::default())),
+            ("reorder", at("journal/day/todo.md", 2, "write about the invoice", TodoOp { dir: "down".into(), ..Default::default() })),
+            ("archive", at("journal/day/todo.md", 0, "", TodoOp { group: Some("Done".into()), ..Default::default() })),
+            ("move", at("journal/day/todo.md", 2, "write about the invoice", TodoOp { to_file: "clients/acme/todo.md".into(), ..Default::default() })),
+            ("move", at("clients/acme/todo.md", 4, "send the invoice", TodoOp { to_file: "journal/day/todo.md".into(), ..Default::default() })),
+            ("toggle", at("TODO.md", 2, "call the bank", TodoOp::default())),
+        ] {
+            let e = shown(todo_op(State(st.clone()), Path(op.into()), as_addon(&narrow, &[]), body).await);
+            assert_eq!((e.status, e.code), (403, "forbidden"), "{op}: {}", e.message);
+        }
+        assert_eq!(t::read(&lib, "journal/day/todo.md"), journal);
+        assert!(t::read(&lib, "clients/acme/todo.md").contains("- [ ] send the invoice") && t::read(&lib, "TODO.md").contains("- [ ] call the bank"));
+        // Inside them it works as before.
+        todo_op(State(st.clone()), Path("toggle".into()), as_addon(&narrow, &[]), at("clients/acme/todo.md", 4, "send the invoice", TodoOp::default())).await.unwrap();
+        assert!(t::read(&lib, "clients/acme/todo.md").contains("- [x] send the invoice"));
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(lib.join("clients/link")).unwrap();
+            std::os::unix::fs::symlink(lib.join("journal/day/todo.md"), lib.join("clients/link/todo.md")).unwrap();
+            let e = shown(todo_op(State(st.clone()), Path("toggle".into()), as_addon(&narrow, &[]), at("clients/link/todo.md", 2, "write about the invoice", TodoOp::default())).await);
+            assert_eq!(e.status, 403, "{}", e.message);
+            assert_eq!(t::read(&lib, "journal/day/todo.md"), journal);
+        }
         for name in [&narrow, &wide] {
             let _ = std::fs::remove_file(plugins.join(name));
             let _ = std::fs::remove_file(plugins.join(name.replace(".js", ".json")));
