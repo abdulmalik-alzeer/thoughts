@@ -109,8 +109,9 @@ pub fn check(f: &Facts) -> Vec<Issue> {
     match &library {
         Some(l) if !l.is_dir() => out.push(issue("library-missing", "choose-library")),
         Some(l) => {
-            // An online backup made with git inside a folder a cloud drive also copies.
-            if s.sync_enabled() && in_cloud_folder(&l.to_string_lossy()) { out.push(issue("library-cloud-git", "use-folder-sync")); }
+            // An online backup made with git inside a folder a cloud drive also copies. (A drive
+            // only ever receives what this computer sends, so it does not fight the cloud drive.)
+            if s.sync_enabled() && s.sync.target != "drive" && in_cloud_folder(&l.to_string_lossy()) { out.push(issue("library-cloud-git", "use-folder-sync")); }
             if s.history_enabled() {
                 if let Some(g) = git_dir(l) {
                     if unfinished_step(&g).is_some() { out.push(issue("history-unfinished", "finish-history")); }
@@ -170,6 +171,9 @@ mod tests {
         std::fs::create_dir_all(lib.join(".git/rebase-merge")).unwrap();
         s.library_path = Some(lib.to_string_lossy().into());
         assert_eq!(ids(&check(&facts(&s, &d))), ["library-cloud-git", "history-unfinished"]);
+        let mut to_drive = s.clone();
+        to_drive.sync.target = "drive".into();
+        assert_eq!(ids(&check(&facts(&to_drive, &d))), ["history-unfinished"], "a drive does not fight the cloud drive");
         // Folder sync in the same place is fine; the history kept for it still counts.
         s.sync.mode = "folder".into();
         assert_eq!(ids(&check(&facts(&s, &d))), ["history-unfinished"]);

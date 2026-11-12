@@ -5,7 +5,9 @@
   import { app, applyTheme, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
   import { failed } from '../lib/errors';
+  import { promptDialog } from '../lib/dialog.svelte';
   import { cloudFor } from '../lib/cloud.svelte';
+  import { driveName } from '../lib/backup.svelte';
   import ThemePicker from './ThemePicker.svelte';
   import Logo from '../lib/Logo.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
@@ -76,6 +78,10 @@
 
   const ar = $derived(s.language === 'ar');
   const isGit = $derived(String(s.sync.mode).startsWith('git'));
+  // "Drive or folder" is sent to the same way as an online location (`sync.target` says which).
+  const isDrive = $derived(isGit && s.sync.target === 'drive');
+  /** The drive or folder chosen for the backup; added as a location once the library exists. */
+  let driveFolder = $state('');
   // Whether a cloud drive syncs the chosen folder is the service's call (real sync folders, shortcuts resolved).
   const cloud = cloudFor(() => String(s.libraryPath ?? ''));
   const inCloud = $derived(cloud.current.synced);
@@ -215,10 +221,21 @@
     if (on && !s.ai.claude.baseUrl) s.ai.claude.baseUrl = 'https://api.anthropic.com';
   }
 
-  /** Backup is one of: no backup, a cloud folder, an online location (sent when Sync is pressed, or after every Wrap). */
-  function setBackup(kind: 'none' | 'folder' | 'online') {
-    s.sync.mode = kind === 'online' ? (isGit ? s.sync.mode : 'git-manual') : kind;
-    if (kind === 'online') s.keepHistory = true;
+  /** Backup is one of: no backup, a cloud folder, an online location or a drive or folder (sent when Sync is pressed, or after every Wrap). */
+  function setBackup(kind: 'none' | 'folder' | 'online' | 'drive') {
+    const sends = kind === 'online' || kind === 'drive';
+    s.sync.mode = sends ? (isGit ? s.sync.mode : 'git-manual') : kind;
+    if (sends) { s.sync.target = kind === 'drive' ? 'drive' : 'online'; s.keepHistory = true; }
+  }
+  async function pickDrive() {
+    let p: string | null = null;
+    if ((window as any).__TAURI_INTERNALS__) {
+      try { const { open } = await import('@tauri-apps/plugin-dialog'); const r = await open({ directory: true }); p = typeof r === 'string' ? r : null; }
+      catch { p = null; }
+    } else {
+      p = await promptDialog({ title: t('histb.drive.typeTitle'), body: t('histb.drive.typeBody'), value: driveFolder });
+    }
+    if (p && p.trim()) driveFolder = p.trim();
   }
   // An online location is sent the history itself, so there the history is always kept.
   const historyOn = $derived(isGit || s.keepHistory !== false);
@@ -258,9 +275,9 @@
     }
     if (step === 2) {
       // Git is only a must for an online location; without it the app still works, minus the history.
-      if (isGit && !git.installed) return t('hista.online.needGit');
-      if (isGit && inCloud && !s.sync.allowCloud) return t('hista.online.cloudClash');
-      if (isGit && remoteUrl.trim()) {
+      if (isGit && !git.installed) return t(isDrive ? 'histb.drive.needGit' : 'hista.online.needGit');
+      if (isGit && !isDrive && inCloud && !s.sync.allowCloud) return t('hista.online.cloudClash');
+      if (isGit && !isDrive && remoteUrl.trim()) {
         if (!validRemote(remoteUrl)) return t('ob.needRemoteUrl');
         if (!remoteAck) return t('ob.needAck');
       }
@@ -270,7 +287,7 @@
 
   const modName = (m: any) => (ar && m.nameAr) || m.name;
   const modDesc = (m: any) => (ar && m.descriptionAr) || m.description;
-  const syncLabel = $derived(t(isGit ? 'hista.backup.online' : s.sync.mode === 'folder' ? 'hista.backup.folder' : 'hista.backup.none'));
+  const syncLabel = $derived(t(isDrive ? 'histb.backup.drive' : isGit ? 'hista.backup.online' : s.sync.mode === 'folder' ? 'hista.backup.folder' : 'hista.backup.none'));
 
   async function finish() {
     if (busy) return;
@@ -285,7 +302,7 @@
       settings.profession = own || profession || null;
       const r = await post('/onboarding', {
         settings, libraryMode, seeds: seeds.split('\n').map((x) => x.trim()).filter(Boolean),
-        remoteUrl: isGit ? remoteUrl.trim() : '', remoteUsername: isGit ? remoteUser : '', remoteToken: isGit ? remoteToken : '',
+        remoteUrl: isGit && !isDrive ? remoteUrl.trim() : '', remoteUsername: isGit && !isDrive ? remoteUser : '', remoteToken: isGit && !isDrive ? remoteToken : '',
         apiToken: useApi ? apiToken.trim() : '',
         profession: own || (profession ? t('layer.prof.' + profession) : ''),
         assistantLater: waitsForAssistant,
@@ -293,6 +310,13 @@
         importFrom: bringing ? importFrom.trim() : '',
       });
       try { app.settings = await api('/settings'); applyTheme(); } catch { /* the app reloads settings on its own */ }
+      // The library exists now: the chosen drive becomes its backup location (the first sync, at
+      // the end of setup, sends the library there). A drive that cannot be used is said plainly,
+      // and can be chosen again in Settings.
+      if (isDrive && driveFolder) {
+        try { await post('/git/remotes', { name: driveName(driveFolder, new Set()), folder: driveFolder }); }
+        catch (e) { failed(t('histb.drive.failed'), e); }
+      }
       // A setup that waits for the assistant is offered again once one is connected; start at Home.
       done(r.waiting ? null : r.setupChatId);
     } catch (e) {
@@ -480,10 +504,11 @@
 
       <h2 id="ob-backup">{t('ob3.backupTitle')}</h2>
       <p class="muted">{t('hista.backupBody')}</p>
-      <div class="opts three" role="group" aria-labelledby="ob-backup">
+      <div class="opts four" role="group" aria-labelledby="ob-backup">
         <button type="button" class="opt" class:sel={s.sync.mode === 'none'} aria-pressed={s.sync.mode === 'none'} onclick={() => setBackup('none')}><b>{t('hista.backup.none')}</b><span class="muted">{t('hista.backup.noneHint')}</span></button>
         <button type="button" class="opt" class:sel={s.sync.mode === 'folder'} aria-pressed={s.sync.mode === 'folder'} onclick={() => setBackup('folder')}><b>{t('hista.backup.folder')}</b><span class="muted">{t('hista.backup.folderHint')}</span></button>
-        <button type="button" class="opt" class:sel={isGit} aria-pressed={isGit} onclick={() => setBackup('online')}><b>{t('hista.backup.online')}</b><span class="muted">{t('hista.backup.onlineHint')}</span></button>
+        <button type="button" class="opt" class:sel={isGit && !isDrive} aria-pressed={isGit && !isDrive} onclick={() => setBackup('online')}><b>{t('hista.backup.online')}</b><span class="muted">{t('hista.backup.onlineHint')}</span></button>
+        <button type="button" class="opt" class:sel={isDrive} aria-pressed={isDrive} onclick={() => setBackup('drive')}><b>{t('histb.backup.drive')}</b><span class="muted">{t('histb.backup.driveHint')}</span></button>
       </div>
       {#if s.sync.mode === 'none'}
         <p class="warn"><Icon name="warning" size={15} /> <span>{t('hista.backup.noneWarn')}</span></p>
@@ -494,6 +519,17 @@
           {#if inCloud}<p class="okline"><Icon name="check" size={15} /> <span>{t('hista.cloud.inside', { service: cloudName })}</span></p>
           {:else}<p class="warn"><Icon name="warning" size={15} /> <span>{t('ob.folderNotCloud')}</span></p>{/if}
           <p class="muted sm">{t('ob.cloudPrivacy')}</p>
+        </div>
+      {:else if isDrive}
+        <div class="card status">
+          <p class="muted sm">{t('histb.drive.hint')}</p>
+          <div class="row gap-top"><code class="grow path"><bdi>{driveFolder || '—'}</bdi></code><button type="button" class="btn" onclick={pickDrive}><Icon name="folder" size={14} /> {t('histb.drive.add')}</button></div>
+          {#if !driveFolder}<p class="muted sm">{t('histb.backup.driveLater')}</p>{/if}
+          <label for="ob-drivemode">{t('hista.online.when')}</label>
+          <select id="ob-drivemode" bind:value={s.sync.mode}>
+            <option value="git-manual">{t('hista.online.manual')}</option>
+            <option value="git-auto">{t('hista.online.auto')}</option>
+          </select>
         </div>
       {:else}
         <div class="card status">
@@ -568,7 +604,7 @@
         <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}{#if adopting}{' · '}{t('sb.adopt.sum')}{/if}</dd>
         {#if bringing}<dt>{t('sb.bring.sum')}</dt><dd><code><bdi>{importFrom.trim()}</bdi></code></dd>{/if}
         <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}{#if waitsForAssistant}{' · '}{t('sb.later.sum')}{/if}</dd>
-        <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if s.sync.mode === 'folder' && !inCloud} · {t('sa.sum.notCloud')}{/if}</dd>
+        <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isDrive && driveFolder} · <bdi>{driveFolder}</bdi>{:else if isGit && !isDrive && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if s.sync.mode === 'folder' && !inCloud} · {t('sa.sum.notCloud')}{/if}</dd>
         <dt>{t('hista.historyTitle')}</dt><dd>{t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</dd>
       </dl>
       <h2>{t('ob.lookTitle')}</h2>
@@ -614,8 +650,8 @@
   .hero-logo { margin-bottom: 14px; filter: drop-shadow(0 10px 24px rgba(0,0,0,.25)); }
   .lbl { font-size: var(--fs-xs); font-weight: 500; color: var(--muted); margin: 10px 0 4px; }
   .opts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
-  .opts.three { grid-template-columns: repeat(3, 1fr); }
-  @media (max-width: 640px) { .opts.three { grid-template-columns: 1fr; } }
+  .opts.four { grid-template-columns: 1fr 1fr; }
+  @media (max-width: 640px) { .opts.four { grid-template-columns: 1fr; } }
   .opt { font: inherit; color: inherit; text-align: start; cursor: pointer; border: var(--border-w) solid var(--border); border-radius: var(--radius); padding: 12px; display: flex; flex-direction: column; gap: 4px; background: var(--bg); }
   .opt.sel { border-color: var(--accent); outline: 2px solid var(--accent); box-shadow: var(--glow); }
   .opt:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }

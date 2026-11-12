@@ -1,6 +1,6 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
-  import { onDestroy, onMount, untrack } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { askNotify, notifState, notifySettingsUrl, openNotifySettings, testNotify, type NotifState } from '../lib/notifyPerm';
   import { api, del, inTauri, post, put, reloadApp } from '../lib/api';
   import { reportUnsaved } from '../lib/unsaved';
@@ -8,9 +8,9 @@
   import { recheckSignIn } from '../lib/auth';
   import { isolatedKeys, tip } from '../lib/shortcuts';
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
-  import { fmtMoney, fmtNum, t, tn } from '../lib/i18n';
+  import { ago, fmtMoney, fmtNum, lang, t, tn } from '../lib/i18n';
   import { failed } from '../lib/errors';
-  import { lastBackupText } from '../lib/backup.svelte';
+  import { backup, driveName, lastBackupText, refreshBackup } from '../lib/backup.svelte';
   import { cloudFor } from '../lib/cloud.svelte';
   import ProviderPresets from './ProviderPresets.svelte';
   import SpendingGuard from './SpendingGuard.svelte';
@@ -35,7 +35,7 @@
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates', 'nativeb.set.title', 'nativeb.set.switch'],
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag', 'chatc.set.suggest'],
-    git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations', 'reorganize'],
+    git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
     privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
@@ -90,7 +90,8 @@
   const isDirty = () => norm(s) !== norm(base);
   const dirty = $derived(isDirty());
   const isGit = $derived(String(s.sync.mode).startsWith('git'));
-  const syncKind = $derived(isGit ? 'git' : s.sync.mode === 'folder' ? 'folder' : 'none');
+  // "Online location" and "Drive or folder" are both sent to by the app (the git modes); `sync.target` says which was chosen.
+  const syncKind = $derived(isGit ? (s.sync.target === 'drive' ? 'drive' : 'git') : s.sync.mode === 'folder' ? 'folder' : 'none');
   // An online location is sent the history itself, so there the history is always kept.
   const historyOn = $derived(isGit || s.keepHistory !== false);
   /** What the saved settings say (the status lines describe what is really happening, not the draft). */
@@ -136,7 +137,7 @@
     if (permValue === '') e.permission = t('set.errPerm');
     const sp = s.spending;
     if (sp && sp.monthlyLimitUsd != null && !(Number(sp.monthlyLimitUsd) >= 1 && Number(sp.monthlyLimitUsd) <= 100000 && Number.isInteger(Number(sp.warnPercent)) && sp.warnPercent >= 50 && sp.warnPercent <= 95)) e.spending = t('runc.spend.err');
-    if (isGit && inCloud && !s.sync.allowCloud && !cloudAlready) e.sync = t('hista.online.cloudClash');
+    if (syncKind === 'git' && inCloud && !s.sync.allowCloud && !cloudAlready) e.sync = t('hista.online.cloudClash');
     return e;
   });
   const invalid = $derived(Object.keys(errors).length > 0);
@@ -157,7 +158,102 @@
     finally { loading[key] = false; }
   }
   const loadModules = () => load('modules', '/modules', (m) => (modules = m));
-  const loadGit = () => load('git', '/git', (g) => (gitStatus = g));
+  const loadGit = () => load('git', '/git', (g) => {
+    gitStatus = g;
+    backup.health = g?.health ?? null;
+    if (String(app.settings?.sync?.mode ?? '').startsWith('git')) loadSignIns();
+  });
+
+  // ----- backup locations: health, sign-ins, drives, SSH servers -----
+  /** Per site the online locations sign in to: `{host, locations, saved, username, store, insecure}` (never a password). */
+  let signIns = $state<any[]>([]);
+  /** The "Update sign-in" form of one location, with the outcome of its check. */
+  let signForm = $state<{ location: string; username: string; token: string; result: string; ok: boolean } | null>(null);
+  const loadSignIns = () => api('/git/credentials').then((v) => (signIns = Array.isArray(v) ? v : [])).catch(() => (signIns = []));
+  /** Fresh after every Sync (the Sync button refreshes it), so the rows here never lag behind. */
+  const health = $derived(backup.health ?? gitStatus.health ?? null);
+  const locHealth = (name: string) => (health?.locations ?? []).find((l: any) => l.name === name) ?? null;
+  const signInOf = (name: string) => signIns.find((x) => (x.locations ?? []).includes(name)) ?? null;
+  const listNames = (names: string[]) => names.map((n) => (lang() === 'ar' ? `«${n}»` : `“${n}”`)).join(lang() === 'ar' ? '، ' : ', ');
+  function healthText(h: any): string {
+    if (!h || !(gitStatus.remotes || []).length) return '';
+    if (h.state === 'ok') return t('histb.health.ok');
+    if (h.state === 'failed') return t('histb.health.failed');
+    if (h.state === 'stale') return (h.locations ?? []).some((l: any) => !l.at) ? t('histb.health.never') : t('histb.health.stale', { days: h.staleDays });
+    if (h.state === 'waiting') return tn('histb.health.waiting', Math.max(0, ...(h.locations ?? []).map((l: any) => Number(l.unsent) || 0)));
+    return '';
+  }
+  function openSignIn(name: string) {
+    const si = signInOf(name);
+    signForm = { location: name, username: si?.username ?? '', token: '', result: '', ok: false };
+  }
+  const saveSignIn = () => run('signin', async () => {
+    const f = signForm;
+    if (!f || !f.token) return;
+    const v = await post('/git/credentials', { location: f.location, username: f.username.trim(), token: f.token });
+    f.token = '';
+    f.ok = !!v?.works;
+    f.result = v?.works ? t('histb.signin.works') : t('histb.signin.notWorks', { why: String(v?.why ?? '') });
+    await loadSignIns();
+    await refreshBackup();
+  });
+  async function forgetSignIn(si: any) {
+    const ok = await confirmDialog({ title: t('histb.signin.forgetTitle', { host: si.host }), body: t('histb.signin.forgetBody'),
+      note: t('histb.signin.forgetAlso'), list: si.locations ?? [], confirmLabel: t('histb.signin.forget'), danger: true });
+    if (!ok) return;
+    await run('forget', async () => {
+      await del(`/git/credentials?host=${encodeURIComponent(si.host)}`);
+      if (signForm && (si.locations ?? []).includes(signForm.location)) signForm = null;
+      toast(t('histb.signin.forgotten'), { kind: 'success' });
+      await loadSignIns();
+    });
+  }
+  async function addDrive() {
+    let p: string | null = null;
+    if (inTauri()) {
+      try { const { open } = await import('@tauri-apps/plugin-dialog'); const r = await open({ directory: true }); p = typeof r === 'string' ? r : null; }
+      catch { toast(t('set.browseFail'), { kind: 'error' }); return; }
+    } else {
+      p = await promptDialog({ title: t('histb.drive.typeTitle'), body: t('histb.drive.typeBody'), value: '' });
+    }
+    const folder = p?.trim();
+    if (!folder) return;
+    await run('drive', async () => {
+      const v = await post('/git/remotes', { name: driveName(folder, new Set((gitStatus.remotes || []).map((r: any) => String(r.name)))), folder });
+      toast(t('histb.drive.added'), { kind: 'success', detail: v?.path ? t('histb.drive.where', { path: v.path }) : undefined });
+      await loadGit();
+      await refreshBackup();
+    });
+  }
+  /** An SSH server this computer has never connected to: show its keys, trust the one the user compared. */
+  const checkServer = (r: any) => run('host', async () => {
+    const k = await api(`/git/hostkey?location=${encodeURIComponent(r.name)}`);
+    const keys: { type: string; fingerprint: string }[] = k?.keys ?? [];
+    const pick = await choiceDialog({
+      title: t('histb.host.title'), body: t('histb.host.body', { host: String(k?.host ?? '') }),
+      list: keys.map((x) => `${x.type}: ${x.fingerprint}`),
+      choices: keys.map((x, i) => ({ id: x.fingerprint, label: keys.length > 1 ? `${t('histb.host.trust')} (${x.type})` : t('histb.host.trust'), primary: i === 0 })),
+    });
+    if (!pick) return;
+    await post(`/git/hostkey?location=${encodeURIComponent(r.name)}`, { fingerprint: pick });
+    toast(t('histb.host.trusted'), { kind: 'success' });
+    await refreshBackup();
+  });
+  // Arriving from a failed Sync ("Update sign-in", "Check the server"): go to the location concerned.
+  let focused = '';
+  $effect(() => {
+    const v = app.view, h = health;
+    if (v.kind !== 'settings' || !v.path || !h || focused === v.path) return;
+    untrack(async () => {
+      focused = v.path!;
+      tab = 'git';
+      const want = v.path === 'signin' ? 'sync.why.sign_in' : v.path === 'hostkey' ? 'sync.why.host_key' : '';
+      const loc = want ? (h.locations ?? []).find((l: any) => l.whyKey === want) : null;
+      if (loc && v.path === 'signin') openSignIn(loc.name);
+      await tick();
+      document.getElementById(loc ? `st-loc-${loc.name}` : 'st-locations')?.scrollIntoView({ block: 'center' });
+    });
+  });
 
   onMount(() => {
     api('/ai/claude/options').then((o) => (opts = o)).catch(() => {});
@@ -167,7 +263,7 @@
   });
 
   // Plain headline per action; whatever the background service said goes in the detail.
-  const FAIL: Record<string, string> = { save: 'ui.set.saveFailed', mod: 'ui.set.modFailed', remote: 'ui.set.remoteFailed', token: 'ui.set.keyFailed', login: 'ui.set.loginFailed', reorg: 'ui.set.reorgFailed', search: 'ui.set.searchFailed' };
+  const FAIL: Record<string, string> = { save: 'ui.set.saveFailed', mod: 'ui.set.modFailed', remote: 'ui.set.remoteFailed', token: 'ui.set.keyFailed', login: 'ui.set.loginFailed', reorg: 'ui.set.reorgFailed', search: 'ui.set.searchFailed', signin: 'histb.signin.failed', forget: 'histb.signin.forgetFailed', drive: 'histb.drive.failed', host: 'histb.host.failed' };
   /** Runs one action with a loading flag; any failure is shown to the user. */
   async function run(key: string, fn: () => Promise<unknown>) {
     if (busy[key]) return;
@@ -284,6 +380,7 @@
     ...(apiToken.trim() ? [t('set.apiKey')] : []),
     ...(provUrl.trim() !== savedUrl ? [t('set.baseUrl')] : []),
     ...(remote.url.trim() || remote.username.trim() || remote.token ? [t('shellui.set.typedRemote')] : []),
+    ...(signForm?.token ? [t('histb.signin.update')] : []),
   ];
 
   // Leaving with unsaved edits: navigation waits for this (`app.leaveGuard`, awaited inside `go()`).
@@ -313,7 +410,7 @@
     // The key and its address are one form (see saveProvider): saving stores both together.
     if (choice === 'key') { await saveProvider(); if (provDirty) return false; }
     else if (choice !== 'leave') return false;
-    apiToken = ''; provUrl = savedUrl; remote = { name: '', url: '', username: '', token: '' };
+    apiToken = ''; provUrl = savedUrl; remote = { name: '', url: '', username: '', token: '' }; signForm = null;
     return true;
   }
   onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; clearTimeout(savedTimer); reportUnsaved('settings', null); });
@@ -428,8 +525,9 @@
   }
 
   function setSyncKind(k: string) {
-    s.sync.mode = k === 'git' ? (isGit ? s.sync.mode : 'git-manual') : k;
-    if (k === 'git') s.keepHistory = true;
+    const sends = k === 'git' || k === 'drive';
+    s.sync.mode = sends ? (isGit ? s.sync.mode : 'git-manual') : k;
+    if (sends) { s.sync.target = k === 'drive' ? 'drive' : 'online'; s.keepHistory = true; }
   }
 
   /** The history needs the free tool Git: start its installer (macOS), or show where to get it. */
@@ -446,7 +544,8 @@
     await run('remote', async () => {
       await post('/git/remotes', { ...remote, name: remote.name.trim() || freeName(), url: remote.url.trim() });
       remote = { name: '', url: '', username: '', token: '' };
-      gitStatus = await api('/git');
+      await loadGit();
+      await refreshBackup();
     });
   }
 
@@ -465,8 +564,8 @@
   }
 
   async function removeRemote(r: any) {
-    if (!(await confirmDialog({ title: t('set.removeRemoteTitle'), body: t('set.removeRemoteBody'), list: [r.url], confirmLabel: t('set.remove'), danger: true }))) return;
-    await run('remote', async () => { await del(`/git/remotes/${encodeURIComponent(r.name)}`); gitStatus = await api('/git'); });
+    if (!(await confirmDialog({ title: t('set.removeRemoteTitle'), body: t('histb.loc.removeBody'), list: [r.url], confirmLabel: t('set.remove'), danger: true }))) return;
+    await run('remote', async () => { await del(`/git/remotes/${encodeURIComponent(r.name)}`); if (signForm?.location === r.name) signForm = null; await loadGit(); await refreshBackup(); });
   }
 
   const enableModule = (id: string) => run('mod:' + id, async () => {
@@ -722,34 +821,35 @@
           {/if}
         {/if}
       {/if}
-      {#if vis(c, 'set.backup', 'hista.backup.online')}
+      {#if vis(c, 'set.backup', 'hista.backup.online', 'histb.backup.drive')}
         <h3>{t('set.backup')}</h3>
         <label for="st-sync" class="sr-only">{t('set.backup')}</label>
         <select id="st-sync" value={syncKind} onchange={(e) => setSyncKind(e.currentTarget.value)} aria-invalid={!!errors.sync} aria-describedby="st-sync-hint">
           <option value="none">{t('hista.backup.none')}</option>
           <option value="folder">{t('hista.backup.folder')}</option>
           <option value="git">{t('hista.backup.online')}</option>
+          <option value="drive">{t('histb.backup.drive')}</option>
         </select>
         {@render err('sync')}
-        <p class="muted sm" id="st-sync-hint">{t(syncKind === 'none' ? 'hista.backup.noneNote' : syncKind === 'folder' ? 'hista.backup.folderNote' : 'hista.backup.onlineNote')}</p>
+        <p class="muted sm" id="st-sync-hint">{t(syncKind === 'none' ? 'hista.backup.noneNote' : syncKind === 'folder' ? 'hista.backup.folderNote' : syncKind === 'drive' ? 'histb.backup.driveNote' : 'hista.backup.onlineNote')}</p>
         {#if syncKind === 'folder' && String(s.libraryPath ?? '').trim()}
           {#if inCloud}<p class="muted sm">{t('hista.cloud.inside', { service: cloudName })}</p>
           {:else}<p class="note"><Icon name="warning" size={15} /> <span>{t('hista.cloud.notInside')}</span></p>{/if}
-        {:else if isGit && inCloud}
+        {:else if syncKind === 'git' && inCloud}
           <p class="note"><Icon name="warning" size={15} /> <span>{t(cloudAlready && !s.sync.allowCloud ? 'hista.cloud.existing' : 'hista.cloud.clash', { service: cloudName })}</span></p>
           <label class="check"><input type="checkbox" bind:checked={s.sync.allowCloud} /> {t('hista.cloud.anyway')}</label>
         {/if}
       {/if}
-      {#if isGit && vis(c, 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations')}
-        <p class="muted sm">{t('hista.online.body')}</p>
-        {#if vis(c, 'hista.backup.online', 'hista.online.when')}
+      {#if isGit && vis(c, 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update')}
+        {#if syncKind === 'git'}<p class="muted sm">{t('hista.online.body')}</p>{/if}
+        {#if vis(c, 'hista.backup.online', 'histb.backup.drive', 'hista.online.when')}
           <label for="st-gitmode">{t('hista.online.when')}</label>
           <select id="st-gitmode" bind:value={s.sync.mode}>
             <option value="git-manual">{t('hista.online.manual')}</option>
             <option value="git-auto">{t('hista.online.auto')}</option>
           </select>
         {/if}
-        {#if vis(c, 'hista.backup.online', 'set.credStore')}
+        {#if (syncKind === 'git' || signIns.length) && vis(c, 'hista.backup.online', 'set.credStore')}
           <label for="st-cred">{t('set.credStore')}</label>
           <select id="st-cred" bind:value={s.sync.credentialStore}>
             <option value="keychain">{t('set.credKeychain')}</option>
@@ -757,26 +857,71 @@
           </select>
           <p class="muted sm">{t(s.sync.credentialStore === 'file' ? 'ui.set.credFileHint' : 'ui.set.credKeychainHint')}</p>
         {/if}
-        {#if vis(c, 'hista.backup.online', 'hista.online.locations')}
-          <h3>{t('hista.online.locations')}</h3>
+        {#if vis(c, 'hista.backup.online', 'histb.backup.drive', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update')}
+          <h3 id="st-locations">{t('histb.loc.title')}</h3>
           {#if loadErr.git}<p class="err" role="alert">{loadErr.git} <button type="button" class="btn ghost" onclick={loadGit}>{t('set.retry')}</button></p>{/if}
+          {#if healthText(health)}<p class="note" class:good={health?.state === 'ok'} role="status"><Icon name={health?.state === 'ok' ? 'check' : 'warning'} size={15} /> <span>{healthText(health)}</span></p>{/if}
           {#if gitStatus.repo}<p class="muted sm">{t('set.gitState', { branch: gitStatus.branch, changed: fmtNum(gitStatus.dirty ?? 0), ahead: fmtNum(gitStatus.ahead ?? 0), behind: fmtNum(gitStatus.behind ?? 0) })}</p>{/if}
           {#each gitStatus.remotes || [] as r, i (r.name)}
-            <div class="row remote"><b dir="auto">{r.name}</b>{#if r.main ?? i === 0}<span class="pill">{t('set.remoteMain')}</span>{/if}<code class="grow sm path"><bdi>{r.url}</bdi></code>{#if !(r.main ?? i === 0)}<button type="button" class="btn ghost" disabled={busy.remote || busy.save} onclick={() => makeMain(r)}>{t('hista.online.makeMain')}</button>{/if}<button type="button" class="btn ghost danger" disabled={busy.remote} onclick={() => removeRemote(r)}>{t('set.remove')}</button></div>
+            {@const h = locHealth(r.name)}
+            {@const si = r.kind === 'online' ? signInOf(r.name) : null}
+            <div class="remote" id="st-loc-{r.name}">
+              <div class="row"><b dir="auto">{r.name}</b>{#if r.main ?? i === 0}<span class="pill">{t('set.remoteMain')}</span>{/if}<code class="grow sm path"><bdi>{r.url}</bdi></code>{#if !(r.main ?? i === 0)}<button type="button" class="btn ghost" disabled={busy.remote || busy.save} onclick={() => makeMain(r)}>{t('hista.online.makeMain')}</button>{/if}<button type="button" class="btn ghost danger" disabled={busy.remote} onclick={() => removeRemote(r)}>{t('set.remove')}</button></div>
+              <p class="muted sm loc-line">
+                <span>{t('histb.loc.kind.' + (r.kind ?? 'online'))}</span>
+                {#if h}<span>{h.at ? t('histb.loc.at', { when: ago(h.at) }) : t('histb.loc.never')}</span>{/if}
+                {#if h && h.unsent > 0}<span>{tn('histb.loc.unsent', h.unsent)}</span>{/if}
+                {#if r.kind === 'folder' && h?.present === false}<span class="warn-text">{t('histb.loc.unplugged')}</span>{/if}
+              </p>
+              {#if h?.why}<p class="err sm" dir="auto">{t('histb.loc.failed', { why: h.why })}</p>{/if}
+              {#if r.kind === 'ssh'}
+                <div class="row wrap"><span class="muted sm grow">{t('histb.signin.ssh')}</span>{#if h?.whyKey === 'sync.why.host_key'}<button type="button" class="btn" disabled={busy.host} aria-busy={busy.host} onclick={() => checkServer(r)}>{t('histb.host.check')}</button>{/if}</div>
+              {:else if si?.insecure}
+                <p class="note sm"><Icon name="warning" size={15} /> <span>{t('histb.signin.insecure')}</span></p>
+              {:else if si}
+                <div class="row wrap">
+                  <span class="muted sm grow" dir="auto">{si.saved ? (si.username ? t('histb.signin.as', { name: si.username }) : t('histb.signin.token')) : t('histb.signin.none')}{#if (si.locations ?? []).length > 1} · {t('histb.signin.shared', { names: listNames(si.locations.filter((n: string) => n !== r.name)) })}{/if}</span>
+                  {#if signForm?.location !== r.name}<button type="button" class="btn" class:primary={h?.whyKey === 'sync.why.sign_in'} onclick={() => openSignIn(r.name)}>{t('histb.signin.update')}</button>{/if}
+                  {#if si.saved}<button type="button" class="btn ghost danger" disabled={busy.forget} onclick={() => forgetSignIn(si)}>{t('histb.signin.forget')}</button>{/if}
+                </div>
+              {/if}
+              {#if signForm && signForm.location === r.name}
+                <div class="signin">
+                  <div class="grid2">
+                    <div><label for="st-su-{i}">{t('set.remoteUser')}</label><input id="st-su-{i}" dir="ltr" bind:value={signForm.username} autocomplete="off" /></div>
+                    <div><label for="st-st-{i}">{t('set.remoteToken')}</label><input id="st-st-{i}" dir="ltr" type="password" bind:value={signForm.token} autocomplete="off" onkeydown={(e) => { if (e.key === 'Enter') saveSignIn(); }} /></div>
+                  </div>
+                  <p class="muted sm">{t('histb.signin.hint')}</p>
+                  <div class="row wrap">
+                    <button type="button" class="btn primary" disabled={!signForm.token || busy.signin} aria-busy={busy.signin} onclick={saveSignIn}>{busy.signin ? t('histb.signin.checking') : t('histb.signin.save')}</button>
+                    <button type="button" class="btn ghost" onclick={() => (signForm = null)}>{signForm.result ? t('close') : t('cancel')}</button>
+                  </div>
+                  {#if signForm.result}<p class="sm" class:err={!signForm.ok} role="status" dir="auto">{signForm.result}</p>{/if}
+                </div>
+              {/if}
+            </div>
           {:else}
             {#if !loading.git && !loadErr.git}<p class="muted sm">{t('set.noRemotes')}</p>{/if}
           {/each}
-          <p class="muted sm">{t('hista.online.mainHint')}</p>
-          {#if !loading.git && !loadErr.git && (gitStatus.remotes || []).length}<p class="muted sm">{lastBackupText(gitStatus.lastBackup ?? null) || t('hista.sync.never')}</p>{/if}
-          <div class="grid2">
-            <div><label for="st-rurl">{t('hista.online.addressShort')}</label><input id="st-rurl" dir="ltr" bind:value={remote.url} placeholder="https://github.com/me/thoughts.git" autocomplete="off" /></div>
-            <div><label for="st-rname">{t('set.remoteName')}</label><input id="st-rname" dir="ltr" bind:value={remote.name} placeholder="origin" autocomplete="off" /></div>
-            <div><label for="st-ruser">{t('set.remoteUser')}</label><input id="st-ruser" dir="ltr" bind:value={remote.username} autocomplete="off" /></div>
-            <div><label for="st-rtoken">{t('set.remoteToken')}</label><input id="st-rtoken" dir="ltr" type="password" bind:value={remote.token} autocomplete="off" /></div>
-          </div>
-          {#if remote.url.trim() && !validRemote}<p class="err" role="alert">{t('set.errRemote')}</p>{/if}
-          <p class="note"><Icon name="warning" size={15} /> <span>{t('set.uploadBody')}</span></p>
-          <button type="button" class="btn" onclick={addRemote} disabled={!validRemote || busy.remote}>{t('set.addRemote')}</button>
+          {#if (gitStatus.remotes || []).length > 1}<p class="muted sm">{t('hista.online.mainHint')}</p>{/if}
+          {#if !loading.git && !loadErr.git && (gitStatus.remotes || []).length}<p class="muted sm">{lastBackupText(backup.last ?? gitStatus.lastBackup ?? null) || t('hista.sync.never')}</p>{/if}
+          {#if syncKind === 'drive'}
+            <p class="muted sm">{t('histb.drive.hint')}</p>
+            <button type="button" class="btn primary" disabled={busy.drive} aria-busy={busy.drive} onclick={addDrive}><Icon name="folder" size={14} /> {t('histb.drive.add')}</button>
+          {:else}
+            <div class="grid2">
+              <div><label for="st-rurl">{t('hista.online.addressShort')}</label><input id="st-rurl" dir="ltr" bind:value={remote.url} placeholder="https://github.com/me/thoughts.git" autocomplete="off" /></div>
+              <div><label for="st-rname">{t('set.remoteName')}</label><input id="st-rname" dir="ltr" bind:value={remote.name} placeholder="origin" autocomplete="off" /></div>
+              <div><label for="st-ruser">{t('set.remoteUser')}</label><input id="st-ruser" dir="ltr" bind:value={remote.username} autocomplete="off" /></div>
+              <div><label for="st-rtoken">{t('set.remoteToken')}</label><input id="st-rtoken" dir="ltr" type="password" bind:value={remote.token} autocomplete="off" /></div>
+            </div>
+            {#if remote.url.trim() && !validRemote}<p class="err" role="alert">{t('set.errRemote')}</p>{/if}
+            <p class="note"><Icon name="warning" size={15} /> <span>{t('set.uploadBody')}</span></p>
+            <div class="row wrap">
+              <button type="button" class="btn" onclick={addRemote} disabled={!validRemote || busy.remote}>{t('set.addRemote')}</button>
+              <button type="button" class="btn ghost" disabled={busy.drive} aria-busy={busy.drive} onclick={addDrive}><Icon name="folder" size={14} /> {t('histb.drive.addAlso')}</button>
+            </div>
+          {/if}
         {/if}
       {/if}
       {#if vis(c, 'reorganize')}
@@ -984,6 +1129,11 @@
   .wrap { flex-wrap: wrap; }
   .gap-top { margin-top: 10px; }
   .mod, .remote { padding: 10px 0; border-bottom: 1px solid var(--hairline); }
+  .remote > p { margin: 4px 0 0; }
+  .loc-line { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+  .warn-text { color: var(--danger); }
+  .signin { margin-top: 8px; padding: 10px 12px; border-radius: var(--radius); background: var(--fill); }
+  .note.good { color: var(--ok); }
   .mod:last-child { border-bottom: 0; }
   .path { overflow-wrap: anywhere; }
   .err { color: var(--danger); font-size: var(--fs-sm); margin: 4px 0 0; }

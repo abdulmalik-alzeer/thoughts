@@ -5,7 +5,7 @@
   import { recheckSignIn, signIn } from './lib/auth';
   import { loadLayer, retryLayer, checkPending, openReview, addonTag, safeCrashText, viewLabel } from './lib/layer';
   import { failed } from './lib/errors';
-  import { lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
+  import { backup, healthWarning, lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
   import { startReminders } from './lib/reminders';
   import { fold } from './lib/CommandPalette.svelte';
@@ -248,7 +248,7 @@
         if (e.type === 'layer.pending' || e.type === 'chat.done') checkPending(true);
         if (e.type === 'chat.persistError') toast(t('layer.chat.persistError'), { kind: 'error', key: 'persist:' + e.chatId, detail: e.error ? String(e.error) : undefined });
         if (e.type === 'wrap.failed') { toast(t(e.rolledBack === false ? 'layer.wrap.failedKept' : 'layer.wrap.failedRolledBack'), { kind: 'error', key: 'wrap', action: e.chatId ? { label: t('layer.details'), run: () => go({ kind: 'chat', id: e.chatId }) } : undefined }); refreshWrap().catch(() => {}); }
-        if (e.type === 'wrap.done') refreshWrap().catch(() => {});
+        if (e.type === 'wrap.done') { refreshWrap().catch(() => {}); if (syncOn) refreshBackup(); }
         // First-run setup ended while the user was looking at something else.
         if (e.type === 'setup.finished' && e.chatId && !(app.view.kind === 'chat' && app.view.id === e.chatId)) toast(t(e.ok ? 'sa.toast.ready' : 'sa.toast.failed'), { kind: e.ok ? 'success' : 'error', key: 'setup', action: { label: t(e.ok ? 'sa.toast.open' : 'sa.toast.see'), run: () => go({ kind: 'chat', id: e.chatId }) } });
         if (e.type === 'reorganize.ready' && e.chatId && app.view.id !== e.chatId) toast(t(e.ok === false ? 'layer.reorg.failed' : 'layer.reorg.ready'), { kind: e.ok === false ? 'error' : 'info', action: { label: t('layer.details'), run: () => go(e.ok === false ? { kind: 'chat', id: e.chatId } : { kind: 'reorganize', id: e.chatId }) } });
@@ -355,7 +355,9 @@
   const syncOn = $derived(!!app.settings?.sync?.mode?.startsWith('git'));
   // The Sync button says when the library last really reached an online location.
   $effect(() => { if (syncOn && app.settings?.libraryPath) refreshBackup(); });
-  const syncTitle = $derived([t('shell.syncTip'), lastBackupText() || t('hista.sync.never')].join(' · '));
+  // …and, before that, when the backup needs attention (a location failed, changes waited too long).
+  const syncWarn = $derived(healthWarning());
+  const syncTitle = $derived([t('shell.syncTip'), syncWarn || lastBackupText() || t('hista.sync.never')].join(' · '));
 
   async function sync() {
     if (syncing) return;
@@ -816,7 +818,7 @@
           {#if app.wrap.count}<span class="pill" aria-hidden="true">{fmtNum(app.wrap.count)}</span><span class="sr-only">— {tn('shell.chatsToWrap', app.wrap.count)}</span>{/if}
         </button>
         <div class="row tools">
-          {#if syncOn}<button class="iconbtn" class:busy={syncing} disabled={syncing || wrapRunning} aria-busy={syncing} onclick={() => command('sync')} aria-label={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : syncTitle} title={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : syncTitle}><Icon name="sync" /></button>{/if}
+          {#if syncOn}<button class="iconbtn" class:busy={syncing} class:warned={!!syncWarn} disabled={syncing || wrapRunning} aria-busy={syncing} onclick={() => command('sync')} aria-label={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : syncTitle} title={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : syncTitle}><Icon name="sync" />{#if syncWarn && !syncing}<span class="rdot" class:bad={backup.health?.state === 'failed'} aria-hidden="true"></span>{/if}</button>{/if}
           <button class="iconbtn" class:on={app.view.kind === 'history'} onclick={() => command('history')} aria-label={t('ui.hist.title')} title={t('shell.rollbackTip')} aria-current={app.view.kind === 'history' ? 'page' : undefined}><Icon name="rollback" /></button>
           <button class="iconbtn" class:on={app.view.kind === 'help'} onclick={() => command('help')} aria-label={t('shell.help')} title={t('shell.help')} aria-current={app.view.kind === 'help' ? 'page' : undefined}><Icon name="help" /></button>
           <button class="iconbtn" onclick={() => command('palette')} aria-label={t('shell.palette')} title={tip(t('shell.palette'), 'palette')}><Icon name="command" /></button>
@@ -974,6 +976,8 @@
   .linktip { position: fixed; bottom: 6px; inset-inline-start: 6px; z-index: 110; max-width: min(640px, 70vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
     font-size: var(--fs-xs); padding: 3px 9px; border-radius: 6px; background: var(--panel); color: var(--fg); border: var(--border-w) solid var(--hairline); box-shadow: var(--shadow); }
   .wrap { flex-wrap: wrap; }
+  .iconbtn.warned { position: relative; }
+  .rdot.bad { background: var(--danger); }
   .rdot { position: absolute; top: 4px; inset-inline-end: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); }
   /* A page an add-on added: a small hollow square in the corner (rail), a small puzzle piece (sidebar). */
   .rmark { position: absolute; bottom: 4px; inset-inline-end: 4px; width: 6px; height: 6px; border: 1.5px solid currentColor; border-radius: 1px; opacity: .8; }
