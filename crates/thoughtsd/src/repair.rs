@@ -280,14 +280,42 @@ pub async fn rebuild(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
     match git::repo_of(dir) {
         Repo::Missing => Err(crate::tr::err("no_history", &[])),
         Repo::Kept(store) => {
+            // What is needed from the old history: its online locations and its branch (read as
+            // text: git may not open it at all any more).
+            let remotes = remotes_in_config(&std::fs::read_to_string(store.join("config")).unwrap_or_default());
+            let branch = std::fs::read_to_string(store.join("HEAD")).ok()
+                .and_then(|h| h.trim().strip_prefix("ref: refs/heads/").map(String::from))
+                .filter(|b| !b.is_empty() && !git::internal_branch(b) && !b.starts_with('-')).unwrap_or_else(|| "main".into());
+            let aside = aside_of(&store, &stamp);
             {
                 let _g = state.git_lock.lock().await;
-                let aside = aside_of(&store, &stamp);
                 std::fs::rename(&store, &aside)?;
                 crate::log::info("history rebuild: the damaged history kept by the app was set aside");
             }
-            git::start_history(state, dir).await?;
-            Ok(json!({"ok": true, "rebuilt": true, "fromLocation": false}))
+            if remotes.is_empty() {
+                git::start_history(state, dir).await?;
+                return Ok(json!({"ok": true, "rebuilt": true, "fromLocation": false}));
+            }
+            // Its locations go on: the new history is the main one's, as for a library's own repository.
+            let made = async {
+                git::ensure_history(state, dir).await?;
+                let _g = state.git_lock.lock().await;
+                if branch != "main" { git::git(state, dir, &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")]).await?; }
+                take_locations(state, dir, &branch, &remotes).await
+            }.await;
+            match made {
+                Ok(from_location) => {
+                    crate::log::info(format!("history rebuild: the history kept by the app started again{}", if from_location { " from the online location" } else { "" }));
+                    Ok(json!({"ok": true, "rebuilt": true, "fromLocation": from_location}))
+                }
+                Err(e) => {
+                    // Back exactly as it was: the new history goes, the old one returns.
+                    let _g = state.git_lock.lock().await;
+                    if store.is_dir() && aside.is_dir() { std::fs::remove_dir_all(&store)?; }
+                    std::fs::rename(&aside, &store)?;
+                    Err(e)
+                }
+            }
         }
         Repo::Own => {
             let _g = state.git_lock.lock().await;
@@ -343,6 +371,30 @@ async fn start_again(state: &AppState, dir: &Path, branch: &str, remotes: &[(Str
     let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
     text.push_str("\n# Written by Thoughts: a damaged history set aside.\n/.git-damaged-*/\n");
     std::fs::write(&exclude, text)?;
+    take_locations(state, dir, branch, remotes).await
+}
+
+/// The online locations (`[remote "name"]` with its `url`) a history's own `config` file names.
+fn remotes_in_config(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = vec![];
+    let mut section: Option<String> = None;
+    for l in text.lines().map(str::trim) {
+        if l.starts_with('[') {
+            section = l.strip_prefix("[remote \"").and_then(|r| r.strip_suffix("\"]")).map(String::from);
+            continue;
+        }
+        let (Some(name), Some((k, v))) = (&section, l.split_once('=')) else { continue };
+        if k.trim().eq_ignore_ascii_case("url") && !out.iter().any(|(n, _)| n == name) {
+            out.push((name.clone(), v.trim().trim_matches('"').to_string()));
+        }
+    }
+    out
+}
+
+/// The new, empty history of `dir` gets the old one's `remotes` and, when the main one has `branch`,
+/// takes its copy of the history; what differs in the folder is recorded as the person's own.
+/// Returns whether the history came from there.
+async fn take_locations(state: &AppState, dir: &Path, branch: &str, remotes: &[(String, String)]) -> anyhow::Result<bool> {
     for (name, url) in remotes { git::git(state, dir, &["remote", "add", "--", name, url]).await?; }
     let chosen = state.settings.read().await.sync.main_location.clone();
     let names: Vec<&str> = remotes.iter().map(|(n, _)| n.as_str()).collect();
@@ -604,6 +656,50 @@ mod tests {
         std::fs::remove_dir_all(&aside[0]).unwrap();
         std::fs::remove_dir_all(&store).unwrap();
         std::fs::remove_dir_all(&lib).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_damaged_history_kept_by_the_app_keeps_its_online_locations() {
+        let st = AppState::for_test();
+        let base = dunce::canonicalize(std::env::temp_dir()).unwrap().join(format!("thoughts-repair-kept-remote-{}", uuid::Uuid::new_v4()));
+        let (lib, remote) = (base.join("Notes"), base.join("remote.git"));
+        write(&lib, "notes.md", "one\n");
+        std::fs::create_dir_all(&remote).unwrap();
+        sh(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        // A "No backup" library that was later given an online location: both live in the history the app keeps.
+        git::start_history(&st, &lib).await.unwrap();
+        git::git(&st, &lib, &["remote", "add", "--", "origin", &remote.to_string_lossy()]).await.unwrap();
+        git::git(&st, &lib, &["push", "-q", "origin", "main"]).await.unwrap();
+        let pushed = sh(&remote, &["rev-parse", "main"]);
+        let Repo::Kept(store) = git::repo_of(&lib) else { panic!("expected a history kept by the app") };
+        std::fs::write(store.join("HEAD"), "not a reference").unwrap();
+        write(&lib, "notes.md", "edited since\n");
+        assert_eq!(remotes_in_config(&std::fs::read_to_string(store.join("config")).unwrap()), [("origin".to_string(), remote.to_string_lossy().to_string())]);
+        // The location cannot be reached: nothing changes at all.
+        let away = base.join("unplugged.git");
+        std::fs::rename(&remote, &away).unwrap();
+        assert_eq!(crate::tr::classify_in(false, &rebuild(&st, &lib).await.unwrap_err()).code, "offline");
+        assert_eq!(std::fs::read_to_string(store.join("HEAD")).unwrap(), "not a reference", "the old history is back in place");
+        std::fs::rename(&away, &remote).unwrap();
+        // Reachable: the new history is the location's, with what differs here as one change on top.
+        let r = rebuild(&st, &lib).await.unwrap();
+        assert_eq!((r["rebuilt"].as_bool(), r["fromLocation"].as_bool()), (Some(true), Some(true)), "{r}");
+        assert_eq!(git::git(&st, &lib, &["remote"]).await.unwrap().trim(), "origin");
+        assert_eq!(git::git(&st, &lib, &["rev-parse", "HEAD~1"]).await.unwrap().trim(), pushed);
+        assert_eq!(git::git(&st, &lib, &["log", "-1", "--format=%s"]).await.unwrap().trim(), "edit: your changes");
+        assert_eq!(read(&lib, "notes.md"), "edited since\n");
+        assert!(!lib.join(".git").exists());
+        for e in std::fs::read_dir(store.parent().unwrap()).unwrap().flatten() {
+            if e.file_name().to_string_lossy().starts_with(&store.file_name().unwrap().to_string_lossy().to_string()) { std::fs::remove_dir_all(e.path()).unwrap(); }
+        }
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn locations_are_read_from_a_history_s_own_settings() {
+        let text = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://example.com/me/notes.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n[remote \"usb\"]\n\turl = \"/Volumes/Backup Drive/library.git\"\n[branch \"main\"]\n\tremote = origin\n";
+        assert_eq!(remotes_in_config(text), [("origin".to_string(), "https://example.com/me/notes.git".to_string()), ("usb".to_string(), "/Volumes/Backup Drive/library.git".to_string())]);
+        assert!(remotes_in_config("").is_empty() && remotes_in_config("not a config").is_empty());
     }
 
     #[tokio::test]
