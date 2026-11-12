@@ -92,6 +92,8 @@ export async function initVoice(): Promise<void> {
   } catch { listening = false; return; }
   const s = await loadVoice();
   if (s?.result) fileResult();
+  // A recording that stopped by itself while no window was listening (the page reloaded).
+  if (s?.recording?.ended) recEnded(s.recording.ended, s.recording);
 }
 
 function onEvent(p: any) {
