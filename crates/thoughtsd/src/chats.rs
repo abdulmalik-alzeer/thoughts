@@ -37,6 +37,9 @@ pub struct RunOptions {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    /// Web lookups: the assistant may search the web and read web pages without asking. An
+    /// ordinary chat's own choice, off unless the user switches it on (see `claude::profile`).
+    pub web: bool,
     /// Spending ceiling for one run (automatic tasks). Set by the app only: never stored, never read from a client.
     #[serde(skip)]
     pub max_budget_usd: Option<f64>,

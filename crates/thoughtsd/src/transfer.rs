@@ -184,6 +184,8 @@ pub fn safe_options(o: RunOptions) -> RunOptions {
         model: o.model.clone().filter(|_| ok("model", &o.model)),
         effort: o.effort.clone().filter(|_| ok("effort", &o.effort)),
         permission_mode: o.permission_mode.filter(|m| m != crate::settings::BYPASS && crate::settings::check_permission_mode(Some(m)).is_ok()),
+        // Web lookups are switched on here, after their warning, like bypass.
+        web: false,
         max_budget_usd: None,
     }
 }

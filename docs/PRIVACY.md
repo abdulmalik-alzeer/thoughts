@@ -44,7 +44,9 @@ Thoughts works by running an AI assistant on your behalf. To answer you, the ass
 
 This is sent through your own account with the provider (by default, your Claude account). How the provider stores, retains and uses that data is set by the terms and privacy settings of that account, not by Thoughts. If you entered a different provider's address in Settings, the same information goes to that provider instead.
 
-The same applies to everything the assistant does for you without a chat window in front of you: **Wrap**, automatic tasks you have approved, and customisation requests.
+The same applies to everything the assistant does for you without a chat window in front of you: **Wrap**, automatic tasks you have approved, and customisation requests. Those runs work with your library's files only: they cannot run commands on your computer, use the web, or use tools you connected to Claude Code yourself, and none of your own Claude Code settings apply to them.
+
+**Web lookups.** In a chat you can switch on **Web lookups** (next to the permission mode, off for every new chat). The assistant may then search the web and open web pages for that chat without asking. What it searches for, and the addresses of the pages it opens, go to the search service and to those websites; the search goes through your AI provider. Pages can contain text written to mislead the assistant, so while web lookups are on it cannot run commands on your computer in that chat. Wrap, automatic tasks and summaries never use the web.
 
 **Automatic summaries.** So that Wrap is quick, Thoughts prepares a short summary of each chat in the background: once the chat has been quiet for a while (15 minutes unless you change it), or when you start another chat, the text of that chat is sent to the AI provider a second time and a few lines come back. This happens without you pressing anything, for every chat in your library, including ones you never mean to wrap. The summary is kept on your computer with the chat. To stop it, switch off **Settings → Privacy → Summarise chats automatically**: a chat is then only read again when you press Wrap.
 
@@ -83,11 +85,12 @@ What is enforced, by the app's background service:
 
 - The assistant's file tools are blocked from reading, listing, searching or changing anything in a private folder. This applies to every kind of run: chats, Wrap, automatic tasks and customisation.
 - Add-ons (the small tools and views created through Customise) cannot read private folders.
-- The assistant is also told, in its instructions, to leave them alone.
+- The assistant is told, in its instructions for every run, which folders are private and to leave them alone, also when a note or a web page asks otherwise. Those instructions are handed over in a file only your account can read, so other people using this computer cannot see your private folders' names.
+- Wrap and automatic tasks cannot run commands at all, so for them the block has no way around it.
 
 What it does not do:
 
-- **It is a safeguard, not a guarantee against every route.** The block applies to the assistant's file tools. If the assistant is allowed to run a command on your computer, a command could still reach a file in a private folder. If that risk is not acceptable for some material, do not keep it in the library at all.
+- **It is a safeguard, not a guarantee against every route.** The block applies to the assistant's file tools. In an ordinary chat the assistant may still run some commands on your computer (looking through files, moving them), and such a command could reach a file in a private folder; it is told not to. If that risk is not acceptable for some material, do not keep it in the library at all.
 - **Private folders are still backed up and synced.** They are ordinary folders in your library, so sync uploads them with everything else. To keep a folder out of sync, keep it **outside the library folder** (anywhere else on your computer) and link to it from your notes if you need to remember where it is.
 - **It does not go back over what is already written elsewhere.** An item's title and one-line summary in your library's index, and anything from the folder that was copied into other notes, stay where they are, and the assistant reads the index in most chats. When you mark a folder private, the app tells you if the index still mentions its items and offers to remove those lines. Text in other notes is yours to tidy.
 - A private folder cannot be used with the assistant. You cannot ask it to summarise or search something it is blocked from reading.
@@ -109,6 +112,7 @@ This section is practical guidance, not legal advice. Thoughts cannot tell you w
 | When | What leaves | Where it goes |
 |---|---|---|
 | You send a chat message, press Wrap, or an automatic task runs | Your message and attachments, and the contents of any library file the assistant opens for that request | The AI provider, through your own account |
+| Web lookups are on in a chat and the assistant uses them | What it searches for, and the addresses of the pages it opens | The search service and those websites |
 | A chat goes quiet, or you start another one (unless "Summarise chats automatically" is off) | The text of that chat, once more, to be summarised | The AI provider, through your own account |
 | Sync is on | The whole library with its history, private folders included | The backup location you entered |
 | You export, print or share an output yourself | That file | Wherever you send it |

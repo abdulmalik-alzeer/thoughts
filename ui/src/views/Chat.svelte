@@ -411,6 +411,28 @@
     await permChanged();
   }
 
+  /** Web lookups for this chat: an ordinary chat's own choice, off until switched on. */
+  async function setWeb(on: boolean) {
+    const before = !!chat.options.web;
+    chat.options.web = on;
+    try {
+      const saved = await patch(`/chats/${id}`, { options: chat.options });
+      chat.options.web = !!saved?.options?.web;
+    } catch (e) { chat.options.web = before; failed(t('runb.web.failed'), e); }
+  }
+
+  /** One thing the assistant was not allowed to do, in plain words. What it named (a command, an
+   *  address, a file) is kept apart from the sentence around it, so it reads the right way in Arabic too. */
+  const DENIED = ['command', 'page', 'search', 'open', 'look', 'change', 'connected', 'tool'];
+  const ISOLATE = [String.fromCharCode(0x2068), String.fromCharCode(0x2069)]; // first-strong isolate … pop
+  function deniedText(d: any): string {
+    if (d?.why === 'appData') return t('runb.denied.appData');
+    const what = DENIED.includes(d?.what) ? d.what : 'tool';
+    const target = String(d?.target || (what === 'tool' ? d?.tool ?? '' : ''));
+    if (!target) return t(['open', 'look', 'change'].includes(what) ? `runb.denied.${what}.none` : 'runb.denied.tool', { target: '' });
+    return t(`runb.denied.${what}`, { target: ISOLATE[0] + target + ISOLATE[1] });
+  }
+
   async function moveTo(pid: string) {
     try {
       await patch(`/chats/${id}`, { projectId: pid || null });
@@ -523,6 +545,10 @@
       <div class="banner alert row" role="status"><Icon name="warning" size={15} /> <span class="grow">{t('chata.bypassOn')}</span>
         <button class="btn" onclick={bypassOff}>{t('chata.bypassOff')}</button></div>
     {/if}
+    {#if chat.kind === 'chat' && chat.options.web && savedPerm !== BYPASS}
+      <div class="banner row" role="status"><Icon name="search" size={14} /> <span class="grow">{t('runb.web.on')}</span>
+        <button class="btn" onclick={() => setWeb(false)}>{t('runb.web.off')}</button></div>
+    {/if}
 
     <div class="msgs-wrap">
       <FindBar root={() => scroller} where={'chat:' + id} anchors=":scope > .msg.user, :scope > .msg.ai" />
@@ -570,6 +596,20 @@
             </div>
           {:else if m.role === 'tool_result'}
             <!-- shown inside its tool call above -->
+          {:else if m.role === 'denied'}
+            <div class="msg denied" role="note">
+              <div class="deniedhead"><Icon name="shield" size={13} /> <span>{t('runb.denied.title')}</span></div>
+              {#if m.tool?.denials?.length}
+                <ul>
+                  {#each m.tool.denials as d}
+                    <li><span dir="auto">{deniedText(d)}</span>{#if d.why !== 'appData'} <span class="muted">{t('runb.why.' + (d.why || 'none'))}</span>{/if}</li>
+                  {/each}
+                </ul>
+                {#if chat.kind === 'chat' && !chat.options.web && savedPerm !== BYPASS && m.tool.denials.some((d: any) => d.why === 'webOff')}
+                  <button class="act show" onclick={() => setWeb(true)}><Icon name="search" size={14} /><span>{t('runb.web.allowHere')}</span></button>
+                {/if}
+              {:else}<div class="sm" dir="auto">{m.text}</div>{/if}
+            </div>
           {:else if m.role === 'error' && m.tool?.code !== 'sessionLost'}
             <div class="msg err" role="alert">
               <div class="errline"><Icon name="warning" size={14} /> <span dir="auto">{m.text}</span></div>
@@ -674,6 +714,12 @@
               {#each permModes as m}<option value={m}>{label('chat3.perm', m)}</option>{/each}
             </select>
           {/if}
+          {#if chat.kind === 'chat' && savedPerm !== BYPASS}
+            <label class="btn ghost webtoggle" class:on={!!chat.options.web} title={t('runb.web.tip')}>
+              <input type="checkbox" checked={!!chat.options.web} onchange={(e) => setWeb(e.currentTarget.checked)} />
+              <Icon name="search" size={14} /><span>{t('runb.web.label')}</span>
+            </label>
+          {/if}
           <span class="grow"></span>
           <span class="esc muted" role="status" aria-live="polite">{#if escHint}{t('chat3.escHint')}{/if}</span>
           {#if chat.running}
@@ -733,6 +779,12 @@
   .msg.err { color: var(--danger); font-size: 13px; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
   .errline { white-space: pre-wrap; align-items: flex-start; }
   .msg.sys { font-size: var(--fs-sm); }
+  .msg.denied { font-size: var(--fs-sm); padding: 6px 10px; border-radius: var(--radius); border: var(--border-w) dashed var(--border); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+  .deniedhead { display: flex; gap: 6px; align-items: center; font-weight: 500; }
+  .msg.denied ul { margin: 0; padding-inline-start: 20px; display: grid; gap: 2px; overflow-wrap: anywhere; }
+  .controls .webtoggle { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); padding: 4px 8px; cursor: pointer; }
+  .controls .webtoggle input { margin: 0; }
+  .controls .webtoggle.on { color: var(--accent); }
   .hint { margin: auto; display: flex; flex-direction: column; align-items: center; gap: 8px; font-size: 13.5px; }
 
   .acts { display: flex; gap: 2px; opacity: 0; transition: opacity .15s; }

@@ -498,7 +498,8 @@ async fn start(state: &Arc<AppState>, w: &Workflow, budget: f64) -> anyhow::Resu
         // The spending limit is passed on only when the installed assistant supports it (`claude::start_run`).
         options: RunOptions { permission_mode: Some("acceptEdits".into()), max_budget_usd: Some(budget), ..Default::default() }, resume: None,
         append_system: Some(format!("This is the automated workflow \"{}\" that the user set up in the Thoughts app. Nobody is watching it run: \
-            do not ask questions, do the work described, do not run git, and end with a short plain-language summary of what you did.", w.name)),
+            do not ask questions, do the work described, do not run git, and end with a short plain-language summary of what you did. \
+            It works with the library's files only: it cannot run commands, use the web or use tools connected to Claude Code.", w.name)),
         extra_deny: vec![],
     };
     if let Err(e) = claude::start_run(state.clone(), spec, None).await {

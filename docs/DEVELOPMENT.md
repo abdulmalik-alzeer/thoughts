@@ -149,6 +149,42 @@ read-only. Earlier versions applied these rules to customise runs only.
 `permissionMode` is allow-listed to `acceptEdits` and `plan`. `default` is still read from old
 settings files and treated as `plan`, because there is no approve/deny UI.
 
+### Run profiles
+
+What a run may use besides reading and writing the files of the folders it works in follows from
+who is behind it (`claude::profile`). The rules travel in the run's private rules file and hold on
+every Claude Code version (a deny rule beats every allow rule and every permission mode, bypass
+included). The flags are added only when the installed CLI's `--help` lists them; each falls back
+to the rules alone.
+
+| Profile | Runs | Commands | Web | User's own Claude Code set-up | Standing rules (CLAUDE.md) | Flags added |
+|---|---|---|---|---|---|---|
+| `chat` | ordinary chat, customise chat | what the mode allows; **none while web lookups are on** | per-chat switch "Web lookups" (ordinary chats only, off by default): allow `WebSearch`, `WebFetch` | kept (settings, hooks, plugins, MCP servers) | may change | `--permission-prompts none` |
+| `shaping` | first-time set-up, Reorganize | what accept-edits allows on its own (moving, deleting, read-only commands) | denied | ignored: `--setting-sources project,local`, no MCP servers | may change (Reorganize's diff is reviewed) | `--permission-prompts none --setting-sources project,local --strict-mcp-config` |
+| `upkeep` | Wrap (preview and apply), adding a feature | denied (`Bash`, `PowerShell`) | denied | ignored | Wrap: denied; adding a feature: may change | `--permission-prompts none --restricted --strict-mcp-config` |
+| `unattended` | automatic task | denied | denied | ignored | denied | as `upkeep`, plus `--max-budget-usd` and the time limits |
+| one-shot | titles, mini-wraps, routine drafts, the provider test | no tools (`--tools ""`) | no | none: `--safe-mode` (no CLAUDE.md, skills, plugins, hooks, MCP servers) | — | `--safe-mode --strict-mcp-config --disable-slash-commands --disallowedTools mcp__* --permission-prompts none` |
+
+- Every profile without the user's own set-up also denies `mcp__*` (every MCP tool) and both web
+  tools, whatever the user's own allow rules say. `--restricted` additionally removes every
+  code-running tool and keeps the file tools inside the run's folders; without it (older CLIs)
+  the user's personal settings are still dropped through `--setting-sources` where available.
+- The library's own project settings are kept by `--setting-sources project,local` (the trust
+  question covers them) and dropped by `--restricted`; nothing in the app's runs depends on them.
+- Runs that may not change CLAUDE.md are told so (`claude::standing_rules_note`), and the Wrap
+  preview fences the mini-wraps between two lines carrying a random mark, as material to file,
+  never instructions. The mini-wrap prompt says the same about the chat transcript.
+- A user who set a gateway only in `~/.claude/settings.json` (its `env`) rather than under
+  Settings › Assistant gets it in ordinary chats only. Settings › Assistant is the supported way.
+
+**What a run was refused** is read from the `permission_denials` list of the CLI's final `result`
+event (`{tool_name, tool_use_id, tool_input}`) and stored as a chat message with role `denied` and
+`tool.denials: [{tool, what, target, why}]` (`claude::denials`). It is pushed after the answer and
+before a run's error, so an error stays the last message. Refused `ExitPlanMode` and
+`AskUserQuestion` calls are left out: nobody could have answered them. The chat words each item
+itself and offers "Allow web lookups in this chat" when a web lookup was refused because the
+switch is off.
+
 ### Library busy and history
 
 - While a Wrap or a Reorganize apply holds the library, every library mutation (file writes, todo
@@ -168,15 +204,23 @@ settings files and treated as `plan`, because there is no approve/deny UI.
 
 - `privatePaths` in settings is a list of library-relative folders the assistant must never read.
   The daemon enforces it when it starts any run (deny rules passed to the assistant, and the
-  list stated in the system prompt); the starter `CLAUDE.md` repeats it as a behavioural rule.
+  list stated in the appended system prompt, `claude::private_note`); the starter `CLAUDE.md`
+  repeats it as a behavioural rule. The system prompt goes through `--append-system-prompt-file`
+  (a 0600 file in `~/.thoughts/run-tmp`) whenever the CLI takes it, because every local account
+  can read a process's command line; on a CLI without it the folders are not named there.
+- Rules are written for the folder name as configured, in lower case and as spelled on disk.
+  Pattern characters in a path (`*`, `?`, `[`, `]`) are escaped the way Claude Code escapes paths
+  itself, and a path holding them also gets a second rule with each replaced by `?`.
 - **Plugin scope is enforced by the daemon, not the UI.** The UI host adds `scope=plugin` to every
   library call it makes for a plugin or view. With that scope the daemon checks private folders
   itself, case-insensitively and on canonical paths, and for writes requires the path to fall
   under the `allow=<prefix>,…` list, which the host fills from the plugin's declared `write`
   folders. Writes are limited to `.md`, `.json`, `.csv` and `.txt`.
 - The deny rules cover the assistant's file tools. They are not a sandbox: a shell command the
-  assistant is permitted to run is not filtered by them. PRIVACY.md says this in plain words;
-  keep the two in step.
+  assistant is permitted to run is not filtered by them (read-only commands such as `grep` and
+  `cat` run without asking in every mode). Runs the app starts by itself have no commands at all
+  (see Run profiles); ordinary chats keep them, except while web lookups are on. PRIVACY.md says
+  this in plain words; keep the two in step.
 - Private folders are still part of the library on disk and are still synced.
 - The file list and search leave a private folder out by where it really is (`library::Hidden`),
   not only by its name. What `INDEX.md` already says about its items is not covered by the deny
@@ -279,7 +323,8 @@ docs/              user docs (English, Arabic in docs/ar/), this file, RELEASING
 ## Roadmap
 
 - Signed and notarized releases; Intel, Windows and Linux downloads (built in CI, never run)
-- Approving tool permissions from inside the chat (until then "ask before changes" is not offered)
+- Approving tool permissions from inside the chat (until then "ask before changes" is not offered;
+  what was refused is listed under the answer)
 - Reminders when the app is not running
 - Previews for PDF, Word and Excel files
 - Codex as a second assistant (switch per chat; history carries over)
