@@ -606,7 +606,9 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
       const path = cleanPath(typeof a[0] === 'string' ? a[0] : a[0]?.item?.path ?? a[0]?.path);
       const status = str(a[1], 20).toLowerCase();
       if (!STATUSES.includes(status)) throw new Error(`ideas.setStatus: status must be one of ${STATUSES.join(', ')}`);
-      await post('/library/ideas/status?scope=plugin', { path, status });
+      // The service checks again that this add-on declares ideas:write, that `path` is an item's page
+      // as the Ideas list shows it, and that it lies inside the folders the add-on may write in.
+      await post(`/library/ideas/status?${allowQuery(p)}&plugin=${encodeURIComponent(p.name)}`, { path, status });
       return { ok: true };
     }
     case 'storage.get': {

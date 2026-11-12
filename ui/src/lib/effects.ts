@@ -36,7 +36,10 @@ export function mayDo(kind: 'addon' | 'page', permissions: string[], write: stri
   if (!permissions.length) return [t(kind === 'page' ? 'ldb.pageAsksNothing' : 'layer.pluginAsksNothing')];
   return permissions.map((p) => p === 'library:write'
     ? (write.length ? `${permText(p)}: ${list(write)}` : `${permText(p)} — ${t('layer3.writeNone')}`)
-    : permText(p));
+    // An item's status only inside the declared folders (layerui-a, BUG-20).
+    : p === 'ideas:write'
+      ? (write.length ? `${permText(p)} — ${t('lua.statusIn')} ${list(write)}` : `${permText(p)} — ${t('lua.statusNone')}`)
+      : permText(p));
 }
 
 function item(e: Effect): FxLine {

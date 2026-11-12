@@ -31,6 +31,8 @@ export default {
     'lua.packAboutBody': 'One line that people read before they add it. You can leave it empty.',
     'lua.packAboutHint': 'For example: A board of clients by status',
     'lua.packSave': 'Save pack',
+    'lua.statusIn': 'Only for items in:',
+    'lua.statusNone': 'It asks to change statuses but names no folder, so it will not be able to.',
   },
   ar: {
     'lua.says': 'إضافة «{name}»: {text}',
@@ -61,5 +63,7 @@ export default {
     'lua.packAboutBody': 'سطر واحد يقرؤه الناس قبل إضافتها. يمكنك تركه فارغاً.',
     'lua.packAboutHint': 'مثال: لوحة للعملاء مرتبة حسب الحالة',
     'lua.packSave': 'حفظ الحزمة',
+    'lua.statusIn': 'فقط للعناصر الموجودة في:',
+    'lua.statusNone': 'تطلب تغيير الحالات لكنها لم تحدّد أي مجلد، فلن تتمكن من ذلك.',
   },
 };

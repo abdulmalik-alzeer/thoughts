@@ -208,13 +208,16 @@ fn api_version(out: &mut Out, path: &str, o: &Map<String, Value>, required: bool
 fn declaration(out: &mut Out, path: &str, o: &Map<String, Value>, view: bool, own_file: bool) {
     api_version(out, path, o, own_file);
     let allowed = if view { VIEW_PERMISSIONS } else { PERMISSIONS };
-    let mut has_write = false;
+    // `library:write` needs `write` folders; `ideas:write` may name them too (it only reaches the
+    // items inside them, so without any it changes nothing).
+    let (mut has_write, mut may_write) = (false, false);
     match o.get("permissions") {
         None => {}
         Some(p) => match strings(p) {
             None => out.add(path, "`permissions` must be a list of permission names.", "يجب أن يكون `permissions` قائمة بأسماء الصلاحيات."),
             Some(list) => for name in list {
                 has_write |= name == "library:write";
+                may_write |= name == "library:write" || name == "ideas:write";
                 if allowed.contains(&name) { continue; }
                 if view && PERMISSIONS.contains(&name) {
                     out.add(path, format!("A view can only read: `{name}` is not allowed here. Use a plugin instead."),
@@ -235,9 +238,9 @@ fn declaration(out: &mut Out, path: &str, o: &Map<String, Value>, view: bool, ow
             None => out.add(path, "`write` must be a list of folder names.", "يجب أن يكون `write` قائمة بأسماء مجلدات."),
             Some(list) => {
                 if view { out.add(path, "A view cannot write: remove `write`.", "صفحات العرض لا تكتب: احذف `write`."); }
-                else if !has_write && !list.is_empty() {
-                    out.add(path, "`write` folders only work together with the `library:write` permission.",
-                        "قائمة `write` لا تعمل إلا مع الصلاحية `library:write`.");
+                else if !may_write && !list.is_empty() {
+                    out.add(path, "`write` folders only work together with the `library:write` or `ideas:write` permission.",
+                        "قائمة `write` لا تعمل إلا مع الصلاحية `library:write` أو `ideas:write`.");
                 }
                 if has_write && list.is_empty() {
                     out.add(path, "`write` is empty: name at least one folder.", "قائمة `write` فارغة: حدّد مجلدًا واحدًا على الأقل.");
@@ -595,6 +598,10 @@ mod tests {
         assert!(with_js(r#"{"apiVersion":1,"permissions":["network"]}"#)[0].contains("Unknown permission `network`"));
         assert!(with_js(r#"{"apiVersion":1,"permissions":"todos:read"}"#)[0].contains("must be a list"));
         assert!(with_js(r#"{"apiVersion":1,"permissions":["library:write"]}"#)[0].contains("needs a `write` list"));
+        // `ideas:write` may name folders (its status changes stay inside them) and need not.
+        assert!(with_js(r#"{"apiVersion":1,"permissions":["ideas:write"],"write":["clients/"]}"#).is_empty());
+        assert!(with_js(r#"{"apiVersion":1,"permissions":["ideas:write"]}"#).is_empty());
+        assert!(with_js(r#"{"apiVersion":1,"permissions":["ideas:read"],"write":["clients/"]}"#)[0].contains("only work together"));
         assert!(with_js(r#"{"apiVersion":1,"permissions":["library:write"],"write":[]}"#)[0].contains("is empty"));
         assert!(with_js(r#"{"apiVersion":1,"permissions":["library:read"],"write":["clients"]}"#)[0].contains("only work together"));
         for bad in ["../outside", "/etc", "~/x", ".git", "notes/.claude/skills", "a/../b", "", ".", "C:\\x"] {

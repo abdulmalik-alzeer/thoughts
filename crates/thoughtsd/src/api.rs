@@ -1611,16 +1611,21 @@ async fn delete_file(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
 #[serde(default)]
 struct IdeaStatus { path: String, status: String }
 /// Change an idea's status (`{path: "<area>/<slug>/README.md" or "<area>/<slug>", status}`).
-/// Add-ons with `ideas:write` use it too (`?scope=plugin`, see `PLUGIN_SCOPED`).
+/// Add-ons use it too (`?scope=plugin&plugin=<file>&allow=…`): see `plugin_may_set_status`.
 async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Json(i): Json<IdeaStatus>) -> R {
     let root = lib(&st).await?;
     let _edit = library_edit(&st).await?;
     let rel = i.path.trim().trim_matches('/').replace('\\', "/");
     let rel = if rel.to_lowercase().ends_with(".md") { rel } else { format!("{rel}/README.md") };
     if !rel.ends_with("/README.md") { return Err(crate::tr::err("invalid.path", &[]).into()); }
-    // Ideas inside a private folder are the user's own business: never changed for an add-on (the
-    // user's own Ideas page can change them).
-    if scope_of(&q).plugin && paths::is_private(&root, &rel, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", &rel)]).into()); }
+    let scope = scope_of(&q);
+    if scope.plugin {
+        let plugin = q.get("plugin").map(String::as_str).unwrap_or("");
+        plugin_may_set_status(&crate::applayer::Dirs::real().layer, plugin, &root, &rel)?;
+        // Ideas inside a private folder are the user's own business: never changed for an add-on (the
+        // user's own Ideas page can change them). And only inside the folders the add-on may write in.
+        scope.check_write(&st, &root, &rel).await?;
+    }
     let today = chrono::Local::now().date_naive();
     library::set_idea_status(&root, &rel, &i.status, today)?;
     // The idea's line in the index shows its status too.
@@ -1632,6 +1637,29 @@ async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
     st.emit(json!({"type": "library.changed"}));
     crate::history::record_soon(&st, &root);
     ok()
+}
+
+/// What an add-on must meet to change an item's status, on top of the private folders and its
+/// declared `write` folders (checked by the caller): the add-on is a plugin of the kept layer that
+/// declares `ideas:write`, and `rel` is an item's README exactly as the Ideas list shows it, reached
+/// without a link anywhere on the way (a linked README could be any file, a private one included).
+/// Every refusal is the usual "this add-on may not change …".
+fn plugin_may_set_status(layer: &std::path::Path, plugin: &str, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
+    let refused = || crate::tr::err("plugin.not_allowed", &[("path", rel)]);
+    let plain = !plugin.is_empty() && plugin.len() <= 80 && plugin.ends_with(".js") && !plugin.starts_with('.')
+        && plugin.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
+    let kept = plain && std::fs::symlink_metadata(layer.join("plugins").join(plugin)).map_or(false, |m| m.is_file());
+    let shared = std::fs::read_to_string(layer.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+    let decl = if kept { crate::applayer::resolve_decl(layer, "plugins", plugin, &shared, false) } else { Value::Null };
+    let declared = decl["unsupported"] != true && decl["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == "ideas:write"));
+    if !declared { return Err(refused()); }
+    if !library::ideas(root).iter().any(|i| i["path"].as_str() == Some(rel)) { return Err(refused()); }
+    let mut at = root.to_path_buf();
+    for part in rel.split('/') {
+        at.push(part);
+        if std::fs::symlink_metadata(&at).map_or(true, |m| m.file_type().is_symlink()) { return Err(refused()); }
+    }
+    Ok(())
 }
 
 /// `GET /api/library/item?path=<area>/<item>[&exclude=private]`: everything one item's page shows,
@@ -3510,6 +3538,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_add_on_sets_the_status_only_of_a_listed_item_with_its_permission_and_inside_its_folders() {
+        let (st, lib) = t::library().await;
+        let seed = "---\ntitle: X\nstatus: seed\n---\n";
+        for p in ["ideas/shop/README.md", "projects/site/README.md", "Me/Finances/README.md", "me/plans/README.md", "inbox/x/README.md",
+                  "notes/README.md", "ideas/a/b/README.md", "ideas/shop/notes.md"] { t::write(&lib, p, seed); }
+        st.settings.write().await.private_paths = vec!["me/finances".into()];
+        // Two plugins of the kept layer: one declares ideas:write, the other does not.
+        let plugins = crate::applayer::Dirs::real().layer.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let (with, without) = (format!("board-{tag}.js"), format!("plain-{tag}.js"));
+        for (name, perms) in [(&with, r#"["ideas:read","ideas:write"]"#), (&without, r#"["ideas:read"]"#)] {
+            std::fs::write(plugins.join(name), "export default () => {}\n").unwrap();
+            std::fs::write(plugins.join(name.replace(".js", ".json")), format!(r#"{{"apiVersion":1,"permissions":{perms}}}"#)).unwrap();
+        }
+        let as_addon = |name: &str, allow: &str| q(&[("scope", "plugin"), ("plugin", name), ("allow", allow)]);
+        let set = |path: &str| Json(IdeaStatus { path: path.into(), status: "active".into() });
+        let unchanged = |path: &str| t::read(&lib, path) == seed;
+
+        // An item's README as the Ideas list shows it, by an add-on that declares ideas:write and may write there.
+        idea_status(State(st.clone()), as_addon(&with, "ideas/"), set("ideas/shop")).await.unwrap();
+        assert!(t::read(&lib, "ideas/shop/README.md").contains("status: active"));
+        // Not an item's README: another note, a README that is no item, an area the Ideas list leaves out, nothing.
+        for (path, file) in [("ideas/shop/notes.md", "ideas/shop/notes.md"), ("notes", "notes/README.md"), ("ideas/a/b", "ideas/a/b/README.md"),
+                             ("me/plans", "me/plans/README.md"), ("inbox/x", "inbox/x/README.md"), ("ideas/nothing", "")] {
+            let e = shown(idea_status(State(st.clone()), as_addon(&with, "ideas/,notes/,me/,inbox/"), set(path)).await);
+            assert!([403, 404, 422].contains(&e.status), "{path}: {}", e.message);
+            assert!(file.is_empty() || unchanged(file), "{path}");
+        }
+        // A private item, by whatever name.
+        for path in ["Me/Finances", "me/finances/README.md"] {
+            let e = shown(idea_status(State(st.clone()), as_addon(&with, "Me/,me/"), set(path)).await);
+            assert_eq!(e.status, 403, "{path}");
+        }
+        assert!(unchanged("Me/Finances/README.md"));
+        // Through a link: a README that is a link to the private one, and an item folder that is.
+        #[cfg(unix)]
+        {
+            std::fs::create_dir_all(lib.join("ideas/link")).unwrap();
+            std::os::unix::fs::symlink(lib.join("Me/Finances/README.md"), lib.join("ideas/link/README.md")).unwrap();
+            std::os::unix::fs::symlink(lib.join("Me/Finances"), lib.join("ideas/folder")).unwrap();
+            for path in ["ideas/link", "ideas/folder"] {
+                assert_eq!(shown(idea_status(State(st.clone()), as_addon(&with, "ideas/"), set(path)).await).status, 403, "{path}");
+            }
+            assert!(unchanged("Me/Finances/README.md"));
+        }
+        // An add-on without the permission, one that is not in the kept layer, or a request that names none.
+        for name in [without.as_str(), "missing.js", "../plugins/x.js", ""] {
+            assert_eq!(shown(idea_status(State(st.clone()), as_addon(name, "projects/"), set("projects/site")).await).code, "forbidden", "{name}");
+        }
+        assert_eq!(shown(idea_status(State(st.clone()), q(&[("scope", "plugin")]), set("projects/site")).await).status, 403);
+        // Only inside the folders it may write in: allowed `clients/`, an item under `projects/` is refused.
+        assert_eq!(shown(idea_status(State(st.clone()), as_addon(&with, "clients/"), set("projects/site")).await).status, 403);
+        assert!(unchanged("projects/site/README.md"));
+        // The person's own Ideas page is not restricted.
+        idea_status(State(st.clone()), none(), set("Me/Finances")).await.unwrap();
+        assert!(t::read(&lib, "Me/Finances/README.md").contains("status: active"));
+        for name in [&with, &without] {
+            let _ = std::fs::remove_file(plugins.join(name));
+            let _ = std::fs::remove_file(plugins.join(name.replace(".js", ".json")));
+        }
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
     async fn the_ideas_page_changes_status_even_in_a_private_folder_but_an_add_on_cannot() {
         let (st, lib) = t::library().await;
         t::write(&lib, "me/plans/README.md", "---\ntitle: Plans\nstatus: seed\nupdated: 2026-01-01\n---\nBody\n");
@@ -4169,15 +4262,6 @@ mod tests {
         assert_eq!(allow_list("a/, b ,,c"), ["a/", "b", "c"]);
         assert_eq!(allow_list(r#" ["a, b/", " c "] "#), ["a, b/", "c"]);
         assert_eq!(allow_list("[drafts]/,x"), ["[drafts]/", "x"], "a folder that only looks like a list is read the plain way");
-        // An idea's status: an add-on may set it (ideas:write is checked by the app), never in a private folder.
-        t::write(&lib, "ideas/shop/README.md", "---\ntitle: Shop\nstatus: seed\n---\n");
-        let set = |path: &str, status: &str| Json(IdeaStatus { path: path.into(), status: status.into() });
-        idea_status(State(st.clone()), plugin(&[]), set("ideas/shop", "active")).await.unwrap();
-        assert!(t::read(&lib, "ideas/shop/README.md").contains("status: active"));
-        assert_eq!(shown(idea_status(State(st.clone()), plugin(&[]), set("Me/Finances", "done")).await).code, "private");
-        assert!(t::read(&lib, "Me/Finances/README.md").contains("status: seed"));
-        idea_status(State(st.clone()), none(), set("Me/Finances", "done")).await.unwrap();
-        assert!(t::read(&lib, "Me/Finances/README.md").contains("status: done"), "the person's own Ideas page is not restricted");
         // Deleting and moving follow the same rule.
         assert_eq!(shown(delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: "README.md".into(), ..Default::default() })).await).status, 403);
         assert_eq!(shown(delete_file(State(st.clone()), plugin(&[]), Json(DeleteFile { path: "billing/hours.csv".into(), ..Default::default() })).await).status, 403);

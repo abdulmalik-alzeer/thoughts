@@ -78,7 +78,7 @@ The app validates the staged files before the user can keep them. Any of these b
   other than 1;
 - a permission is not one of the names listed under "Permissions";
 - `library:write` is declared without a `write` list, or `write` is given without
-  `library:write`, or a `write` folder is absolute, contains `..`, is empty or `.`, or is or sits
+  `library:write` or `ideas:write`, or a `write` folder is absolute, contains `..`, is empty or `.`, or is or sits
   inside `.claude` or `.git`;
 - a view declares anything but read permissions, or declares `write`;
 - `nav.json` hides `home`, `settings` or `help`;
@@ -120,8 +120,9 @@ Every plugin that uses a permission has its own small file beside it, with the s
 - `apiVersion` — always `1`. (A plugin, view or pack that asks for a higher number is listed as
   unsupported and not loaded.)
 - `permissions` — see the list below. A plugin with no declaration runs with **no** permissions.
-- `write` — only with `library:write`: the library folders the plugin may write into, relative to
-  the library, e.g. `["clients/"]`. Writes anywhere else are refused by the app.
+- `write` — only with `library:write` or `ideas:write`: the library folders the plugin may write
+  into (or whose items' status it may change), relative to the library, e.g. `["clients/"]`.
+  Anything elsewhere is refused by the app.
 - `description` — one plain sentence; the user sees it when reviewing.
 
 Because each plugin has its own file, adding or removing one plugin never touches another, and the
@@ -140,7 +141,7 @@ permissions.
 | `todos:read` | `todos.list` |
 | `todos:write` | `todos.add`, `todos.setDone`, `todos.edit`, `todos.remove` |
 | `ideas:read` | `ideas.list` |
-| `ideas:write` | `ideas.setStatus` |
+| `ideas:write` | `ideas.setStatus` — only for items inside the folders declared in `write` (none declared: no item) |
 | `chat:start` | `chat.start` |
 | `storage` | `storage.get`, `storage.set` — the plugin's own private document |
 
@@ -291,7 +292,7 @@ export default function (thoughts) {
 | `thoughts.todos.edit(item, text)` | Replaces a todo's text (keep or change its ` @due(…)` suffix) | `todos:write` |
 | `thoughts.todos.remove(item)` | Deletes a todo | `todos:write` |
 | `thoughts.ideas.list()` | Promise of `[{ path, area, slug, title, status, summary, tags, updated }]` | `ideas:read` |
-| `thoughts.ideas.setStatus(path, status)` | Sets an item's status (`path` as given by `ideas.list()`); statuses are `seed`, `active`, `parked`, `done`, `dropped` | `ideas:write` |
+| `thoughts.ideas.setStatus(path, status)` | Sets an item's status (`path` exactly as given by `ideas.list()`, inside a folder declared in `write`); statuses are `seed`, `active`, `parked`, `done`, `dropped` | `ideas:write` |
 | `thoughts.storage.get()` | Promise of the plugin's own saved object (`{}` the first time) | `storage` |
 | `thoughts.storage.set(obj)` | Saves `obj` (a plain JSON object, at most 256 KB) in place of what was saved before | `storage` |
 | `thoughts.chat.start(prompt)` | Opens a new chat with that prompt. Only right after the user pressed something of this plugin (a button in its page or widget, one of its commands or item actions), a few seconds apart, at most 20 an hour | `chat:start` |
@@ -657,9 +658,13 @@ keyboard users) changes that item's status.
 {
   "apiVersion": 1,
   "permissions": ["ideas:read", "ideas:write"],
+  "write": ["clients/", "projects/"],
   "description": "A board of your items by status; drag a card to change its status"
 }
 ```
+
+`write` names the areas (top folders) whose items the board may change: list the user's own
+(from `INDEX.md` or `ideas.list()`). An item elsewhere is shown but its status stays as it is.
 
 `plugins/status-board.js`
 
