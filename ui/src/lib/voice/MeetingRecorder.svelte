@@ -7,7 +7,8 @@
   import { untrack } from 'svelte';
   import { Mic, Pause, Play, Square } from '@lucide/svelte';
   import Icon from '../Icon.svelte';
-  import { t, fmtDate, fmtNum } from '../i18n';
+  import { t, fmtDate } from '../i18n';
+  import { fmtSize } from '../content/util';
   import { go } from '../store.svelte';
   import { openItem } from '../item';
   import {
@@ -68,7 +69,6 @@
   const pct = (j: { done: number; total: number }) => (j.total > 0 ? Math.min(100, Math.round((j.done / j.total) * 100)) : null);
   const when = (d: string) => (/^\d{4}-\d{2}-\d{2}$/.test(d) ? fmtDate(d + 'T12:00:00', { day: 'numeric', month: 'short', year: 'numeric' }) : '');
   const name = (f: any) => recordingMeta(f.path, item.dir).title || t('voice.rec.meetingDefault');
-  const mb = (n: number) => fmtNum(Math.max(0.1, Math.round((n / 1048576) * 10) / 10)) + ' MB';
 </script>
 
 {#if shown}
@@ -160,7 +160,7 @@
       {#each pending as f (f.path)}
         {@const m = recordingMeta(f.path, item.dir)}
         <li>
-          <span class="grow body"><b dir="auto">{name(f)}</b><span class="muted sm">{when(m.date)}{#if when(m.date)}{' · '}{/if}{mb(f.size ?? 0)}</span></span>
+          <span class="grow body"><b dir="auto">{name(f)}</b><span class="muted sm">{when(m.date)}{#if when(m.date)}{' · '}{/if}<bdi>{fmtSize(f.size ?? 0)}</bdi></span></span>
           <button class="btn sm" disabled={!!voice.job} onclick={() => transcribe(f.path, voice.lang, m)}>{t('voice.pending.transcribe')}</button>
           <button class="ib" onclick={() => playRecording(f.path)} aria-label={t('voice.notes.play')} title={t('voice.notes.play')}><Play size={14} /></button>
         </li>

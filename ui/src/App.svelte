@@ -879,6 +879,7 @@
       <UsageBanner />
       <WrapWaiting />
       <SetupWaiting />
+      <VoiceBar />
       {#if app.safeMode}
         <div class="safe no-print" role={app.safeReason === 'crash' ? 'alert' : 'status'}>
           <Icon name="shield" size={16} />
@@ -948,7 +949,6 @@
 {#if showRecent}<RecentMessages close={() => (showRecent = false)} />{/if}
 {#if app.showPalette}<CommandPalette items={paletteItems} close={() => (app.showPalette = false)} />{/if}
 
-<VoiceBar />
 <Toasts />
 {#if linkTip}<div class="linktip no-print" aria-hidden="true" dir="ltr">{linkTip}</div>{/if}
 

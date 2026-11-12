@@ -46,6 +46,9 @@
       const use = await ensureLang(l);
       if (!use || use === 'later') return;
       await startDictation(use, id);
+      // Back to the text box (a question may have taken the focus), where Enter inserts.
+      const box = target();
+      if (box && document.activeElement !== box) { box.focus(); if (sel) box.setSelectionRange(sel[0], sel[1]); }
     } catch (e) { voiceError(e); }
     finally { busy = false; }
   }
@@ -91,13 +94,29 @@
     });
   });
 
-  // While listening: Enter in the text box inserts the words (instead of sending the message), Esc cancels.
+  /** Keep the panel inside the window: moved toward the middle when it would stick out of either side. */
+  function fit(node: HTMLElement) {
+    const place = () => {
+      node.style.translate = '';
+      const r = node.getBoundingClientRect();
+      const over = r.right - (window.innerWidth - 12);
+      const under = 12 - r.left;
+      if (over > 0) node.style.translate = `${-over}px 0`;
+      else if (under > 0) node.style.translate = `${under}px 0`;
+    };
+    place();
+    window.addEventListener('resize', place);
+    return { destroy: () => window.removeEventListener('resize', place) };
+  }
+
+  // While listening: Esc cancels (unless a dialog is open, which Esc closes); Enter in the text box
+  // inserts the words instead of sending the message.
   function onKey(e: KeyboardEvent) {
     if (!mine || e.isComposing) return;
+    if (e.key === 'Escape' && !document.querySelector('.modal-bg')) { e.preventDefault(); e.stopPropagation(); cancel(); return; }
     const inBox = document.activeElement === target() || !!(document.activeElement as HTMLElement | null)?.closest?.(`[data-dict="${id}"]`);
     if (!inBox) return;
-    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); cancel(); }
-    else if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && (e.target as HTMLElement)?.tagName !== 'SELECT') {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && (e.target as HTMLElement)?.tagName !== 'SELECT') {
       e.preventDefault(); e.stopPropagation(); finish();
     }
   }
@@ -115,7 +134,7 @@
       {#if mine}<span class="dot" aria-hidden="true"></span>{/if}
     </button>
     {#if mine}
-      <div class="pop card" class:below={place === 'below'} role="group" aria-label={t('voice.dict.listening')}>
+      <div class="pop card" class:below={place === 'below'} use:fit role="group" aria-label={t('voice.dict.listening')}>
         <div class="top">
           <span class="meter" aria-hidden="true">{#each [0.6, 1, 0.75] as k, i (i)}<i style="transform: scaleY({0.18 + Math.min(1, voice.level * k * 1.3) * 0.82})"></i>{/each}</span>
           <b>{t('voice.dict.listening')}</b>
@@ -149,7 +168,7 @@
   .dot { position: absolute; top: 3px; inset-inline-end: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); animation: blink 1.2s ease-in-out infinite; }
   @keyframes blink { 50% { opacity: 0.25; } }
   @media (prefers-reduced-motion: reduce) { .dot { animation: none; } .meter i { transition: none; } }
-  .pop { position: absolute; bottom: calc(100% + 8px); inset-inline-start: 0; z-index: 30; width: min(380px, 80vw); padding: 10px 12px; display: grid; gap: 6px; box-shadow: var(--shadow-lg, 0 8px 30px rgba(0, 0, 0, 0.18)); }
+  .pop { position: absolute; bottom: calc(100% + 8px); inset-inline-start: 0; z-index: 30; width: min(380px, calc(100vw - 24px)); padding: 10px 12px; display: grid; gap: 6px; box-shadow: var(--shadow-lg, 0 8px 30px rgba(0, 0, 0, 0.18)); }
   .pop.below { bottom: auto; top: calc(100% + 8px); }
   .top { display: flex; align-items: center; gap: 8px; }
   .grow { flex: 1; }

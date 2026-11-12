@@ -110,7 +110,7 @@ export default {
     'voice.dict.speakNow': 'تحدّث الآن، وستظهر كلماتك هنا أولاً بأول.',
     'voice.dict.local': 'يتحوّل كلامك إلى نص على هذا الجهاز، ولا يُرسَل شيء إلى أي مكان.',
     'voice.dict.insert': 'إدراج',
-    'voice.dict.keys': 'Enter للإدراج · Esc للإلغاء',
+    'voice.dict.keys': '\u2066Enter\u2069 للإدراج · \u2066Esc\u2069 للإلغاء',
     'voice.dict.nothing': 'لم يُلتقط أي كلام. تحقّق من الميكروفون وأعد المحاولة.',
     'voice.dict.ended': 'توقّف الإملاء من تلقاء نفسه، وأُدرج ما التُقط.',
     'voice.dict.endedEmpty': 'توقّف الإملاء من تلقاء نفسه قبل أن يُلتقط أي كلام.',

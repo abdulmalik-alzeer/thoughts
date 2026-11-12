@@ -1,7 +1,7 @@
 <script lang="ts">
-  // A small bar at the bottom of the window while a meeting is being recorded or turned into text
-  // (FEAT-55), wherever the user is in the app — so a recording is never forgotten. Not shown on
-  // the item's own Meetings tab, which has the full controls.
+  // A banner at the top of every page while a meeting is being recorded or turned into text
+  // (FEAT-55), wherever the user is in the app, so a recording is never forgotten; it covers
+  // nothing. Not shown on the item's own Meetings tab, which has the full controls.
   import { onMount } from 'svelte';
   import { Square } from '@lucide/svelte';
   import { t } from '../i18n';
@@ -35,9 +35,9 @@
 {/if}
 
 <style>
-  .vbar { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 40; display: flex; align-items: center; gap: 10px; max-width: min(640px, calc(100vw - 32px));
-    padding: 8px 10px 8px 14px; border-radius: 99px; background: var(--panel); border: var(--border-w) solid var(--border); box-shadow: var(--shadow-lg, 0 8px 30px rgba(0, 0, 0, 0.18)); font-size: 13px; }
-  .txt { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+  .vbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 4px 28px 0; padding: 7px 10px 7px 14px; border-radius: var(--radius-lg); background: var(--panel);
+    border: var(--border-w) solid var(--border); font-size: 13px; }
+  .txt { flex: 1 1 180px; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
   .time { font-variant-numeric: tabular-nums; direction: ltr; color: var(--muted); }
   .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--danger); flex: none; animation: blink 1.4s ease-in-out infinite; }
   .dot.paused { animation: none; background: var(--muted); }
