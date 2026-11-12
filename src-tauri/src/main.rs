@@ -1185,9 +1185,12 @@ fn main() {
                     stop_daemon(false);
                 }
             }
-            // Clicking the Dock icon brings back a window hidden to the tray.
+            // Clicking the Dock icon brings back a window hidden to the tray, also while only the
+            // quick-capture box is on screen (it counts as a visible window).
             #[cfg(target_os = "macos")]
-            tauri::RunEvent::Reopen { has_visible_windows: false, .. } => show_main(_app),
+            tauri::RunEvent::Reopen { has_visible_windows, .. } => {
+                if !has_visible_windows || main_window(_app).map_or(true, |w| !w.is_visible().unwrap_or(false)) { show_main(_app); }
+            }
             _ => {}
         });
 }
