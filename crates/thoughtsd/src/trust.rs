@@ -90,10 +90,18 @@ fn canon(p: &Path) -> String { dunce::canonicalize(p).unwrap_or_else(|_| p.to_pa
 /// would only make macOS offer to install the developer tools, or hang.
 fn git_out(dir: Option<&Path>, args: &[&std::ffi::OsStr]) -> Option<std::process::Output> {
     if !crate::git::usable() { return None; }
+    #[cfg(test)]
+    GIT_RUNS.with(|n| n.set(n.get() + 1));
     let mut c = crate::proc::std_command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
     if let Some(d) = dir { c.current_dir(d); }
     c.env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1").args(["-c", "core.fsmonitor=false"]).args(args);
     crate::proc::std_output_timeout(&mut c, crate::git::LOCAL_TIMEOUT).ok()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many git commands this thread's trust checks started (tests only).
+    static GIT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The starter kit's version of library file `rel` (a path under `.claude/`), if it ships one.
@@ -433,13 +441,17 @@ struct Scan {
     trustable: bool,
     /// What git's part is made of: every risky setting with its value, every hook with its contents.
     git_marks: Vec<String>,
+    /// There was a real git to look at `.git` with (`git::usable`, decided once for the whole scan).
+    /// Without one git's part was not looked at, so nothing that runs git may rely on this scan.
+    git: bool,
 }
 
 impl Scan {
     fn of(path: &Path) -> Scan {
-        let mut s = Scan { findings: vec![], own: false, files: BTreeMap::new(), trustable: true, git_marks: vec![] };
+        let git = crate::git::usable();
+        let mut s = Scan { findings: vec![], own: false, files: BTreeMap::new(), trustable: true, git_marks: vec![], git };
         s.assistant(path);
-        s.git(path);
+        if git { s.git(path); }
         s.findings.sort();
         s.findings.dedup();
         s.git_marks.sort();
@@ -517,10 +529,6 @@ impl Scan {
     fn git(&mut self, path: &Path) {
         use Part::Git as G;
         if !path.join(".git").exists() { return; }
-        // Without a real git nothing in `.git` can run (hooks, filters and ssh commands are git's
-        // own), and the app runs no git either: nothing to look at, and no reason to ask. Once git
-        // is there, the next check looks, and asks about whatever needs it.
-        if !crate::git::usable() { return; }
         // Resolve both the worktree gitdir and the common dir with the same git the app uses; fail closed.
         let rev = |arg: &str| git_out(Some(path), &["rev-parse".as_ref(), arg.as_ref()])
             .filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
@@ -808,9 +816,16 @@ fn ask(path: &Path, state: &str) -> String {
 #[derive(Clone, Copy, PartialEq)]
 enum Scope { Whole, Git }
 
-/// Is `path` — in the state it is in right now — one the user has trusted?
-fn check(path: &Path, scope: Scope) -> Result<(), Untrusted> {
+/// Is `path` — in the state it is in right now — one the user has trusted? Fails with
+/// [`Untrusted`] when it needs the user's yes, and with `git.missing` when git's part is asked for
+/// but there was no real git to look at it with.
+fn check(path: &Path, scope: Scope) -> anyhow::Result<()> {
     let scan = Scan::of(path);
+    // Without a real git nothing in `.git` can run (hooks, filters and ssh commands are git's own),
+    // so what the assistant may do does not depend on it. But a scan that did not look at `.git`
+    // never clears anything that runs git: should git appear before it runs, its settings would be
+    // unseen. The app's git refuses on its own too (`git::run`); this keeps the two from disagreeing.
+    if scope == Scope::Git && !scan.git { return Err(crate::tr::err("git.missing", &[])); }
     let (need_a, need_g) = (scan.needs_assistant() && scope == Scope::Whole, scan.needs_git());
     if !need_a && !need_g { return Ok(()); }
     let key = canon(path);
@@ -856,7 +871,7 @@ fn check(path: &Path, scope: Scope) -> Result<(), Untrusted> {
         files.extend(e.files.keys().filter(|f| !scan.files.contains_key(*f)).map(|f| (f.clone(), "removed")));
         files.sort();
     }
-    Err(Untrusted { id: ask(path, &scan.state()), path: key, known: old.is_some(), changed, items, files })
+    Err(Untrusted { id: ask(path, &scan.state()), path: key, known: old.is_some(), changed, items, files }.into())
 }
 
 /// Fail with [`Untrusted`] when `path` needs the user's trust before the assistant works in it.
@@ -869,6 +884,8 @@ pub fn require(path: &Path) -> anyhow::Result<()> { Ok(check(path, Scope::Whole)
 /// Before the daemon itself runs git in a library: nothing that makes git run programs (hooks,
 /// filters, aliases, ssh commands…) may have appeared or changed since the folder was trusted.
 /// The assistant's files are not git's business: a changed routine never stops a sync.
+/// Without a real git it fails (`git.missing`) and runs nothing: a git that turns up afterwards
+/// must not run against settings nobody looked at.
 pub fn require_git(path: &Path) -> anyhow::Result<()> { Ok(check(path, Scope::Git)?) }
 
 /// The user's yes to question `id`: trust that folder as it was listed. Fails with a fresh
@@ -1538,21 +1555,33 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
 
-    /// Without a real git (a Mac without Apple's developer tools) the check runs no git at all, so
-    /// macOS never offers to install anything: nothing in `.git` can run, so nothing there is asked
-    /// about. Once git is there, what needs the user's yes is asked about before git runs.
+    /// Without a real git (a Mac without Apple's developer tools) the check starts no git at all, so
+    /// macOS never offers to install anything. What the assistant may do does not depend on `.git`
+    /// then, but nothing that runs git is ever cleared by a scan that did not look at it.
     #[test]
-    fn without_a_real_git_the_git_folder_is_not_looked_at() {
+    fn without_a_real_git_nothing_runs_and_git_work_is_refused() {
         let d = tmp("nogit");
         git(&d, &["init", "-q"]);
-        git(&d, &["config", "core.sshCommand", "ssh -i key"]);
+        git(&d, &["config", "core.fsmonitor", "./watch.sh"]);
+        put(&d, ".git/hooks/post-commit", "#!/bin/sh
+echo hi
+");
+        let runs = || GIT_RUNS.with(|n| n.get());
         crate::git::TEST_NO_GIT.with(|c| c.set(true));
-        assert!(git_out(Some(&d), &["--version".as_ref()]).is_none(), "no git is started");
+        let before = runs();
+        assert!(git_out(Some(&d), &["--version".as_ref()]).is_none());
         assert!(kinds(&d).is_empty(), "{:?}", kinds(&d));
-        assert!(require(&d).is_ok() && require_git(&d).is_ok());
+        assert!(require(&d).is_ok(), "the assistant's side has nothing to ask");
+        let err = require_git(&d).unwrap_err();
+        assert!(err.downcast_ref::<Untrusted>().is_none());
+        assert_eq!(crate::tr::classify(&err).code, "git_missing", "git work stops");
+        assert_eq!(runs(), before, "no git command was started");
+        // With git there, its settings and hooks are looked at and asked about before git runs.
         crate::git::TEST_NO_GIT.with(|c| c.set(false));
-        assert_eq!(kinds(&d), [".git/config git_setting"]);
-        assert!(question(require_git(&d)).items.iter().any(|(f, _)| f.kind == "git_setting"));
+        let q = question(require_git(&d));
+        assert!(runs() > before);
+        assert!(q.items.iter().any(|(f, _)| f.kind == "git_setting" && f.name == "core.fsmonitor"), "{q:?}");
+        assert!(q.items.iter().any(|(f, _)| f.kind == "git_hooks"), "{q:?}");
         std::fs::remove_dir_all(d).unwrap();
     }
 
