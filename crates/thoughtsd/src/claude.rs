@@ -730,6 +730,10 @@ pub struct RunInfo {
     pub deny: Vec<String>,
     /// Every allow rule it would have been started with (web lookups in a chat that has them on).
     pub allow: Vec<String>,
+    /// Every ask rule it would have been started with (commands, under strict private folders).
+    pub ask: Vec<String>,
+    /// The token its questions to the user would carry (`approvals.rs`), when it may ask at all.
+    pub prompt_token: Option<String>,
     /// What the run may use besides the files it works on.
     pub profile: Profile,
     /// The instructions it would have been given on top of its prompt.
@@ -945,6 +949,9 @@ pub struct Profile {
     /// any folder, and the checklists in `routines/` (`.claude/`, where the app keeps the routines
     /// the assistant follows, is closed to every run but first-time set-up).
     pub standing_rules: bool,
+    /// Strict private folders close commands here (`Profile::strict`): every command asks the user,
+    /// or, where nobody can be asked, is refused.
+    pub strict: bool,
 }
 
 /// The profile of a run of this kind of chat, in permission mode `mode`, with web lookups asked
@@ -954,16 +961,16 @@ pub fn profile(kind: &str, mode: &str, web: bool) -> Profile {
         "chat" | "customize" => {
             // A choice for ordinary chats only; in bypass mode everything is allowed already.
             if web && kind == "chat" && mode != crate::settings::BYPASS {
-                Profile { name: "chat", own_setup: true, mcp: false, shell: false, web: true, standing_rules: false }
+                Profile { name: "chat", own_setup: true, mcp: false, shell: false, web: true, standing_rules: false, strict: false }
             } else {
-                Profile { name: "chat", own_setup: true, mcp: true, shell: true, web: false, standing_rules: true }
+                Profile { name: "chat", own_setup: true, mcp: true, shell: true, web: false, standing_rules: true, strict: false }
             }
         }
-        "setup" | "reorganize" => Profile { name: "shaping", own_setup: false, mcp: false, shell: true, web: false, standing_rules: true },
-        "workflow" => Profile { name: "unattended", own_setup: false, mcp: false, shell: false, web: false, standing_rules: false },
+        "setup" | "reorganize" => Profile { name: "shaping", own_setup: false, mcp: false, shell: true, web: false, standing_rules: true, strict: false },
+        "workflow" => Profile { name: "unattended", own_setup: false, mcp: false, shell: false, web: false, standing_rules: false, strict: false },
         // Adding a feature writes its paragraph into CLAUDE.md; a Wrap never changes it (its routine says so too).
-        "module" => Profile { name: "upkeep", own_setup: false, mcp: false, shell: false, web: false, standing_rules: true },
-        _ => Profile { name: "upkeep", own_setup: false, mcp: false, shell: false, web: false, standing_rules: false },
+        "module" => Profile { name: "upkeep", own_setup: false, mcp: false, shell: false, web: false, standing_rules: true, strict: false },
+        _ => Profile { name: "upkeep", own_setup: false, mcp: false, shell: false, web: false, standing_rules: false, strict: false },
     }
 }
 
@@ -971,6 +978,11 @@ impl Profile {
     /// Are the standing files put back after the run when it changed them anyway (`StandingSnapshot`)?
     /// For runs nobody watches while they write: Wrap and automatic tasks.
     pub fn restores_standing(&self) -> bool { !self.standing_rules && self.name != "chat" }
+
+    /// The profile with strict private folders in force (`approvals::strict_applies`): commands stay
+    /// only where every one of them is put to the user first (`asks`, through an `ask` rule), and
+    /// are refused everywhere else.
+    pub fn strict(self, asks: bool) -> Profile { Profile { shell: self.shell && asks, strict: true, ..self } }
 }
 
 /// The built-in tools that run commands.
@@ -1141,6 +1153,15 @@ fn with_allow(doc: Option<String>, allow: &[String]) -> Option<String> {
     if allow.is_empty() { return doc; }
     let mut v = doc.as_deref().and_then(|t| serde_json::from_str::<Value>(t).ok()).unwrap_or_else(|| json!({"permissions": {}}));
     v["permissions"]["allow"] = json!(allow);
+    Some(v.to_string())
+}
+
+/// Add ask rules to a `--settings` deny document: what they name is put to the user every time, whatever
+/// the mode and the user's own allow rules say (a deny rule still wins over them).
+fn with_ask(doc: Option<String>, ask: &[&str]) -> Option<String> {
+    if ask.is_empty() { return doc; }
+    let mut v = doc.as_deref().and_then(|t| serde_json::from_str::<Value>(t).ok()).unwrap_or_else(|| json!({"permissions": {}}));
+    v["permissions"]["ask"] = json!(ask);
     Some(v.to_string())
 }
 
@@ -1532,11 +1553,21 @@ pub async fn start_run(
         deny = merge_deny(deny, Some(json!({"permissions": {"deny": spec.extra_deny}}).to_string()));
     }
     // What the run may use besides its files: commands, the web, the user's own set-up, the standing rules.
-    let prof = profile(&kind, &mode, spec.options.web);
+    let mut prof = profile(&kind, &mode, spec.options.web);
+    // Who answers when something needs permission: the user, in the chat (`approvals.rs`), for an
+    // ordinary chat whose program can ask that way; nobody (it is refused) for everything else.
+    let hook = state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let help = if hook.is_some() { String::new() } else { help_text(&state).await };
+    let asks = crate::approvals::wanted(&kind, &mode, &prof)
+        && (hook.is_some() || (crate::approvals::supported(&help) && crate::approvals::port() != 0));
+    // Strict private folders: commands are put to the user one by one, or closed where nobody can be asked.
+    let strict = crate::approvals::strict_applies(settings.strict_private(), &settings.private_paths, &kind, &mode);
+    if strict { prof = prof.strict(asks); }
     let dirs: Vec<&Path> = std::iter::once(spec.cwd.as_path()).chain(spec.add_dirs.iter().map(PathBuf::as_path)).collect();
     let (prof_deny, prof_allow) = profile_rules(&prof, &dirs);
     if !prof_deny.is_empty() { deny = merge_deny(deny, Some(json!({"permissions": {"deny": prof_deny}}).to_string())); }
     let deny = with_allow(deny, &prof_allow);
+    let deny = if strict && prof.shell { with_ask(deny, &SHELL_TOOLS) } else { deny };
     // A Wrap or an automatic task may not change the standing files. Should one do so anyway, what
     // was there before is put back when it ends.
     let standing = if prof.restores_standing() {
@@ -1555,19 +1586,24 @@ pub async fn start_run(
     // private (named only when the instructions travel in a private file), and the user's language.
     let system_text = |named: bool| {
         let private = private_note(library.as_deref(), &settings.private_paths, named);
-        [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), Some(language_note(&settings.language))]
+        let (asking, strictly) = (asks.then_some(crate::approvals::NOTE), strict.then(|| crate::approvals::strict_note(prof.shell)));
+        [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(language_note(&settings.language))]
             .into_iter().flatten().collect::<Vec<_>>().join("\n\n")
     };
     let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };
     let id = spec.chat_id.clone();
 
-    let hook = state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    // What the run's questions are asked with, for as long as it runs.
+    let ticket = asks.then(|| crate::approvals::open(&state, crate::approvals::RunCtx {
+        chat_id: spec.chat_id.clone(), mode: mode.clone(), strict, cwd: spec.cwd.clone(), add_dirs: spec.add_dirs.clone(),
+        library: library.clone(), private: settings.private_paths.clone() }));
     if let Some(hook) = hook {
         let rules = |key: &str| -> Vec<String> { deny.as_deref().and_then(|d| serde_json::from_str::<Value>(d).ok())
             .and_then(|v| v["permissions"][key].as_array().cloned()).unwrap_or_default()
             .iter().filter_map(|r| r.as_str().map(String::from)).collect() };
         let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: Some(mode.clone()),
-            deny: rules("deny"), allow: rules("allow"), profile: prof, system: system_text(true) };
+            deny: rules("deny"), allow: rules("allow"), ask: rules("ask"), prompt_token: ticket.as_ref().map(|t| t.token().to_string()),
+            profile: prof, system: system_text(true) };
         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
         state.runs.lock().await.insert(id.clone(), kill_tx);
         state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
@@ -1580,6 +1616,7 @@ pub async fn start_run(
                 _ = &mut kill_rx => { push(&state, &id, Msg::new("system", stopped)).await; false }
                 ok = hook(info) => ok,
             };
+            drop(ticket);
             if let Some(s) = standing { put_back_standing(&state, &id, s).await; }
             finish(state, id, ok, record, touches_library, on_done).await;
         });
@@ -1599,7 +1636,6 @@ pub async fn start_run(
     // name the private folders, so they travel in a private file too wherever the program takes
     // one (and must, on Windows, through npm's `claude.cmd`: cmd.exe cannot carry multi-line or
     // quote-heavy arguments at all).
-    let help = help_text(&state).await;
     let mut temp = TempFiles::default();
     let tmp_dir = crate::paths::run_tmp_dir();
     let via_files = (cfg!(windows) && is_cmd_shim(&bin)) || supports(&help, "--append-system-prompt-file");
@@ -1618,7 +1654,14 @@ pub async fn start_run(
     let mut options = spec.options.clone();
     options.prompt_suggestions = options.prompt_suggestions && kind == "chat" && supports(&help, "--prompt-suggestions");
     c.current_dir(&spec.cwd).args(run_args(&options, &mode, budget.as_deref(), spec.resume.as_deref(), &spec.add_dirs, rules_file.as_deref(), system));
-    c.args(profile_flags(&prof, &help));
+    // A run that asks loads the daemon's approvals endpoint from a private file (the run's token is in it).
+    match &ticket {
+        Some(t) => {
+            let config = temp.add(&tmp_dir, "mcp.json", &crate::approvals::config_json(crate::approvals::port(), t.token()))?;
+            c.args(crate::approvals::flags(profile_flags(&prof, &help), &help, &config));
+        }
+        None => { c.args(profile_flags(&prof, &help)); }
+    }
     provider.apply(&mut c);
     c.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -1635,7 +1678,8 @@ pub async fn start_run(
     let pid = child.id();
     crate::runs::record(pid, &spec.chat_id);
     let started = std::time::Instant::now();
-    crate::log::info(format!("run {} started (pid {}, mode {mode}, profile {}, in {})", spec.chat_id, pid.unwrap_or(0), prof.name, spec.cwd.display()));
+    crate::log::info(format!("run {} started (pid {}, mode {mode}, profile {}{}{}, in {})", spec.chat_id, pid.unwrap_or(0), prof.name,
+        if asks { ", asks the user" } else { "" }, if strict { ", strict private folders" } else { "" }, spec.cwd.display()));
     let prompt = spec.prompt.clone();
     tokio::spawn(async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
@@ -1654,6 +1698,7 @@ pub async fn start_run(
     tokio::spawn(async move {
         // Removed when the run is over, however it ends.
         let _temp = temp;
+        let ticket = ticket;
         let (st, cid) = (state.clone(), id.clone());
         let f = follow(&mut child, &mut kill_rx, limits, move |line| {
             let (st, cid) = (st.clone(), cid.clone());
@@ -1662,6 +1707,8 @@ pub async fn start_run(
                 handle_event(&st, &cid, &ev).await
             }
         }).await;
+        // Nothing more can be asked: what still waits is refused, and its card says so.
+        drop(ticket);
         // Put back what a run nobody watched changed among the standing files (also when it was cut off).
         if let Some(s) = standing { put_back_standing(&state, &id, s).await; }
         // The daemon is stopping (and has ended this process): the run was cut off, not finished.
@@ -1770,7 +1817,7 @@ pub fn denials(list: &Value, cx: &DenialContext) -> Vec<Value> {
 }
 
 /// Why a profile closes commands or connected tools: web lookups in a chat, or a run the app started.
-fn closed_by(p: &Profile) -> &'static str { if p.name == "chat" { "webOn" } else { "app" } }
+fn closed_by(p: &Profile) -> &'static str { if p.name != "chat" { "app" } else if p.strict && !p.web { "strict" } else { "webOn" } }
 
 /// Is library-relative `rel` one of the standing files (`Profile::standing_rules`), in any letter case?
 pub fn is_standing(rel: &str) -> bool {
@@ -1908,8 +1955,13 @@ async fn denied_msg(state: &AppState, id: &str, list: &Value) -> Option<Msg> {
     let settings = state.settings.read().await;
     let library = settings.library();
     let home = crate::paths::home();
-    let cx = DenialContext { profile: profile(&kind, &mode, options.web), mode: &mode, cwd: &cwd, library: library.as_deref(), private: &settings.private_paths, home: &home };
-    let items = denials(list, &cx);
+    let mut prof = profile(&kind, &mode, options.web);
+    if crate::approvals::strict_applies(settings.strict_private(), &settings.private_paths, &kind, &mode) { prof = prof.strict(state.approvals.asking(id)); }
+    let cx = DenialContext { profile: prof, mode: &mode, cwd: &cwd, library: library.as_deref(), private: &settings.private_paths, home: &home };
+    // What the user refused on a card (or let run out) is on that card already.
+    let carded = state.approvals.carded(id);
+    let list = Value::Array(list.as_array().into_iter().flatten().filter(|d| d["tool_use_id"].as_str().map_or(true, |t| !carded.contains(t))).cloned().collect());
+    let items = denials(&list, &cx);
     if items.is_empty() { return None; }
     crate::log::info(format!("run {id}: the assistant was refused {} thing(s): {}", items.len(),
         items.iter().map(|d| format!("{}{}", d["tool"].as_str().unwrap_or(""), d["why"].as_str().map(|w| format!(" ({w})")).unwrap_or_default())).collect::<Vec<_>>().join(", ")));
@@ -1924,7 +1976,7 @@ async fn denied_msg(state: &AppState, id: &str, list: &Value) -> Option<Msg> {
 }
 
 /// Returns Some(success) on the final `result` event.
-async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
+pub(crate) async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
     match ev["type"].as_str()? {
         "system" if ev["subtype"] == "init" => {
             if let Some(sid) = ev["session_id"].as_str() {

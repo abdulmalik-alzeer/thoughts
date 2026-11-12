@@ -242,6 +242,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::routines::routes())
         .merge(crate::inbox::routes())
         .merge(crate::tokens::routes())
+        .merge(crate::approvals::routes())
         // maintenance: self-check, newer version, moving, removing
         .merge(crate::care_api::routes())
         // bringing in notes the user already has
@@ -264,7 +265,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             .max_age(PREFLIGHT_MAX_AGE));
     // Added after the layers, so it is the one route that needs no token: a client uses it to check
     // who is answering on this port before it sends the token anywhere (see `hello.rs`).
-    api.merge(crate::hello::routes()).with_state(state)
+    // The approvals endpoint the assistant program calls checks a token of its own, made for one run.
+    api.merge(crate::hello::routes()).merge(crate::approvals::mcp_routes()).with_state(state)
 }
 
 /// How long a webview may remember the answer to a CORS preflight.
@@ -2251,6 +2253,7 @@ pub(crate) async fn remove_chat(st: &AppState, id: &str) -> bool {
         }
     }
     let Some(chat) = st.chats.remove(id).await else { return false };
+    st.approvals.forget_chat(id);
     // "Deleted from this computer" includes what Claude Code kept about the conversation: the
     // transcript of each session this chat had, the folders and files it keeps per session, and the plan file.
     let sessions = chat.all_sessions();

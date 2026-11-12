@@ -39,6 +39,12 @@ pub struct Settings {
     pub search: SearchSettings,
     /// Library-relative folders the AI must never read.
     pub private_paths: Vec<String>,
+    /// Strict private folders: while there are private folders, chats (other than in bypass mode)
+    /// get no commands of their own — every command needs the user's OK in the chat, or is refused
+    /// where nobody can be asked (`approvals::strict_applies`). Off unless the user switches it on.
+    /// A save that does not name it keeps it as it is (`strict_private()` reads it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strict_private: Option<bool>,
     /// Keep the local-only usage log that suggestions are drawn from. Off = nothing is recorded or suggested.
     pub usage_signals: bool,
     /// What the user does, in their own words (asked at setup). Shapes suggestions and wording.
@@ -443,6 +449,7 @@ impl Default for Settings {
             last_wrap: None,
             search: SearchSettings::default(),
             private_paths: vec![],
+            strict_private: None,
             usage_signals: true,
             profession: None,
             accessibility: Accessibility::default(),
@@ -702,6 +709,8 @@ impl Settings {
             if !private.contains(&clean) { private.push(clean); }
         }
         self.private_paths = private;
+        // A client that does not know the switch (an older window, a partial object) never turns it off.
+        if self.strict_private.is_none() { self.strict_private = old.strict_private; }
 
         // One line of plain text, or nothing.
         self.profession = self.profession.take().map(|p| p.chars().filter(|c| !c.is_control()).take(200).collect::<String>().trim().to_string()).filter(|p| !p.is_empty());
@@ -713,6 +722,9 @@ impl Settings {
         *self = std::mem::take(self).with_defaults();
         Ok(())
     }
+
+    /// Are strict private folders switched on?
+    pub fn strict_private(&self) -> bool { self.strict_private == Some(true) }
 
     pub fn library(&self) -> Option<std::path::PathBuf> {
         self.library_path.as_ref().map(std::path::PathBuf::from)

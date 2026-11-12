@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod applayer;
+pub mod approvals;
 pub mod askpass;
 pub mod care_api;
 pub mod changes;
@@ -127,6 +128,8 @@ pub async fn run() -> anyhow::Result<()> {
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
+    // Runs that ask the user (`approvals.rs`) are pointed at this port.
+    approvals::set_port(port);
     paths::write_daemon_info(&paths::DaemonInfo {
         port,
         token: state.token.clone(),

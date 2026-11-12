@@ -64,6 +64,8 @@ pub struct AppState {
     pub plan_limit: std::sync::Mutex<Option<(crate::spend::PlanLimit, i64)>>,
     /// Access keys for other programs on this computer (`tokens.rs`).
     pub keys: crate::tokens::Store,
+    /// What the assistant asks the user from inside a chat, and what was allowed there (`approvals.rs`).
+    pub approvals: crate::approvals::Approvals,
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
@@ -128,6 +130,7 @@ impl AppState {
             spend_told: std::sync::Mutex::new((month_key(), crate::spend::Level::Off)),
             plan_limit: Default::default(),
             keys: crate::tokens::Store::load(crate::paths::tokens_file()),
+            approvals: crate::approvals::Approvals::at(crate::paths::home().join("chat-approvals.json")),
         })
     }
 
@@ -169,6 +172,7 @@ impl AppState {
             spend_told: std::sync::Mutex::new((month_key(), crate::spend::Level::Off)),
             plan_limit: Default::default(),
             keys: crate::tokens::Store::load(dir.join("tokens.json")),
+            approvals: crate::approvals::Approvals::at(dir.join("chat-approvals.json")),
         }
     }
 

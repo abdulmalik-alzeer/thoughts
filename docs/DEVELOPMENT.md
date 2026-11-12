@@ -159,7 +159,7 @@ to the rules alone.
 
 | Profile | Runs | Commands | Web | User's own settings (allow rules, hooks, plugins) | Connected tools (MCP) | Standing files | Flags added |
 |---|---|---|---|---|---|---|---|
-| `chat` | ordinary chat, customise chat | what the mode allows | off | kept | kept | may change | `--permission-prompts none` |
+| `chat` | ordinary chat, customise chat | what the mode allows; under strict private folders every command asks (ordinary chat) or is denied (customise chat) | off | kept | kept | may change | ordinary chat: `--permission-prompts host --mcp-config <file> --permission-prompt-tool mcp__thoughtsapp__approve` (see Approvals); customise chat and bypass: `--permission-prompts none` |
 | `chat`, web lookups on | an ordinary chat whose switch "Web lookups" is on (never in bypass mode) | denied | allowed: `WebSearch`, `WebFetch` | kept | denied | denied | `--permission-prompts none --strict-mcp-config` |
 | `shaping` | first-time set-up, Reorganize | what accept-edits allows on its own (moving, deleting, read-only commands) | denied | not loaded | denied | may change (Reorganize's diff is reviewed) | `--permission-prompts none --setting-sources project,local --strict-mcp-config` |
 | `upkeep` | Wrap (preview and apply), adding a feature | denied (`Bash`, `PowerShell`) | denied | not loaded | denied | Wrap: denied, and put back if changed anyway; adding a feature: may change | `--permission-prompts none --setting-sources project,local --restricted --strict-mcp-config` |
@@ -195,7 +195,8 @@ to the rules alone.
   chat transcript.
 - Switching web lookups on asks first, in plain words: pages can carry instructions, and the
   assistant may send what it read (notes included) to the sites it opens. It is per chat and off
-  by default; the CLI cannot ask per page in a `-p` run, so there is no per-fetch approval.
+  by default. There is no per-fetch approval: a web chat never asks (below), and in a chat with
+  the switch off a web lookup is refused without asking.
 - The library's own project settings are kept by `--setting-sources project,local` (the trust
   question covers them); `--restricted` is documented to load only managed settings and
   `--settings`. Nothing in the app's runs depends on project settings.
@@ -209,6 +210,57 @@ before a run's error, so an error stays the last message. Refused `ExitPlanMode`
 `AskUserQuestion` calls are left out: nobody could have answered them. The chat words each item
 itself and offers "Allow web lookups in this chat" when a web lookup was refused because the
 switch is off.
+
+### Approvals in a chat
+
+`claude -p` has nobody to ask, so an ordinary chat's run names an MCP tool that asks for it
+(`approvals.rs`): `--permission-prompt-tool mcp__thoughtsapp__approve`, with `--permission-prompts
+host` in place of `none` and `--mcp-config` pointing at a 0600 file in `run-tmp`. That file names
+the daemon's own endpoint, `POST /mcp/approvals` on its port (streamable HTTP, one JSON-RPC
+message per request: `initialize`, `ping`, `tools/list`, `tools/call`; `GET` is 405), with a
+bearer token made for that one run, and a per-server `timeout` above the wait (Claude Code gives
+an HTTP server's request 60 seconds and a silent call 5 minutes otherwise). The endpoint sits
+outside the API's token check, answers only a token whose run is going, and refuses any request
+with an `Origin`.
+
+- **Who asks:** `kind == "chat"`, not bypass, web lookups off, and a CLI whose `--help` shows
+  `--permission-prompts host` naming `--permission-prompt-tool` (2.1.259 and later; the flag itself
+  is hidden). Everything else keeps `--permission-prompts none`: Wrap, automatic tasks, adding a
+  feature, set-up, Reorganize, customise chats, one-shot answers, web chats, bypass chats.
+- **The request** (`{tool_name, input, tool_use_id}`) becomes a chat message with role `approval`
+  and `tool: {code: "approval", status, card: {tool, what, target, why, mode, strict, private,
+  always, detail, toolUseId}, expiresAt}`. The `tools/call` answer is an SSE stream (a comment
+  line every 15 s, then the result) or plain JSON when the client does not take a stream. The
+  result is one text block, `{"behavior":"allow"}` or `{"behavior":"deny","message":…}`, with no
+  `structuredContent` — Claude Code's documented contract.
+- **Answers:** `POST /api/chats/:id/approvals/:msgId {answer: once|always|deny}`. Unanswered for
+  5 minutes (`approvals::WAIT`): refused, status `timeout`. The run ending (Stop, an error, the
+  daemon stopping) or the program dropping the call: refused, status `ended`. The status is
+  written into the message and sent again as `chat.message` with the same id.
+- **Decided without a card** (`approvals::decide_now`): the app's own tool (the model can see it
+  and is told not to call it), `AskUserQuestion` and `ExitPlanMode`, `WebFetch`/`WebSearch` (the
+  switch is off), a file whose real path is in a private folder (`paths::is_private`, links
+  resolved), a tool use already asked about or already answered, and what the chat allows always.
+- **Always for this chat** is kept by the daemon in `chat-approvals.json`, never in Claude Code's
+  settings: this exact command (and tool), changes to this exact file, reading this exact path,
+  or this connected tool with any input. Deny rules still come first. `GET /api/chats/:id/approvals`
+  lists them, `DELETE /api/chats/:id/always/:id` takes one back, deleting the chat forgets them.
+  Under strict private folders a command is offered once only and the "always" list is not
+  consulted for commands.
+- Refusals the user gave on a card are left out of the `denied` list under the answer.
+- `approval.asked {chatId, id, title}` and `approval.changed {chatId}` go out on the event stream
+  (not to add-ons); the window shows a toast when the user is elsewhere, and a notification when
+  it is in the background.
+
+**Strict private folders** (`settings.strictPrivate`, off by default; a save that leaves it out
+keeps it): while there are private folders, every chat that is not in bypass mode loses its own
+commands (`approvals::strict_applies`, `Profile::strict`). An ordinary chat that asks gets the
+rules `ask: ["Bash", "PowerShell"]` — an ask rule beats the user's allow rules and the built-in
+read-only commands — so every command comes to a card with the private-folder warning, offered
+once only. A customise chat, a web chat, or a chat whose CLI cannot ask gets `deny: ["Bash",
+"PowerShell"]`, and a refusal names the reason (`why: "strict"`). Runs the app starts by itself
+are unchanged: Wrap, automatic tasks and adding a feature have no commands anyway; set-up and
+Reorganize keep theirs.
 
 ### Library busy and history
 
@@ -244,8 +296,9 @@ switch is off.
 - The deny rules cover the assistant's file tools. They are not a sandbox: a shell command the
   assistant is permitted to run is not filtered by them (read-only commands such as `grep` and
   `cat` run without asking in every mode). Runs the app starts by itself have no commands at all
-  (see Run profiles); ordinary chats keep them, except while web lookups are on. PRIVACY.md says
-  this in plain words; keep the two in step.
+  (see Run profiles); ordinary chats keep them, except while web lookups are on or strict private
+  folders are switched on (every command then asks first, see Approvals in a chat). PRIVACY.md
+  says this in plain words; keep the two in step.
 - Private folders are still part of the library on disk and are still synced.
 - The file list and search leave a private folder out by where it really is (`library::Hidden`),
   not only by its name. What `INDEX.md` already says about its items is not covered by the deny
