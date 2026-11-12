@@ -12,6 +12,7 @@ let ws: WebSocket | null = null;
 export const inTauri = () => typeof (window as any).__TAURI_INTERNALS__ !== 'undefined';
 
 export async function connect(): Promise<void> {
+  if (halted) throw new Error('Thoughts was removed from this computer');
   if (inTauri()) {
     const { invoke } = await import('@tauri-apps/api/core');
     const i = await invoke<Info & { stale?: boolean }>('daemon_info');
@@ -30,6 +31,15 @@ export async function connect(): Promise<void> {
     if (!info) throw new Error('Open with ?port=&token= from ~/.thoughts/daemon.json');
   }
   openSocket();
+}
+
+/** Thoughts was removed from this computer: never reach the background service again (reaching it
+ *  would start a new one, which would make a fresh data folder). */
+let halted = false;
+export function halt() {
+  halted = true;
+  if (retry) { clearTimeout(retry); retry = null; }
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
 }
 
 /** True when an older background service was kept running because it was busy (it switches over later). */

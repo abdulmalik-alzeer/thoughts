@@ -181,6 +181,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // app layer & updates & extensions
         .merge(crate::layer_api::routes())
         .merge(crate::routines::routes())
+        // maintenance: self-check, newer version, moving, removing
+        .merge(crate::care_api::routes())
         .route("/api/extensions", get(extensions))
         .route("/api/extensions/search/:op", post(search_ext))
         .route("/api/events", get(events))
@@ -349,6 +351,7 @@ async fn status(State(st): S) -> R {
         "libraryMissing": s.library().map_or(false, |l| !l.is_dir()),
         "platform": std::env::consts::OS,
         "home": dirs::home_dir(),
+        "newerVersion": crate::release::newer_value(&crate::release::load(&paths::home()), env!("CARGO_PKG_VERSION")),
     })))
 }
 
@@ -417,7 +420,7 @@ async fn diagnostics(State(st): S) -> R {
 
 /// Is a working git available? On macOS /usr/bin/git is a stub until the command-line tools
 /// are installed, so check xcode-select first (running the stub would pop a dialog).
-async fn git_tool_status() -> Value {
+pub(crate) async fn git_tool_status() -> Value {
     use crate::proc::command;
     #[cfg(target_os = "macos")]
     {
@@ -780,6 +783,28 @@ pub fn reconcile_login_item(settings: &Settings) {
         LoginFix::Remove => { crate::log::info("start at login is off: removing the entry left behind"); crate::log::ok_or_warn("could not remove the start-at-login entry", login_item(false)); }
     }
 }
+
+/// What the start-at-login entry needs to match the setting, if anything: `"write"` or `"remove"`
+/// (for the self-check; `reconcile_login_item` makes the same repair at start).
+pub(crate) fn login_item_drift(settings: &Settings) -> Option<&'static str> {
+    if !login_items_allowed() || !settings.onboarded { return None; }
+    let registered = registered_login_program().ok()?;
+    let exe = paths::app_exe().ok()?.to_string_lossy().to_string();
+    let exists = registered.as_deref().is_some_and(|p| !p.is_empty() && std::path::Path::new(p).is_file());
+    match login_fix(settings.daemon.run_at_login, registered.as_deref(), exists, &exe) {
+        LoginFix::Keep => None,
+        LoginFix::Write => Some("write"),
+        LoginFix::Remove => Some("remove"),
+    }
+}
+
+/// Bring the start-at-login entry in line with the setting, reporting a failure.
+pub(crate) fn repair_login_item(settings: &Settings) -> anyhow::Result<()> {
+    match login_item_drift(settings) { Some("write") => login_item(true), Some(_) => login_item(false), None => Ok(()) }
+}
+
+/// Remove the start-at-login entry (removing Thoughts from this computer).
+pub(crate) fn remove_login_item() -> anyhow::Result<()> { login_item(false) }
 
 // ---------- onboarding ----------
 

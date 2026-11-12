@@ -7,11 +7,13 @@
 pub mod api;
 pub mod applayer;
 pub mod askpass;
+pub mod care_api;
 pub mod chats;
 pub mod claude;
 pub mod git;
 pub mod hello;
 pub mod history;
+pub mod health;
 pub mod layer_api;
 pub mod library;
 pub mod links;
@@ -21,6 +23,8 @@ pub mod packs;
 pub mod paths;
 pub mod proc;
 pub mod routines;
+pub mod release;
+pub mod removal;
 pub mod runs;
 pub mod search;
 pub mod secrets;
@@ -31,6 +35,7 @@ pub mod suggestions;
 pub mod todos;
 pub mod tr;
 pub mod traces;
+pub mod transfer;
 pub mod trust;
 pub mod updates;
 pub mod usage;
@@ -109,6 +114,8 @@ pub async fn run() -> anyhow::Result<()> {
     layer_api::start(state.clone());
     // Every library has a history of changes: one that has none yet (from before 0.0.9) gets it now.
     history::start(state.clone());
+    // The weekly "is there a newer version?" check, for users who switched it on.
+    tokio::spawn(release::weekly(state.clone()));
     // Streaming chats are written to disk at most every couple of seconds; this picks up the rest.
     let flusher = state.clone();
     tokio::spawn(async move {

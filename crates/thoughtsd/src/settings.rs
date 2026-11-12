@@ -42,6 +42,9 @@ pub struct Settings {
     pub profession: Option<String>,
     pub accessibility: Accessibility,
     pub calendar: CalendarSettings,
+    /// Ask once a week whether a newer version has been published (`release.rs`). Off unless the
+    /// user switches it on: it is a request to the internet the app does not otherwise make.
+    pub release_check: bool,
 }
 
 /// Calendar preferences: the first day of the week and the weekend (`None` = from the library's
@@ -299,6 +302,7 @@ impl Default for Settings {
             profession: None,
             accessibility: Accessibility::default(),
             calendar: CalendarSettings::default(),
+            release_check: false,
         }
     }
 }
@@ -830,6 +834,8 @@ mod tests {
         assert!(s.usage_signals, "on unless the user turns it off");
         assert!(!serde_json::from_str::<Settings>(r#"{"usageSignals":false}"#).unwrap().usage_signals);
         assert_eq!(s.accessibility, Accessibility::default());
+        assert!(!s.release_check, "the version check is off unless switched on");
+        assert!(serde_json::from_str::<Settings>(r#"{"releaseCheck":true}"#).unwrap().release_check);
     }
 
     #[test]

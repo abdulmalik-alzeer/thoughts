@@ -5,12 +5,15 @@ import { choiceDialog, confirmDialog } from './dialog.svelte';
 import { t, tn } from './i18n';
 import { checkPending } from './layer';
 import { withBusyPrompt } from './shell';
+import { offerDownload } from './maintenance';
 
 let checking = false;
 
 /** Ask the shell whether a new version exists. `manual` (menu / button) also reports "nothing new". */
 export async function checkAppUpdate(manual = false) {
-  if (!inTauri()) { if (manual) toast(t('layer.upd.desktopOnly')); return; }
+  // Without the built-in updater (a browser preview, a build without an updater key, a Linux
+  // package) a check asked for by the user looks up the latest published version instead.
+  if (!inTauri()) { if (manual) await checkRelease('layer.upd.desktopOnly'); return; }
   if (checking) return;
   checking = true;
   try {
@@ -18,7 +21,7 @@ export async function checkAppUpdate(manual = false) {
     let r: any;
     try { r = await invoke('update_check'); }
     catch (e: any) { if (manual) toast(t('layer.upd.checkFailed'), { kind: 'error', detail: String(e?.message ?? e) }); return; }
-    if (!r?.configured) { if (manual) toast(t(r?.reason === 'deb' ? 'ui.upd.deb' : r?.reason === 'build' ? 'ui.upd.build' : 'layer.upd.notConfigured'), { key: 'upd' }); return; }
+    if (!r?.configured) { if (manual) await checkRelease(r?.reason === 'deb' ? 'ui.upd.deb' : r?.reason === 'build' ? 'ui.upd.build' : 'layer.upd.notConfigured'); return; }
     if (!r.available) { if (manual) toast(t('layer.upd.none'), { kind: 'success', key: 'upd' }); return; }
     const ok = await confirmDialog({
       title: t('layer.upd.available', { version: r.version ?? '' }),
@@ -32,6 +35,16 @@ export async function checkAppUpdate(manual = false) {
       if (!done) toast(t('ui.busy.waiting'), { key: 'upd' });
     } catch (e: any) { toast(t('layer.upd.installFailed'), { kind: 'error', key: 'upd', detail: String(e?.message ?? e) }); }
   } finally { checking = false; }
+}
+
+/** Ask the background service for the latest published version (one request to GitHub, see
+ *  docs/PRIVACY.md). When it cannot tell, say what the build says about updates (`fallback`). */
+async function checkRelease(fallback: string) {
+  let r: any = null;
+  try { r = await post('/release-check'); } catch { /* older background service, or no connection */ }
+  if (r?.state === 'newer' && r.version && r.url) { await offerDownload(r.version, r.url); return; }
+  if (r?.state === 'current') { toast(t('layer.upd.none'), { kind: 'success', key: 'upd' }); return; }
+  toast(r?.state === 'unknown' ? `${t(fallback)} ${t('care.upd.unknown')}` : t(fallback), { key: 'upd' });
 }
 
 const seen = {

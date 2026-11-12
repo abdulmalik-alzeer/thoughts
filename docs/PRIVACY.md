@@ -52,11 +52,22 @@ Nothing is sent to an AI provider when you are only reading, searching or editin
 
 Sync is off unless you turn it on. When it is on, Thoughts uploads your whole library, including its history of earlier versions, to the location you entered, and downloads changes from it. Who can see it there depends on that service and how you set it up. Chats and settings are not part of the library and are not synced.
 
+To take them to another computer, use **Settings → Maintenance → Move to another computer**. It saves one file in your Downloads folder with your chats (and their attachments), settings and customisations. The file never contains passwords, your provider key or anything that unlocks an account, but your chats are in it as plain text: keep it somewhere safe and delete it once you have imported it.
+
 If you keep your library inside a folder that another service backs up (iCloud Drive, Dropbox and the like), that service copies it too. That is between you and that service.
 
 ## No analytics
 
-Thoughts does not collect usage statistics, crash reports or any other information about you, and has no account of its own. When it checks whether a new version is available, it contacts the page the app is downloaded from; it sends nothing about you or your library.
+Thoughts does not collect usage statistics, crash reports or any other information about you, and has no account of its own.
+
+Checking for a newer version is the one time Thoughts contacts the internet on its own behalf, and only in these cases:
+
+- **When you choose "Check for Updates…"** (in the menu, or under Settings → Customisations).
+- **Once a week, if you switch on "Check once a week for a newer version"** under Settings → Maintenance. It is off unless you switch it on.
+
+Either way it asks GitHub, where Thoughts is published (`api.github.com`), for the number of the latest version. The request carries nothing about you, your library or your settings: no account, no cookie, no identifier, only the address it asks for and the name "Thoughts" as the program asking. Like any connection, it lets GitHub see your internet address. A copy with the built-in updater switched on asks the download page in the same way when you check.
+
+Thoughts never downloads or installs anything by itself: when a newer version exists it shows you a link to its download page.
 
 To suggest improvements (for example the monthly tune-up described in [Making Thoughts your own](CUSTOMISING.md)), the app keeps a small record on your computer of which screens you open and which customisations you kept or discarded. That record never leaves your computer on its own. If you accept a tune-up suggestion, a short summary of it is included in the request to the assistant, like anything else you send in a chat.
 
@@ -130,7 +141,7 @@ Libraries created by Thoughts contain one such setting, which fetches the latest
 
 ## Deleting everything
 
-1. **The app and its data.** Quit Thoughts completely, remove the app, and delete the `.thoughts` folder in your home folder. This removes chats, attachments, settings and customisations. Also remove its entry from the things that open when you log in. See [Uninstall](../README.md#uninstall).
+1. **The app and its data.** The quickest way is **Settings → Maintenance → Remove Thoughts from this computer**: it removes chats, attachments, settings, customisations, the saved passwords and key, and the login item, then quits; your library stays. Then remove the app itself. By hand: quit Thoughts completely, remove the app, and delete the `.thoughts` folder in your home folder. This removes chats, attachments, settings and customisations. Also remove its entry from the things that open when you log in. See [Uninstall](../README.md#uninstall).
 2. **Your library.** Delete the library folder. Until you do, it stays exactly as it is, readable with any text editor.
 3. **Saved passwords.** In your computer's password store (Keychain Access on a Mac), delete the entries named `thoughts-git` and `thoughts-ai`. A password saved with the file option is removed with the `.thoughts` folder.
 4. **Synced copies.** Delete the copy at the location you synced to, using that service.

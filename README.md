@@ -79,8 +79,12 @@ confidential client data: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## Uninstall
 
-Quit Thoughts completely first (from its menu, not only by closing the window). Then remove three
-things:
+The simplest way: **Settings → Maintenance → Remove Thoughts from this computer**. It removes the
+data folder, the saved passwords and key, and the login item, then quits. Then drag the app to
+the Trash.
+
+By hand: quit Thoughts completely first (from its menu, not only by closing the window). Then
+remove three things:
 
 1. **The app** itself, from Applications.
 2. **The data folder** `.thoughts` in your home folder (`~/.thoughts`): chats, settings,

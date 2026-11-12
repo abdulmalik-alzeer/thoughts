@@ -479,6 +479,14 @@ async fn update_install(app: tauri::AppHandle, force: Option<bool>) -> Result<()
     app.restart()
 }
 
+/// Quit completely (after "Remove Thoughts from this computer": the settings are gone, so
+/// "keep running in the background" must not keep a hidden window alive).
+#[tauri::command]
+fn quit_app(app: tauri::AppHandle) {
+    QUIT_ALL.store(true, Ordering::SeqCst);
+    app.exit(0);
+}
+
 /// Rebuild the native menus after the UI language changed.
 #[tauri::command]
 fn refresh_menu(app: tauri::AppHandle) -> Result<(), String> {
@@ -843,7 +851,8 @@ fn main() {
             set_dock_icon,
             update_check,
             update_install,
-            refresh_menu
+            refresh_menu,
+            quit_app
         ])
         .setup(|app| {
             let h = app.handle();

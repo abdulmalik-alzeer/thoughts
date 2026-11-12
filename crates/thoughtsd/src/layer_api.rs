@@ -19,7 +19,7 @@ type R = Result<Json<Value>, ApiErr>;
 fn ok() -> R { Ok(Json(json!({"ok": true}))) }
 
 /// One layer operation at a time (apply, discard, undo, rollback, import, starting a run).
-static LAYER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static LAYER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()

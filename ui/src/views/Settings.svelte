@@ -14,12 +14,14 @@
   import CalendarPrefs from '../lib/CalendarPrefs.svelte';
   import Customise from './Customise.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
+  import Maintenance from './Maintenance.svelte';
+  import { checkAppUpdate } from '../lib/updates';
 
   let { reload }: { reload: () => Promise<void> } = $props();
 
-  const cats = ['general', 'accessibility', 'ai', 'git', 'privacy', 'modules', 'daemon', 'appLayer'] as const;
+  const cats = ['general', 'accessibility', 'ai', 'git', 'privacy', 'modules', 'daemon', 'appLayer', 'maintenance'] as const;
   type Cat = (typeof cats)[number];
-  const catIcon: Record<Cat, string> = { general: 'settings', accessibility: 'accessibility', ai: 'ai', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette' };
+  const catIcon: Record<Cat, string> = { general: 'settings', accessibility: 'accessibility', ai: 'ai', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette', maintenance: 'tool' };
   // Row labels per category (i18n keys) — used by the search box. `adv` rows live behind the Advanced disclosure.
   const basic: Record<Cat, string[]> = {
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates'],
@@ -30,6 +32,7 @@
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'layer.appUpdates'],
+    maintenance: ['care.health.title', 'care.upd.title', 'care.move.title', 'care.rm.title'],
   };
   const adv: Record<Cat, string[]> = {
     general: [],
@@ -40,6 +43,7 @@
     modules: [],
     daemon: ['set.restart'],
     appLayer: ['set.safeMode'],
+    maintenance: [],
   };
   // Claude Code's own mode names. "Ask before changes" (`default`) was removed — the app has no way
   // to answer the questions — so a stored `default` means plan mode. Bypass is confirmed in a dialog.
@@ -52,7 +56,7 @@
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));
-    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true;
+    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true; x.releaseCheck ??= false;
     if (x.ai?.claude) x.ai.claude.permissionMode = realPerm(x.ai.claude.permissionMode);
     return x;
   };
@@ -795,6 +799,17 @@
         <button type="button" class="btn" disabled={busy.restart} onclick={restart}>{busy.restart ? t('set.restarting') : t('set.restart')}</button>
       </details>
     {/if}
+  {:else if c === 'maintenance'}
+    {#if vis(c, 'care.upd.title')}
+      <div class="card">
+        <h3>{t('care.upd.title')}</h3>
+        <label class="check"><input type="checkbox" bind:checked={s.releaseCheck} aria-describedby="st-release-hint" /> {t('care.upd.toggle')}</label>
+        <p class="muted sm" id="st-release-hint">{t('care.upd.hint')}</p>
+        {#if app.status?.newerVersion?.version}<p class="muted sm" role="status">{t('care.upd.available', { version: app.status.newerVersion.version })}</p>{/if}
+        <button type="button" class="btn" onclick={() => checkAppUpdate(true)}><Icon name="sync" size={14} /> {t('care.upd.check')}</button>
+      </div>
+    {/if}
+    <Maintenance show={(...keys) => vis(c, ...keys)} open={(to) => { tab = to; query = ''; if (to === 'ai') advOpen.ai = true; }} />
   {:else if c === 'appLayer'}
     <Customise show={(...keys) => vis(c, ...keys)} />
     {#if vis(c, ...adv.appLayer)}
