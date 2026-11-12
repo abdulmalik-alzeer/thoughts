@@ -26,6 +26,7 @@
   import WrapPanel from './WrapPanel.svelte';
   import StreamText from './chat/StreamText.svelte';
   import ChatOptions from './chat/ChatOptions.svelte';
+  import DictateButton from '../lib/voice/DictateButton.svelte';
   import Attachments from './chat/Attachments.svelte';
   import QueuedCard from './chat/QueuedCard.svelte';
   import ExportMenu from './chat/ExportMenu.svelte';
@@ -831,6 +832,7 @@
           aria-controls={mentionHits.length ? 'mention-list' : undefined} aria-activedescendant={mentionHits.length ? `mention-${mentionIdx}` : undefined}></textarea>
         <div class="row controls">
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
+          <DictateButton target={() => input} />
           <!-- Model, effort and what the assistant may do: one control; the mode is always named on it. -->
           <ChatOptions options={chat.options} models={opts.models} efforts={opts.efforts} modes={permModes} {label}
             onmodel={modelChanged} extraModel={{ value: MODEL_OTHER, label: t('runc.model.other') }} oneffort={(v) => { chat.options.effort = v; saveOpts(); }}

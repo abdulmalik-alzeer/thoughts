@@ -10,7 +10,8 @@
   import { fmtSize, notify, prettyName } from '../../lib/content/util';
   import { showHijri } from '../../lib/weekPrefs.svelte';
 
-  let { files, mode }: { files: any[]; mode: 'meetings' | 'notes' | 'outputs' | 'other' } = $props();
+  import type { Snippet } from 'svelte';
+  let { files, mode, extra }: { files: any[]; mode: 'meetings' | 'notes' | 'outputs' | 'other'; /** More buttons for a file (a meeting note's recording, FEAT-55). */ extra?: Snippet<[any]> } = $props();
 
   const desktop = inTauri();
   const isMac = /mac/i.test(navigator.platform || navigator.userAgent);
@@ -56,6 +57,7 @@
         </span>
       </button>
       <span class="acts">
+        {#if extra}{@render extra(f)}{/if}
         {#if (mode === 'meetings' || mode === 'notes') && EDIT_EXT.test(f.path)}
           <button class="ib" onclick={() => go({ kind: 'docs', path: f.path, id: 'edit' })} aria-label={t('item.editNote', { name: nameOf(f) })} title={t('edit')}><Icon name="edit" size={14} /></button>
         {/if}

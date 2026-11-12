@@ -1,0 +1,4 @@
+/* Why Thoughts asks for the microphone (dictation and meeting recordings). */
+"NSMicrophoneUsageDescription" = "Thoughts uses the microphone when you dictate or record a meeting. What you say is turned into text on this Mac; the sound is not sent anywhere.";
+/* Why Thoughts asks for speech recognition. */
+"NSSpeechRecognitionUsageDescription" = "Thoughts turns your speech into text with the speech recognition built into macOS, on this Mac only. Nothing you say is sent to Apple or anyone else.";

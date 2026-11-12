@@ -29,7 +29,12 @@
       "dmg"
     ],
     "macOS": {
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "entitlements": "./Entitlements.plist",
+      "files": {
+        "Resources/en.lproj/InfoPlist.strings": "./macos/en.lproj/InfoPlist.strings",
+        "Resources/ar.lproj/InfoPlist.strings": "./macos/ar.lproj/InfoPlist.strings"
+      }
     }
   }
 }

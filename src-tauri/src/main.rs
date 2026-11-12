@@ -10,6 +10,7 @@ mod capture;
 mod links;
 mod quit;
 mod recovery;
+mod voice;
 
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -1002,6 +1003,7 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(voice::plugin())
         // The app window only ever shows the app itself; any attempt to navigate elsewhere is refused.
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("nav-guard")
@@ -1039,7 +1041,20 @@ fn main() {
             capture::capture_open_main,
             capture::capture_shortcut,
             capture::set_capture_shortcut,
-            capture::pause_capture_shortcut
+            capture::pause_capture_shortcut,
+            voice::voice_status,
+            voice::voice_permit,
+            voice::voice_dictate_start,
+            voice::voice_dictate_stop,
+            voice::voice_dictate_cancel,
+            voice::voice_record_start,
+            voice::voice_record_pause,
+            voice::voice_record_stop,
+            voice::voice_record_discard,
+            voice::voice_transcribe,
+            voice::voice_transcribe_cancel,
+            voice::voice_result,
+            voice::voice_result_clear
         ])
         // A page that starts loading holds nothing unsaved yet, whatever the last one reported.
         .on_page_load(|webview, payload| {

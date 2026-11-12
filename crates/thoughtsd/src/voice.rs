@@ -49,6 +49,9 @@ pub fn locale_candidates(lang_code: &str, preferred: &[String]) -> Vec<String> {
     out
 }
 
+/// Today on this computer's clock (the date a recording is filed under).
+pub fn today() -> chrono::NaiveDate { chrono::Local::now().date_naive() }
+
 fn clean_title(title: &str, arabic_ui: bool) -> String {
     let t: String = title.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
     if t.is_empty() { (if arabic_ui { "اجتماع" } else { "Meeting" }).to_string() } else { t }

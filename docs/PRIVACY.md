@@ -9,6 +9,7 @@ This page describes what the Thoughts app does with your information. It is a de
 - Your library and your chats are stored on your computer.
 - When you chat, the conversation and the files the assistant reads to answer you are sent to the AI provider you signed in with.
 - Sync uploads your library to the place you chose, and nowhere else.
+- Dictation and meeting recordings are turned into text on your Mac; the sound is never sent anywhere.
 - The app contains no analytics, tracking or advertising.
 
 ## What stays on your computer
@@ -16,6 +17,7 @@ This page describes what the Thoughts app does with your information. It is a de
 | What | Where |
 |---|---|
 | Your library: notes, ideas, todos, meeting notes, outputs | The library folder you chose during setup |
+| Meeting recordings and their transcripts (Mac app) | The item's `meetings` folder in your library. See [Voice](#voice-dictation-and-meeting-recordings) |
 | Chat history and attachments | A folder named `.thoughts` in your home folder |
 | Settings, customisations and logs | The same `.thoughts` folder |
 | Saved passwords for sync and for the AI provider (if you entered any) | Your computer's password store (the Keychain on a Mac). See [Saved passwords](#saved-passwords) |
@@ -51,6 +53,19 @@ The same applies to everything the assistant does for you without a chat window 
 **Automatic summaries.** So that Wrap is quick, Thoughts prepares a short summary of each chat in the background: once the chat has been quiet for a while (15 minutes unless you change it), or when you start another chat, the text of that chat is sent to the AI provider a second time and a few lines come back. This happens without you pressing anything, for every chat in your library, including ones you never mean to wrap. The summary is kept on your computer with the chat. To stop it, switch off **Settings → Privacy → Summarise chats automatically**: a chat is then only read again when you press Wrap.
 
 Nothing is sent to an AI provider when you are only reading, searching or editing your library in the app.
+
+## Voice: dictation and meeting recordings
+
+In the Mac app, Thoughts can turn speech into text: the microphone button in the message box and in the note editor (dictation), and **Record a meeting** on the Meetings tab of a client, matter, class, project or idea.
+
+- **Speech is turned into text on your Mac, never anywhere else.** Thoughts uses the speech recognition built into macOS and always requires its on-device mode, in which macOS keeps the audio on the computer. If a language cannot be recognised on your Mac (on many Macs Arabic cannot yet), Thoughts says so and does not use it: it never falls back to sending your voice to Apple's servers. Thoughts itself makes no network connection for any of this.
+- **The first time**, macOS asks whether Thoughts may use the microphone and speech recognition. You can change your answer at any time in System Settings → Privacy & Security → Microphone, and → Speech Recognition.
+- **Dictation** keeps no recording: the words go into the text box and nothing else is kept.
+- **A meeting recording** is saved as a sound file in that item's `meetings` folder in your library, and its transcript as a dated meeting note beside it. They are ordinary files of your library: they are part of its history and, if sync is on, they are uploaded with it like your other files. Delete the sound file once you no longer need it. A recording stops by itself after four hours.
+- **Write meeting notes** starts a chat: as in any chat, the assistant reads the transcript note, so the transcript is sent to your AI provider. The sound itself is never sent. For an item in a private folder, the button does not start a chat.
+- Ask the people in a meeting before you record it. The rules on recording conversations differ from place to place.
+- On Windows and Linux there is no voice button yet: there is no speech recognition there that Thoughts can keep on the computer.
+- The Dictation key of macOS itself (which types into any text box) is a feature of macOS, not of Thoughts; System Settings → Keyboard → Dictation says how it handles your voice.
 
 ## What sync does
 
@@ -117,6 +132,7 @@ This section is practical guidance, not legal advice. Thoughts cannot tell you w
 | A chat goes quiet, or you start another one (unless "Summarise chats automatically" is off) | The text of that chat, once more, to be summarised | The AI provider, through your own account |
 | Sync is on | The whole library with its history, private folders included | The backup location you entered |
 | You export, print or share an output yourself | That file | Wherever you send it |
+| You dictate or record a meeting in the Mac app | Nothing: speech is turned into text on your Mac | — |
 | You read, search or edit in the app without chatting | Nothing | — |
 
 Thoughts has no servers of its own. Nothing passes through the people who make the app.

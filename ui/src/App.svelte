@@ -47,6 +47,7 @@
   import SyncConflict from './lib/SyncConflict.svelte';
   import { settleClash } from './lib/conflict.svelte';
   import Toasts from './lib/Toasts.svelte';
+  import VoiceBar from './lib/voice/VoiceBar.svelte';
   import RecentMessages from './lib/RecentMessages.svelte';
   import { crashText, reportError } from './lib/crash';
   import CommandPalette, { type PaletteItem } from './lib/CommandPalette.svelte';
@@ -947,6 +948,7 @@
 {#if showRecent}<RecentMessages close={() => (showRecent = false)} />{/if}
 {#if app.showPalette}<CommandPalette items={paletteItems} close={() => (app.showPalette = false)} />{/if}
 
+<VoiceBar />
 <Toasts />
 {#if linkTip}<div class="linktip no-print" aria-hidden="true" dir="ltr">{linkTip}</div>{/if}
 

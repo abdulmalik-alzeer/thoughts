@@ -23,7 +23,9 @@
       "identifier": "opener:allow-open-url",
       "allow": [
         { "url": "x-apple.systempreferences:com.apple.preference.notifications" },
-        { "url": "ms-settings:notifications" }
+        { "url": "ms-settings:notifications" },
+        { "url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone" },
+        { "url": "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition" }
       ]
     }
   ]

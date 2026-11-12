@@ -4864,6 +4864,7 @@ name = "thoughts"
 version = "0.0.8"
 dependencies = [
  "anyhow",
+ "block2",
  "dunce",
  "objc2",
  "objc2-app-kit",

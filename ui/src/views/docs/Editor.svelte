@@ -19,6 +19,7 @@
   import { isMac } from '../../lib/shortcuts';
   import { trapFocus } from '../../lib/focus';
   import * as E from './editing';
+  import DictateButton from '../../lib/voice/DictateButton.svelte';
 
   let { value = $bindable(''), path, plain = false, preview = false, label }: {
     /** The file's text, with its own line endings. */
@@ -554,6 +555,7 @@
         <span class="sep" aria-hidden="true"></span>
         <button type="button" class="tb" data-tool tabindex={active === 9 ? 0 : -1} onclick={() => { if (!adding) picker?.click(); }} aria-disabled={adding > 0}
           aria-label={t('edtr.picture')} title={t('edtr.pictureTip')}><ImagePlus size={17} strokeWidth={1.9} /></button>
+        <DictateButton target={() => ta} tool tabindex={active === 10 ? 0 : -1} place="below" />
         <span class="status" role="status" aria-live="polite">{status}</span>
         <input type="file" accept="image/png,image/jpeg,image/gif,image/webp,image/*" multiple hidden bind:this={picker} onchange={pick} />
       </div>

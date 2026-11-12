@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Thoughts uses the microphone when you dictate or record a meeting. What you say is turned into text on this Mac; the sound is not sent anywhere.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Thoughts turns your speech into text with the speech recognition built into macOS, on this Mac only. Nothing you say is sent to Apple or anyone else.</string>
+</dict>
+</plist>

@@ -31,3 +31,5 @@ thoughtsd = { path = "../crates/thoughtsd" }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder", "NSRunningApplication", "NSWorkspace", "libc"] }
 objc2-foundation = { version = "0.3", features = ["NSData"] }
+# Blocks for the Speech and AVFoundation callbacks of voice in (already in the tree through objc2-app-kit).
+block2 = "0.6"

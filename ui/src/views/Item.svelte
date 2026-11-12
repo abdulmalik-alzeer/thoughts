@@ -25,6 +25,9 @@
   import { showHijri } from '../lib/weekPrefs.svelte';
   import { areaLabel, term } from '../lib/terms';
   import { itemOf, itemTerm, openItem, wordOf } from '../lib/item';
+  import MeetingRecorder from '../lib/voice/MeetingRecorder.svelte';
+  import MeetingNoteActions from '../lib/voice/MeetingNoteActions.svelte';
+  import { isAudio, unpaired } from '../lib/voice.svelte';
 
   let { path, tab: first }: { path?: string; tab?: string } = $props();
 
@@ -98,8 +101,11 @@
   const upcoming = $derived.by(() => { clock.day; const today = isoDay(); return ((data?.keyDates ?? []) as any[]).filter((k) => k.date >= today).slice(0, 3); });
 
   // ----- counts on the tabs -----
+  // Meeting recordings (FEAT-55) are shown with the note made from them, or as waiting to be turned into text.
+  const meetingNotes = $derived(((data?.meetings ?? []) as any[]).filter((m) => !isAudio(m.path)));
+  const looseRecordings = $derived(unpaired(data?.meetings ?? []).length);
   const openTodos = $derived(((data?.todo?.items ?? []) as any[]).filter((i) => !i.done).length);
-  const count = (k: Tab): number => !data ? 0 : k === 'todos' ? openTodos : k === 'meetings' ? data.meetings.length
+  const count = (k: Tab): number => !data ? 0 : k === 'todos' ? openTodos : k === 'meetings' ? meetingNotes.length + looseRecordings
     : k === 'notes' ? data.notes.length + data.other.length : k === 'outputs' ? data.outputs.length : k === 'log' ? data.log.entries.length : 0;
 
   async function pick(k: Tab, focus = false) {
@@ -305,6 +311,7 @@
       {:else if tab === 'todos'}
         <ItemTodos list={data.todo} dir={data.dir} {word} reload={load} />
       {:else if tab === 'meetings'}
+        <MeetingRecorder item={{ dir: data.dir, title, private: !!data.private, meetings: data.meetings }} privateMsg={data.private ? say('itemPrivate') : null} reload={load} />
         {#if meetingOpen}
           <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
           <form class="card newm" aria-label={t('item.meeting.formLabel')} onsubmit={(e) => { e.preventDefault(); createMeeting(); }}
@@ -325,9 +332,10 @@
             </div>
           </form>
         {/if}
-        {#if data.meetings.length}
-          <ItemFiles files={data.meetings} mode="meetings" />
-        {:else if !meetingOpen}
+        {#snippet noteExtra(f: any)}<MeetingNoteActions note={f} files={data.meetings} privateMsg={data.private ? say('itemPrivate') : null} />{/snippet}
+        {#if meetingNotes.length}
+          <ItemFiles files={meetingNotes} mode="meetings" extra={noteExtra} />
+        {:else if !meetingOpen && !looseRecordings}
           <div class="state">
             <Icon name="chats" size={26} />
             <p class="lead" dir="auto">{say('itemMeetingsEmpty')}</p>
