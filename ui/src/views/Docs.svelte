@@ -9,6 +9,7 @@
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { errCode, errDetail, failed } from '../lib/errors';
   import { saveFile } from '../lib/download';
+  import { noteLink } from '../lib/deeplink';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, prettyName, rawBlobUrl, readAsDataURL } from '../lib/content/util';
   import Versions from './docs/Versions.svelte';
   import FolderPicker from './docs/FolderPicker.svelte';
@@ -581,6 +582,11 @@
     } catch (e) { failed(t('docsb.wordFailed'), e); }
     finally { makingWord = false; }
   }
+  /** A link that opens this note from a calendar event or another app (thoughts://note/…). */
+  async function copyNoteLink() {
+    const ok = await copyText(noteLink(current));
+    notify(t(ok ? 'nativeb.link.copied' : 'nativeb.link.copyFailed'), { kind: ok ? 'success' : 'error' });
+  }
   /** A saved export: in Word (or whatever opens it) on the desktop, here otherwise. */
   async function openOutput(p: string) {
     if (desktop && canOpenExternal) {
@@ -787,6 +793,7 @@
         ...(isMd(current) ? [{ id: 'source', label: t(showSource ? 'docsa.showFormatted' : 'docsa.showSource'), icon: 'eye', run: () => (showSource = !showSource) }] : []),
       ] : []),
       ...(desktop && absPath ? [{ id: 'reveal', label: t(isMac ? 'docs.revealMac' : 'docs.reveal'), icon: 'folder', run: reveal }] : []),
+      ...(desktop && current ? [{ id: 'link', label: t('nativeb.link.copy'), icon: 'copy', run: copyNoteLink }] : []),
       { id: 'rename', label: t('docs3.rename'), icon: 'edit', run: () => renamePath(current) },
       { id: 'move', label: t('docs3.move'), icon: 'arrow', run: () => movePath(current) },
       { id: 'delete', label: t('docs3.delete'), icon: 'trash', danger: true, run: () => removePath(current) },

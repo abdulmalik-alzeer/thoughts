@@ -50,6 +50,7 @@
   import Marked from './lib/Marked.svelte';
   import { findOnOpen, findWords, markTerms, openFind, searchAll } from './lib/search';
   import { prettyName } from './lib/content/util';
+  import { watchDeepLinks } from './lib/deeplink';
 
   let projects = $state<any[]>([]);
   let showTour = $state(false);
@@ -268,6 +269,7 @@
         listen('open-settings', () => command('settings'));
         listen('open-help', () => command('help'));
         listen('check-updates', () => checkAppUpdate(true));
+        watchDeepLinks();
         // Everything else in the Recovery menu (undo, going back, safe mode, reload, restart) is done
         // by the desktop app itself, with its own dialogs: it must work when this page does not.
       }

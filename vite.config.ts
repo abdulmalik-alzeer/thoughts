@@ -14,5 +14,9 @@ export default defineConfig({
   define: { __APP_VERSION__: JSON.stringify(version) },
   clearScreen: false,
   server: { port: 1420, strictPort: true, fs: { allow: ['..'] } }, // '..' lets the dev server read the user guides in docs/
-  build: { outDir: '../dist', emptyOutDir: true, target: 'safari15' },
+  build: {
+    outDir: '../dist', emptyOutDir: true, target: 'safari15',
+    // capture.html is the quick capture box, a window of its own (src-tauri/src/capture.rs).
+    rollupOptions: { input: { main: 'ui/index.html', capture: 'ui/capture.html' } },
+  },
 });

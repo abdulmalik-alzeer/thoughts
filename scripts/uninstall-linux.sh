@@ -26,6 +26,18 @@ else
   say "Start at login: nothing to remove."
 fi
 
+# An AppImage registers itself as the opener of thoughts:// links (a .deb package does that itself).
+case "${XDG_DATA_HOME:-}" in
+  /*) DATA_HOME="$XDG_DATA_HOME" ;;
+  *) DATA_HOME="$HOME/.local/share" ;;
+esac
+HANDLER="$DATA_HOME/applications/thoughts-handler.desktop"
+if [ -f "$HANDLER" ]; then
+  rm -f -- "$HANDLER"
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$DATA_HOME/applications" >/dev/null 2>&1 || true
+  say "Links (thoughts://): removed."
+fi
+
 if [ "$PURGE" -eq 1 ]; then
   purge_data
   # Saved passwords in the desktop keyring (Secret Service): sync passwords ("thoughts-git") and

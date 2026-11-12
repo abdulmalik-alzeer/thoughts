@@ -6,6 +6,8 @@
 //   * THOUGHTS_ASKPASS=1   — git credential helper backed by the OS keychain
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod capture;
+mod links;
 mod quit;
 mod recovery;
 
@@ -512,6 +514,11 @@ fn set_safe_mode(app: tauri::AppHandle, on: bool) -> Result<(), String> {
     install_menus(&app).map_err(|e| e.to_string())
 }
 
+/// Rebuild the menus (the quick capture shortcut they show changed).
+fn refresh_menus(app: &tauri::AppHandle) {
+    let _ = install_menus(app);
+}
+
 fn is_main_label(label: &str) -> bool {
     label == "main" || label.starts_with("main-")
 }
@@ -589,6 +596,7 @@ fn label(ar: bool, key: &str) -> &'static str {
         "restart-daemon" => ("Restart background service", "إعادة تشغيل خدمة الخلفية"),
         "help" => ("Thoughts Help", "مساعدة Thoughts"),
         "check-updates" => ("Check for Updates…", "التحقق من وجود تحديثات…"),
+        "capture" | "tray-capture" => ("Quick capture…", "تدوين سريع…"),
         "tray-open" => ("Open Thoughts", "فتح Thoughts"),
         "tray-quit" => ("Quit Thoughts completely", "إنهاء Thoughts تمامًا"),
         "file" => ("File", "ملف"),
@@ -674,6 +682,15 @@ fn quit_item(h: &tauri::AppHandle, ar: bool) -> tauri::Result<MenuItem<tauri::Wr
     item(h, ar, "quit", accel)
 }
 
+/// "Quick capture…", showing the shortcut while it works (a menu that cannot show those keys gets
+/// the item without them).
+fn capture_item(h: &tauri::AppHandle, ar: bool, id: &str) -> tauri::Result<MenuItem<tauri::Wry>> {
+    match capture::accelerator() {
+        Some(keys) => item(h, ar, id, Some(&keys)).or_else(|_| item(h, ar, id, None)),
+        None => item(h, ar, id, None),
+    }
+}
+
 fn edit_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Submenu<tauri::Wry>> {
     Submenu::with_items(
         h,
@@ -722,7 +739,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
             &quit_item(h, ar)?,
         ],
     )?;
-    let file = Submenu::with_items(h, label(ar, "file"), true, &[&*std_item(h, ar, "close_window")?])?;
+    let file = Submenu::with_items(h, label(ar, "file"), true, &[&capture_item(h, ar, "capture")?, &PredefinedMenuItem::separator(h)?, &*std_item(h, ar, "close_window")?])?;
     let view = Submenu::with_items(h, label(ar, "view"), true, &[&*std_item(h, ar, "fullscreen")?])?;
     let window = Submenu::with_id_and_items(
         h,
@@ -751,6 +768,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
         label(ar, "file"),
         true,
         &[
+            &capture_item(h, ar, "capture")?,
             &item(h, ar, "settings", Some("CmdOrCtrl+Comma"))?,
             &PredefinedMenuItem::separator(h)?,
             &*std_item(h, ar, "close_window")?,
@@ -808,7 +826,12 @@ fn quit_requested(app: &tauri::AppHandle) {
 fn tray_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>> {
     Menu::with_items(
         h,
-        &[&item(h, ar, "tray-open", None)?, &PredefinedMenuItem::separator(h)?, &item(h, ar, "tray-quit", None)?],
+        &[
+            &item(h, ar, "tray-open", None)?,
+            &capture_item(h, ar, "tray-capture")?,
+            &PredefinedMenuItem::separator(h)?,
+            &item(h, ar, "tray-quit", None)?,
+        ],
     )
 }
 
@@ -879,8 +902,11 @@ fn main() {
     }
 
     tauri::Builder::default()
-        // Must be the first plugin: a second launch focuses the existing window and exits.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
+        // Must be the first plugin: a second launch focuses the existing window and exits. A second
+        // launch that carries a thoughts:// link (Windows, Linux) is handed to the link handler first
+        // (the `deep-link` feature), and that decides what to show.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| if !links::in_args(&args) { show_main(app) }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -910,7 +936,17 @@ fn main() {
             refresh_menu,
             quit_app,
             set_safe_mode,
-            quit::set_unsaved
+            quit::set_unsaved,
+            links::take_deep_link,
+            capture::open_capture,
+            capture::capture_ready,
+            capture::capture_take,
+            capture::capture_show,
+            capture::capture_hide,
+            capture::capture_open_main,
+            capture::capture_shortcut,
+            capture::set_capture_shortcut,
+            capture::pause_capture_shortcut
         ])
         // A page that starts loading holds nothing unsaved yet, whatever the last one reported.
         .on_page_load(|webview, payload| {
@@ -940,14 +976,35 @@ fn main() {
             }
             let tray = tray.build(app)?;
             let _ = tray.set_visible(keep_running());
+            // The quick capture shortcut first: the menus show its keys.
+            capture::init(h);
             install_menus(h)?;
             // The window is opened here rather than by the config ("create": false), so that it
             // can start with customisations off when that was chosen in the Recovery menu.
             open_main_window(h, false)?;
             recovery::watch_versions(h);
+            // thoughts:// links: those that arrive while the app runs, and the one it was opened with.
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let links_app = h.clone();
+                h.deep_link().on_open_url(move |e| links::handle(&links_app, e.urls()));
+                // An AppImage is not installed by a package, so it says itself that it opens these
+                // links (a .deb, the Windows installer and the macOS app say so when installed).
+                #[cfg(target_os = "linux")]
+                if appimage_path().is_some() {
+                    let _ = h.deep_link().register_all();
+                }
+                if let Ok(Some(urls)) = h.deep_link().get_current() {
+                    links::handle(h, urls);
+                }
+            }
             Ok(())
         })
         .on_window_event(|window, ev| {
+            if window.label() == capture::LABEL {
+                capture::on_window_event(window, ev);
+                return;
+            }
             if !is_main_label(window.label()) {
                 return;
             }
@@ -976,6 +1033,7 @@ fn main() {
                 "help" => { show_main(app); let _ = app.emit("open-help", ()); }
                 "check-updates" => { show_main(app); let _ = app.emit("check-updates", ()); }
                 "tray-open" => show_main(app),
+                "capture" | "tray-capture" => capture::from_menu(app),
                 // The one action that stops everything, "keep running" or not: asks first.
                 "tray-quit" => quit::request(app, true),
                 "quit" => quit_requested(app),

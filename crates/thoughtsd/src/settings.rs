@@ -50,6 +50,8 @@ pub struct Settings {
     pub release_check: bool,
     /// The monthly spending guard (see `spend.rs`).
     pub spending: SpendingSettings,
+    /// Quick capture from anywhere (the desktop app's keyboard shortcut).
+    pub capture: CaptureSettings,
 }
 
 /// A monthly spending limit the user sets, in US dollars. `None` = no limit. At `warn_percent` of it
@@ -76,6 +78,28 @@ impl SpendingSettings {
         }
         if !(50..=95).contains(&self.warn_percent) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
         Ok(())
+    }
+}
+
+/// The keyboard shortcut that opens the quick capture box from any app. Only the desktop app reads
+/// it (it registers the shortcut with the system); `shortcut` is the key combination as the desktop
+/// app writes it ("Control+Alt+Space"), empty for the app's own default on this computer.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CaptureSettings {
+    pub shortcut_on: bool,
+    pub shortcut: String,
+}
+
+impl Default for CaptureSettings {
+    fn default() -> Self { Self { shortcut_on: true, shortcut: String::new() } }
+}
+
+impl CaptureSettings {
+    /// Key names joined by `+`, nothing else (the desktop app checks the combination itself).
+    fn sanitize(&mut self) {
+        let ok = self.shortcut.len() <= 80 && self.shortcut.chars().all(|c| c.is_ascii_alphanumeric() || c == '+');
+        if !ok { self.shortcut.clear(); }
     }
 }
 
@@ -348,6 +372,7 @@ impl Default for Settings {
             calendar: CalendarSettings::default(),
             release_check: false,
             spending: SpendingSettings::default(),
+            capture: CaptureSettings::default(),
         }
     }
 }
@@ -581,6 +606,7 @@ impl Settings {
         self.user_name = self.user_name.chars().filter(|c| !c.is_control()).take(120).collect::<String>().trim().to_string();
         if !["en", "ar"].contains(&self.language.as_str()) { self.language = old.language.clone(); }
         self.calendar.sanitize();
+        self.capture.sanitize();
         // Zero is "unset" for these (a client that sent a partial object): fill them like a loaded file.
         *self = std::mem::take(self).with_defaults();
         Ok(())
@@ -930,5 +956,22 @@ mod tests {
         assert_eq!(z(r#"{"accessibility":{"zoom":900}}"#), ZOOM_MAX);
         assert_eq!(z(r#"{"accessibility":{"zoom":125,"reduceMotion":true}}"#), 125);
         assert!(parse(r#"{"accessibility":{"reduceMotion":true}}"#).unwrap().accessibility.reduce_motion);
+    }
+
+    #[test]
+    fn the_capture_shortcut_is_on_by_default_and_only_ever_key_names() {
+        // On for a fresh install and for a file written before the setting existed.
+        for file in [r#"{}"#, r#"{"onboarded":true}"#] {
+            let c = parse(file).unwrap().capture;
+            assert!(c.shortcut_on && c.shortcut.is_empty(), "{file}");
+        }
+        let off = parse(r#"{"capture":{"shortcutOn":false,"shortcut":"Control+Alt+KeyN"}}"#).unwrap().capture;
+        assert_eq!(off, CaptureSettings { shortcut_on: false, shortcut: "Control+Alt+KeyN".into() });
+        // A save keeps a plain combination and drops anything else (the default is used instead).
+        let saved = |keys: &str| { let mut s = Settings::default(); s.capture.shortcut = keys.into(); s.sanitize_update(&Settings::default()).unwrap(); s.capture.shortcut };
+        assert_eq!(saved("Control+Alt+Super+Space"), "Control+Alt+Super+Space");
+        for bad in ["Ctrl Alt Space", "Control+Alt+\u{0}", "Control+<script>", "Control+Alt+مسافة", &"Control+".repeat(20)] {
+            assert_eq!(saved(bad), "", "{bad}");
+        }
     }
 }
