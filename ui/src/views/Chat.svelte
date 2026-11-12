@@ -34,6 +34,8 @@
   import SetupCard from './SetupCard.svelte';
   import { foldMap } from '../lib/search';
   import { enqueue, restored, sendNowOrAfterStop, take, waiting as queuedBy, type Mention } from '../lib/chatQueue.svelte';
+  import ApprovalCard from './ApprovalCard.svelte';
+  import ChatAllowed from './ChatAllowed.svelte';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
 
@@ -666,6 +668,7 @@
       <div class="banner row" role="status"><Icon name="search" size={14} /> <span class="grow">{t('runb.web.on')}</span>
         <button class="btn" onclick={() => setWeb(false)}>{t('runb.web.off')}</button></div>
     {/if}
+    {#if chat.kind === 'chat'}<ChatAllowed chatId={id} />{/if}
 
     <div class="msgs-wrap">
       <FindBar root={() => scroller} where={'chat:' + id} anchors=":scope > .msg.user, :scope > .msg.ai" />
@@ -714,6 +717,8 @@
             </div>
           {:else if m.role === 'tool_result'}
             <!-- shown inside its tool call above -->
+          {:else if m.role === 'approval'}
+            <ApprovalCard {m} chatId={id} running={!!chat.running} />
           {:else if m.role === 'denied'}
             <div class="msg denied" role="note">
               <div class="deniedhead"><Icon name="shield" size={13} /> <span>{t('runb.denied.title')}</span></div>

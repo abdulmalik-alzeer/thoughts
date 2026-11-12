@@ -36,7 +36,7 @@
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag', 'chatc.set.suggest'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
-    privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
+    privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'ldc.tab.addons', 'ldc.tab.ready', 'ldc.tab.updates'],
@@ -63,7 +63,7 @@
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));
-    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true; x.releaseCheck ??= false; x.spending ??= { monthlyLimitUsd: null, warnPercent: 80 };
+    x.privatePaths ??= []; x.strictPrivate ??= false; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true; x.releaseCheck ??= false; x.spending ??= { monthlyLimitUsd: null, warnPercent: 80 };
     if (x.ai?.claude) x.ai.claude.permissionMode = realPerm(x.ai.claude.permissionMode);
     return x;
   };
@@ -930,12 +930,12 @@
       {/if}
     </div>
   {:else if c === 'privacy'}
-    {#if vis(c, 'set.privTitle', 'seca.access.title')}
+    {#if vis(c, 'set.privTitle', 'appr.strict.title', 'seca.access.title')}
       <div class="card">
         <h3>{t('set.privSentTitle')}</h3>
         <p class="muted sm">{t('set.privSent')}</p>
         <h3>{t('set.privTitle')}</h3>
-        <p class="muted sm">{t('set.privBody')}</p>
+        <p class="muted sm">{t('appr.privBody')}</p>
         {#each s.privatePaths as p (p)}
           <div class="row remote"><Icon name="shield" size={15} /><code class="grow path"><bdi>{p}</bdi></code><button type="button" class="btn ghost danger" onclick={() => removePrivate(p)}>{t('set.remove')}</button></div>
         {:else}
@@ -943,6 +943,10 @@
         {/each}
         {#if privErr}<p class="err" role="alert">{privErr}</p>{/if}
         <div class="row gap-top"><button type="button" class="btn" onclick={addPrivate}><Icon name="plus" size={14} /> {t('set.privAdd')}</button></div>
+        <h3>{t('appr.strict.title')}</h3>
+        <p class="muted sm" id="st-strict-hint">{t('appr.strict.body')}</p>
+        {#if !s.privatePaths.length}<p class="muted sm">{t('appr.strict.none')}</p>{/if}
+        <label class="check"><input type="checkbox" bind:checked={s.strictPrivate} disabled={readOnly} aria-describedby="st-strict-hint" /> {t('appr.strict.toggle')}</label>
         {#if openToOthers !== null}
           <h3>{t('seca.access.title')}</h3>
           {#if openToOthers}

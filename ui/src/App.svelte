@@ -245,6 +245,11 @@
         if (e.type === 'limit.changed' && app.status) app.status = { ...app.status, planLimit: e.planLimit ?? null };
         if (e.type === 'chat.done' && app.settings?.notifications && !document.hasFocus()) notify('Thoughts', t('shell.chatFinished', { title: e.title || t('shell.aChat') }));
         if (e.type === 'workflow.result') workflowNotice(e, notify);
+        // The assistant waits for the user's OK in a chat they are not looking at (or the window is in the background).
+        if (e.type === 'approval.asked' && e.chatId) {
+          if (!(app.view.kind === 'chat' && app.view.id === e.chatId)) toast(t('appr.notifyTitle'), { key: 'approval:' + e.chatId, action: { label: t('appr.open'), run: () => go({ kind: 'chat', id: e.chatId }) } });
+          if (app.settings?.notifications && !document.hasFocus()) notify(t('appr.notifyTitle'), t('appr.notifyBody', { title: e.title || t('shell.aChat') }));
+        }
         if (e.type === 'notify') { toast(`${e.title}: ${e.body}`); if (app.settings?.notifications && !document.hasFocus()) notify(e.title, e.body); }
         if (e.type === 'layer.changed') loadLayer().catch(layerError);
         if (e.type === 'layer.pending' || e.type === 'chat.done') checkPending(true);
