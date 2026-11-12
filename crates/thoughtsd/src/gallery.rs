@@ -105,7 +105,7 @@ fn as_pack(name: &str, about: &str, files: &BTreeMap<String, String>) -> Value {
 pub fn pack(id: &str, ar: bool) -> Option<(Value, String)> {
     let (name, about, files) = build(id, ar)?;
     let summary = if ar {
-        format!("إضافة «{name}» من الحزم الجاهزة\n\n{about}\n\nهذه الحزمة مرفقة بالتطبيق. جرّبها أولاً، ثم أبقِها إن أعجبتك؛ ويمكنك لاحقاً إيقافها أو إزالتها أو التراجع عنها.")
+        format!("إضافة «{name}» من الحزم الجاهزة\n\n{about}\n\nهذه الحزمة مرفقة بالتطبيق. جرّبها أولاً، ثم اعتمدها إن أعجبتك؛ ويمكنك لاحقاً إيقافها أو إزالتها أو التراجع عنها.")
     } else {
         format!("Add \u{201c}{name}\u{201d} from the ready-made packs\n\n{about}\n\nIt comes with Thoughts. Try it first, then keep it if you like it; you can switch it off, remove it or undo it later.")
     };

@@ -83,7 +83,7 @@ pub fn compute(i: &Input) -> Vec<Value> {
     if todo_days.len() >= 5 && i.overdue >= 3 {
         out.push(item("due-on-home", i.arabic,
             ("Show what's due on your Home screen", "You open Todos almost every day and a few items are overdue. A small box on Home can show them the moment you open the app."),
-            ("اعرض المهام المستحقة في الصفحة الرئيسية", "تفتح المهام كل يوم تقريبًا وهناك مهام فات موعدها. يمكن لمربع صغير في الصفحة الرئيسية أن يعرضها لك فور فتح التطبيق."),
+            ("اعرض المهام المستحقة في الصفحة الرئيسية", "تفتح المهام كل يوم تقريباً وهناك مهام فات موعدها. يمكن لمربع صغير في الصفحة الرئيسية أن يعرضها لك فور فتح التطبيق."),
             "Add a Home widget that lists my overdue todos (open todos whose @due date has passed), oldest first, at most 7, each showing its title and due date, with a link to the Todos page. Use a plugin with only the todos:read permission.".into()));
     }
 
@@ -103,7 +103,7 @@ pub fn compute(i: &Input) -> Vec<Value> {
         if i.chips.iter().any(|c| c.to_lowercase().starts_with(&key)) { continue; }
         let id = format!("chip-{}", short_hash(&key));
         let (title, body) = if i.arabic {
-            (format!("أضف زرًّا بنقرة واحدة لعبارة «{shown}»"), "تبدأ كثيرًا من طلباتك في الصفحة الرئيسية بالعبارة نفسها. زرّ جاهز يوفّر عليك كتابتها كل مرة.".to_string())
+            (format!("أضف زراً بنقرة واحدة لعبارة «{shown}»"), "تبدأ كثيراً من طلباتك في الصفحة الرئيسية بالعبارة نفسها. زرّ جاهز يوفّر عليك كتابتها كل مرة.".to_string())
         } else {
             (format!("Add a one-click button for '{shown}'"), "You often start a request on Home with the same words. A ready button saves you typing them each time.".to_string())
         };
@@ -136,8 +136,8 @@ pub fn compute(i: &Input) -> Vec<Value> {
         // The working week ends on Thursday where Arabic is the app's language, on Friday elsewhere.
         let (day_en, at) = if i.arabic { ("Thursday", "15:00") } else { ("Friday", "16:00") };
         out.push(item("weekly-review", i.arabic,
-            ("Add a Friday weekly-review workflow", "You wrap up your chats regularly. A weekly review can gather what you decided, what is still open and what is due next week — automatically."),
-            ("أضف مراجعة أسبوعية كل يوم خميس", "أنت تحفظ خلاصة محادثاتك بانتظام. يمكن لمراجعة أسبوعية أن تجمع لك ما قرّرته وما بقي مفتوحًا وما يحين موعده في الأسبوع القادم، تلقائيًا."),
+            ("Add a weekly review every Friday", "You wrap up your chats regularly. An automatic task can gather what you decided, what is still open and what is due next week, every Friday."),
+            ("أضف ملخص الأسبوع مهمةً تلقائية كل خميس", "أنت تحفظ خلاصة محادثاتك بانتظام. يمكن لملخص أسبوعي أن يجمع لك ما قرّرته وما بقي مفتوحاً وما يحين موعده في الأسبوع القادم، تلقائياً."),
             format!("Add a workflow that runs every {day_en} at {at} and writes a short weekly review into my library: what I decided this week, what is still open, and the todos due next week. Put it where my library's conventions say reviews or logs belong.")));
     }
 
@@ -149,7 +149,7 @@ pub fn compute(i: &Input) -> Vec<Value> {
         let summary = crate::usage::summary(i.events, i.now);
         out.push(item(&id, i.arabic,
             ("Monthly app tune-up", "Let the assistant look at a short summary of how you used the app this month (pages opened, buttons used, changes you kept or discarded — no note contents) and propose one improvement. You review it before anything changes."),
-            ("صيانة شهرية للتطبيق", "دع المساعد يطّلع على ملخص قصير لطريقة استخدامك للتطبيق هذا الشهر (الصفحات التي فتحتها، والأزرار التي استخدمتها، والتغييرات التي أبقيتها أو تجاهلتها، دون محتوى ملاحظاتك) ليقترح تحسينًا واحدًا. ستراجعه قبل أن يتغيّر أي شيء."),
+            ("ضبط شهري للتطبيق", "دع المساعد يطّلع على ملخص قصير لطريقة استخدامك للتطبيق هذا الشهر (الصفحات التي فتحتها، والأزرار التي استخدمتها، والتغييرات التي أبقيتها أو تجاهلتها، دون محتوى ملاحظاتك) ليقترح تحسيناً واحداً. ستراجعه قبل أن يتغيّر أي شيء."),
             format!("This is my monthly app tune-up. Below is a summary of how I used the Thoughts app in the last 30 days; it was gathered on my computer.\n\n{summary}\n\n\
                 Propose and prepare exactly ONE small customisation that would make the app fit how I actually work: for example a Home button for something I type often, hiding a page I never open (nav.json), a different todo grouping (todos.json), a Home widget, or a workflow. \
                 Learn from what I kept and what I discarded or undid: do not repeat a discarded idea. If nothing is clearly worth changing, change nothing and say so in plain words. \
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(ids(&s), ["tuneup-2026-11"]);
         let prompt = s[0]["prompt"].as_str().unwrap();
         assert!(prompt.contains("todos ×60, docs ×20") && prompt.contains("\"Make everything pink\"") && prompt.contains("exactly ONE"));
-        assert_eq!(compute(&Input { arabic: true, ..input(&ev) })[0]["title"], "صيانة شهرية للتطبيق");
+        assert_eq!(compute(&Input { arabic: true, ..input(&ev) })[0]["title"], "ضبط شهري للتطبيق");
         // Dismissed for this month only; quiet installs and brand-new ones are left alone.
         let d = ["tuneup-2026-11".to_string()];
         assert!(compute(&Input { dismissed: &d, ..input(&ev) }).is_empty());

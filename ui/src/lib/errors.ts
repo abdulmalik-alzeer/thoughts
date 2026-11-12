@@ -12,6 +12,11 @@ export function errCode(e: unknown): string {
   return (e instanceof ApiError && e.code) || codeOf(msgOf(e));
 }
 
+/** The technical words a plain message stands in for (git's, the system's), for "Show details". */
+export function errTech(e: unknown): string | undefined {
+  return e instanceof ApiError ? e.detail : undefined;
+}
+
 /** The message without its machine prefix (`CONFLICT::a;b` → `a;b`). */
 export function errDetail(e: unknown): string {
   return msgOf(e).replace(/(^|\s)[A-Z][A-Z_]{2,}::/, '$1').trim();
@@ -45,8 +50,8 @@ export function failed(headline: string, e: unknown, opts: ToastOpts = {}): void
   if (code === 'NEWER_SETTINGS') { toast(t('err.newerSettings'), { kind: 'error', key: 'newer-settings' }); return; }
   // The history is in a state the app cannot work in: the way out is one tap away.
   if (code === 'history_state') {
-    toast(headline, { kind: 'error', key: 'history-state', duration: 0, ...opts, detail: detail && detail !== headline ? detail : undefined, action: { label: t('histc.repair.action'), run: () => go({ kind: 'history', id: 'repair' }) } });
+    toast(headline, { kind: 'error', key: 'history-state', duration: 0, ...opts, detail: detail && detail !== headline ? detail : undefined, tech: errTech(e), action: { label: t('histc.repair.action'), run: () => go({ kind: 'history', id: 'repair' }) } });
     return;
   }
-  toast(headline, { kind: 'error', detail: detail && detail !== headline ? detail : undefined, ...opts });
+  toast(headline, { kind: 'error', detail: detail && detail !== headline ? detail : undefined, tech: errTech(e), ...opts });
 }

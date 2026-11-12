@@ -178,7 +178,12 @@ export class ApiError extends Error {
   code: string;
   /** The parsed error body, when the daemon sent one (`{error, code, …}`). */
   data?: any;
-  constructor(message: string, status: number, code = '', data?: any) { super(message); this.status = status; this.code = code; this.data = data; }
+  /** The technical words the message stands in for (git's, the system's), for "Show details". */
+  detail?: string;
+  constructor(message: string, status: number, code = '', data?: any) {
+    super(message); this.status = status; this.code = code; this.data = data;
+    if (typeof data?.detail === 'string' && data.detail) this.detail = data.detail;
+  }
 }
 
 const trustAsked = new Map<string, Promise<boolean>>();
@@ -211,7 +216,9 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
   }
   const text = await r.text();
   let data: any = null;
-  try { data = text ? JSON.parse(text) : null; } catch { data = { error: text.slice(0, 300) }; }
+  // A refusal that is not the service's own JSON (a request it could not read): a plain sentence,
+  // whatever it said kept for "Show details".
+  try { data = text ? JSON.parse(text) : null; } catch { const { t } = await import('./i18n'); data = { error: t('wording.err.generic'), detail: text.slice(0, 2000) || undefined }; }
   if (!r.ok) {
     const msg: string = data?.error || r.statusText;
     // The daemon refuses to work in a folder that can run programs until the user trusts it. The

@@ -3,7 +3,7 @@
 // library; anything else is shown as a failure that names the location and the reason.
 import { api, ApiError } from './api';
 import { go, toast } from './store.svelte';
-import { errCode, errDetail, failed } from './errors';
+import { errCode, errDetail, errTech, failed } from './errors';
 import { ago, fmtDate, lang, t } from './i18n';
 
 type Last = { at: string; location: string } | null;
@@ -65,7 +65,7 @@ export async function syncFailed(e: unknown, headline: string): Promise<void> {
     // the problem is put right — the toast's button goes straight there.
     if (e instanceof ApiError) await refreshBackup();
     const fix = errCode(e) === 'no_location' ? { label: t('settings'), path: 'locations' } : errCode(e) === 'sign_in' ? { label: t('histb.toast.updateSignIn'), path: 'signin' } : fixFor(backup.health);
-    toast(headline, { kind: 'error', key: 'sync', detail: errDetail(e) || undefined, duration: 0, action: { label: fix.label, run: () => go({ kind: 'settings', id: 'git', path: fix.path }) } });
+    toast(headline, { kind: 'error', key: 'sync', detail: errDetail(e) || undefined, tech: errTech(e), duration: 0, action: { label: fix.label, run: () => go({ kind: 'settings', id: 'git', path: fix.path }) } });
     return;
   }
   failed(headline, e, { key: 'sync' });

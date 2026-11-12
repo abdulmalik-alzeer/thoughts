@@ -633,7 +633,9 @@ pub async fn set_limits(file: &str, minutes: u32, budget: f64) -> anyhow::Result
 /// What a finished run's chat says about it: (its error text, cost, cut off by a restart, ended in an error).
 async fn chat_facts(state: &AppState, chat: &str) -> (String, f64, bool, bool) {
     state.chats.with(chat, |c| {
-        let error = c.messages.iter().rev().take(3).find(|m| m.role == "error").map(|m| m.text.clone()).unwrap_or_default();
+        // The sentence shown, and the assistant's own words behind it ("Run ended: error_max_budget_usd").
+        let error = c.messages.iter().rev().take(3).find(|m| m.role == "error")
+            .map(|m| format!("{} {}", m.text, m.tool.as_ref().and_then(|t| t["detail"].as_str()).unwrap_or_default())).unwrap_or_default();
         (error, c.cost_usd, c.interrupted, c.messages.last().map_or(false, |m| m.role == "error"))
     }).await.unwrap_or_default()
 }

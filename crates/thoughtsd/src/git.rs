@@ -509,6 +509,7 @@ fn why_not_sent(e: &anyhow::Error, kind: &str) -> &'static str {
         "timeout" => return "sync.why.timeout",
         _ => {}
     }
+    if has(&["repository not found", "does not appear to be a git repository", "returned error: 404"]) { return "sync.why.not_found"; }
     if has(&["non-fast-forward", "fetch first", "(stale info)", "tip of your current branch is behind"]) { "sync.why.rejected" }
     else if has(&["file size limit", "too large", "exceeds", "larger than"]) { "sync.why.too_large" }
     else { "sync.why.refused" }
@@ -653,15 +654,16 @@ fn sync_outcome(dir: &Path, sent: &[(String, Option<&'static str>)]) -> anyhow::
 }
 
 /// Receiving from the main location `name` failed with `e`: noted as that location's last attempt,
-/// and said plainly when the reason is a known one (otherwise git's own words follow "pull failed").
+/// and said plainly: the reason when it is a known one, otherwise that it answered with an error
+/// (git's own words are kept for "Show details").
 fn not_received(dir: &Path, name: &str, kind: &str, e: anyhow::Error) -> anyhow::Error {
     let why = why_not_sent(&e, kind);
     note_attempts(dir, &[(name.to_string(), Some(why))]);
     crate::log::warn(format!("sync: receiving from {name} failed: {e}"));
-    if why == "sync.why.refused" || why == "sync.why.rejected" || why == "sync.why.too_large" { return anyhow::anyhow!("pull failed: {e}"); }
-    let ar = crate::tr::arabic();
-    let why = crate::tr::text_in(ar, why, &[]);
-    crate::tr::user_err_in(ar, "sync.not_received", &[("name", name), ("why", &why)]).into()
+    // Sending-side reasons say nothing about receiving.
+    let why = if matches!(why, "sync.why.refused" | "sync.why.rejected" | "sync.why.too_large") { "sync.why.receive" } else { why };
+    let why = crate::tr::text(why, &[]);
+    crate::tr::err_detail("sync.not_received", &[("name", name), ("why", &why)], format!("{e:#}"))
 }
 
 /// Fetch `branch` from the location `name`: the commit it is at there, or `None` when the location
@@ -738,7 +740,7 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
                             anyhow::bail!("CONFLICT::{}", files.join(";"));
                         }
                         crate::log::warn(format!("sync: pull from {primary} failed: {e}"));
-                        anyhow::bail!("pull failed: {e}")
+                        return Err(crate::tr::err_detail("sync.not_received", &[("name", primary), ("why", &crate::tr::text("sync.why.receive", &[]))], format!("{e:#}")));
                     }
                     log.push(format!("pulled {primary}"));
                 }
@@ -836,7 +838,7 @@ pub async fn resolve_each(state: &AppState, dir: &Path, default: Option<&str>, c
         let committed = commit_all(state, dir, &subject::edit("your changes")).await?;
         let rs = remotes(state, dir).await;
         let primary = main_of(&rs).ok_or_else(|| crate::tr::err("git.no_remote", &[]))?;
-        if head(state, dir).await.is_none() { anyhow::bail!("there is nothing in this library's history yet"); }
+        if head(state, dir).await.is_none() { return Err(crate::tr::err("history.empty", &[])); }
         (branch, committed, rs, primary)
     };
     let (url, kind) = location_of(&rs, &primary);
@@ -871,7 +873,7 @@ pub async fn resolve_each(state: &AppState, dir: &Path, default: Option<&str>, c
                     let mut files = unmerged(state, dir).await;
                     if files.is_empty() {
                         let _ = git(state, dir, &["merge", "--abort"]).await;
-                        anyhow::bail!("could not combine the two versions: {e}");
+                        return Err(crate::tr::err_detail("history.combine_failed", &[], format!("{e:#}")));
                     }
                     // A merge that looked clean but was not (an older git without merge-tree): back up now.
                     if backup.is_none() {
@@ -900,7 +902,7 @@ pub async fn resolve_each(state: &AppState, dir: &Path, default: Option<&str>, c
                     }.await;
                     if let Err(e) = done {
                         let _ = git(state, dir, &["merge", "--abort"]).await;
-                        anyhow::bail!("could not combine the two versions: {e}");
+                        return Err(crate::tr::err_detail("history.combine_failed", &[], format!("{e:#}")));
                     }
                 }
                 log.push(format!("merged {primary} ({how})"));
@@ -1203,7 +1205,7 @@ pub async fn undo_commit(state: &AppState, dir: &Path, hash: &str) -> anyhow::Re
         // Everything was recorded just above, so this only clears the half-applied undo.
         let _ = git(state, dir, &["reset", "-q", "--hard", "HEAD"]).await;
         crate::log::warn(format!("history: undo of {hash} clashes with later changes in {} file(s): {e}", files.len()));
-        if files.is_empty() { anyhow::bail!("this change could not be undone: {e}"); }
+        if files.is_empty() { return Err(crate::tr::err_detail("history.undo_failed", &[], format!("{e:#}"))); }
         return Err(crate::tr::err("conflict", &[("files", &files.join(";"))]));
     }
     if git(state, dir, &["diff", "--cached", "--quiet"]).await.is_ok() {
@@ -1643,9 +1645,12 @@ mod tests {
         assert_eq!(drive("fatal: '/Volumes/Backup/notes.git' does not appear to be a git repository\nfatal: Could not read from remote repository."), "sync.why.unplugged");
         assert_eq!(drive("error: unable to create temporary object directory: No space left on device"), "sync.why.full");
         assert_eq!(drive("error: insufficient permission for adding an object to repository database ./objects\nPermission denied"), "sync.why.no_write");
+        // An online address that is not there (or that the account cannot see).
+        assert_eq!(why("remote: Repository not found.\nfatal: repository 'https://github.com/a/b.git/' not found"), "sync.why.not_found");
         // Every reason has its sentence in both languages.
         for key in ["sync.why.sign_in", "sync.why.offline", "sync.why.timeout", "sync.why.rejected", "sync.why.too_large", "sync.why.refused",
-                    "sync.why.unplugged", "sync.why.full", "sync.why.no_write", "sync.why.host_key", "sync.why.host_changed", "sync.why.ssh_key"] {
+                    "sync.why.unplugged", "sync.why.full", "sync.why.no_write", "sync.why.host_key", "sync.why.host_changed", "sync.why.ssh_key",
+                    "sync.why.not_found", "sync.why.receive"] {
             assert!(!crate::tr::text_in(false, key, &[]).contains("unexpected") && crate::tr::text_in(true, key, &[]) != crate::tr::text_in(false, key, &[]), "{key}");
         }
     }

@@ -12,12 +12,14 @@ export type ToastOpts = {
   action?: { label: string; run: () => void };
   /** Long or multi-line output (logs…) shown in a scrollable block with a Copy button. */
   detail?: string;
+  /** Technical words behind an error (git's, the assistant's), folded away under "Show details". */
+  tech?: string;
   /** Milliseconds on screen. Default scales with length (min 5s, errors 10s). 0 = stays until dismissed. */
   duration?: number;
   /** Toasts with the same key replace each other instead of stacking. */
   key?: string;
 };
-export type ToastItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; action?: { label: string; run: () => void }; detail?: string; duration: number; key?: string };
+export type ToastItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; action?: { label: string; run: () => void }; detail?: string; tech?: string; duration: number; key?: string };
 /** A toast as remembered in "Recent messages" after it has left the screen. */
 export type ToastLogItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; detail?: string; at: number; key?: string };
 
@@ -124,7 +126,8 @@ export function toast(text: string, opts: ToastOpts = {}): number {
   const duration = opts.duration ?? Math.min(30000, Math.max(min, 2500 + msg.length * 70 + (detail ? 6000 : 0)));
   const id = ++toastSeq;
   const rest = app.toasts.filter((x) => !(opts.key && x.key === opts.key));
-  app.toasts = [...rest.slice(-4), { id, text: msg, kind, action: opts.action, detail, duration, key: opts.key }];
+  const tech = opts.tech && opts.tech !== detail && opts.tech !== msg ? opts.tech : undefined;
+  app.toasts = [...rest.slice(-4), { id, text: msg, kind, action: opts.action, detail, tech, duration, key: opts.key }];
   // Kept after the toast is gone (or pushed out by newer ones). A keyed toast replaces its older entry.
   app.toastLog = [{ id, text: msg, kind, detail, at: Date.now(), key: opts.key }, ...app.toastLog.filter((x) => !(opts.key && x.key === opts.key))].slice(0, 20);
   if (kind === 'error') app.toastLogUnread = true;

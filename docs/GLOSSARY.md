@@ -116,6 +116,7 @@ keeping it (see below).
 | Change | تغيير | A prepared customisation waiting to be kept. |
 | Review | المراجعة | Looking at a change before it is kept. The only meaning of «مراجعة» in the app. |
 | Try it · Keep · Discard | تجربة · اعتماد · تجاهل | The three buttons of a review. |
+| Keep these changes (a Wrap) | أبقِ هذه التغييرات | A Wrap's changes, looked at before they enter the library. |
 | Add-on · Page · Look · Layout | إضافة · صفحة · المظهر · الترتيب | Kinds of customisation. |
 | Automatic task | مهمة تلقائية | Something the assistant does on a schedule. Never *job*. |
 | Pack · Ready-made packs | حزمة · حزم جاهزة | A file of customisations to share or import. |

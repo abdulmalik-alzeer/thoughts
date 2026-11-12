@@ -59,6 +59,17 @@
           <button class="btn sm" onclick={() => copy(x)}><Icon name={copied === x.id ? 'check' : 'copy'} size={13} /> {copied === x.id ? t('shell.copied') : t('shell.copy')}</button>
         </div>
       {/if}
+      {#if x.tech}
+        <!-- What git, the system or the assistant said, for whoever helps: folded away. -->
+        <details class="tech">
+          <summary>{t('wording.showDetails')}</summary>
+          <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+          <pre class="detail" dir="ltr" tabindex="0" aria-label={t('shell.details')}>{x.tech}</pre>
+          <div class="line end">
+            <button class="btn sm" onclick={async () => { try { await navigator.clipboard.writeText(x.tech ?? ''); copied = x.id; setTimeout(() => { if (copied === x.id) copied = null; }, 2000); } catch { copied = null; } }}><Icon name={copied === x.id ? 'check' : 'copy'} size={13} /> {copied === x.id ? t('shell.copied') : t('shell.copy')}</button>
+          </div>
+        </details>
+      {/if}
     </div>
   {/each}
 </div>
@@ -77,4 +88,7 @@
   .x:hover { background: var(--fill); color: var(--fg); }
   .detail { margin: 0; max-height: 180px; overflow: auto; font-size: var(--fs-xs); padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; text-align: start; }
   .sm { font-size: var(--fs-xs); padding: 3px 8px; }
+  .tech { display: grid; gap: 6px; }
+  .tech summary { cursor: pointer; font-size: var(--fs-xs); color: var(--muted); width: max-content; }
+  .tech[open] { gap: 6px; }
 </style>

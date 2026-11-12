@@ -4,8 +4,9 @@
 //! an HTTP status, an optional machine-readable prefix the UI matches on (`BUSY::`, `STALE::`…) and
 //! the sentence in both languages. Errors raised with `err` carry all of that (`UserErr`); anything
 //! else that reaches the API is passed through `classify`, which recognises the well-known raw
-//! messages (a missing folder, git asking for a password, no network…) and otherwise keeps the
-//! English text behind a localised "something unexpected went wrong".
+//! messages (a missing folder, git asking for a password, no network…) and otherwise shows a
+//! localised "something unexpected went wrong". Whatever technical text a plain sentence stands in
+//! for travels beside it (`explain`, `Detailed`), for the app's "Show details".
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -35,6 +36,24 @@ impl std::fmt::Display for UserErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.message) }
 }
 impl std::error::Error for UserErr {}
+
+/// A plain message for the person, with the technical text that explains it (git's or the
+/// assistant's own words), kept for "Show details".
+#[derive(Debug, Clone)]
+pub struct Detailed {
+    pub shown: UserErr,
+    pub detail: String,
+}
+
+impl std::fmt::Display for Detailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(&self.shown.message) }
+}
+impl std::error::Error for Detailed {}
+
+/// The most of a technical text kept as detail.
+const DETAIL_MAX: usize = 2000;
+
+fn clip(s: &str) -> String { s.trim().chars().take(DETAIL_MAX).collect() }
 
 struct Entry { key: &'static str, code: &'static str, status: u16, prefix: &'static str, en: &'static str, ar: &'static str }
 
@@ -84,7 +103,7 @@ const TABLE: &[Entry] = &[
         "اختر مجلداً لمكتبتك (بمساره الكامل)."),
     e("library.not_thoughts", "validation", 422, "",
         "{path} does not look like a Thoughts library. Choose the folder that holds your notes, or start a new library.",
-        "المجلد {path} لا يبدو مكتبة «أفكار». اختر المجلد الذي يحوي ملاحظاتك، أو أنشئ مكتبة جديدة."),
+        "المجلد {path} لا يبدو مكتبة Thoughts. اختر المجلد الذي يحوي ملاحظاتك، أو أنشئ مكتبة جديدة."),
     e("library.exists", "library_exists", 422, "",
         "There is already a library in {path}. To open it, go back and choose \"I already have one\". To start a new one, choose another folder.",
         "توجد مكتبة في {path} من قبل. لفتحها ارجع واختر «لديّ مكتبة سابقة»، ولبدء مكتبة جديدة اختر مجلداً آخر."),
@@ -326,7 +345,7 @@ const TABLE: &[Entry] = &[
         "لم تبقَ مساحة على القرص. أفرغ بعض المساحة عليه، أو اختر قرصاً آخر."),
     e("sync.why.no_write", "sync_failed", 409, "",
         "Thoughts is not allowed to write there. The drive may be locked or read-only; choose a folder you can save files in.",
-        "لا يُسمح لـ«أفكار» بالكتابة هناك. ربما كان القرص مقفلاً أو للقراءة فقط؛ اختر مجلداً يمكنك حفظ الملفات فيه."),
+        "لا يُسمح لتطبيق Thoughts بالكتابة هناك. ربما كان القرص مقفلاً أو للقراءة فقط؛ اختر مجلداً يمكنك حفظ الملفات فيه."),
     e("sync.why.host_key", "sync_failed", 409, "",
         "this computer has not connected to that server before, so it does not know whether to trust it. Open Settings › Library & backup and check the server there.",
         "لم يتصل هذا الجهاز بذلك الخادم من قبل، فلا يعرف هل يثق به. افتح الإعدادات › المكتبة والنسخ الاحتياطي وتحقّق من الخادم هناك."),
@@ -335,7 +354,7 @@ const TABLE: &[Entry] = &[
         "تغيّرت هوية الخادم منذ آخر اتصال لهذا الجهاز به، وقد يعني ذلك أن أحداً يعترض الاتصال. لم يُرسَل شيء. اسأل من يدير الخادم قبل المتابعة."),
     e("sync.why.ssh_key", "sync_failed", 409, "",
         "the server did not accept this computer's key. Make sure the key is added to your account there. Thoughts cannot type a key's passphrase: if your key has one, add it to your computer's key agent first, then press Sync again.",
-        "لم يقبل الخادم مفتاح هذا الجهاز. تأكّد أن المفتاح مضاف إلى حسابك هناك. لا يستطيع «أفكار» كتابة عبارة المرور الخاصة بالمفتاح: فإن كانت له عبارة مرور، فأضفه أولاً إلى وكيل المفاتيح في جهازك، ثم اضغط «مزامنة» مجدداً."),
+        "لم يقبل الخادم مفتاح هذا الجهاز. تأكّد أن المفتاح مضاف إلى حسابك هناك. لا يستطيع Thoughts كتابة عبارة المرور الخاصة بالمفتاح: فإن كانت له عبارة مرور، فأضفه أولاً إلى وكيل المفاتيح في جهازك، ثم اضغط «مزامنة» مجدداً."),
     e("sync.not_received", "sync_failed", 409, "",
         "Nothing was synced, because changes could not be received from \"{name}\": {why}",
         "لم تتم المزامنة، لأنه تعذّر استلام التغييرات من «{name}»: {why}"),
@@ -361,7 +380,7 @@ const TABLE: &[Entry] = &[
         "تعذّرت قراءة النسخة الاحتياطية في هذا المجلد. ربما تكون تالفة، أو يكون القرص معطوباً."),
     e("backup.folder_unwritable", "validation", 422, "",
         "Thoughts could not create the backup there. The drive may be full, locked or read-only; choose a folder you can save files in.",
-        "تعذّر على «أفكار» إنشاء النسخة الاحتياطية هناك. ربما كان القرص ممتلئاً أو مقفلاً أو للقراءة فقط؛ اختر مجلداً يمكنك حفظ الملفات فيه."),
+        "تعذّر على Thoughts إنشاء النسخة الاحتياطية هناك. ربما كان القرص ممتلئاً أو مقفلاً أو للقراءة فقط؛ اختر مجلداً يمكنك حفظ الملفات فيه."),
     e("signin.empty", "validation", 422, "",
         "Enter the password or access token.",
         "أدخل كلمة المرور أو رمز الدخول."),
@@ -407,16 +426,99 @@ const TABLE: &[Entry] = &[
     // --- settings ---
     e("newer_settings", "newer_settings", 409, "NEWER_SETTINGS::",
         "Your settings were saved by a newer version of Thoughts. Update the app to change them.",
-        "حُفظت إعداداتك بإصدار أحدث من «أفكار». حدّث التطبيق لتتمكن من تغييرها."),
+        "حُفظت إعداداتك بإصدار أحدث من Thoughts. حدّث التطبيق لتتمكن من تغييرها."),
     e("login_item.translocated", "validation", 422, "",
         "Move Thoughts into your Applications folder and open it from there, then turn this on.",
-        "انقل «أفكار» إلى مجلد التطبيقات وافتحه من هناك، ثم فعّل هذا الخيار."),
+        "انقل Thoughts إلى مجلد التطبيقات وافتحه من هناك، ثم فعّل هذا الخيار."),
     e("login_item.other_home", "validation", 422, "",
         "This copy of Thoughts keeps its data in a separate folder, so it cannot change whether Thoughts starts when you log in. Change it in the app you normally use.",
-        "تحفظ هذه النسخة من «أفكار» بياناتها في مجلد مستقل، لذا لا يمكنها تغيير تشغيل «أفكار» عند تسجيل الدخول. غيّر ذلك من التطبيق الذي تستخدمه عادةً."),
+        "تحفظ هذه النسخة من Thoughts بياناتها في مجلد مستقل، لذا لا يمكنها تغيير تشغيل Thoughts عند تسجيل الدخول. غيّر ذلك من التطبيق الذي تستخدمه عادةً."),
     e("module.always_on", "validation", 422, "",
         "This feature is the backbone of the app and stays on.",
         "هذه الميزة أساس التطبيق وتبقى مفعّلة."),
+    e("login_item.failed", "login_item", 500, "",
+        "Thoughts could not change whether it starts when you log in.",
+        "تعذّر على Thoughts تغيير تشغيله عند تسجيل الدخول."),
+    e("login_item.unsupported", "validation", 422, "",
+        "Starting when you log in is not available on this system.",
+        "التشغيل عند تسجيل الدخول غير متاح في هذا النظام."),
+    // --- wording pass: plain sentences for what used to reach the person as raw text ---
+    e("folder.name_needed", "validation", 422, "",
+        "Give the folder a name.",
+        "أعطِ المجلد اسماً."),
+    e("files.too_many_named", "validation", 422, "",
+        "There are already too many files named “{name}” here. Rename some of them, then try again.",
+        "يوجد هنا عدد كبير جداً من الملفات باسم «{name}». غيّر أسماء بعضها ثم حاول مرة أخرى."),
+    e("history.empty", "conflict", 409, "",
+        "There is nothing in this library's history yet. Save a change first, then sync.",
+        "لا شيء في سجلّ هذه المكتبة بعد. احفظ تغييراً أولاً ثم زامن."),
+    e("history.combine_failed", "conflict", 409, "",
+        "The changes from the other computer could not be combined with yours, so nothing was changed. Try Sync again; if it keeps happening, Repair history can help.",
+        "تعذّر جمع التغييرات القادمة من الجهاز الآخر مع تغييراتك، فلم يتغيّر شيء. اضغط «مزامنة» مجدداً، وإن تكرر ذلك فقد يساعد «إصلاح السجلّ»."),
+    e("history.undo_failed", "conflict", 409, "",
+        "This change could not be undone. Nothing was changed.",
+        "تعذّر التراجع عن هذا التغيير، ولم يتغيّر شيء."),
+    e("sync.repo_not_found", "sync_failed", 409, "",
+        "The online location was not found. Check its address under Settings › Library & backup, and that your account there can see it.",
+        "لم يُعثر على الموقع على الإنترنت. تحقّق من عنوانه في الإعدادات › المكتبة والنسخ الاحتياطي، ومن أن حسابك هناك يستطيع الوصول إليه."),
+    e("sync.why.not_found", "sync_failed", 409, "",
+        "the address was not found there. Check it under Settings › Library & backup, and that your account there can see it.",
+        "لم يُعثر على العنوان هناك. تحقّق منه في الإعدادات › المكتبة والنسخ الاحتياطي، ومن أن حسابك هناك يستطيع الوصول إليه."),
+    e("sync.why.receive", "sync_failed", 409, "",
+        "it answered with an error. The details say what it reported.",
+        "ردّ بخطأ، والتفاصيل تبيّن ما أبلغ عنه."),
+    e("reorganize.empty", "conflict", 409, "",
+        "There is nothing in this library to reorganize yet.",
+        "لا يوجد في هذه المكتبة ما يُعاد تنظيمه بعد."),
+    e("reorganize.waiting", "conflict", 409, "",
+        "A Reorganize is already running or waiting for your review. Keep or discard it first.",
+        "توجد إعادة تنظيم تعمل الآن أو تنتظر مراجعتك. اعتمدها أو تجاهلها أولاً."),
+    e("reorganize.running", "busy", 409, "",
+        "Reorganize is still working. Stop it, or wait for it to finish.",
+        "ما زالت إعادة التنظيم تعمل. أوقفها أو انتظر حتى تنتهي."),
+    e("reorganize.closed", "conflict", 409, "",
+        "This Reorganize has already been kept or discarded.",
+        "سبق أن اعتُمدت إعادة التنظيم هذه أو تُجوهلت."),
+    e("reorganize.apply_failed", "conflict", 409, "",
+        "The new arrangement could not be applied, so your library was not changed.",
+        "تعذّر تطبيق الترتيب الجديد، فلم تتغيّر مكتبتك."),
+    e("wrap.apply_failed", "conflict", 409, "",
+        "The changes could not be added to your library, so nothing was saved.",
+        "تعذّرت إضافة التغييرات إلى مكتبتك، فلم يُحفظ شيء."),
+    e("assistant.empty_summary", "run_ended", 500, "",
+        "The assistant returned an empty summary. Try again.",
+        "أعاد المساعد ملخصاً فارغاً. حاول مرة أخرى."),
+    e("assistant.no_connection", "run_ended", 500, "",
+        "Thoughts could not connect to the assistant program. Try again; if it keeps happening, restart Thoughts.",
+        "تعذّر على Thoughts الاتصال ببرنامج المساعد. حاول مرة أخرى، وإن تكرر ذلك فأعد تشغيل Thoughts."),
+    // How a run of the assistant ended, when its own words say something the person can act on.
+    e("assistant.offline", "offline", 503, "",
+        "The assistant could not reach its service. Check your internet connection, then try again.",
+        "تعذّر على المساعد الوصول إلى خدمته. تحقّق من اتصالك بالإنترنت ثم حاول مرة أخرى."),
+    e("assistant.overloaded", "run_ended", 503, "",
+        "The assistant's service is busy or having trouble right now. Wait a minute, then try again.",
+        "خدمة المساعد مشغولة أو تواجه مشكلة الآن. انتظر دقيقة ثم حاول مرة أخرى."),
+    e("assistant.rate_limit", "limit", 429, "",
+        "The service asked the assistant to slow down. Wait a little, then try again.",
+        "طلبت الخدمة من المساعد التمهّل. انتظر قليلاً ثم حاول مرة أخرى."),
+    e("assistant.credit", "limit", 402, "",
+        "The account the assistant uses has no credit left. Add credit with the service, or sign in with a Claude plan under Settings › Assistant.",
+        "لا رصيد في الحساب الذي يستخدمه المساعد. أضف رصيداً لدى الخدمة، أو سجّل الدخول باشتراك Claude من الإعدادات › المساعد."),
+    e("assistant.turn_limit", "run_ended", 500, "",
+        "The assistant took the most steps it may take for one message and stopped before it finished. Send “continue” to let it go on.",
+        "بلغ المساعد أقصى عدد من الخطوات المسموح به للرسالة الواحدة، فتوقف قبل أن ينتهي. أرسل «تابع» ليكمل."),
+    e("assistant.budget", "limit", 409, "",
+        "This run reached the most it may spend and stopped.",
+        "بلغت هذه العملية أقصى ما يُسمح لها بإنفاقه، فتوقفت."),
+    e("assistant.too_long", "run_ended", 500, "",
+        "This chat has grown too long for the assistant to read at once. Start a new chat; to keep what was said here, Wrap it first.",
+        "طالت هذه المحادثة حتى لم يعد المساعد قادراً على قراءتها دفعة واحدة. ابدأ محادثة جديدة، ولتحتفظ بما قيل فيها احفظها أولاً بـ«تلخيص وحفظ»."),
+    e("assistant.no_answer", "run_ended", 500, "",
+        "The assistant stopped without answering. Try again.",
+        "توقف المساعد دون أن يجيب. حاول مرة أخرى."),
+    e("assistant.failed", "run_ended", 500, "",
+        "The assistant stopped because of an error. Try again; if it keeps happening, the details say what it reported.",
+        "توقف المساعد بسبب خطأ. حاول مرة أخرى، وإن تكرر ذلك فالتفاصيل تبيّن ما أبلغ عنه."),
     // --- the assistant ---
     e("assistant.missing", "assistant_missing", 409, "",
         "The assistant (Claude Code) is not installed, or could not be found.",
@@ -714,16 +816,16 @@ const TABLE: &[Entry] = &[
         "ما زالت محادثة أو عملية «تلخيص وحفظ» قيد التشغيل. انتظر حتى تنتهي أو أوقفها، ثم حاول مرة أخرى."),
     e("move.bad", "validation", 422, "MOVE_BAD::",
         "This is not a Thoughts move file, or it was changed after it was made. Nothing was imported.",
-        "هذا ليس ملف نقل من «أفكار»، أو أنه تغيّر بعد إنشائه. لم يُستورد شيء."),
+        "هذا ليس ملف نقل من Thoughts، أو أنه تغيّر بعد إنشائه. لم يُستورد شيء."),
     e("move.newer", "validation", 422, "MOVE_NEWER::",
         "This file was made by a newer version of Thoughts. Update this copy first, then import it.",
-        "أُنشئ هذا الملف بإصدار أحدث من «أفكار». حدّث هذه النسخة أولاً، ثم استورده."),
+        "أُنشئ هذا الملف بإصدار أحدث من Thoughts. حدّث هذه النسخة أولاً، ثم استورده."),
     e("remove.unconfirmed", "confirm_needed", 409, "",
         "Removing Thoughts must be confirmed first.",
-        "إزالة «أفكار» تحتاج إلى تأكيدك أولاً."),
+        "إزالة Thoughts تحتاج إلى تأكيدك أولاً."),
     e("remove.blocked", "forbidden", 403, "REMOVE_BLOCKED::",
         "Thoughts' data folder cannot be removed safely from here: your library or a linked folder is inside it, or it is a link to another place. Nothing was removed.",
-        "لا يمكن إزالة مجلد بيانات «أفكار» بأمان من هنا: مكتبتك أو مجلد مرتبط موجود داخله، أو أنه رابط إلى مكان آخر. لم يُحذف شيء."),
+        "لا يمكن إزالة مجلد بيانات Thoughts بأمان من هنا: مكتبتك أو مجلد مرتبط موجود داخله، أو أنه رابط إلى مكان آخر. لم يُحذف شيء."),
     // --- bringing in notes the user already has (setup-b) ---
     e("import.no_folder", "validation", 422, "",
         "There is no folder there. Choose the folder that holds your notes.",
@@ -733,7 +835,7 @@ const TABLE: &[Entry] = &[
         "هذا المجلد هو مكتبتك، أو يحويها، أو يقع داخلها. اختر مجلد ملاحظات خارج مكتبتك."),
     e("import.app_data", "validation", 422, "",
         "That folder holds Thoughts' own data, not notes. Choose the folder that holds your notes.",
-        "هذا المجلد يحوي بيانات «أفكار» نفسها لا ملاحظاتك. اختر المجلد الذي يحوي ملاحظاتك."),
+        "هذا المجلد يحوي بيانات Thoughts الخاصة به، لا ملاحظاتك. اختر المجلد الذي يحوي ملاحظاتك."),
     e("import.bad_name", "validation", 422, "",
         "That is not a name a folder can have. Leave out characters such as : ? * and do not start or end with a dot or a space.",
         "هذا اسم لا يصلح لمجلد. تجنّب رموزاً مثل : ? * ولا تبدأ الاسم أو تنهِه بنقطة أو مسافة."),
@@ -779,10 +881,10 @@ const TABLE: &[Entry] = &[
         "لا يوجد تغيير ينتظر المراجعة."),
     e("pack.not_pack", "validation", 422, "",
         "This file is not a Thoughts customisation pack.",
-        "هذا الملف ليس حزمة تخصيص من «أفكار»."),
+        "هذا الملف ليس حزمة تخصيص من Thoughts."),
     e("pack.newer", "validation", 422, "",
         "This pack was made for a newer version of Thoughts. Update the app, then try again.",
-        "صُنعت هذه الحزمة لإصدار أحدث من «أفكار». حدّث التطبيق ثم حاول مرة أخرى."),
+        "صُنعت هذه الحزمة لإصدار أحدث من Thoughts. حدّث التطبيق ثم حاول مرة أخرى."),
     e("pack.empty", "validation", 422, "",
         "This pack has nothing in it.",
         "هذه الحزمة فارغة."),
@@ -791,7 +893,7 @@ const TABLE: &[Entry] = &[
         "في هذه الحزمة ملفات كثيرة جداً (الحد الأقصى {count}). لم يتغيّر شيء."),
     e("pack.bad_file", "validation", 422, "",
         "This pack contains a file that Thoughts does not accept as a customisation ({path}). Nothing was changed.",
-        "تحتوي هذه الحزمة على ملف لا يقبله «أفكار» ضمن التخصيصات ({path}). لم يتغيّر شيء."),
+        "تحتوي هذه الحزمة على ملف لا يقبله Thoughts ضمن التخصيصات ({path}). لم يتغيّر شيء."),
     e("pack.not_text", "validation", 422, "",
         "{path} in this pack is not text. Nothing was changed.",
         "الملف {path} في هذه الحزمة ليس نصاً. لم يتغيّر شيء."),
@@ -830,7 +932,7 @@ const TABLE: &[Entry] = &[
         "هذه الإضافة ما زالت في تطبيقك، فلا يمكن حذف بياناتها نهائياً. امسحها بدلاً من ذلك، أو أزل الإضافة أولاً."),
     e("gallery.gone", "not_found", 404, "",
         "This ready-made pack is not part of this version of Thoughts.",
-        "هذه الحزمة الجاهزة ليست ضمن هذا الإصدار من «أفكار»."),
+        "هذه الحزمة الجاهزة ليست ضمن هذا الإصدار من Thoughts."),
     // --- several libraries (libs) ---
     e("libs.not_found", "not_found", 404, "",
         "That library is no longer in your list.",
@@ -864,10 +966,10 @@ const TABLE: &[Entry] = &[
         "هذا المجلد داخل مكتبة «{name}» أو يحويها. لا يمكن أن تكون مكتبة داخل أخرى: اختر مجلداً خارج «{name}»."),
     e("libs.already_set_up", "conflict", 409, "",
         "Thoughts is already set up. To use another library as well, choose \"Add a library\" in the library list at the top of the sidebar.",
-        "«أفكار» مُجهَّز من قبل. لاستعمال مكتبة أخرى أيضاً، اختر «أضِف مكتبة» من قائمة المكتبات أعلى الشريط الجانبي."),
+        "Thoughts مُجهَّز من قبل. لاستعمال مكتبة أخرى أيضاً، اختر «أضِف مكتبة» من قائمة المكتبات أعلى الشريط الجانبي."),
     e("libs.not_set_up", "conflict", 409, "",
         "Finish setting up Thoughts first. Then you can add more libraries.",
-        "أكمل تجهيز «أفكار» أولاً، ثم يمكنك إضافة مكتبات أخرى."),
+        "أكمل تجهيز Thoughts أولاً، ثم يمكنك إضافة مكتبات أخرى."),
     // --- what add-ons may do (addons.rs, FEAT-43/44/47/48/58) ---
     e("plugin.not_readable", "forbidden", 403, "",
         "This add-on may only read the folders it was given; {path} is not in them.",
@@ -951,6 +1053,11 @@ pub fn user_err_in(ar: bool, key: &str, args: &[(&str, &str)]) -> UserErr {
 /// A user-facing error in the UI language.
 pub fn err(key: &str, args: &[(&str, &str)]) -> anyhow::Error { user_err_in(arabic(), key, args).into() }
 
+/// A user-facing error in the UI language, with the technical text behind it for "Show details".
+pub fn err_detail(key: &str, args: &[(&str, &str)], detail: impl std::fmt::Display) -> anyhow::Error {
+    Detailed { shown: user_err_in(arabic(), key, args), detail: clip(&detail.to_string()) }.into()
+}
+
 /// Machine prefixes other parts of the daemon raise as plain strings, with their status and code.
 const PREFIXES: &[(&str, u16, &str)] = &[
     ("BUSY::", 423, "busy"), ("WRAP_INTERRUPTED::", 409, "wrap_interrupted"), ("CONFLICT::", 409, "conflict"),
@@ -980,6 +1087,8 @@ fn known_raw(msg: &str) -> Option<&'static str> {
     if has(&["no library configured", "no library"]) && m.len() < 40 { return Some("library.none"); }
     if has(&["no such chat"]) { return Some("not_found.chat"); }
     if has(&["claude code cli not found"]) { return Some("assistant.missing"); }
+    if has(&["repository not found", "does not appear to be a git repository", "requested url returned error: 404"])
+        && (m.contains("git ") || m.contains("fatal: ")) { return Some("sync.repo_not_found"); }
     if has(&["authentication failed", "could not read username", "could not read password", "terminal prompts disabled",
              "invalid username or password", "permission denied (publickey", "http 401", "error: 401", "error: 403",
              "requested url returned error: 403", "requested url returned error: 401"]) { return Some("sign_in"); }
@@ -989,41 +1098,68 @@ fn known_raw(msg: &str) -> Option<&'static str> {
     None
 }
 
+/// Words that only a developer can read: git's own output, a command that failed.
+fn technical(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    m.starts_with("git ") || m.contains(": git ") || m.contains("fatal: ") || m.starts_with("pull failed")
+        || m.starts_with("claude: ") || m.starts_with("error: ")
+}
+
 /// Turn any error that reaches the API into what the person should see: status, code, message.
-pub fn classify_in(ar: bool, err: &anyhow::Error) -> UserErr {
-    if let Some(u) = err.chain().find_map(|c| c.downcast_ref::<UserErr>()) { return u.clone(); }
+pub fn classify_in(ar: bool, err: &anyhow::Error) -> UserErr { explain_in(ar, err).0 }
+
+/// What the person should see for `err`, and the technical text the plain sentence stands in for
+/// (`None` when the sentence says everything): the app keeps it under "Show details".
+pub fn explain_in(ar: bool, err: &anyhow::Error) -> (UserErr, Option<String>) {
+    if let Some(d) = err.chain().find_map(|c| c.downcast_ref::<Detailed>()) {
+        return (d.shown.clone(), Some(d.detail.clone()).filter(|t| !t.is_empty()));
+    }
+    let (shown, raw) = shown_in(ar, err);
+    let msg = err.to_string();
+    let detail = raw.then(|| clip(&format!("{err:#}"))).filter(|t| !t.is_empty() && *t != shown.message && msg != shown.message);
+    (shown, detail)
+}
+
+/// `explain`, in the UI language.
+pub fn explain(err: &anyhow::Error) -> (UserErr, Option<String>) { explain_in(arabic(), err) }
+
+/// The message for `err`, and whether it stands in for words of git, the system or another
+/// program (whose text is then worth keeping as detail).
+fn shown_in(ar: bool, err: &anyhow::Error) -> (UserErr, bool) {
+    let generic = |code: &'static str, status: u16| UserErr { code, status, message: text_in(ar, "unexpected", &[]) };
+    if let Some(u) = err.chain().find_map(|c| c.downcast_ref::<UserErr>()) { return (u.clone(), false); }
     // A folder that needs the user's trust is known by its type alone. No wording can stand in for
     // it: text that merely contains a trust marker is an ordinary message.
     if let Some(u) = err.chain().find_map(|c| c.downcast_ref::<crate::trust::Untrusted>()) {
-        return UserErr { code: "untrusted", status: 403, message: u.message_in(ar) };
+        return (UserErr { code: "untrusted", status: 403, message: u.message_in(ar) }, false);
     }
     let msg = err.to_string();
     // Machine-readable errors keep their exact text (the UI parses it).
     for (prefix, status, code) in PREFIXES {
         if msg.starts_with(prefix) || msg.contains(&format!(" {prefix}")) {
-            return UserErr { code, status: *status, message: msg };
+            return (UserErr { code, status: *status, message: msg }, false);
         }
     }
-    if let Some(key) = known_raw(&msg) { return user_err_in(ar, key, &[]); }
+    if let Some(key) = known_raw(&msg) { return (user_err_in(ar, key, &[]), true); }
     // Bare operating-system and parser errors mean nothing to a person.
     let io = err.chain().find_map(|c| c.downcast_ref::<std::io::Error>());
     if let Some(io) = io {
-        if let Some(u) = io.get_ref().and_then(|inner| inner.downcast_ref::<UserErr>()) { return u.clone(); }
-        if io.kind() == std::io::ErrorKind::NotFound { return user_err_in(ar, "not_found.file", &[]); }
-        if io.kind() == std::io::ErrorKind::TimedOut { return user_err_in(ar, "git.timeout", &[]); }
-        return UserErr { code: "internal", status: 500, message: format!("{} ({msg})", text_in(ar, "unexpected", &[])) };
+        if let Some(u) = io.get_ref().and_then(|inner| inner.downcast_ref::<UserErr>()) { return (u.clone(), false); }
+        if io.kind() == std::io::ErrorKind::NotFound { return (user_err_in(ar, "not_found.file", &[]), true); }
+        if io.kind() == std::io::ErrorKind::TimedOut { return (user_err_in(ar, "git.timeout", &[]), true); }
+        return (generic("internal", 500), true);
     }
     if msg.contains("(os error ") {
-        if msg.contains("os error 2)") { return user_err_in(ar, "not_found.file", &[]); }
-        return UserErr { code: "internal", status: 500, message: format!("{} ({msg})", text_in(ar, "unexpected", &[])) };
+        if msg.contains("os error 2)") { return (user_err_in(ar, "not_found.file", &[]), true); }
+        return (generic("internal", 500), true);
     }
-    if err.chain().any(|c| c.downcast_ref::<serde_json::Error>().is_some()) {
-        return UserErr { code: "internal", status: 500, message: format!("{} ({msg})", text_in(ar, "unexpected", &[])) };
-    }
+    if err.chain().any(|c| c.downcast_ref::<serde_json::Error>().is_some()) { return (generic("internal", 500), true); }
+    // Git's or another program's own words: a plain sentence, their text kept as detail.
+    if technical(&msg) { return (generic("error", 400), true); }
     // Everything else is a message some part of the app wrote for the person. Ones that are not
-    // translated yet stay in English behind a sentence in the UI language.
-    let message = if ar && !has_arabic(&msg) { format!("{} ({msg})", text_in(true, "unexpected", &[])) } else { msg };
-    UserErr { code: "error", status: 400, message }
+    // translated yet are a plain sentence in Arabic, with the English kept as detail.
+    if ar && !has_arabic(&msg) { return (generic("error", 400), true); }
+    (UserErr { code: "error", status: 400, message: msg }, false)
 }
 
 pub fn classify(err: &anyhow::Error) -> UserErr { classify_in(arabic(), err) }
@@ -1097,9 +1233,57 @@ mod tests {
             assert!(u.message.contains("Repair history") && !u.message.contains(".git"), "{}", u.message);
         }
         assert_eq!(c(anyhow::anyhow!("no such chat"), false).status, 404);
-        // An untranslated message stays readable: as is in English, behind a generic sentence in Arabic.
+        // An untranslated message stays readable: as is in English; in Arabic a plain sentence,
+        // with the English kept as detail.
         assert_eq!(c(anyhow::anyhow!("give the project a name"), false).message, "give the project a name");
-        assert_eq!(c(anyhow::anyhow!("give the project a name"), true).message, "حدث خطأ غير متوقع. (give the project a name)");
+        assert_eq!(c(anyhow::anyhow!("give the project a name"), true).message, "حدث خطأ غير متوقع.");
+        assert_eq!(explain_in(true, &anyhow::anyhow!("give the project a name")).1.as_deref(), Some("give the project a name"));
+        assert_eq!(explain_in(false, &anyhow::anyhow!("give the project a name")).1, None);
         assert_eq!(c(anyhow::anyhow!("هذه رسالة عربية"), true).message, "هذه رسالة عربية");
+    }
+
+    #[test]
+    fn technical_words_stay_behind_a_plain_sentence() {
+        // Git's own output never is the message: a plain sentence, git's words as detail.
+        for raw in ["pull failed: git pull --rebase: fatal: refusing to merge unrelated histories",
+                    "git merge --no-edit: error: Your local changes would be overwritten",
+                    "claude: something broke inside"] {
+            for ar in [false, true] {
+                let (shown, detail) = explain_in(ar, &anyhow::anyhow!("{raw}"));
+                assert_eq!(shown.message, text_in(ar, "unexpected", &[]), "{raw}");
+                assert!(!shown.message.contains("git") && !shown.message.contains("fatal"), "{}", shown.message);
+                assert_eq!(detail.as_deref(), Some(raw));
+            }
+        }
+        // A known one is said plainly, and still keeps what git said.
+        let (shown, detail) = explain_in(false, &anyhow::anyhow!("git push -u -- origin main: remote: Repository not found.\nfatal: repository 'https://github.com/a/b.git/' not found"));
+        assert_eq!(shown.code, "sync_failed");
+        assert!(shown.message.contains("Settings › Library & backup"));
+        assert!(detail.unwrap().contains("Repository not found"));
+        // The operating system's words, too, are only detail.
+        let (shown, detail) = explain_in(true, &std::io::Error::from(std::io::ErrorKind::PermissionDenied).into());
+        assert_eq!((shown.status, shown.message.as_str()), (500, "حدث خطأ غير متوقع."));
+        assert!(detail.is_some());
+        // Our own sentences need no detail.
+        assert_eq!(explain_in(false, &user_err_in(false, "busy", &[]).into()).1, None);
+    }
+
+    #[test]
+    fn a_detailed_error_shows_its_sentence_and_keeps_the_rest() {
+        let e = anyhow::Error::from(Detailed { shown: user_err_in(true, "history.undo_failed", &[]), detail: "git revert: error: could not revert 1234".into() }).context("undoing");
+        let (shown, detail) = explain_in(true, &e);
+        assert_eq!((shown.code, shown.status), ("conflict", 409));
+        assert!(shown.message.starts_with("تعذّر التراجع"));
+        assert_eq!(detail.as_deref(), Some("git revert: error: could not revert 1234"));
+        assert_eq!(classify_in(true, &e).message, shown.message);
+        // A very long text is cut.
+        let long = err_detail("assistant.failed", &[], "x".repeat(DETAIL_MAX * 2));
+        assert_eq!(explain_in(false, &long).1.unwrap().chars().count(), DETAIL_MAX);
+    }
+
+    #[test]
+    fn the_app_is_called_thoughts_in_arabic_too() {
+        // «أفكار» is the Ideas page: the app's own name stays in Latin letters.
+        for x in TABLE { assert!(!x.ar.contains("«أفكار»"), "{}", x.key); }
     }
 }

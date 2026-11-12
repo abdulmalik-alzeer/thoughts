@@ -1708,7 +1708,7 @@ pub async fn start_run(
     })?;
     let Some(mut stdin) = child.stdin.take() else {
         if let Some(pid) = child.id() { crate::proc::kill_tree(pid); }
-        anyhow::bail!("could not connect to the assistant process");
+        return Err(crate::tr::err("assistant.no_connection", &[]));
     };
     // Remember the process, so a daemon that dies uncleanly can be cleaned up after.
     let pid = child.id();
@@ -1771,6 +1771,8 @@ pub async fn start_run(
             }
             (Ended::Stopped, _) => push(&state, &id, Msg::new("system", stopped)).await,
             (Ended::NoResult, _) if !f.stderr.trim().is_empty() => push(&state, &id, error_msg(&state, f.stderr.trim()).await).await,
+            // Ended with no answer and no word of why: say so, rather than nothing at all.
+            (Ended::NoResult, _) => push(&state, &id, Msg::new("error", crate::tr::text("assistant.no_answer", &[]))).await,
             _ => {}
         }
         if ok {
@@ -2226,8 +2228,46 @@ async fn error_msg(state: &AppState, text: &str) -> Msg {
             m.tool = Some(json!({"code": code, "detail": text.chars().take(600).collect::<String>()}));
             m
         }
-        None => Msg::new("error", text),
+        // Anything else: a plain sentence, the assistant's own words kept for "Show details".
+        None => {
+            let key = run_problem(text);
+            let mut m = Msg::new("error", crate::tr::text(key, &[]));
+            m.tool = Some(json!({"code": ASSISTANT_ERROR, "reason": key.trim_start_matches("assistant."), "detail": text.chars().take(2000).collect::<String>()}));
+            m
+        }
     }
+}
+
+/// The chat message for an action that failed with `err`: the plain sentence, and the technical
+/// words behind it (if any) kept for "Show details".
+pub fn failure_msg_in(ar: bool, err: &anyhow::Error) -> Msg {
+    let (shown, detail) = crate::tr::explain_in(ar, err);
+    let mut m = Msg::new("error", shown.message);
+    if let Some(d) = detail { m.tool = Some(json!({"code": ASSISTANT_ERROR, "reason": "failed", "detail": d})); }
+    m
+}
+
+/// `tool.code` of the chat message for a run that failed for another reason (`tool.reason` says
+/// which, `tool.detail` holds the assistant's own words).
+pub const ASSISTANT_ERROR: &str = "assistantError";
+
+/// What a failed run's own words mean for the person: the `tr` key of the sentence to show.
+pub fn run_problem(text: &str) -> &'static str {
+    let t = text.to_lowercase();
+    let has = |ks: &[&str]| ks.iter().any(|k| t.contains(k));
+    if has(&["credit balance is too low", "insufficient credit", "billing"]) { return "assistant.credit"; }
+    if has(&["max_budget", "max budget", "budget exceeded", "exceeded the budget"]) { return "assistant.budget"; }
+    if has(&["error_max_turns", "max turns", "maximum number of turns"]) { return "assistant.turn_limit"; }
+    if has(&["prompt is too long", "context length", "context window", "input is too long", "too many tokens", "request too large"]) { return "assistant.too_long"; }
+    if has(&["rate limit", "rate_limit", "error: 429", "api error: 429", "too many requests"]) { return "assistant.rate_limit"; }
+    if has(&["overloaded", "api error: 500", "api error: 502", "api error: 503", "api error: 504", "api error: 529", "internal server error", "service unavailable", "bad gateway"]) {
+        return "assistant.overloaded";
+    }
+    if has(&["connection error", "econnrefused", "econnreset", "enotfound", "etimedout", "eai_again", "fetch failed", "unable to connect",
+             "socket hang up", "getaddrinfo", "could not resolve", "network is unreachable", "network error", "request timed out"]) {
+        return "assistant.offline";
+    }
+    "assistant.failed"
 }
 
 fn tool_label(name: &str, input: &Value) -> String {
@@ -2470,9 +2510,11 @@ mod tests {
         assert!(st.auth_failed.load(std::sync::atomic::Ordering::Relaxed));
         st.note_run_ok();
         assert!(!st.auth_failed.load(std::sync::atomic::Ordering::Relaxed));
-        // Any other failure is shown as it is and changes nothing.
+        // Any other failure is said in plain words, keeps the assistant's own as detail, and
+        // changes nothing.
         let m = error_msg(&st, "API Error: 529 Overloaded").await;
-        assert!(m.tool.is_none() && m.text.contains("529"));
+        assert!(!m.text.contains("529") && m.tool.as_ref().unwrap()["detail"] == "API Error: 529 Overloaded");
+        assert_eq!(m.tool.as_ref().unwrap()["code"], ASSISTANT_ERROR);
         assert!(!st.auth_failed.load(std::sync::atomic::Ordering::Relaxed));
         // With the user's own provider key, a refusal is about that key, not the Claude account:
         // said in plain words, and the app does not start asking the user to sign in.

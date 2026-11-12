@@ -39,11 +39,14 @@ impl IntoResponse for ApiErr {
     /// 422 not valid, 403 not allowed, 500 unexpected (400 for anything unclassified). The message
     /// is in the UI language and keeps any machine prefix (`BUSY::`, `STALE::`…) the UI matches on.
     /// A folder that needs the user's trust answers 403 `untrusted` with a `trust` object as well.
+    /// When the message stands in for technical words (git's, the system's), those come as
+    /// `detail`, which the app keeps under "Show details".
     fn into_response(self) -> Response {
-        let e = crate::tr::classify(&self.0);
+        let (e, detail) = crate::tr::explain(&self.0);
         if e.status >= 500 { crate::log::error(format!("api: {:#}", self.0)); }
         let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
         let mut body = json!({"error": e.message, "code": e.code});
+        if let Some(d) = detail { body["detail"] = json!(d); }
         // The trust question travels as data of its own (`trust: {id, path, items…}`), put there only
         // for the daemon's own typed error — the one thing the app's trust dialog reacts to.
         if let Some(u) = self.0.chain().find_map(|c| c.downcast_ref::<crate::trust::Untrusted>()) { body["trust"] = u.payload(); }
@@ -923,7 +926,7 @@ fn login_item(enable: bool) -> anyhow::Result<()> {
             if !o.status.success() { return Ok(()); }
             o
         };
-        if !out.status.success() { bail!("could not change the start-at-login setting: {}", String::from_utf8_lossy(&out.stderr).trim()); }
+        if !out.status.success() { return Err(crate::tr::err_detail("login_item.failed", &[], String::from_utf8_lossy(&out.stderr).trim())); }
         Ok(())
     }
     #[cfg(target_os = "linux")]
@@ -949,7 +952,7 @@ fn login_item(enable: bool) -> anyhow::Result<()> {
     #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
     {
         let _ = enable;
-        bail!("starting at login is not supported on this system")
+        Err(crate::tr::err("login_item.unsupported", &[]))
     }
 }
 
@@ -1298,7 +1301,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     // the chat says why and offers to run it again.
     if let Err(e) = start_setup(st.clone(), &id, false).await {
         crate::log::warn(format!("onboarding: the setup run did not start: {e:#}"));
-        claude::push(&st, &id, Msg::new("error", crate::tr::classify(&e).message)).await;
+        claude::push(&st, &id, claude::failure_msg_in(crate::tr::arabic(), &e)).await;
     }
     Ok(Json(json!({"ok": true, "setupChatId": id})))
 }
@@ -2564,7 +2567,7 @@ fn save_attachment(dir: &std::path::Path, name: &str, bytes: &[u8]) -> anyhow::R
             Err(e) => return Err(e.into()),
         }
     }
-    bail!("too many files named {name}")
+    Err(crate::tr::err("files.too_many_named", &[("name", name)]))
 }
 
 type RunDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'static, ()> + Send>;
@@ -2607,7 +2610,7 @@ async fn resend_without_session(st: &Arc<AppState>, again: RunSpec, kind: &str) 
         Ok(()) => true,
         Err(e) => {
             crate::log::error(format!("chat {id}: could not continue from the saved conversation: {e}"));
-            claude::push(st, &id, Msg::new("error", crate::tr::classify(&e).message)).await;
+            claude::push(st, &id, claude::failure_msg_in(crate::tr::arabic(), &e)).await;
             false
         }
     }
@@ -3123,7 +3126,7 @@ async fn project_add(State(st): S, Json(p): Json<NewProject>) -> R {
     let path = if p.inside_library {
         let slug: String = p.name.to_lowercase().chars().map(|c| if c.is_alphanumeric() { c } else { '-' }).collect();
         let slug = slug.trim_matches('-');
-        if slug.is_empty() { bail!("give the project a name"); }
+        if slug.is_empty() { return Err(crate::tr::err("folder.name_needed", &[]).into()); }
         let dir = library::resolve(&s.library().ok_or_else(|| crate::tr::err("library.none", &[]))?, &format!("projects/{slug}"))?;
         std::fs::create_dir_all(&dir)?;
         dir
@@ -3137,7 +3140,7 @@ async fn project_add(State(st): S, Json(p): Json<NewProject>) -> R {
     // A linked folder can carry its own hooks and settings: the user must trust it first.
     crate::trust::require(&path)?;
     let name = if !p.name.trim().is_empty() { p.name.trim().to_string() } else {
-        path.file_name().map(|n| n.to_string_lossy().to_string()).ok_or_else(|| anyhow::anyhow!("give the project a name"))?
+        path.file_name().map(|n| n.to_string_lossy().to_string()).ok_or_else(|| crate::tr::err("folder.name_needed", &[]))?
     };
     let proj = Project { id: uuid::Uuid::new_v4().to_string(), name, path: path.to_string_lossy().into() };
     change_settings(&mut s, Settings::save, |s| s.projects.push(proj.clone()))?;
@@ -3746,6 +3749,22 @@ mod tests {
         trust_library(Json(TrustReq { id })).await.unwrap();
         assert!(crate::trust::require(&d).is_ok());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// UX-13: git's or the system's words never are the message; they come as `detail`.
+    #[tokio::test]
+    async fn technical_words_come_as_detail_behind_a_plain_sentence() {
+        async fn body(e: anyhow::Error) -> Value {
+            let bytes = axum::body::to_bytes(ApiErr(e).into_response().into_body(), 1 << 20).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+        let v = body(anyhow::anyhow!("git pull --rebase -- origin main: fatal: refusing to merge unrelated histories")).await;
+        assert!(!v["error"].as_str().unwrap().contains("git") && v["code"] == "error", "{v}");
+        assert!(v["detail"].as_str().unwrap().contains("refusing to merge unrelated histories"), "{v}");
+        let v = body(crate::tr::err_detail("history.undo_failed", &[], "git revert: error: could not revert abc")).await;
+        assert_eq!((v["code"].as_str(), v["detail"].as_str()), (Some("conflict"), Some("git revert: error: could not revert abc")));
+        // Our own sentences come alone.
+        assert!(body(crate::tr::err("busy", &[])).await.get("detail").is_none());
     }
 
     #[tokio::test]

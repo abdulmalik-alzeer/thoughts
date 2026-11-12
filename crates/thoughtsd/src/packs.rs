@@ -358,10 +358,10 @@ pub async fn import_with(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool, own_s
     let name = quoted_name(&name);
     let mut summary = match (own_summary, arabic, feature) {
         (Some(s), _, _) => s,
-        (None, true, true) => format!("إضافة حزمة «{name}» إلى تخصيصاتك\n\nتضيف الحزمة {} ملف/ملفات وتُدمج مع ما لديك دون أن تستبدل إعداداتك الأخرى. جرّبها أولًا، ثم أبقِها إن أعجبتك؛ ويمكنك التراجع عنها لاحقًا من السجل.", files.len()),
-        (None, true, false) => format!("استيراد حزمة التخصيص «{name}»\n\nتحتوي الحزمة على {} ملف/ملفات تحلّ محلّ الملفات المقابلة لديك. جرّبها أولًا، ثم أبقِها إن أعجبتك؛ ويمكنك التراجع عنها لاحقًا من السجل.", files.len()),
-        (None, false, true) => format!("Add the pack \"{name}\" to your customisations\n\nThe pack brings {} file(s) and is merged into what you already have; your other settings stay as they are. Try it first, then keep it if you like it — you can undo it later from History.", files.len()),
-        (None, false, false) => format!("Import the customisation pack \"{name}\"\n\nThe pack contains {} file(s), which replace the matching files you have now. Try it first, then keep it if you like it — you can undo it later from History.", files.len()),
+        (None, true, true) => format!("إضافة حزمة «{name}» إلى تخصيصاتك\n\nتضيف الحزمة {} وتُدمج مع ما لديك دون أن تستبدل إعداداتك الأخرى. جرّبها أولاً، ثم اعتمدها إن أعجبتك؛ ويمكنك التراجع عنها لاحقاً من السجل.", files_ar(files.len(), false)),
+        (None, true, false) => format!("استيراد حزمة التخصيص «{name}»\n\nتحتوي الحزمة على {} تحلّ محلّ الملفات المقابلة لديك. جرّبها أولاً، ثم اعتمدها إن أعجبتك؛ ويمكنك التراجع عنها لاحقاً من السجل.", files_ar(files.len(), true)),
+        (None, false, true) => format!("Add the pack \"{name}\" to your customisations\n\nThe pack brings {} and is merged into what you already have; your other settings stay as they are. Try it first, then keep it if you like it — you can undo it later from History.", files_en(files.len())),
+        (None, false, false) => format!("Import the customisation pack \"{name}\"\n\nThe pack contains {}, which replace the matching files you have now. Try it first, then keep it if you like it — you can undo it later from History.", files_en(files.len())),
     };
     if !replaced.is_empty() {
         let list = replaced.join(", ");
@@ -371,9 +371,32 @@ pub async fn import_with(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool, own_s
     Ok(())
 }
 
+/// "1 file", "3 files".
+fn files_en(n: usize) -> String { if n == 1 { "1 file".into() } else { format!("{n} files") } }
+
+/// A number of files in Arabic, with the noun in the form the number takes (`after_preposition`:
+/// after «على», where one file is «ملف واحد» rather than «ملفاً واحداً»).
+fn files_ar(n: usize, after_preposition: bool) -> String {
+    match (n, n % 100) {
+        (1, _) => if after_preposition { "ملف واحد".into() } else { "ملفاً واحداً".into() },
+        (2, _) => "ملفين".into(),
+        (_, 3..=10) => format!("{n} ملفات"),
+        (_, 11..=99) => format!("{n} ملفاً"),
+        _ => format!("{n} ملف"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_counts_read_naturally_in_both_languages() {
+        assert_eq!((files_en(1), files_en(3)), ("1 file".to_string(), "3 files".to_string()));
+        let ar: Vec<String> = [1, 2, 3, 10, 11, 99, 100, 103, 111].iter().map(|n| files_ar(*n, false)).collect();
+        assert_eq!(ar, ["ملفاً واحداً", "ملفين", "3 ملفات", "10 ملفات", "11 ملفاً", "99 ملفاً", "100 ملف", "103 ملفات", "111 ملفاً"]);
+        assert_eq!(files_ar(1, true), "ملف واحد");
+    }
 
     #[test]
     fn path_rules() {

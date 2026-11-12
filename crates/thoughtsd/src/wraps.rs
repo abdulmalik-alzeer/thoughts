@@ -271,7 +271,7 @@ async fn complete_summary(state: &AppState, prompt: &str, fallback: bool) -> any
         let s = state.settings.read().await;
         (crate::assistant::one_shot_model(&s, true), crate::assistant::one_shot_model(&s, false))
     };
-    let empty = || anyhow::anyhow!("the assistant returned an empty summary");
+    let empty = || crate::tr::err("assistant.empty_summary", &[]);
     let first = match claude::complete_cheap(state, prompt, mini.clone()).await {
         Ok(t) if !t.trim().is_empty() => return Ok(t),
         Ok(_) => empty(),
@@ -677,7 +677,7 @@ async fn prepare_preview(st: Arc<AppState>, wid: String, pending: Vec<ChatMeta>,
     let started = claude::start_run(st.clone(), spec, Some(after_plan_run(wid.clone()))).await;
     if let Err(e) = started {
         crate::log::error(format!("wrap {wid}: preview could not start: {e}"));
-        claude::push(&st, &wid, Msg::new("error", crate::tr::classify_in(ar, &e).message)).await;
+        claude::push(&st, &wid, claude::failure_msg_in(ar, &e)).await;
         st.chats.update(&wid, |c| if c.meta["phase"] == "preview" { c.meta["phase"] = json!("preview_failed"); }).await;
         changed(&st, &wid).await;
     }
@@ -817,7 +817,7 @@ async fn run_wrap(state: Arc<AppState>, spec: RunSpec, fresh: String, ar: bool, 
                     Ok(()) => return,
                     Err(e) => {
                         crate::log::error(format!("wrap {id}: could not start again: {e}"));
-                        claude::push(&st, &id, Msg::new("error", crate::tr::classify_in(ar, &e).message)).await;
+                        claude::push(&st, &id, claude::failure_msg_in(ar, &e)).await;
                     }
                 }
             }
@@ -1611,7 +1611,7 @@ pub async fn save(state: Arc<AppState>, wrap_id: &str) -> anyhow::Result<()> {
                 let files = crate::git::unmerged(&state, &dir).await;
                 let _ = crate::git::git(&state, &dir, &["rebase", "--abort"]).await;
                 crate::log::warn(format!("wrap {wrap_id}: its changes clash with later ones in {} file(s): {e}", files.len()));
-                if files.is_empty() { anyhow::bail!("the changes could not be added to your library: {e}"); }
+                if files.is_empty() { return Err(crate::tr::err_detail("wrap.apply_failed", &[], format!("{e:#}"))); }
                 return Err(crate::tr::err("wrap.conflict", &[("files", &files.join(";"))]));
             }
             // Everything it would add is in the library already (the person made the same changes).
@@ -1778,9 +1778,9 @@ pub async fn reorganize_prepare(state: &AppState, lib: &Path, wt: &Path) -> anyh
     let _g = state.git_lock.lock().await;
     crate::trust::require_git(lib)?;
     crate::git::commit_all(state, lib, &crate::git::subject::edit("changes before reorganize")).await?;
-    if crate::git::head(state, lib).await.is_none() { anyhow::bail!("there is nothing in this library to reorganize yet"); }
+    if crate::git::head(state, lib).await.is_none() { return Err(crate::tr::err("reorganize.empty", &[])); }
     let base = crate::git::current_branch(state, lib).await?;
-    if crate::git::internal_branch(&base) { anyhow::bail!("the library is on \"{base}\", which the app keeps for its own use"); }
+    if crate::git::internal_branch(&base) { return Err(crate::tr::err("git.internal_branch", &[("branch", &base)])); }
     remove_worktree(state, lib, wt, "").await;
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let mut branch = format!("reorganize/{stamp}");
@@ -1809,7 +1809,7 @@ pub async fn reorganize_conclude(state: &AppState, lib: &Path, wt: &Path, branch
                 let files = crate::git::unmerged(state, lib).await;
                 let _ = crate::git::git(state, lib, &["merge", "--abort"]).await;
                 crate::log::warn(format!("reorganize: merge of {branch} conflicts in {} file(s): {e}", files.len()));
-                if files.is_empty() { anyhow::bail!("could not apply the new structure: {e}"); }
+                if files.is_empty() { return Err(crate::tr::err_detail("reorganize.apply_failed", &[], format!("{e:#}"))); }
                 anyhow::bail!("REORG_CONFLICT::{}", files.join(";"));
             }
         }
@@ -1823,7 +1823,7 @@ pub async fn reorganize_start(state: Arc<AppState>, instructions: &str) -> anyho
     // Reorganize works on a copy and is reviewed and undone through the history of changes.
     if !state.settings.read().await.git_enabled() || !crate::git::ready(&state, &lib).await { return Err(crate::tr::err("no_history", &[])); }
     if state.chats.list().await.iter().any(|c| c.kind == "reorganize" && matches!(c.meta["phase"].as_str(), Some("running") | Some("review"))) {
-        anyhow::bail!("A reorganize is already in progress or waiting for your review. Keep or discard it first.");
+        return Err(crate::tr::err("reorganize.waiting", &[]));
     }
     // The working copy is cut from what is recorded: the kit's session hook must be the current one first.
     crate::claude::refresh_starter_hook(&state, &lib).await;
@@ -1909,10 +1909,10 @@ pub async fn reorganize_finish(state: &AppState, id: &str, keep: bool) -> anyhow
     if c.kind != "reorganize" { anyhow::bail!("no such chat"); }
     // Its branch is in the library it was started in: never merged into another one.
     if !Scope::now(state).await.holds(c.library.as_deref()) { return Err(crate::tr::err("wrap.other_library", &[])); }
-    if c.running { anyhow::bail!("the reorganize is still running — stop it or wait for it to finish"); }
+    if c.running { return Err(crate::tr::err("reorganize.running", &[])); }
     match c.meta["phase"].as_str() {
-        Some("merged") | Some("discarded") => anyhow::bail!("this reorganize has already been closed"),
-        Some("interrupted") | Some("failed") if keep => anyhow::bail!("this reorganize did not finish, so there is nothing to apply"),
+        Some("merged") | Some("discarded") => return Err(crate::tr::err("reorganize.closed", &[])),
+        Some("interrupted") | Some("failed") if keep => return Err(crate::tr::err("reorganize.unfinished", &[])),
         // Stopped or failed halfway: what it left is an incomplete arrangement, not a proposal.
         _ if keep && c.meta["ok"] == false => return Err(crate::tr::err("reorganize.unfinished", &[])),
         _ => {}

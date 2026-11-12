@@ -273,7 +273,7 @@ fn save_numbered(root: &Path, folder: &str, name: &str, bytes: &[u8]) -> anyhow:
             Err(e) => return Err(e.into()),
         }
     }
-    anyhow::bail!("too many files named {name}")
+    Err(crate::tr::err("files.too_many_named", &[("name", name)]))
 }
 
 /// Largest picture that can be pasted or dropped into a note.
@@ -341,7 +341,7 @@ pub fn save_picture(root: &Path, note: &str, name: &str, bytes: &[u8]) -> anyhow
             Err(e) => return Err(e.into()),
         }
     }
-    anyhow::bail!("too many pictures named {stem}")
+    Err(crate::tr::err("files.too_many_named", &[("name", &stem)]))
 }
 
 /// Split `---\nyaml\n---\nbody`.

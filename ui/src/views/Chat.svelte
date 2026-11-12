@@ -785,6 +785,10 @@
           {:else if m.role === 'error' && m.tool?.code !== 'sessionLost'}
             <div class="msg err" role="alert">
               <div class="errline"><Icon name="warning" size={14} /> <span dir="auto">{m.text}</span></div>
+              {#if m.tool?.detail && m.tool.detail !== m.text}
+                <!-- What the assistant itself said: for whoever helps, folded away. -->
+                <details class="errdetail"><summary>{t('wording.showDetails')}</summary><pre dir="ltr">{m.tool.detail}</pre></details>
+              {/if}
               {#if m.tool?.code === 'signedOut' && m.id === lastAnswerId}
                 <button class="act show" onclick={() => signIn(m.tool?.provider === 'codex' ? 'codex' : 'claude')}><Icon name="external" size={14} /><span>{t(m.tool?.provider === 'codex' ? 'codex.set.signIn' : 'auth.signIn')}</span></button>
               {:else if m.tool?.code === 'providerKey' && m.id === lastAnswerId}
@@ -1043,4 +1047,6 @@
     header select, header .btn, .cost, .acts, .jump, .composer, .runbar, .approve, .dropzone, .banner .btn, .working, .think, .hint, .suggest { display: none !important; }
     .tooldetail pre { max-height: none; overflow: visible; }
   }
+  .errdetail summary { cursor: pointer; font-size: var(--fs-xs); color: var(--muted); width: max-content; }
+  .errdetail pre { color: var(--muted); margin: 6px 0 0; max-height: 180px; overflow: auto; font-size: var(--fs-xs); white-space: pre-wrap; overflow-wrap: anywhere; text-align: start; }
 </style>
