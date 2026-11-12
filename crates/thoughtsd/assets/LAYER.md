@@ -183,8 +183,9 @@ each defining at least the thirteen colour tokens above. Keep existing entries.
 }
 ```
 
-- `chips` — one-click starters under the Home prompt box. `prompt` is what gets filled in; end it
-  with a space when the user is meant to finish the sentence.
+- `chips` — one-click starters under the Home prompt box. Clicking one puts `prompt` in the box
+  (above anything already typed); it is never sent until the user presses Send. End it with a space
+  when the user is meant to finish the sentence.
 - `hidden` — Home sections not to show. Sections: `stats`, `ideas`, `todos`, `chats`, `projects`,
   `upcoming`.
 - `order` — the order of things on Home. Besides the six sections it may name `suggestions` (the
@@ -263,7 +264,7 @@ export default function (thoughts) {
 | `thoughts.ui.addView({ id, title, icon?, render(el) })` | Adds a page to the sidebar; `render` fills the element `el` | none |
 | `thoughts.ui.addCommand({ id, title, run })` | Adds a command to the command palette | none |
 | `thoughts.ui.addHomeWidget({ id, title, render(el) })` | Adds a box to the Home screen (place it with `widget:<id>` in `home.json`) | none |
-| `thoughts.ui.addHomeChip({ id, label, prompt })` | Adds a quick-start chip on Home (prefer `home.json` when it is static) | none |
+| `thoughts.ui.addHomeChip({ id, label, prompt })` | Adds a quick-start chip on Home that fills the prompt box (prefer `home.json` when it is static) | chat:start |
 | `thoughts.ui.addItemAction({ target, id, label, run })` | Adds an action to each todo (`target: "todo"`) or idea (`target: "idea"`); see below | none |
 | `thoughts.on(event, cb)` | Calls `cb` when something happens; returns a function that stops listening | none |
 

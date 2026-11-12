@@ -114,7 +114,7 @@ export default {
     'layer.sug.setUp': 'Set it up',
     'layer.sug.notNow': 'Not now',
     'layer.signalsTitle': 'Suggestions from how you work',
-    'layer.signalsBody': 'Thoughts notes which pages you open and which quick buttons you use, so it can suggest small improvements such as a button for something you type often. These notes stay on this computer and are never sent anywhere — not to us, not to the assistant.',
+    'layer.signalsBody': 'Thoughts notes which pages you open and which quick buttons you use — never what you type — so it can suggest small improvements. These notes stay on this computer and are never sent to us. The assistant only sees a short count of them when you accept a suggestion that uses them, such as the monthly tune-up.',
     'layer.signalsToggle': 'Keep these notes and show suggestions',
 
     // app updates
@@ -307,7 +307,7 @@ export default {
     'layer.sug.setUp': 'جهّزه لي',
     'layer.sug.notNow': 'ليس الآن',
     'layer.signalsTitle': 'اقتراحات من طريقة عملك',
-    'layer.signalsBody': 'يدوّن التطبيق الصفحات التي تفتحها والأزرار السريعة التي تستخدمها، ليقترح عليك تحسينات صغيرة مثل زر لعبارة تكتبها كثيراً. هذه الملاحظات تبقى على هذا الجهاز ولا تُرسل إلى أي مكان — لا إلينا ولا إلى المساعد.',
+    'layer.signalsBody': 'يدوّن التطبيق الصفحات التي تفتحها والأزرار السريعة التي تستخدمها — ولا يدوّن أبداً ما تكتبه — ليقترح عليك تحسينات صغيرة. تبقى هذه الملاحظات على هذا الجهاز ولا تُرسل إلينا، ولا يطّلع المساعد إلا على ملخص قصير لأعدادها حين تقبل اقتراحاً يعتمد عليها، مثل الصيانة الشهرية.',
     'layer.signalsToggle': 'احتفظ بهذه الملاحظات واعرض الاقتراحات',
 
     'layer.appUpdatesHint': 'يُتحقق من الإصدارات الجديدة عند تشغيل التطبيق. تخصيصاتك محفوظة: ما غيّرته بنفسك لا يُستبدل أبداً دون سؤالك.',

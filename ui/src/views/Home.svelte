@@ -4,9 +4,10 @@
   import { app, go, refreshChats, toast, track } from '../lib/store.svelte';
   import { startCustomise } from '../lib/layer';
   import { t, tn, ago, fmtDate, fmtNum, lang } from '../lib/i18n';
-  import { dueLabel, dueState, normTodo } from '../lib/content/util';
+  import { dueLabel as dueLabelOn, dueState as dueStateOn, normTodo } from '../lib/content/util';
+  import { clock } from '../lib/clock.svelte';
   import { failed } from '../lib/errors';
-  import { term, termN } from '../lib/terms';
+  import { isWorkItem, newItemTrigger, term, termN } from '../lib/terms';
   import { capturePrefix, captureKind, normalizeCapture } from '../lib/capture';
   import Icon from '../lib/Icon.svelte';
   import Emblem from '../lib/Emblem.svelte';
@@ -16,11 +17,31 @@
   let ideas = $state<any[]>([]);
   let lists = $state<any[]>([]);
   let files = $state(0);
-  let ask = $state('');
+  // What is in the box survives looking something up and coming back (and a restart), like a chat draft.
+  const DRAFT_KEY = 'thoughts.homedraft';
+  const DRAFT_MAX = 20000;
+  function readDraft(): { text: string; chip: boolean } {
+    try {
+      const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+      if (d && typeof d.text === 'string') return { text: d.text.slice(0, DRAFT_MAX), chip: !!d.chip };
+    } catch { /* no draft */ }
+    return { text: '', chip: false };
+  }
+  const draft = readDraft();
+  let ask = $state(draft.text);
   // True from the moment a chip put its own text in the box until the box is empty again: such a
   // message is not one the user wrote from scratch, so it never counts as `byUser`.
-  let chipFilled = false;
+  let chipFilled = $state(draft.chip);
   $effect(() => { if (!ask.trim()) chipFilled = false; });
+  $effect(() => {
+    const text = ask.slice(0, DRAFT_MAX), chip = chipFilled;
+    try {
+      if (text.trim()) localStorage.setItem(DRAFT_KEY, JSON.stringify({ text, chip }));
+      else localStorage.removeItem(DRAFT_KEY);
+    } catch { /* storage full or unavailable: the draft just isn't kept */ }
+  });
+  // From pressing send until the new chat opens: a second Enter, click or chip does nothing.
+  let sending = $state(false);
   let askEl: HTMLTextAreaElement;
 
   // Nothing is shown as "0" until it has really been counted: placeholders while loading, a notice when it failed.
@@ -32,7 +53,8 @@
     const [i, td, st] = await Promise.allSettled([api('/library/ideas'), api('/todos'), api('/library/stats')]);
     if (i.status === 'fulfilled') ideas = Array.isArray(i.value) ? i.value : [];
     if (td.status === 'fulfilled') lists = Array.isArray(td.value) ? td.value : [];
-    if (st.status === 'fulfilled') files = Number(st.value?.markdownFiles) || 0;
+    // `notes` leaves out the library's own system files; older services only send `markdownFiles`.
+    if (st.status === 'fulfilled') files = Number(st.value?.notes ?? st.value?.markdownFiles) || 0;
     partFailed = { ideas: i.status === 'rejected', todos: td.status === 'rejected', files: st.status === 'rejected' };
     const bad = [i, td, st].find((r) => r.status === 'rejected') as PromiseRejectedResult | undefined;
     loadError = bad ? String(bad.reason?.message ?? bad.reason ?? '') || t('ui.home.loadFailed') : '';
@@ -92,9 +114,11 @@
 
   /** Capture chips: with nothing typed they put the prefix in the box for the user to finish; otherwise they send. */
   function capture(kind: 'todo' | 'idea') {
+    if (sending) return;
     track(kind === 'todo' ? 'home.chip:todo' : 'home.chip:new idea');
     const typed = ask.trim();
-    const prefix = capturePrefix(kind, lang());
+    // A new item uses the user's own word ("new client: …") so the assistant files it in the right place.
+    const prefix = kind === 'todo' ? capturePrefix(kind, lang()) : newItemTrigger();
     if (!typed || (captureKind(typed) === kind && !normalizeCapture(typed).replace(/^[^:]+:\s*/, '').trim())) {
       ask = prefix;
       askEl?.focus();
@@ -104,21 +128,31 @@
     submit(captureKind(typed) ? '' : prefix, false);
   }
 
+  /** Chips from customisations and add-ons only fill the box — the user sees the whole request and
+   *  sends it themselves, so no click can start a run the user has not read. Text already typed is kept below it. */
   function useChip(c: { label: string; prompt: string }) {
+    if (sending) return;
     track('home.chip:' + c.label);
-    // A prompt ending in a space is a sentence for the user to finish.
-    if (/\s$/.test(c.prompt) && !ask.trim()) { ask = c.prompt; chipFilled = true; askEl?.focus(); return; }
-    submit(/\s$/.test(c.prompt) || !ask.trim() ? c.prompt : c.prompt + '\n\n', false);
+    const typed = ask.trim();
+    ask = !typed ? c.prompt : /\s$/.test(c.prompt) ? c.prompt + typed : c.prompt + '\n\n' + typed;
+    chipFilled = true;
+    askEl?.focus();
+    requestAnimationFrame(() => askEl?.setSelectionRange(ask.length, ask.length));
   }
 
   onMount(() => { load(); loadSuggestions(); return on((e) => { if (['todos.changed', 'library.changed', 'chat.done'].includes(e.type)) load(); }); });
 
-  const hour = new Date().getHours();
+  // The greeting and the date follow the shared clock, so a window left open overnight catches up.
+  const hour = $derived(clock.hour);
   // Arabic says «مساء الخير» from mid-afternoon; «طاب نهارك» covers noon to three. English keeps "afternoon" until six.
   const greeting = $derived(t(hour < 12 ? 'goodMorning' : hour < 15 || (hour < 18 && lang() !== 'ar') ? 'goodAfternoon' : 'goodEvening'));
-  const today = $derived(fmtDate(new Date(), { weekday: 'long', day: 'numeric', month: 'long' }));
+  const today = $derived(fmtDate(clock.day + 'T12:00:00', { weekday: 'long', day: 'numeric', month: 'long' }));
+  const dueState = (d: string) => { clock.day; return dueStateOn(d); };
+  const dueLabel = (d: string) => { clock.day; return dueLabelOn(d); };
 
-  const active = $derived(ideas.filter((i) => i.status === 'active' || i.status === 'seed'));
+  // Only what is really in progress: new items ("seed") are not active yet. With a work word
+  // ("Active clients"), only work items count — not ideas or reference pages.
+  const active = $derived(ideas.filter((i) => i.status === 'active' && isWorkItem(i)));
   const recentIdeas = $derived([...ideas].sort((a, b) => String(b.updated).localeCompare(String(a.updated))).slice(0, 4));
   const openTodos = $derived(lists.flatMap((l) => l.items.filter((i: any) => !i.done).map((i: any) => ({ ...normTodo(i), file: l.file, idea: l.idea }))));
   // Next few dated todos, earliest first — so anything overdue leads the list.
@@ -127,27 +161,32 @@
   const recentChats = $derived(app.chats.filter((c) => c.kind === 'chat').slice(0, 5));
 
   async function submit(prefix = '', typed = true) {
+    if (sending) return;
     const text = normalizeCapture((prefix + ask).trim());
     if (!text) return askEl?.focus();
+    sending = true;
     if (captureKind(text) === 'todo') track('todo.add');
-    if (typed && !prefix) track('home.prompt:' + text.split(/\s+/).slice(0, 3).join(' '));
+    // Only that something was typed — never the words themselves (they stay in the chat, nowhere else).
+    if (typed && !prefix) track('home.prompt:');
     try {
       // Only what the user typed themselves counts as a chat they started (see `inherited_mode` in the service).
       const c = await post('/chats', { byUser: typed && !prefix && !chipFilled });
       await post(`/chats/${c.id}/send`, { text });
       ask = '';
-      await refreshChats();
+      await refreshChats().catch(() => {});
       go({ kind: 'chat', id: c.id });
     } catch (e) { failed(t('ui.home.sendFailed'), e); }
+    finally { sending = false; }
   }
 
-  async function toggle(it: any) {
+  /** When the change could not be saved the box is unticked again, so it shows what is really in the list. */
+  async function toggle(it: any, box?: HTMLInputElement) {
     const ref = { file: it.file, line: it.line, text: it.text };
     try {
       await post('/todos/toggle', ref);
       track('todo.done');
       toast(t('ui.todo.completed'), { key: 'todo-done', action: { label: t('undo'), run: () => { post('/todos/toggle', ref).then(load).catch((e) => failed(t('ui.todo.undoFailed'), e)); } } });
-    } catch (e) { failed(t('ui.todo.toggleFailed'), e); }
+    } catch (e) { failed(t('ui.todo.toggleFailed'), e); if (box) box.checked = false; }
     load();
   }
 
@@ -158,7 +197,7 @@
   }
 
   function keydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); submit(); }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!sending) submit(); }
   }
 </script>
 
@@ -172,7 +211,7 @@
       <button class="stat" onclick={() => go({ kind: 'ideas' })}>{@render num(active.length, partFailed.ideas)}<span>{termN('active', active.length)}</span></button>
       <button class="stat" onclick={() => go({ kind: 'todos' })}>{@render num(openTodos.length, partFailed.todos)}<span>{tn('ui.home.openTodos', openTodos.length)}</span></button>
       <button class="stat" class:attn={app.wrap.count > 0} onclick={() => (app.wrap.count ? startWrap() : go({ kind: 'chats' }))}>
-        <b>{fmtNum(app.wrap.count)}</b><span>{app.wrap.count ? tn('ui.home.toWrap', app.wrap.count) : t('allSaved')}</span></button>
+        <b>{#if app.wrap.count}{fmtNum(app.wrap.count)}{:else}<Icon name="check" size={26} />{/if}</b><span>{app.wrap.count ? tn('ui.home.toWrap', app.wrap.count) : t('allSaved')}</span></button>
       <button class="stat" onclick={() => go({ kind: 'docs' })}>{@render num(files, partFailed.files)}<span>{tn('ui.home.notes', files)}</span></button>
     {/if}
   </section>
@@ -219,7 +258,7 @@
         {#each upcoming as it (it.file + it.line)}
           {@const s = dueState(it.due!)}
           <label class="todo">
-            <input type="checkbox" onchange={() => toggle(it)} />
+            <input type="checkbox" onchange={(e) => toggle(it, e.currentTarget)} />
             <span class="grow" dir="auto">{it.title}</span>
             {#if it.idea}<span class="muted when ell"><bdi>{it.idea.split('/').pop()}</bdi></span>{/if}
             <span class="due {s}"><Icon name={s === 'overdue' ? 'warning' : 'calendar'} size={12} />{#if s === 'overdue'}<b>{t('todo.overdue')}</b> ·{/if} {dueLabel(it.due!)}</span>
@@ -236,7 +275,7 @@
       <div class="ph"><h2>{t('todos')}</h2><button class="more" onclick={() => go({ kind: 'todos' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
       {#each openTodos.slice(0, 7) as it (it.file + it.line)}
         <label class="todo">
-          <input type="checkbox" onchange={() => toggle(it)} />
+          <input type="checkbox" onchange={(e) => toggle(it, e.currentTarget)} />
           <span class="grow" dir="auto">{it.title}</span>
           {#if it.idea}<span class="muted when ell"><bdi>{it.idea.split('/').pop()}</bdi></span>{/if}
         </label>
@@ -324,14 +363,14 @@
       <div class="ask surface">
         <textarea bind:this={askEl} bind:value={ask} onkeydown={keydown} rows="2" placeholder={t('askPlaceholder')} aria-label={t('askPlaceholder')} dir="auto"></textarea>
         <div class="row chips">
-          <button class="chip" onclick={() => capture('idea')}><Icon name="ideas" size={14} />{term('capture')}</button>
-          <button class="chip" onclick={() => capture('todo')}><Icon name="todos" size={14} />{t('addTodoChip')}</button>
-          {#if app.settings?.modules?.checkin}<button class="chip" onclick={() => { track('home.chip:check-in'); submit('check-in'); }}><Icon name="calendar" size={14} />{t('checkIn')}</button>{/if}
+          <button class="chip" disabled={sending} onclick={() => capture('idea')}><Icon name="ideas" size={14} />{term('capture')}</button>
+          <button class="chip" disabled={sending} onclick={() => capture('todo')}><Icon name="todos" size={14} />{t('addTodoChip')}</button>
+          {#if app.settings?.modules?.checkin}<button class="chip" disabled={sending} onclick={() => { if (sending) return; track('home.chip:check-in'); submit('check-in'); }}><Icon name="calendar" size={14} />{t('checkIn')}</button>{/if}
           {#each [...app.home.chips, ...app.homeChips] as c, i (i + ':' + c.label)}
-            <button class="chip" dir="auto" title={c.prompt} onclick={() => useChip(c)}>{c.label}</button>
+            <button class="chip" dir="auto" disabled={sending} title={c.prompt.slice(0, 300)} onclick={() => useChip(c)}>{c.label}</button>
           {/each}
           <span class="grow"></span>
-          <button class="btn primary round" onclick={() => submit()} disabled={!ask.trim()} aria-label={t('send')}><Icon name="send" size={16} stroke={2.25} /></button>
+          <button class="btn primary round" onclick={() => submit()} disabled={!ask.trim() || sending} aria-busy={sending} aria-label={t('send')}><Icon name="send" size={16} stroke={2.25} /></button>
         </div>
       </div>
     </div>
@@ -369,7 +408,8 @@
   .ask textarea:focus { background: transparent; box-shadow: none; }
   .ask .row { position: relative; }
   .chip { font: inherit; background: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); font-weight: 500; color: var(--muted); padding: 5px 11px; border-radius: 99px; border: 1px solid var(--hairline); }
-  .chip:hover { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 25%, transparent); }
+  .chip:hover:not(:disabled) { color: var(--fg); border-color: color-mix(in srgb, var(--fg) 25%, transparent); }
+  .chip:disabled { cursor: default; opacity: .6; }
   .round { width: 32px; height: 32px; padding: 0; border-radius: 50%; }
 
   .stats { display: flex; gap: 56px; padding: 26px 2px 8px; flex-wrap: wrap; }

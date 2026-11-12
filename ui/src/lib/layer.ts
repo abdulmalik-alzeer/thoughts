@@ -94,6 +94,8 @@ const NEEDS: Record<string, string> = {
   'library.write': 'library:write', 'library.remove': 'library:write',
   'todos.list': 'todos:read', 'todos.add': 'todos:write', 'todos.setDone': 'todos:write', 'todos.edit': 'todos:write', 'todos.remove': 'todos:write',
   'ideas.list': 'ideas:read', 'ideas.setStatus': 'ideas:write', 'chat.start': 'chat:start',
+  // A Home chip puts a request in front of the assistant, so it needs the same permission as starting a chat.
+  'ui.addHomeChip': 'chat:start',
   'storage.get': 'storage', 'storage.set': 'storage',
 };
 /** Calls that change something. Rejected while a staged change is only being tried. */
@@ -349,7 +351,8 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
     case 'todos.add': {
       const text = str(a[0], 500).replace(/\s*\n\s*/g, ' ').trim();
       if (!text) throw new Error('todos.add(text): text is empty');
-      await post('/todos/add?scope=plugin', { file: 'TODO.md', text });
+      // No file named: the service adds it to the library's general list, wherever that is kept.
+      await post('/todos/add?scope=plugin', { file: '', text });
       return { ok: true };
     }
     case 'ideas.list': return ((await api('/library/ideas?scope=plugin')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
