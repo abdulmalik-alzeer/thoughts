@@ -11,6 +11,7 @@
   import { app, command, go, refreshWrap, toast } from '../lib/store.svelte';
   import { choiceDialog, confirmDialog } from '../lib/dialog.svelte';
   import { fmtNum, t, tn } from '../lib/i18n';
+  import { imeKey } from '../lib/ime';
   import { discardPlan, finishWrap, keepCutOffWrap, undoCutOffWrap, undoSavedWrap } from '../lib/wrap';
 
   let { chat, id, reload }: { chat: any; id: string; reload: () => Promise<unknown> } = $props();
@@ -192,7 +193,7 @@
     {#if stale}<p class="hint" role="status"><Icon name="info" size={15} /> <span>{t('wrapb.plan.stale')}</span></p>{/if}
     <div class="row acts">
       <input class="grow" placeholder={t('wrapb.plan.notePlaceholder')} aria-label={t('wrapb.plan.notePlaceholder')} bind:value={note} dir="auto" disabled={busy}
-        onkeydown={(e) => { if (e.key === 'Enter' && !e.isComposing && note.trim()) { e.preventDefault(); makePlan(true); } }} />
+        onkeydown={(e) => { if (e.key === 'Enter' && !imeKey(e) && note.trim()) { e.preventDefault(); makePlan(true); } }} />
       <button class="btn" disabled={busy} onclick={() => act(() => discardPlan(id))} title={t('wrapa.discardTip')}>{t('wrapa.discard')}</button>
       <button class="btn" class:primary={stale} disabled={busy || !chosen.length || (!stale && !note.trim())} onclick={() => makePlan(true)}
         title={t('wrapb.plan.reviseTip')}><Icon name="retry" size={14} /> {t(stale ? 'wrapb.plan.update' : 'wrapb.plan.revise')}</button>
@@ -222,7 +223,7 @@
     {/if}
     <div class="row acts">
       <input class="grow" placeholder={t('wrapb.review.notePlaceholder')} aria-label={t('wrapb.review.notePlaceholder')} bind:value={note} dir="auto" disabled={busy}
-        onkeydown={(e) => { if (e.key === 'Enter' && !e.isComposing && note.trim()) { e.preventDefault(); rework(); } }} />
+        onkeydown={(e) => { if (e.key === 'Enter' && !imeKey(e) && note.trim()) { e.preventDefault(); rework(); } }} />
       <button class="btn" disabled={busy} onclick={discardChanges}>{t('wrapb.review.discard')}</button>
       <button class="btn" disabled={busy || !note.trim()} onclick={rework} title={t('wrapb.review.changeTip')}><Icon name="edit" size={14} /> {t('wrapb.review.change')}</button>
       <button class="btn primary" disabled={busy} aria-busy={busy} onclick={keep}><Icon name="check" size={15} /> {t('wrapb.review.keep')}</button>

@@ -5,6 +5,7 @@
   import { app, applyTheme, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
   import { failed } from '../lib/errors';
+  import { imeKey } from '../lib/ime';
   import { promptDialog } from '../lib/dialog.svelte';
   import { cloudFor } from '../lib/cloud.svelte';
   import { driveName } from '../lib/backup.svelte';
@@ -352,7 +353,7 @@
   // Enter in a text box moves on, like the Next button (never from a checkbox, a list or the notes box).
   function onKey(e: KeyboardEvent) {
     if (adding && cancel && e.key === 'Escape' && !busy && !e.defaultPrevented) { e.preventDefault(); cancel(); return; }
-    if (e.key !== 'Enter' || e.isComposing || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    if (e.key !== 'Enter' || imeKey(e) || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
     const el = e.target;
     if (!(el instanceof HTMLInputElement) || !['text', 'password', 'url', 'email', 'search', ''].includes(el.type)) return;
     if (step >= steps.length - 1 || blocker || busy) return;
