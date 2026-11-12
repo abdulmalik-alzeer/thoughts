@@ -1145,7 +1145,7 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
     if again && !awaits_setup(&path) { return Err(crate::tr::err("setup.done", &[])); }
     let mut prompt = chat.meta["prompt"].as_str().filter(|p| !p.is_empty()).ok_or_else(no_chat)?.to_string();
     if again {
-        library_free(&st)?;
+        library_free(&st).await?;
         claude::require_signed_in(&st).await?;
         prompt.push_str(SETUP_AGAIN);
     }

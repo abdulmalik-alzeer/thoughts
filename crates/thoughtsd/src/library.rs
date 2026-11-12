@@ -1183,7 +1183,7 @@ mod tests {
         assert_eq!(std::fs::read(d.join(".claude/presets/ar/legal.md")).unwrap(), STARTER.get_file("presets/ar/legal.md").unwrap().contents());
         assert!(!d.join(".claude/presets/teaching.md").exists(), "a preset the user changed is not installed in their name");
         // The app's own files only: the folder still needs no trust decision, and nothing is left to do.
-        assert!(!crate::trust::has_own_claude_files(&d) && crate::trust::require(&d).is_ok());
+        assert!(crate::trust::findings(&d).is_empty() && crate::trust::require(&d).is_ok());
         assert_eq!(tidy_kit_leftovers(&d), 0);
         // A welcome page the user edited stays; so does everything in a folder that never was a library.
         std::fs::write(d.join("START-HERE.md"), "my own start page").unwrap();
