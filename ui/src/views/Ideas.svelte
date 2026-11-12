@@ -45,7 +45,7 @@
   const byUpdated = (a: any, b: any) => String(b.updated ?? '').localeCompare(String(a.updated ?? '')) || byName(a, b);
   const sorter = $derived(sort === 'name' ? byName : sort === 'status' ? (a: any, b: any) => rankOf(a.status) - rankOf(b.status) || byUpdated(a, b) : byUpdated);
   const shown = $derived(ideas.filter((i) => (!status || i.status === status) && (!area || i.area === area) &&
-    (!q.trim() || fold(`${i.title} ${i.summary} ${(i.tags || []).join(' ')}`).includes(fold(q.trim())))).sort(sorter));
+    (!q.trim() || fold(`${i.title} ${i.summary} ${[i.tags ?? []].flat().join(' ')}`).includes(fold(q.trim())))).sort(sorter));
 
   // Changing an item's status from its card. The card shows the new status straight away and goes
   // back if it could not be saved.

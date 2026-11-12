@@ -96,7 +96,7 @@
     catch (e) { filing = null; failed(t('inbox.fileFailed'), e); }
   }
   const dirOf = (p: string) => p.replace(/\/README\.md$/i, '');
-  const matches = $derived((targets ?? []).filter((i) => !q.trim() || fold(`${i.title} ${i.summary ?? ''} ${(i.tags || []).join(' ')} ${areaLabel(i.area)}`).includes(fold(q.trim()))).slice(0, 60));
+  const matches = $derived((targets ?? []).filter((i) => !q.trim() || fold(`${i.title} ${i.summary ?? ''} ${[i.tags ?? []].flat().join(' ')} ${areaLabel(i.area)}`).includes(fold(q.trim()))).slice(0, 60));
 
   /** Moved into the item's notes folder (a plain text file becomes a note, .md, on the way) and
    *  listed in the item's files, where the assistant looks for its notes. */
