@@ -1409,6 +1409,8 @@ async fn write_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json
     scope_of(&q).check_write(&st, &root, &w.path).await?;
     let hash = library::write_checked(&root, &w.path, &w.content, w.base_hash.as_deref())?;
     st.emit(json!({"type": "library.changed"}));
+    // Every save becomes a version of its own, recorded once the editing pauses.
+    crate::history::record_soon(&st, &root);
     Ok(Json(json!({"ok": true, "hash": hash})))
 }
 
@@ -1423,6 +1425,7 @@ async fn new_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(n
     scope_of(&q).check_write(&st, &root, &rel).await?;
     let hash = library::create(&root, &rel, &n.content)?;
     st.emit(json!({"type": "library.changed"}));
+    crate::history::record_soon(&st, &root);
     Ok(Json(json!({"ok": true, "path": rel, "hash": hash})))
 }
 
@@ -1513,6 +1516,7 @@ async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
         }
     }
     st.emit(json!({"type": "library.changed"}));
+    crate::history::record_soon(&st, &root);
     ok()
 }
 
@@ -1838,6 +1842,7 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<S
         _ => bail!("unknown op"),
     };
     st.emit(json!({"type": "todos.changed"}));
+    crate::history::record_soon(&st, &root);
     let mut out = out;
     out["ok"] = json!(true);
     Ok(Json(out))

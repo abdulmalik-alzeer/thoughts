@@ -10,7 +10,54 @@
 //!   created, changed or removed.
 
 use crate::state::AppState;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// How long the library is left alone after a save before that save is recorded as a version of
+/// its own. A burst of saves (or of ticked todos) is one entry; every pause in the work is one.
+/// (Under test nothing is recorded by itself, so tests decide what their history holds.)
+pub const SAVE_QUIET: Duration = Duration::from_secs(if cfg!(test) { 24 * 3600 } else { 10 });
+
+/// Something was saved in the library at `root` (a document, a todo, a new file): record it in the
+/// history once the library has been quiet for `SAVE_QUIET`, so each saved version can be found
+/// and restored later instead of being folded into whatever is recorded next.
+pub fn record_soon(state: &Arc<AppState>, root: &Path) { record_after(state, root, SAVE_QUIET) }
+
+/// `record_soon` with the quiet time given. A newer save of the same library starts the wait again;
+/// while the assistant works there, or the library is held by a wrap or another save, it waits on.
+pub fn record_after(state: &Arc<AppState>, root: &Path, quiet: Duration) {
+    // Per library, the number of the latest save: only the task of the latest one records.
+    static LATEST: std::sync::Mutex<std::collections::BTreeMap<PathBuf, u64>> = std::sync::Mutex::new(std::collections::BTreeMap::new());
+    let key = root.to_path_buf();
+    let mine = {
+        let mut latest = LATEST.lock().unwrap_or_else(|e| e.into_inner());
+        let n = latest.entry(key.clone()).or_insert(0);
+        *n += 1;
+        *n
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(quiet).await;
+        if LATEST.lock().unwrap_or_else(|e| e.into_inner()).get(&key) != Some(&mine) { return; }
+        if !record_saved(&state, &key).await { record_after(&state, &key, quiet); }
+    });
+}
+
+/// Record the user's saved changes now, when nothing stands in the way. `false`: not now (the
+/// assistant is working in the library, or a wrap or a save holds it), try again later.
+async fn record_saved(state: &Arc<AppState>, root: &Path) -> bool {
+    // Another library was chosen meanwhile, or the history was switched off: nothing to do.
+    let current = state.settings.read().await.library().map(|l| crate::paths::canonical_lenient(&l));
+    if current.as_deref() != Some(crate::paths::canonical_lenient(root).as_path()) { return true; }
+    // The assistant's half-written files are not the user's version; its own entry follows its work.
+    if state.run_active_in(root) { return false; }
+    let Ok(_guard) = state.library_lock.clone().try_lock_owned() else { return false };
+    let before = crate::git::head(state, root).await;
+    crate::claude::record_library_locked(state, root, &crate::git::subject::edit("your changes")).await;
+    if crate::git::head(state, root).await != before { state.emit(serde_json::json!({"type": "history.changed"})); }
+    true
+}
 
 /// Give the configured library a history when it should have one and has none. Returns whether
 /// the library has a history afterwards. Never touches a library that is not set up, is missing,
@@ -162,6 +209,72 @@ mod tests {
         assert_eq!(t::read(&lib, "notes/today.md"), "written while reviewing\n");
         assert!(!wt.exists() && !lib.join(".git").exists());
         assert_eq!(git::git(&st, &lib, &["status", "--porcelain"]).await.unwrap(), "");
+        std::fs::remove_dir_all(&store).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_save_becomes_a_version_once_the_editing_pauses() {
+        let (st, lib, root) = plain_library("none").await;
+        assert!(ensure_for_library(&st).await);
+        let git::Repo::Kept(store) = git::repo_of(&lib) else { panic!("the history should be kept by the app") };
+        let quiet = Duration::from_millis(60);
+        let versions = || async { git::history(&st, &lib, Some("notes/plan.md"), 50).await.unwrap() };
+        let wait = || tokio::time::sleep(Duration::from_millis(400));
+        let mut events = st.events.subscribe();
+        // Saved at 10:00 …
+        t::write(&lib, "notes/plan.md", "the ten o'clock text\n");
+        record_after(&st, &lib, quiet);
+        wait().await;
+        assert_eq!(versions().await.len(), 1, "recorded without opening History");
+        assert_eq!(events.try_recv().unwrap()["type"], "history.changed");
+        // … overwritten and saved again at 11:00: both versions are there to go back to.
+        t::write(&lib, "notes/plan.md", "the eleven o'clock text\n");
+        record_after(&st, &lib, quiet);
+        wait().await;
+        let v = versions().await;
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0]["subject"], "edit: your changes");
+        assert_eq!(git::file_at(&st, &lib, "notes/plan.md", v[1]["hash"].as_str().unwrap()).await.unwrap(), b"the ten o'clock text\n");
+
+        // A burst of saves is one version, recorded after the last of them.
+        for n in 1..=5 {
+            t::write(&lib, "TODO.md", &format!("- [ ] call the bank\n- [x] task {n}\n"));
+            record_after(&st, &lib, Duration::from_millis(150));
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        let before = git::history(&st, &lib, None, 500).await.unwrap().len();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let all = git::history(&st, &lib, None, 500).await.unwrap();
+        assert_eq!(all.len(), before + 1);
+        assert_eq!(all[0]["files"], serde_json::json!(["TODO.md"]));
+
+        // While a wrap or another save holds the library, or the assistant works in it, the
+        // version waits — and is recorded when the way is clear.
+        let held = st.library_lock.clone().lock_owned().await;
+        st.run_dirs.lock().unwrap().insert("chat".into(), lib.clone());
+        t::write(&lib, "notes/plan.md", "typed while a wrap was saving\n");
+        record_after(&st, &lib, quiet);
+        wait().await;
+        assert_eq!(versions().await.len(), 2);
+        drop(held);
+        wait().await;
+        assert_eq!(versions().await.len(), 2, "not while the assistant is at work");
+        st.run_dirs.lock().unwrap().clear();
+        wait().await;
+        assert_eq!(versions().await.len(), 3);
+
+        // Nothing is recorded with the history switched off, or for a library no longer chosen.
+        st.settings.write().await.keep_history = false;
+        t::write(&lib, "notes/plan.md", "history is off\n");
+        record_after(&st, &lib, quiet);
+        wait().await;
+        st.settings.write().await.keep_history = true;
+        assert_eq!(versions().await.len(), 3);
+        st.settings.write().await.library_path = Some(root.join("another").to_string_lossy().to_string());
+        record_after(&st, &lib, quiet);
+        wait().await;
+        assert_eq!(versions().await.len(), 3);
         std::fs::remove_dir_all(&store).unwrap();
         std::fs::remove_dir_all(&root).unwrap();
     }

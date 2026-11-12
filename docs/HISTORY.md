@@ -50,7 +50,7 @@ Open the document, then open its **History** (document versions). You see every 
 ## Good to know
 
 - History covers the library only. Chats, settings and customisations are not part of it.
-- History is saved at certain moments: after a Wrap, after the assistant finishes a piece of work, and when you save an edit. Text you typed and never saved is not in it.
+- History is saved at certain moments: after a Wrap, after the assistant finishes a piece of work, and a few seconds after you save a document, change a todo or an idea's status. Saves made one right after another become one entry. Text you typed and never saved is not in it.
 - With **Online location** as the backup, the history is uploaded with the library, so earlier versions are also available on your other computers. This also means that deleting something from a note does not delete it from the history or from your backup. See [Privacy](PRIVACY.md).
 - The history takes disk space of its own: about the size of your library to begin with, growing slowly as you make changes.
 - While a Wrap is running, the library is briefly locked and restore waits until it finishes.

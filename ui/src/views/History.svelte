@@ -51,7 +51,8 @@
       else loadError = errDetail(e) || t('ui.hist.loadFailed');
     } finally { loading = false; }
   }
-  onMount(() => { load(); return on((e) => { if (e.type === 'library.changed' || e.type === 'resync') load(); }); });
+  // `history.changed`: a save was recorded as a version a few seconds after it was made.
+  onMount(() => { load(); return on((e) => { if (e.type === 'library.changed' || e.type === 'history.changed' || e.type === 'resync') load(); }); });
 
   async function older() {
     if (loadingMore) return;
