@@ -53,6 +53,7 @@
 import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
 import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
 import { confirmDialog, promptDialog } from './dialog.svelte';
+import { aboveShield } from './layer/shield';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang } from './i18n';
 
@@ -960,7 +961,7 @@ export function closeReview() { dismissed = sig(app.pending); app.showReview = f
 async function sureDespiteFreeze(what: 'try' | 'keep'): Promise<boolean> {
   const fz = froze.get();
   if (!fz || fz.sig !== sig(app.pending)) return true;
-  return confirmDialog({ title: t('lua.frozeTitle'), body: t(what === 'try' ? 'lua.frozeTry' : 'lua.frozeKeep'), confirmLabel: t(what === 'try' ? 'lua.frozeTryAnyway' : 'lua.frozeKeepAnyway'), danger: true });
+  return aboveShield(() => confirmDialog({ title: t('lua.frozeTitle'), body: t(what === 'try' ? 'lua.frozeTry' : 'lua.frozeKeep'), confirmLabel: t(what === 'try' ? 'lua.frozeTryAnyway' : 'lua.frozeKeepAnyway'), danger: true }));
 }
 
 /** Start a customise run. The assistant works on a staged copy; nothing changes until the review. */

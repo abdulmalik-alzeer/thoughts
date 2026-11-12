@@ -15,8 +15,8 @@
   import Icon from '../lib/Icon.svelte';
   import { app, go, toast } from '../lib/store.svelte';
   import { t, tn } from '../lib/i18n';
-  import { failed } from '../lib/errors';
-  import { shield } from '../lib/layer/shield';
+  import { errDetail, failed } from '../lib/errors';
+  import { aboveShield, shield } from '../lib/layer/shield';
   import { confirmDialog } from '../lib/dialog.svelte';
   import { api, post } from '../lib/api';
   import { checkLayerUpdates } from '../lib/updates';
@@ -92,10 +92,13 @@
   const others = $derived(drafts.list);
   $effect(() => { void p?.signature; refreshDrafts(); });
 
+  let error = $state('');
   async function act(key: string, fn: () => Promise<unknown>, failKey: string) {
     if (busy) return;
     busy = key;
-    try { await fn(); } catch (e) { failed(t(failKey), e); }
+    // Also said inside the panel: a toast would sit underneath it.
+    error = '';
+    try { await fn(); } catch (e) { failed(t(failKey), e); const d = errDetail(e); error = d ? `${t(failKey)} ${d}` : t(failKey); }
     finally { busy = ''; }
   }
   const tryIt = () => act('try', async () => { if (await tryPending()) toast(t('lua.previewOn'), { key: 'layer' }); }, 'layer.tryFailed');
@@ -108,7 +111,7 @@
     }, 'layer3.keepFailed');
   };
   async function discard() {
-    if (!(await confirmDialog({ title: t('layer.discardTitle'), body: t('layer.discardBody'), confirmLabel: t('layer.discard'), danger: true }))) { app.showReview = true; return; }
+    if (!(await aboveShield(() => confirmDialog({ title: t('layer.discardTitle'), body: t('layer.discardBody'), confirmLabel: t('layer.discard'), danger: true })))) { app.showReview = true; return; }
     const wasUpdate = origin === 'update';
     await act('discard', async () => { await discardPending(); toast(t('layer.discarded'), { key: 'layer' }); }, 'layer.discardFailed');
     // A discarded merge of an app update leaves its question open: ask it again now.
@@ -394,6 +397,7 @@
       {/if}
 
       {#if app.safeMode}<p class="muted">{t('layer.safeNoTry')}</p>{/if}
+      {#if error}<p class="err" role="alert" dir="auto">{error}</p>{/if}
       {#if blocked}<p class="err" id="rv-blocked">{blockedText}</p>{/if}
       <div class="row end">
         <button class="btn ghost" disabled={!!busy} onclick={closeReview}>{t('layer.later')}</button>

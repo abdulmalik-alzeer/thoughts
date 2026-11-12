@@ -15,9 +15,12 @@
 //   document's `dir`, and the colours are fixed values (AA contrast, light and dark) set on `.sh`
 //   instead of the theme's variables.
 // * A dialog (`trap`) is also put in the browser's top layer (`popover`), where no element of the
-//   page can be painted over it whatever its z-index. It steps down while one of the app's own
-//   confirm dialogs or toasts is up, so that shows above it. Where the top layer is not available the
-//   dialog is an ordinary fixed box as before.
+//   page can be painted over it whatever its z-index. It steps down only while a question it asked
+//   itself is open (`aboveShield`, which only the app's own code can call), so that the question
+//   shows above it. Nothing on the page decides that: not a toast (an add-on can raise one), not an
+//   element or a class a style sheet could fake. Where the top layer is not available the dialog is
+//   an ordinary fixed box as before. Messages meant for the person while it is open are shown
+//   inside it (the Review shows its own errors), since a toast would sit underneath.
 // * Focus: `document.activeElement` is the host for anything focused inside, so the focus trap here
 //   uses the shadow root's own `activeElement`.
 
@@ -81,6 +84,17 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 
 let sheet: CSSStyleSheet | null = null;
 
+// Questions a shielded dialog asks itself (Discard this change? Try it anyway?) must show above it.
+let asking = 0;
+const onAsk = new Set<() => void>();
+/** Open one of the app's own dialogs from inside a shielded one: while `ask` runs, the shield steps
+ *  out of the top layer so the dialog shows above it, and comes back once it is answered. */
+export async function aboveShield<T>(ask: () => Promise<T>): Promise<T> {
+  asking++;
+  onAsk.forEach((f) => f());
+  try { return await ask(); } finally { asking--; onAsk.forEach((f) => f()); }
+}
+
 export type ShieldOpts = {
   /** Inline box for the host element, e.g. 'position:fixed;inset:0;z-index:60'. Applied with !important. */
   box?: string;
@@ -126,11 +140,9 @@ export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
   // The top layer, for dialogs (see the notes at the top).
   const canTop = !!opts.trap && typeof (node as any).showPopover === 'function';
   let onTop = false;
-  // The app's own confirm dialog, or a toast (a failed Keep is reported in one), must show above it.
-  const dialogOpen = () => !!document.querySelector('.modal-bg.top, .toast-wrap > *');
   function layer() {
     if (!canTop || !node.isConnected) return;
-    const want = !dialogOpen();
+    const want = asking === 0;
     if (want === onTop) return;
     try {
       if (want) { node.setAttribute('popover', 'manual'); (node as any).showPopover(); }
@@ -138,9 +150,7 @@ export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
       onTop = want;
     } catch { /* stays an ordinary fixed box */ }
   }
-  const dialogs = canTop ? new MutationObserver(layer) : null;
-  dialogs?.observe(document.body, { childList: true, subtree: true });
-  if (canTop) queueMicrotask(layer);
+  if (canTop) { onAsk.add(layer); queueMicrotask(layer); }
 
   const items = () => Array.from(inner.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.getClientRects().length > 0);
   function onKey(e: KeyboardEvent) {
@@ -175,7 +185,7 @@ export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
     update(o: ShieldOpts) { opts = { ...opts, ...o }; },
     destroy() {
       mo.disconnect();
-      dialogs?.disconnect();
+      onAsk.delete(layer);
       if (onTop) { try { (node as any).hidePopover(); } catch { /* already gone */ } }
       document.removeEventListener('focusin', onDocFocus);
       if (opts.trap) prev?.focus?.();
