@@ -24,8 +24,9 @@ use std::time::Duration;
 pub enum Probe {
     /// The daemon that owns this token, and the version it reports.
     Daemon(String),
-    /// Something that answers like a daemon from before 0.0.9, which has no `/api/hello`. Nothing
-    /// is proven: see `legacy_daemon` in the desktop shell for the only use made of it.
+    /// Something that answers the way a daemon from before 0.0.9 would (it has no `/api/hello`).
+    /// Nothing is proven and anyone can answer like this, so it is never trusted and never sent the
+    /// token. It only tells the desktop shell that an old daemon *process* may need replacing.
     Legacy,
     /// Nothing, or something that is not the daemon.
     Nobody,
@@ -97,6 +98,15 @@ pub fn probe(port: u16, token: &str) -> Probe {
         // Before 0.0.9 there was no such route: "not found", or "no token" from the token check.
         Some(401) | Some(404) => Probe::Legacy,
         _ => Probe::Nobody,
+    }
+}
+
+/// The version of the daemon on `port`, if and only if it proved that it holds `token`. This is
+/// the one test a client applies before it uses the port for anything or sends the token to it.
+pub fn proven(port: u16, token: &str) -> Option<String> {
+    match probe(port, token) {
+        Probe::Daemon(version) => Some(version),
+        Probe::Legacy | Probe::Nobody => None,
     }
 }
 
@@ -186,6 +196,75 @@ mod tests {
             http("200 OK", &json!({"ok": true, "version": "1.2.3", "proof": proof("the-real-token", &nonce)}).to_string())
         });
         assert_eq!(probe(port, "the-real-token"), Probe::Daemon("1.2.3".into()));
+    }
+
+    /// Like `impostor`, but it stays up, answers every request with `reply`, and keeps what it was sent.
+    fn recording_impostor(reply: impl Fn(&str) -> String + Send + 'static) -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { return };
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                let _ = s.write_all(reply(&req).as_bytes());
+                log.lock().unwrap().push(req);
+            }
+        });
+        (port, seen)
+    }
+
+    #[test]
+    fn answering_ping_without_the_proof_earns_no_trust_and_no_token() {
+        let token = "the-real-token-0123456789";
+        let nothing_leaked = |seen: &Arc<std::sync::Mutex<Vec<String>>>| {
+            let seen = seen.lock().unwrap();
+            assert!(!seen.is_empty(), "the responder was asked");
+            for req in seen.iter() {
+                assert!(req.starts_with("GET /api/hello?nonce="), "only the challenge is ever sent: {req}");
+                assert!(!req.contains(token) && !req.to_lowercase().contains("authorization") && !req.to_lowercase().contains("bearer"), "{req}");
+            }
+        };
+        // What used to be enough: 200 and the current version on every path, /api/ping included.
+        let (port, seen) = recording_impostor(|_| http("200 OK", r#"{"ok":true,"version":"0.0.9"}"#));
+        assert_eq!(proven(port, token), None);
+        nothing_leaked(&seen);
+        // Posing as a daemon too old to know the challenge: "not found" for it, 200 for /api/ping.
+        // It is reported as such, is not trusted, and is not asked anything else.
+        let (port, seen) = recording_impostor(|req| if req.starts_with("GET /api/hello") { http("404 Not Found", "") } else { http("200 OK", r#"{"ok":true,"version":"0.0.8"}"#) });
+        assert_eq!(probe(port, token), Probe::Legacy);
+        assert_eq!(proven(port, token), None);
+        assert_eq!(seen.lock().unwrap().len(), 2, "one challenge per check, and no follow-up request");
+        nothing_leaked(&seen);
+        // Replaying a proof it saw for an earlier challenge does not work: every challenge is new.
+        let old_nonce = new_nonce();
+        let replay = json!({"ok": true, "version": "0.0.9", "proof": proof(token, &old_nonce)}).to_string();
+        let (port, seen) = recording_impostor(move |_| http("200 OK", &replay));
+        assert_eq!(proven(port, token), None);
+        nothing_leaked(&seen);
+        // Echoing back whatever the request contained does not work either: the proof cannot be
+        // learned from the challenge.
+        let (port, seen) = recording_impostor(|req| {
+            let nonce = req.split("nonce=").nth(1).and_then(|r| r.split_whitespace().next()).unwrap_or("").to_string();
+            http("200 OK", &json!({"ok": true, "version": "0.0.9", "proof": nonce}).to_string())
+        });
+        assert_eq!(proven(port, token), None);
+        nothing_leaked(&seen);
+    }
+
+    #[test]
+    fn a_correct_proof_is_trusted() {
+        let (port, seen) = recording_impostor(|req| {
+            let nonce = req.split("nonce=").nth(1).and_then(|r| r.split_whitespace().next()).unwrap_or("").to_string();
+            http("200 OK", &json!({"ok": true, "version": "1.2.3", "proof": proof("the-real-token", &nonce)}).to_string())
+        });
+        assert_eq!(proven(port, "the-real-token").as_deref(), Some("1.2.3"));
+        // The same responder is nobody to a client holding a different token.
+        assert_eq!(proven(port, "another-token"), None);
+        assert!(seen.lock().unwrap().iter().all(|r| !r.contains("the-real-token") && !r.contains("another-token")));
     }
 
     #[tokio::test]

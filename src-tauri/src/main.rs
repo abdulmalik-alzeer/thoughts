@@ -33,50 +33,148 @@ struct UpdaterConfigured(bool);
 /// The live daemon and the version it reports, if one answers.
 ///
 /// "Something answers on the port in daemon.json" is not enough: that file outlives a daemon that
-/// was killed, and any program may have taken the port since. The responder has to prove it knows
-/// the token (`thoughtsd::hello`); only then is the token sent to it, by this or any later call.
+/// was killed, and any program may have taken the port since. The responder has to prove that it
+/// knows the token (`thoughtsd::hello`: an HMAC over a fresh random challenge). Until it has, it is
+/// not the daemon, and the token is not sent to it: not by this function, and not by any caller,
+/// because every caller gets the port and token from here.
 fn daemon_alive() -> Option<(thoughtsd::paths::DaemonInfo, Option<String>)> {
-    use thoughtsd::hello::Probe;
     let info = thoughtsd::paths::read_daemon_info()?;
-    match thoughtsd::hello::probe(info.port, &info.token) {
-        Probe::Daemon(version) => Some((info, Some(version))),
-        Probe::Legacy => legacy_daemon(info),
-        Probe::Nobody => None,
+    let version = thoughtsd::hello::proven(info.port, &info.token)?;
+    Some((info, Some(version)))
+}
+
+/// What to do about the daemon recorded in daemon.json when it has not proved itself.
+#[derive(Debug, PartialEq, Eq)]
+enum Unproven {
+    /// Nothing: there is no old daemon to replace, or it cannot be told for certain.
+    Leave,
+    /// End this process: it is a daemon from before 0.0.9, which cannot answer the challenge.
+    Stop(u32),
+}
+
+/// A daemon left running by an app older than 0.0.9 cannot prove itself, so it is never trusted and
+/// never sent the token; but while it lives it holds the daemon lock, and no new daemon can start.
+/// It is therefore replaced as a *process*, and only when all of this holds:
+///   * the port answered the way an old daemon does (`Probe::Legacy`), not with silence;
+///   * the daemon lock is held by another process. A free lock means no daemon is alive and the
+///     recorded pid is stale; a lock that cannot be read means nothing is known. Either way: leave;
+///   * the recorded pid is a running copy of this app started as the background service.
+/// Nothing the responder on the port says is believed beyond "this looks like an old daemon".
+fn unproven_daemon(
+    probe: &thoughtsd::hello::Probe,
+    lock: &std::io::Result<Option<std::fs::File>>,
+    pid: u32,
+    command: Option<&str>,
+    exe: &str,
+) -> Unproven {
+    let held_by_another = matches!(lock, Ok(None));
+    let ours = command.is_some_and(|c| is_daemon_command(c, exe));
+    if *probe == thoughtsd::hello::Probe::Legacy && held_by_another && ours && pid > 1 && pid != std::process::id() {
+        Unproven::Stop(pid)
+    } else {
+        Unproven::Leave
     }
 }
 
-/// A daemon left running by an app older than 0.0.9 cannot answer the challenge. It still has to
-/// be found, so that it can be replaced once it is idle (`ensure_daemon`), but it is believed only
-/// when a daemon process demonstrably exists: the daemon lock is held, and daemon.json is still the
-/// file that was read (a daemon that has just started removes a stale one before anything else).
-/// With the lock free there is no daemon at all, and whatever answers on that port is someone else.
-fn legacy_daemon(info: thoughtsd::paths::DaemonInfo) -> Option<(thoughtsd::paths::DaemonInfo, Option<String>)> {
-    if let Ok(Some(_free)) = thoughtsd::acquire_lock(&thoughtsd::paths::lock_file()) {
-        return None;
+/// Whether `command` (a process's command line) is this app running as the background service:
+/// `<this program> --daemon`, or the stand-alone `thoughtsd`. `exe` is this program's file name.
+/// On Windows only the program's file name is known (see `process_command`).
+fn is_daemon_command(command: &str, exe: &str) -> bool {
+    let name = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or("").trim_end_matches(".exe").to_lowercase();
+    let exe = name(&exe.to_lowercase());
+    let command = command.trim();
+    if exe.is_empty() || command.is_empty() {
+        return false;
     }
-    let now = thoughtsd::paths::read_daemon_info()?;
-    if now.port != info.port || now.token != info.token {
-        return None;
+    if cfg!(windows) {
+        return name(&command.to_lowercase()) == exe;
     }
-    let body = ureq::get(&format!("http://127.0.0.1:{}/api/ping", info.port))
-        .set("Authorization", &format!("Bearer {}", info.token))
-        .timeout(Duration::from_millis(800))
-        .call()
-        .ok()?
-        .into_string()
-        .unwrap_or_default();
-    let version = serde_json::from_str::<Value>(&body).ok().and_then(|v| v["version"].as_str().map(String::from))?;
-    // This version and every later one answer the challenge: claiming to be one of them is a lie.
-    legacy_version(&version, VERSION).then_some((info, Some(version)))
+    match command.strip_suffix(" --daemon") {
+        Some(program) => name(&program.to_lowercase()) == exe,
+        None => name(&command.to_lowercase()) == "thoughtsd",
+    }
 }
 
-/// Whether `reported` is a version from before the challenge existed, that is, older than this app.
-fn legacy_version(reported: &str, ours: &str) -> bool {
-    let parts = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse().ok()).collect() };
-    match (parts(reported), parts(ours)) {
-        (Some(r), Some(o)) => r.len() == 3 && r < o,
-        _ => false,
+/// The command line of process `pid` if it is running. Windows: its program file name only.
+fn process_command(pid: u32) -> Option<String> {
+    let out;
+    #[cfg(unix)]
+    {
+        out = std::process::Command::new("ps").args(["-p", &pid.to_string(), "-o", "command="]).stderr(std::process::Stdio::null()).output().ok()?;
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // "thoughts.exe","1234","Console","1","12,345 K". UNTESTED on Windows.
+        out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .creation_flags(0x08000000)
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    if cfg!(windows) {
+        return line.strip_prefix('"').and_then(|l| l.split('"').next()).filter(|n| !n.is_empty()).map(String::from);
+    }
+    Some(line.to_string())
+}
+
+/// End process `pid`: politely, or with `force` at once.
+fn end_process(pid: u32, force: bool) {
+    let mut kill;
+    #[cfg(unix)]
+    {
+        kill = std::process::Command::new("kill");
+        if force {
+            kill.arg("-KILL");
+        }
+        kill.arg(pid.to_string());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = force;
+        kill = std::process::Command::new("taskkill");
+        kill.args(["/PID", &pid.to_string(), "/F"]).creation_flags(0x08000000); // UNTESTED on Windows
+    }
+    let _ = kill.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+}
+
+/// Stop a daemon from before 0.0.9 that is still running (see `unproven_daemon`), so that this
+/// version's daemon can start. It is not asked whether it is busy: asking needs the token, and the
+/// token is not sent to a daemon that cannot prove itself. A chat it was running shows as
+/// interrupted afterwards, exactly as after a crash. Returns whether a process was stopped.
+fn retire_unproven_daemon() -> bool {
+    let Some(info) = thoughtsd::paths::read_daemon_info() else { return false };
+    let probe = thoughtsd::hello::probe(info.port, &info.token);
+    if probe != thoughtsd::hello::Probe::Legacy {
+        return false;
+    }
+    let lock_file = thoughtsd::paths::lock_file();
+    let exe = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default();
+    let lock = thoughtsd::acquire_lock(&lock_file);
+    let decision = unproven_daemon(&probe, &lock, info.pid, process_command(info.pid).as_deref(), &exe);
+    drop(lock);
+    let Unproven::Stop(pid) = decision else { return false };
+    let gone = |wait: Duration| {
+        let start = Instant::now();
+        while start.elapsed() < wait {
+            // The lock is free again once its holder has exited.
+            if matches!(thoughtsd::acquire_lock(&lock_file), Ok(Some(_))) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    };
+    end_process(pid, false);
+    if !gone(Duration::from_secs(3)) {
+        end_process(pid, true);
+        gone(Duration::from_secs(2));
+    }
+    true
 }
 
 /// The AppImage this app was started from (`$APPIMAGE`), if any.
@@ -194,19 +292,7 @@ fn stop_daemon(wait: bool) {
         }
     }
     // Still answering (graceful shutdown waits on open connections): end the process.
-    let mut kill;
-    #[cfg(unix)]
-    {
-        kill = std::process::Command::new("kill");
-        kill.arg(i.pid.to_string());
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        kill = std::process::Command::new("taskkill");
-        kill.args(["/PID", &i.pid.to_string(), "/F"]).creation_flags(0x08000000); // UNTESTED on Windows
-    }
-    let _ = kill.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    end_process(i.pid, false);
     std::thread::sleep(Duration::from_millis(300));
     if daemon_alive().is_none() {
         thoughtsd::paths::clear_daemon_info();
@@ -232,12 +318,17 @@ fn ensure_daemon() -> Result<(thoughtsd::paths::DaemonInfo, bool), String> {
         stop_daemon(true);
     }
     VERSION_CHECKED.store(true, Ordering::SeqCst);
-    spawn_daemon().map_err(|e| e.to_string())?;
-    let start = Instant::now();
-    while start.elapsed() < Duration::from_secs(10) {
-        std::thread::sleep(Duration::from_millis(150));
-        if let Some((i, _)) = daemon_alive() {
-            return Ok((i, false));
+    // Nothing proved itself. If that is because a daemon from before 0.0.9 is still running, it is
+    // stopped first (it holds the lock). A second round covers one that was only just starting.
+    for _round in 0..2 {
+        retire_unproven_daemon();
+        spawn_daemon().map_err(|e| e.to_string())?;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(150));
+            if let Some((i, _)) = daemon_alive() {
+                return Ok((i, false));
+            }
         }
     }
     Err("The Thoughts daemon did not start".into())
@@ -877,11 +968,54 @@ mod tests {
     }
 
     #[test]
-    fn only_an_older_daemon_may_skip_the_challenge() {
-        assert!(legacy_version("0.0.8", "0.0.9") && legacy_version("0.0.1", "0.1.0") && legacy_version("0.9.9", "1.0.0"));
-        // The same version or a newer one knows the challenge; anything unparsable is not believed.
-        for v in ["0.0.9", "0.0.10", "1.0.0", "", "0.0", "0.0.8-beta", "latest", "0.0.8.1"] {
-            assert!(!legacy_version(v, "0.0.9"), "{v}");
+    fn a_daemon_that_cannot_prove_itself_is_never_trusted_and_only_stopped_when_certain() {
+        use thoughtsd::hello::Probe;
+        let exe = "Thoughts";
+        let daemon = "/Applications/Thoughts.app/Contents/MacOS/Thoughts --daemon";
+        let held = || -> std::io::Result<Option<std::fs::File>> { Ok(None) };
+        // Without a proof there is nobody to send the token to, whatever the lock says: there is no
+        // code path from an unproven responder to a (port, token) pair. `daemon_alive` is
+        // `hello::proven` and nothing else, and that is tested in the daemon crate.
+        // The only thing left to decide is whether an old daemon *process* may be stopped.
+        assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 4242, Some(daemon), exe), Unproven::Stop(4242));
+        // The lock could not be read: nothing is known, so nothing is done (fail closed).
+        let unreadable = || -> std::io::Result<Option<std::fs::File>> { Err(std::io::Error::other("locks are not supported here")) };
+        assert_eq!(unproven_daemon(&Probe::Legacy, &unreadable(), 4242, Some(daemon), exe), Unproven::Leave);
+        // The lock is free: no daemon is alive, the recorded pid is stale and may be anyone's by now.
+        let scratch = std::env::temp_dir().join(format!("thoughts-shell-test-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let free = || -> std::io::Result<Option<std::fs::File>> { Ok(Some(std::fs::File::create(&scratch).unwrap())) };
+        assert_eq!(unproven_daemon(&Probe::Legacy, &free(), 4242, Some(daemon), exe), Unproven::Leave);
+        let _ = std::fs::remove_file(&scratch);
+        // Silence on the port (a slow or starting daemon) is not evidence of an old one.
+        assert_eq!(unproven_daemon(&Probe::Nobody, &held(), 4242, Some(daemon), exe), Unproven::Leave);
+        assert_eq!(unproven_daemon(&Probe::Daemon("0.0.9".into()), &held(), 4242, Some(daemon), exe), Unproven::Leave);
+        // The recorded pid is gone, or belongs to some other program: never stop that.
+        assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 4242, None, exe), Unproven::Leave);
+        assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 4242, Some("/usr/bin/vim notes.md"), exe), Unproven::Leave);
+        assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 4242, Some("/Applications/Thoughts.app/Contents/MacOS/Thoughts"), exe), Unproven::Leave);
+        // Never this process, and never pid 0 or 1.
+        assert_eq!(unproven_daemon(&Probe::Legacy, &held(), std::process::id(), Some(daemon), exe), Unproven::Leave);
+        assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 1, Some(daemon), exe), Unproven::Leave);
+        assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 0, Some(daemon), exe), Unproven::Leave);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn recognises_this_app_running_as_the_background_service() {
+        for yes in ["/Applications/Thoughts.app/Contents/MacOS/Thoughts --daemon", "/Users/a b/My Apps/Thoughts.app/Contents/MacOS/thoughts --daemon",
+            "/tmp/.mount_ThoughXyZ/usr/bin/thoughts --daemon", "thoughts --daemon", "/home/me/code/target/debug/thoughtsd", "thoughtsd"] {
+            assert!(is_daemon_command(yes, "Thoughts"), "{yes}");
         }
+        // The window itself, another program, another program that happens to take --daemon, and
+        // a program whose arguments merely mention this one.
+        for no in ["/Applications/Thoughts.app/Contents/MacOS/Thoughts", "/usr/bin/vim notes.md", "/usr/sbin/sshd --daemon", "/usr/bin/vim Thoughts --daemon",
+            "/bin/sh -c thoughts --daemon; true", "/Applications/Thoughts.app/Contents/MacOS/Thoughts --daemon --verbose", "", "   "] {
+            assert!(!is_daemon_command(no, "Thoughts"), "{no}");
+        }
+        assert!(!is_daemon_command("/Applications/Thoughts.app/Contents/MacOS/Thoughts --daemon", ""));
+        // This test process is running, and it is not the background service.
+        let me = process_command(std::process::id()).expect("ps knows this process");
+        assert!(!me.is_empty() && !is_daemon_command(&me, "Thoughts"), "{me}");
+        assert_eq!(process_command(0x7fff_fff0), None, "no such process");
     }
 }
