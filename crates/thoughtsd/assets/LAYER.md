@@ -61,7 +61,13 @@ of the layer).
 | `views/<name>.html` | A static page shown in the sidebar, in a sandboxed frame |
 | `views/<name>.json` | That view's declaration (only if it reads data) |
 | `workflows/<name>.json` | A job the app runs on a schedule or after an event |
+| `addons.json` | Add-ons and pages the user switched off — see below |
 | `manifest.json` | Older shared list of plugin permissions — still read, do not add to it |
+
+`addons.json` is `{ "off": ["plugins/hours.js", "views/board.html"] }`. What it lists stays in the
+layer but is not loaded. The user switches add-ons off and on, and removes them, themselves (in
+Customise, Add-ons); leave this file alone unless they ask you to switch one on or off. A plugin
+you change while it is off stays off: say so in the summary.
 
 Limits: at most 200 files, 512 KB per file, 4 MB in total. Text files only — the layer cannot
 carry images, fonts or any other binary file.
@@ -346,7 +352,9 @@ thoughts.ui.addItemAction({
 ```
 
 **Storage.** `storage` is one JSON object per plugin, kept on this computer outside the library
-(it is not synced and not part of packs). Read it, change it, write the whole object back:
+(it is not synced and not part of packs; it does travel in the move file to another computer, and
+the app keeps a few earlier copies the user can put back). Read it, change it, write the whole
+object back:
 
 ```js
 const data = await thoughts.storage.get();          // {} the first time

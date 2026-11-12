@@ -86,6 +86,22 @@ Every change you keep is recorded. Under **Customise → History** you can undo 
 
 If a customisation ever leaves the app unusable, even with a blank or frozen window, the **Recovery** menu in the menu bar still works, because the desktop app does it itself: undo the last change, go back to an earlier version, discard a change waiting for review, switch customisations off (they stay off until you switch them back on), reload, or open a fresh window. Each step says what it will change and asks first, and afterwards offers to put things back. Customisations cannot remove that menu.
 
+### Your add-ons, one at a time
+
+Under **Customise → Add-ons** every add-on and page you have is listed with what it may do.
+
+- **Switch off** stops one from loading without removing it, and **Switch on** brings it back. Useful when one misbehaves.
+- **Remove** takes it out of the app.
+- **Take away** beside a permission withdraws just that permission. The add-on may then stop working in the parts that needed it.
+
+Each of these is one entry in History and can be undone, even when later changes built on the add-on.
+
+What an add-on saved (an hours tracker's entries, for example) stays on this computer when you remove the add-on, so undoing the removal brings it back with its data. Thoughts also keeps up to twelve earlier copies of each add-on's saved data (the newest few, then one a day), so one bad save never loses it: open **Earlier copies** to put one back. The saved data travels with you in the move file (**Settings → Maintenance → Move to another computer**).
+
+### Ready-made packs
+
+Under **Customise → Ready-made** are packs that come with Thoughts: billable hours, a status board, a new-client form, overdue todos on Home, a weekly review, todos grouped by date and a sand theme. Choosing one opens the same review as any other pack. Nothing is switched on until you keep it, and nothing is downloaded.
+
 ### The monthly tune-up
 
 About once a month, Home may show one suggestion titled as an app tune-up. If you accept it, the assistant looks at a short summary of how you used the app that month (which screens you opened, which shortcuts you used, which changes you kept or discarded) and proposes **one** customisation. It goes through the same review: Try it, then Keep or Discard.
@@ -98,6 +114,8 @@ Under **Customise** you can export what you have made as a pack file.
 
 - **A feature pack** holds one thing or a few: a board, a tracker, a theme. Importing a feature pack **merges** it with what you already have. Its add-ons and automatic tasks are added, its Home and sidebar choices are combined with yours, and its styling is added alongside your own. It does not replace your other customisations. Importing a newer version of the same pack updates that pack's part only.
 - **A full pack** holds everything you have changed, for moving to another computer or reinstalling.
+
+When you share a pack you give it a name, and if you like your name and a version number. Every pack also has a **fingerprint**: a short code such as `3F9A-12C4-77B0`, calculated from exactly what the pack holds. Whoever opens the file sees the same code before anything is staged, so you can check over the phone that it is the pack you sent. If the code written in the file does not match what it holds, Thoughts says the pack was changed after it was made. The fingerprint and the pack's version are kept with its entry in History.
 
 An imported pack is never applied directly. It goes through the same review, with Try it, Keep and Discard. A pack made for a newer version of Thoughts than yours is not applied; the review says so.
 

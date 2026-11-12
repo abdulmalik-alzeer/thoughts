@@ -42,6 +42,10 @@ pub struct Meta {
     /// For an imported pack: what the pack calls itself. Shown as the pack's words, never the app's.
     pub pack_name: String,
     pub pack_description: String,
+    /// Also the pack's own claims (author, version), and the fingerprint the app calculated for it.
+    pub pack_author: String,
+    pub pack_version: String,
+    pub pack_fingerprint: String,
     /// For an app-update merge: the built-in file whose conflict is settled when this change is kept.
     pub resolves: String,
     /// The state of the live layer (a commit) this change could not be combined with (see `sync`).
@@ -73,6 +77,13 @@ pub fn set_pack(d: &Dirs, name: &str, description: &str) {
     let _ = save_meta(d, &m);
 }
 
+/// Remember who an imported pack says made it, its version, and its fingerprint.
+pub fn set_pack_identity(d: &Dirs, author: &str, version: &str, fingerprint: &str) {
+    let Some(mut m) = load_meta(d) else { return };
+    (m.pack_author, m.pack_version, m.pack_fingerprint) = (author.to_string(), version.to_string(), fingerprint.to_string());
+    let _ = save_meta(d, &m);
+}
+
 /// Remember which update conflict the pending change settles once it is kept.
 pub fn set_resolves(d: &Dirs, path: &str) {
     let Some(mut m) = load_meta(d) else { return };
@@ -96,9 +107,7 @@ async fn remove(g: Git<'_>, d: &Dirs) {
 }
 
 /// The refusal when a change is still being written by the assistant.
-fn still_preparing() -> anyhow::Error {
-    anyhow::anyhow!("Another customisation is still being prepared. Wait for it to finish, or stop it first.")
-}
+fn still_preparing() -> anyhow::Error { crate::tr::err("layer.preparing", &[]) }
 
 /// Start a fresh staging copy from the live layer, replacing any earlier pending change.
 pub async fn recreate(g: Git<'_>, d: &Dirs, origin: &str, chat_id: Option<&str>) -> anyhow::Result<()> {
@@ -813,7 +822,7 @@ fn describe_staged(d: &Dirs, m: &Meta, files: &[(String, &'static str)], ignored
     let css = files.iter().any(|(p, s)| p == "custom.css" && *s != "deleted")
         .then(|| validate::css_report(&text_of(&d.layer.join("custom.css")), &text_of(&d.staging.join("custom.css"))));
     let pack = (m.origin == "import" && !(m.pack_name.is_empty() && m.pack_description.is_empty()))
-        .then(|| json!({"name": m.pack_name, "description": m.pack_description}));
+        .then(|| json!({"name": m.pack_name, "description": m.pack_description, "author": m.pack_author, "version": m.pack_version, "fingerprint": m.pack_fingerprint}));
     // What it does, item by item, read from the files (half-finished files say nothing yet).
     let described = if running { json!({"effects": [], "installed": []}) } else { effects::describe(&d.layer, &d.staging, &files) };
     json!({
@@ -907,9 +916,9 @@ fn incomplete_error(arabic: bool) -> &'static str {
 /// `signature` describes anyway.
 pub async fn accept_incomplete(g: Git<'_>, d: &Dirs, arabic: bool, signature: &str) -> anyhow::Result<()> {
     let p = pending(g, d, arabic).await;
-    if p["exists"] != true { anyhow::bail!("there is no pending change"); }
+    if p["exists"] != true { return Err(crate::tr::err("layer.no_pending", &[])); }
     if p["signature"] != signature { anyhow::bail!("{}", changed_error(arabic)); }
-    let mut m = load_meta(d).ok_or_else(|| anyhow::anyhow!("there is no pending change"))?;
+    let mut m = load_meta(d).ok_or_else(|| crate::tr::err("layer.no_pending", &[]))?;
     m.accepted = signature.to_string();
     save_meta(d, &m)
 }
@@ -935,13 +944,13 @@ fn writable(layer: &Path, rel: &str) -> bool {
 /// apply goes ahead only if it still describes exactly what is staged. All or nothing: if any file
 /// cannot be written or the entry cannot be recorded, the live layer is put back as it was.
 pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) -> anyhow::Result<Value> {
-    let m = load_meta(d).filter(|_| staged(d)).ok_or_else(|| anyhow::anyhow!("there is no pending change"))?;
-    if chat_running(g, &m).await { anyhow::bail!("The assistant is still working on this change. Wait for it to finish, or stop it first."); }
+    let m = load_meta(d).filter(|_| staged(d)).ok_or_else(|| crate::tr::err("layer.no_pending", &[]))?;
+    if chat_running(g, &m).await { return Err(crate::tr::err("layer.assistant_working", &[])); }
     // Whatever reached the live layer without a review is taken out first (it comes back as a
     // review of its own): this entry records the reviewed change and nothing else.
     set_aside(g, d).await?;
     let p = pending(g, d, arabic).await;
-    if p["exists"] != true { anyhow::bail!("there is no pending change"); }
+    if p["exists"] != true { return Err(crate::tr::err("layer.no_pending", &[])); }
     if p["stale"] == true { anyhow::bail!("{}", stale_error(arabic)); }
     let (files, _) = changes(g, d).await?;
     // Everything is read once, checked against the review, and those same bytes are what gets
@@ -1004,7 +1013,7 @@ pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) 
 
 pub async fn discard(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
     if let Some(m) = load_meta(d) {
-        if chat_running(g, &m).await { anyhow::bail!("The assistant is still working on this change. Stop it first."); }
+        if chat_running(g, &m).await { return Err(crate::tr::err("layer.assistant_working", &[])); }
     }
     remove(g, d).await;
     Ok(())

@@ -125,7 +125,11 @@ async fn all_chats(st: &AppState) -> Vec<Chat> { st.chats.chats.read().await.val
 async fn move_export(State(st): S) -> R {
     let s = st.settings.read().await.clone();
     let chats = all_chats(&st).await;
-    let (v, info) = tokio::task::spawn_blocking(move || transfer::export(&s, chats, &paths::attachments_dir(), &paths::app_layer_dir())).await?;
+    let (v, info) = tokio::task::spawn_blocking(move || {
+        let (mut v, mut info) = transfer::export(&s, chats, &paths::attachments_dir(), &paths::app_layer_dir());
+        transfer::add_addon_data(&mut v, &mut info, &paths::home());
+        (v, info)
+    }).await?;
     let text = serde_json::to_vec(&v)?;
     let path = tokio::task::spawn_blocking(move || transfer::save_export(&transfer::export_dir(), &text)).await??;
     crate::log::info(format!("move: exported {} chat(s) and {} attachment(s)", info.chats, info.attachments));
@@ -165,7 +169,14 @@ async fn move_inspect(State(st): S, Json(i): Json<Inspect>) -> R {
         "settings": b.settings.is_some(),
         "customisations": b.customisations.as_ref().map_or(0, |p| custom_changes(p, &paths::app_layer_dir())),
         "projects": projects,
+        "addonData": b.addon_data.len(),
+        "addonDataExisting": b.addon_data.keys().filter(|n| has_addon_data(&paths::home(), n)).count(),
     })))
+}
+
+/// Has add-on `name` saved anything on this computer?
+fn has_addon_data(home: &Path, name: &str) -> bool {
+    crate::layer_api::storage_read(home, name).map_or(false, |v| v.as_object().map_or(false, |o| !o.is_empty()))
 }
 
 /// How many of a pack's files differ from the customisation layer here (a file identical to the
@@ -185,6 +196,10 @@ struct Choices {
     replace: bool,
     /// Linked folder id in the file -> the folder on this computer ("" or missing: leave it out).
     projects: BTreeMap<String, String>,
+    /// Bring what add-ons saved on the other computer.
+    addon_data: bool,
+    /// …also for add-ons that have saved data here (what is here is kept as an earlier copy).
+    addon_data_replace: bool,
 }
 
 #[derive(Deserialize)]
@@ -276,9 +291,21 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
             }
         }
     }
-    crate::log::info(format!("move: imported {added} new and {replaced} replaced chat(s), skipped {skipped}; settings {settings_done}; customisations {custom}"));
+    // 5. What add-ons saved: added where there is none here; replacing only when asked, and then
+    //    what is here is kept as an earlier copy the add-on's data can be put back to.
+    let (mut data_added, mut data_replaced, mut data_skipped) = (0usize, 0usize, 0usize);
+    if ch.addon_data {
+        for (name, data) in &b.addon_data {
+            let here = has_addon_data(home, name);
+            if here && !ch.addon_data_replace { data_skipped += 1; continue; }
+            crate::layer_api::storage_replace(home, name, data)?;
+            if here { data_replaced += 1 } else { data_added += 1 }
+        }
+    }
+    crate::log::info(format!("move: imported {added} new and {replaced} replaced chat(s), skipped {skipped}; settings {settings_done}; customisations {custom}; add-on data {data_added} new, {data_replaced} replaced, {data_skipped} kept"));
     Ok(json!({"chatsAdded": added, "chatsReplaced": replaced, "chatsSkipped": skipped, "attachments": files,
-              "settings": settings_done, "projects": new_projects.len(), "customisations": custom, "customisationsError": custom_error}))
+              "settings": settings_done, "projects": new_projects.len(), "customisations": custom, "customisationsError": custom_error,
+              "addonData": {"added": data_added, "replaced": data_replaced, "skipped": data_skipped}}))
 }
 
 // ---------- removing Thoughts from this computer ----------
@@ -496,6 +523,33 @@ mod tests {
         let r = import(&st, b, &Choices { chats: true, replace: true, ..Default::default() }, &home).await.unwrap();
         assert_eq!(r["chatsReplaced"], 1);
         assert_eq!(st.chats.get("c-2").await.unwrap().title, "Theirs");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn add_on_data_comes_along_and_replaces_only_when_asked() {
+        let root = tmp();
+        let home = root.join("data");
+        std::fs::create_dir_all(&home).unwrap();
+        let st = AppState::for_test();
+        crate::layer_api::storage_write(&home, "hours.js", br#"{"entries":["here"]}"#, false).unwrap();
+        let mut file = bundle_with(Value::Null, Value::Null, Value::Null);
+        file["addonData"] = json!({"hours.js": {"entries": ["there"]}, "board.js": {"cols": 4}});
+        let ch = |replace: bool| Choices { addon_data: true, addon_data_replace: replace, ..Default::default() };
+        let r = import(&st, transfer::read(&file).unwrap(), &Choices::default(), &home).await.unwrap();
+        assert_eq!(r["addonData"]["added"], 0, "not chosen: nothing");
+        let r = import(&st, transfer::read(&file).unwrap(), &ch(false), &home).await.unwrap();
+        assert_eq!((r["addonData"]["added"].as_u64(), r["addonData"]["skipped"].as_u64()), (Some(1), Some(1)));
+        assert_eq!(crate::layer_api::storage_read(&home, "hours.js").unwrap()["entries"], json!(["here"]), "not replaced unasked");
+        assert_eq!(crate::layer_api::storage_read(&home, "board.js").unwrap()["cols"], 4);
+        let r = import(&st, transfer::read(&file).unwrap(), &ch(true), &home).await.unwrap();
+        assert_eq!(r["addonData"]["replaced"], 2);
+        assert_eq!(crate::layer_api::storage_read(&home, "hours.js").unwrap()["entries"], json!(["there"]));
+        // What was here can be put back.
+        let info = crate::layer_api::data_info(&home, "hours.js").unwrap();
+        let first = info["versions"].as_array().unwrap().iter().find(|v| v["bytes"] == br#"{"entries":["here"]}"#.len()).unwrap()["id"].as_str().unwrap().to_string();
+        crate::layer_api::storage_restore(&home, "hours.js", &first).unwrap();
+        assert_eq!(crate::layer_api::storage_read(&home, "hours.js").unwrap()["entries"], json!(["here"]));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

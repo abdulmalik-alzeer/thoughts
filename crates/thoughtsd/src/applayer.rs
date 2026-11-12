@@ -222,10 +222,13 @@ pub fn manifest_lang(dir: &Path, arabic: bool) -> Value {
     let parsed = |p: &str| std::fs::read_to_string(dir.join(p)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
     let object = |p: &str| Some(parsed(p)).filter(Value::is_object).unwrap_or(Value::Null);
     let shared = parsed("manifest.json");
+    // What the user switched off is not handed to the UI at all: it is listed under `off` only.
+    let off = switched_off(dir);
     let list = |sub: &str, ext: &str| -> Vec<Value> {
         let mut v: Vec<Value> = std::fs::read_dir(dir.join(sub)).into_iter().flatten().flatten()
             .filter(|e| e.path().extension().map_or(false, |x| x == ext) && !e.file_name().to_string_lossy().starts_with('.'))
             .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
+            .filter(|e| !off.contains(&format!("{sub}/{}", e.file_name().to_string_lossy())))
             .map(|e| {
                 let name = e.file_name().to_string_lossy().to_string();
                 let mut item = resolve_decl(dir, sub, &name, &shared, arabic);
@@ -249,13 +252,189 @@ pub fn manifest_lang(dir: &Path, arabic: bool) -> Value {
         "todos": object("todos.json"),
         "nav": object("nav.json"),
         "workflows": crate::workflows::load(dir),
+        "off": off.iter().filter(|p| dir.join(p).is_file()).collect::<Vec<_>>(),
     })
+}
+
+// ---------- switching one add-on or page off, removing it ----------
+
+/// The layer file listing the add-ons and pages the user switched off: `{"off": ["plugins/hours.js"]}`.
+pub const ADDONS_FILE: &str = "addons.json";
+
+/// `plugins/<plain name>.js` or `views/<plain name>.html` → `("plugins" | "views", file name)`.
+pub fn item_path(path: &str) -> Option<(&'static str, &str)> {
+    let (sub, file) = path.split_once('/')?;
+    let (sub, ext) = match sub { "plugins" => ("plugins", ".js"), "views" => ("views", ".html"), _ => return None };
+    (file.len() > ext.len() && file.ends_with(ext) && crate::layer_api::valid_plugin_name(file)).then_some((sub, file))
+}
+
+/// The add-ons and pages switched off in the layer at `dir`.
+pub fn switched_off(dir: &Path) -> BTreeSet<String> {
+    let v: Value = std::fs::read_to_string(dir.join(ADDONS_FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+    v["off"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|p| item_path(p).is_some()).map(String::from).collect()
+}
+
+fn read_object(path: &Path) -> Option<serde_json::Map<String, Value>> {
+    std::fs::read_to_string(path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.as_object().cloned())
+}
+
+fn write_json(path: &Path, v: &Value) -> anyhow::Result<()> {
+    std::fs::write(path, serde_json::to_string_pretty(v)? + "\n")?;
+    Ok(())
+}
+
+/// Write the switched-off list (keeping anything else the file holds).
+fn write_off(dir: &Path, off: &BTreeSet<String>) -> anyhow::Result<()> {
+    let mut o = read_object(&dir.join(ADDONS_FILE)).unwrap_or_default();
+    o.insert("off".into(), json!(off));
+    write_json(&dir.join(ADDONS_FILE), &Value::Object(o))
+}
+
+/// A change the app makes to the live layer for the user, outside a review: `edit` changes the
+/// files it names, and they (nothing else) become one history entry, marked as `act`. Whatever was
+/// in the live layer without a review is set aside first, and if anything fails the layer is put
+/// back exactly as it was. Returns the new entry (empty when nothing changed).
+async fn app_change(g: Git<'_>, dir: &Path, subject: &str, act: Act, edit: impl FnOnce(&Path) -> anyhow::Result<Vec<String>>) -> anyhow::Result<String> {
+    crate::staging::set_aside(g, &Dirs::of_layer(dir)).await?;
+    let head = g.rev(dir, "HEAD").await?;
+    let done: anyhow::Result<String> = async {
+        let touched = edit(dir)?;
+        if touched.is_empty() { return Ok(String::new()); }
+        let mut add = vec!["add", "-A", "--"];
+        add.extend(touched.iter().map(String::as_str));
+        g.run(dir, &add).await?;
+        if g.run(dir, &["diff", "--cached", "--quiet"]).await.is_ok() { return Ok(String::new()); }
+        g.commit_staged(dir, subject, &[]).await?;
+        g.rev(dir, "HEAD").await
+    }.await;
+    match done {
+        Ok(hash) => {
+            if !hash.is_empty() { mark_act(g, dir, act).await; }
+            Ok(hash)
+        }
+        Err(e) => {
+            let _ = g.run(dir, &["reset", "-q", "--hard", &head]).await;
+            let _ = g.run(dir, &["clean", "-fdq"]).await;
+            crate::log::warn(format!("layer: {subject} failed and was undone: {e}"));
+            Err(e)
+        }
+    }
+}
+
+fn known_item<'p>(dir: &Path, path: &'p str) -> anyhow::Result<(&'static str, &'p str)> {
+    let item = item_path(path).filter(|_| std::fs::symlink_metadata(dir.join(path)).map_or(false, |m| m.is_file()));
+    item.ok_or_else(|| crate::tr::err("addon.gone", &[]))
+}
+
+/// Switch one add-on or page off (`on = false`) or back on. It stays in the layer, is simply not
+/// loaded, and the switch is one history entry of its own, so it works whatever later changes did
+/// and can itself be undone. Returns the new entry (empty when it already was that way).
+pub async fn switch_in(g: Git<'_>, dir: &Path, path: &str, on: bool) -> anyhow::Result<String> {
+    known_item(dir, path)?;
+    let mut off = switched_off(dir);
+    if off.contains(path) != on { return Ok(String::new()); }
+    let subject = format!("{} {path}", if on { "Switch on" } else { "Switch off" });
+    let act = Act { kind: (if on { "on" } else { "off" }).into(), item: path.to_string(), ..Default::default() };
+    app_change(g, dir, &subject, act, |dir| {
+        if on { off.remove(path); } else { off.insert(path.to_string()); }
+        write_off(dir, &off)?;
+        Ok(vec![ADDONS_FILE.to_string()])
+    }).await
+}
+
+/// Take one add-on or page out of the layer: its file, its own declaration, its entry in
+/// `manifest.json` and its line in the switched-off list. A history entry of its own, so it works
+/// whatever later changes did, and undoing it brings everything back. Its saved data is kept.
+pub async fn remove_in(g: Git<'_>, dir: &Path, path: &str) -> anyhow::Result<String> {
+    let (sub, file) = known_item(dir, path)?;
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s).to_string();
+    let act = Act { kind: "remove".into(), item: path.to_string(), ..Default::default() };
+    app_change(g, dir, &format!("Remove {path}"), act, |dir| {
+        let mut touched = vec![path.to_string()];
+        std::fs::remove_file(dir.join(path))?;
+        let decl = format!("{sub}/{stem}.json");
+        if std::fs::symlink_metadata(dir.join(&decl)).map_or(false, |m| m.is_file()) {
+            std::fs::remove_file(dir.join(&decl))?;
+            touched.push(decl);
+        }
+        if let Some(mut m) = read_object(&dir.join("manifest.json")) {
+            if m.get_mut(sub).and_then(Value::as_object_mut).and_then(|s| s.remove(file)).is_some() {
+                write_json(&dir.join("manifest.json"), &Value::Object(m))?;
+                touched.push("manifest.json".into());
+            }
+        }
+        let mut off = switched_off(dir);
+        if off.remove(path) {
+            write_off(dir, &off)?;
+            touched.push(ADDONS_FILE.into());
+        }
+        Ok(touched)
+    }).await
+}
+
+/// Take one permission away from an add-on or page (and, with `library:write`, its write folders),
+/// wherever its declaration lives. The add-on may stop working in the parts that needed it.
+pub async fn withdraw_in(g: Git<'_>, dir: &Path, path: &str, permission: &str) -> anyhow::Result<String> {
+    let (sub, file) = known_item(dir, path)?;
+    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s).to_string();
+    let shared = std::fs::read_to_string(dir.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+    if !resolve_decl(dir, sub, file, &shared, false)["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == permission)) {
+        return Err(crate::tr::err("addon.no_permission", &[]));
+    }
+    let act = Act { kind: "permission".into(), item: path.to_string(), detail: permission.to_string() };
+    let own = format!("{sub}/{stem}.json");
+    app_change(g, dir, &format!("Take away {permission} from {path}"), act, |dir| {
+        let take = |decl: &mut serde_json::Map<String, Value>| {
+            if let Some(Value::Array(list)) = decl.get_mut("permissions") { list.retain(|p| p != permission); }
+            if permission == "library:write" { decl.remove("write"); }
+        };
+        // The same place `resolve_decl` reads: the add-on's own file, else its manifest entry.
+        if let Some(mut decl) = read_object(&dir.join(&own)).filter(|_| std::fs::symlink_metadata(dir.join(&own)).map_or(false, |m| m.is_file())) {
+            take(&mut decl);
+            write_json(&dir.join(&own), &Value::Object(decl))?;
+            return Ok(vec![own.clone()]);
+        }
+        let mut m = read_object(&dir.join("manifest.json")).ok_or_else(|| crate::tr::err("addon.no_permission", &[]))?;
+        let decl = m.get_mut(sub).and_then(Value::as_object_mut).and_then(|s| s.get_mut(file)).and_then(Value::as_object_mut)
+            .ok_or_else(|| crate::tr::err("addon.no_permission", &[]))?;
+        take(decl);
+        write_json(&dir.join("manifest.json"), &Value::Object(m))?;
+        Ok(vec!["manifest.json".into()])
+    }).await
+}
+
+/// Every add-on and page in the layer at `dir`, on or off: `{path, name, kind, on, permissions,
+/// write, description, unsupported, message?}`, plugins first, by name.
+pub fn addons_of(dir: &Path, arabic: bool) -> Vec<Value> {
+    let shared = std::fs::read_to_string(dir.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+    let off = switched_off(dir);
+    let mut out = vec![];
+    for (sub, ext, kind) in [("plugins", "js", "plugin"), ("views", "html", "view")] {
+        let mut names: Vec<String> = std::fs::read_dir(dir.join(sub)).into_iter().flatten().flatten()
+            .filter(|e| e.file_type().map_or(false, |t| t.is_file()) && e.path().extension().map_or(false, |x| x == ext))
+            .map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| !n.starts_with('.')).collect();
+        names.sort();
+        for name in names {
+            let path = format!("{sub}/{name}");
+            let mut v = resolve_decl(dir, sub, &name, &shared, arabic);
+            v["path"] = json!(path);
+            v["name"] = json!(name);
+            v["label"] = json!(item_label(&path));
+            v["kind"] = json!(kind);
+            v["on"] = json!(!off.contains(&path));
+            // Only a plain name can be switched off, removed or keep saved data.
+            v["manageable"] = json!(item_path(&path).is_some());
+            out.push(v);
+        }
+    }
+    out
 }
 
 // ---------- history ----------
 
 const GUIDE_SUBJECT: &str = "Update customisation guide";
 const DEFAULTS_SUBJECT: &str = "Update built-in defaults";
+const BACK_SUBJECT: &str = "Went back to an earlier version";
 
 /// What the app itself knows about its history entries: which ones are undos (and of what), and
 /// which are its own housekeeping. Kept beside the history, inside the layer's `.git` folder where
@@ -268,7 +447,24 @@ struct Marks {
     undo: BTreeMap<String, String>,
     /// The app's own entries: refreshed guide, refreshed built-in defaults.
     system: BTreeSet<String>,
+    /// Entries the app wrote for something the user did outside a review (see `Act`).
+    acts: BTreeMap<String, Act>,
+    /// Kept pack imports: what the pack said it was, and the fingerprint the app calculated.
+    packs: BTreeMap<String, PackMark>,
 }
+
+/// What an entry the app wrote for the user stands for: `back` (went back to an earlier version,
+/// `item` = its short id), `off` / `on` / `remove` (an add-on or page, `item` = its file) and
+/// `permission` (`detail` = the permission taken away from `item`). Its title is written from this
+/// in the language of the moment, never read out of the stored text.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct Act { pub kind: String, pub item: String, pub detail: String }
+
+/// A kept pack: its own claims (name, author, version) and the fingerprint the app calculated.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[serde(default)]
+pub struct PackMark { pub name: String, pub author: String, pub version: String, pub fingerprint: String }
 
 impl Marks {
     /// Is the change `hash` made still part of the layer? Not when an undo of it is itself still in effect.
@@ -343,6 +539,14 @@ async fn seed_marks(g: Git<'_>, dir: &Path) -> Marks {
             m.system.insert(hash.clone());
             continue;
         }
+        // "Went back to an earlier version (<short id of an older entry>)": only its title is read
+        // from this (it stays an ordinary entry that can be undone).
+        if let Some(short) = subject.strip_prefix(&format!("{BACK_SUBJECT} (")).and_then(|r| r.strip_suffix(')')) {
+            if valid_hash(short) && recs[i + 1..].iter().any(|o| o[0].starts_with(short)) {
+                m.acts.insert(hash.clone(), Act { kind: "back".into(), item: short.to_string(), ..Default::default() });
+                continue;
+            }
+        }
         let Some(of) = bodies.get(hash).and_then(|b| b.trim_end_matches(['\n', '\r']).strip_prefix("Reverts: ")).filter(|h| full_hash(h)) else { continue };
         let older = recs[i + 1..].iter().find(|o| o[0] == of);
         if older.map_or(false, |o| subject == format!("Undo: {}", o[1].trim()) || subject == format!("Undo: {}", clean_subject(&o[1]))) {
@@ -372,15 +576,109 @@ fn kind_of(marks: &Marks, hash: &str, parents: &str) -> &'static str {
     else { "change" }
 }
 
-/// `[{hash, short, date, summary, files:[path], kind, undoable, undone}]`, newest first (`subject` =
-/// `summary`, kept for older UIs). `kind` is `start` (the first entry), `system` (the app's own
-/// housekeeping), `undo` or `change`; only the last two can be undone on their own.
+/// What an entry is, finer than `kind_of`, for History to group and name it: `start`, `guide`,
+/// `defaults`, `undo`, `back`, `off`, `on`, `remove`, `permission`, `pack` or `change`.
+fn entry_of(marks: &Marks, hash: &str, parents: &str, stored: &str) -> &'static str {
+    match kind_of(marks, hash, parents) {
+        "start" => return "start",
+        "system" => return if stored.starts_with(DEFAULTS_SUBJECT) { "defaults" } else { "guide" },
+        "undo" => return "undo",
+        _ => {}
+    }
+    match marks.acts.get(hash).map(|a| a.kind.as_str()) {
+        Some("back") => "back",
+        Some("off") => "off",
+        Some("on") => "on",
+        Some("remove") => "remove",
+        Some("permission") => "permission",
+        _ if marks.packs.contains_key(hash) => "pack",
+        _ => "change",
+    }
+}
+
+/// An add-on's or page's name as people know it: its file name without `.js` / `.html`.
+pub fn item_label(path: &str) -> String {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    show_hidden(file.strip_suffix(".js").or_else(|| file.strip_suffix(".html")).unwrap_or(file), false)
+}
+
+/// A permission in a few plain words (for History; the add-on list uses the UI's longer wording).
+pub fn permission_words(p: &str, ar: bool) -> &'static str {
+    match (p, ar) {
+        ("library:read", false) => "read your notes", ("library:read", true) => "قراءة ملاحظاتك",
+        ("library:write", false) => "write in your library", ("library:write", true) => "الكتابة في مكتبتك",
+        ("todos:read", false) => "read your todos", ("todos:read", true) => "قراءة مهامك",
+        ("todos:write", false) => "change your todos", ("todos:write", true) => "تعديل مهامك",
+        ("ideas:read", false) => "read your ideas", ("ideas:read", true) => "قراءة أفكارك",
+        ("ideas:write", false) => "change the status of your ideas", ("ideas:write", true) => "تغيير حالة أفكارك",
+        ("chat:start", false) => "start chats", ("chat:start", true) => "بدء المحادثات",
+        ("storage", false) => "keep its own saved data", ("storage", true) => "حفظ بياناتها الخاصة",
+        (_, false) => "a permission", (_, true) => "صلاحية",
+    }
+}
+
+/// An entry's title in the UI language. The app's own entries are named from what the app recorded
+/// about them, so they read in the language of the moment; every other title is shown as stored
+/// (the words of the change's summary).
+fn title_of(marks: &Marks, hash: &str, parents: &str, raw: &str, ar: bool, depth: u8) -> String {
+    let stored = clean_subject(raw);
+    let act = marks.acts.get(hash).cloned().unwrap_or_default();
+    let page = act.item.starts_with("views/");
+    let name = item_label(&act.item);
+    match entry_of(marks, hash, parents, &stored) {
+        "start" => (if ar { "نقطة البداية" } else { "Starting point" }).into(),
+        "guide" => (if ar { "تحديث دليل التخصيص" } else { "Update customisation guide" }).into(),
+        "defaults" => {
+            let v = stored.strip_prefix(&format!("{DEFAULTS_SUBJECT} to version ")).unwrap_or("").trim();
+            if ar { format!("تحديث الملفات الافتراضية المرفقة بالتطبيق إلى الإصدار {v}") } else { format!("{DEFAULTS_SUBJECT} to version {v}") }
+        }
+        "undo" => {
+            let inner = stored.strip_prefix("Undo: ").unwrap_or(&stored).to_string();
+            // (An undo is never of the starting point, so the entry it undid has a parent.)
+            let of = marks.undo.get(hash).cloned().unwrap_or_default();
+            let title = if depth < 8 { title_of(marks, &of, "-", &inner, ar, depth + 1) } else { inner };
+            if ar { format!("تراجع: {title}") } else { format!("Undo: {title}") }
+        }
+        "back" => if ar { format!("العودة إلى إصدار سابق ({})", act.item) } else { format!("{BACK_SUBJECT} ({})", act.item) },
+        "off" => match (ar, page) {
+            (true, true) => format!("إيقاف الصفحة «{name}»"), (true, false) => format!("إيقاف الإضافة «{name}»"),
+            (false, true) => format!("Switched off the page \u{201c}{name}\u{201d}"), (false, false) => format!("Switched off the add-on \u{201c}{name}\u{201d}"),
+        },
+        "on" => match (ar, page) {
+            (true, true) => format!("تشغيل الصفحة «{name}»"), (true, false) => format!("تشغيل الإضافة «{name}»"),
+            (false, true) => format!("Switched on the page \u{201c}{name}\u{201d}"), (false, false) => format!("Switched on the add-on \u{201c}{name}\u{201d}"),
+        },
+        "remove" => match (ar, page) {
+            (true, true) => format!("إزالة الصفحة «{name}»"), (true, false) => format!("إزالة الإضافة «{name}»"),
+            (false, true) => format!("Removed the page \u{201c}{name}\u{201d}"), (false, false) => format!("Removed the add-on \u{201c}{name}\u{201d}"),
+        },
+        "permission" => {
+            let what = permission_words(&act.detail, ar);
+            if ar { format!("سحب صلاحية من «{name}»: {what}") } else { format!("Took a permission away from \u{201c}{name}\u{201d}: {what}") }
+        }
+        "pack" => {
+            let n = marks.packs.get(hash).map(|p| p.name.clone()).unwrap_or_default();
+            if ar { format!("إضافة الحزمة «{n}»") } else { format!("Added the pack \u{201c}{n}\u{201d}") }
+        }
+        _ => stored,
+    }
+}
+
+/// `[{hash, short, date, summary, files:[path], kind, entry, undoable, undone, pack?}]`, newest
+/// first (`subject` = `summary`, kept for older UIs). `kind` is `start` (the first entry), `system`
+/// (the app's own housekeeping), `undo` or `change`; only the last two can be undone on their own.
+/// `entry` names it more finely (see `entry_of`), and the app's own entries are titled in the UI
+/// language. `pack`: for a kept pack, what it said it was and the fingerprint the app calculated.
 pub async fn history(state: &AppState) -> Vec<Value> { history_in(Git(Some(state)), &Dirs::real().layer).await }
 
 pub async fn history_in(g: Git<'_>, dir: &Path) -> Vec<Value> { history_page(g, dir, 0, 100).await }
 
 /// `limit` entries of the history after skipping the `offset` newest.
 pub async fn history_page(g: Git<'_>, dir: &Path, offset: usize, limit: usize) -> Vec<Value> {
+    history_page_in(g, dir, offset, limit, crate::tr::arabic()).await
+}
+
+pub async fn history_page_in(g: Git<'_>, dir: &Path, offset: usize, limit: usize, ar: bool) -> Vec<Value> {
     let (skip, max) = (format!("--skip={offset}"), format!("--max-count={}", limit.clamp(1, 500)));
     let range = [skip.as_str(), max.as_str()];
     let recs = log_records(g, dir, &range, &["%H", "%h", "%cI", "%P", "%s"]).await;
@@ -390,13 +688,37 @@ pub async fn history_page(g: Git<'_>, dir: &Path, offset: usize, limit: usize) -
     let marks = load_marks(g, dir).await;
     recs.iter().map(|p| {
         let kind = kind_of(&marks, &p[0], &p[3]);
-        let summary = clean_subject(&p[4]);
-        json!({"hash": p[0], "short": p[1], "summary": summary, "subject": summary, "date": p[2], "files": files.remove(&p[0]).unwrap_or_default(),
-            "kind": kind, "undoable": kind == "change" || kind == "undo", "undone": !marks.in_effect(&p[0])})
+        let summary = title_of(&marks, &p[0], &p[3], &p[4], ar, 0);
+        let mut v = json!({"hash": p[0], "short": p[1], "summary": summary, "subject": summary, "date": p[2], "files": files.remove(&p[0]).unwrap_or_default(),
+            "kind": kind, "entry": entry_of(&marks, &p[0], &p[3], &clean_subject(&p[4])), "undoable": kind == "change" || kind == "undo", "undone": !marks.in_effect(&p[0])});
+        if let Some(pk) = marks.packs.get(&p[0]) { v["pack"] = json!(pk); }
+        v
     }).collect()
 }
 
-fn bad_entry() -> anyhow::Error { anyhow::anyhow!("bad history entry") }
+/// Record what the pack kept as entry `hash` said it was (see `PackMark`).
+pub async fn mark_pack(g: Git<'_>, dir: &Path, hash: &str, pack: PackMark) {
+    if !full_hash(hash) { return; }
+    let mut m = load_marks(g, dir).await;
+    m.packs.insert(hash.to_string(), pack);
+    save_marks(dir, &m);
+}
+
+/// The packs kept so far (newest last): `(entry, pack)`.
+pub async fn kept_packs(g: Git<'_>, dir: &Path) -> Vec<(String, PackMark)> {
+    let m = load_marks(g, dir).await;
+    let order: Vec<String> = log_records(g, dir, &["--reverse"], &["%H", "%s"]).await.into_iter().map(|mut p| p.remove(0)).collect();
+    order.into_iter().filter_map(|h| m.packs.get(&h).map(|p| (h.clone(), p.clone()))).collect()
+}
+
+async fn mark_act(g: Git<'_>, dir: &Path, act: Act) {
+    let Ok(head) = g.rev(dir, "HEAD").await else { return };
+    let mut m = load_marks(g, dir).await;
+    m.acts.insert(head, act);
+    save_marks(dir, &m);
+}
+
+fn bad_entry() -> anyhow::Error { crate::tr::err("layer.bad_entry", &[]) }
 
 /// `hash` as an entry of this layer's own history (never a commit of the staging copy, which lives
 /// in the same repository and has not been reviewed).
@@ -421,7 +743,9 @@ pub async fn rollback_in(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<(
     let full = own_entry(g, dir, hash).await?;
     let short = g.run(dir, &["rev-parse", "--short", "--end-of-options", &full]).await?.trim().to_string();
     g.run(dir, &["read-tree", "-u", "--reset", "--end-of-options", &full]).await?;
-    g.commit_all(dir, &format!("Went back to an earlier version ({short})")).await?;
+    if g.commit_all(dir, &format!("{BACK_SUBJECT} ({short})")).await? {
+        mark_act(g, dir, Act { kind: "back".into(), item: short, ..Default::default() }).await;
+    }
     Ok(())
 }
 
@@ -451,11 +775,11 @@ pub async fn revert_in(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<()>
         let _ = g.run(dir, &["revert", "--abort"]).await;
         let _ = g.run(dir, &["reset", "-q", "--hard", "HEAD"]).await;
         crate::log::warn(format!("layer: revert of {hash} failed: {e}"));
-        anyhow::bail!("This change cannot be undone on its own because later changes build on it. Use Rollback to go back to an earlier version instead.");
+        return Err(crate::tr::err("layer.undo_builds_on", &[]));
     }
     if g.run(dir, &["diff", "--cached", "--quiet"]).await.is_ok() {
         let _ = g.run(dir, &["revert", "--quit"]).await;
-        anyhow::bail!("This change is already undone.");
+        return Err(crate::tr::err("layer.already_undone", &[]));
     }
     g.commit_staged(dir, &format!("Undo: {subject}\n\nReverts: {full}"), &[]).await?;
     let _ = g.run(dir, &["revert", "--quit"]).await;
@@ -478,7 +802,7 @@ pub async fn last_undoable_in(g: Git<'_>, dir: &Path) -> Option<(String, String)
     let marks = load_marks(g, dir).await;
     log_records(g, dir, &["-200"], &["%H", "%P", "%s"]).await.into_iter()
         .find(|p| kind_of(&marks, &p[0], &p[1]) == "change" && marks.in_effect(&p[0]))
-        .map(|p| (p[0].clone(), clean_subject(&p[2])))
+        .map(|p| (p[0].clone(), title_of(&marks, &p[0], &p[1], &p[2], crate::tr::arabic(), 0)))
 }
 
 /// Undo the most recent change that is still in effect. Returns `(hash, subject)` of what was undone.
@@ -667,6 +991,109 @@ mod tests {
         assert_eq!(titles(history_page(st, &d.layer, 6, 3).await), ["Change 1", "Starting point"]);
         assert!(history_page(st, &d.layer, 8, 3).await.is_empty());
         assert_eq!(history_page(st, &d.layer, 6, 3).await[1]["files"].as_array().unwrap().len(), 9, "the first entry lists the starting files");
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    /// FEAT-22: one add-on is switched off, back on, loses a permission or is removed, although a
+    /// later change built on the change that added it (so undoing that change is refused). Each is
+    /// one history entry that can itself be undone.
+    #[tokio::test]
+    async fn one_add_on_can_be_switched_off_or_removed_whatever_came_after() {
+        let (st, d) = testutil::layer("addon-off").await;
+        let w = |p: &str, t: &str| std::fs::write(d.layer.join(p), t).unwrap();
+        w("plugins/hours.js", "export default () => { /* hours */ }\n");
+        w("plugins/hours.json", r#"{"apiVersion":1,"permissions":["storage","todos:read"]}"#);
+        w("views/board.html", "<p>board</p>");
+        st.commit_all(&d.layer, "Add hours and a board").await.unwrap();
+        let added = st.rev(&d.layer, "HEAD").await.unwrap();
+        w("plugins/hours.js", "export default () => { /* hours, v2 */ }\n");
+        st.commit_all(&d.layer, "Improve hours").await.unwrap();
+        assert!(revert_in(st, &d.layer, &added).await.unwrap_err().to_string().contains("later changes build on it"));
+        let names = |m: &Value, k: &str| m[k].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+        // Off: not handed to the app at all, still in the layer, listed as off.
+        let off = switch_in(st, &d.layer, "plugins/hours.js", false).await.unwrap();
+        assert!(!off.is_empty());
+        let m = manifest_of(&d.layer);
+        assert!(names(&m, "plugins").is_empty() && names(&m, "views") == ["board.html"]);
+        assert_eq!(m["off"], json!(["plugins/hours.js"]));
+        assert!(d.layer.join("plugins/hours.js").exists());
+        assert_eq!(switch_in(st, &d.layer, "plugins/hours.js", false).await.unwrap(), "", "already off: no entry");
+        let a = addons_of(&d.layer, false);
+        assert_eq!((a[0]["path"].as_str(), a[0]["on"].as_bool(), a[1]["on"].as_bool()), (Some("plugins/hours.js"), Some(false), Some(true)));
+        let h = history_page_in(st, &d.layer, 0, 10, false).await;
+        assert_eq!((h[0]["entry"].as_str(), h[0]["summary"].as_str(), h[0]["undoable"].as_bool()), (Some("off"), Some("Switched off the add-on \u{201c}hours\u{201d}"), Some(true)));
+        assert_eq!(history_page_in(st, &d.layer, 0, 1, true).await[0]["summary"], "إيقاف الإضافة «hours»");
+        // Undoing the switch (here: the native "Undo last app change") turns it back on.
+        let (undone, title) = undo_last_in(st, &d.layer, false).await.unwrap();
+        assert_eq!((undone.as_str(), title.as_str()), (off.as_str(), "Switched off the add-on \u{201c}hours\u{201d}"));
+        assert_eq!(names(&manifest_of(&d.layer), "plugins"), ["hours.js"]);
+        assert_eq!(history_page_in(st, &d.layer, 0, 1, false).await[0]["summary"], "Undo: Switched off the add-on \u{201c}hours\u{201d}");
+        assert_eq!(history_page_in(st, &d.layer, 0, 1, true).await[0]["summary"], "تراجع: إيقاف الإضافة «hours»");
+        // Off, then on again by hand.
+        switch_in(st, &d.layer, "views/board.html", false).await.unwrap();
+        assert!(names(&manifest_of(&d.layer), "views").is_empty());
+        switch_in(st, &d.layer, "views/board.html", true).await.unwrap();
+        assert_eq!(names(&manifest_of(&d.layer), "views"), ["board.html"]);
+        assert_eq!(history_page_in(st, &d.layer, 0, 1, false).await[0]["summary"], "Switched on the page \u{201c}board\u{201d}");
+
+        // A permission taken away, from wherever the declaration lives.
+        withdraw_in(st, &d.layer, "plugins/hours.js", "todos:read").await.unwrap();
+        assert_eq!(manifest_of(&d.layer)["plugins"][0]["permissions"], json!(["storage"]));
+        assert!(withdraw_in(st, &d.layer, "plugins/hours.js", "todos:read").await.is_err(), "it has it no more");
+        assert_eq!(history_page_in(st, &d.layer, 0, 1, false).await[0]["summary"], "Took a permission away from \u{201c}hours\u{201d}: read your todos");
+        w("manifest.json", r#"{"apiVersion":1,"plugins":{"old.js":{"permissions":["library:write","todos:read"],"write":["clients/"]}}}"#);
+        w("plugins/old.js", "export default () => {}\n");
+        st.commit_all(&d.layer, "Add an old-style add-on").await.unwrap();
+        withdraw_in(st, &d.layer, "plugins/old.js", "library:write").await.unwrap();
+        let old = manifest_of(&d.layer)["plugins"].as_array().unwrap().iter().find(|p| p["name"] == "old.js").unwrap().clone();
+        assert_eq!((old["permissions"].clone(), old["write"].clone()), (json!(["todos:read"]), json!([])), "its write folders go with it");
+
+        // Removed: every trace of it in the layer, in one entry; its saved data is not touched.
+        switch_in(st, &d.layer, "plugins/old.js", false).await.unwrap();
+        crate::layer_api::storage_write(&d.home, "old.js", br#"{"x":1}"#, false).unwrap();
+        let removed = remove_in(st, &d.layer, "plugins/old.js").await.unwrap();
+        assert!(!d.layer.join("plugins/old.js").exists());
+        let man: Value = serde_json::from_str(&std::fs::read_to_string(d.layer.join("manifest.json")).unwrap()).unwrap();
+        assert!(man["plugins"].get("old.js").is_none());
+        assert!(switched_off(&d.layer).is_empty());
+        assert_eq!(crate::layer_api::storage_read(&d.home, "old.js").unwrap()["x"], 1);
+        remove_in(st, &d.layer, "plugins/hours.js").await.unwrap();
+        assert!(!d.layer.join("plugins/hours.json").exists());
+        assert_eq!(history_page_in(st, &d.layer, 0, 1, true).await[0]["summary"], "إزالة الإضافة «hours»");
+        // The remove of "old" is undone on its own although "hours" was removed after it.
+        revert_in(st, &d.layer, &removed).await.unwrap();
+        assert!(d.layer.join("plugins/old.js").exists());
+        assert_eq!(switched_off(&d.layer), BTreeSet::from(["plugins/old.js".to_string()]), "back as it was: off");
+        // Nothing outside the layer's add-ons can be reached this way.
+        for bad in ["plugins/../manifest.json", "custom.css", "plugins/gone.js", "plugins/a b.js", "views/x.js", "plugins/hours.json"] {
+            assert!(switch_in(st, &d.layer, bad, false).await.is_err() && remove_in(st, &d.layer, bad).await.is_err(), "{bad}");
+        }
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    /// UX-30: the app's own entries are named in the language of the moment.
+    #[tokio::test]
+    async fn the_apps_own_entries_speak_the_users_language() {
+        let (st, d) = testutil::layer("lang").await;
+        std::fs::write(d.layer.join("README.md"), "old").unwrap();
+        st.commit_all(&d.layer, "old guide").await.unwrap();
+        ensure_in(st, &d).await.unwrap();
+        std::fs::write(d.layer.join("custom.css"), "body{}\n").unwrap();
+        st.commit_all(&d.layer, "Make it calm").await.unwrap();
+        let start = history_in(st, &d.layer).await.last().unwrap()["hash"].as_str().unwrap().to_string();
+        rollback_in(st, &d.layer, &start).await.unwrap();
+        let en = history_page_in(st, &d.layer, 0, 10, false).await;
+        let ar = history_page_in(st, &d.layer, 0, 10, true).await;
+        let short = &start[..7];
+        assert!(en[0]["summary"].as_str().unwrap().starts_with("Went back to an earlier version (") && en[0]["entry"] == "back");
+        assert!(ar[0]["summary"].as_str().unwrap().starts_with("العودة إلى إصدار سابق (") && ar[0]["summary"].as_str().unwrap().contains(short));
+        assert_eq!((ar[1]["summary"].as_str(), ar[1]["entry"].as_str()), (Some("Make it calm"), Some("change")), "the user's own words stay");
+        assert_eq!((ar[2]["summary"].as_str(), ar[2]["entry"].as_str()), (Some("تحديث دليل التخصيص"), Some("guide")));
+        assert_eq!((ar.last().unwrap()["summary"].as_str(), ar.last().unwrap()["entry"].as_str()), (Some("نقطة البداية"), Some("start")));
+        // The same, read back from a history whose record was lost.
+        std::fs::remove_file(marks_file(&d.layer)).unwrap();
+        assert_eq!(history_page_in(st, &d.layer, 0, 10, true).await, ar);
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 

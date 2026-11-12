@@ -1,6 +1,7 @@
 //! Moving Thoughts to another computer (Settings → Maintenance): one file with the chats (and
-//! their attachments and unwrapped summaries), the settings and the customisations. The library
-//! travels on its own, through sync or a copy of its folder.
+//! their attachments and unwrapped summaries), the settings, the customisations and what add-ons
+//! saved (their records exist nowhere else). The library travels on its own, through sync or a
+//! copy of its folder.
 //!
 //! The file never holds a secret: no provider key, no sync password, no daemon token (those live
 //! in the keychain or in files that are not read here), and the settings say "no key saved".
@@ -57,7 +58,33 @@ pub fn settings_for_export(s: &Settings) -> Value {
 /// What an export holds, for the confirmation.
 #[derive(Debug, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Exported { pub chats: usize, pub attachments: usize, pub attachments_left: usize, pub customisations: usize }
+pub struct Exported { pub chats: usize, pub attachments: usize, pub attachments_left: usize, pub customisations: usize, pub addon_data: usize }
+
+/// At most this many add-ons' saved data travel in one file (each at most the storage limit).
+pub const MAX_ADDON_DATA: usize = 500;
+
+/// Add what add-ons saved on this computer (`home/plugin-data`) to an export.
+pub fn add_addon_data(v: &mut Value, info: &mut Exported, home: &Path) {
+    let data = crate::layer_api::storage_all(home);
+    let data: BTreeMap<String, Value> = data.into_iter().take(MAX_ADDON_DATA).collect();
+    info.addon_data = data.len();
+    v["addonData"] = json!(data);
+}
+
+/// Check the add-on data of a move file: plain add-on names, each a JSON object within the storage limit.
+fn read_addon_data(v: &Value) -> Option<BTreeMap<String, Value>> {
+    let mut out = BTreeMap::new();
+    match v {
+        Value::Null => {}
+        Value::Object(m) if m.len() <= MAX_ADDON_DATA => for (name, data) in m {
+            let size = serde_json::to_string(data).ok()?.len();
+            if !crate::layer_api::valid_plugin_name(name) || !data.is_object() || size > crate::layer_api::STORAGE_MAX_BYTES { return None; }
+            out.insert(name.clone(), data.clone());
+        },
+        _ => return None,
+    }
+    Some(out)
+}
 
 /// Build the file. Only ordinary chats travel (Wrap, setup and customise runs belong to this
 /// computer's history). `layer` is the customisation layer.
@@ -115,6 +142,8 @@ pub struct Bundle {
     /// chat id -> file name -> bytes
     pub attachments: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
     pub customisations: Option<Value>,
+    /// add-on name -> what it saved
+    pub addon_data: BTreeMap<String, Value>,
     pub app_version: String,
     pub created_at: Option<String>,
 }
@@ -169,8 +198,9 @@ pub fn read(v: &Value) -> anyhow::Result<Bundle> {
         Value::Null => None,
         p => { crate::packs::check_pack(p).map_err(|_| bad("customisations"))?; Some(p.clone()) }
     };
+    let addon_data = read_addon_data(&v["addonData"]).ok_or_else(|| bad("addon-data"))?;
     Ok(Bundle {
-        settings, chats, attachments, customisations,
+        settings, chats, attachments, customisations, addon_data,
         app_version: v["appVersion"].as_str().unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || ".-+".contains(*c)).take(30).collect(),
         created_at: v["createdAt"].as_str().map(|s| s.chars().take(40).collect()),
     })
@@ -375,6 +405,30 @@ mod tests {
         let mut v = ok();
         v["chats"][0]["kind"] = json!("customize");
         assert!(read(&v).unwrap().chats.is_empty());
+    }
+
+    #[test]
+    fn what_add_ons_saved_travels_and_is_checked_like_the_rest() {
+        let d = tmp();
+        crate::layer_api::storage_write(&d, "hours.js", br#"{"entries":[{"date":"2026-11-10","client":"Acme","hours":2.5}]}"#, false).unwrap();
+        crate::layer_api::storage_write(&d, "empty.js", b"{}", false).unwrap();
+        let (mut v, mut info) = export(&Settings::default(), vec![], &d.join("attachments"), &d.join("app-layer"));
+        add_addon_data(&mut v, &mut info, &d);
+        assert_eq!(info.addon_data, 1, "nothing saved, nothing to carry");
+        assert_eq!(v["addonData"]["hours.js"]["entries"][0]["client"], "Acme");
+        let b = read(&v).unwrap();
+        assert_eq!(b.addon_data.keys().collect::<Vec<_>>(), ["hours.js"]);
+        // Names that would reach outside the data folder, and anything but a JSON object of a fitting size.
+        let with = |data: Value| { let mut x = v.clone(); x["addonData"] = data; read(&x).map(|_| ()).unwrap_err().to_string() };
+        for bad in [json!({"../settings": {}}), json!({".versions": {}}), json!({"a/b.js": {}}), json!({"hours.js": [1]}), json!({"hours.js": "x"}),
+                    json!({"hours.js": {"x": "a".repeat(crate::layer_api::STORAGE_MAX_BYTES)}}), json!([1])] {
+            assert_eq!(with(bad.clone()), "MOVE_BAD::addon-data", "{bad}");
+        }
+        // An older file without any is fine.
+        let mut old = v.clone();
+        old.as_object_mut().unwrap().remove("addonData");
+        assert!(read(&old).unwrap().addon_data.is_empty());
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

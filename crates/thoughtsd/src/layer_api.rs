@@ -40,6 +40,15 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/drafts/discard", post(draft_discard))
         .route("/api/layer/export", get(export))
         .route("/api/layer/import", post(import).layer(DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/api/layer/pack/inspect", post(pack_inspect).layer(DefaultBodyLimit::max(8 * 1024 * 1024)))
+        .route("/api/layer/gallery", get(gallery_list))
+        .route("/api/layer/gallery/stage", post(gallery_stage))
+        .route("/api/layer/addons", get(addon_list))
+        .route("/api/layer/addons/switch", post(addon_switch))
+        .route("/api/layer/addons/remove", post(addon_remove))
+        .route("/api/layer/addons/permission", post(addon_permission))
+        .route("/api/layer/addons/data/restore", post(addon_data_restore))
+        .route("/api/layer/addons/data/clear", post(addon_data_clear))
         .route("/api/workflows", get(workflow_list))
         .route("/api/workflows/approve", post(workflow_approve))
         .route("/api/workflows/disable", post(workflow_disable))
@@ -114,7 +123,7 @@ async fn layer(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     // first and offered for review like any other change.
     if staging::guard(Git(Some(&st)), &d, ar).await { st.emit(json!({"type": "layer.pending"})); }
     if preview {
-        if !d.staging.join(".git").exists() { return Err(anyhow::anyhow!("there is no pending change to preview").into()); }
+        if !d.staging.join(".git").exists() { return Err(crate::tr::err("layer.no_pending", &[]).into()); }
         staging::sync(Git(Some(&st)), &d).await;
         return Ok(Json(applayer::manifest_lang(&d.staging, ar)));
     }
@@ -234,6 +243,8 @@ async fn pending_apply(State(st): S, body: axum::body::Bytes) -> R {
     let Some(signature) = body["signature"].as_str().filter(|s| !s.is_empty()) else { return Err(anyhow::anyhow!(staging::changed_error(ar)).into()) };
     let before = staging::pending(Git(Some(&st)), &d, ar).await;
     let mut r = staging::apply(Git(Some(&st)), &d, ar, Some(signature)).await?;
+    // A kept pack's entry remembers what the pack said it was and the fingerprint calculated here.
+    if r["origin"] == "import" { mark_kept_pack(Git(Some(&st)), &d, r["hash"].as_str().unwrap_or_default(), &before).await; }
     let approved = workflows::approve_paths(&d.layer, &d.home, &workflows_to_approve(&before, approve))?;
     if !approved.is_empty() { crate::log::info(format!("workflows approved with a kept change: {}", approved.join(", "))); }
     r["approvedWorkflows"] = json!(approved);
@@ -300,12 +311,138 @@ async fn draft_discard(State(st): S, Json(r): Json<DraftRef>) -> R {
     Ok(Json(json!({"ok": true, "origin": x.meta.origin})))
 }
 
-/// `GET /api/layer/export?name=&description=&paths=a,b` — the whole layer, or with `paths` (files,
-/// or folders ending in `/`) a feature pack of just those.
+
+/// Record the identity of the pack whose pending change (`pending`, read before it was kept) became entry `hash`.
+async fn mark_kept_pack(g: Git<'_>, d: &Dirs, hash: &str, pending: &Value) {
+    let p = &pending["pack"];
+    let s = |k: &str| p[k].as_str().unwrap_or_default().to_string();
+    if hash.is_empty() || !p.is_object() { return; }
+    applayer::mark_pack(g, &d.layer, hash, applayer::PackMark { name: s("name"), author: s("author"), version: s("version"), fingerprint: s("fingerprint") }).await;
+}
+
+/// `GET /api/layer/export?name=&author=&version=&description=&paths=a,b` — the whole layer, or with
+/// `paths` (files, or folders ending in `/`) a feature pack of just those. The pack carries what
+/// the sharer says it is, and its fingerprint.
 async fn export(Query(q): Query<HashMap<String, String>>) -> R {
     let get = |k: &str| q.get(k).map_or("", String::as_str);
     let paths: Option<Vec<String>> = q.get("paths").filter(|p| !p.trim().is_empty()).map(|p| p.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
-    Ok(Json(packs::export_with(&Dirs::real().layer, get("name"), get("description"), paths.as_deref())?))
+    let who = packs::Identity { name: get("name"), author: get("author"), version: get("version"), description: get("description") };
+    Ok(Json(packs::export_as(&Dirs::real().layer, &who, paths.as_deref())?))
+}
+
+#[derive(Deserialize)]
+struct Inspect { pack: Value }
+
+/// `POST /api/layer/pack/inspect {pack}` — check a pack before anything is staged and say what it
+/// is (see `packs::inspect`). Nothing is written.
+async fn pack_inspect(State(st): S, Json(i): Json<Inspect>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let d = Dirs::real();
+    let kept = applayer::kept_packs(Git(Some(&st)), &d.layer).await;
+    Ok(Json(packs::inspect(&i.pack, &d.layer, &kept)?))
+}
+
+// ---------- ready-made packs ----------
+
+/// `GET /api/layer/gallery` — the packs that come with the app, in the UI language, each with
+/// whether it is already part of the app exactly as it comes.
+async fn gallery_list(State(st): S) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let ar = arabic(&st).await;
+    let layer = Dirs::real().layer;
+    Ok(Json(json!(crate::gallery::list(ar, &layer))))
+}
+
+#[derive(Deserialize)]
+struct GalleryPick { id: String }
+
+/// `POST /api/layer/gallery/stage {id}` — stage a ready-made pack for the usual review (never kept
+/// here). → the pending change, like an import.
+async fn gallery_stage(State(st): S, Json(p): Json<GalleryPick>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let d = Dirs::real();
+    let ar = arabic(&st).await;
+    let (pack, summary) = crate::gallery::pack(&p.id, ar).ok_or_else(|| crate::tr::err("gallery.gone", &[]))?;
+    applayer::ensure_in(Git(Some(&st)), &d).await?;
+    packs::import_with(Git(Some(&st)), &d, &pack, ar, Some(summary)).await?;
+    st.emit(json!({"type": "layer.pending"}));
+    Ok(Json(staging::pending(Git(Some(&st)), &d, ar).await))
+}
+
+// ---------- one add-on at a time: switch off, remove, take a permission away ----------
+
+/// `GET /api/layer/addons` — `{items: [...], leftover: [...]}`: every add-on and page of the app,
+/// on or off, with what it may do and its saved data (`applayer::addons_of` + `data`), and the
+/// saved data of add-ons that are no longer in the app.
+async fn addon_list(State(st): S) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let (d, ar) = (Dirs::real(), arabic(&st).await);
+    if staging::guard(Git(Some(&st)), &d, ar).await { st.emit(json!({"type": "layer.pending"})); }
+    Ok(Json(addons_with_data(&d, ar)))
+}
+
+pub fn addons_with_data(d: &Dirs, ar: bool) -> Value {
+    let mut items = applayer::addons_of(&d.layer, ar);
+    let mut known = std::collections::BTreeSet::new();
+    for it in &mut items {
+        let name = it["name"].as_str().unwrap_or_default().to_string();
+        it["data"] = data_info(&d.home, &name).unwrap_or(Value::Null);
+        known.insert(name);
+    }
+    let leftover: Vec<Value> = stored_names(&d.home).into_iter().filter(|n| !known.contains(n))
+        .filter_map(|n| data_info(&d.home, &n).map(|info| json!({"name": n, "label": applayer::item_label(&n), "data": info}))).collect();
+    json!({"items": items, "leftover": leftover})
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct AddonRef { path: String, on: bool, permission: String }
+
+/// After a change to the live layer made here: the app reloads it.
+fn changed(st: &AppState, hash: &str) -> R {
+    if !hash.is_empty() { st.emit(json!({"type": "layer.changed"})); }
+    Ok(Json(json!({"ok": true, "hash": hash})))
+}
+
+/// `POST /api/layer/addons/switch {path, on}` → `{ok, hash}` (the history entry; empty when nothing changed).
+async fn addon_switch(State(st): S, Json(a): Json<AddonRef>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let hash = applayer::switch_in(Git(Some(&st)), &Dirs::real().layer, &a.path, a.on).await?;
+    crate::log::info(format!("layer: {} switched {}", a.path, if a.on { "on" } else { "off" }));
+    changed(&st, &hash)
+}
+
+/// `POST /api/layer/addons/remove {path}` → `{ok, hash}`. Its saved data stays.
+async fn addon_remove(State(st): S, Json(a): Json<AddonRef>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let hash = applayer::remove_in(Git(Some(&st)), &Dirs::real().layer, &a.path).await?;
+    crate::log::info(format!("layer: {} removed", a.path));
+    changed(&st, &hash)
+}
+
+/// `POST /api/layer/addons/permission {path, permission}` → `{ok, hash}`.
+async fn addon_permission(State(st): S, Json(a): Json<AddonRef>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let hash = applayer::withdraw_in(Git(Some(&st)), &Dirs::real().layer, &a.path, &a.permission).await?;
+    crate::log::info(format!("layer: {} no longer has {}", a.path, a.permission));
+    changed(&st, &hash)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct DataRef { name: String, version: String }
+
+/// `POST /api/layer/addons/data/restore {name, version}` — put an earlier copy back. What was
+/// saved until now is kept as a copy first, so this can be reversed the same way.
+async fn addon_data_restore(Json(r): Json<DataRef>) -> R {
+    storage_restore(&crate::paths::home(), &r.name, &r.version)?;
+    ok()
+}
+
+/// `POST /api/layer/addons/data/clear {name}` — remove what an add-on saved (a copy is kept with the earlier ones).
+async fn addon_data_clear(Json(r): Json<DataRef>) -> R {
+    storage_clear(&crate::paths::home(), &r.name)?;
+    ok()
 }
 
 #[derive(Deserialize)]
@@ -344,7 +481,9 @@ pub fn storage_read(home: &std::path::Path, plugin: &str) -> anyhow::Result<Valu
     Ok(stored.unwrap_or_else(|| json!({})))
 }
 
-/// Replace plugin `plugin`'s document. Private folder, private file, written atomically.
+/// Replace plugin `plugin`'s document. Private folder, private file, written atomically. What was
+/// saved before is kept as an earlier copy when the newest copy is more than an hour old (see
+/// `keep_version`), so one bad save never loses an add-on's records.
 pub fn storage_write(home: &std::path::Path, plugin: &str, bytes: &[u8], arabic: bool) -> anyhow::Result<()> {
     let file = storage_file(home, plugin)?;
     if bytes.len() > STORAGE_MAX_BYTES {
@@ -352,12 +491,142 @@ pub fn storage_write(home: &std::path::Path, plugin: &str, bytes: &[u8], arabic:
     }
     let v: Value = serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("storage must be a JSON object"))?;
     if !v.is_object() { anyhow::bail!("storage must be a JSON object"); }
+    let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = home.join("plugin-data");
     crate::paths::create_private_dir(&dir)?;
     // Never write through a link someone planted in the data folder.
     if std::fs::symlink_metadata(&file).map_or(false, |m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
+    keep_version(home, plugin, false, chrono::Local::now())?;
     crate::paths::write_atomic(&file, serde_json::to_string(&v)?.as_bytes(), true)?;
     Ok(())
+}
+
+/// Replace what `plugin` saved with `v` from elsewhere (a move file), keeping the current document
+/// as an earlier copy first.
+pub fn storage_replace(home: &std::path::Path, plugin: &str, v: &Value) -> anyhow::Result<()> {
+    let file = storage_file(home, plugin)?;
+    let text = serde_json::to_string(v)?;
+    if !v.is_object() || text.len() > STORAGE_MAX_BYTES { anyhow::bail!("storage must be a JSON object of at most 256 KB"); }
+    let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    crate::paths::create_private_dir(&home.join("plugin-data"))?;
+    if std::fs::symlink_metadata(&file).map_or(false, |m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
+    keep_version(home, plugin, true, chrono::Local::now())?;
+    crate::paths::write_atomic(&file, text.as_bytes(), true)?;
+    Ok(())
+}
+
+/// One saved document is written at a time (keeping a copy and writing belong together).
+static STORAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// How many earlier copies of each add-on's saved data are kept at most: the five newest, and
+/// before them one a day.
+pub const VERSIONS_KEPT: usize = 12;
+const VERSIONS_RECENT: usize = 5;
+
+/// Earlier copies live beside the documents, in a folder no add-on name can reach (names never start with a dot).
+fn versions_dir(home: &std::path::Path, plugin: &str) -> std::path::PathBuf { home.join("plugin-data").join(".versions").join(plugin) }
+
+/// A copy's id is when it was taken, local time: `YYYYMMDD-HHMMSS-mmm`.
+fn valid_version(id: &str) -> bool {
+    id.len() == 19 && id.bytes().enumerate().all(|(i, b)| if i == 8 || i == 15 { b == b'-' } else { b.is_ascii_digit() })
+}
+
+/// The kept copies of `plugin`'s data, newest first: `(id, path)`.
+fn versions(home: &std::path::Path, plugin: &str) -> Vec<(String, std::path::PathBuf)> {
+    let mut v: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(versions_dir(home, plugin)).into_iter().flatten().flatten()
+        .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
+        .filter_map(|e| { let n = e.file_name().to_string_lossy().to_string(); n.strip_suffix(".json").filter(|id| valid_version(id)).map(|id| (id.to_string(), e.path())) })
+        .collect();
+    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v
+}
+
+/// Before `plugin`'s document is replaced: keep a copy of it, unless the newest copy is less than
+/// an hour old (`force`: always, for a restore, a clear or data from elsewhere) or holds the same.
+/// Then thin the copies out: the newest `VERSIONS_RECENT`, then the newest of each earlier day, at
+/// most `VERSIONS_KEPT` in all.
+fn keep_version(home: &std::path::Path, plugin: &str, force: bool, now: chrono::DateTime<chrono::Local>) -> anyhow::Result<()> {
+    let file = storage_file(home, plugin)?;
+    if !std::fs::symlink_metadata(&file).map_or(false, |m| m.is_file()) { return Ok(()); }
+    let current = std::fs::read(&file)?;
+    let list = versions(home, plugin);
+    let stamp = |t: chrono::DateTime<chrono::Local>| t.format("%Y%m%d-%H%M%S-%3f").to_string();
+    let hour_ago = stamp(now - chrono::Duration::hours(1));
+    if let Some((newest, path)) = list.first() {
+        if std::fs::read(path).ok().as_deref() == Some(current.as_slice()) { return Ok(()); }
+        if !force && *newest > hour_ago { return Ok(()); }
+    }
+    let dir = versions_dir(home, plugin);
+    crate::paths::create_private_dir(&dir)?;
+    // Two copies taken within the same millisecond each keep their own name.
+    let mut t = now;
+    while dir.join(format!("{}.json", stamp(t))).exists() { t += chrono::Duration::milliseconds(1); }
+    let id = stamp(t);
+    crate::paths::write_atomic(&dir.join(format!("{id}.json")), &current, true)?;
+    // Newest first: the first copy met of a day is that day's newest.
+    let mut days = std::collections::BTreeSet::new();
+    let mut kept = 0usize;
+    for (i, (vid, path)) in versions(home, plugin).into_iter().enumerate() {
+        let new_day = days.insert(vid[..8].to_string());
+        if (i < VERSIONS_RECENT || new_day) && kept < VERSIONS_KEPT { kept += 1; } else { let _ = std::fs::remove_file(path); }
+    }
+    Ok(())
+}
+
+/// What `plugin` saved and its earlier copies: `{bytes, saved, versions: [{id, saved, bytes}]}`
+/// (`bytes`/`saved` null when nothing is saved now), or `None` when there is neither.
+pub fn data_info(home: &std::path::Path, plugin: &str) -> Option<Value> {
+    let file = storage_file(home, plugin).ok()?;
+    let when = |m: &std::fs::Metadata| m.modified().ok().map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+    let now = std::fs::symlink_metadata(&file).ok().filter(|m| m.is_file());
+    let list: Vec<Value> = versions(home, plugin).into_iter().filter_map(|(id, path)| {
+        let m = std::fs::symlink_metadata(&path).ok()?;
+        Some(json!({"id": id, "saved": when(&m), "bytes": m.len()}))
+    }).collect();
+    if now.is_none() && list.is_empty() { return None; }
+    Some(json!({"bytes": now.as_ref().map(|m| m.len()), "saved": now.as_ref().and_then(when), "versions": list}))
+}
+
+/// The names of add-ons that have saved data (or earlier copies of it).
+pub fn stored_names(home: &std::path::Path) -> Vec<String> {
+    let mut out: std::collections::BTreeSet<String> = std::fs::read_dir(home.join("plugin-data")).into_iter().flatten().flatten()
+        .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
+        .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".json").map(String::from)).filter(|n| valid_plugin_name(n)).collect();
+    out.extend(std::fs::read_dir(home.join("plugin-data").join(".versions")).into_iter().flatten().flatten()
+        .filter(|e| e.file_type().map_or(false, |t| t.is_dir())).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| valid_plugin_name(n)));
+    out.into_iter().collect()
+}
+
+/// Put the copy `version` of `plugin`'s data back, keeping what is saved now as a copy first.
+pub fn storage_restore(home: &std::path::Path, plugin: &str, version: &str) -> anyhow::Result<()> {
+    let file = storage_file(home, plugin)?;
+    if !valid_version(version) { return Err(crate::tr::err("addon.version_gone", &[])); }
+    let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let src = versions_dir(home, plugin).join(format!("{version}.json"));
+    let bytes = std::fs::symlink_metadata(&src).ok().filter(|m| m.is_file() && m.len() as usize <= STORAGE_MAX_BYTES)
+        .and_then(|_| std::fs::read(&src).ok()).filter(|b| serde_json::from_slice::<Value>(b).map_or(false, |v| v.is_object()))
+        .ok_or_else(|| crate::tr::err("addon.version_gone", &[]))?;
+    crate::paths::create_private_dir(&home.join("plugin-data"))?;
+    if std::fs::symlink_metadata(&file).map_or(false, |m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
+    keep_version(home, plugin, true, chrono::Local::now())?;
+    crate::paths::write_atomic(&file, &bytes, true)?;
+    Ok(())
+}
+
+/// Remove what `plugin` saved now (a copy is kept with the earlier ones, so it can be put back).
+pub fn storage_clear(home: &std::path::Path, plugin: &str) -> anyhow::Result<()> {
+    let file = storage_file(home, plugin)?;
+    let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !std::fs::symlink_metadata(&file).map_or(false, |m| m.is_file()) { return Ok(()); }
+    keep_version(home, plugin, true, chrono::Local::now())?;
+    std::fs::remove_file(&file)?;
+    Ok(())
+}
+
+/// Every add-on's saved document (valid JSON objects within the limit), for a move file.
+pub fn storage_all(home: &std::path::Path) -> std::collections::BTreeMap<String, Value> {
+    stored_names(home).into_iter().filter(|n| storage_file(home, n).map_or(false, |f| std::fs::symlink_metadata(f).map_or(false, |m| m.is_file())))
+        .filter_map(|n| storage_read(home, &n).ok().filter(|v| v.as_object().map_or(false, |o| !o.is_empty())).map(|v| (n, v))).collect()
 }
 
 /// `GET /api/layer/storage/<plugin>` → the plugin's JSON object (`{}` when empty).
@@ -620,6 +889,52 @@ mod tests {
         }
         for good in ["hours.js", "client-intake", "a_b.1", &"x".repeat(60)] { assert!(valid_plugin_name(good), "{good}"); }
         assert!(!home.join("settings.json").exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// FEAT-23: one bad save never loses an add-on's records: earlier copies are kept (the newest
+    /// few, then one a day), can be put back, and clearing keeps a copy too.
+    #[test]
+    fn saved_data_keeps_earlier_copies_that_can_be_put_back() {
+        use chrono::TimeZone;
+        let home = std::env::temp_dir().join(format!("thoughts-versions-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let at = |day: u32, h: u32, m: u32| chrono::Local.with_ymd_and_hms(2026, 10, day, h, m, 0).unwrap();
+        let file = storage_file(&home, "hours.js").unwrap();
+        let put = |n: u32, when| { keep_version(&home, "hours.js", false, when).unwrap(); crate::paths::write_atomic(&file, format!(r#"{{"n":{n}}}"#).as_bytes(), true).unwrap(); };
+        storage_write(&home, "hours.js", br#"{"n":0}"#, false).unwrap();
+        assert!(versions(&home, "hours.js").is_empty(), "nothing before the first save");
+        put(1, at(1, 9, 0));
+        put(2, at(1, 9, 20));
+        assert_eq!(versions(&home, "hours.js").len(), 1, "at most one copy an hour");
+        put(3, at(1, 11, 0));
+        keep_version(&home, "hours.js", false, at(1, 13, 0)).unwrap();
+        keep_version(&home, "hours.js", false, at(1, 15, 0)).unwrap();
+        assert_eq!(versions(&home, "hours.js").len(), 3, "the same content is not copied twice");
+        for day in 2..=25 { put(day + 10, at(day, 9, 0)); }
+        let kept = versions(&home, "hours.js");
+        assert_eq!(kept.len(), VERSIONS_KEPT);
+        let days: std::collections::BTreeSet<&str> = kept.iter().map(|(id, _)| &id[..8]).collect();
+        assert_eq!(days.len(), VERSIONS_KEPT, "the newest few, then one a day");
+        assert!(kept[0].0.starts_with("20261025"));
+        #[cfg(unix)]
+        { use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(versions_dir(&home, "hours.js")).unwrap().permissions().mode() & 0o777, 0o700); }
+        // Putting one back keeps what was there as a copy first.
+        let (oldest, _) = kept.last().unwrap().clone();
+        let before = std::fs::read_to_string(&file).unwrap();
+        storage_restore(&home, "hours.js", &oldest).unwrap();
+        assert_ne!(std::fs::read_to_string(&file).unwrap(), before);
+        assert_eq!(std::fs::read_to_string(&versions(&home, "hours.js")[0].1).unwrap(), before);
+        for bad in ["../x", "2026", "20261001-090000-00a", "", "20261001-090000-000/../../x"] { assert!(storage_restore(&home, "hours.js", bad).is_err(), "{bad}"); }
+        assert!(storage_restore(&home, "../settings", &oldest).is_err());
+        // Clearing removes what is saved now, keeping a copy; the data is still listed (for a removed add-on too).
+        storage_clear(&home, "hours.js").unwrap();
+        assert!(!file.exists());
+        let info = data_info(&home, "hours.js").unwrap();
+        assert!(info["bytes"].is_null() && info["versions"].as_array().unwrap().len() == VERSIONS_KEPT);
+        assert_eq!(stored_names(&home), ["hours.js"]);
+        assert!(data_info(&home, "never.js").is_none());
+        assert!(storage_all(&home).is_empty(), "nothing saved now: nothing to move");
         std::fs::remove_dir_all(home).unwrap();
     }
 

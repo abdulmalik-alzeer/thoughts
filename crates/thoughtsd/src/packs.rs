@@ -10,7 +10,7 @@ pub const MAX_FILES: usize = 200;
 pub const MAX_FILE_BYTES: usize = 512 * 1024;
 pub const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
-const TOP_FILES: &[&str] = &["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json"];
+const TOP_FILES: &[&str] = &["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json", crate::applayer::ADDONS_FILE];
 const TOP_DIRS: &[&str] = &["plugins", "views", "workflows"];
 
 /// Is `path` a place a customisation may live? Relative, forward slashes, no `..`, no dotfiles,
@@ -33,33 +33,82 @@ pub fn check_path(path: &str) -> anyhow::Result<()> {
         1 => TOP_FILES.contains(&parts[0]),
         n => TOP_DIRS.contains(&parts[0]) && n <= 6,
     };
-    if !ok { return Err(bad("not a customisation file (allowed: custom.css, themes.json, home.json, nav.json, todos.json, manifest.json, plugins/, views/, workflows/)")); }
+    if !ok { return Err(bad("not a customisation file (allowed: custom.css, themes.json, home.json, nav.json, todos.json, addons.json, manifest.json, plugins/, views/, workflows/)")); }
     Ok(())
 }
 
-/// Validate a pack and return its files.
+/// A file name from a pack inside one of the app's sentences: one line, anything invisible written out.
+fn shown_path(path: &str) -> String { clean_line(path, 120) }
+
+/// Validate a pack and return its files. Refusals are in the UI language.
 pub fn check_pack(pack: &Value) -> anyhow::Result<BTreeMap<String, String>> {
-    if pack["format"] != "thoughts-pack" { anyhow::bail!("this file is not a Thoughts customisation pack"); }
-    if pack["version"] != 1 { anyhow::bail!("this pack was made by a newer version of Thoughts"); }
+    let no = |key: &str, args: &[(&str, &str)]| crate::tr::err(key, args);
+    if pack["format"] != "thoughts-pack" { return Err(no("pack.not_pack", &[])); }
+    if pack["version"] != 1 { return Err(no("pack.newer", &[])); }
     // Older packs carry no apiVersion: they are version 1.
     if !pack["apiVersion"].is_null() && pack["apiVersion"].as_u64().map_or(true, |v| v == 0 || v > crate::applayer::API_VERSION) {
-        anyhow::bail!("this pack needs a newer version of Thoughts (it uses a newer plugin API)");
+        return Err(no("pack.newer", &[]));
     }
-    if !pack["kind"].is_null() && pack["kind"] != "full" && pack["kind"] != "feature" { anyhow::bail!("this pack is of a kind this version of Thoughts does not know"); }
-    let files = pack["files"].as_object().ok_or_else(|| anyhow::anyhow!("the pack has no files"))?;
-    if files.is_empty() { anyhow::bail!("the pack has no files"); }
-    if files.len() > MAX_FILES { anyhow::bail!("the pack has too many files (limit {MAX_FILES})"); }
+    if !pack["kind"].is_null() && pack["kind"] != "full" && pack["kind"] != "feature" { return Err(no("pack.newer", &[])); }
+    let files = pack["files"].as_object().ok_or_else(|| no("pack.empty", &[]))?;
+    if files.is_empty() { return Err(no("pack.empty", &[])); }
+    if files.len() > MAX_FILES { return Err(no("pack.too_many", &[("count", &MAX_FILES.to_string())])); }
     let mut out = BTreeMap::new();
     let mut total = 0usize;
     for (path, v) in files {
-        check_path(path)?;
-        let text = v.as_str().ok_or_else(|| anyhow::anyhow!("{path} is not text"))?;
-        if text.len() > MAX_FILE_BYTES { anyhow::bail!("{path} is too large (limit 512 KB)"); }
+        if check_path(path).is_err() { return Err(no("pack.bad_file", &[("path", &shown_path(path))])); }
+        let text = v.as_str().ok_or_else(|| no("pack.not_text", &[("path", &shown_path(path))]))?;
+        if text.len() > MAX_FILE_BYTES { return Err(no("pack.file_too_big", &[("path", &shown_path(path))])); }
         total += text.len();
-        if total > MAX_TOTAL_BYTES { anyhow::bail!("the pack is too large (limit 4 MB)"); }
+        if total > MAX_TOTAL_BYTES { return Err(no("pack.too_big", &[])); }
         out.insert(path.clone(), text.to_string());
     }
     Ok(out)
+}
+
+/// A pack's fingerprint: a short code calculated from exactly what it would bring (its kind and
+/// every file with its content), so two people can tell they hold the same pack by reading it out.
+/// What the pack calls itself plays no part, and a fingerprint written in the file is never trusted.
+pub fn fingerprint(kind: &str, files: &BTreeMap<String, String>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"thoughts-pack\0");
+    h.update(if kind == "feature" { b"feature\0".as_slice() } else { b"full\0".as_slice() });
+    for (path, text) in files {
+        h.update(path.as_bytes());
+        h.update([0u8]);
+        h.update((text.len() as u64).to_le_bytes());
+        h.update(text.as_bytes());
+    }
+    let hex = format!("{:X}", h.finalize());
+    format!("{}-{}-{}", &hex[0..4], &hex[4..8], &hex[8..12])
+}
+
+/// What a pack says it is, each claim one short clean line: `(name, author, version, description)`.
+pub fn claims(pack: &Value) -> (String, String, String, String) {
+    let s = |k: &str, max: usize| clean_line(pack[k].as_str().unwrap_or(""), max);
+    (s("name", 80), s("author", 80), s("packVersion", 20), s("description", 400))
+}
+
+/// A pack checked before anything is staged, for the import dialog: what it says it is (its
+/// maker's words), its fingerprint as calculated here, whether the fingerprint written in it
+/// matches (`null` when it has none), how many of its files differ from the layer at `layer`, and
+/// the newest earlier pack of the same name that was kept here. Refusals are in the UI language.
+pub fn inspect(pack: &Value, layer: &Path, kept: &[(String, crate::applayer::PackMark)]) -> anyhow::Result<Value> {
+    let files = check_pack(pack)?;
+    let kind = if pack["kind"] == "feature" { "feature" } else { "full" };
+    let print = fingerprint(kind, &files);
+    let claimed = pack["fingerprint"].as_str().map(|f| clean_line(f, 20));
+    let (name, author, version, description) = claims(pack);
+    let mine = collect(layer);
+    let changes = files.iter().filter(|(p, t)| mine.get(p.as_str()) != Some(*t)).count();
+    let earlier = kept.iter().rev().find(|(_, p)| !name.is_empty() && p.name == name).map(|(h, p)| json!({"entry": h, "version": p.version, "author": p.author, "fingerprint": p.fingerprint}));
+    Ok(json!({
+        "name": name, "author": author, "version": version, "description": description, "kind": kind,
+        "files": files.keys().collect::<Vec<_>>(), "fingerprint": print,
+        "claimed": claimed, "matches": claimed.as_ref().map(|c| c.eq_ignore_ascii_case(&print)),
+        "changes": changes, "earlier": earlier, "appVersion": clean_line(pack["appVersion"].as_str().unwrap_or(""), 30),
+    }))
 }
 
 /// Every customisation file in `dir` (text files in allowed places only; links are never followed).
@@ -98,11 +147,21 @@ fn quoted_name(name: &str) -> String {
 /// The whole layer as a pack (`kind: "full"`).
 pub fn export(dir: &Path, name: &str) -> Value { export_with(dir, name, "", None).unwrap_or_else(|_| json!({})) }
 
+/// What the person sharing a pack says it is.
+#[derive(Default, Clone, Copy)]
+pub struct Identity<'a> { pub name: &'a str, pub author: &'a str, pub version: &'a str, pub description: &'a str }
+
+pub fn export_with(dir: &Path, name: &str, description: &str, paths: Option<&[String]>) -> anyhow::Result<Value> {
+    export_as(dir, &Identity { name, description, ..Default::default() }, paths)
+}
+
 /// A pack of the layer. With `paths` (files, or folders ending in `/`) only those are included and
 /// the pack is a `feature` pack that merges into the importer's layer instead of replacing files.
 /// A selected plugin or view always travels with its declaration: its own `<name>.json`, or one
-/// written from its `manifest.json` entry.
-pub fn export_with(dir: &Path, name: &str, description: &str, paths: Option<&[String]>) -> anyhow::Result<Value> {
+/// written from its `manifest.json` entry. The pack carries its maker's name, author and version,
+/// and the fingerprint of what it holds (see `fingerprint`).
+pub fn export_as(dir: &Path, who: &Identity, paths: Option<&[String]>) -> anyhow::Result<Value> {
+    let (name, description) = (who.name, who.description);
     let all = collect(dir);
     let (kind, files) = match paths {
         None => ("full", all),
@@ -124,18 +183,24 @@ pub fn export_with(dir: &Path, name: &str, description: &str, paths: Option<&[St
                     }
                 }
             }
-            if out.is_empty() { anyhow::bail!("nothing to export: none of the chosen files exist"); }
+            if out.is_empty() { return Err(crate::tr::err("pack.nothing", &[])); }
             ("feature", out)
         }
     };
     let name = clean_line(name, 80);
-    Ok(json!({
+    let mut pack = json!({
         "format": "thoughts-pack", "version": 1, "apiVersion": crate::applayer::API_VERSION, "kind": kind,
         "name": if name.is_empty() { "My customisations" } else { name.as_str() },
         "description": clean_line(description, 400),
         "appVersion": env!("CARGO_PKG_VERSION"),
+        "fingerprint": fingerprint(kind, &files),
         "files": files,
-    }))
+    });
+    for (key, value, max) in [("author", who.author, 80), ("packVersion", who.version, 20)] {
+        let v = clean_line(value, max);
+        if !v.is_empty() { pack[key] = json!(v); }
+    }
+    Ok(pack)
 }
 
 /// Key-wise merge of a pack's JSON into the user's: objects merge per key, lists are unioned (the
@@ -203,18 +268,39 @@ fn merged_file(path: &str, mine: Option<&str>, theirs: &str, pack_name: &str) ->
     if path == "custom.css" { return Ok(merge_css(mine.unwrap_or(""), theirs, pack_name)); }
     let top_json = !path.contains('/') && path.ends_with(".json");
     let Some(mine) = mine.filter(|_| top_json) else { return Ok(theirs.to_string()) };
-    let theirs_v: Value = serde_json::from_str(theirs).map_err(|_| anyhow::anyhow!("{path} in the pack is not valid JSON"))?;
+    let shown = shown_path(path);
+    let theirs_v: Value = serde_json::from_str(theirs).map_err(|_| crate::tr::err("pack.bad_json", &[("path", &shown)]))?;
     // A damaged file of the user's is never silently replaced by a merge.
-    let mine_v: Value = serde_json::from_str(mine).map_err(|_| anyhow::anyhow!("your {path} is not valid JSON, so the pack cannot be merged into it; fix or remove it first"))?;
-    if std::mem::discriminant(&mine_v) != std::mem::discriminant(&theirs_v) { anyhow::bail!("{path} in the pack does not have the same shape as yours"); }
+    let mine_v: Value = serde_json::from_str(mine).map_err(|_| crate::tr::err("pack.yours_broken", &[("path", &shown)]))?;
+    if std::mem::discriminant(&mine_v) != std::mem::discriminant(&theirs_v) { return Err(crate::tr::err("pack.shape", &[("path", &shown)])); }
     Ok(serde_json::to_string_pretty(&merge_json(&mine_v, &theirs_v))? + "\n")
+}
+
+/// Would importing `pack` into the layer at `layer` change nothing (it is already there, exactly)?
+pub fn already_in(pack: &Value, layer: &Path) -> bool {
+    let Ok(files) = check_pack(pack) else { return false };
+    let feature = pack["kind"] == "feature";
+    let name = clean_line(pack["name"].as_str().unwrap_or(""), 80);
+    let name = if name.is_empty() { "pack".to_string() } else { name };
+    let css_key = css_block_key(&name, pack["id"].as_str());
+    files.iter().all(|(path, text)| {
+        let mine = std::fs::read_to_string(layer.join(path)).ok();
+        let out = if feature { merged_file(path, mine.as_deref(), text, &css_key).ok() } else { Some(text.clone()) };
+        out.is_some() && out == mine
+    })
 }
 
 /// Stage a pack as a pending change (origin `import`). Nothing is applied. A `full` pack replaces
 /// the files it names; a `feature` pack merges into what the user already has.
-pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow::Result<()> {
+pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow::Result<()> { import_with(g, d, pack, arabic, None).await }
+
+/// `import`, with the app's own description of the change in place of the usual one (for the
+/// ready-made packs that come with the app, whose words are the app's).
+pub async fn import_with(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool, own_summary: Option<String>) -> anyhow::Result<()> {
     let files = check_pack(pack)?;
     let feature = pack["kind"] == "feature";
+    let print = fingerprint(if feature { "feature" } else { "full" }, &files);
+    let (_, author, version, _) = claims(pack);
     let name = clean_line(pack["name"].as_str().unwrap_or(""), 80);
     let name = if name.is_empty() { "pack".to_string() } else { name };
     let css_key = css_block_key(&name, pack["id"].as_str());
@@ -232,7 +318,7 @@ pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow:
             if std::fs::symlink_metadata(&target).map_or(false, |m| m.file_type().is_symlink()) { std::fs::remove_file(&target)?; }
             let mine = std::fs::read_to_string(&target).ok();
             let out = if feature { merged_file(path, mine.as_deref(), text, &css_key)? } else { text.clone() };
-            if out.len() > MAX_FILE_BYTES { anyhow::bail!("{path} would become too large (limit 512 KB)"); }
+            if out.len() > MAX_FILE_BYTES { return Err(crate::tr::err("pack.grows_too_big", &[("path", &shown_path(path))])); }
             if feature && path.contains('/') && mine.as_deref().map_or(false, |m| m != out) { replaced.push(path.as_str()); }
             std::fs::write(&target, out)?;
         }
@@ -249,13 +335,17 @@ pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow:
     if let Some(w) = waiting { crate::staging::let_go(g, d, w).await; }
     // What the pack says about itself is kept apart and shown as the pack's words. It never becomes
     // part of the app's own description of the change, nor of the history entry.
-    crate::staging::set_pack(d, &name, &clean_line(pack["description"].as_str().unwrap_or(""), 400));
+    // (A ready-made pack's description is the app's own, part of `own_summary`: no quotation.)
+    let pack_words = if own_summary.is_some() { String::new() } else { clean_line(pack["description"].as_str().unwrap_or(""), 400) };
+    crate::staging::set_pack(d, &name, &pack_words);
+    crate::staging::set_pack_identity(d, &author, &version, &print);
     let name = quoted_name(&name);
-    let mut summary = match (arabic, feature) {
-        (true, true) => format!("إضافة حزمة «{name}» إلى تخصيصاتك\n\nتضيف الحزمة {} ملف/ملفات وتُدمج مع ما لديك دون أن تستبدل إعداداتك الأخرى. جرّبها أولًا، ثم أبقِها إن أعجبتك؛ ويمكنك التراجع عنها لاحقًا من السجل.", files.len()),
-        (true, false) => format!("استيراد حزمة التخصيص «{name}»\n\nتحتوي الحزمة على {} ملف/ملفات تحلّ محلّ الملفات المقابلة لديك. جرّبها أولًا، ثم أبقِها إن أعجبتك؛ ويمكنك التراجع عنها لاحقًا من السجل.", files.len()),
-        (false, true) => format!("Add the pack \"{name}\" to your customisations\n\nThe pack brings {} file(s) and is merged into what you already have; your other settings stay as they are. Try it first, then keep it if you like it — you can undo it later from History.", files.len()),
-        (false, false) => format!("Import the customisation pack \"{name}\"\n\nThe pack contains {} file(s), which replace the matching files you have now. Try it first, then keep it if you like it — you can undo it later from History.", files.len()),
+    let mut summary = match (own_summary, arabic, feature) {
+        (Some(s), _, _) => s,
+        (None, true, true) => format!("إضافة حزمة «{name}» إلى تخصيصاتك\n\nتضيف الحزمة {} ملف/ملفات وتُدمج مع ما لديك دون أن تستبدل إعداداتك الأخرى. جرّبها أولًا، ثم أبقِها إن أعجبتك؛ ويمكنك التراجع عنها لاحقًا من السجل.", files.len()),
+        (None, true, false) => format!("استيراد حزمة التخصيص «{name}»\n\nتحتوي الحزمة على {} ملف/ملفات تحلّ محلّ الملفات المقابلة لديك. جرّبها أولًا، ثم أبقِها إن أعجبتك؛ ويمكنك التراجع عنها لاحقًا من السجل.", files.len()),
+        (None, false, true) => format!("Add the pack \"{name}\" to your customisations\n\nThe pack brings {} file(s) and is merged into what you already have; your other settings stay as they are. Try it first, then keep it if you like it — you can undo it later from History.", files.len()),
+        (None, false, false) => format!("Import the customisation pack \"{name}\"\n\nThe pack contains {} file(s), which replace the matching files you have now. Try it first, then keep it if you like it — you can undo it later from History.", files.len()),
     };
     if !replaced.is_empty() {
         let list = replaced.join(", ");
@@ -351,6 +441,58 @@ mod tests {
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
+    /// FEAT-24: a pack says who made it and which version it is, and carries a fingerprint of what
+    /// it holds. The importer calculates the fingerprint itself, sees whether the file's matches,
+    /// and the kept entry remembers all of it.
+    #[tokio::test]
+    async fn a_pack_has_an_identity_and_a_fingerprint_the_importer_calculates() {
+        let (st, d) = crate::applayer::testutil::layer("identity").await;
+        std::fs::write(d.layer.join("plugins/board.js"), "export default () => {}\n").unwrap();
+        let who = Identity { name: "Kanban", author: "Sara\u{202e}", version: "1.2", description: "A board." };
+        let pack = export_as(&d.layer, &who, Some(&["plugins/board.js".to_string()])).unwrap();
+        assert_eq!((&pack["author"], &pack["packVersion"]), (&json!("Sara[U+202E]"), &json!("1.2")));
+        let print = pack["fingerprint"].as_str().unwrap().to_string();
+        assert!(regex::Regex::new(r"^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$").unwrap().is_match(&print), "{print}");
+        // The same content under another name has the same fingerprint; other content another one.
+        let renamed = export_as(&d.layer, &Identity { name: "Something else", ..who }, Some(&["plugins/board.js".to_string()])).unwrap();
+        assert_eq!(renamed["fingerprint"], pack["fingerprint"]);
+        assert_ne!(export_as(&d.layer, &who, None).unwrap()["fingerprint"], pack["fingerprint"], "the whole layer is another pack");
+
+        // Someone else looks at it before importing.
+        let (st2, d2) = crate::applayer::testutil::layer("identity-in").await;
+        let i = inspect(&pack, &d2.layer, &[]).unwrap();
+        assert_eq!((&i["name"], &i["author"], &i["version"], &i["fingerprint"], &i["matches"]), (&json!("Kanban"), &json!("Sara[U+202E]"), &json!("1.2"), &json!(print), &json!(true)));
+        assert_eq!(i["changes"], 1);
+        // A file changed after it was made: the fingerprint written in it no longer matches.
+        let mut tampered = pack.clone();
+        tampered["files"]["plugins/board.js"] = json!("export default () => { steal() }\n");
+        let t = inspect(&tampered, &d2.layer, &[]).unwrap();
+        assert_eq!((t["matches"].clone(), t["claimed"].clone()), (json!(false), json!(print)));
+        assert_ne!(t["fingerprint"], json!(print));
+        let mut bare = pack.clone();
+        bare.as_object_mut().unwrap().remove("fingerprint");
+        assert!(inspect(&bare, &d2.layer, &[]).unwrap()["matches"].is_null(), "an older pack has none to compare");
+        assert!(inspect(&json!({"format": "zip"}), &d2.layer, &[]).unwrap_err().to_string().contains("not a Thoughts customisation pack"));
+
+        // Imported and kept: the entry remembers the identity, and the next import of the same name knows the earlier one.
+        import(st2, &d2, &pack, false).await.unwrap();
+        let p = crate::staging::pending(st2, &d2, false).await;
+        assert_eq!((&p["pack"]["author"], &p["pack"]["version"], &p["pack"]["fingerprint"]), (&json!("Sara[U+202E]"), &json!("1.2"), &json!(print)));
+        let kept = crate::staging::apply(st2, &d2, false, p["signature"].as_str()).await.unwrap();
+        let hash = kept["hash"].as_str().unwrap();
+        crate::applayer::mark_pack(st2, &d2.layer, hash, crate::applayer::PackMark { name: "Kanban".into(), author: "Sara".into(), version: "1.2".into(), fingerprint: print.clone() }).await;
+        let h = crate::applayer::history_page_in(st2, &d2.layer, 0, 1, false).await;
+        assert_eq!((h[0]["entry"].as_str(), h[0]["summary"].as_str(), h[0]["pack"]["fingerprint"].as_str()), (Some("pack"), Some("Added the pack \u{201c}Kanban\u{201d}"), Some(print.as_str())));
+        assert_eq!(crate::applayer::history_page_in(st2, &d2.layer, 0, 1, true).await[0]["summary"], "إضافة الحزمة «Kanban»");
+        let kept_packs = crate::applayer::kept_packs(st2, &d2.layer).await;
+        let again = inspect(&pack, &d2.layer, &kept_packs).unwrap();
+        assert_eq!((again["earlier"]["version"].as_str(), again["changes"].as_u64()), (Some("1.2"), Some(0)));
+        assert!(already_in(&pack, &d2.layer));
+        let _ = st;
+        std::fs::remove_dir_all(&d.home).unwrap();
+        std::fs::remove_dir_all(&d2.home).unwrap();
+    }
+
     #[test]
     fn merges_json_key_wise_and_css_in_marked_blocks() {
         let mine = json!({"chips": [{"label": "Plan", "prompt": "Plan my week: "}], "hidden": ["stats"], "order": ["todos", "chats"], "mine": {"keep": true}});
@@ -427,7 +569,8 @@ mod tests {
         assert_eq!((&p["origin"], &p["problems"]), (&json!("import"), &json!([])));
         // What the pack says about itself is the pack's, not the app's: apart from the app's summary.
         assert!(!p["summary"].as_str().unwrap().contains("A board of your items by status."));
-        assert_eq!(p["pack"], json!({"name": "Kanban", "description": "A board of your items by status."}));
+        assert_eq!(p["pack"], json!({"name": "Kanban", "description": "A board of your items by status.", "author": "", "version": "",
+            "fingerprint": fingerprint("feature", &check_pack(&pack).unwrap())}));
         let status = |path: &str| p["files"].as_array().unwrap().iter().find(|f| f["path"] == path).map(|f| f["status"].as_str().unwrap().to_string());
         assert_eq!(status("plugins/board.js").as_deref(), Some("added"));
         assert_eq!(status("home.json").as_deref(), Some("modified"));
@@ -450,7 +593,7 @@ mod tests {
         assert_eq!(crate::staging::pending(st2, &d2, false).await["exists"], false, "already merged: no duplicate chips, no second CSS block");
         std::fs::write(d2.layer.join("home.json"), "{broken").unwrap();
         st2.commit_all(&d2.layer, "oops").await.unwrap();
-        assert!(import(st2, &d2, &pack, false).await.unwrap_err().to_string().contains("your home.json is not valid JSON"));
+        assert!(import(st2, &d2, &pack, false).await.unwrap_err().to_string().contains("Your home.json is damaged"));
         assert!(!d2.staging.exists(), "nothing half-staged is left behind");
         // The same files as a full pack replace instead.
         let mut full = pack.clone();

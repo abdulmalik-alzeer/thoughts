@@ -56,7 +56,7 @@ Nothing is sent to an AI provider when you are only reading, searching or editin
 
 Sync is off unless you turn it on. When it is on, Thoughts uploads your whole library, including its history of earlier versions, to the location you entered, and downloads changes from it. Who can see it there depends on that service and how you set it up. Chats and settings are not part of the library and are not synced.
 
-To take them to another computer, use **Settings → Maintenance → Move to another computer**. It saves one file in your Downloads folder with your chats (and their attachments), settings and customisations. The file never contains passwords, your provider key or anything that unlocks an account, but your chats are in it as plain text: keep it somewhere safe and delete it once you have imported it.
+To take them to another computer, use **Settings → Maintenance → Move to another computer**. It saves one file in your Downloads folder with your chats (and their attachments), settings, customisations and what your add-ons saved (an hours tracker's entries, for example). The file never contains passwords, your provider key or anything that unlocks an account, but your chats are in it as plain text: keep it somewhere safe and delete it once you have imported it.
 
 If you keep your library inside a folder that another service backs up (iCloud Drive, Dropbox and the like), that service copies it too. That is between you and that service.
 

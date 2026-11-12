@@ -12,6 +12,7 @@ pub mod changes;
 pub mod chats;
 pub mod claude;
 pub mod cloud;
+pub mod gallery;
 pub mod git;
 pub mod hello;
 pub mod inbox;
