@@ -13,7 +13,8 @@ parse_args() {
       -h|--help)
         say "Usage: $0 [--purge]"
         say "  Stops the Thoughts background service and removes its start-at-login entry."
-        say "  --purge  also removes $DATA_DIR (settings, chats, customisations)."
+        say "  --purge  also removes $DATA_DIR (settings, chats, customisations) and the"
+        say "           passwords and AI provider key Thoughts saved in the system keychain."
         say "  Your library (your notes folder) is never removed."
         exit 0 ;;
       *) say "Unknown option: $a (try --help)"; exit 2 ;;

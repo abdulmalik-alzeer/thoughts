@@ -3,6 +3,7 @@
 #
 #   sh uninstall-macos.sh            stop the background service, remove the start-at-login entry
 #   sh uninstall-macos.sh --purge    …and also remove ~/.thoughts (settings, chats, customisations)
+#                                    and the passwords and AI provider key saved in the keychain
 #
 # Your library (your notes folder) is never removed. The app itself is not removed either:
 # drag Thoughts from Applications to the Trash.
@@ -24,10 +25,18 @@ fi
 
 if [ "$PURGE" -eq 1 ]; then
   purge_data
-  # Saved sync passwords in the login keychain (service "thoughts-git"), one entry per call.
-  n=0
-  while [ "$n" -lt 50 ] && security delete-generic-password -s thoughts-git >/dev/null 2>&1; do n=$((n + 1)); done
-  [ "$n" -gt 0 ] && say "Keychain: removed $n saved sync password(s)."
+  # Saved passwords in the login keychain, one entry per call: sync passwords (service
+  # "thoughts-git", one per backup address) and the AI provider key (service "thoughts-ai").
+  for service in thoughts-git thoughts-ai; do
+    n=0
+    while [ "$n" -lt 50 ] && security delete-generic-password -s "$service" >/dev/null 2>&1; do n=$((n + 1)); done
+    if [ "$n" -gt 0 ]; then
+      case "$service" in
+        thoughts-git) say "Keychain: removed $n saved sync password(s)." ;;
+        *) say "Keychain: removed the saved AI provider key." ;;
+      esac
+    fi
+  done
 else
   say "Data folder: kept ($DATA_DIR). Run again with --purge to remove it."
 fi

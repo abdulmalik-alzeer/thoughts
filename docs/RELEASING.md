@@ -357,8 +357,11 @@ seen it work and noted the version and date.
 - **The release workflow end to end.** Draft creation from three parallel jobs, the npm and
   crate Tauri versions agreeing, and artefact names have not been confirmed on a real tag since
   the last changes.
-- **Uninstall clean-up.** Nothing removes the login item or `~/.thoughts` automatically on any
-  platform; the README steps are manual.
+- **Uninstall clean-up.** Settings → Maintenance → "Remove Thoughts from this computer" and the
+  `scripts/uninstall-*.sh --purge` scripts remove the login item, the saved passwords and key
+  (`thoughts-git`, `thoughts-ai`) and `~/.thoughts`; the Windows uninstaller removes the login item
+  and, if ticked, the data folder, but not saved passwords. Only the macOS script has been run;
+  the in-app removal on Windows and Linux and the Linux `secret-tool` step are untested.
 - **Notifications for due dates** on Windows and Linux, and with macOS notification permission
   denied.
 - **Standard native menu items** (Undo, Copy, Quit and so on) appearing in Arabic when the

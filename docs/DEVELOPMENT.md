@@ -203,9 +203,22 @@ rm -rf /Applications/Thoughts.app ~/.thoughts ~/Library/LaunchAgents/app.thought
 
 That is the macOS form: the app, the data folder and the login item (LaunchAgent). Your library
 folder is never touched. Delete it yourself if you want it gone. Saved credentials are under
-"thoughts-git" and "thoughts-ai" in Keychain Access. On Windows and Linux the same three things
-apply (the installed app, `~/.thoughts`, the autostart entry); nothing removes them automatically
-yet.
+"thoughts-git" (sync passwords, one per backup address) and "thoughts-ai" (the AI provider key)
+in Keychain Access.
+
+What removes them for you:
+
+- **Settings → Maintenance → Remove Thoughts from this computer** (every platform): stops the
+  background service, removes the login item and the saved passwords and key, and optionally the
+  data folder. It deletes a fixed list of the app's own files and folders inside the data folder,
+  never the library.
+- `sh scripts/uninstall-macos.sh --purge` / `uninstall-linux.sh --purge`: the same from a
+  terminal, plus both keychain services ("thoughts-git" and "thoughts-ai"). Without `--purge` they
+  only stop the service and remove the login item. The Linux script uses `secret-tool` when it is
+  installed (untested).
+- The Windows uninstaller removes the login item and, when you tick "Delete the application
+  data", `%USERPROFILE%\.thoughts`. It does not remove saved passwords from Windows Credential
+  Manager (entries named `thoughts-git` and `thoughts-ai`); use the in-app removal first.
 
 ## Commands & layout
 

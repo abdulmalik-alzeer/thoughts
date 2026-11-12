@@ -3,6 +3,7 @@
 #
 #   sh uninstall-linux.sh            stop the background service, remove the start-at-login entry
 #   sh uninstall-linux.sh --purge    …and also remove ~/.thoughts (settings, chats, customisations)
+#                                    and the passwords and AI provider key saved in the keyring
 #
 # Your library (your notes folder) is never removed. The app itself is not removed either:
 # use your package manager (for example: sudo apt remove thoughts) or delete the AppImage file.
@@ -27,7 +28,16 @@ fi
 
 if [ "$PURGE" -eq 1 ]; then
   purge_data
-  say "Saved sync passwords in your system keyring (named \"thoughts-git\") can be removed with your keyring app."
+  # Saved passwords in the desktop keyring (Secret Service): sync passwords ("thoughts-git") and
+  # the AI provider key ("thoughts-ai"). UNTESTED: assumes the keyring stores the service name
+  # under the "service" attribute, as the keyring library the app uses does.
+  if command -v secret-tool >/dev/null 2>&1; then
+    for service in thoughts-git thoughts-ai; do secret-tool clear service "$service" >/dev/null 2>&1 || true; done
+    say "Keyring: removed the saved sync passwords and AI provider key (thoughts-git, thoughts-ai)."
+  else
+    say "Saved passwords in your system keyring, named \"thoughts-git\" (sync) and \"thoughts-ai\" (AI provider key),"
+    say "can be removed with your keyring app (for example Passwords and Keys)."
+  fi
 else
   say "Data folder: kept ($DATA_DIR). Run again with --purge to remove it."
 fi
