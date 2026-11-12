@@ -115,6 +115,8 @@
     if (wasDone) return;
     track('todo.done');
     if (res.next) {
+      // A repeat stays open (on its next date): the box the user ticked must show that again.
+      if (box) box.checked = false;
       notify(t('todob.repeatNext', { date: inSentence(dueLabel(res.next)) }), { key: 'todo-done', action: { label: t('undo'), run: () => { op('edit', { file: l.file, line: res.line, text: res.text, new_text: res.previous }); } } });
       return;
     }

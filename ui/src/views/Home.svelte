@@ -232,9 +232,13 @@
   async function toggle(it: any, box?: HTMLInputElement) {
     const ref = { file: it.file, line: it.line, text: it.text };
     try {
-      await post('/todos/toggle', ref);
+      const res: any = await post('/todos/toggle', ref);
       track('todo.done');
-      toast(t('ui.todo.completed'), { key: 'todo-done', action: { label: t('undo'), run: () => { post('/todos/toggle', ref).then(load).catch((e) => failed(t('ui.todo.undoFailed'), e)); } } });
+      if (res?.next) {
+        // A repeating todo stays open on its next date: its box shows that again, and Undo puts the old date back.
+        if (box) box.checked = false;
+        toast(t('todob.repeatNext', { date: inSentence(dueLabel(res.next)) }), { key: 'todo-done', action: { label: t('undo'), run: () => { post('/todos/edit', { file: it.file, line: res.line, text: res.text, new_text: res.previous }).then(load).catch((e) => failed(t('ui.todo.undoFailed'), e)); } } });
+      } else toast(t('ui.todo.completed'), { key: 'todo-done', action: { label: t('undo'), run: () => { post('/todos/toggle', ref).then(load).catch((e) => failed(t('ui.todo.undoFailed'), e)); } } });
     } catch (e) { failed(t('ui.todo.toggleFailed'), e); if (box) box.checked = false; }
     load();
   }
