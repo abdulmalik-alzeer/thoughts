@@ -62,6 +62,7 @@ import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
 import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
 import { confirmDialog, promptDialog, dialogs } from './dialog.svelte';
 import { saveFile as offerFile } from './download';
+import { matchShortcut } from './shortcuts';
 import { aboveShield } from './layer/shield';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang } from './i18n';
@@ -624,13 +625,43 @@ function printPage(f: Frame) {
   try { window.print(); } catch { done(); toast(t('docs.printFailed'), { kind: 'error' }); }
 }
 
-/** A shortcut the person pressed inside an add-on's page (UX-31), handed to the app's own key handler
- *  as if it had been pressed outside the frame. */
-function pressKey(m: any) {
-  window.dispatchEvent(new KeyboardEvent('keydown', {
-    key: str(m.key, 20), code: str(m.code, 30), metaKey: m.meta === true, ctrlKey: m.ctrl === true,
-    shiftKey: m.shift === true, altKey: m.alt === true, bubbles: true, cancelable: true,
-  }));
+// ---------- the app's shortcuts from inside an add-on's page (UX-31) ----------
+/** What a key pressed inside an add-on's page may do in the app: move around (pages, back and
+ *  forward, search), open the command palette, zoom, show or hide the sidebar. Nothing that starts,
+ *  saves, syncs, wraps, undoes or opens settings, whatever the frame says was pressed. */
+const FORWARDED = /^(palette|nav\.[1-9]|back|forward|search\.focus|find|sidebar\.toggle|zoom\.(in|out|reset))$/;
+/** Key events the app itself made from a key pressed inside an add-on's page. Only this module adds
+ *  to it, and an add-on cannot reach an event of the app's window. */
+const fromAddOn = new WeakSet<Event>();
+/** Did this key event come from inside an add-on's page? The app's key handler then runs nothing
+ *  but `FORWARDED` (see App.svelte `onKey`). */
+export const keyFromAddOn = (e: Event): boolean => fromAddOn.has(e);
+export const keyMayComeFromAddOn = (id: string): boolean => FORWARDED.test(id);
+
+/** A key the person pressed inside an add-on's page or widget (its runtime passes on only keys a
+ *  person pressed, with Cmd or Ctrl, and Escape). It counts only while that very frame has the
+ *  keyboard, a few a second at most. Escape takes the keyboard out of the add-on, back to the app
+ *  (never closing anything of the app's); any other key runs the app's shortcut only when it is
+ *  one of `FORWARDED`. */
+function pressKey(f: Frame, m: any) {
+  if (document.activeElement !== f.el) return;
+  const presses = recent('keys:' + f.key, 1000);
+  if (presses.length >= 5) return;
+  presses.push(Date.now());
+  const key = str(m.key, 20), code = str(m.code, 30);
+  const meta = m.meta === true, ctrl = m.ctrl === true, shift = m.shift === true, alt = m.alt === true;
+  if (key === 'Escape') {
+    if (meta || ctrl || alt || dialogs.current || app.showPalette || app.showReview || app.showRollback) return;
+    const into = f.el.parentElement;
+    f.el.blur();
+    if (into) { into.tabIndex = -1; into.focus({ preventScroll: true }); }
+    return;
+  }
+  const ev = new KeyboardEvent('keydown', { key, code, metaKey: meta, ctrlKey: ctrl, shiftKey: shift, altKey: alt, bubbles: true, cancelable: true });
+  const id = matchShortcut(ev);
+  if (!id || !FORWARDED.test(id)) return;
+  fromAddOn.add(ev);
+  window.dispatchEvent(ev);
 }
 
 /** `asked`: the person pressed or typed something in this very frame a moment ago (its runtime says
@@ -752,10 +783,11 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
       if (file && !/(^|\/)(TODO|todo)\.md$/.test(file)) throw new Error(`todos.add: "${file}" is not a todo list (give the "file" of a list from todos.list())`);
       if (trying) {
         // The same checks the service makes, on the lists the add-on can see.
-        if (file || group) {
+        // (An add-on with `read` folders adds only to lists inside them, the general list included.)
+        if (file || group || p.read.length) {
           const lists = (await api(`/todos?${scope}`)) as any[];
           const target = file ? lists.find((l) => l.file === file) : lists.find((l) => l.file === 'tasks/TODO.md') ?? lists.find((l) => l.file === 'TODO.md');
-          if (file && !target) throw new Error(t('lub.noList', { file }));
+          if (!target && (file || p.read.length)) throw new Error(t('lub.noList', { file: file || 'TODO.md' }));
           if (group && target && !(target.groups ?? []).includes(group)) throw new Error(t('lub.noGroup', { group }));
         }
         wouldDo(p, file ? 'addTo' : 'add', { text: str(text, 80), list: file });
@@ -941,7 +973,7 @@ function onMessage(e: MessageEvent) {
     return;
   } else if (m.type === 'key') {
     // Only from a frame the person can be typing in; never from a test load.
-    if (f.surface && !p.dry && !p.dead) pressKey(m);
+    if (f.surface && !p.dry && !p.dead) pressKey(f, m);
     return;
   } else if (m.type === 'loaded' || m.type === 'failed') {
     landed(f);

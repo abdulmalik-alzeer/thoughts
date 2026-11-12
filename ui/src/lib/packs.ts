@@ -11,6 +11,8 @@ export type AddOn = {
   path: string; name: string; label: string; kind: 'plugin' | 'view'; on: boolean; manageable: boolean;
   permissions: string[]; write: string[]; description: string; unsupported: boolean; message?: string;
   data: DataInfo | null;
+  /** The only folders it reads in (none: the whole library but private folders). */
+  read?: string[];
 };
 export type Leftover = { name: string; label: string; data: DataInfo };
 

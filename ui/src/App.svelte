@@ -3,7 +3,7 @@
   import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
-  import { loadLayer, retryLayer, checkPending, openReview, addonTag, safeCrashText, viewLabel } from './lib/layer';
+  import { loadLayer, retryLayer, checkPending, openReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn } from './lib/layer';
   import { failed } from './lib/errors';
   import { backup, healthWarning, lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
@@ -465,6 +465,8 @@
     if (e.defaultPrevented) return;
     let id = matchShortcut(e);
     if (!id) return;
+    // A key pressed inside an add-on's page runs only moving around and the palette (lib/layer.ts).
+    if (keyFromAddOn(e) && !keyMayComeFromAddOn(id)) return;
     if (id === 'escape') { if (closeTop()) e.preventDefault(); return; }
     if (!app.ready || !app.settings?.onboarded) return;
     const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour || showRecent;

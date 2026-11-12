@@ -407,9 +407,11 @@ Writing a good plugin:
   commands carry the plugin's name. Do not imitate the app's own messages or settings.
 - Never wait for something in a loop (`while (!ready) {}`): code that does not give control back
   freezes the app. Use `await` and events.
-- The app's keyboard shortcuts (Cmd/Ctrl with a key, Escape) keep working while the user is in the
-  plugin's page or widget. A key the plugin handles itself (Escape to close its own menu, Ctrl+Enter
-  to save its form): call `event.preventDefault()` in its `keydown` listener and the app leaves it alone.
+- While the user is in the plugin's page or widget, the app's shortcuts for moving around keep
+  working (the command palette, the pages, back and forward, search, zoom, the sidebar), and Escape
+  takes the keyboard back to the app. No other shortcut of the app can be reached from a plugin. A
+  key the plugin handles itself (Escape to close its own menu, Ctrl+Enter to save its form): call
+  `event.preventDefault()` in its `keydown` listener and the app leaves it alone.
 - **Try it.** While the user tries a change, the plugin runs as it will once kept, but nothing is
   saved: what it writes to the library, removes, saves in `storage` or sets as an item's status is
   kept aside and read back to it until the preview ends; todo changes are answered as done. The user
