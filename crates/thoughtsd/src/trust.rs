@@ -260,7 +260,9 @@ fn risky_git_key(k: &str) -> bool {
     let (section, var) = match (k.split_once('.'), k.rsplit_once('.')) { (Some((a, _)), Some((_, b))) => (a, b), _ => return true };
     let has_sub = k.matches('.').count() >= 2;
     let sub_ok = has_sub && match section {
-        "remote" => ["url", "fetch", "pushurl", "prune"].contains(&var),
+        // Not `pushurl`: it sends every backup to a second address that `git remote -v` lists only
+        // after the one the app shows, so it is reported (see `Scan::git`).
+        "remote" => ["url", "fetch", "prune"].contains(&var),
         "branch" => ["remote", "merge", "rebase"].contains(&var),
         _ => false,
     };
@@ -462,7 +464,13 @@ impl Scan {
                     Some(o) if o.status.success() => for rec in String::from_utf8_lossy(&o.stdout).split('\0').filter(|r| !r.is_empty()) {
                         let (key, value) = rec.split_once('\n').unwrap_or((rec, ""));
                         if !risky_git_key(key) { continue; }
-                        self.add(G, "git_setting", &place(&cfg), key, value, Some(format!("git setting {}", key.replace('\n', " "))));
+                        // A separate upload address is said as what it is; 0.0.8 took it for harmless.
+                        let lower = key.to_lowercase();
+                        if lower.starts_with("remote.") && lower.ends_with(".pushurl") {
+                            self.add(G, "git_pushurl", &place(&cfg), key, value, None);
+                        } else {
+                            self.add(G, "git_setting", &place(&cfg), key, value, Some(format!("git setting {}", key.replace('\n', " "))));
+                        }
                         self.git_marks.push(format!("setting {}={value}", key.to_lowercase()));
                     },
                     _ => self.add(G, "git_unreadable", &place(&cfg), "", "", Some(format!("git {name} that could not be read"))),
@@ -995,6 +1003,32 @@ mod tests {
         assert!(require_git(&d).is_ok());
         put(&d, ".git/hooks/pre-commit", "#!/bin/sh\nevil\n");
         assert!(require_git(&d).is_err());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// SEC-15: `pushurl` makes `git push` upload somewhere other than the address the app shows.
+    #[test]
+    fn a_separate_upload_address_is_reported() {
+        let d = tmp("pushurl");
+        git(&d, &["init", "-q"]);
+        git(&d, &["remote", "add", "origin", "https://example.com/mine.git"]);
+        assert!(require_git(&d).is_ok());
+        git(&d, &["config", "remote.origin.pushurl", "https://collector.example/theirs.git"]);
+        // The problem itself: the first line git lists for a remote (the one Settings shows) is
+        // the download address, while uploads go to the other one.
+        let out = |a: &[&str]| String::from_utf8_lossy(&std::process::Command::new("git").current_dir(&d).args(a).output().unwrap().stdout).to_string();
+        assert!(out(&["remote", "-v"]).lines().next().unwrap().contains("https://example.com/mine.git"));
+        assert_eq!(out(&["remote", "get-url", "--push", "origin"]).trim(), "https://collector.example/theirs.git");
+        // So it stops the app's own git until the user has seen where uploads would go.
+        let q = question(require_git(&d));
+        let (f, _) = q.items.iter().find(|(f, _)| f.kind == "git_pushurl").expect("reported");
+        assert_eq!((f.name.as_str(), f.detail.as_str()), ("remote.origin.pushurl", "https://collector.example/theirs.git"));
+        trust(&d).unwrap();
+        assert!(require_git(&d).is_ok());
+        // Pointing it somewhere else asks again.
+        git(&d, &["config", "remote.origin.pushurl", "https://elsewhere.example/x.git"]);
+        assert!(require_git(&d).is_err());
+        assert!(!risky_git_key("remote.origin.url") && !risky_git_key("remote.origin.fetch") && risky_git_key("remote.Origin.PushURL"));
         std::fs::remove_dir_all(d).unwrap();
     }
 
