@@ -473,7 +473,9 @@
     if (keyFromAddOn(e) && !keyMayComeFromAddOn(id)) return;
     if (id === 'escape') { if (closeTop()) e.preventDefault(); return; }
     if (!app.ready || !app.settings?.onboarded) return;
-    const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour || showRecent;
+    // Dialogs that views and features open themselves (adding a library, a sync clash, a link…) count too.
+    const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour || showRecent
+      || !!document.querySelector('[aria-modal="true"]:not(.pal)');
     if (modal || (app.showPalette && id !== 'palette')) return;
     if (id.startsWith('nav.')) {
       const it = navItems[+id.slice(4) - 1];

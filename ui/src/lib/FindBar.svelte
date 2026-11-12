@@ -282,7 +282,9 @@
   function onWindowKey(e: KeyboardEvent) {
     if (!open || e.key !== 'Escape' || e.defaultPrevented || e.isComposing) return;
     const el = e.target as HTMLElement | null;
-    if (el?.closest?.('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="menu"]')) return;
+    if (el?.closest?.('input, textarea, select, [contenteditable="true"], [role="dialog"], [role="alertdialog"], [role="menu"], [role="group"], [aria-haspopup][aria-expanded="true"]')) return;
+    // A confirmation or another dialog is open: this Escape closes that, not the bar as well.
+    if (document.querySelector('[aria-modal="true"]')) return;
     e.preventDefault();
     close();
   }
