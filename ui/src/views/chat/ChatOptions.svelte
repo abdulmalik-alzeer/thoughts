@@ -6,9 +6,13 @@
   import Icon from '../../lib/Icon.svelte';
   import { t } from '../../lib/i18n';
 
-  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm }: {
+  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram }: {
     options: { model?: string | null; effort?: string | null; permissionMode?: string | null };
     models: string[]; efforts: string[]; modes: string[];
+    /** Where the names of the modes and efforts are (Codex has names of its own for them). */
+    permPrefix?: string; hintPrefix?: string; effortPrefix?: string;
+    /** The assistant programs this chat can be moved between, when there are two. */
+    programs?: { id: string; label: string; ok: boolean }[]; program?: string; onprogram?: (id: string) => void;
     /** Translated label when there is one, the raw value otherwise. */
     label: (prefix: string, v: string) => string;
     /** The model menu changed (its value: '' = automatic). The handler may put the menu back. */
@@ -26,8 +30,8 @@
 
   const mode = $derived(options.permissionMode ?? 'acceptEdits');
   // What the button says: the mode always; model and effort only when they are not the default.
-  const extra = $derived([options.model, options.effort ? label('chat.effort', options.effort) : null].filter(Boolean).join(' · '));
-  const hint = (m: string) => { const k = `set.perm.${m}.hint`; const s = t(k); return s === k ? '' : s; };
+  const extra = $derived([programs.length > 1 ? programs.find((p) => p.id === program)?.label : null, options.model, options.effort ? label(effortPrefix, options.effort) : null].filter(Boolean).join(' · '));
+  const hint = (m: string) => { const k = `${hintPrefix}.${m}.hint`; const s = t(k); return s === k ? '' : s; };
 
   function close(refocus = true) { open = false; if (refocus) button?.focus(); }
   function onkey(e: KeyboardEvent) { if (e.key === 'Escape' && open) { e.stopPropagation(); e.preventDefault(); close(); } }
@@ -39,21 +43,34 @@
 <span class="co" bind:this={root} onkeydown={onkey}>
   <button bind:this={button} type="button" class="cobtn" class:bypass={mode === BYPASS} class:plan={mode === 'plan'}
     aria-haspopup="dialog" aria-expanded={open} aria-controls="co-{uid}" onclick={() => (open = !open)}
-    title={t('chatc.opt.tip')} aria-label={t('chatc.opt.aria', { mode: label('chat3.perm', mode) })}>
+    title={t('chatc.opt.tip')} aria-label={t('chatc.opt.aria', { mode: label(permPrefix, mode) })}>
     <Icon name={mode === BYPASS ? 'warning' : mode === 'plan' ? 'eye' : 'shield'} size={13} />
-    <span class="ell">{label('chat3.perm', mode)}</span>
+    <span class="ell">{label(permPrefix, mode)}</span>
     {#if extra}<span class="ell muted extra" dir="ltr">· {extra}</span>{/if}
     <Icon name="down" size={12} />
   </button>
   {#if open}
     <div class="pop" id="co-{uid}" role="dialog" aria-label={t('chatc.opt.title')}>
+      {#if programs.length > 1 && onprogram}
+        <fieldset>
+          <legend>{t('codex.move.label')}</legend>
+          <div class="progs">
+            {#each programs as p (p.id)}
+              <label class="radio prog" class:on={p.id === program} title={p.ok ? undefined : t('codex.move.unavailable', { to: p.label })}>
+                <input type="radio" name="co-prog-{uid}" value={p.id} checked={p.id === program} disabled={!p.ok && p.id !== program} onchange={() => { close(false); onprogram?.(p.id); }} />
+                <span><b><bdi>{p.label}</bdi></b></span>
+              </label>
+            {/each}
+          </div>
+        </fieldset>
+      {/if}
       {#if modes.length}
         <fieldset>
           <legend>{t('chatc.opt.may')}</legend>
           {#each modes as m (m)}
             <label class="radio" class:danger={m === BYPASS}>
               <input type="radio" name="co-perm-{uid}" value={m} checked={mode === m} onchange={() => onperm(m)} />
-              <span><b>{label('chat3.perm', m)}</b>{#if hint(m)}<span class="muted sm blk">{hint(m)}</span>{/if}</span>
+              <span><b>{label(permPrefix, m)}</b>{#if hint(m)}<span class="muted sm blk">{hint(m)}</span>{/if}</span>
             </label>
           {/each}
         </fieldset>
@@ -73,7 +90,7 @@
             <span class="lbl">{t('effort')}</span>
             <select value={options.effort ?? ''} onchange={(e) => oneffort((e.target as HTMLSelectElement).value || null)}>
               <option value="">{t('chatc.opt.auto')}</option>
-              {#each efforts as m (m)}<option value={m}>{label('chat.effort', m)}</option>{/each}
+              {#each efforts as m (m)}<option value={m}>{label(effortPrefix, m)}</option>{/each}
             </select>
           </label>
         {/if}
@@ -107,4 +124,7 @@
   .field, .lbl { margin: 0; }
   .field select { width: 100%; font-size: var(--fs-xs); padding: 4px 6px; }
   .note { margin: 0; }
+  .progs { display: flex; gap: 4px; flex-wrap: wrap; }
+  .prog { flex: 1 1 120px; }
+  .prog.on { background: var(--fill); }
 </style>

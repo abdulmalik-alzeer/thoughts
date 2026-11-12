@@ -17,7 +17,7 @@
   import { api, del, on, patch, post, ApiError } from '../lib/api';
   import { md, mdClick } from '../lib/md';
   import { app, costVisible, go, refreshChats } from '../lib/store.svelte';
-  import { t, tn, fmtMoney } from '../lib/i18n';
+  import { t, tn, fmtMoney, fmtNum } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { signIn } from '../lib/auth';
   import { normalizeCapture } from '../lib/capture';
@@ -139,6 +139,7 @@
       // A mode picked while its warning is still on screen stays picked.
       if (pendingPerm !== undefined) c.options.permissionMode = pendingPerm;
       chat = c;
+      loadOpts(c.provider);
       applyPartial(c.partial);
       // Files named in sent messages are shown by their titles.
       if (c.messages.some((m: any) => m.tool?.mentions?.length)) loadMentionables();
@@ -252,7 +253,6 @@
   onMount(() => {
     load(true);
     window.addEventListener('resize', grow);
-    api('/ai/claude/options').then((o) => (opts = { models: [], efforts: [], permissionModes: [], ...o })).catch(() => {});
     const off = on((e) => {
       if (e.type === 'resync') { load(); return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
@@ -262,6 +262,37 @@
     });
     return () => { off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); };
   });
+
+  // ---- which assistant program answers this chat (Claude Code or Codex), and its own choices ----
+  let optsFor = '';
+  function loadOpts(provider: string) {
+    const p = provider === 'codex' ? 'codex' : 'claude';
+    if (optsFor === p) return;
+    optsFor = p;
+    api(`/ai/${p}/options`).then((o) => { if (optsFor === p) opts = { models: [], efforts: [], permissionModes: [], ...o }; }).catch(() => { if (optsFor === p) optsFor = ''; });
+  }
+  const onCodex = $derived(chat?.provider === 'codex');
+  const PROGRAMS = [{ id: 'claude', label: 'Claude Code' }, { id: 'codex', label: 'Codex' }];
+  /** The two programs, offered in the chat's control once Codex is installed (or the chat already uses it). */
+  const programs = $derived(chat?.kind === 'chat' && (app.status?.codex?.installed || onCodex)
+    ? PROGRAMS.map((p) => ({ ...p, ok: !!app.status?.[p.id]?.installed })) : []);
+
+  /** Move this chat to the other assistant program. Its conversation goes along with the next
+   *  message — whole when it fits, otherwise a summary with the last messages — and the chat says which. */
+  async function moveProgram(to: string) {
+    if (!chat || chat.provider === to || chat.running || sending) return;
+    const name = PROGRAMS.find((p) => p.id === to)?.label ?? to;
+    const said = chat.messages.some((m: any) => m.role === 'assistant');
+    if (!(await confirmDialog({ title: t('codex.move.title', { to: name }), body: t(said ? 'codex.move.body' : 'codex.move.bodyEmpty', { to: name }), confirmLabel: t('codex.move.confirm') }))) return;
+    try {
+      const v = await patch(`/chats/${id}`, { provider: to });
+      chat.provider = v?.provider ?? to;
+      if (v?.options) { chat.options = { ...chat.options, ...v.options }; savedPerm = chat.options.permissionMode ?? savedPerm; }
+      loadOpts(chat.provider);
+      if (v?.handoff) notify(t(v.handoff === 'summary' ? 'codex.move.bodySummary' : 'codex.move.bodyReplay', { to: name }), { kind: 'info', key: 'move:' + id });
+      refreshChats().catch(() => {});
+    } catch (e) { failed(t('codex.move.failed'), e); }
+  }
 
   let sending = false;   // a message is on its way to the service and its answer has not come back yet
   async function sendBody(body: any, failKey = 'chat3.sendFailed') {
@@ -505,8 +536,8 @@
     if (turnsOn) {
       pendingPerm = want;
       const yes = await confirmDialog({
-        title: t('perm.bypass.title'), body: `${t('perm.bypass.body')}\n\n${t('perm.bypass.chat')}`,
-        note: t('perm.bypass.note'), confirmLabel: t('perm.bypass.confirm'), danger: true,
+        title: t('perm.bypass.title'), body: `${t(onCodex ? 'codex.bypass.body' : 'perm.bypass.body')}\n\n${t('perm.bypass.chat')}`,
+        note: t(onCodex ? 'codex.bypass.note' : 'perm.bypass.note'), confirmLabel: t(onCodex ? 'codex.perm.bypassPermissions' : 'perm.bypass.confirm'), danger: true,
       });
       pendingPerm = undefined;
       if (!yes) { chat.options.permissionMode = savedPerm; return; }
@@ -532,7 +563,7 @@
   async function setWeb(on: boolean) {
     const before = !!chat.options.web;
     // Switching it on says first, plainly, what it lets in and what it may send out.
-    if (on && !before && !(await confirmDialog({ title: t('runb.web.confirmTitle'), body: t('runb.web.confirmBody'), confirmLabel: t('runb.web.confirm') }))) return;
+    if (on && !before && !(await confirmDialog({ title: t('runb.web.confirmTitle'), body: t(onCodex ? 'codex.web.confirmBody' : 'runb.web.confirmBody'), confirmLabel: t('runb.web.confirm') }))) return;
     chat.options.web = on;
     try {
       const saved = await patch(`/chats/${id}`, { options: chat.options });
@@ -639,6 +670,9 @@
       {:else}
         <span class="pill accent">{label('chat.kind', chat.kind)}</span>
       {/if}
+      {#if chat.usageTokens > 0 && !(chat.costUsd > 0)}
+        <span class="pill cost" title={t('codex.chat.tokensTip')}><bdi>{t('codex.chat.tokens', { n: fmtNum(chat.usageTokens) })}</bdi></span>
+      {/if}
       {#if chat.costUsd > 0 && costVisible()}
         <button class="pill cost" type="button" title={t('chat.costTip')} aria-label="{t('chat.costLabel', { cost: usd(chat.costUsd) })}. {t('chat.costTip')}"
           onclick={() => notify(t('chat.costTip'), { kind: 'info' })}><bdi>{usd(chat.costUsd)}</bdi> <Icon name="info" size={12} /></button>
@@ -665,8 +699,12 @@
       <div class="banner alert row" role="status"><Icon name="warning" size={15} /> <span class="grow">{t('chata.bypassOn')}</span>
         <button class="btn" onclick={bypassOff}>{t('chata.bypassOff')}</button></div>
     {/if}
+    {#if onCodex && (app.settings?.privatePaths ?? []).length}
+      <div class="banner alert row" role="note"><Icon name="warning" size={15} /> <span class="grow">{t('codex.chat.private')}</span>
+        {#if chat.kind === 'chat' && app.status?.claude?.installed}<button class="btn" onclick={() => moveProgram('claude')}>{t('codex.chat.privateMove')}</button>{/if}</div>
+    {/if}
     {#if chat.kind === 'chat' && chat.options.web && savedPerm !== BYPASS}
-      <div class="banner row" role="status"><Icon name="search" size={14} /> <span class="grow">{t('runb.web.on')}</span>
+      <div class="banner row" role="status"><Icon name="search" size={14} /> <span class="grow">{t(onCodex ? 'codex.web.on' : 'runb.web.on')}</span>
         <button class="btn" onclick={() => setWeb(false)}>{t('runb.web.off')}</button></div>
     {/if}
     {#if chat.kind === 'chat'}<ChatAllowed chatId={id} />{/if}
@@ -738,7 +776,7 @@
             <div class="msg err" role="alert">
               <div class="errline"><Icon name="warning" size={14} /> <span dir="auto">{m.text}</span></div>
               {#if m.tool?.code === 'signedOut' && m.id === lastAnswerId}
-                <button class="act show" onclick={signIn}><Icon name="external" size={14} /><span>{t('auth.signIn')}</span></button>
+                <button class="act show" onclick={() => signIn(m.tool?.provider === 'codex' ? 'codex' : 'claude')}><Icon name="external" size={14} /><span>{t(m.tool?.provider === 'codex' ? 'codex.set.signIn' : 'auth.signIn')}</span></button>
               {:else if m.tool?.code === 'providerKey' && m.id === lastAnswerId}
                 <!-- The service refused the saved key: it is changed in Settings, under Assistant. -->
                 <button class="act show" onclick={() => go({ kind: 'settings', id: 'ai' })}><Icon name="settings" size={14} /><span>{t('chatc.openSettings')}</span></button>
@@ -835,6 +873,8 @@
           <DictateButton target={() => input} />
           <!-- Model, effort and what the assistant may do: one control; the mode is always named on it. -->
           <ChatOptions options={chat.options} models={opts.models} efforts={opts.efforts} modes={permModes} {label}
+            permPrefix={onCodex ? 'codex.perm' : 'chat3.perm'} hintPrefix={onCodex ? 'codex.perm' : 'set.perm'} effortPrefix={onCodex ? 'codex.effort' : 'chat.effort'}
+            {programs} program={chat.provider} onprogram={programs.every((p) => p.ok) && !chat.running ? moveProgram : undefined}
             onmodel={modelChanged} extraModel={{ value: MODEL_OTHER, label: t('runc.model.other') }} oneffort={(v) => { chat.options.effort = v; saveOpts(); }}
             onperm={(v) => { chat.options.permissionMode = v; permChanged(); }} />
           {#if chat.kind === 'chat' && savedPerm !== BYPASS}

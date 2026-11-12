@@ -38,7 +38,8 @@ export function failed(headline: string, e: unknown, opts: ToastOpts = {}): void
     toast(t('err.noHistory'), { kind: 'error', key: 'no-history', action: { label: t('settings'), run: () => go({ kind: 'settings', id: 'git' }) } });
     return;
   }
-  if (code === 'SIGNED_OUT') { toast(detail || t('auth.banner'), { kind: 'error', key: 'auth', action: { label: t('auth.signIn'), run: signIn } }); return; }
+  if (code === 'SIGNED_OUT') { toast(detail || t('auth.banner'), { kind: 'error', key: 'auth', action: { label: t('auth.signIn'), run: () => signIn('claude') } }); return; }
+  if (code === 'CODEX_SIGNED_OUT') { toast(detail || t('codex.auth.banner'), { kind: 'error', key: 'auth', action: { label: t('codex.set.signIn'), run: () => signIn('codex') } }); return; }
   // Saying no to trusting a folder is the user's own choice: a plain note, not something that went wrong.
   if (code === 'TRUST_DECLINED') { toast(detail || t('seca.trust.declined'), { key: 'trust-declined' }); return; }
   if (code === 'NEWER_SETTINGS') { toast(t('err.newerSettings'), { kind: 'error', key: 'newer-settings' }); return; }

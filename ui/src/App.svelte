@@ -129,17 +129,20 @@
   // Known up front, not when a message fails: the status says so at start, the service says so the
   // moment a run is refused (`auth.changed`), and coming back to the window looks again (the user
   // may have signed in or out in a terminal meanwhile).
-  const signedOut = $derived(!!app.settings?.onboarded && app.status?.claude?.installed === true && app.status.claude.loggedIn === false);
+  // The program chosen in Settings › Assistant is the one that has to be signed in (Claude Code or Codex).
+  const onCodex = $derived(app.settings?.ai?.primary === 'codex');
+  const primaryStatus = $derived<any>(onCodex ? app.status?.codex : app.status?.claude);
+  const signedOut = $derived(!!app.settings?.onboarded && primaryStatus?.installed === true && primaryStatus.loggedIn === false && (!onCodex || primaryStatus.known !== false));
   let authBusy = $state(false);
   async function authChanged() {
     const was = signedOut;
     await refreshStatus();
-    if (was && !signedOut) toast(t('auth.signedIn'), { kind: 'success', key: 'auth' });
+    if (was && !signedOut) toast(t(onCodex ? 'codex.auth.signedIn' : 'auth.signedIn'), { kind: 'success', key: 'auth' });
   }
   async function checkSignIn() {
     if (authBusy) return;
     authBusy = true;
-    try { toast(t((await recheckSignIn()) ? 'auth.signedIn' : 'auth.stillOut'), { key: 'auth' }); }
+    try { toast(t((await recheckSignIn(onCodex ? 'codex' : 'claude')) ? (onCodex ? 'codex.auth.signedIn' : 'auth.signedIn') : 'auth.stillOut'), { key: 'auth' }); }
     catch (e: any) { toast(t('set.failed'), { kind: 'error', key: 'auth', detail: e?.message }); }
     finally { authBusy = false; }
   }
@@ -871,8 +874,8 @@
       {#if signedOut && app.online}
         <div class="safe no-print" role="alert">
           <Icon name="warning" size={16} />
-          <span class="grow">{t(app.status.claude.authFailed ? 'auth.bannerExpired' : 'auth.banner')}</span>
-          <button class="btn primary" onclick={signIn}><Icon name="external" size={14} /> {t('auth.signIn')}</button>
+          <span class="grow">{t(onCodex ? (primaryStatus.authFailed ? 'codex.auth.bannerExpired' : 'codex.auth.banner') : (app.status.claude.authFailed ? 'auth.bannerExpired' : 'auth.banner'))}</span>
+          <button class="btn primary" onclick={() => signIn(onCodex ? 'codex' : 'claude')}><Icon name="external" size={14} /> {t('auth.signIn')}</button>
           <button class="btn" disabled={authBusy} aria-busy={authBusy} onclick={checkSignIn}><Icon name="retry" size={14} /> {t('auth.check')}</button>
         </div>
       {/if}

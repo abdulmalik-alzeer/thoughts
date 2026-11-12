@@ -13,6 +13,7 @@
   import { backup, driveName, lastBackupText, refreshBackup } from '../lib/backup.svelte';
   import { cloudFor } from '../lib/cloud.svelte';
   import ProviderPresets from './ProviderPresets.svelte';
+  import CodexSettings from './CodexSettings.svelte';
   import SpendingGuard from './SpendingGuard.svelte';
   import { restartService } from '../lib/shell';
   import { keepLibraryToMe, libraryOpenToOthers, offerIndexCleanup } from '../lib/privacy';
@@ -34,7 +35,7 @@
   const basic: Record<Cat, string[]> = {
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates', 'nativeb.set.title', 'nativeb.set.switch'],
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
-    ai: ['set.account', 'set.perm', 'set.wrapNag', 'chatc.set.suggest'],
+    ai: ['codex.set.which', 'set.account', 'codex.set.title', 'codex.set.limitsTitle', 'set.perm', 'set.wrapNag', 'chatc.set.suggest'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
     privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
     modules: ['set.modulesIntro'],
@@ -45,7 +46,7 @@
   const adv: Record<Cat, string[]> = {
     general: [],
     accessibility: [],
-    ai: ['set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle', 'set.provider', 'set.baseUrl', 'set.apiKey'],
+    ai: ['set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle', 'set.provider', 'set.baseUrl', 'set.apiKey', 'codex.set.model', 'codex.set.effort', 'codex.set.mini', 'codex.set.binary'],
     git: [],
     privacy: [],
     modules: [],
@@ -706,6 +707,7 @@
     </div>
   {:else if c === 'ai'}
     <div class="card">
+      <CodexSettings bind:ai={s.ai} part="which" vis={(...k) => vis(c, ...k)} {readOnly} />
       {#if vis(c, 'set.account')}
         <h3>{t('set.account')}</h3>
         <div class="row wrap">
@@ -727,6 +729,7 @@
         <!-- Not installed, or not signed in: the steps to get there, checked as they happen (FEAT-07). -->
         {#if !claude.installed || (provKind === 'account' && !claude.loggedIn)}<AssistantGuide bind:claude keyInstead={provKind === 'anthropicKey' || provKind === 'service'} />{/if}
       {/if}
+      <CodexSettings bind:ai={s.ai} part="codex" vis={(...k) => vis(c, ...k)} {readOnly} />
       {#if vis(c, 'set.perm')}
         <fieldset class="perm" aria-describedby={errors.permission ? 'st-err-permission' : undefined}>
           <legend>{t('set.perm')}</legend>
@@ -796,6 +799,7 @@
           <p class="muted sm">{t('runc.prov.testHint')}</p>
           <p class="muted sm">{t('set.apiKeyHint')}</p>
         {/if}
+        <CodexSettings bind:ai={s.ai} part="advanced" vis={(...k) => vis(c, ...k)} {readOnly} />
       </details>
     {/if}
   {:else if c === 'git'}
