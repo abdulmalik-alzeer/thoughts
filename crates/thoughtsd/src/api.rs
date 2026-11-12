@@ -2123,7 +2123,7 @@ async fn todo_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R 
 /// the calendar whose task is no longer open come back as cancelled (see `todos::calendar`).
 async fn todo_calendar(State(st): S) -> Result<Response, ApiErr> {
     let root = lib(&st).await?;
-    let opts = todos::CalOpts { alarm: st.settings.read().await.calendar.alarm_time() };
+    let opts = { let s = st.settings.read().await; todos::CalOpts { alarm: s.calendar.alarm_time(), private: s.private_paths.clone() } };
     // What earlier exports of this library sent, kept beside the settings (never in the library).
     #[derive(serde::Serialize, Deserialize, Default)]
     struct Kept { library: String, events: todos::CalRecord }

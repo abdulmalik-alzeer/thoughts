@@ -563,9 +563,10 @@ fn ics_escape(text: &str) -> String {
     text.replace('\\', "\\\\").replace(';', "\\;").replace(',', "\\,").replace(['\r', '\n'], " ")
 }
 
-/// Calendar export choices: a reminder at this time of day on the due day (`None` = no reminder).
-#[derive(Clone, Copy, Debug, Default)]
-pub struct CalOpts { pub alarm: Option<(u32, u32)> }
+/// Calendar export choices: a reminder at this time of day on the due day (`None` = no reminder),
+/// and the library's private folders, whose tasks never go into a calendar.
+#[derive(Clone, Debug, Default)]
+pub struct CalOpts { pub alarm: Option<(u32, u32)>, pub private: Vec<String> }
 
 /// What earlier exports put in the user's calendar, so the next one can take back what is no longer
 /// open (ticked off, deleted, renamed): `uid → {date, summary, gone?}`. Kept in the app's own folder.
@@ -588,7 +589,9 @@ fn rrule(every: &str) -> Option<&'static str> {
 /// repeats in the calendar too). Each event's UID is derived from the list and the task's title, so
 /// importing the file again updates the same events rather than adding duplicates — and moving a
 /// due date moves the event. Events from an earlier export whose task is no longer open come back
-/// as cancelled, so a re-import clears them; `record` is updated to match.
+/// as cancelled, so a re-import clears them; `record` is updated to match. Lists in a private folder
+/// (judged on where they really are) are left out; an event an earlier export made from one comes
+/// back cancelled without its title.
 pub fn calendar(root: &Path, now: chrono::DateTime<chrono::Utc>, opts: CalOpts, record: &mut CalRecord) -> String {
     use sha2::{Digest, Sha256};
     let stamp = now.format("%Y%m%dT%H%M%SZ").to_string();
@@ -607,8 +610,20 @@ pub fn calendar(root: &Path, now: chrono::DateTime<chrono::Utc>, opts: CalOpts, 
         lines.push(format!("SUMMARY:{}", ics_escape(summary)));
     };
     let mut seen = std::collections::HashSet::new();
+    let mut hidden = std::collections::HashSet::new();
     for list in list(root) {
         let file = list["file"].as_str().unwrap_or_default().to_string();
+        if crate::paths::is_private(root, &file, &opts.private) {
+            // Its events from before the folder was made private are taken back, and say nothing.
+            for item in list["items"].as_array().into_iter().flatten() {
+                let title = item["title"].as_str().unwrap_or_default();
+                for n in 1..=8 {
+                    let key = if n == 1 { format!("{file}\n{title}") } else { format!("{file}\n{title}\n{n}") };
+                    hidden.insert(format!("{:x}", Sha256::digest(key.as_bytes()))[..32].to_string());
+                }
+            }
+            continue;
+        }
         for item in list["items"].as_array().into_iter().flatten() {
             if item["done"] == true { continue; }
             let (Some(due), Some(title)) = (item["due"].as_str(), item["title"].as_str()) else { continue };
@@ -641,6 +656,7 @@ pub fn calendar(root: &Path, now: chrono::DateTime<chrono::Utc>, opts: CalOpts, 
     let keep_from = today - chrono::Duration::days(CANCEL_DAYS);
     record.retain(|uid, e| {
         if seen.contains(uid) { return true; }
+        if hidden.contains(uid) { e.summary.clear(); }
         let gone = *e.gone.get_or_insert_with(|| today.format("%Y-%m-%d").to_string()) >= keep_from.format("%Y-%m-%d").to_string();
         if gone {
             if let Ok(day) = chrono::NaiveDate::parse_from_str(&e.date, "%Y-%m-%d") {
@@ -1021,7 +1037,7 @@ mod tests {
         let d = tmp(&[("TODO.md", "- [ ] Pay VAT @every(quarter) @due(2026-12-31)\n- [ ] Call the bank @due(2026-11-20)\n")]);
         let now = chrono::DateTime::parse_from_rfc3339("2026-11-10T08:00:00Z").unwrap().with_timezone(&chrono::Utc);
         let mut record = CalRecord::new();
-        let ics = calendar(&d, now, CalOpts { alarm: Some((9, 0)) }, &mut record).replace("\r\n ", "");
+        let ics = calendar(&d, now, CalOpts { alarm: Some((9, 0)), ..Default::default() }, &mut record).replace("\r\n ", "");
         assert_eq!(ics.matches("BEGIN:VALARM").count(), 2);
         assert!(ics.contains("TRIGGER:PT9H0M\r\n") && ics.contains("RRULE:FREQ=MONTHLY;INTERVAL=3\r\n"));
         assert!(ics.contains("SUMMARY:Pay VAT\r\n") && !ics.contains("STATUS:CANCELLED"));
@@ -1041,6 +1057,30 @@ mod tests {
         let ics3 = calendar(&d, later + chrono::Duration::days(61), CalOpts::default(), &mut record);
         assert!(!ics3.contains("CANCELLED"));
         assert_eq!(record.len(), 1);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn tasks_in_private_folders_never_go_into_a_calendar() {
+        let d = tmp(&[("TODO.md", "- [ ] Call the bank @due(2026-11-20)\n"), ("me/health/todo.md", "- [ ] See the cardiologist @due(2026-11-21)\n"),
+                      ("clients/acme/todo.md", "- [ ] Send the invoice @due(2026-11-22)\n")]);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-10T08:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let mut record = CalRecord::new();
+        // Exported while the health folder was not private yet.
+        let before = calendar(&d, now, CalOpts::default(), &mut record);
+        assert!(before.contains("cardiologist") && record.len() == 3);
+        // Now it is (written in another letter case), and the client folder is private through a link.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(d.join("clients"), d.join("work")).unwrap();
+        let private = vec!["Me/Health".to_string(), if cfg!(unix) { "work".to_string() } else { "clients".to_string() }];
+        let ics = calendar(&d, now, CalOpts { private, ..Default::default() }, &mut record).replace("\r\n ", "");
+        assert!(ics.contains("SUMMARY:Call the bank\r\n"));
+        assert!(!ics.contains("cardiologist") && !ics.contains("invoice"), "{ics}");
+        // Their earlier events are taken back, without saying what they were.
+        let cancelled: Vec<&str> = ics.split("BEGIN:VEVENT").filter(|e| e.contains("STATUS:CANCELLED")).collect();
+        assert_eq!(cancelled.len(), 2);
+        assert!(cancelled.iter().all(|e| e.contains("SUMMARY:\r\n")), "{cancelled:?}");
+        assert!(record.values().all(|e| !e.summary.contains("cardiologist") && !e.summary.contains("invoice")));
         std::fs::remove_dir_all(d).unwrap();
     }
 

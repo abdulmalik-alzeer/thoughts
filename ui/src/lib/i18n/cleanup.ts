@@ -9,6 +9,8 @@ export default {
     // An add-on that lists the folders it reads: what it may do to files where it saves.
     'cln.addon.changeOnly': 'changes or deletes files only inside {folders}; elsewhere it can only add new files',
     'cln.addon.changeOnlyLine': 'Changes or deletes files only inside: {folders}. Elsewhere it can only add new files.',
+    // Add to my calendar: what the calendar file leaves out.
+    'cln.cal.private': 'Todos in folders you marked private are never included.',
     // Move to another computer, with several libraries: the file holds the open one only.
     'cln.move.oneLibrary': 'The file holds only “{name}”, the library open now: its chats and settings. Your other libraries stay on this computer; open one and save a move file of its own to take it along.',
   },
@@ -17,6 +19,7 @@ export default {
     'cln.voice.whereCloud': 'يُحفظ التسجيل ضمن اجتماعات «{where}» ويُحوَّل إلى نص على هذا الجهاز، ولا يرسل Thoughts شيئاً إلى أي مكان. لا يدخل الملف الصوتي سجل مكتبتك، لكن مكتبتك في مجلد تزامنه خدمة سحابية، وهذه الخدمة تنسخه كأي ملف آخر.',
     'cln.addon.changeOnly': 'لا تعدّل الملفات ولا تحذفها إلا داخل {folders}؛ وفي غيرها لا تستطيع إلا إضافة ملفات جديدة',
     'cln.addon.changeOnlyLine': 'لا تعدّل الملفات ولا تحذفها إلا داخل: {folders}. وفي غيرها لا تستطيع إلا إضافة ملفات جديدة.',
+    'cln.cal.private': 'المهام الموجودة في المجلدات التي جعلتها خاصة لا تدخل ملف التقويم أبداً.',
     'cln.move.oneLibrary': 'لا يحمل الملف إلا «{name}»، المكتبة المفتوحة الآن: محادثاتها وإعداداتها. أما مكتباتك الأخرى فتبقى على هذا الجهاز؛ افتح أيّاً منها واحفظ لها ملف نقل خاصاً بها لتأخذها معك.',
   },
 };

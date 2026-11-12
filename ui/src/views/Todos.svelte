@@ -140,7 +140,9 @@
       const blob = await apiBlob('/todos/calendar.ics');
       const text = await blob.text();
       const r = await saveFile('thoughts-todos.ics', text, 'text/calendar');
-      if (r === 'saved') notify(t('ui.cal.saved'), { kind: 'success' });
+      // Todos in private folders never go into the file (the daemon leaves them out): said whenever there are some.
+      const priv = app.settings?.privatePaths?.length ? ' ' + t('cln.cal.private') : '';
+      if (r === 'saved') notify(t('ui.cal.saved') + priv, { kind: 'success' });
       else if (r === 'unsupported') notify((await copyText(text)) ? t('ui.cal.copied') : t('ui.cal.saveFailed'), { kind: 'info' });
     } catch (e) { failed(t('ui.cal.saveFailed'), e); }
   }
@@ -381,7 +383,7 @@
         <button class="segb" aria-pressed={mode === 'list'} onclick={() => setMode('list')}><Icon name="todos" size={14} /> {t('ui.cal.list')}</button>
         <button class="segb" aria-pressed={mode === 'calendar'} onclick={() => setMode('calendar')}><Icon name="calendar" size={14} /> {t('ui.cal.title')}</button>
       </div>
-      <button class="btn" onclick={downloadCalendar} title={t('ui.cal.addHint')}><Icon name="download" size={14} /> {t('ui.cal.add')}</button>
+      <button class="btn" onclick={downloadCalendar} title={`${t('ui.cal.addHint')}. ${t('cln.cal.private')}`}><Icon name="download" size={14} /> {t('ui.cal.add')}</button>
     {/if}
   </div>
 
