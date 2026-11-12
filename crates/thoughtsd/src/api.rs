@@ -547,7 +547,7 @@ struct PrivateIndex { path: String }
 /// `POST /api/library/private-index {path}` → `{removed}`: take those lines out of the index, in place.
 async fn private_index_remove(State(st): S, Json(b): Json<PrivateIndex>) -> R {
     let root = lib(&st).await?;
-    library_free(&st)?;
+    library_free(&st).await?;
     let dir = private_folder(&st, &b.path).await?;
     let removed = library::remove_index_lines(&root, &dir)?;
     if removed > 0 { st.emit(json!({"type": "library.changed"})); }
