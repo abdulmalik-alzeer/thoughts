@@ -13,6 +13,7 @@
   import Versions from './docs/Versions.svelte';
   import FolderPicker from './docs/FolderPicker.svelte';
   import Conflict from './docs/Conflict.svelte';
+  import Editor from './docs/Editor.svelte';
   import FindBar from '../lib/FindBar.svelte';
   import SearchResults from '../lib/SearchResults.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
@@ -1025,13 +1026,7 @@
             <button class="btn sm-btn" onclick={() => resolveConflict(theirs)}>{t('docsa.compare')}</button>
           </div>
         {/if}
-        <div class="split" class:two={preview && !doc.plain}>
-          <textarea class="editor" bind:value={draft} dir="auto" spellcheck={!doc.plain} aria-label={t('docs.editorLabel', { name: current })}></textarea>
-          {#if preview && !doc.plain}
-            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-            <article class="md pv scroll" dir="auto" aria-label={t('docs.preview')} onclick={(e) => { if (!mdClick(e) && (e.target as HTMLElement).closest('a')) e.preventDefault(); }}>{@html md(draft)}</article>
-          {/if}
-        </div>
+        <Editor bind:value={draft} path={current} plain={doc.plain} preview={preview && !doc.plain} label={t('docs.editorLabel', { name: current })} />
       {:else if doc.plain}
         <h1 class="ptitle" dir="auto">{baseName(current)}</h1>
         <article bind:this={article} aria-label={t('docs3.textLabel', { name: baseName(current) })}><pre class="plain" dir="auto">{doc.content}</pre></article>
@@ -1124,11 +1119,6 @@
   .fm { flex-wrap: wrap; margin: 6px 0 10px; }
   .fm .pill { font-size: var(--fs-xs); }
 
-  .split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; height: calc(100vh - 110px); }
-  .split.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  /* Each paragraph finds its own direction, so an Arabic note behind English front matter is still
-     written right-to-left, line by line. */
-  .editor { height: 100%; font-family: var(--mono); font-size: 13px; line-height: 1.55; resize: none; unicode-bidi: plaintext; text-align: start; }
   .banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; padding: 8px 12px; border-radius: var(--radius);
     border: var(--border-w) solid color-mix(in srgb, var(--accent-2) 45%, var(--border)); background: color-mix(in srgb, var(--accent-2) 10%, var(--bg)); font-size: var(--fs-sm); }
   .banner.info { border-color: var(--border); background: var(--panel); }
@@ -1137,8 +1127,6 @@
   .src { unicode-bidi: plaintext; text-align: start; }
   .inv { font-family: var(--mono); font-size: .85em; padding: 0 3px; border-radius: 4px; border: 1px dashed var(--danger); color: var(--danger); }
   .sys { margin-top: 10px; }
-  .pv { height: 100%; padding: 8px 14px; border-radius: var(--radius); border: var(--border-w) solid var(--border); overflow-wrap: anywhere; }
-  @container docs (max-width: 900px) { .split.two { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr 1fr; } }
 
   /* Narrow window: the reading column takes the whole width and the file list opens over it. */
   @container docs (max-width: 760px) {
