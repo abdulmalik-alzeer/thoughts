@@ -388,6 +388,9 @@ pub(crate) struct Version {
     hash: String,
     date: String,
     summary: String,
+    /// The app as it first was. Told by the entry's kind, since its summary comes in the app's
+    /// language ("Starting point", «نقطة البداية»).
+    start: bool,
 }
 
 /// How many earlier versions the menu lists before "More versions…".
@@ -404,6 +407,7 @@ fn versions_of(history: &Value) -> Vec<Version> {
             hash: hash.to_string(),
             date: h["date"].as_str().unwrap_or_default().to_string(),
             summary: h["summary"].as_str().or(h["subject"].as_str()).unwrap_or_default().to_string(),
+            start: h["entry"] == "start",
         })
     }).collect()
 }
@@ -453,7 +457,7 @@ pub(crate) fn summary_of(v: &Version, ar: bool) -> String {
 }
 
 fn is_starting_point(v: &Version) -> bool {
-    v.summary.trim() == "Starting point"
+    v.start || v.summary.trim() == "Starting point"
 }
 
 /// The menu line for a version: when it was made and what it was.
@@ -663,7 +667,7 @@ fn undo_last(app: &tauri::AppHandle) {
     if next["exists"] != true || hash.is_empty() {
         return tell(app, MessageDialogKind::Info, tx(ar, "undo.none.title"), tx(ar, "undo.none.body"));
     }
-    let what = summary_of(&Version { hash: hash.clone(), date: String::new(), summary: next["summary"].as_str().unwrap_or_default().to_string() }, ar);
+    let what = summary_of(&Version { hash: hash.clone(), date: String::new(), summary: next["summary"].as_str().unwrap_or_default().to_string(), start: false }, ar);
     let body = fill(ar, "undo.ask.body", &[("what", &what)]);
     if choose(app, MessageDialogKind::Warning, tx(ar, "undo.ask.title"), &body, &[tx(ar, "undo.go"), tx(ar, "cancel")]) != 0 {
         return;
@@ -827,7 +831,7 @@ mod tests {
     use super::*;
 
     fn version(summary: &str, date: &str) -> Version {
-        Version { hash: "0123abcd".into(), date: date.into(), summary: summary.into() }
+        Version { hash: "0123abcd".into(), date: date.into(), summary: summary.into(), start: false }
     }
 
     #[test]
@@ -896,6 +900,11 @@ mod tests {
         assert_eq!(v.iter().map(|x| x.hash.as_str()).collect::<Vec<_>>(), ["aaaa1111", "bbbb2222"]);
         assert_eq!(v[1].summary, "Older client field");
         assert!(versions_of(&json!({"error": "nope"})).is_empty() && versions_of(&Value::Null).is_empty());
+        // The service words its entries in the app's language: the starting point is told by its kind.
+        let arabic = versions_of(&json!([{"hash": "cccc3333", "summary": "نقطة البداية", "entry": "start", "date": "2026-01-01T09:00:00Z"}]));
+        assert!(is_starting_point(&arabic[0]));
+        assert_eq!(version_label(&arabic[0], true), "التطبيق كما كان أول مرة (بلا تخصيصات)");
+        assert!(!is_starting_point(&v[0]) && is_starting_point(&version("Starting point", "")));
     }
 
     #[test]
