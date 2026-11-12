@@ -102,6 +102,15 @@ pub async fn run() -> anyhow::Result<()> {
     wraps::recover(&state).await;
     // The start-at-login entry records where the app was when it was switched on: check it still matches.
     { let s = state.settings.read().await.clone(); tokio::task::spawn_blocking(move || api::reconcile_login_item(&s)); }
+    // A library set up by an older version still carries a few of the starter kit's one-time files.
+    // (Not while a cut-off wrap is waiting: its undo must find the library exactly as it left it.)
+    if wraps::interrupted_wrap(&state).await.is_none() {
+        let s = state.settings.read().await.clone();
+        if let Some(lib) = s.library().filter(|l| s.onboarded && l.is_dir()) {
+            let cleared = library::tidy_kit_leftovers(&lib);
+            if cleared > 0 { log::info(format!("cleared away {cleared} leftover starter-kit file(s) from the library")); }
+        }
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     paths::write_daemon_info(&paths::DaemonInfo {

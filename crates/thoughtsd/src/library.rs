@@ -520,6 +520,68 @@ pub fn finish_setup(root: &Path) {
     install_presets(root);
 }
 
+/// The welcome pages and presets exactly as the kit shipped them in 0.0.8 (sha256), for
+/// `tidy_kit_leftovers`: the kit's current files may have been reworded since.
+const KIT_0_0_8: &[(&str, &str)] = &[
+    ("START-HERE.md", "8feffc62aa0b0c09b095914af6181414b5dab35695ee19f55c3f4a7a7c842a07"),
+    ("START-HERE.ar.md", "b933845d41fa9dc1e04aa806528d802108993e437f224ef27998c16afc5f9ef6"),
+    ("presets/accounting-finance.md", "75302339d359a0524a8bd5180e3af83806e600780a309e827b644b2268302dc9"),
+    ("presets/ar/accounting-finance.md", "17f79953e8a6441788b416e496176380887a2a9bb920fa2d43d716566a66e7b4"),
+    ("presets/ar/consulting.md", "a659e3236d0b07fe7d180681f9fe19a8da0d95a040626491af87182a8e68eeec"),
+    ("presets/ar/founder-product.md", "9578b190192e0c1490cc43caccca54a3d972f7931454f8a5edf7859a4dadd57d"),
+    ("presets/ar/legal.md", "b182e7d7d1385a939aed06fa1a660d0c997ad346055f92b3b04a3db3aa67c202"),
+    ("presets/ar/research-study.md", "4312581180d474d2d4d5421ebef2173608e08dedb6feb6cb9e5382288497bfee"),
+    ("presets/ar/teaching.md", "f6765dc36e6d0a2ca8b5bb843d276410c4241015dc3620c908db7803a35930a0"),
+    ("presets/consulting.md", "5a63cf17c35eea0fad6fc2c57adb8f0dcdc70fcdb5ffe7f9d080b9f1a7adc883"),
+    ("presets/founder-product.md", "32cbbb38c563c2d56e93e954acb0e5dd792c9e264cf4cf8f2216578e7c0d76c5"),
+    ("presets/legal.md", "6fa7da4e50188f52390420679a8977cd0053277b7ec51cfcfd62047b0e722abc"),
+    ("presets/research-study.md", "67fbbaea82702d80daf542da3cd1779aa89b3f3904f4d0f5a5e7a96b99966267"),
+    ("presets/teaching.md", "5724379a2abfdad17ca9abf6ff42dd7511dab2555abe6c98cec2fda15df71e13"),
+];
+
+/// Is the library's file at `rel` still exactly what a kit shipped there (this version's, or 0.0.8's)?
+fn untouched_kit_file(root: &Path, rel: &str) -> bool {
+    let file = root.join(rel);
+    if !std::fs::symlink_metadata(&file).map_or(false, |m| m.is_file() && m.len() < 1 << 20) { return false; }
+    let Ok(bytes) = std::fs::read(&file) else { return false };
+    if STARTER.get_file(rel).map_or(false, |f| f.contents() == bytes) { return true; }
+    let hash = content_hash(&bytes);
+    KIT_0_0_8.iter().any(|(r, h)| *r == rel && *h == hash)
+}
+
+/// A library set up with 0.0.8 or earlier kept the Arabic welcome page at the top and, usually,
+/// the kit's whole presets folder (that version's setup could not clear them away). Finish that
+/// job: remove those files where they are still exactly what the kit shipped, and make sure the
+/// presets are where the routines expect them, under `.claude/presets/`. A file the user changed,
+/// and anything else in a folder called `presets`, is left alone; a library that has not been set
+/// up yet is not touched at all. Returns how many files were cleared away.
+pub fn tidy_kit_leftovers(root: &Path) -> usize {
+    if awaits_setup(root) || !root.join("CLAUDE.md").is_file() { return 0; }
+    let mut cleared = 0;
+    for page in ["START-HERE.md", "START-HERE.ar.md"] {
+        if untouched_kit_file(root, page) && std::fs::remove_file(root.join(page)).is_ok() { cleared += 1; }
+    }
+    let (mut dirs, mut stack) = (vec![], STARTER.get_dir("presets").into_iter().collect::<Vec<_>>());
+    while let Some(d) = stack.pop() {
+        stack.extend(d.dirs());
+        dirs.push(d.path().to_path_buf());
+        for f in d.files() {
+            let rel = f.path().to_string_lossy().replace('\\', "/");
+            if !untouched_kit_file(root, &rel) { continue; }
+            // Installed as the kit ships it today, so it stays one of the app's own files.
+            let home = root.join(".claude").join(f.path());
+            if std::fs::symlink_metadata(&home).is_err() {
+                let put = home.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&home, f.contents()));
+                if let Err(e) = put { crate::log::warn(format!("could not install the preset {rel}: {e}")); continue; }
+            }
+            if std::fs::remove_file(root.join(&rel)).is_ok() { cleared += 1; }
+        }
+    }
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    for d in dirs { let _ = std::fs::remove_dir(root.join(d)); }
+    cleared
+}
+
 /// The kit's one-time setup routine. While it is there, the library has not been set up.
 pub const SETUP_ROUTINE: &str = ".claude/skills/init-library";
 
@@ -1098,6 +1160,47 @@ mod tests {
             std::fs::remove_dir_all(elsewhere).unwrap();
         }
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn leftovers_of_an_older_setup_are_cleared_but_nothing_of_the_users() {
+        // What 0.0.8 left in every new library: the Arabic welcome page and the presets at the top.
+        let d = tmp();
+        create_from_starter(&d).unwrap();
+        // Not set up yet: hands off.
+        assert_eq!(tidy_kit_leftovers(&d), 0);
+        assert!(d.join("START-HERE.ar.md").exists() && d.join("presets/legal.md").exists());
+        std::fs::remove_dir_all(d.join(SETUP_ROUTINE)).unwrap();
+        std::fs::remove_file(d.join("START-HERE.md")).unwrap();
+        // The user rewrote one preset and keeps a file of their own beside the kit's.
+        std::fs::write(d.join("presets/teaching.md"), "my own teaching notes").unwrap();
+        std::fs::write(d.join("presets/price-list.md"), "mine").unwrap();
+        let shipped = STARTER.get_dir("presets").unwrap().files().count() + STARTER.get_dir("presets/ar").unwrap().files().count();
+        assert_eq!(tidy_kit_leftovers(&d), 1 + shipped - 1, "the Arabic welcome page and every untouched preset");
+        assert!(!d.join("START-HERE.ar.md").exists() && !d.join("presets/legal.md").exists() && !d.join("presets/ar").exists());
+        assert_eq!(std::fs::read_to_string(d.join("presets/teaching.md")).unwrap(), "my own teaching notes");
+        assert_eq!(std::fs::read_to_string(d.join("presets/price-list.md")).unwrap(), "mine");
+        assert_eq!(std::fs::read(d.join(".claude/presets/ar/legal.md")).unwrap(), STARTER.get_file("presets/ar/legal.md").unwrap().contents());
+        assert!(!d.join(".claude/presets/teaching.md").exists(), "a preset the user changed is not installed in their name");
+        // The app's own files only: the folder still needs no trust decision, and nothing is left to do.
+        assert!(!crate::trust::has_own_claude_files(&d) && crate::trust::require(&d).is_ok());
+        assert_eq!(tidy_kit_leftovers(&d), 0);
+        // A welcome page the user edited stays; so does everything in a folder that never was a library.
+        std::fs::write(d.join("START-HERE.md"), "my own start page").unwrap();
+        assert_eq!(tidy_kit_leftovers(&d), 0);
+        assert!(d.join("START-HERE.md").exists());
+        std::fs::remove_dir_all(&d).unwrap();
+        let other = tmp();
+        std::fs::create_dir_all(other.join("presets")).unwrap();
+        std::fs::write(other.join("presets/legal.md"), STARTER.get_file("presets/legal.md").unwrap().contents()).unwrap();
+        assert_eq!(tidy_kit_leftovers(&other), 0);
+        assert!(other.join("presets/legal.md").exists());
+        // The 0.0.8 list names real kit files, each once.
+        for (rel, hash) in KIT_0_0_8 {
+            assert!(STARTER.get_file(rel).is_some() && hash.len() == 64, "{rel}");
+            assert_eq!(KIT_0_0_8.iter().filter(|(r, _)| r == rel).count(), 1, "{rel}");
+        }
+        std::fs::remove_dir_all(other).unwrap();
     }
 
     #[test]
