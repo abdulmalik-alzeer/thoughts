@@ -32,7 +32,7 @@ export function workflowNotice(e: any, notify: (title: string, body: string) => 
     ? { label: t('auto.runNow'), run: () => { runTask({ file: e.file, hash: e.hash }); } }
     : e.chatId
       ? { label: t('auto.openRun'), run: () => go({ kind: 'chat', id: e.chatId }) }
-      : { label: t('auto.details'), run: () => go({ kind: 'settings', id: 'appLayer' }) };
+      : { label: t('auto.details'), run: () => go({ kind: 'customise', id: 'tasks' }) };
   toast(text, { kind: e.outcome === 'skipped' ? 'info' : 'error', key: 'wf:' + e.file, duration: 0, action });
   if (app.settings?.notifications && !document.hasFocus()) notify(t('auto.notice.title'), text);
 }

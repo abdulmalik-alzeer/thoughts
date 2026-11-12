@@ -49,7 +49,7 @@ export async function discardDraft(id: string) {
   if (r?.origin === 'update') checkLayerUpdates();
 }
 
-const settings = () => go({ kind: 'settings', id: 'appLayer' });
+const settings = () => go({ kind: 'customise', id: 'ask' });
 
 on((e) => {
   if (e?.type === 'layer.pending' || e?.type === 'layer.changed') refreshDrafts();

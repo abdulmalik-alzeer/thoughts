@@ -74,7 +74,7 @@
   let bundle: any = null;
   let reading = $state(false);
   let inspected = $state<any>(null);
-  let pick = $state({ chats: true, settings: true, customisations: true, replace: false });
+  let pick = $state({ chats: true, settings: true, customisations: true, replace: false, addonData: true, addonDataReplace: false });
   let folders = $state<Record<string, string>>({});
   let importing = $state(false);
   let imported = $state<any>(null);
@@ -92,7 +92,7 @@
       const info = await post('/move/inspect', { bundle: parsed });
       bundle = parsed;
       folders = Object.fromEntries((info.projects ?? []).map((p: any) => [p.id, p.here ? p.path : '']));
-      pick = { chats: info.chats > 0, settings: !!info.settings, customisations: info.customisations > 0, replace: false };
+      pick = { chats: info.chats > 0, settings: !!info.settings, customisations: info.customisations > 0, replace: false, addonData: (info.addonData ?? 0) > 0, addonDataReplace: false };
       inspected = info;
     } catch (err) { failed(t('care.move.failed'), err); }
     finally { reading = false; if (fileInput) fileInput.value = ''; }
@@ -110,18 +110,20 @@
     if (p !== null && p.trim()) folders[id] = p.trim();
   }
 
-  const nothingPicked = $derived(!!inspected && !((pick.chats && inspected.chats > 0) || (pick.settings && inspected.settings) || (pick.customisations && inspected.customisations > 0)));
+  const nothingPicked = $derived(!!inspected && !((pick.chats && inspected.chats > 0) || (pick.settings && inspected.settings) || (pick.customisations && inspected.customisations > 0) || (pick.addonData && inspected.addonData > 0)));
 
   async function importMove() {
     if (!bundle || importing || nothingPicked) return;
     importing = true;
     try {
-      const choices = { chats: pick.chats, settings: pick.settings, customisations: pick.customisations, replace: pick.replace, projects: $state.snapshot(folders) };
+      const choices = { chats: pick.chats, settings: pick.settings, customisations: pick.customisations, replace: pick.replace, projects: $state.snapshot(folders), addonData: pick.addonData, addonDataReplace: pick.addonDataReplace };
       const r = await post('/move/import', { bundle, choices });
       imported = r;
       bundle = null; inspected = null;
       toast(t('care.move.done', { added: fmtNum(r.chatsAdded ?? 0), replaced: fmtNum(r.chatsReplaced ?? 0), skipped: fmtNum(r.chatsSkipped ?? 0) }), { kind: 'success', key: 'move' });
       if (r.customisations === 'failed') toast(t('care.move.customFailed'), { kind: 'error', detail: r.customisationsError || undefined });
+      const data = (r.addonData?.added ?? 0) + (r.addonData?.replaced ?? 0);
+      if (data) toast(t('ldc.move.dataDone', { n: fmtNum(data) }), { kind: 'success', key: 'move-data' });
     } catch (e) { failed(t('care.move.failed'), e); }
     finally { importing = false; }
   }
@@ -250,6 +252,16 @@
         {#if inspected.customisations > 0}
           <label class="check"><input type="checkbox" bind:checked={pick.customisations} aria-describedby="care-cust-hint" /> {t('care.move.custom', { n: fmtNum(inspected.customisations) })}</label>
           <p class="muted sm sub" id="care-cust-hint">{t('care.move.customHint')}</p>
+        {/if}
+        {#if inspected.addonData > 0}
+          <label class="check"><input type="checkbox" bind:checked={pick.addonData} aria-describedby="care-data-hint" /> {t('ldc.move.data', { n: fmtNum(inspected.addonData) })}</label>
+          <p class="muted sm sub" id="care-data-hint">{t('ldc.move.dataHint')}</p>
+          {#if pick.addonData && inspected.addonDataExisting > 0}
+            <div class="sub">
+              <label class="check"><input type="checkbox" bind:checked={pick.addonDataReplace} aria-describedby="care-data-rep-hint" /> {t('ldc.move.dataReplace', { n: fmtNum(inspected.addonDataExisting) })}</label>
+              <p class="muted sm" id="care-data-rep-hint">{t('ldc.move.dataReplaceHint')}</p>
+            </div>
+          {/if}
         {/if}
         {#if pick.chats && inspected.projects?.length}
           <h4>{t('care.move.folders')}</h4>

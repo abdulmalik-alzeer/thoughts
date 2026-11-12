@@ -38,6 +38,7 @@
   import Home from './views/Home.svelte';
   import Help from './views/Help.svelte';
   import History from './views/History.svelte';
+  import Customise from './views/Customise.svelte';
   import PreviewBanner from './views/PreviewBanner.svelte';
   import SetupWaiting from './views/SetupWaiting.svelte';
   import Icon from './lib/Icon.svelte';
@@ -417,7 +418,7 @@
     'history': () => go({ kind: 'history' }),
     'back': () => goBack(),
     'forward': () => goForward(),
-    'customise': () => go({ kind: 'settings', id: 'appLayer' }),
+    'customise': () => go({ kind: 'customise' }),
     'review': () => openReview(),
     'updates.check': () => checkAppUpdate(true),
     'settings': () => go({ kind: 'settings' }),
@@ -600,7 +601,9 @@
     // An add-on's page is keyed by an id that carries the add-on's name, so two add-ons (or an add-on and
     // the app) can use the same short id; `nav.json` may name it by either.
     for (const v of app.pluginViews) items.push({ id: v.id, alias: v.short && !APP_PAGES.includes(v.short) ? v.short : undefined, from: v.plugin, label: viewLabel(v), icon: v.icon || 'plugin', custom: true, active: app.view.kind === 'plugin' && app.view.id === v.id, run: () => { go({ kind: 'plugin', id: v.id }); } });
-    const hidden = new Set((app.nav?.hidden ?? []).filter((id) => id !== 'home'));
+    // Customise is where customisations are switched off and undone, so no customisation hides it.
+    items.push({ id: 'customise', label: navLabel('customise', t('layer.customise')), icon: 'palette', active: isActive('customise'), run: () => { go({ kind: 'customise' }); } });
+    const hidden = new Set((app.nav?.hidden ?? []).filter((id) => id !== 'home' && id !== 'customise'));
     const list = items.filter((i) => !hidden.has(i.id) && !(i.alias && hidden.has(i.alias)));
     const first: NavItem[] = [];
     for (const id of app.nav?.order ?? []) {
@@ -649,7 +652,8 @@
       items.push({ id, title, group, icon, keys: keys(id) || undefined, run: () => command(id), ...extra });
     add('chat.new', t('newChat'), g.act, 'plus');
     // What an add-on added says so, with the add-on's name, wherever it is listed.
-    navItems.forEach((it, i) => items.push({ id: (it.custom ? 'view:' : 'nav.') + it.id, title: it.label, group: it.custom ? addonTag(it.from) : g.go, icon: it.icon, keys: keys('nav.' + (i + 1)) || undefined, run: it.run }));
+    // (Customise is listed once, below, with the words people search it by.)
+    navItems.forEach((it, i) => { if (it.id !== 'customise') items.push({ id: (it.custom ? 'view:' : 'nav.') + it.id, title: it.label, group: it.custom ? addonTag(it.from) : g.go, icon: it.icon, keys: keys('nav.' + (i + 1)) || undefined, run: it.run }); });
     add('settings', t('settings'), g.go, 'settings');
     add('help', t('shell.help'), g.go, 'help', { keywords: 'help shortcuts privacy cost مساعدة اختصارات خصوصية' });
     add('wrap.start', t('shell.pal.wrap'), g.act, 'wrap', { keywords: 'wrap save حفظ تلخيص' });
@@ -913,6 +917,7 @@
       {:else if app.view.kind === 'todos'}<Todos mode={app.view.id === 'calendar' ? 'calendar' : 'list'} />
       {:else if app.view.kind === 'inbox'}<Inbox />
       {:else if app.view.kind === 'history'}<History />
+      {:else if app.view.kind === 'customise'}<Customise />
       {:else if app.view.kind === 'projects'}<Projects {projects} reload={loadProjects} {newChat} />
       {:else if app.view.kind === 'settings'}<Settings reload={loadProjects} />
       {:else if app.view.kind === 'help'}<Help />

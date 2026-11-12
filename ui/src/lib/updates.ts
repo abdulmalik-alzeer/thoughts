@@ -75,7 +75,7 @@ export async function checkLayerUpdates() {
   // A conflict whose merge is being prepared or waits for review is answered by keeping that review.
   const open = (Array.isArray(s?.conflicts) ? s.conflicts : []).filter((c: any) => c && typeof c.path === 'string' && !c.merging);
   if (open.length) {
-    toast(tn('ldb.upd.toast', open.length), { key: 'upd-choose', duration: 20000, action: { label: t('ldb.upd.choose'), run: () => go({ kind: 'settings', id: 'appLayer' }) } });
+    toast(tn('ldb.upd.toast', open.length), { key: 'upd-choose', duration: 20000, action: { label: t('ldb.upd.choose'), run: () => go({ kind: 'customise', id: 'updates' }) } });
   }
   emitUpdates(s);
 }

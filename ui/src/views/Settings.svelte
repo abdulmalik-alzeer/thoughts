@@ -19,7 +19,6 @@
   import ThemePicker from './ThemePicker.svelte';
   import CalendarPrefs from '../lib/CalendarPrefs.svelte';
   import QuickCapturePrefs from '../lib/QuickCapturePrefs.svelte';
-  import Customise from './Customise.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
   import Maintenance from './Maintenance.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
@@ -39,7 +38,7 @@
     privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
-    appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'layer.appUpdates'],
+    appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'ldc.tab.addons', 'ldc.tab.ready', 'ldc.tab.updates'],
     maintenance: ['care.health.title', 'care.upd.title', 'care.move.title', 'care.rm.title'],
   };
   const adv: Record<Cat, string[]> = {
@@ -882,7 +881,11 @@
     {/if}
     <Maintenance show={(...keys) => vis(c, ...keys)} open={(to) => { tab = to; query = ''; if (to === 'ai') advOpen.ai = true; }} />
   {:else if c === 'appLayer'}
-    <Customise show={(...keys) => vis(c, ...keys)} />
+    <!-- Customise has a page of its own (sidebar); this category points there. -->
+    <div class="card">
+      <p class="muted">{t('ldc.set.moved')}</p>
+      <button type="button" class="btn primary" onclick={() => go({ kind: 'customise' })}><Icon name="palette" size={15} /> {t('ldc.set.open')}</button>
+    </div>
     {#if vis(c, ...adv.appLayer)}
       <details class="card adv" open={!!q || advOpen.appLayer} ontoggle={(e) => { if (!q) advOpen.appLayer = e.currentTarget.open; }}>
         <summary>{t('set.advanced')}</summary>

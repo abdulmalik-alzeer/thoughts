@@ -61,7 +61,7 @@ export default {
     'care.fix.finishBody': 'The half-done combination of changes is cancelled and the history goes back to how it was just before. If you were combining changes yourself in another program, finish there instead.',
 
     'care.move.title': 'Move to another computer',
-    'care.move.intro': 'Your library travels through sync or a copy of its folder. This file carries the rest: your chats (with their attachments and the summaries not wrapped yet), your settings and your customisations.',
+    'care.move.intro': 'Your library travels through sync or a copy of its folder. This file carries the rest: your chats (with their attachments and the summaries not wrapped yet), your settings, your customisations and what your add-ons saved.',
     'care.move.export': 'Save a move file',
     'care.move.exporting': 'Saving…',
     'care.move.saved': 'Saved “{name}” in your {folder} folder: {chats} chats and {files} attachments.',
@@ -210,7 +210,7 @@ export default {
     'care.fix.finishBody': 'يُلغى دمج التغييرات غير المكتمل ويعود السجل إلى ما كان عليه قبله مباشرة. إن كنت تدمج التغييرات بنفسك في برنامج آخر، فأكمل هناك بدلاً من ذلك.',
 
     'care.move.title': 'النقل إلى جهاز آخر',
-    'care.move.intro': 'تنتقل مكتبتك عبر المزامنة أو بنسخ مجلدها. وهذا الملف يحمل الباقي: محادثاتك (بمرفقاتها وملخصاتها التي لم تُحفظ بعد) وإعداداتك وتخصيصاتك.',
+    'care.move.intro': 'تنتقل مكتبتك عبر المزامنة أو بنسخ مجلدها. وهذا الملف يحمل الباقي: محادثاتك (بمرفقاتها وملخصاتها التي لم تُحفظ بعد) وإعداداتك وتخصيصاتك وما حفظته إضافاتك.',
     'care.move.export': 'حفظ ملف النقل',
     'care.move.exporting': 'جارٍ الحفظ…',
     'care.move.saved': 'حُفظ «{name}» في مجلد {folder}: {chats} محادثة و{files} مرفق.',

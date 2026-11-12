@@ -49,6 +49,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/addons/permission", post(addon_permission))
         .route("/api/layer/addons/data/restore", post(addon_data_restore))
         .route("/api/layer/addons/data/clear", post(addon_data_clear))
+        .route("/api/layer/addons/data/forget", post(addon_data_forget))
         .route("/api/workflows", get(workflow_list))
         .route("/api/workflows/approve", post(workflow_approve))
         .route("/api/workflows/disable", post(workflow_disable))
@@ -445,6 +446,17 @@ async fn addon_data_clear(Json(r): Json<DataRef>) -> R {
     ok()
 }
 
+/// `POST /api/layer/addons/data/forget {name}` — delete, for good, what an add-on that is no longer
+/// in the app saved, with its earlier copies. Refused while the add-on is in the app.
+async fn addon_data_forget(Json(r): Json<DataRef>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let d = Dirs::real();
+    if applayer::addons_of(&d.layer, false).iter().any(|a| a["name"] == r.name.as_str()) { return Err(crate::tr::err("addon.data_in_use", &[]).into()); }
+    storage_forget(&d.home, &r.name)?;
+    crate::log::info(format!("layer: saved data of the removed add-on {} deleted", r.name));
+    ok()
+}
+
 #[derive(Deserialize)]
 struct Import { pack: Value }
 
@@ -620,6 +632,17 @@ pub fn storage_clear(home: &std::path::Path, plugin: &str) -> anyhow::Result<()>
     if !std::fs::symlink_metadata(&file).map_or(false, |m| m.is_file()) { return Ok(()); }
     keep_version(home, plugin, true, chrono::Local::now())?;
     std::fs::remove_file(&file)?;
+    Ok(())
+}
+
+/// Delete what `plugin` saved and every earlier copy, for good (offered for add-ons no longer in the app).
+pub fn storage_forget(home: &std::path::Path, plugin: &str) -> anyhow::Result<()> {
+    let file = storage_file(home, plugin)?;
+    let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if std::fs::symlink_metadata(&file).is_ok() { std::fs::remove_file(&file)?; }
+    let dir = versions_dir(home, plugin);
+    if std::fs::symlink_metadata(&dir).map_or(false, |m| m.is_dir()) { std::fs::remove_dir_all(&dir)?; }
+    else if std::fs::symlink_metadata(&dir).is_ok() { std::fs::remove_file(&dir)?; }
     Ok(())
 }
 
@@ -935,6 +958,13 @@ mod tests {
         assert_eq!(stored_names(&home), ["hours.js"]);
         assert!(data_info(&home, "never.js").is_none());
         assert!(storage_all(&home).is_empty(), "nothing saved now: nothing to move");
+        // Deleted for good: the data and every copy, nothing else.
+        storage_write(&home, "other.js", br#"{"keep":true}"#, false).unwrap();
+        storage_forget(&home, "hours.js").unwrap();
+        assert!(data_info(&home, "hours.js").is_none() && !versions_dir(&home, "hours.js").exists());
+        assert_eq!(storage_read(&home, "other.js").unwrap()["keep"], true);
+        assert!(storage_forget(&home, "..").is_err() && storage_forget(&home, "").is_err());
+        assert!(home.join("plugin-data/.versions").is_dir());
         std::fs::remove_dir_all(home).unwrap();
     }
 

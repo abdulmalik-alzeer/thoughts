@@ -235,7 +235,8 @@ function fail(p: Plugin, e: any) {
   dispose(p);
   toast(t('shell.pluginCrashed', { name: p.name }), {
     kind: 'error', key: 'plugin:' + p.name, detail: String(e?.message ?? e),
-    action: { label: t('shell.openRollback'), run: () => (app.showRollback = true) },
+    // The next step after a crash: switch that add-on off, or undo what brought it.
+    action: { label: t('ldc.crash.manage'), run: () => { go({ kind: 'customise', id: 'addons' }); } },
   });
 }
 
@@ -1102,7 +1103,7 @@ export function whenText(trigger: any): string {
 /** A pack's id: the same for every export under one name from this computer, different for anyone
  *  else's pack of that name. On import the pack's CSS block is keyed by it, so a newer export replaces
  *  its own earlier block and never another pack's. */
-function packId(name: string): string {
+export function packId(name: string): string {
   const key = name.trim().toLowerCase();
   let ids: Record<string, string> = {};
   try { const v = JSON.parse(store.get('thoughts.packIds') || '{}'); if (v && typeof v === 'object' && !Array.isArray(v)) ids = v; } catch { /* start again */ }

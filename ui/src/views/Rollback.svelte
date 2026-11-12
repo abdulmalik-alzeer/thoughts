@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import { api, post } from '../lib/api';
   import { app, toast } from '../lib/store.svelte';
-  import { t, tn, fmtDate } from '../lib/i18n';
+  import { t, tn, fmtDate, fmtNum } from '../lib/i18n';
   import { trapFocus } from '../lib/focus';
   import { confirmDialog } from '../lib/dialog.svelte';
   import { clearLayerBootFlag, retryLayer, revertChange } from '../lib/layer';
@@ -50,6 +50,12 @@
   onMount(load);
   /** The first entry and the app's own housekeeping cannot be undone on their own (older services say nothing: allow). */
   const canUndo = (h: any) => h?.undoable !== false;
+  // The app's own updates to its files sit between the user's changes; they are shown on request.
+  let showAll = $state(false);
+  const shown = $derived(showAll ? history : history.filter((h) => h.kind !== 'system'));
+  const hiddenCount = $derived(history.length - shown.length);
+  /** A kept pack's own claims (version, maker) and the fingerprint the app worked out. */
+  const packLine = (p: any) => [p?.version ? t('ldc.hist.packVersion', { version: p.version }) : '', p?.author ? t('ldc.hist.packBy', { author: p.author }) : '', p?.code ? t('ldc.hist.packFp', { fp: p.code }) : ''].filter(Boolean).join(' · ');
 
   async function restore(h: any) {
     const ok = await confirmDialog({
@@ -97,12 +103,18 @@
     {:else if !history.length}
       <p class="muted">{t('shell.rb.empty')}</p>
     {:else}
+      <ul class="legend muted sm">
+        <li>{t('ldc.hist.undoWhat')}</li>
+        <li>{t('ldc.hist.backWhat')}</li>
+      </ul>
       <ul class="hist">
-        {#each history as h, i (h.hash)}
+        {#each shown as h (h.hash)}
           <li class="item">
             <div class="row top">
-              <span class="grow"><b dir="auto">{h.summary ?? h.subject}</b><br /><span class="muted sm">{fmtDate(h.date, { dateStyle: 'medium', timeStyle: 'short' })}</span></span>
-              {#if i === 0}<span class="pill accent">{t('shell.rb.current')}</span>{/if}
+              <span class="grow"><b dir="auto">{h.summary ?? h.subject}</b><br /><span class="muted sm">{fmtDate(h.date, { dateStyle: 'medium', timeStyle: 'short' })}</span>
+                {#if h.pack && packLine(h.pack)}<br /><span class="muted sm"><bdi>{packLine(h.pack)}</bdi></span>{/if}</span>
+              {#if h === history[0]}<span class="pill accent">{t('shell.rb.current')}</span>{/if}
+              {#if h.undone}<span class="pill">{t('ldc.hist.undone')}</span>{/if}
             </div>
             {#if h.files?.length}
               <details class="sm">
@@ -116,11 +128,17 @@
               {:else}
                 <span class="muted sm">{t(h.kind === 'start' ? 'lda.hist.start' : 'lda.hist.system')}</span>
               {/if}
-              {#if i > 0}<button class="btn ghost" disabled={busy} onclick={() => restore(h)}>{t('layer.goBackHere')}</button>{/if}
+              {#if h !== history[0]}<button class="btn ghost" disabled={busy} onclick={() => restore(h)}>{t('layer.goBackHere')}</button>{/if}
             </div>
           </li>
         {/each}
       </ul>
+      {#if hiddenCount || showAll}
+        <p class="row wrap sm">
+          <label class="check"><input type="checkbox" bind:checked={showAll} /> {t('ldc.hist.showAll')}</label>
+          {#if !showAll}<span class="muted">{t('ldc.hist.hidden', { n: fmtNum(hiddenCount) })}</span>{/if}
+        </p>
+      {/if}
       {#if more}
         <p class="row wrap">
           <button class="btn" disabled={loadingOlder || busy} aria-busy={loadingOlder} onclick={older}>{t(loadingOlder ? 'lda.hist.olderLoading' : 'lda.hist.older')}</button>
@@ -145,6 +163,7 @@
 
 <style>
   .hist { list-style: none; margin: 0; padding: 0; }
+  .legend { margin: 0 0 8px; padding-inline-start: 18px; display: grid; gap: 2px; }
   .item { padding: 10px 0; border-bottom: var(--border-w) solid var(--border); display: grid; gap: 6px; }
   .top { align-items: flex-start; }
   .fl { margin: 4px 0 0; padding-inline-start: 18px; font-family: var(--mono); overflow-wrap: anywhere; }
