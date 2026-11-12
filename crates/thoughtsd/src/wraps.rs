@@ -358,6 +358,9 @@ fn ar_chats(n: usize) -> String {
     }
 }
 
+/// "1 chat" / "3 chats" in English.
+fn en_n(n: usize, one: &str) -> String { if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") } }
+
 /// "3 documents" in Arabic.
 fn ar_docs(n: usize) -> String {
     match n {
@@ -418,7 +421,7 @@ pub async fn start(state: Arc<AppState>) -> anyhow::Result<String> {
     let mut wrap = Chat { title: format!("{} — {}", tr(ar, "Wrap", "تلخيص وحفظ"), chrono::Local::now().format("%Y-%m-%d %H:%M")), kind: "wrap".into(),
         library: scope.key(), ..Default::default() };
     wrap.meta = json!({"chatIds": pending.iter().map(|c| &c.id).collect::<Vec<_>>(), "phase": "preparing", "previewAt": Utc::now()});
-    wrap.messages.push(Msg::new("system", if ar { format!("جارٍ قراءة {}…", ar_chats(pending.len())) } else { format!("Reading {} chat(s)…", pending.len()) }));
+    wrap.messages.push(Msg::new("system", if ar { format!("جارٍ قراءة {}…", ar_chats(pending.len())) } else { format!("Reading {}…", en_n(pending.len(), "chat")) }));
     let wrap_id = wrap.id.clone();
     state.chats.insert(wrap).await;
     crate::log::info(format!("wrap {wrap_id}: preview for {} chat(s)", pending.len()));
@@ -462,8 +465,10 @@ async fn prepare_preview(st: Arc<AppState>, wid: String, pending: Vec<ChatMeta>,
         let names = name_list(ar, &unread.iter().map(|c| c.title.clone()).collect::<Vec<_>>());
         claude::push(&st, &wid, Msg::new("system", if ar {
             format!("تعذّرت قراءة {} الآن، فلن تدخل في هذا التلخيص: {names}. ستبقى غير محفوظة، ويمكنك حفظها بـ«تلخيص وحفظ» لاحقاً.", ar_chats(unread.len()))
+        } else if unread.len() == 1 {
+            format!("1 chat could not be read just now and is left out of this Wrap: {names}. It stays unsaved — press Wrap again later to save it.")
         } else {
-            format!("{} chat(s) could not be read just now and are left out of this Wrap: {names}. They stay unsaved — press Wrap again later to save them.", unread.len())
+            format!("{} chats could not be read just now and are left out of this Wrap: {names}. They stay unsaved — press Wrap again later to save them.", unread.len())
         })).await;
     }
     if ready.is_empty() {
@@ -471,7 +476,10 @@ async fn prepare_preview(st: Arc<AppState>, wid: String, pending: Vec<ChatMeta>,
             claude::push(&st, &wid, Msg::new("system", tr(ar,
                 "Nothing new was said in these chats since they were last saved, so there is nothing to wrap.",
                 "لم يُقَل في هذه المحادثات شيء جديد منذ آخر حفظ لها، فلا يوجد ما يُلخَّص."))).await;
-            st.chats.update(&wid, |c| { c.meta["phase"] = json!("done"); c.meta["chatIds"] = json!([]); c.meta["saved"] = json!(false); }).await;
+            st.chats.update(&wid, |c| {
+                c.meta["phase"] = json!("done"); c.meta["chatIds"] = json!([]); c.meta["saved"] = json!(false);
+                c.meta["changed"] = json!([]); c.meta["changesKnown"] = json!(true);
+            }).await;
         } else {
             crate::log::error(format!("wrap {wid}: none of the chats could be summarised"));
             claude::push(&st, &wid, Msg::new("error", tr(ar,
@@ -585,9 +593,11 @@ async fn tree_changes(state: &AppState, lib: &Path, from: &str, to: &str) -> any
 /// without recording anything: the history does not move. The caller holds the git lock.
 async fn worktree_tree(state: &AppState, lib: &Path) -> anyhow::Result<String> {
     crate::trust::require_git(lib)?;
-    crate::git::git(state, lib, &["add", "-A"]).await?;
-    let tree = crate::git::git(state, lib, &["write-tree"]).await;
-    // Nothing stays staged.
+    let tree = match crate::git::git(state, lib, &["add", "-A"]).await {
+        Ok(_) => crate::git::git(state, lib, &["write-tree"]).await,
+        Err(e) => Err(e),
+    };
+    // Nothing stays staged, whether or not that worked.
     let _ = crate::git::git(state, lib, &["reset", "-q"]).await;
     let tree = tree?.trim().to_string();
     if !crate::git::valid_hash(&tree) { anyhow::bail!("could not read the library's current state"); }
@@ -721,7 +731,8 @@ fn kept_note(ar: bool, kept: &[String]) -> String {
     if kept.is_empty() { return String::new(); }
     let names = name_list(ar, kept);
     if ar { format!(" أما ما تغيّر بعد انقطاع التلخيص فبقي كما هو ({}): {names}.", ar_docs(kept.len())) }
-    else { format!(" {} document(s) that changed after the wrap was cut off were left as they are: {names}.", kept.len()) }
+    else if kept.len() == 1 { format!(" 1 document that changed after the wrap was cut off was left as it is: {names}.") }
+    else { format!(" {} documents that changed after the wrap was cut off were left as they are: {names}.", kept.len()) }
 }
 
 /// Like `undo_partial`, for a wrap that was being finished in a library that had also changed since
@@ -775,7 +786,7 @@ fn closing_note(ar: bool, history: bool, saved: &Result<bool, String>, docs: usi
             "لم يكن هناك ما يحتاج إلى حفظ؛ فمكتبتك تحوي أصلاً كل ما في هذه المحادثات.").to_string(),
         Ok(true) if docs == 0 => tr(ar, "Saved to your library and its history.", "حُفظت في مكتبتك وفي سجلّها.").to_string(),
         Ok(true) => if ar { format!("حُفظت في مكتبتك وفي سجلّها. المستندات التي تغيّرت: {docs}.") }
-            else { format!("Saved to your library and its history: {docs} document(s) changed.") },
+            else { format!("Saved to your library and its history: {} changed.", en_n(docs, "document")) },
     };
     match backup {
         Backup::NotAsked => {}
@@ -796,11 +807,13 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
     let w = state.chats.meta(wrap_id).await.ok_or_else(|| crate::tr::err("not_found.wrap", &[]))?;
     if w.kind != "wrap" { return Err(crate::tr::err("not_found.wrap", &[])); }
     if !Scope::now(&state).await.holds(w.library.as_deref()) { return Err(crate::tr::err("wrap.other_library", &[])); }
-    if w.running { return Err(crate::tr::err("wrap.preparing", &[])); }
     let finishing = match w.meta["phase"].as_str() {
         Some("applying") => return Err(busy()),
         Some("done") => return Err(crate::tr::err("wrap.saved", &[])),
         Some("preparing") => return Err(crate::tr::err("wrap.preparing", &[])),
+        // Its plan is still being written.
+        Some("preview") if w.running => return Err(crate::tr::err("wrap.preparing", &[])),
+        _ if w.running => return Err(busy()),
         Some("interrupted") => true,
         // Only a plan that was written to the end: one that failed or was stopped is not a plan.
         Some("preview") if w.meta["previewOk"] == true => false,
@@ -913,6 +926,7 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
         let git_mode = st.settings.read().await.sync.mode.clone();
         let mut saved: Result<bool, String> = Ok(true);
         let mut docs: Vec<Change> = vec![];
+        let mut complete = false;
         let mut commit: Option<String> = None;
         let mut backup = Backup::NotAsked;
         if git_on {
@@ -925,7 +939,7 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
                     // What this wrap changed, for the person to see (and open) afterwards.
                     if let Some(h) = &commit {
                         match tree_changes(&st, &lib, snapshot.as_deref().unwrap_or(EMPTY_TREE), h).await {
-                            Ok(c) => docs = c,
+                            Ok(c) => { docs = c; complete = true; }
                             Err(e) => crate::log::warn(format!("wrap {wid}: could not list what it changed: {e}")),
                         }
                     }
@@ -957,18 +971,23 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
         let listed: Vec<Value> = docs.iter().take(200).map(|c| json!({"path": c.path, "change": c.kind()})).collect();
         let total = docs.len();
         let saved_ok = git_on && matches!(saved, Ok(true));
+        // Whether `changed` is the whole story. Not when the library keeps no history (there is
+        // nothing to compare with), the save into the history failed, or the list could not be read:
+        // the page must not then say that nothing changed.
+        let known = git_on && match &saved { Ok(true) => complete, Ok(false) => true, Err(_) => false };
         st.chats.update(&wid, |c| {
             c.meta["saved"] = json!(saved_ok);
             c.meta["commit"] = json!(commit);
             c.meta["changed"] = json!(listed);
             c.meta["changedCount"] = json!(total);
+            c.meta["changesKnown"] = json!(known);
         }).await;
         changed(&st, &wid).await;
         crate::log::info(format!("wrap {wid}: done ({} chat(s), {total} document(s) changed)", ids.len()));
         st.emit(json!({"type": "wrap.done", "chatId": wid}));
         st.emit(json!({"type": "library.changed"}));
         if ar { st.notify("اكتمل التلخيص والحفظ", &format!("حُفظت خلاصة {} في مكتبتك", ar_chats(ids.len()))); }
-        else { st.notify("Wrap complete", &format!("{} chat(s) saved into your library", ids.len())); }
+        else { st.notify("Wrap complete", &format!("{} saved into your library", en_n(ids.len(), "chat"))); }
     })))).await;
     if let Err(e) = &started {
         // Nothing ran (and the lock went with the dropped callback): back to where it was.
@@ -1740,7 +1759,7 @@ mod tests {
         assert!(!plan_prompt.contains("TAIL-PART") && !plan_prompt.contains("EARLY-PART") && !plan_prompt.contains("Client call"));
         // The person is told which chat is missing.
         let told = st.chats.with(&wrap, |c| c.messages.iter().filter(|m| m.role == "system").map(|m| m.text.clone()).collect::<Vec<_>>().join("\n")).await.unwrap();
-        assert!(told.contains("“Client call”") && told.contains("left out"), "{told}");
+        assert!(told.starts_with("Reading 2 chats…") && told.contains("1 chat could not be read just now and is left out of this Wrap: “Client call”."), "{told}");
         let mut rx = st.events.subscribe();
         apply(st.clone(), &wrap, "").await.unwrap();
         t::event(&mut rx, &st, "wrap.done").await;
@@ -1898,7 +1917,7 @@ mod tests {
         assert_eq!(interrupted_wrap(&st).await, None);
         // The person is told what was left alone.
         let said = st.chats.with(&wrap, |c| c.messages.last().unwrap().text.clone()).await.unwrap();
-        assert!(said.contains("4 document(s) that changed after") && said.contains("“notes/later.md”"), "{said}");
+        assert!(said.contains("4 documents that changed after") && said.contains("“notes/later.md”"), "{said}");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
@@ -1978,7 +1997,7 @@ mod tests {
         assert_eq!(msgs.last().unwrap(), &("system".to_string(), "حُفظت في مكتبتك وفي سجلّها. المستندات التي تغيّرت: 2.".to_string()));
         let w = st.chats.meta(&wrap).await.unwrap();
         assert_eq!(w.meta["changed"], json!([{"path": "TODO.md", "change": "edited"}, {"path": "ideas/shop/log.md", "change": "added"}]));
-        assert_eq!((w.meta["saved"].as_bool(), w.meta["changedCount"].as_u64()), (Some(true), Some(2)));
+        assert_eq!((w.meta["saved"].as_bool(), w.meta["changedCount"].as_u64(), w.meta["changesKnown"].as_bool()), (Some(true), Some(2), Some(true)));
         assert_eq!(w.meta["commit"], t::sh(&lib, &["rev-parse", "HEAD"]).as_str());
 
         // Undo it: the documents go back (as a new history entry) and the chat waits again.
@@ -2002,7 +2021,24 @@ mod tests {
         assert_eq!(last, "Nothing needed saving: your library already had everything from these chats.");
         let w = st.chats.meta(&again).await.unwrap();
         assert_eq!((w.meta["saved"].as_bool(), w.meta["changed"].as_array().map(Vec::len), w.meta["commit"].is_null()), (Some(false), Some(0), true));
+        // "Nothing changed" is known for certain here, so the page may say so.
+        assert_eq!(w.meta["changesKnown"], true);
         assert!(undo(&st, &again).await.is_err(), "there is nothing to undo");
+
+        // A library that keeps no history: the Wrap is saved, but what it changed cannot be listed,
+        // so the page must not claim that nothing changed.
+        { let mut s = st.settings.write().await; s.keep_history = false; s.sync.mode = "none".into(); }
+        say(&st, &chat, "and the sign is green").await;
+        let plain = t::wrap_ready(&st, &[chat.clone()]).await;
+        assistant(&st, &lib, |lib| { t::write(lib, "ideas/shop/log.md", "## later\n- Decided: green sign\n"); true });
+        apply(st.clone(), &plain, "").await.unwrap();
+        t::event(&mut rx, &st, "wrap.done").await;
+        assert_eq!(t::read(&lib, "ideas/shop/log.md"), "## later\n- Decided: green sign\n");
+        let w = st.chats.meta(&plain).await.unwrap();
+        assert_eq!((w.meta["saved"].as_bool(), w.meta["changesKnown"].as_bool(), w.meta["commit"].is_null()), (Some(false), Some(false), true));
+        let last = st.chats.with(&plain, |c| c.messages.last().unwrap().text.clone()).await.unwrap();
+        assert_eq!(last, "Saved to your library.");
+        assert!(!st.chats.meta(&chat).await.unwrap().is_unwrapped());
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
@@ -2024,7 +2060,9 @@ mod tests {
             assert_eq!(l.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)), i % 2 == 1, "{l}");
             assert!(!l.contains("ًا"), "{l}: write اً, not ًا");
         }
-        assert_eq!(lines[0], "Saved to your library and its history: 3 document(s) changed. Press Sync when you want a copy sent to your backup location.");
+        assert_eq!(lines[0], "Saved to your library and its history: 3 documents changed. Press Sync when you want a copy sent to your backup location.");
+        assert_eq!(lines[2], "Saved to your library and its history: 1 document changed. A copy was sent to your backup location.");
+        assert_eq!(kept_note(false, &["a.md".into()]), " 1 document that changed after the wrap was cut off was left as it is: “a.md”.");
         assert_eq!(approval_shown(false, "", true), "Finish saving this Wrap.");
         assert_eq!(approval_shown(true, "", false), "موافق، احفظها في مكتبتي.");
     }

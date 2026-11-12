@@ -46,7 +46,8 @@
   </div>
 {:else if planReady}
   <div class="wp card">
-    <p class="hint muted">{t('wrapa.planHint')}{#if skipped} {tn('wrapa.skipped', skipped)}{/if}</p>
+    <p class="hint muted">{t('wrapa.planHint')}</p>
+    {#if skipped}<p class="hint muted">{tn('wrapa.skipped', skipped)}</p>{/if}
     <div class="row">
       <input class="grow" placeholder={t('chat.wrapNotePlaceholder')} aria-label={t('chat.wrapNotePlaceholder')} bind:value={note} dir="auto"
         onkeydown={(e) => { if (e.key === 'Enter' && !e.isComposing) { e.preventDefault(); approve(); } }} />
@@ -75,10 +76,12 @@
     <span class="grow">{t(meta.kept ? 'wrapa.keptNote' : meta.rolledBack === false ? 'layer.wrap.failedKept' : 'layer.wrap.failedRolledBack')}</span>
     {#if !meta.kept && meta.rolledBack !== false}<button class="btn" onclick={() => command('wrap.start')}><Icon name="retry" size={14} /> {t('wrapa.tryAgain')}</button>{/if}
   </div>
-{:else if phase === 'done' && meta.saved !== undefined}
+{:else if phase === 'done' && (meta.changesKnown === true || (meta.saved && meta.commit))}
+  <!-- Only a list that is known to be complete may say "nothing changed": a library without
+       history, or a save that failed, has its outcome in the conversation above instead. -->
   <div class="wp card">
     <div class="row">
-      <b class="grow">{total ? tn('wrapa.changed', total) : t('wrapa.changedNone')}</b>
+      <b class="grow">{meta.changesKnown !== true ? t('wrapa.savedUnlisted') : total ? tn('wrapa.changed', total) : t('wrapa.changedNone')}</b>
       {#if meta.saved && meta.commit}<button class="btn" disabled={busy} onclick={() => act(() => undoSavedWrap(id))}><Icon name="undo" size={14} /> {t('wrapa.undoWrap')}</button>{/if}
     </div>
     {#if changed.length}
