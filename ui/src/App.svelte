@@ -10,6 +10,7 @@
   import { askBusy } from './lib/shell';
   import { fold } from './lib/CommandPalette.svelte';
   import { checkAppUpdate, checkLayerUpdates } from './lib/updates';
+  import { announceWhatsNew, markWhatsNewSeen } from './lib/whatsnew';
   import { t, tn, ago, fmtDate, fmtNum } from './lib/i18n';
   import { matchShortcut, keys, tip, isMac, isTyping } from './lib/shortcuts';
   import { choiceDialog, confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
@@ -73,7 +74,7 @@
       // The app is up: a later start no longer needs to suspect the customisations.
       setTimeout(layerBooted, 2500);
       statusNotices();
-      if (app.settings.onboarded) { checkAppUpdate(false); checkLayerUpdates(); }
+      if (app.settings.onboarded) { checkAppUpdate(false); checkLayerUpdates(); announceWhatsNew(); } else markWhatsNewSeen(); // a fresh install has nothing new to announce
     } catch (e: any) {
       // Settings never loaded, so fall back to the language and theme used last time.
       if (!app.settings) { const look = cachedLook(); if (look?.language) app.settings = { ...look, onboarded: false }; }

@@ -1,9 +1,11 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
-  import { api } from '../lib/api';
-  import { app, command, toast, APP_VERSION } from '../lib/store.svelte';
+  import { app, command, go, APP_VERSION } from '../lib/store.svelte';
   import { t, fmtMoney } from '../lib/i18n';
   import { shortcuts, keys } from '../lib/shortcuts';
+  import HelpGuide from './HelpGuide.svelte';
+  import HelpReport from './HelpReport.svelte';
+  import { guideNames, guideTitle, guideSource, changelogSource } from '../lib/guides';
 
   const terms = ['library', 'chat', 'wrap', 'sync', 'rollback'];
   const rows = $derived(shortcuts.filter((s) => !s.hidden).map((s) => ({
@@ -17,31 +19,25 @@
   const usesFile = $derived(app.settings?.sync?.credentialStore === 'file');
   const monthCost = $derived(app.status?.usage?.monthCostUsd);
 
-  let copying = $state(false);
-  async function copyDiagnostics() {
-    copying = true;
-    const basics = [
-      `Thoughts ${app.status?.version ?? '?'} (${app.status?.platform ?? '?'})`,
-      `Language: ${app.settings?.language ?? '?'} · Theme: ${app.settings?.theme ?? '?'}/${app.settings?.mode ?? '?'} · Safe mode: ${app.safeMode ? 'on' : 'off'}`,
-      `Assistant installed: ${app.status?.claude?.installed ?? '?'} · signed in: ${app.status?.claude?.loggedIn ?? '?'} · git: ${app.status?.git?.installed ?? '?'} ${app.status?.git?.version ?? ''}`,
-      navigator.userAgent,
-    ].join('\n');
-    let text = basics, full = true;
-    try {
-      const d = await api('/diagnostics');
-      text = `Thoughts ${d.version} (${d.platform})\n${basics.split('\n').slice(1).join('\n')}\n\n--- log ---\n${d.log ?? ''}`;
-    } catch { full = false; /* older background service without diagnostics: copy the basics */ }
-    try {
-      await navigator.clipboard.writeText(text);
-      toast(full ? t('shell.help.diagCopied') : t('shell.help.diagBasic'), { kind: 'success' });
-    } catch {
-      // Clipboard blocked: show it so it can be selected and copied by hand.
-      toast(t('shell.help.diagManual'), { kind: 'error', detail: text, duration: 0 });
-    } finally { copying = false; }
-  }
+  // Help has sub-pages, kept in the view itself so Back works: id 'report', id 'whatsnew', or path 'GUIDE#section'.
+  const sub = $derived(app.view.id === 'report' ? 'report' : app.view.id === 'whatsnew' ? 'new' : app.view.path ? 'guide' : '');
+  const guidePath = $derived((app.view.path ?? '').split('#'));
+  const guideName = $derived(guidePath[0]);
+  const guideAnchor = $derived(guidePath.slice(1).join('#'));
+  const guideSrc = $derived(sub === 'guide' ? guideSource(guideName) : undefined);
+  const backToHelp = () => { go({ kind: 'help' }); };
+  const openGuide = (name: string, anchor = '') => { go({ kind: 'help', path: anchor ? `${name}#${anchor}` : name }); };
+  const notes = $derived(changelogSource());
 </script>
 
 <div class="page help">
+{#if sub === 'report'}
+  <HelpReport back={backToHelp} />
+{:else if sub === 'new'}
+  <HelpGuide src={notes || `# ${t('help.new.title')}\n\n${t('help.new.empty')}`} back={backToHelp} open={openGuide} />
+{:else if sub === 'guide' && guideSrc !== undefined}
+  <HelpGuide src={guideSrc} anchor={guideAnchor} back={backToHelp} open={openGuide} />
+{:else}
   <h1 class="row"><Icon name="help" size={24} /> {t('shell.help')}</h1>
   <p class="muted lead">{t('shell.help.lead')}</p>
 
@@ -50,7 +46,7 @@
     <p>{t('shell.help.howBody')}</p>
     <dl>
       {#each terms as k}
-        <dt>{t(`shell.help.term.${k}`)}</dt><dd>{t(`shell.help.def.${k}`)}</dd>
+        <dt>{t(`shell.help.term.${k}`)}</dt><dd>{t(k === 'rollback' ? 'help.def.history' : `shell.help.def.${k}`)}</dd>
       {/each}
     </dl>
   </section>
@@ -91,6 +87,14 @@
     </div>
   </section>
 
+  <section aria-labelledby="h-guides">
+    <h2 id="h-guides" class="row"><Icon name="book" size={18} /> {t('help.guides')}</h2>
+    <p class="muted">{t('help.guidesBody')}</p>
+    <div class="row wrap">
+      {#each guideNames as g}<button class="btn" onclick={() => openGuide(g)}><Icon name="book" size={15} /> <span dir="auto">{guideTitle(g)}</span></button>{/each}
+    </div>
+  </section>
+
   <section aria-labelledby="h-keys">
     <h2 id="h-keys" class="row"><Icon name="keyboard" size={18} /> {t('shell.help.keys')}</h2>
     <table>
@@ -105,11 +109,11 @@
     <h2 id="h-priv" class="row"><Icon name="lock" size={18} /> {t('shell.help.privacy')}</h2>
     <dl>
       <dt>{t('shell.help.sentT')}</dt><dd>{t('shell.help.sent')}</dd>
-      <dt>{t('shell.help.localT')}</dt><dd>{t('shell.help.local')} {t(usesFile ? 'ob3.help.secretsFile' : 'ob3.help.secretsBoth')}</dd>
+      <dt>{t('shell.help.localT')}</dt><dd>{t('help.local')} {t(usesFile ? 'ob3.help.secretsFile' : 'ob3.help.secretsBoth')}</dd>
       <dt>{t('shell.help.privateT')}</dt><dd>{t('shell.help.private')}</dd>
       <dt>{t('shell.help.noTrackT')}</dt><dd>{t('shell.help.noTrack')}</dd>
     </dl>
-    <p class="muted">{t('shell.help.privacyMore')} <bdi><code>docs/PRIVACY.md</code></bdi></p>
+    <p class="muted">{t('help.privacyMore')}</p>
     <button class="btn" onclick={() => command('settings')}><Icon name="settings" size={15} /> {t('shell.help.openSettings')}</button>
   </section>
 
@@ -127,17 +131,20 @@
   <section aria-labelledby="h-fix">
     <h2 id="h-fix">{t('shell.help.trouble')}</h2>
     <dl>
-      {#each ['noAnswer', 'broken', 'sync', 'offline'] as k}
-        <dt>{t(`shell.help.fix.${k}T`)}</dt><dd>{t(`shell.help.fix.${k}`)}</dd>
+      {#each ['noAnswer', 'limit', 'noNet', 'broken', 'sync', 'offline'] as k}
+        {@const ns = k === 'limit' || k === 'noNet' ? 'help' : 'shell.help'}
+        <dt>{t(`${ns}.fix.${k}T`)}</dt><dd>{t(`${ns}.fix.${k}`)}</dd>
       {/each}
     </dl>
-    <p class="muted">{t('shell.help.diagBody')}</p>
+    <p class="muted">{t('help.diagBody')}</p>
     <div class="row wrap">
-      <button class="btn primary" disabled={copying} onclick={copyDiagnostics}><Icon name="copy" size={15} /> {t('shell.help.diag')}</button>
+      <button class="btn primary" onclick={() => go({ kind: 'help', id: 'report' })}><Icon name="warning" size={15} /> {t('help.rep.btn')}</button>
       <button class="btn" onclick={() => command('rollback')}><Icon name="rollback" size={15} /> {t('shell.rb.title')}</button>
     </div>
+    <div class="row wrap"><button class="btn" onclick={() => go({ kind: 'help', id: 'whatsnew' })}><Icon name="info" size={15} /> {t('help.new.btn')}</button></div>
     <p class="muted sm">{t('shell.help.version', { v: APP_VERSION })}{#if app.status?.version && app.status.version !== APP_VERSION} — {t('ver.mismatch', { app: APP_VERSION, service: app.status.version })}{/if}</p>
   </section>
+{/if}
 </div>
 
 <style>

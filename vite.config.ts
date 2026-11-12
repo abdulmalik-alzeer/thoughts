@@ -13,6 +13,6 @@ export default defineConfig({
   plugins: [svelte()],
   define: { __APP_VERSION__: JSON.stringify(version) },
   clearScreen: false,
-  server: { port: 1420, strictPort: true },
+  server: { port: 1420, strictPort: true, fs: { allow: ['..'] } }, // '..' lets the dev server read the user guides in docs/
   build: { outDir: '../dist', emptyOutDir: true, target: 'safari15' },
 });
