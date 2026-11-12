@@ -95,7 +95,15 @@
   });
   const ax = $derived(a11y());
   const zoomChoices = $derived([...new Set([...ZOOM_STEPS, ax.zoom])].sort((a, b) => a - b));
-  const setAx = (patch: Partial<A11y>) => { setA11y(patch).catch((e) => failed(t('a11y.saveFailed'), e)); };
+  /** Save an accessibility choice. When the save fails the control goes back to what is stored:
+   *  the box or list was changed by the click itself, and Svelte does not reset an unchanged value. */
+  const setAx = (patch: Partial<A11y>, el?: HTMLInputElement | HTMLSelectElement) => {
+    setA11y(patch).catch((e) => {
+      if (el instanceof HTMLInputElement) { const k = Object.keys(patch)[0] as keyof A11y; el.checked = !!a11y()[k]; }
+      else if (el) el.value = String(a11y().zoom);
+      failed(t('a11y.saveFailed'), e);
+    });
+  };
   const stepZoom = (d: -1 | 1) => { zoomStep(d).catch((e) => failed(t('a11y.saveFailed'), e)); };
   const cost = $derived(app.status?.usage?.monthCostUsd);
   const validRemote = $derived(/^(https?:\/\/|ssh:\/\/|git@)\S+$/.test(remote.url.trim()));
@@ -530,7 +538,7 @@
         <label for="st-zoom">{t('a11y.zoom')}</label>
         <div class="row wrap">
           <button type="button" class="btn" disabled={ax.zoom <= ZOOM_STEPS[0]} onclick={() => stepZoom(-1)} aria-label={t('a11y.zoomOut')} title={tip(t('a11y.zoomOut'), 'zoom.out')}><Icon name="zoomOut" size={15} /></button>
-          <select id="st-zoom" class="num" value={ax.zoom} onchange={(e) => setAx({ zoom: +e.currentTarget.value })} aria-describedby="st-zoom-hint">
+          <select id="st-zoom" class="num" value={ax.zoom} onchange={(e) => setAx({ zoom: +e.currentTarget.value }, e.currentTarget)} aria-describedby="st-zoom-hint">
             {#each zoomChoices as z}<option value={z}>{fmtNum(z)}%</option>{/each}
           </select>
           <button type="button" class="btn" disabled={ax.zoom >= ZOOM_STEPS[ZOOM_STEPS.length - 1]} onclick={() => stepZoom(1)} aria-label={t('a11y.zoomIn')} title={tip(t('a11y.zoomIn'), 'zoom.in')}><Icon name="zoomIn" size={15} /></button>
@@ -540,7 +548,7 @@
       {/if}
       {#each [['a11y.motion', 'reduceMotion'], ['a11y.links', 'underlineLinks'], ['a11y.focus', 'strongFocus'], ['a11y.spacing', 'textSpacing']] as [key, field]}
         {#if vis(c, key)}
-          <label class="check ax"><input type="checkbox" checked={!!ax[field as keyof A11y]} onchange={(e) => setAx({ [field]: e.currentTarget.checked } as Partial<A11y>)} aria-describedby={'st-' + field + '-hint'} /> {t(key)}</label>
+          <label class="check ax"><input type="checkbox" checked={!!ax[field as keyof A11y]} onchange={(e) => setAx({ [field]: e.currentTarget.checked } as Partial<A11y>, e.currentTarget)} aria-describedby={'st-' + field + '-hint'} /> {t(key)}</label>
           <p class="muted sm axhint" id={'st-' + field + '-hint'}>{t(key + 'Hint')}</p>
         {/if}
       {/each}
