@@ -1842,7 +1842,9 @@ pub async fn reorganize_start(state: Arc<AppState>, instructions: &str) -> anyho
         return Err(crate::tr::err("reorganize.untrusted", &[("files", &differing.join(", "))]));
     }
     let ar = is_ar(&state).await;
-    let mut c = Chat { title: tr(ar, "Reorganize library", "إعادة تنظيم المكتبة").into(), kind: "reorganize".into(), ..Default::default() };
+    // Its branch lives in this library's history: it is kept or discarded here, never in another one opened meanwhile.
+    let mut c = Chat { title: tr(ar, "Reorganize library", "إعادة تنظيم المكتبة").into(), kind: "reorganize".into(),
+        library: Some(lib.to_string_lossy().to_string()), ..Default::default() };
     c.meta = json!({"base": base, "branch": branch, "worktree": wt, "phase": "running"});
     let id = c.id.clone();
     state.chats.insert(c).await;
@@ -3457,8 +3459,39 @@ mod tests {
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
+    /// Tests that start a real reorganize share its one working-copy folder: one at a time.
+    static REORG_COPY: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn a_reorganize_is_kept_or_discarded_only_in_the_library_it_was_started_in() {
+        let _one = REORG_COPY.lock().await;
+        let (st, a) = t::library().await;
+        let (_, b) = t::library().await;
+        t::assistant(&st, |info| async move { t::write(&info.cwd, "README.md", "reorganized\n"); true });
+        let id = reorganize_start(st.clone(), "").await.unwrap();
+        for _ in 0..2000 { if t::phase(&st, &id).await == "review" { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        assert_eq!(t::phase(&st, &id).await, "review");
+        assert_eq!(st.chats.meta(&id).await.unwrap().library.as_deref(), Some(a.to_string_lossy().as_ref()));
+        // Another library is opened: the proposal is not offered there, and neither Keep nor Discard touches it.
+        st.settings.write().await.library_path = Some(b.to_string_lossy().to_string());
+        assert!(!Scope::now(&st).await.holds(st.chats.meta(&id).await.unwrap().library.as_deref()));
+        for keep in [true, false] {
+            let e = reorganize_finish(&st, &id, keep).await.unwrap_err();
+            assert_eq!(crate::tr::classify_in(false, &e).message, crate::tr::text_in(false, "wrap.other_library", &[]));
+        }
+        assert!(crate::paths::reorganize_worktree().is_dir(), "the proposal is still there");
+        assert_eq!(t::read(&b, "README.md"), "my library\n");
+        // Back in its own library it is kept as usual.
+        st.settings.write().await.library_path = Some(a.to_string_lossy().to_string());
+        reorganize_finish(&st, &id, true).await.unwrap();
+        assert_eq!(t::read(&a, "README.md"), "reorganized\n");
+        assert!(!crate::paths::reorganize_worktree().exists());
+        for l in [&a, &b] { std::fs::remove_dir_all(l.parent().unwrap()).unwrap(); }
+    }
+
     #[tokio::test]
     async fn reorganize_never_runs_on_recorded_settings_the_user_has_not_seen() {
+        let _one = REORG_COPY.lock().await;
         let (st, lib) = t::library().await;
         // Recorded: a settings file with a hook. On disk: the harmless starter one, with git told
         // not to notice the difference — so the folder passes the trust check.
