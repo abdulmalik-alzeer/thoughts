@@ -409,6 +409,16 @@
     try { await patch(`/chats/${id}`, { title }); chat.title = title; refreshChats().catch(() => {}); } catch (e) { failed(t('chat3.renameFailed'), e); }
   }
 
+  // Pin the chat to the top of the lists, or put it away (archived: out of the side list, still kept).
+  async function flag(key: 'pinned' | 'archived') {
+    try {
+      const v = await patch(`/chats/${id}`, { [key]: !chat[key] });
+      chat[key] = v[key];
+      refreshChats().catch(() => {});
+      if (key === 'archived' && v.archived) { notify(t('chatb.archivedToast'), { kind: 'info' }); go({ kind: 'chats' }); }
+    } catch (e) { failed(t('chatb.failChange'), e); }
+  }
+
   async function remove() {
     if (!(await confirmDialog({ title: t('chat.deleteTitle'), body: t('chata.deleteBody'), confirmLabel: t('delete'), danger: true }))) return;
     try {
@@ -475,6 +485,10 @@
       {#if chat.costUsd > 0 && costVisible()}
         <button class="pill cost" type="button" title={t('chat.costTip')} aria-label="{t('chat.costLabel', { cost: usd(chat.costUsd) })}. {t('chat.costTip')}"
           onclick={() => notify(t('chat.costTip'), { kind: 'info' })}><bdi>{usd(chat.costUsd)}</bdi> <Icon name="info" size={12} /></button>
+      {/if}
+      {#if chat.kind === 'chat'}
+        <button class="btn ghost" class:on={chat.pinned} aria-pressed={!!chat.pinned} onclick={() => flag('pinned')} title={chat.pinned ? t('chatb.unpin') : t('chatb.pin')} aria-label={chat.pinned ? t('chatb.unpin') : t('chatb.pin')}><Icon name="pin" /></button>
+        <button class="btn ghost" onclick={() => flag('archived')} title={t('chatb.archive')} aria-label={t('chatb.archive')}><Icon name="archive" /></button>
       {/if}
       <button class="btn ghost" onclick={remove} title={t('chat.deleteChat')} aria-label={t('chat.deleteChat')}><Icon name="trash" /></button>
     </header>

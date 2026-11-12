@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { api, connect, daemonStale, on, post, reconnect, reloadApp } from './lib/api';
+  import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
   import { loadLayer, layerBooted, retryLayer, checkPending, openReview } from './lib/layer';
@@ -17,6 +17,7 @@
   import { choiceDialog, confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
   import Chat from './views/Chat.svelte';
+  import ChatList from './views/ChatList.svelte';
   import Ideas from './views/Ideas.svelte';
   import Docs from './views/Docs.svelte';
   import Todos from './views/Todos.svelte';
@@ -224,7 +225,7 @@
         }
         if (e.type === 'daemon.stale') { stale = !!e.stale; return; }
         if (!app.ready) return;
-        if (e.type === 'chat.updated' || e.type === 'chat.done') {
+        if (e.type === 'chat.updated' || e.type === 'chat.done' || e.type === 'chat.removed') {
           await refreshChats();
           await refreshWrap();
         }
@@ -297,6 +298,28 @@
       await refreshChats();
       go({ kind: 'chat', id: c.id });
     } catch (e: any) { toast(t('shell.newChatFailed'), { kind: 'error', detail: e.message }); }
+  }
+
+  // A chat nobody wrote in is not kept once the person leaves it (New chat pressed, then something else opened).
+  let lastChatView: string | null = null;
+  $effect(() => {
+    const now = app.view.kind === 'chat' ? (app.view.id ?? null) : null;
+    const left = lastChatView;
+    lastChatView = now;
+    if (left && left !== now) setTimeout(() => dropIfEmpty(left), 600);
+  });
+  async function dropIfEmpty(id: string) {
+    try {
+      if (app.view.id === id) return;
+      const c = app.chats.find((x: any) => x.id === id);
+      if (!c || c.kind !== 'chat' || c.messageCount > 0 || c.pinned || c.running) return;
+      // Text typed (or files added) but not sent keeps the chat.
+      try { if (localStorage.getItem(`thoughts.chatdraft:${id}`)) return; } catch { /* no storage */ }
+      const full = await api(`/chats/${id}`);
+      if (full.messages?.length || full.running) return;
+      await del(`/chats/${id}`);
+      await refreshChats();
+    } catch { /* it stays; the daemon removes it later */ }
   }
 
   // A wrap holds the library while it runs: Wrap and Sync wait for it.
@@ -526,7 +549,8 @@
   const groups = $derived.by(() => {
     // Running or open system chats are listed under System already: never twice.
     const inSystem = new Set(system.map((c) => c.id));
-    const visible = app.chats.filter((c) => c.kind === 'chat' || ((c.running || app.view.id === c.id) && !inSystem.has(c.id)));
+    const visible = app.chats.filter((c) => (c.kind === 'chat' && (!c.archived || c.running || app.view.id === c.id)) || ((c.running || app.view.id === c.id) && !inSystem.has(c.id)))
+      .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
     const byProj = new Map<string | null, any[]>();
     for (const c of visible) {
       const k = c.projectId ?? null;
@@ -725,6 +749,7 @@
             <button class="chat" class:active={app.view.id === c.id} aria-current={app.view.id === c.id ? 'page' : undefined} title={c.title} onclick={() => go({ kind: 'chat', id: c.id })}>
               <span class="dot" class:run={c.running} class:unw={!c.running && c.unwrapped} title={dotLabel(c) || undefined}></span>
               <span class="grow ell"><bdi>{c.title}</bdi></span>
+              {#if c.pinned}<span class="cut" title={t('chatb.pinned')}><Icon name="pin" size={12} /><span class="sr-only">({t('chatb.pinned')})</span></span>{/if}
               {#if c.interrupted}<span class="cut" title={t('layer.chat.interrupted')}><Icon name="warning" size={12} /><span class="sr-only">({t('layer.chat.interruptedShort')})</span></span>{/if}
               {#if c.bypass}<span class="cut" style="color: var(--danger)" title={t('perm.bypass.on')}><Icon name="shield" size={12} /><span class="sr-only">({t('perm.bypass.on')})</span></span>{/if}
               {#if dotLabel(c)}<span class="sr-only">({dotLabel(c)})</span>{/if}
@@ -840,23 +865,7 @@
       {:else if app.view.kind === 'home'}<Home {projects} {newChat} {startWrap} />
       {:else if app.view.kind === 'chat' && app.view.id}
         {#key app.view.id}<Chat id={app.view.id} {projects} />{/key}
-      {:else if app.view.kind === 'chats'}
-        <div class="page">
-          <h1>{t('chats')}</h1>
-          <div class="row" style="flex-wrap:wrap">
-            <button class="btn primary" title={tip(t('newChat'), 'chat.new')} onclick={() => newChat()}><Icon name="plus" size={15} />{t('newChat')}</button>
-            {#each projects as p (p.id)}<button class="btn" title={t('shell.newChatIn', { name: p.name })} onclick={() => newChat(p.id)}><Icon name="folder" size={15} /><span dir="auto">{p.name}</span></button>{/each}
-          </div>
-          {#if !app.chats.length}<p class="muted">{t('noChats')}</p>{/if}
-          <div class="list">
-            {#each app.chats as c (c.id)}
-              <button class="card item" onclick={() => go({ kind: 'chat', id: c.id })}>
-                <div class="row"><b class="grow ell" dir="auto">{c.title}</b>{#if c.running}<span class="pill accent">{t('shell.dot.running')}</span>{/if}{#if c.unwrapped}<span class="pill">{t('shell.dot.unwrapped')}</span>{/if}{#if c.kind !== 'chat'}<span class="pill">{kindLabel(c.kind)}</span>{/if}</div>
-                <div class="muted sm"><span title={fmtDate(c.updated, { dateStyle: 'medium', timeStyle: 'short' })}>{ago(c.updated)}</span> · {tn('shell.msgs', c.messageCount ?? 0)}</div>
-              </button>
-            {/each}
-          </div>
-        </div>
+      {:else if app.view.kind === 'chats'}<ChatList {projects} {newChat} />
       {:else if app.view.kind === 'ideas'}<Ideas />
       {:else if app.view.kind === 'docs'}<Docs path={app.view.path} />
       {:else if app.view.kind === 'todos'}<Todos mode={app.view.id === 'calendar' ? 'calendar' : 'list'} />
@@ -1012,7 +1021,4 @@
   .missing { display: grid; place-items: center; min-height: 70vh; max-width: none; }
   .missing .card { max-width: 520px; display: grid; gap: 10px; justify-items: start; padding: 24px; }
   .missing h1, .missing p { margin: 0; }
-  .list { display: grid; gap: 8px; margin-top: 16px; }
-  .item { font: inherit; color: inherit; text-align: start; width: 100%; cursor: pointer; display: block; background: var(--panel); border: 1px solid var(--hairline); border-radius: var(--radius-lg); padding: 12px 14px; box-shadow: var(--shadow); transition: transform .15s, box-shadow .15s; }
-  .item:hover { transform: translateY(-1px); box-shadow: var(--shadow-lg); }
 </style>

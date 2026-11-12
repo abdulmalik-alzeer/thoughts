@@ -1499,6 +1499,13 @@ mod tests {
         let (st, lib) = t::library().await;
         let chat = t::chat(&st, "let us plan the shop").await;
         let wrap = t::wrap_ready(&st, &[chat.clone()]).await;
+        // The preview left a plan file in the assistant's own folder; it goes once the wrap is saved, the conversation stays.
+        let sid = uuid::Uuid::new_v4().to_string();
+        st.chats.update(&wrap, |c| c.session_id = Some(sid.clone())).await;
+        let config = crate::traces::config_dir().unwrap();
+        let (transcript, plan) = (config.join(format!("projects/-wrapplan/{sid}.jsonl")), config.join("plans/wrap-apply-plan-hippo.md"));
+        t::write(transcript.parent().unwrap(), &format!("{sid}.jsonl"), &format!("{{\"sessionId\":\"{sid}\",\"slug\":\"wrap-apply-plan-hippo\"}}\n"));
+        t::write(plan.parent().unwrap(), "wrap-apply-plan-hippo.md", "# plan\n");
         let lib2 = lib.clone();
         t::assistant(&st, move |_| { let lib = lib2.clone(); async move { t::write(&lib, "ideas/shop/log.md", "## today\n- Decided: open in May\n"); true } });
         let mut rx = st.events.subscribe();
@@ -1506,6 +1513,8 @@ mod tests {
         // While it is being saved the wrap cannot be started twice.
         t::event(&mut rx, &st, "wrap.done").await;
         assert_eq!(t::phase(&st, &wrap).await, "done");
+        assert!(!plan.exists() && transcript.exists());
+        std::fs::remove_file(transcript).unwrap();
         assert!(!st.chats.meta(&chat).await.unwrap().is_unwrapped());
         assert!(t::sh(&lib, &["log", "-1", "--format=%s"]).starts_with("wrap: "));
         assert_eq!(crate::git::commit_kind(&t::sh(&lib, &["log", "-1", "--format=%s"])), "wrap");
