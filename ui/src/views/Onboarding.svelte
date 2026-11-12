@@ -5,6 +5,7 @@
   import { app, applyTheme, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
   import { failed } from '../lib/errors';
+  import { cloudFor } from '../lib/cloud.svelte';
   import ThemePicker from './ThemePicker.svelte';
   import Logo from '../lib/Logo.svelte';
 
@@ -59,8 +60,10 @@
 
   const ar = $derived(s.language === 'ar');
   const isGit = $derived(String(s.sync.mode).startsWith('git'));
-  const cloudWords = ['Mobile Documents', 'Library/CloudStorage', 'Dropbox', 'OneDrive', 'Google Drive', 'iCloud'];
-  const inCloud = $derived(cloudWords.some((k) => String(s.libraryPath ?? '').includes(k)));
+  // Whether a cloud drive syncs the chosen folder is the service's call (real sync folders, shortcuts resolved).
+  const cloud = cloudFor(() => String(s.libraryPath ?? ''));
+  const inCloud = $derived(cloud.current.synced);
+  const cloudName = $derived(cloud.current.service || t('hista.cloud.someDrive'));
   const validUrl = (u: string) => /^https?:\/\/\S+$/.test((u ?? '').trim());
   const validRemote = (u: string) => /^(https?:\/\/|ssh:\/\/|git@)\S+$/.test(u.trim());
 
@@ -144,7 +147,7 @@
     if (step === 2) {
       // Git is only a must for an online location; without it the app still works, minus the history.
       if (isGit && !git.installed) return t('hista.online.needGit');
-      if (isGit && inCloud) return t('hista.online.cloudClash');
+      if (isGit && inCloud && !s.sync.allowCloud) return t('hista.online.cloudClash');
       if (isGit && remoteUrl.trim()) {
         if (!validRemote(remoteUrl)) return t('ob.needRemoteUrl');
         if (!remoteAck) return t('ob.needAck');
@@ -292,13 +295,22 @@
         <div class="card status">
           <p>{t('ob.folderPick')}</p>
           <div class="row gap-top"><code class="grow path"><bdi>{s.libraryPath}</bdi></code><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.chooseFolder')}</button></div>
-          {#if inCloud}<p class="okline"><Icon name="check" size={15} /> <span>{t('ob.folderOk')}</span></p>
+          {#if inCloud}<p class="okline"><Icon name="check" size={15} /> <span>{t('hista.cloud.inside', { service: cloudName })}</span></p>
           {:else}<p class="warn"><Icon name="warning" size={15} /> <span>{t('ob.folderNotCloud')}</span></p>{/if}
           <p class="muted sm">{t('ob.cloudPrivacy')}</p>
         </div>
       {:else}
         <div class="card status">
           <p class="muted sm">{t('hista.online.body')}</p>
+          {#if inCloud}
+            <div class="warn box" role="note">
+              <Icon name="warning" size={15} />
+              <div>
+                <div>{t('hista.cloud.clash', { service: cloudName })}</div>
+                <label class="check"><input type="checkbox" bind:checked={s.sync.allowCloud} /> {t('hista.cloud.anyway')}</label>
+              </div>
+            </div>
+          {/if}
           <label for="ob-gitmode">{t('hista.online.when')}</label>
           <select id="ob-gitmode" bind:value={s.sync.mode}>
             <option value="git-manual">{t('hista.online.manual')}</option>

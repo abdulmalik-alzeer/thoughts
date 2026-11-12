@@ -10,6 +10,7 @@ pub mod askpass;
 pub mod care_api;
 pub mod chats;
 pub mod claude;
+pub mod cloud;
 pub mod git;
 pub mod hello;
 pub mod history;

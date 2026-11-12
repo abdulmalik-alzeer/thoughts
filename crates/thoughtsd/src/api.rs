@@ -165,6 +165,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/move", post(move_file))
         .route("/api/library/delete", post(delete_file))
         .route("/api/library/history", get(library_history))
+        .route("/api/library/cloud", get(library_cloud))
         .route("/api/library/version", get(library_version))
         .route("/api/library/restore", post(library_restore))
         .route("/api/library/undo", post(library_undo))
@@ -597,17 +598,41 @@ async fn shutdown(State(st): S, body: axum::body::Bytes) -> R {
 
 async fn get_settings(State(st): S) -> R { Ok(Json(serde_json::to_value(&*st.settings.read().await)?)) }
 
-fn cloud_folder(p: &str) -> bool {
-    ["Mobile Documents", "Library/CloudStorage", "Dropbox", "OneDrive", "Google Drive", "iCloud"].iter().any(|k| p.contains(k))
+/// The cloud drive that syncs the folder a path names (`~/…` allowed; it need not exist yet):
+/// `Some(name)`, with an empty name for a drive the app has no name for. See `cloud.rs`.
+fn cloud_service(p: &str) -> Option<&'static str> {
+    let path = paths::expand_tilde(p.trim()).ok().filter(|p| p.is_absolute())?;
+    crate::cloud::service_of(&path)
 }
 
-fn validate(s: &Settings) -> anyhow::Result<()> {
-    if let Some(p) = &s.library_path {
-        if s.sync_enabled() && cloud_folder(p) {
-            return Err(crate::tr::err("library.cloud", &[]));
-        }
-    }
+/// A library that a cloud drive already syncs is not also sent to an online location: two things
+/// syncing the same files fight over them. Checked when that combination is being entered (a new
+/// folder, or the backup switched to an online location) and not when the user said to use it
+/// anyway (`sync.allowCloud`). A library already set up that way keeps working, so that its other
+/// settings can still be saved; Settings shows the warning.
+fn validate(s: &Settings, old: Option<&Settings>) -> anyhow::Result<()> { validate_with(s, old, |p| cloud_service(p).is_some()) }
+
+/// `validate`, with the question "does a cloud drive sync this folder?" answered by `synced`.
+fn validate_with(s: &Settings, old: Option<&Settings>, synced: impl Fn(&str) -> bool) -> anyhow::Result<()> {
+    if !s.sync_enabled() || s.sync.allow_cloud { return Ok(()); }
+    let Some(p) = &s.library_path else { return Ok(()) };
+    if old.map_or(false, |o| o.sync_enabled() && o.library_path.as_deref().map(str::trim) == Some(p.trim())) { return Ok(()); }
+    if synced(p) { return Err(crate::tr::err("library.cloud", &[])); }
     Ok(())
+}
+
+/// `GET /api/library/cloud?path=` → `{synced, service}`: is that folder (it need not exist yet;
+/// the library's own when no path is given) kept in sync by a cloud drive, and by which one?
+async fn library_cloud(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let path = match q.get("path").map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => st.settings.read().await.library_path.clone().unwrap_or_default(),
+    };
+    Ok(Json(cloud_json(cloud_service(&path))))
+}
+
+fn cloud_json(service: Option<&str>) -> Value {
+    json!({"synced": service.is_some(), "service": service.filter(|s| !s.is_empty())})
 }
 
 async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Json(mut new): Json<Settings>) -> R {
@@ -615,10 +640,10 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     if crate::settings::read_only() || st.settings_newer.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(crate::tr::err("newer_settings", &[]).into());
     }
-    validate(&new)?;
     // Hold the write lock across validate + save so two saves cannot interleave.
     let mut cur = st.settings.write().await;
     let old = cur.clone();
+    validate(&new, Some(&old))?;
     if new.library_path != old.library_path {
         if let Some(p) = new.library_path.clone().filter(|p| !p.trim().is_empty()) {
             // A library can only be pointed at a folder that is really there.
@@ -938,7 +963,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     if !path.is_absolute() { return Err(crate::tr::err("library.choose", &[]).into()); }
     if !o.profession.trim().is_empty() { s.profession = Some(o.profession.clone()); }
     s.library_path = Some(path.to_string_lossy().to_string());
-    validate(&s)?;
+    validate(&s, None)?;
     // Same server-side validation as PUT /api/settings. The provider (address and key) is set
     // further down, the two together.
     let wanted_url = s.ai.claude.base_url.take();
@@ -1059,7 +1084,8 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
 /// entry once the assistant has set it up; an existing one is recorded as it stands.
 async fn begin_history(st: &AppState, s: &Settings, path: &std::path::Path, fresh: bool) -> anyhow::Result<()> {
     if !s.history_enabled() { return Ok(()); }
-    if s.sync_enabled() && git::repo_of(path) == git::Repo::Missing && git::enclosing_repo(path).is_none() { git::init(st, path).await?; }
+    // (Nor does git ever put its own files into a folder a cloud drive syncs: that damages them.)
+    if s.sync_enabled() && git::repo_of(path) == git::Repo::Missing && git::enclosing_repo(path).is_none() && crate::cloud::service_of(path).is_none() { git::init(st, path).await?; }
     if fresh { git::ensure_history(st, path).await.map(|_| ()) } else { git::start_history(st, path).await }
 }
 
@@ -2068,6 +2094,8 @@ async fn git_status(State(st): S) -> R {
     v["history"] = json!({"on": s.history_enabled(), "ready": v["repo"]});
     // `{at, location}`: the last time the library really reached an online location (null: never).
     v["lastBackup"] = git::last_backup(&l);
+    // `{synced, service}`: is the library folder one a cloud drive keeps in sync?
+    v["cloud"] = cloud_json(crate::cloud::service_of(&l));
     Ok(Json(v))
 }
 /// What a sync needs before it may touch the library: sync switched on, no wrap or reorganize in
@@ -2858,6 +2886,39 @@ mod tests {
         assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/scratch.md".into(), ..Default::default() })).await.unwrap().0["recoverable"], false);
         assert_eq!(shown(git_sync(State(st.clone())).await).code, "sync_off");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn an_online_location_is_refused_for_a_folder_a_cloud_drive_syncs_unless_the_user_insists() {
+        let synced = |p: &str| p.starts_with("/Users/sara/Documents");
+        let with = |path: &str, mode: &str| { let mut s = Settings::default(); s.library_path = Some(path.into()); s.sync.mode = mode.into(); s };
+        let refused = |new: &Settings, old: Option<&Settings>| validate_with(new, old, synced).is_err();
+        // Setup, and switching to an online location or to a synced folder later, are refused…
+        assert!(refused(&with("/Users/sara/Documents/Thoughts", "git-manual"), None));
+        assert!(refused(&with("/Users/sara/Documents/Thoughts", "git-auto"), Some(&with("/Users/sara/Documents/Thoughts", "folder"))));
+        assert!(refused(&with("/Users/sara/Documents/Thoughts", "git-manual"), Some(&with("/Users/sara/Notes", "git-manual"))));
+        // …with a message that uses the names the app shows.
+        let e = crate::tr::classify_in(false, &validate_with(&with("/Users/sara/Documents/Thoughts", "git-manual"), None, synced).unwrap_err());
+        assert!(e.status == 422 && e.message.contains("\"Cloud folder\""), "{}", e.message);
+        // A cloud folder with any other backup is exactly what "Cloud folder" is for; history is safe there.
+        for mode in ["none", "folder"] { assert!(!refused(&with("/Users/sara/Documents/Thoughts", mode), None), "{mode}"); }
+        // A folder that only sounds like a cloud drive is not refused.
+        assert!(!refused(&with("/Users/sara/Notes/Dropbox-export", "git-manual"), None));
+        // "Use it anyway" is the user's call.
+        let mut insists = with("/Users/sara/Documents/Thoughts", "git-manual");
+        insists.sync.allow_cloud = true;
+        assert!(!refused(&insists, None));
+        // A library that was already set up this way can still have its other settings saved.
+        let old = with("/Users/sara/Documents/Thoughts", "git-manual");
+        let mut new = old.clone();
+        new.theme = "contrast".into();
+        new.sync.mode = "git-auto".into();
+        assert!(!refused(&new, Some(&old)));
+        // The check for a path as typed: home-relative, and never a relative one.
+        assert_eq!(cloud_service("relative/path"), None);
+        assert_eq!(cloud_json(Some("Dropbox")), json!({"synced": true, "service": "Dropbox"}));
+        assert_eq!(cloud_json(Some("")), json!({"synced": true, "service": null}));
+        assert_eq!(cloud_json(None), json!({"synced": false, "service": null}));
     }
 
     /// A state whose library is a plain folder of notes: no repository in it or above it.

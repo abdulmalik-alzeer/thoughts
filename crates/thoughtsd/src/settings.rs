@@ -251,6 +251,9 @@ pub struct SyncSettings {
     /// The online location a sync receives changes from, by its short name, when the user picked
     /// one ("Make main"). Unset, or naming a location that is gone: the first one that was added.
     pub main_location: Option<String>,
+    /// The user said to send the library to an online location although its folder is one a cloud
+    /// drive also syncs ("use it anyway"). Without this that combination is refused.
+    pub allow_cloud: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -318,7 +321,7 @@ impl Default for AiSettings {
 
 impl Default for SyncSettings {
     fn default() -> Self {
-        Self { mode: "git-manual".into(), credential_store: "keychain".into(), main_location: None }
+        Self { mode: "git-manual".into(), credential_store: "keychain".into(), main_location: None, allow_cloud: false }
     }
 }
 

@@ -39,6 +39,13 @@ export default {
     'hista.online.needGit': 'An online location needs Git. Install it, or choose another backup.',
     'hista.online.cloudClash': 'This folder is already synced by a cloud drive, and an online location would fight with it over the same files. Choose “Cloud folder”, or pick a folder outside the cloud drive.',
 
+    'hista.cloud.someDrive': 'a cloud drive',
+    'hista.cloud.inside': 'This folder is inside {service}, which keeps the second copy.',
+    'hista.cloud.notInside': 'The library folder is not inside a cloud drive, so nothing is keeping a second copy of it. Move the library into your cloud drive and choose it again above, or choose another backup.',
+    'hista.cloud.clash': 'This folder is already kept in sync by {service}. Sending it to an online location as well makes the two fight over the same files, and changes can be lost. Choose “Cloud folder” as the backup, or pick a folder outside {service}.',
+    'hista.cloud.existing': 'This library is sent to an online location and is also kept in sync by {service}. The two can fight over the same files. Consider choosing “Cloud folder” as the backup, or moving the library out of {service}.',
+    'hista.cloud.anyway': 'Use an online location anyway',
+
     'hista.state.kept': 'Changes are being recorded. Thoughts stores the history on this computer, outside the library folder.',
     'hista.state.own': 'Changes are being recorded. The history is stored inside the library folder, and it is what an online location receives.',
     'hista.state.noGit': 'Changes are not being recorded yet, because the free tool Git is not installed on this computer.',
@@ -93,6 +100,13 @@ export default {
     'hista.online.makeMain': 'اجعله الرئيسي',
     'hista.online.needGit': 'الموقع على الإنترنت يحتاج إلى Git. ثبّتها أو اختر نسخاً احتياطياً آخر.',
     'hista.online.cloudClash': 'هذا المجلد تُزامنه خدمة سحابية أصلاً، والموقع على الإنترنت سيتنازع معها على الملفات نفسها. اختر «مجلد سحابي»، أو اختر مجلداً خارج الخدمة السحابية.',
+
+    'hista.cloud.someDrive': 'خدمة سحابية',
+    'hista.cloud.inside': 'هذا المجلد داخل {service}، وهي التي تحتفظ بالنسخة الثانية.',
+    'hista.cloud.notInside': 'مجلد المكتبة ليس داخل خدمة سحابية، فلا شيء يحتفظ بنسخة ثانية منه. انقل المكتبة إلى مساحتك السحابية ثم اخترها من جديد في الأعلى، أو اختر نسخاً احتياطياً آخر.',
+    'hista.cloud.clash': 'هذا المجلد تُزامنه {service} أصلاً. وإرساله إلى موقع على الإنترنت أيضاً يجعل الطريقتين تتنازعان الملفات نفسها، وقد تضيع بذلك تغييرات. اختر «مجلد سحابي» للنسخ الاحتياطي، أو اختر مجلداً خارج {service}.',
+    'hista.cloud.existing': 'هذه المكتبة تُرسَل إلى موقع على الإنترنت وتُزامنها {service} أيضاً، وقد تتنازع الطريقتان الملفات نفسها. يحسن اختيار «مجلد سحابي» للنسخ الاحتياطي، أو نقل المكتبة خارج {service}.',
+    'hista.cloud.anyway': 'استخدم موقعاً على الإنترنت على أي حال',
 
     'hista.state.kept': 'التغييرات تُسجَّل. يحفظ Thoughts السجلّ على هذا الجهاز خارج مجلد المكتبة.',
     'hista.state.own': 'التغييرات تُسجَّل. يُحفظ السجلّ داخل مجلد المكتبة، وهو ما يُرسَل إلى الموقع على الإنترنت.',

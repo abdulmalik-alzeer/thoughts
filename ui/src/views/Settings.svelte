@@ -10,6 +10,7 @@
   import { fmtMoney, fmtNum, t, tn } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { lastBackupText } from '../lib/backup.svelte';
+  import { cloudFor } from '../lib/cloud.svelte';
   import { restartService } from '../lib/shell';
   import { keepLibraryToMe, libraryOpenToOthers, offerIndexCleanup } from '../lib/privacy';
   import ThemePicker from './ThemePicker.svelte';
@@ -54,7 +55,6 @@
   /** The mode a stored value stands for. Nothing stored is accept-edits, exactly as the service reads it. */
   const realPerm = (m: unknown) => (m == null || m === '' ? 'acceptEdits' : m === 'default' ? 'plan' : String(m));
   const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
-  const cloudWords = ['Mobile Documents', 'Library/CloudStorage', 'Dropbox', 'OneDrive', 'Google Drive', 'iCloud'];
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));
@@ -91,6 +91,12 @@
   /** What the saved settings say (the status lines describe what is really happening, not the draft). */
   const historySaved = $derived(String(base.sync?.mode ?? '').startsWith('git') || base.keepHistory !== false);
   const gitMissing = $derived(app.status?.git?.installed === false);
+  // Whether a cloud drive syncs the library folder is the service's call (real sync folders, shortcuts resolved).
+  const cloud = cloudFor(() => String(s.libraryPath ?? ''));
+  const inCloud = $derived(cloud.current.synced);
+  const cloudName = $derived(cloud.current.service || t('hista.cloud.someDrive'));
+  /** The library was already sent to an online location from this very folder: warned about, never locked out. */
+  const cloudAlready = $derived(String(base.sync?.mode ?? '').startsWith('git') && String(base.libraryPath ?? '').trim() === String(s.libraryPath ?? '').trim());
   const pm = $derived(s.ai.claude.permissionMode);
   const permValue = $derived((perms as readonly string[]).includes(realPerm(pm)) ? realPerm(pm) : '');
   /** A settings file written by a newer version is never rewritten: everything here is read-only. */
@@ -123,7 +129,7 @@
     if (!whole(s.idleMinutes)) e.idleMinutes = t('set.errWhole');
     if (!whole(s.wrapNagThreshold)) e.wrapNagThreshold = t('set.errWhole');
     if (permValue === '') e.permission = t('set.errPerm');
-    if (isGit && cloudWords.some((k) => String(s.libraryPath ?? '').includes(k))) e.sync = t('hista.online.cloudClash');
+    if (isGit && inCloud && !s.sync.allowCloud && !cloudAlready) e.sync = t('hista.online.cloudClash');
     return e;
   });
   const invalid = $derived(Object.keys(errors).length > 0);
@@ -701,6 +707,13 @@
         </select>
         {@render err('sync')}
         <p class="muted sm" id="st-sync-hint">{t(syncKind === 'none' ? 'hista.backup.noneNote' : syncKind === 'folder' ? 'hista.backup.folderNote' : 'hista.backup.onlineNote')}</p>
+        {#if syncKind === 'folder' && String(s.libraryPath ?? '').trim()}
+          {#if inCloud}<p class="muted sm">{t('hista.cloud.inside', { service: cloudName })}</p>
+          {:else}<p class="note"><Icon name="warning" size={15} /> <span>{t('hista.cloud.notInside')}</span></p>{/if}
+        {:else if isGit && inCloud}
+          <p class="note"><Icon name="warning" size={15} /> <span>{t(cloudAlready && !s.sync.allowCloud ? 'hista.cloud.existing' : 'hista.cloud.clash', { service: cloudName })}</span></p>
+          <label class="check"><input type="checkbox" bind:checked={s.sync.allowCloud} /> {t('hista.cloud.anyway')}</label>
+        {/if}
       {/if}
       {#if isGit && vis(c, 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations')}
         <p class="muted sm">{t('hista.online.body')}</p>
