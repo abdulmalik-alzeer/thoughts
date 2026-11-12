@@ -991,6 +991,9 @@ pub struct Launch {
 /// and `on_done` runs when it is over, however it ended.
 pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     let id = l.spec.chat_id.clone();
+    // Customising never runs here: Codex's sandbox closes writes, not reads, so it could read the
+    // app's own data (`assistant::CUSTOMIZE`). `assistant::for_run` never sends one; this holds anyway.
+    if l.kind == "customize" { return Err(crate::tr::err("customize.needs_claude", &[])); }
     let bin = binary(&state).await.ok_or_else(|| crate::tr::err("codex.missing", &[]))?;
     let help = exec_help(&state).await;
     if json_flag(&help).is_none() { return Err(crate::tr::err("codex.too_old", &[])); }

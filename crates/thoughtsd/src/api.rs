@@ -2306,6 +2306,8 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     if let Some(k) = n.kind.filter(|k| k == "chat" || k == "customize") { c.kind = k; }
     // The program asked for (one this version knows), else the one chosen in Settings; with its own model and effort.
     let program = n.provider.as_deref().and_then(crate::assistant::Program::from_name).unwrap_or_else(|| crate::assistant::primary(&s));
+    // Customising the app always runs on Claude Code (`assistant::CUSTOMIZE`).
+    let program = if c.kind == "customize" { crate::assistant::CUSTOMIZE } else { program };
     c.provider = program.name().into();
     let (model, effort) = crate::assistant::chat_defaults(&s, program);
     c.options = normalized(RunOptions { model, effort, permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() }, None);
@@ -2633,8 +2635,9 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         return Err(crate::tr::err("chat.other_library", &[("path", chat.library.as_deref().unwrap_or_default())]).into());
     }
     // Say "not signed in" before the message is saved, not as a failed answer afterwards — by the
-    // program this chat uses.
-    crate::assistant::require_signed_in(&st, crate::assistant::of_chat(&chat.provider)).await?;
+    // program this chat uses (customising: always Claude Code, see `assistant::CUSTOMIZE`).
+    if chat.kind == "customize" { crate::assistant::require_for_customize(&st).await?; }
+    else { crate::assistant::require_signed_in(&st, crate::assistant::of_chat(&chat.provider)).await?; }
     let s = st.settings.read().await.clone();
     let library = s.library();
     // Where the session runs: a project folder, the app layer, or the library.

@@ -90,3 +90,50 @@ async fn a_codex_chat_asks_codex_whether_it_is_signed_in() {
     assert_eq!(e.message, crate::tr::text_in(false, "codex.missing", &[]));
     assert!(st.chats.get(&id).await.unwrap().messages.is_empty());
 }
+
+/// Customising the app runs on Claude Code only, whichever program answers everything else: on Codex
+/// a customise run could read the app's own data. Enforced by the daemon, whatever a client asks for.
+#[cfg(unix)]
+#[tokio::test]
+async fn customising_runs_on_claude_code_whatever_program_is_chosen() {
+    let st = Arc::new(AppState::for_test());
+    fake_codex(&st).await;
+    let bin = std::env::temp_dir().join(format!("thoughts-no-claude-{}", uuid::Uuid::new_v4())).join("claude");
+    { let mut s = st.settings.write().await; s.ai.primary = "codex".into(); s.ai.codex.model = Some("gpt-5".into()); s.ai.claude.model = Some("opus".into());
+      s.ai.claude.binary = Some(bin.to_string_lossy().into()); }
+    // A new customise chat is Claude Code's, with Claude Code's model — also when Codex is asked for by name.
+    let mut made = vec![];
+    for provider in [None, Some("codex")] {
+        let c = chat_create(State(st.clone()), Json(NewChat { kind: Some("customize".into()), provider: provider.map(String::from), ..Default::default() })).await.unwrap().0;
+        assert_eq!((c["provider"].as_str(), c["options"]["model"].as_str()), (Some("claude"), Some("opus")), "{provider:?}");
+        made.push(c["id"].as_str().unwrap().to_string());
+    }
+    // Claude Code is not installed: the message is refused up front, saying customising needs it.
+    let send = |id: String| chat_send(State(st.clone()), Path(id), Json(SendBody { text: "Add a page for my invoices".into(), ..Default::default() }));
+    let e = shown(send(made[0].clone()).await);
+    assert_eq!(e.message, crate::tr::text_in(false, "customize.needs_claude", &[]));
+    assert!(st.chats.get(&made[0]).await.unwrap().messages.is_empty());
+    // Installed but signed out: said the same way, with the code that offers to sign in to Claude Code.
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, "#!/bin/sh\necho '{\"loggedIn\": false}'\n").unwrap();
+    { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+    let e = shown(send(made[1].clone()).await);
+    assert_eq!((e.code, e.message), ("signed_out", format!("SIGNED_OUT::{}", crate::tr::text_in(false, "customize.claude_signed_out", &[]))));
+    // A customise chat recorded with Codex (by an earlier build) still runs on Claude Code, and is put right.
+    let old = Chat { kind: "customize".into(), provider: "codex".into(), ..Default::default() };
+    let id = old.id.clone();
+    st.chats.insert(old).await;
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Program>::new()));
+    let log = seen.clone();
+    t::assistant(&st, move |info| { let log = log.clone(); async move { log.lock().unwrap().push(info.program); true } });
+    let cwd = bin.parent().unwrap().join("work");
+    std::fs::create_dir_all(&cwd).unwrap();
+    crate::claude::start_run(st.clone(), crate::claude::RunSpec { chat_id: id.clone(), prompt: "x".into(), cwd, add_dirs: vec![],
+        options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, resume: None, append_system: None, extra_deny: vec![] }, None).await.unwrap();
+    for _ in 0..400 { if !seen.lock().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+    assert_eq!(seen.lock().unwrap().as_slice(), [Program::Claude]);
+    assert_eq!(st.chats.get(&id).await.unwrap().provider, "claude");
+    // Moving one to Codex is refused like any chat that is not an ordinary one.
+    assert_eq!(shown(chat_patch(State(st.clone()), Path(made[0].clone()), patch("codex")).await).status, 403);
+    std::fs::remove_dir_all(bin.parent().unwrap()).unwrap();
+}

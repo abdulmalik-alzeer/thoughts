@@ -117,6 +117,7 @@
       <li>{t('codex.lim.sandbox')}</li>
       <li class="warn"><Icon name="warning" size={13} /> <span>{t('codex.lim.private')}</span></li>
       <li>{t('codex.lim.claude')}</li>
+      <li>{t('revsec.codex.customize')}</li>
       <li>{t('codex.lim.cost')}</li>
       <li>{t('codex.lim.stream')}</li>
     </ul>

@@ -33,13 +33,24 @@ pub fn of_chat(provider: &str) -> Program { Program::from_name(provider).unwrap_
 /// - Anything the app starts itself: the one chosen in Settings when it starts afresh — recorded on
 ///   its chat — and, when it continues a session (a Wrap's saving step continues its preview), the
 ///   one that made that session.
+/// - Customising the app: always Claude Code (`CUSTOMIZE`), whatever the chat or Settings say.
 pub async fn for_run(state: &AppState, chat_id: &str, kind: &str, resumes: bool) -> Program {
     let own = state.chats.with(chat_id, |c| of_chat(&c.provider)).await.unwrap_or(Program::Claude);
-    if matches!(kind, "chat" | "customize") || resumes { return own; }
+    if kind == "customize" {
+        // A customise chat made on Codex by an earlier build is put right, not run there.
+        if own != CUSTOMIZE { state.chats.update(chat_id, |c| c.provider = CUSTOMIZE.name().into()).await; }
+        return CUSTOMIZE;
+    }
+    if kind == "chat" || resumes { return own; }
     let chosen = primary(&*state.settings.read().await);
     if chosen != own { state.chats.update(chat_id, |c| c.provider = chosen.name().into()).await; }
     chosen
 }
+
+/// The program that customises the app, whichever one is chosen in Settings. On Codex a customise run
+/// could read the app's own data (settings, other chats and their files) — its sandbox closes writes,
+/// not reads — which Claude Code's deny rules keep closed (`paths::secret_paths_in`).
+pub const CUSTOMIZE: Program = Program::Claude;
 
 /// Ask before a message is sent whether `program` is signed in, so a missing sign-in is said
 /// plainly up front instead of as a failed answer.
@@ -48,6 +59,19 @@ pub async fn require_signed_in(state: &AppState, program: Program) -> anyhow::Re
         Program::Claude => crate::claude::require_signed_in(state).await,
         Program::Codex => crate::codex::require_signed_in(state).await,
     }
+}
+
+/// `require_signed_in` before a customise message: Claude Code must be there and signed in. With
+/// Codex chosen in Settings, the person is told that customising needs Claude Code (with the way to
+/// sign in, when that is what is missing), not just that Claude Code is missing.
+pub async fn require_for_customize(state: &AppState) -> anyhow::Result<()> {
+    let r = require_signed_in(state, CUSTOMIZE).await;
+    if primary(&*state.settings.read().await) == CUSTOMIZE { return r; }
+    r.map_err(|e| match e.downcast_ref::<crate::tr::UserErr>().map(|u| u.code) {
+        Some("assistant_missing") => crate::tr::err("customize.needs_claude", &[]),
+        Some("signed_out") => crate::tr::err("customize.claude_signed_out", &[]),
+        _ => e,
+    })
 }
 
 /// The model a one-shot answer (a summary, a routine draft) of the chosen program asks for.
