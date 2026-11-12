@@ -361,20 +361,40 @@ async fn save_pack(app: tauri::AppHandle, name: String, contents: String) -> Res
     Ok(true)
 }
 
-/// Save a file the app generated (an exported document, a calendar file). Like `save_pack`, the save
-/// dialog is opened in native code so the destination is always the user's choice; only document
-/// formats that cannot run when opened are allowed.
-#[tauri::command]
-async fn save_file(app: tauri::AppHandle, name: String, contents: String) -> Result<bool, String> {
-    use tauri_plugin_dialog::DialogExt;
-    const SAFE: &[&str] = &["html", "ics", "json", "md", "txt", "csv"];
-    if contents.len() > 16 << 20 { return Err("file is too large".into()); }
-    let p = std::path::Path::new(&name);
+/// The name a generated file is offered under and its kind (extension), or why it cannot be saved:
+/// only document formats that cannot run when opened, within a sensible size, and a Word document
+/// only when it really is one (a ZIP package, as every .docx is).
+fn export_file(name: &str, bytes: &[u8]) -> Result<(String, String), String> {
+    const SAFE: &[&str] = &["html", "ics", "json", "md", "txt", "csv", "docx"];
+    let p = std::path::Path::new(name);
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if !SAFE.contains(&ext.as_str()) { return Err("this kind of file cannot be saved from Thoughts".into()); }
+    let limit = if ext == "docx" { 32 << 20 } else { 16 << 20 };
+    if bytes.len() > limit { return Err("file is too large".into()); }
+    if ext == "docx" && !bytes.starts_with(b"PK\x03\x04") { return Err("this is not a Word document".into()); }
     let stem: String = p.file_stem().and_then(|e| e.to_str()).unwrap_or("export").chars()
         .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')).take(80).collect();
-    let file = format!("{}.{ext}", if stem.trim().is_empty() { "export" } else { stem.trim() });
+    Ok((format!("{}.{ext}", if stem.trim().is_empty() { "export" } else { stem.trim() }), ext))
+}
+
+/// Save a file the app generated (an exported document, a calendar file, a Word document). Like
+/// `save_pack`, the save dialog is opened in native code so the destination is always the user's
+/// choice (see `export_file` for what may be saved). Text comes as `{name, contents}`; anything else
+/// (a Word document) as the raw request body, with the file name, URI-encoded, in `x-file-name`.
+#[tauri::command]
+async fn save_file(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (name, bytes) = match request.body() {
+        tauri::ipc::InvokeBody::Json(v) => {
+            let contents = v["contents"].as_str().ok_or("nothing to save")?;
+            (v["name"].as_str().unwrap_or_default().to_string(), contents.as_bytes().to_vec())
+        }
+        tauri::ipc::InvokeBody::Raw(b) => {
+            let name = request.headers().get("x-file-name").and_then(|h| h.to_str().ok()).and_then(links::percent_decode).unwrap_or_default();
+            (name, b.clone())
+        }
+    };
+    let (file, ext) = export_file(&name, &bytes)?;
     let ext2 = ext.clone();
     let picked = tauri::async_runtime::spawn_blocking(move || {
         app.dialog().file().set_file_name(&file).add_filter(&ext2.to_uppercase(), &[ext2.as_str()]).blocking_save_file()
@@ -382,7 +402,7 @@ async fn save_file(app: tauri::AppHandle, name: String, contents: String) -> Res
     let Some(mut path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(false) };
     // Keep the safe extension even if the user typed another one in the dialog.
     if path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) != Some(ext.clone()) { path.set_extension(&ext); }
-    std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(true)
 }
 
@@ -1068,6 +1088,25 @@ mod tests {
     use super::*;
 
     fn url(s: &str) -> tauri::Url { tauri::Url::parse(s).unwrap() }
+
+    #[test]
+    fn generated_files_are_saved_only_as_documents_that_cannot_run() {
+        let docx = b"PK\x03\x04 rest of a Word package";
+        assert_eq!(export_file("Plan.docx", docx), Ok(("Plan.docx".into(), "docx".into())));
+        assert_eq!(export_file("خطة العمل.DOCX", docx), Ok(("خطة العمل.docx".into(), "docx".into())));
+        assert_eq!(export_file("calendar.ics", b"BEGIN:VCALENDAR"), Ok(("calendar.ics".into(), "ics".into())));
+        assert_eq!(export_file("../../etc/evil.md", b"x"), Ok(("evil.md".into(), "md".into())));
+        assert_eq!(export_file("<>.html", b"x"), Ok(("export.html".into(), "html".into())));
+        // Kinds that can run, and names without a kind.
+        for bad in ["run.exe", "macro.docm", "page.htm", "script.sh", "app.command", "noext", "x.docx.exe"] {
+            assert!(export_file(bad, docx).is_err(), "{bad}");
+        }
+        // A Word file has to be one, and nothing is saved past the size limits.
+        assert!(export_file("fake.docx", b"<html>").is_err());
+        assert!(export_file("big.docx", &[b"PK\x03\x04".as_slice(), &vec![0u8; 33 << 20]].concat()).is_err());
+        assert!(export_file("big.txt", &vec![b'a'; (16 << 20) + 1]).is_err());
+        assert!(export_file("ok.txt", &vec![b'a'; 16 << 20]).is_ok());
+    }
 
     #[test]
     fn the_window_only_loads_the_app_itself() {

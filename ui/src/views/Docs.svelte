@@ -582,6 +582,22 @@
     } catch (e) { failed(t('docsb.wordFailed'), e); }
     finally { makingWord = false; }
   }
+  /** The note as a Word document, saved wherever the user picks (the system's save dialog in the
+   *  desktop app, a download in a browser). */
+  async function exportDocxAs() {
+    if (makingWord) return;
+    if (showSource) { showSource = false; await tick(); }
+    const el = exportClone();
+    if (!el || editing) { notify(t('docs3.printNotDoc'), { kind: 'info' }); return; }
+    makingWord = true;
+    try {
+      const blob = await toDocx(el, { title: docTitle(), lang: lang() });
+      const r = await saveFile(baseName(current).replace(/\.[a-z0-9]+$/i, '') + '.docx', blob, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      if (r === 'saved') notify(t('nativeb.word.saved'), { kind: 'success' });
+      else if (r === 'unsupported') notify(t('nativeb.word.failed'), { kind: 'error' });
+    } catch (e) { failed(t('nativeb.word.failed'), e); }
+    finally { makingWord = false; }
+  }
   /** A link that opens this note from a calendar event or another app (thoughts://note/…). */
   async function copyNoteLink() {
     const ok = await copyText(noteLink(current));
@@ -786,7 +802,7 @@
     return [
       ...(text ? [
         { id: 'versions', label: t('docs3.versions'), icon: 'rollback', run: () => (showVersions = true) },
-        ...(isMd(current) ? [{ id: 'docx', label: t('docsb.saveWord'), icon: 'download', run: exportDocx }, { id: 'pdf', label: t('docsb.savePdf'), icon: 'print', run: savePdf }] : []),
+        ...(isMd(current) ? [{ id: 'docx', label: t('docsb.saveWord'), icon: 'download', run: exportDocx }, { id: 'docx-as', label: t(desktop ? 'nativeb.word.saveAs' : 'nativeb.word.download'), icon: 'download', run: exportDocxAs }, { id: 'pdf', label: t('docsb.savePdf'), icon: 'print', run: savePdf }] : []),
         { id: 'html', label: t('docs3.exportHtml'), icon: 'download', run: exportHtml },
         { id: 'rich', label: t('docs3.copyRich'), icon: 'copy', run: copyRich },
         { id: 'copy', label: t('docs.copyText'), icon: 'copy', run: copyDoc },
