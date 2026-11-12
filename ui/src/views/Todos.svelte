@@ -8,7 +8,8 @@
   import TodoCalendar from './TodoCalendar.svelte';
   import Icon from '../lib/Icon.svelte';
   import ItemActions from '../lib/ItemActions.svelte';
-  import { copyText, dueLabel, dueState, isoDay, normTodo, notify, prettyName, withDue } from '../lib/content/util';
+  import { copyText, dueLabel as dueLabelOn, dueState as dueStateOn, isoDay, normTodo, notify, prettyName, withDue } from '../lib/content/util';
+  import { clock } from '../lib/clock.svelte';
 
   type Filter = 'all' | 'soon' | 'overdue';
   type GroupBy = 'list' | 'due' | 'tag' | 'none';
@@ -73,6 +74,13 @@
   }
   onMount(() => { load(); return on((e) => { if (['todos.changed', 'library.changed', 'resync'].includes(e.type)) load(); }); });
 
+  // Due wording follows the shared clock, so "today" and "overdue" move on at midnight by themselves.
+  const dueState = (d: string) => { clock.day; return dueStateOn(d); };
+  const dueLabel = (d: string) => { clock.day; return dueLabelOn(d); };
+
+  // The general list: the service picks the one that exists (the starter keeps it in tasks/TODO.md).
+  const GENERAL = '';
+
   const OP_FAIL: Record<string, string> = { add: 'ui.todo.addFailed', toggle: 'ui.todo.toggleFailed', edit: 'ui.todo.editFailed', delete: 'ui.todo.deleteFailed' };
   async function op(name: string, body: any): Promise<boolean> {
     let ok = true;
@@ -81,11 +89,12 @@
     return ok;
   }
 
-  /** Ticking a todo off can be undone from the toast (un-ticking needs no undo). */
-  async function toggle(l: any, it: any) {
+  /** Ticking a todo off can be undone from the toast (un-ticking needs no undo). When the change
+   *  could not be saved the box goes back to what is really in the list. */
+  async function toggle(l: any, it: any, box?: HTMLInputElement) {
     const r = ref(l, it);
     const wasDone = it.done;
-    if (!(await op('toggle', r))) return;
+    if (!(await op('toggle', r))) { if (box) box.checked = wasDone; return; }
     if (wasDone) return;
     track('todo.done');
     notify(t('ui.todo.completed'), { key: 'todo-done', action: { label: t('undo'), run: () => { op('toggle', r); } } });
@@ -119,7 +128,7 @@
     const text = first.trim();
     if (!text) return;
     first = '';
-    if (!(await addTo('TODO.md', text))) first = text;
+    if (!(await addTo(GENERAL, text))) first = text;
   }
 
   const key = (l: any, it: any) => l.file + ':' + it.line;
@@ -200,7 +209,7 @@
   <div class="item" class:done={it.done}>
     <div class="row line">
       <input type="checkbox" checked={it.done} aria-label={t(it.done ? 'todo.markOpen' : 'todo.markDone', { title: it.title })}
-        onchange={() => toggle(l, it)} />
+        onchange={(e) => toggle(l, it, e.currentTarget)} />
       {#if editing === k}
         <form class="grow row" onsubmit={(e) => { e.preventDefault(); saveEdit(l, it); }}>
           <input id="todo-edit" class="grow" bind:value={editText} dir="auto" aria-label={t('todo.editLabel')}
@@ -271,7 +280,7 @@
       </form>
     </div>
   {:else if mode === 'calendar'}
-    <TodoCalendar {lists} add={(text, due) => addTo('TODO.md', text, due)} toggle={(l, it) => toggle(l, it)} />
+    <TodoCalendar {lists} add={(text, due) => addTo(GENERAL, text, due)} toggle={(l, it, box) => toggle(l, it, box)} setDue={(l, it, due) => setDue(l, it, due)} />
   {:else}
     <div class="row tools">
       <div class="seg" role="group" aria-label={t('todo.filterLabel')}>
@@ -307,9 +316,9 @@
     {/if}
 
     {#if groupBy !== 'list'}
-      <form class="row add quick" onsubmit={(e) => { e.preventDefault(); add('TODO.md'); }}>
-        <input class="grow" placeholder={t('addTodo')} aria-label={t('todo.addTo', { list: t('todo.general') })} bind:value={drafts['TODO.md']} dir="auto" />
-        {#if drafts['TODO.md']?.trim()}<button class="btn primary sm">{t('todo.add')}</button>{/if}
+      <form class="row add quick" onsubmit={(e) => { e.preventDefault(); add(GENERAL); }}>
+        <input class="grow" placeholder={t('addTodo')} aria-label={t('todo.addTo', { list: t('todo.general') })} bind:value={drafts[GENERAL]} dir="auto" />
+        {#if drafts[GENERAL]?.trim()}<button class="btn primary sm">{t('todo.add')}</button>{/if}
       </form>
     {/if}
 

@@ -1,10 +1,12 @@
-// Due-date reminders. On launch, every hour, and whenever todos change, open todos that are due today
+// Due-date reminders. On launch, every hour, when the date changes, when the window comes back after
+// a while (for example after the computer slept), and whenever todos change, open todos that are due today
 // or overdue are counted (for the badge on the Todos item) and — if notifications are on — announced
 // with a system notification, once per todo per day. What was already announced is remembered locally.
 import { api, inTauri, on } from './api';
 import { app } from './store.svelte';
 import { t, tn } from './i18n';
 import { isoDay, normTodo } from './content/util';
+import { onNewDay } from './clock.svelte';
 
 const KEY = 'thoughts.reminded';
 type Seen = { day: string; ids: string[] };
@@ -41,9 +43,11 @@ async function send(title: string, body: string): Promise<boolean> {
 }
 
 let running = false;
+let lastCheck = 0;
 export async function checkReminders(): Promise<void> {
   if (running || !app.settings?.onboarded) return;
   running = true;
+  lastCheck = Date.now();
   try {
     const lists: any[] = await api('/todos');
     const today = isoDay();
@@ -81,6 +85,11 @@ export function startReminders() {
   started = true;
   checkReminders();
   setInterval(checkReminders, 60 * 60 * 1000);
+  onNewDay(checkReminders);
+  // Back at the computer: an hourly timer may have been asleep with it, so look again.
+  const back = () => { if (Date.now() - lastCheck > 5 * 60 * 1000) checkReminders(); };
+  window.addEventListener('focus', back);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) back(); });
   let timer: ReturnType<typeof setTimeout> | undefined;
   on((e) => {
     if (e.type !== 'todos.changed' && e.type !== 'library.changed' && e.type !== 'resync') return;

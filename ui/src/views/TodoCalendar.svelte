@@ -1,19 +1,23 @@
 <script lang="ts">
   // Month view of todos with due dates. The grid is one tab stop: arrow keys move by day and week,
   // Page Up / Page Down by month, Home / End to the ends of the week, Enter adds a todo on that day.
+  // A click selects a day and lists its todos below (where each can be moved to another day);
+  // a double-click or the day's + button adds one.
   import { tick } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import { promptDialog } from '../lib/dialog.svelte';
   import { t, tn, fmtDate, fmtNum, lang } from '../lib/i18n';
-  import { isoDay, prettyName } from '../lib/content/util';
+  import { prettyName } from '../lib/content/util';
+  import { clock } from '../lib/clock.svelte';
 
-  let { lists, add, toggle }: {
+  let { lists, add, toggle, setDue }: {
     lists: any[];
     add: (text: string, due: string) => Promise<boolean>;
-    toggle: (l: any, it: any) => void;
+    toggle: (l: any, it: any, box?: HTMLInputElement) => void;
+    setDue: (l: any, it: any, due: string | null) => void;
   } = $props();
 
-  const today = isoDay();
+  const today = $derived(clock.day);
   const iso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const parse = (s: string) => new Date(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10), 12);
   const shift = (s: string, days: number) => { const d = parse(s); d.setDate(d.getDate() + days); return iso(d); };
@@ -24,7 +28,7 @@
     return iso(d);
   };
 
-  let cursor = $state(today); // the focused day; its month is the one shown
+  let cursor = $state(clock.day); // the focused day; its month is the one shown
   let gridEl = $state<HTMLElement | null>(null);
 
   // Weeks start on Sunday in Arabic (the Saudi working week), Monday in English.
@@ -115,12 +119,13 @@
           {@const items = byDay.get(d) ?? []}
           {@const out = d.slice(0, 7) !== cursor.slice(0, 7)}
           <div class="cell" class:out class:today={d === today} class:sel={d === cursor} role="gridcell" aria-selected={d === cursor}>
-            <button class="daybtn" data-day={d} tabindex={d === cursor ? 0 : -1} aria-label={dayLabel(d)} title={t('ui.cal.addHere')}
-              onclick={() => addOn(d)} onfocus={() => (cursor = d)}>
+            <button class="daybtn" data-day={d} tabindex={d === cursor ? 0 : -1} aria-label={dayLabel(d)} title={t('todoa.cal.dayHint')}
+              onclick={() => (cursor = d)} ondblclick={() => addOn(d)} onfocus={() => (cursor = d)}>
               <span class="num">{fmtNum(+d.slice(8))}</span>
               {#if d === today}<span class="tag">{t('todo.dueToday')}</span>{/if}
               {#if isOverdue(d)}<span class="tag late"><Icon name="warning" size={11} /> {t('todo.overdue')}</span>{/if}
             </button>
+            <button class="cadd" tabindex="-1" aria-label={t('ui.cal.addHere')} title={t('ui.cal.addHere')} onclick={() => addOn(d)}><Icon name="plus" size={12} /></button>
             <div class="items" aria-hidden="true">
               {#each items.slice(0, 3) as r (r.l.file + r.it.line)}
                 <div class="ev" class:done={r.it.done} class:late={!r.it.done && d < today} dir="auto">{r.it.title}</div>
@@ -140,10 +145,12 @@
     </div>
     {#each selected as r (r.l.file + r.it.line)}
       <label class="todo" class:done={r.it.done}>
-        <input type="checkbox" checked={r.it.done} onchange={() => toggle(r.l, r.it)} />
+        <input type="checkbox" checked={r.it.done} onchange={(e) => toggle(r.l, r.it, e.currentTarget)} />
         <span class="grow" dir="auto">{r.it.title}</span>
         {#if !r.it.done && cursor < today}<span class="tag late"><Icon name="warning" size={11} /> {t('todo.overdue')}</span>{/if}
         <span class="muted sm" dir="auto">{listName(r.l)}</span>
+        <input type="date" class="mv" lang={lang()} value={r.it.due} aria-label={t('todoa.cal.move', { title: r.it.title })} title={t('todoa.cal.moveHint')}
+          onchange={(e) => { const v = e.currentTarget.value; if (v && v !== r.it.due) setDue(r.l, r.it, v); }} />
       </label>
     {:else}
       <p class="muted sm none">{t('ui.cal.dayEmpty')}</p>
@@ -173,6 +180,11 @@
   .daybtn:focus-visible { outline: none; }
   .daybtn:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -2px; }
   .num { font-size: 13px; font-weight: 600; }
+  /* The + appears on the selected day and on hover; it is a mouse shortcut (Enter does the same from the keyboard). */
+  .cadd { position: absolute; inset-block-start: 3px; inset-inline-end: 3px; z-index: 1; font: inherit; color: var(--muted); background: var(--bg); border: var(--border-w) solid var(--hairline); border-radius: 6px; width: 22px; height: 22px; padding: 0; display: grid; place-items: center; cursor: pointer; opacity: 0; }
+  .cell:hover .cadd, .cell.sel .cadd { opacity: 1; }
+  .cadd:hover { color: var(--fg); }
+  .mv { width: auto; padding: 2px 6px; font-size: var(--fs-xs); }
   .tag { font-size: var(--fs-xxs); font-weight: 600; color: var(--on-tint); background: var(--tint); border-radius: 99px; padding: 0 6px; display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
   .tag.late { color: var(--danger); background: none; border: 1px solid currentColor; }
   .items { padding: 2px 4px 4px; display: grid; gap: 2px; position: relative; pointer-events: none; }
