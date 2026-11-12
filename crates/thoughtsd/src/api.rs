@@ -87,7 +87,7 @@ fn plugin_scoped(query: &str) -> bool { query.split('&').any(|kv| kv == "scope=p
 /// May a request for `path` with this query string go through? (See `PLUGIN_SCOPED`.)
 fn plugin_scope_allowed(path: &str, query: &str) -> bool {
     if !plugin_scoped(query) { return true; }
-    let guarded = path.starts_with("/api/library/") || path == "/api/todos/calendar.ics";
+    let guarded = path.starts_with("/api/library/") || path == "/api/todos/calendar.ics" || path == "/api/capture";
     !guarded || PLUGIN_SCOPED.contains(&path)
 }
 
@@ -146,6 +146,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/stats", get(stats))
         .route("/api/todos", get(todo_list))
         .route("/api/todos/calendar.ics", get(todo_calendar))
+        .route("/api/todos/week", get(todo_week))
+        .route("/api/capture", post(capture))
         .route("/api/todos/:op", post(todo_op))
         // chats
         .route("/api/chats", get(chat_list).post(chat_create))
@@ -1164,14 +1166,15 @@ async fn delete_file(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
 #[serde(default)]
 struct IdeaStatus { path: String, status: String }
 /// Change an idea's status (`{path: "<area>/<slug>/README.md" or "<area>/<slug>", status}`).
-async fn idea_status(State(st): S, Json(i): Json<IdeaStatus>) -> R {
+async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Json(i): Json<IdeaStatus>) -> R {
     let root = lib(&st).await?;
     library_free(&st).await?;
     let rel = i.path.trim().trim_matches('/').replace('\\', "/");
     let rel = if rel.to_lowercase().ends_with(".md") { rel } else { format!("{rel}/README.md") };
     if !rel.ends_with("/README.md") { return Err(crate::tr::err("invalid.path", &[]).into()); }
-    // Ideas inside a private folder are the user's own business: add-ons work through this endpoint.
-    if paths::is_private(&root, &rel, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", &rel)]).into()); }
+    // Ideas inside a private folder are the user's own business: never changed for an add-on (the
+    // user's own Ideas page can change them).
+    if scope_of(&q).plugin && paths::is_private(&root, &rel, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", &rel)]).into()); }
     library::set_idea_status(&root, &rel, &i.status, chrono::Local::now().date_naive())?;
     st.emit(json!({"type": "library.changed"}));
     ok()
@@ -1306,13 +1309,82 @@ async fn todo_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R 
 
 /// `GET /api/todos/calendar.ics`: open tasks with a due date as an iCalendar file, for importing
 /// into any calendar app.
+/// Each event carries a reminder at the time chosen in Settings, and events an earlier export put in
+/// the calendar whose task is no longer open come back as cancelled (see `todos::calendar`).
 async fn todo_calendar(State(st): S) -> Result<Response, ApiErr> {
     let root = lib(&st).await?;
+    let opts = todos::CalOpts { alarm: st.settings.read().await.calendar.alarm_time() };
+    // What earlier exports of this library sent, kept beside the settings (never in the library).
+    #[derive(serde::Serialize, Deserialize, Default)]
+    struct Kept { library: String, events: todos::CalRecord }
+    let file = paths::home().join("calendar-export.json");
+    let here = root.to_string_lossy().to_string();
+    let mut kept: Kept = std::fs::read(&file).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(|k: &Kept| k.library == here)
+        .unwrap_or(Kept { library: here, events: Default::default() });
+    let ics = todos::calendar(&root, chrono::Utc::now(), opts, &mut kept.events);
+    if let Ok(bytes) = serde_json::to_vec(&kept) { crate::log::ok_or_warn("could not keep the calendar export record", paths::write_atomic(&file, &bytes, false)); }
     Ok(([
         (header::CONTENT_TYPE, HeaderValue::from_static("text/calendar; charset=utf-8")),
         (header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment; filename=\"thoughts-todos.ics\"")),
         (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
-    ], todos::calendar(&root, chrono::Utc::now())).into_response())
+    ], ics).into_response())
+}
+
+/// The first day of the week for "next week": the user's setting, else the library's `Week:` line,
+/// else Sunday for Arabic and Monday otherwise (Sunday = 0).
+async fn week_start(st: &AppState, root: &std::path::Path) -> u32 {
+    let s = st.settings.read().await;
+    s.calendar.week_start.map(u32::from).or_else(|| todos::library_week(root).map(|w| w.0)).unwrap_or(if s.language == "ar" { 0 } else { 1 })
+}
+
+/// `GET /api/todos/week` → `{start, working}` from the library's `Week:` line (both null without one).
+async fn todo_week(State(st): S) -> R {
+    let root = lib(&st).await?;
+    let w = todos::library_week(&root);
+    Ok(Json(json!({"start": w.as_ref().map(|w| w.0), "working": w.map(|w| w.1)})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Capture { kind: String, text: String, file: String }
+/// `POST /api/capture {kind: "todo" | "note", text, file?}`: quick capture straight into the library,
+/// without an assistant run (the Home box today; the tray and a global shortcut can use it too).
+/// - `todo`: added to the general list (or `file`); a date said at the end ("tomorrow", "by
+///   Friday", «غداً») becomes its due date → `{kind, file, line, text, title, due}`.
+/// - `note`: saved as its own file in `inbox/` → `{kind, path}`.
+/// A leading "todo:" / «مهمة:» or "note:" / «ملاحظة:» is dropped.
+async fn capture(State(st): S, Json(c): Json<Capture>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st).await?;
+    let text = c.text.trim();
+    let strip = |t: &str, prefixes: &[&str]| -> Option<String> {
+        prefixes.iter().find_map(|p| {
+            let head: String = t.chars().take(p.chars().count()).collect();
+            (head.to_lowercase() == *p).then(|| t[head.len()..].trim_start().trim_start_matches([':', '：']).trim().to_string())
+        })
+    };
+    match c.kind.as_str() {
+        "todo" => {
+            let text = strip(text, &["todo:", "todo :", "مهمة:", "مهمه:", "مهمة :"]).unwrap_or_else(|| text.to_string());
+            let file = if c.file.is_empty() { todos::general(&root) } else { c.file.clone() };
+            check_todo_file(&file)?;
+            let today = chrono::Local::now().date_naive();
+            let (title, due) = if todos::split_task(&text).1.is_some() { (text.clone(), None) } else { todos::quick_due(&text, today, week_start(&st, &root).await) };
+            let due = due.map(|d| d.format("%Y-%m-%d").to_string());
+            let line_text = todos::compose(&title, None, due.as_deref());
+            let line = todos::add(&root, &file, &line_text)?;
+            st.emit(json!({"type": "todos.changed"}));
+            let (shown, due_at, _) = todos::split_task(&line_text);
+            Ok(Json(json!({"ok": true, "kind": "todo", "file": file, "line": line, "text": line_text, "title": shown, "due": due_at})))
+        }
+        "note" => {
+            let text = strip(text, &["note:", "note :", "ملاحظة:", "ملاحظه:", "ملاحظة :"]).unwrap_or_else(|| text.to_string());
+            let path = todos::inbox_note(&root, &text, chrono::Local::now())?;
+            st.emit(json!({"type": "library.changed"}));
+            Ok(Json(json!({"ok": true, "kind": "note", "path": path})))
+        }
+        _ => Err(crate::tr::err("capture.kind", &[]).into()),
+    }
 }
 
 /// Only real todo files, and never one inside a protected folder.
@@ -1323,28 +1395,60 @@ fn check_todo_file(file: &str) -> anyhow::Result<()> {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct TodoOp { file: String, line: usize, text: String, new_text: String }
+struct TodoOp {
+    file: String, line: usize, text: String, new_text: String,
+    /// add: the group to add to; toggle: the group to move the task to; move: the target group.
+    group: Option<String>,
+    /// move: the list to move to (the same list when empty).
+    to_file: String,
+    /// reorder: "up" or "down".
+    dir: String,
+    /// restore: the lines a delete removed.
+    lines: Vec<String>,
+    /// add: read a date said at the end ("tomorrow", «غداً») as the due date.
+    dates: bool,
+}
 async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<String, String>>, Json(t): Json<TodoOp>) -> R {
     let root = lib(&st).await?;
     library_free(&st).await?;
     let file = if t.file.is_empty() { todos::general(&root) } else { t.file.clone() };
-    check_todo_file(&file)?;
-    if scope_of(&q).plugin {
-        // An add-on names a list plainly (no `.` or `..` steps) and never one in a private folder,
-        // however the folder is spelled or linked.
-        let clean = paths::clean_rel(&file).map_err(|_| crate::tr::err("invalid.path", &[]))?;
-        if clean != file.replace('\\', "/") { return Err(crate::tr::err("invalid.path", &[]).into()); }
-        if paths::is_private(&root, &file, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", &file)]).into()); }
+    let to_file = if t.to_file.is_empty() { file.clone() } else { t.to_file.clone() };
+    let plugin = scope_of(&q).plugin;
+    for f in [&file, &to_file] {
+        check_todo_file(f)?;
+        if plugin {
+            // An add-on names a list plainly (no `.` or `..` steps) and never one in a private folder,
+            // however the folder is spelled or linked.
+            let clean = paths::clean_rel(f).map_err(|_| crate::tr::err("invalid.path", &[]))?;
+            if clean != f.replace('\\', "/") { return Err(crate::tr::err("invalid.path", &[]).into()); }
+            if paths::is_private(&root, f, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", f)]).into()); }
+        }
     }
-    match op.as_str() {
-        "toggle" => todos::toggle(&root, &file, t.line, &t.text)?,
-        "add" => todos::add(&root, &file, &t.text)?,
-        "edit" => todos::edit(&root, &file, t.line, &t.text, &t.new_text)?,
-        "delete" => todos::delete(&root, &file, t.line, &t.text)?,
+    let group = t.group.as_deref();
+    let today = chrono::Local::now().date_naive();
+    let out = match op.as_str() {
+        "toggle" => todos::toggle_with(&root, &file, t.line, &t.text, group, today)?,
+        "add" => {
+            let text = if t.dates && todos::split_task(&t.text).1.is_none() {
+                let (title, due) = todos::quick_due(&t.text, today, week_start(&st, &root).await);
+                let (title, _, every) = todos::split_task(&title);
+                todos::compose(title, every, due.map(|d| d.format("%Y-%m-%d").to_string()).as_deref())
+            } else { t.text.clone() };
+            let line = todos::add_to(&root, &file, group, &text)?;
+            json!({"line": line, "text": text.trim()})
+        }
+        "edit" => { todos::edit(&root, &file, t.line, &t.text, &t.new_text)?; json!({}) }
+        "delete" => json!({"removed": {"line": t.line, "lines": todos::delete(&root, &file, t.line, &t.text)?}}),
+        "restore" => json!({"line": todos::restore(&root, &file, t.line, &t.lines)?}),
+        "move" => json!({"file": to_file, "line": todos::move_to(&root, &file, t.line, &t.text, &to_file, group.unwrap_or(""))?}),
+        "reorder" => json!({"line": todos::reorder(&root, &file, t.line, &t.text, t.dir == "up")?}),
+        "archive" => json!({"moved": todos::archive(&root, &file, group.unwrap_or(""))?}),
         _ => bail!("unknown op"),
-    }
+    };
     st.emit(json!({"type": "todos.changed"}));
-    ok()
+    let mut out = out;
+    out["ok"] = json!(true);
+    Ok(Json(out))
 }
 
 // ---------- chats ----------
@@ -2140,7 +2244,7 @@ mod tests {
         busy(new_file(State(st.clone()), none(), Json(NewFile { path: "notes/new.md".into(), content: "x".into() })).await);
         busy(move_file(State(st.clone()), none(), Json(MoveFile { from: "README.md".into(), to: "READ.md".into() })).await);
         busy(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "README.md".into(), ..Default::default() })).await);
-        busy(idea_status(State(st.clone()), Json(IdeaStatus { path: "ideas/shop".into(), status: "active".into() })).await);
+        busy(idea_status(State(st.clone()), none(), Json(IdeaStatus { path: "ideas/shop".into(), status: "active".into() })).await);
         busy(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
         busy(library_undo(State(st.clone()), Json(Undo { hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
         busy(git_sync(State(st.clone())).await);
@@ -2164,6 +2268,61 @@ mod tests {
         write_file(State(st.clone()), none(), save("notes/today.md", "typed after the wrap")).await.unwrap();
         todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "new task".into(), ..Default::default() })).await.unwrap();
         assert_eq!(t::read(&lib, "notes/today.md"), "typed after the wrap");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_ideas_page_changes_status_even_in_a_private_folder_but_an_add_on_cannot() {
+        let (st, lib) = t::library().await;
+        t::write(&lib, "me/plans/README.md", "---\ntitle: Plans\nstatus: seed\nupdated: 2026-01-01\n---\nBody\n");
+        st.settings.write().await.private_paths = vec!["me".into()];
+        let set = |path: &str, status: &str| Json(IdeaStatus { path: path.into(), status: status.into() });
+        assert_eq!(shown(idea_status(State(st.clone()), q(&[("scope", "plugin")]), set("me/plans/README.md", "parked")).await).status, 403);
+        idea_status(State(st.clone()), none(), set("me/plans/README.md", "parked")).await.unwrap();
+        idea_status(State(st.clone()), none(), set("ideas/shop", "done")).await.unwrap();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_eq!(t::read(&lib, "me/plans/README.md"), format!("---\ntitle: Plans\nstatus: parked\nupdated: {today}\n---\nBody\n"));
+        assert!(t::read(&lib, "ideas/shop/README.md").contains("status: done\n"));
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quick_capture_writes_straight_to_the_library_and_undo_restores_a_whole_task() {
+        let (st, lib) = t::library().await;
+        let cap = |kind: &str, text: &str| Json(Capture { kind: kind.into(), text: text.into(), ..Default::default() });
+        let v = capture(State(st.clone()), cap("todo", "todo: Call the bank tomorrow")).await.unwrap().0;
+        let tomorrow = (chrono::Local::now().date_naive() + chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
+        assert_eq!((v["file"].as_str(), v["line"].as_u64(), v["title"].as_str(), v["due"].as_str()), (Some("TODO.md"), Some(3), Some("Call the bank"), Some(tomorrow.as_str())));
+        assert_eq!(t::read(&lib, "TODO.md"), format!("# Todo\n\n- [ ] call the bank\n- [ ] Call the bank @due({tomorrow})\n"));
+        let v = capture(State(st.clone()), cap("note", "ملاحظة: فكرة عن متجر صغير\nبتفاصيل")).await.unwrap().0;
+        let path = v["path"].as_str().unwrap();
+        assert!(path.starts_with("inbox/") && path.ends_with("-فكرة-عن-متجر-صغير.md"), "{path}");
+        assert!(t::read(&lib, path).ends_with("\n\nفكرة عن متجر صغير\nبتفاصيل\n"));
+        assert_eq!(shown(capture(State(st.clone()), cap("idea", "x")).await).status, 422);
+        assert_eq!(shown(capture(State(st.clone()), cap("todo", "  ")).await).status, 422);
+        // No chat was started for any of it.
+        assert!(st.chats.list().await.is_empty());
+
+        // Delete hands back every line it removed; restore puts exactly those back.
+        t::write(&lib, "TODO.md", "# Todo\n\n- [ ] a\n  - note one\n\t- note two\n- [ ] b\n");
+        let op = |file: &str, line: usize, text: &str| TodoOp { file: file.into(), line, text: text.into(), ..Default::default() };
+        let v = todo_op(State(st.clone()), Path("delete".into()), none(), Json(op("TODO.md", 2, "a"))).await.unwrap().0;
+        assert_eq!(v["removed"], json!({"line": 2, "lines": ["- [ ] a", "  - note one", "\t- note two"]}));
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [ ] b\n");
+        let lines: Vec<String> = serde_json::from_value(v["removed"]["lines"].clone()).unwrap();
+        todo_op(State(st.clone()), Path("restore".into()), none(), Json(TodoOp { lines, ..op("TODO.md", 2, "") })).await.unwrap();
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [ ] a\n  - note one\n\t- note two\n- [ ] b\n");
+        // A restore can only put back a task with its notes, never other text.
+        for bad in [vec![], vec!["# Heading".to_string()], vec!["- [ ] x".to_string(), "not a note".to_string()], vec!["- [ ] x\n## y".to_string()]] {
+            assert_eq!(shown(todo_op(State(st.clone()), Path("restore".into()), none(), Json(TodoOp { lines: bad, ..op("TODO.md", 0, "") })).await).status, 422);
+        }
+        // Adding with dates on reads the date; moving to another list carries the notes along.
+        todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { dates: true, ..op("TODO.md", 0, "Pay rent end of month") })).await.unwrap();
+        assert!(t::read(&lib, "TODO.md").contains("- [ ] Pay rent @due("));
+        let v = todo_op(State(st.clone()), Path("move".into()), none(), Json(TodoOp { to_file: "ideas/shop/todo.md".into(), group: Some("Later".into()), ..op("TODO.md", 2, "a") })).await.unwrap().0;
+        assert_eq!(v["file"], "ideas/shop/todo.md");
+        assert_eq!(t::read(&lib, "ideas/shop/todo.md"), "# Todo\n\n## Later\n- [ ] a\n  - note one\n\t- note two\n");
+        assert!(!t::read(&lib, "TODO.md").contains("note one"));
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
@@ -2197,7 +2356,7 @@ mod tests {
         interrupted(new_file(State(st.clone()), none(), Json(NewFile { path: "notes/new.md".into(), content: "x".into() })).await);
         interrupted(move_file(State(st.clone()), none(), Json(MoveFile { from: "README.md".into(), to: "READ.md".into() })).await);
         interrupted(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "TODO.md".into(), ..Default::default() })).await);
-        interrupted(idea_status(State(st.clone()), Json(IdeaStatus { path: "ideas/shop".into(), status: "active".into() })).await);
+        interrupted(idea_status(State(st.clone()), none(), Json(IdeaStatus { path: "ideas/shop".into(), status: "active".into() })).await);
         interrupted(import_files(State(st.clone()), Json(ImportReq { files: vec![ImportFile { name: "a.txt".into(), data_base64: "aGk=".into() }] })).await);
         interrupted(todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "new task".into(), ..Default::default() })).await);
         interrupted(chat_send(State(st.clone()), Path(other.clone()), Json(SendBody { text: "write a note".into(), ..Default::default() })).await);
@@ -2522,7 +2681,7 @@ mod tests {
         let files = |v: Value| v.as_array().unwrap().iter().map(|x| x["file"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         assert_eq!(files(todo_list(State(st.clone()), plugin(&[])).await.unwrap().0), ["TODO.md", "ideas/shop/todo.md"]);
         assert!(files(todo_list(State(st.clone()), none()).await.unwrap().0).contains(&"Me/Finances/todo.md".to_string()));
-        let op = |file: &str, text: &str| Json(TodoOp { file: file.into(), line: 0, text: text.into(), new_text: "changed".into() });
+        let op = |file: &str, text: &str| Json(TodoOp { file: file.into(), line: 0, text: text.into(), new_text: "changed".into(), ..Default::default() });
         for file in ["Me/Finances/todo.md", "me/finances/todo.md", "ME/FINANCES/todo.md", "ideas/../Me/Finances/todo.md", "./me/finances/todo.md", "ideas/./../me/finances/todo.md"] {
             for action in ["toggle", "edit", "delete", "add"] {
                 let e = shown(todo_op(State(st.clone()), Path(action.into()), plugin(&[]), op(file, "pay tax")).await);
@@ -2532,13 +2691,17 @@ mod tests {
         assert_eq!(t::read(&lib, "Me/Finances/todo.md"), "- [ ] pay tax\n");
         todo_op(State(st.clone()), Path("toggle".into()), plugin(&[]), op("ideas/shop/todo.md", "rent a stall")).await.unwrap();
         assert_eq!(t::read(&lib, "ideas/shop/todo.md"), "- [x] rent a stall\n");
+        // Nor can an add-on move a task into a private list.
+        let into_private = Json(TodoOp { file: "ideas/shop/todo.md".into(), line: 0, text: "rent a stall".into(), to_file: "Me/Finances/todo.md".into(), ..Default::default() });
+        assert!([403, 422].contains(&shown(todo_op(State(st.clone()), Path("move".into()), plugin(&[]), into_private).await).status));
+        assert_eq!(t::read(&lib, "ideas/shop/todo.md"), "- [x] rent a stall\n");
         // The user's own app is not restricted.
         todo_op(State(st.clone()), Path("toggle".into()), none(), op("Me/Finances/todo.md", "pay tax")).await.unwrap();
         assert_eq!(t::read(&lib, "Me/Finances/todo.md"), "- [x] pay tax\n");
 
         // Everything else under the library API is closed to a request made for an add-on.
         for path in ["/api/library/restore", "/api/library/undo", "/api/library/history", "/api/library/import", "/api/library/stats",
-                     "/api/library/trust", "/api/library/ideas/status", "/api/todos/calendar.ics"] {
+                     "/api/library/trust", "/api/library/ideas/status", "/api/todos/calendar.ics", "/api/capture"] {
             assert!(!plugin_scope_allowed(path, "scope=plugin"), "{path}");
             assert!(!plugin_scope_allowed(path, "allow=x&scope=plugin&path=a"), "{path}");
             assert!(plugin_scope_allowed(path, ""), "{path}");

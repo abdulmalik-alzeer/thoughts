@@ -41,7 +41,7 @@ export type PendingChange = {
 /** `nav.json` from the customisation layer: hide, reorder and relabel sidebar items. */
 export type NavConfig = { hidden: string[]; order: string[]; labels: Record<string, { en?: string; ar?: string }> };
 /** `todos.json` from the customisation layer: default grouping, order and filter of the Todos view. */
-export type TodosConfig = { groupBy?: 'list' | 'due' | 'tag' | 'none'; sort?: 'list' | 'due'; filter?: 'all' | 'soon' | 'overdue'; showDone?: boolean };
+export type TodosConfig = { groupBy?: 'list' | 'due' | 'tag' | 'none'; sort?: 'list' | 'due'; filter?: 'all' | 'soon' | 'overdue'; showDone?: boolean; moveDone?: boolean };
 
 const ls = {
   get(k: string): string | null { try { return localStorage.getItem(k); } catch { return null; } },

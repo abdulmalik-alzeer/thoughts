@@ -2,6 +2,8 @@
 // a while (for example after the computer slept), and whenever todos change, open todos that are due today
 // or overdue are counted (for the badge on the Todos item) and — if notifications are on — announced
 // with a system notification, once per todo per day. What was already announced is remembered locally.
+// Todos due today are announced from the reminder time chosen in Settings (09:00 unless changed; the
+// same time the exported calendar uses), so a window left open overnight does not ring at midnight.
 import { api, inTauri, on } from './api';
 import { app } from './store.svelte';
 import { t, tn } from './i18n';
@@ -44,6 +46,13 @@ async function send(title: string, body: string): Promise<boolean> {
 
 let running = false;
 let lastCheck = 0;
+let atTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** Minutes after midnight of the reminder time, or null when there is none (announce at once). */
+function reminderMinutes(): number | null {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(app.settings?.calendar?.alarm ?? ''));
+  return m ? Math.min(23, +m[1]) * 60 + Math.min(59, +m[2]) : null;
+}
 export async function checkReminders(): Promise<void> {
   if (running || !app.settings?.onboarded) return;
   running = true;
@@ -61,8 +70,16 @@ export async function checkReminders(): Promise<void> {
     }
     app.dueToday = due.length;
     if (!app.settings?.notifications || !due.length) return;
+    // Before the reminder time only what is already overdue is announced; look again at that time.
+    const at = reminderMinutes();
+    const now = new Date();
+    const early = at !== null && now.getHours() * 60 + now.getMinutes() < at;
+    if (early) {
+      clearTimeout(atTimer);
+      atTimer = setTimeout(checkReminders, ((at! - now.getHours() * 60 - now.getMinutes()) * 60 - now.getSeconds()) * 1000 + 1000);
+    }
     const s = seen();
-    const fresh = due.filter((d) => !s.ids.includes(d.id));
+    const fresh = due.filter((d) => !s.ids.includes(d.id) && (!early || d.overdue));
     if (!fresh.length) return;
     let sent: boolean;
     if (fresh.length <= 3) {

@@ -530,6 +530,7 @@ function todosConfig(v: any): TodosConfig | null {
   const s = oneOf(v.sort, ['list', 'due'] as const); if (s) c.sort = s;
   const f = oneOf(v.filter, ['all', 'soon', 'overdue'] as const); if (f) c.filter = f;
   if (typeof v.showDone === 'boolean') c.showDone = v.showDone;
+  if (typeof v.moveDone === 'boolean') c.moveDone = v.moveDone;
   return c;
 }
 

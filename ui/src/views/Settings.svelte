@@ -11,6 +11,7 @@
   import { failed } from '../lib/errors';
   import { restartService } from '../lib/shell';
   import ThemePicker from './ThemePicker.svelte';
+  import CalendarPrefs from '../lib/CalendarPrefs.svelte';
   import Customise from './Customise.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
 
@@ -21,7 +22,7 @@
   const catIcon: Record<Cat, string> = { general: 'settings', accessibility: 'accessibility', ai: 'ai', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette' };
   // Row labels per category (i18n keys) — used by the search box. `adv` rows live behind the Advanced disclosure.
   const basic: Record<Cat, string[]> = {
-    general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify'],
+    general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates'],
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations', 'reorganize'],
@@ -521,6 +522,7 @@
           <button type="button" class="btn ghost" disabled={busy.notif} aria-busy={busy.notif} onclick={sendTest}><Icon name="bell" size={14} /> {t('shellui.notif.test')}</button>
         </div>
       {/if}
+      {#if vis(c, 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates') && s.calendar}<CalendarPrefs bind:cal={s.calendar} />{/if}
     </div>
   {:else if c === 'accessibility'}
     <div class="card">

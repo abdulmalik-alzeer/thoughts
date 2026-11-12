@@ -168,6 +168,12 @@ const TABLE: &[Entry] = &[
     e("todo.not_file", "validation", 422, "",
         "That is not a task list.",
         "هذه ليست قائمة مهام."),
+    e("todo.restore_invalid", "validation", 422, "",
+        "This task could not be put back.",
+        "تعذّرت إعادة هذه المهمة."),
+    e("capture.kind", "validation", 422, "",
+        "Only a todo or a note can be saved this way.",
+        "يمكن حفظ مهمة أو ملاحظة فقط بهذه الطريقة."),
     // --- history and sync ---
     e("conflict", "conflict", 409, "CONFLICT::", "{files}", "{files}"),
     e("no_history", "no_history", 409, "NO_HISTORY::",

@@ -3,7 +3,8 @@
   import { api, on, post } from '../lib/api';
   import { app, go, refreshChats, toast, track } from '../lib/store.svelte';
   import { startCustomise } from '../lib/layer';
-  import { t, tn, ago, fmtDate, fmtNum, lang } from '../lib/i18n';
+  import { t, tn, ago, fmtDate, fmtHijri, fmtNum, lang } from '../lib/i18n';
+  import { showHijri } from '../lib/weekPrefs.svelte';
   import { dueLabel as dueLabelOn, dueState as dueStateOn, normTodo } from '../lib/content/util';
   import { clock } from '../lib/clock.svelte';
   import { failed } from '../lib/errors';
@@ -112,20 +113,61 @@
     return { destroy() { try { if (typeof cleanup === 'function') cleanup(); } catch { /* frame already gone */ } } };
   }
 
-  /** Capture chips: with nothing typed they put the prefix in the box for the user to finish; otherwise they send. */
-  function capture(kind: 'todo' | 'idea') {
+  // A quick note starts with "note:" or «ملاحظة:» (only here: it never reaches the assistant).
+  const NOTE = /^\s*(?:note|ملاحظ[ةه])\s*[:：]\s*/i;
+  const notePrefix = () => (lang() === 'ar' ? 'ملاحظة: ' : 'note: ');
+  /** What kind of quick capture the text is: a todo, a note, or neither (an ordinary message). */
+  const quickKind = (text: string): 'todo' | 'note' | null => (NOTE.test(text) ? 'note' : captureKind(text) === 'todo' ? 'todo' : null);
+  const quickBody = (text: string) => (NOTE.test(text) ? text.replace(NOTE, '') : normalizeCapture(text).replace(/^todo:\s*/i, '')).trim();
+
+  /** Capture chips: with nothing typed they put the prefix in the box for the user to finish;
+   *  otherwise they save what is typed straight into the library — no chat, nothing to wrap. */
+  function capture(kind: 'todo' | 'note') {
     if (sending) return;
-    track(kind === 'todo' ? 'home.chip:todo' : 'home.chip:new idea');
+    track(kind === 'todo' ? 'home.chip:todo' : 'home.chip:note');
     const typed = ask.trim();
-    // A new item uses the user's own word ("new client: …") so the assistant files it in the right place.
-    const prefix = kind === 'todo' ? capturePrefix(kind, lang()) : newItemTrigger();
-    if (!typed || (captureKind(typed) === kind && !normalizeCapture(typed).replace(/^[^:]+:\s*/, '').trim())) {
-      ask = prefix;
+    const body = quickKind(typed) ? quickBody(typed) : typed;
+    if (!body) {
+      ask = kind === 'todo' ? capturePrefix('todo', lang()) : notePrefix();
       askEl?.focus();
       requestAnimationFrame(() => askEl?.setSelectionRange(ask.length, ask.length));
       return;
     }
-    submit(captureKind(typed) ? '' : prefix, false);
+    saveQuick(kind, body);
+  }
+
+  /** Write a todo or a note straight to the library. The toast offers Undo (todo) or taking the
+   *  note to the assistant (one click: a chat that files it as a new item). */
+  async function saveQuick(kind: 'todo' | 'note', body: string) {
+    if (sending) return;
+    sending = true;
+    try {
+      const r = await post('/capture', { kind, text: body });
+      ask = '';
+      if (kind === 'todo') {
+        track('todo.add');
+        const msg = r?.due ? t('todob.home.todoDue', { date: dueLabelOn(r.due) }) : t('todob.home.todoSaved');
+        const undo = { file: r.file, line: r.line, text: r.text };
+        toast(msg, { kind: 'success', action: { label: t('undo'), run: () => { post('/todos/delete', undo).then(load).catch((e) => failed(t('ui.todo.undoFailed'), e)); } } });
+      } else {
+        track('home.note');
+        toast(t('todob.home.noteSaved'), { kind: 'success', action: { label: t('todob.home.think'), run: () => { think(body, r?.path); } } });
+      }
+      load();
+    } catch (e) { failed(t(kind === 'todo' ? 'ui.todo.addFailed' : 'todob.home.noteFailed'), e); }
+    finally { sending = false; }
+  }
+
+  /** Think a saved note through with the assistant: it is filed as a new item (in the user's own
+   *  word, "new client: …"), so the copy waiting in the inbox is no longer needed. */
+  async function think(body: string, path?: string) {
+    try {
+      const c = await post('/chats', { byUser: false });
+      await post(`/chats/${c.id}/send`, { text: newItemTrigger() + body });
+      if (path) post('/library/delete', { path }).catch(() => {});
+      await refreshChats().catch(() => {});
+      go({ kind: 'chat', id: c.id });
+    } catch (e) { failed(t('ui.home.sendFailed'), e); }
   }
 
   /** Chips from customisations and add-ons only fill the box — the user sees the whole request and
@@ -146,7 +188,7 @@
   const hour = $derived(clock.hour);
   // Arabic says «مساء الخير» from mid-afternoon; «طاب نهارك» covers noon to three. English keeps "afternoon" until six.
   const greeting = $derived(t(hour < 12 ? 'goodMorning' : hour < 15 || (hour < 18 && lang() !== 'ar') ? 'goodAfternoon' : 'goodEvening'));
-  const today = $derived(fmtDate(clock.day + 'T12:00:00', { weekday: 'long', day: 'numeric', month: 'long' }));
+  const today = $derived(fmtDate(clock.day + 'T12:00:00', { weekday: 'long', day: 'numeric', month: 'long' }) + (showHijri() ? ' · ' + fmtHijri(clock.day + 'T12:00:00', { day: 'numeric', month: 'long' }) : ''));
   const dueState = (d: string) => { clock.day; return dueStateOn(d); };
   const dueLabel = (d: string) => { clock.day; return dueLabelOn(d); };
 
@@ -162,10 +204,13 @@
 
   async function submit(prefix = '', typed = true) {
     if (sending) return;
-    const text = normalizeCapture((prefix + ask).trim());
-    if (!text) return askEl?.focus();
+    const raw = (prefix + ask).trim();
+    // "todo: …" and "note: …" are saved straight away; everything else is a message to the assistant.
+    const quick = prefix ? null : quickKind(raw);
+    if (quick && quickBody(raw)) return saveQuick(quick, quickBody(raw));
+    const text = normalizeCapture(raw);
+    if (!text || quick) return askEl?.focus();
     sending = true;
-    if (captureKind(text) === 'todo') track('todo.add');
     // Only that something was typed — never the words themselves (they stay in the chat, nowhere else).
     if (typed && !prefix) track('home.prompt:');
     try {
@@ -363,8 +408,8 @@
       <div class="ask surface">
         <textarea bind:this={askEl} bind:value={ask} onkeydown={keydown} rows="2" placeholder={t('askPlaceholder')} aria-label={t('askPlaceholder')} dir="auto"></textarea>
         <div class="row chips">
-          <button class="chip" disabled={sending} onclick={() => capture('idea')}><Icon name="ideas" size={14} />{term('capture')}</button>
-          <button class="chip" disabled={sending} onclick={() => capture('todo')}><Icon name="todos" size={14} />{t('addTodoChip')}</button>
+          <button class="chip" disabled={sending} onclick={() => capture('todo')} title={t('todob.home.todoHint')}><Icon name="todos" size={14} />{t('addTodoChip')}</button>
+          <button class="chip" disabled={sending} onclick={() => capture('note')} title={t('todob.home.noteHint')}><Icon name="inbox" size={14} />{t('todob.home.note')}</button>
           {#if app.settings?.modules?.checkin}<button class="chip" disabled={sending} onclick={() => { if (sending) return; track('home.chip:check-in'); submit('check-in'); }}><Icon name="calendar" size={14} />{t('checkIn')}</button>{/if}
           {#each [...app.home.chips, ...app.homeChips] as c, i (i + ':' + c.label)}
             <button class="chip" dir="auto" disabled={sending} title={c.prompt.slice(0, 300)} onclick={() => useChip(c)}>{c.label}</button>

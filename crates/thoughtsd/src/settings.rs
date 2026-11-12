@@ -41,6 +41,41 @@ pub struct Settings {
     /// What the user does, in their own words (asked at setup). Shapes suggestions and wording.
     pub profession: Option<String>,
     pub accessibility: Accessibility,
+    pub calendar: CalendarSettings,
+}
+
+/// Calendar preferences: the first day of the week and the weekend (`None` = from the library's
+/// `Week:` line, else the region), Hijri dates beside Gregorian ones, and the time of the reminder
+/// in exported calendar events (`None` = no reminder). Days are counted from Sunday = 0.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CalendarSettings {
+    pub week_start: Option<u8>,
+    pub weekend: Option<Vec<u8>>,
+    /// "gregorian" | "both"
+    pub dates: String,
+    /// "HH:MM"
+    pub alarm: Option<String>,
+}
+
+impl Default for CalendarSettings {
+    fn default() -> Self { Self { week_start: None, weekend: None, dates: "gregorian".into(), alarm: Some("09:00".into()) } }
+}
+
+impl CalendarSettings {
+    /// The reminder time as `(hour, minute)`, when there is a valid one.
+    pub fn alarm_time(&self) -> Option<(u32, u32)> {
+        let t = chrono::NaiveTime::parse_from_str(self.alarm.as_deref()?.trim(), "%H:%M").ok()?;
+        use chrono::Timelike;
+        Some((t.hour(), t.minute()))
+    }
+    fn sanitize(&mut self) {
+        self.week_start = self.week_start.filter(|d| *d < 7);
+        self.weekend = self.weekend.take().map(|w| { let mut w: Vec<u8> = w.into_iter().filter(|d| *d < 7).collect(); w.sort(); w.dedup(); w.truncate(6); w });
+        if !["gregorian", "both"].contains(&self.dates.as_str()) { self.dates = "gregorian".into(); }
+        if self.alarm.is_some() && self.alarm_time().is_none() { self.alarm = None; }
+        if let Some((h, m)) = self.alarm_time() { self.alarm = Some(format!("{h:02}:{m:02}")); }
+    }
 }
 
 /// How the window is shown, for people who need it larger, calmer or clearer.
@@ -263,6 +298,7 @@ impl Default for Settings {
             usage_signals: true,
             profession: None,
             accessibility: Accessibility::default(),
+            calendar: CalendarSettings::default(),
         }
     }
 }
@@ -487,6 +523,7 @@ impl Settings {
         self.profession = self.profession.take().map(|p| p.chars().filter(|c| !c.is_control()).take(200).collect::<String>().trim().to_string()).filter(|p| !p.is_empty());
         self.user_name = self.user_name.chars().filter(|c| !c.is_control()).take(120).collect::<String>().trim().to_string();
         if !["en", "ar"].contains(&self.language.as_str()) { self.language = old.language.clone(); }
+        self.calendar.sanitize();
         // Zero is "unset" for these (a client that sent a partial object): fill them like a loaded file.
         *self = std::mem::take(self).with_defaults();
         Ok(())

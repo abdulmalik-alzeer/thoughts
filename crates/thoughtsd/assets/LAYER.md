@@ -230,6 +230,8 @@ How the Todos page is laid out. All keys optional.
 - `sort` — `"list"` (the order in the files) or `"due"` (earliest date first).
 - `filter` — what the page shows when it opens: `"all"`, `"soon"` (due soon) or `"overdue"`.
 - `showDone` — `true` to show finished todos too.
+- `moveDone` — `true` to move a todo to its list's Done group when it is ticked off (only in lists
+  that have groups; a repeating todo moves on to its next date instead).
 
 ### plugins/*.js — Plugin API v1
 

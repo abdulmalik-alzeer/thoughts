@@ -2,7 +2,7 @@
   import { onMount, tick } from 'svelte';
   import { api, apiBlob, on, post } from '../lib/api';
   import { app, go, track } from '../lib/store.svelte';
-  import { t, tn, fmtNum, lang } from '../lib/i18n';
+  import { t, tn, fmtNum, fmtHijri, lang } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { saveFile } from '../lib/download';
   import TodoCalendar from './TodoCalendar.svelte';
@@ -10,10 +10,12 @@
   import ItemActions from '../lib/ItemActions.svelte';
   import { copyText, dueLabel as dueLabelOn, dueState as dueStateOn, isoDay, normTodo, notify, prettyName, withDue } from '../lib/content/util';
   import { clock } from '../lib/clock.svelte';
+  import { loadLibraryWeek, nextWeekDay, showHijri } from '../lib/weekPrefs.svelte';
+  import { compose, doneGroupOf, REPEATS } from '../lib/todoline';
 
   type Filter = 'all' | 'soon' | 'overdue';
   type GroupBy = 'list' | 'due' | 'tag' | 'none';
-  type Prefs = { groupBy: GroupBy; sort: 'list' | 'due'; filter: Filter; showDone: boolean };
+  type Prefs = { groupBy: GroupBy; sort: 'list' | 'due'; filter: Filter; showDone: boolean; moveDone: boolean };
 
   let { mode = 'list' }: { mode?: 'list' | 'calendar' } = $props();
 
@@ -22,13 +24,14 @@
   const PREF_KEY = 'thoughts.todos.view';
   const GROUPS: GroupBy[] = ['list', 'due', 'tag', 'none'];
   function initial(): Prefs {
-    const base: Prefs = { groupBy: 'list', sort: 'list', filter: 'all', showDone: false };
+    const base: Prefs = { groupBy: 'list', sort: 'list', filter: 'all', showDone: false, moveDone: false };
     const pick = (o: any) => {
       if (!o || typeof o !== 'object') return;
       if (GROUPS.includes(o.groupBy)) base.groupBy = o.groupBy;
       if (o.sort === 'list' || o.sort === 'due') base.sort = o.sort;
       if (['all', 'soon', 'overdue'].includes(o.filter)) base.filter = o.filter;
       if (typeof o.showDone === 'boolean') base.showDone = o.showDone;
+      if (typeof o.moveDone === 'boolean') base.moveDone = o.moveDone;
     };
     pick(app.todosCfg);
     try { pick(JSON.parse(localStorage.getItem(PREF_KEY) || 'null')); } catch { /* ignore */ }
@@ -38,13 +41,13 @@
   let touched = false;
   function remember() {
     touched = true;
-    try { localStorage.setItem(PREF_KEY, JSON.stringify({ groupBy, sort, filter, showDone })); } catch { /* private mode */ }
+    try { localStorage.setItem(PREF_KEY, JSON.stringify({ groupBy, sort, filter, showDone, moveDone })); } catch { /* private mode */ }
   }
   function resetView() {
     try { localStorage.removeItem(PREF_KEY); } catch { /* ignore */ }
     touched = false;
     const d = initial();
-    groupBy = d.groupBy; sort = d.sort; filter = d.filter; showDone = d.showDone;
+    groupBy = d.groupBy; sort = d.sort; filter = d.filter; showDone = d.showDone; moveDone = d.moveDone;
   }
 
   let lists = $state<any[]>([]);
@@ -54,6 +57,8 @@
   let filter = $state<Filter>(start.filter);
   let sort = $state<'list' | 'due'>(start.sort);
   let groupBy = $state<GroupBy>(start.groupBy);
+  // Ticked todos move to their list's Done group (in lists that are grouped).
+  let moveDone = $state(start.moveDone);
   // A customisation applied while this view is open becomes the default straight away — unless the user chose their own.
   $effect(() => { app.todosCfg; if (!touched && !hasOwn()) resetView(); });
   function hasOwn() { try { return !!localStorage.getItem(PREF_KEY); } catch { return false; } }
@@ -62,6 +67,11 @@
   let editing = $state<string | null>(null);
   let editText = $state('');
   let dueFor = $state<string | null>(null);
+  let moveFor = $state<string | null>(null);
+  // Items of the library (ideas, clients…), so a todo can go to one that has no list yet.
+  let items = $state<any[]>([]);
+  let target = $state('');
+  async function loadItems() { try { const r = await api('/library/ideas'); items = Array.isArray(r) ? r : []; } catch { /* the list just offers fewer places */ } }
 
   async function load() {
     try {
@@ -72,7 +82,10 @@
     } catch (e: any) { loadError = e?.message ?? String(e); if (lists.length) failed(t('todo.loadFailed'), e); }
     finally { loading = false; }
   }
-  onMount(() => { load(); return on((e) => { if (['todos.changed', 'library.changed', 'resync'].includes(e.type)) load(); }); });
+  onMount(() => {
+    load(); loadItems(); loadLibraryWeek();
+    return on((e) => { if (['todos.changed', 'library.changed', 'resync'].includes(e.type)) load(); if (e.type === 'library.changed') loadItems(); });
+  });
 
   // Due wording follows the shared clock, so "today" and "overdue" move on at midnight by themselves.
   const dueState = (d: string) => { clock.day; return dueStateOn(d); };
@@ -81,30 +94,43 @@
   // The general list: the service picks the one that exists (the starter keeps it in tasks/TODO.md).
   const GENERAL = '';
 
-  const OP_FAIL: Record<string, string> = { add: 'ui.todo.addFailed', toggle: 'ui.todo.toggleFailed', edit: 'ui.todo.editFailed', delete: 'ui.todo.deleteFailed' };
-  async function op(name: string, body: any): Promise<boolean> {
-    let ok = true;
-    try { await post(`/todos/${name}`, body); } catch (e) { failed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e); ok = false; }
+  const OP_FAIL: Record<string, string> = { add: 'ui.todo.addFailed', toggle: 'ui.todo.toggleFailed', edit: 'ui.todo.editFailed', delete: 'ui.todo.deleteFailed',
+    restore: 'ui.todo.undoFailed', move: 'todob.moveFailed', reorder: 'todob.moveFailed', archive: 'todob.moveFailed' };
+  /** Run one change on a list → the service's answer, or null when it failed (already reported). */
+  async function op(name: string, body: any): Promise<any | null> {
+    let res: any = null;
+    try { res = (await post(`/todos/${name}`, body)) ?? { ok: true }; } catch (e) { failed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e); }
     await load();
-    return ok;
+    return res;
   }
 
-  /** Ticking a todo off can be undone from the toast (un-ticking needs no undo). When the change
-   *  could not be saved the box goes back to what is really in the list. */
+  /** Ticking a todo off can be undone from the toast (un-ticking needs no undo). A repeating todo
+   *  moves on to its next date instead; with "Move ticked todos to Done" a grouped list files it
+   *  under its Done group. When the change could not be saved the box goes back to what is really in the list. */
   async function toggle(l: any, it: any, box?: HTMLInputElement) {
-    const r = ref(l, it);
     const wasDone = it.done;
-    if (!(await op('toggle', r))) { if (box) box.checked = wasDone; return; }
+    const group = moveDone && !wasDone && !it.every && l.groups?.length ? doneGroupOf(l) ?? t('todob.doneGroup') : null;
+    const res = await op('toggle', { ...ref(l, it), group });
+    if (!res) { if (box) box.checked = wasDone; return; }
     if (wasDone) return;
     track('todo.done');
-    notify(t('ui.todo.completed'), { key: 'todo-done', action: { label: t('undo'), run: () => { op('toggle', r); } } });
+    if (res.next) {
+      notify(t('todob.repeatNext', { date: dueLabel(res.next) }), { key: 'todo-done', action: { label: t('undo'), run: () => { op('edit', { file: l.file, line: res.line, text: res.text, new_text: res.previous }); } } });
+      return;
+    }
+    const line = typeof res.line === 'number' ? res.line : it.line;
+    notify(t('ui.todo.completed'), { key: 'todo-done', action: { label: t('undo'), run: () => { op('toggle', { file: l.file, line, text: it.text, group: group ? it.group || null : null }); } } });
   }
 
-  /** Add a todo (optionally due on a day) to a list file — used by the list boxes and by the calendar. */
-  async function addTo(file: string, text: string, due: string | null = null): Promise<boolean> {
-    const ok = await op('add', { file, text: withDue(text, due) });
-    if (ok) track('todo.add');
-    return ok;
+  /** Add a todo (optionally due on a day) to a list file — used by the list boxes and by the calendar.
+   *  Without a day, a date said at the end ("… tomorrow", «… غداً») becomes the due date. */
+  async function addTo(file: string, text: string, due: string | null = null, group: string | null = null): Promise<boolean> {
+    const res = await op('add', { file, text: withDue(text, due), dates: !due, group: group || null });
+    if (!res) return false;
+    track('todo.add');
+    const read = !due && typeof res.text === 'string' ? /@due\((\d{4}-\d{2}-\d{2})\)\s*$/.exec(res.text)?.[1] : null;
+    if (read && !/@due\(/.test(text)) notify(t('todob.dateRead', { date: dueLabel(read) }), { kind: 'success' });
+    return true;
   }
 
   async function downloadCalendar() {
@@ -122,6 +148,15 @@
     if (!text) return;
     drafts[file] = '';
     if (!(await addTo(file, text))) drafts[file] = text;
+  }
+  /** The box at the top: adds to the list chosen beside it (the general list unless changed). */
+  async function addTop() {
+    const text = drafts[GENERAL]?.trim();
+    if (!text) return;
+    drafts[GENERAL] = '';
+    let [file, group] = [GENERAL, ''];
+    try { if (target) [file, group] = JSON.parse(target); } catch { /* general */ }
+    if (!(await addTo(file, text, null, group))) drafts[GENERAL] = text;
   }
 
   async function createFirst() {
@@ -143,16 +178,73 @@
     const title = editText.trim();
     editing = null;
     if (!title || title === it.title) return;
-    await op('edit', { ...ref(l, it), new_text: withDue(title, it.due) });
+    await op('edit', { ...ref(l, it), new_text: compose(title, it.every, it.due) });
   }
   async function setDue(l: any, it: any, due: string | null) {
     dueFor = null;
     if ((due || null) === it.due) return;
-    await op('edit', { ...ref(l, it), new_text: withDue(it.text, due || null) });
+    await op('edit', { ...ref(l, it), new_text: compose(it.title, it.every, due || null) });
   }
+  async function setRepeat(l: any, it: any, every: string | null) {
+    if ((every || null) === (it.every ?? null)) return;
+    dueFor = null;
+    await op('edit', { ...ref(l, it), new_text: compose(it.title, every || null, it.due) });
+  }
+  /** Delete a todo with its notes; Undo puts back exactly the lines that were removed. */
   async function remove(l: any, it: any) {
-    if (!(await op('delete', ref(l, it)))) return;
-    notify(t('todo.deleted'), { action: { label: t('undo'), run: () => { op('add', { file: l.file, text: it.text }); } } });
+    const res = await op('delete', ref(l, it));
+    if (!res) return;
+    const removed = res.removed;
+    const undo = () => Array.isArray(removed?.lines) && removed.lines.length
+      ? op('restore', { file: l.file, line: removed.line, lines: removed.lines })
+      : op('add', { file: l.file, text: it.text });
+    notify(t('todo.deleted'), { action: { label: t('undo'), run: () => { undo(); } } });
+  }
+
+  // ----- moving: to another group or list, and up or down within its group -----
+  type Target = { file: string; group: string };
+  const tkey = (x: Target) => JSON.stringify([x.file, x.group]);
+  const todoFileOf = (path: string) => String(path).replace(/README\.md$/i, 'todo.md');
+  /** Every place a todo can go: each list (by group when it has groups), then items with no list yet. */
+  const places = $derived.by(() => {
+    const out: { label: string; options: { value: string; label: string; file: string; group: string }[] }[] = [];
+    for (const l of lists) {
+      const gs: string[] = l.groups?.length ? l.groups : [''];
+      out.push({ label: listName(l), options: gs.map((g) => ({ value: tkey({ file: l.file, group: g }), label: g || listName(l), file: l.file, group: g })) });
+    }
+    const have = new Set(lists.map((l) => l.file));
+    const others = items.filter((i) => String(i.path).split('/').length === 3 && !have.has(todoFileOf(i.path)))
+      .map((i) => ({ value: tkey({ file: todoFileOf(i.path), group: '' }), label: i.title || prettyName(i.path), file: todoFileOf(i.path), group: '' }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+    if (others.length) out.push({ label: t('todob.newListFor'), options: others });
+    return out;
+  });
+  const placeLabel = (file: string, group: string) => {
+    for (const p of places) for (const o of p.options) if (o.file === file && o.group === group) return group && p.label !== o.label ? `${p.label} › ${o.label}` : o.label;
+    return file;
+  };
+  async function moveTask(l: any, it: any, value: string) {
+    let to: [string, string];
+    try { to = JSON.parse(value); } catch { return; }
+    moveFor = null;
+    const res = await op('move', { ...ref(l, it), to_file: to[0], group: to[1] });
+    if (!res) return;
+    const back = { file: res.file ?? to[0], line: res.line, text: it.text, to_file: l.file, group: it.group || '' };
+    notify(t('todob.moved', { place: placeLabel(to[0], to[1]) }), { action: { label: t('undo'), run: () => { op('move', back); } } });
+  }
+  /** Neighbours in the same group, in file order (moving only ever swaps within a group). */
+  const siblings = (l: any, it: any) => l.items.filter((x: any) => (x.group ?? '') === (it.group ?? ''));
+  async function shiftTask(l: any, it: any, dir: 'up' | 'down') {
+    const res = await op('reorder', { ...ref(l, it), dir });
+    if (!res || typeof res.line !== 'number') return;
+    moveFor = l.file + ':' + res.line;
+    await tick();
+    document.getElementById(`mv-${dir}`)?.focus();
+  }
+  const finishedOutside = (l: any) => { const g = doneGroupOf(l); return l.items.filter((x: any) => x.done && (!g || x.group !== g)).length; };
+  async function archiveList(l: any) {
+    const res = await op('archive', { file: l.file, group: doneGroupOf(l) ?? t('todob.doneGroup') });
+    if (res && res.moved) notify(tn('todob.archived', res.moved), { kind: 'success' });
   }
 
   const matches = (it: any) => {
@@ -221,16 +313,19 @@
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <span class="txt grow" dir="auto" ondblclick={() => startEdit(l, it)}>{it.title}</span>
         {#if showList}<span class="muted from ell" dir="auto">{listName(l)}</span>{/if}
+        {#if it.every}<span class="rep" title={t('todob.rep.' + it.every)}><Icon name="retry" size={11} /><span class="sr-only">{t('todob.repeats')}</span> {t('todob.rep.' + it.every)}</span>{/if}
         {#if it.due}
           {@const s = it.done ? 'later' : dueState(it.due)}
-          <button class="due {s}" onclick={() => (dueFor = dueFor === k ? null : k)} aria-expanded={dueFor === k} title={t('todo.changeDue')}>
+          <button class="due {s}" onclick={() => { moveFor = null; dueFor = dueFor === k ? null : k; }} aria-expanded={dueFor === k} title={t('todo.changeDue')}>
             <Icon name={s === 'overdue' ? 'warning' : 'calendar'} size={12} />
             {#if s === 'overdue'}<b>{t('todo.overdue')}</b> ·{/if}
             {dueLabel(it.due)}
+            {#if showHijri()}<span class="hj" dir="auto">· {fmtHijri(it.due + 'T12:00:00', { day: 'numeric', month: 'short' })}</span>{/if}
           </button>
         {/if}
         <span class="acts">
-          {#if !it.due}<button class="ib" onclick={() => (dueFor = dueFor === k ? null : k)} aria-expanded={dueFor === k} aria-label={t('todo.setDue')} title={t('todo.setDue')}><Icon name="calendar" size={14} /></button>{/if}
+          {#if !it.due}<button class="ib" onclick={() => { moveFor = null; dueFor = dueFor === k ? null : k; }} aria-expanded={dueFor === k} aria-label={t('todo.setDue')} title={t('todo.setDue')}><Icon name="calendar" size={14} /></button>{/if}
+          <button class="ib" onclick={() => { dueFor = null; moveFor = moveFor === k ? null : k; }} aria-expanded={moveFor === k} aria-label={t('todob.moveItem', { title: it.title })} title={t('todob.move')}><Icon name="arrow" size={14} /></button>
           <ItemActions target="todo" name={it.title} item={{ file: l.file, idea: l.idea ?? null, line: it.line, text: it.text, title: it.title, due: it.due, done: it.done, group: it.group ?? null }} />
           <button class="ib" onclick={() => startEdit(l, it)} aria-label={t('todo.editItem', { title: it.title })} title={t('edit')}><Icon name="edit" size={14} /></button>
           <button class="ib" onclick={() => remove(l, it)} aria-label={t('todo.deleteItem', { title: it.title })} title={t('delete')}><Icon name="trash" size={14} /></button>
@@ -243,9 +338,34 @@
         <input id="due-{k}" type="date" lang={lang()} value={it.due ?? ''} onchange={(e) => setDue(l, it, (e.target as HTMLInputElement).value)} />
         <button class="btn sm" onclick={() => setDue(l, it, isoDay())}>{t('todo.today')}</button>
         <button class="btn sm" onclick={() => setDue(l, it, isoDay(1))}>{t('todo.tomorrow')}</button>
-        <button class="btn sm" onclick={() => setDue(l, it, isoDay(7))}>{t('todo.nextWeek')}</button>
+        <button class="btn sm" onclick={() => setDue(l, it, nextWeekDay())}>{t('todo.nextWeek')}</button>
         {#if it.due}<button class="btn ghost sm" onclick={() => setDue(l, it, null)}>{t('todo.clearDue')}</button>{/if}
+        <label class="inl" for="rep-{k}">{t('todob.repeat')}</label>
+        <select id="rep-{k}" class="sel" value={it.every ?? ''} onchange={(e) => setRepeat(l, it, e.currentTarget.value || null)}>
+          <option value="">{t('todob.rep.none')}</option>
+          {#each REPEATS as r}<option value={r}>{t('todob.rep.' + r)}</option>{/each}
+        </select>
         <button class="ib" onclick={() => (dueFor = null)} aria-label={t('close')}><Icon name="close" size={14} /></button>
+      </div>
+    {/if}
+    {#if moveFor === k}
+      {@const sib = siblings(l, it)}
+      {@const pos = sib.findIndex((x: any) => x.line === it.line)}
+      <div class="row duebar">
+        <label class="inl" for="mv-{k}">{t('todob.moveTo')}</label>
+        <select id="mv-{k}" class="sel" onchange={(e) => moveTask(l, it, e.currentTarget.value)}>
+          <option value="" selected disabled>{t('todob.choose')}</option>
+          {#each places as p (p.label)}
+            <optgroup label={p.label}>
+              {#each p.options as o (o.value)}<option value={o.value} disabled={o.file === l.file && o.group === (it.group ?? '')}>{o.label}</option>{/each}
+            </optgroup>
+          {/each}
+        </select>
+        {#if sort === 'list'}
+          <button id="mv-up" class="btn sm" disabled={pos <= 0} onclick={() => shiftTask(l, it, 'up')}><Icon name="send" size={12} /> {t('todob.up')}</button>
+          <button id="mv-down" class="btn sm" disabled={pos < 0 || pos >= sib.length - 1} onclick={() => shiftTask(l, it, 'down')}><Icon name="arrowDown" size={12} /> {t('todob.down')}</button>
+        {/if}
+        <button class="ib" onclick={() => (moveFor = null)} aria-label={t('close')}><Icon name="close" size={14} /></button>
       </div>
     {/if}
   </div>
@@ -304,6 +424,7 @@
         <option value="due">{t('todo.sort.due')}</option>
       </select>
       <label class="row inl"><input type="checkbox" bind:checked={showDone} onchange={remember} /> {t('todo.showDone')}</label>
+      <label class="row inl" title={t('todob.moveDoneHint')}><input type="checkbox" bind:checked={moveDone} onchange={remember} /> {t('todob.moveDone')}</label>
       {#if app.todosCfg && hasOwn()}<button class="btn ghost sm" onclick={resetView} title={t('ui.todo.resetViewHint')}>{t('ui.todo.resetView')}</button>{/if}
     </div>
 
@@ -315,12 +436,19 @@
       </div>
     {/if}
 
-    {#if groupBy !== 'list'}
-      <form class="row add quick" onsubmit={(e) => { e.preventDefault(); add(GENERAL); }}>
-        <input class="grow" placeholder={t('addTodo')} aria-label={t('todo.addTo', { list: t('todo.general') })} bind:value={drafts[GENERAL]} dir="auto" />
-        {#if drafts[GENERAL]?.trim()}<button class="btn primary sm">{t('todo.add')}</button>{/if}
-      </form>
-    {/if}
+    <form class="row add quick" onsubmit={(e) => { e.preventDefault(); addTop(); }}>
+      <input class="grow" placeholder={t('todob.addPlaceholder')} aria-label={t('addTodo')} bind:value={drafts[GENERAL]} dir="auto" />
+      <label class="inl" for="todo-target">{t('todob.addIn')}</label>
+      <select id="todo-target" class="sel" bind:value={target}>
+        <option value="">{t('todo.general')}</option>
+        {#each places as p (p.label)}
+          <optgroup label={p.label}>
+            {#each p.options.filter((o) => o.file !== lists.find((x) => !x.idea)?.file || o.group) as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+          </optgroup>
+        {/each}
+      </select>
+      <button class="btn primary sm" disabled={!drafts[GENERAL]?.trim()}>{t('todo.add')}</button>
+    </form>
 
     {#each sections as sec (sec.id)}
       {@const l = sec.list}
@@ -328,6 +456,7 @@
         <section class="card list" aria-label={sec.title}>
           <div class="row head">
             <b class="grow" dir="auto">{#if sec.overdue}<Icon name="warning" size={13} /> {/if}{sec.title}{#if !l} <span class="muted n">{tn('ui.todo.count', sec.rows.length)}</span>{/if}</b>
+            {#if l && l.groups?.length && finishedOutside(l)}<button class="btn ghost sm" onclick={() => archiveList(l)} title={t('todob.archiveHint')}>{tn('todob.archive', finishedOutside(l))}</button>{/if}
             {#if l}<button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: l.idea ? `${l.idea}/README.md` : l.file })} title={t('todo.openSource')}><bdi>{l.file}</bdi></button>{/if}
           </div>
           {#each sec.rows as r, idx (key(r.l, r.it))}
@@ -358,7 +487,11 @@
   .top { flex-wrap: wrap; }
   .head .n { font-weight: 400; font-size: var(--fs-xs); margin-inline-start: 6px; }
   .from { font-size: var(--fs-xs); max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .quick { margin-top: 10px; }
+  .quick { margin-top: 10px; flex-wrap: wrap; }
+  .quick input { margin-top: 0; }
+  .sel { width: auto; max-width: 240px; font-size: 13px; padding: 4px 8px; }
+  .rep { font-size: var(--fs-xs); color: var(--muted); display: inline-flex; align-items: center; gap: 3px; white-space: nowrap; }
+  .hj { font-weight: 400; opacity: .85; }
 
   .list { margin-top: 12px; }
   .head { margin-bottom: 6px; }

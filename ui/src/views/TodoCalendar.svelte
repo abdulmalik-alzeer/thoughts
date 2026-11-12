@@ -6,7 +6,8 @@
   import { tick } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import { promptDialog } from '../lib/dialog.svelte';
-  import { t, tn, fmtDate, fmtNum, lang } from '../lib/i18n';
+  import { t, tn, fmtDate, fmtHijri, fmtNum, lang } from '../lib/i18n';
+  import { showHijri, weekend, weekStart as firstDay } from '../lib/weekPrefs.svelte';
   import { prettyName } from '../lib/content/util';
   import { clock } from '../lib/clock.svelte';
 
@@ -31,8 +32,12 @@
   let cursor = $state(clock.day); // the focused day; its month is the one shown
   let gridEl = $state<HTMLElement | null>(null);
 
-  // Weeks start on Sunday in Arabic (the Saudi working week), Monday in English.
-  const weekStart = $derived(lang() === 'ar' ? 0 : 1);
+  // The first day and the weekend come from Settings, else the library's working week, else the
+  // region (see weekPrefs): a Saudi user working in English still gets a Sunday–Thursday week.
+  const weekStart = $derived(firstDay());
+  const offDays = $derived(new Set(weekend()));
+  const hijri = $derived(showHijri());
+  const isOff = (d: string) => offDays.has(parse(d).getDay());
   const weeks = $derived.by(() => {
     const first = parse(cursor.slice(0, 8) + '01');
     const lead = (first.getDay() - weekStart + 7) % 7;
@@ -43,6 +48,14 @@
   });
   const weekdays = $derived(weeks[0].map((d) => ({ short: fmtDate(parse(d), { weekday: 'short' }), long: fmtDate(parse(d), { weekday: 'long' }) })));
   const monthTitle = $derived(fmtDate(parse(cursor), { month: 'long', year: 'numeric' }));
+  // The Hijri months the grid's month spans ("Jumada I – Jumada II 1448").
+  const hijriTitle = $derived.by(() => {
+    if (!hijri) return '';
+    const first = parse(cursor.slice(0, 8) + '01');
+    const last = new Date(first.getFullYear(), first.getMonth() + 1, 0, 12);
+    const a = fmtHijri(first, { month: 'long' }), b = fmtHijri(last, { month: 'long', year: 'numeric' });
+    return a && b ? (b.startsWith(a) ? b : `${a} – ${b}`) : '';
+  });
 
   type Row = { l: any; it: any };
   const byDay = $derived.by(() => {
@@ -62,6 +75,7 @@
   function dayLabel(d: string): string {
     const n = openOn(d).length;
     const parts = [fmtDate(parse(d), { weekday: 'long', day: 'numeric', month: 'long' })];
+    if (hijri) parts.push(fmtHijri(parse(d), { day: 'numeric', month: 'long' }));
     if (d === today) parts.push(t('todo.dueToday'));
     parts.push(n ? tn('ui.cal.dayCount', n) : t('ui.cal.dayNone'));
     if (isOverdue(d)) parts.push(t('todo.overdue'));
@@ -100,7 +114,7 @@
 
 <div class="cal">
   <div class="row bar">
-    <h2 class="grow" aria-live="polite">{monthTitle}</h2>
+    <h2 class="grow" aria-live="polite">{monthTitle}{#if hijriTitle} <span class="hjt">{hijriTitle}</span>{/if}</h2>
     <button class="btn" onclick={() => move(today)} disabled={cursor === today}>{t('todo.today')}</button>
     <button class="ib" aria-label={t('ui.cal.prev')} title={t('ui.cal.prev')} onclick={() => move(shiftMonth(cursor, -1))}><Icon name="left" class="flip-rtl" /></button>
     <button class="ib" aria-label={t('ui.cal.next')} title={t('ui.cal.next')} onclick={() => move(shiftMonth(cursor, 1))}><Icon name="right" class="flip-rtl" /></button>
@@ -111,24 +125,25 @@
   <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_interactive_supports_focus -->
   <div class="grid card" role="grid" aria-label={monthTitle} aria-describedby="cal-help" bind:this={gridEl} onkeydown={onKey}>
     <div class="wk head" role="row">
-      {#each weekdays as w (w.long)}<div class="wd" role="columnheader" aria-label={w.long}><span aria-hidden="true">{w.short}</span></div>{/each}
+      {#each weekdays as w, i (w.long)}<div class="wd" class:off={isOff(weeks[0][i])} role="columnheader" aria-label={w.long}><span aria-hidden="true">{w.short}</span></div>{/each}
     </div>
     {#each weeks as week (week[0])}
       <div class="wk" role="row">
         {#each week as d (d)}
           {@const items = byDay.get(d) ?? []}
           {@const out = d.slice(0, 7) !== cursor.slice(0, 7)}
-          <div class="cell" class:out class:today={d === today} class:sel={d === cursor} role="gridcell" aria-selected={d === cursor}>
+          <div class="cell" class:out class:off={isOff(d)} class:today={d === today} class:sel={d === cursor} role="gridcell" aria-selected={d === cursor}>
             <button class="daybtn" data-day={d} tabindex={d === cursor ? 0 : -1} aria-label={dayLabel(d)} title={t('todoa.cal.dayHint')}
               onclick={() => (cursor = d)} ondblclick={() => addOn(d)} onfocus={() => (cursor = d)}>
               <span class="num">{fmtNum(+d.slice(8))}</span>
+              {#if hijri}<span class="hjd" aria-hidden="true">{fmtHijri(parse(d), { day: 'numeric' })}</span>{/if}
               {#if d === today}<span class="tag">{t('todo.dueToday')}</span>{/if}
               {#if isOverdue(d)}<span class="tag late"><Icon name="warning" size={11} /> {t('todo.overdue')}</span>{/if}
             </button>
             <button class="cadd" tabindex="-1" aria-label={t('ui.cal.addHere')} title={t('ui.cal.addHere')} onclick={() => addOn(d)}><Icon name="plus" size={12} /></button>
             <div class="items" aria-hidden="true">
               {#each items.slice(0, 3) as r (r.l.file + r.it.line)}
-                <div class="ev" class:done={r.it.done} class:late={!r.it.done && d < today} dir="auto">{r.it.title}</div>
+                <div class="ev" class:done={r.it.done} class:late={!r.it.done && d < today} dir="auto">{#if r.it.every}<Icon name="retry" size={10} /> {/if}{r.it.title}</div>
               {/each}
               {#if items.length > 3}<div class="ev morec">{tn('ui.cal.more', items.length - 3)}</div>{/if}
             </div>
@@ -140,13 +155,13 @@
 
   <section class="card daylist" aria-label={fmtDate(parse(cursor), { dateStyle: 'full' })}>
     <div class="row">
-      <b class="grow">{fmtDate(parse(cursor), { weekday: 'long', day: 'numeric', month: 'long' })}{#if cursor === today} · {t('todo.dueToday')}{/if}</b>
+      <b class="grow">{fmtDate(parse(cursor), { weekday: 'long', day: 'numeric', month: 'long' })}{#if hijri} <span class="hjt">{fmtHijri(parse(cursor))}</span>{/if}{#if cursor === today} · {t('todo.dueToday')}{/if}</b>
       <button class="btn" onclick={() => addOn(cursor)}><Icon name="plus" size={14} /> {t('ui.cal.addBtn')}</button>
     </div>
     {#each selected as r (r.l.file + r.it.line)}
       <label class="todo" class:done={r.it.done}>
         <input type="checkbox" checked={r.it.done} onchange={(e) => toggle(r.l, r.it, e.currentTarget)} />
-        <span class="grow" dir="auto">{r.it.title}</span>
+        <span class="grow" dir="auto">{r.it.title}{#if r.it.every} <span class="muted sm"><Icon name="retry" size={11} /> {t('todob.rep.' + r.it.every)}</span>{/if}</span>
         {#if !r.it.done && cursor < today}<span class="tag late"><Icon name="warning" size={11} /> {t('todo.overdue')}</span>{/if}
         <span class="muted sm" dir="auto">{listName(r.l)}</span>
         <input type="date" class="mv" lang={lang()} value={r.it.due} aria-label={t('todoa.cal.move', { title: r.it.title })} title={t('todoa.cal.moveHint')}
@@ -180,6 +195,11 @@
   .daybtn:focus-visible { outline: none; }
   .daybtn:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -2px; }
   .num { font-size: 13px; font-weight: 600; }
+  .hjd { font-size: var(--fs-xxs); color: var(--muted); }
+  .hjt { font-size: 13px; font-weight: 400; color: var(--muted); }
+  /* Weekend days are shaded (never colour alone: the column header names the day). */
+  .cell.off:not(.out) { background: color-mix(in srgb, var(--fill) 60%, transparent); }
+  .wd.off { opacity: .8; }
   /* The + appears on the selected day and on hover; it is a mouse shortcut (Enter does the same from the keyboard). */
   .cadd { position: absolute; inset-block-start: 3px; inset-inline-end: 3px; z-index: 1; font: inherit; color: var(--muted); background: var(--bg); border: var(--border-w) solid var(--hairline); border-radius: 6px; width: 22px; height: 22px; padding: 0; display: grid; place-items: center; cursor: pointer; opacity: 0; }
   .cell:hover .cadd, .cell.sel .cadd { opacity: 1; }

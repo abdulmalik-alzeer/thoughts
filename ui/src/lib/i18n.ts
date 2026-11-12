@@ -85,6 +85,11 @@ export const fmtNum = (n: number) => new Intl.NumberFormat(lang() === 'ar' ? 'ar
 export function fmtDate(d: string | number | Date, opts: Intl.DateTimeFormatOptions = { dateStyle: 'medium' }): string {
   return new Intl.DateTimeFormat(lang() === 'ar' ? 'ar-SA-u-ca-gregory-nu-latn' : 'en', opts).format(new Date(d));
 }
+/** The same day in the Hijri (Umm al-Qura) calendar, for showing beside the Gregorian date. */
+export function fmtHijri(d: string | number | Date, opts: Intl.DateTimeFormatOptions = { day: 'numeric', month: 'long', year: 'numeric' }): string {
+  try { return new Intl.DateTimeFormat(lang() === 'ar' ? 'ar-SA-u-ca-islamic-umalqura-nu-latn' : 'en-u-ca-islamic-umalqura', opts).format(new Date(d)); }
+  catch { return ''; }
+}
 
 /** A US-dollar amount (the assistant's usage is billed in dollars) in the app language's number style. */
 export const fmtMoney = (usd: number) =>

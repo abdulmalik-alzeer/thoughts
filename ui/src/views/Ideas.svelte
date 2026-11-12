@@ -3,7 +3,7 @@
   import ItemActions from '../lib/ItemActions.svelte';
   import { onMount } from 'svelte';
   import { api, on, post } from '../lib/api';
-  import { go, refreshChats } from '../lib/store.svelte';
+  import { go, refreshChats, toast } from '../lib/store.svelte';
   import { t, tn, fmtDate, fmtNum } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { areaKey, areaLabel, areaWord, newItemTrigger, term } from '../lib/terms';
@@ -34,8 +34,33 @@
   const byArea = (a: string, b: string) => rank(a) - rank(b) || areaLabel(a).localeCompare(areaLabel(b));
   const allAreas = $derived([...new Set(ideas.map((i) => i.area))].sort(byArea));
   $effect(() => { if (area && !allAreas.includes(area)) area = ''; });
+  // Sorting: most recently updated first (the default), by name, or by status. Remembered on this device.
+  type Sort = 'updated' | 'name' | 'status';
+  const SORT_KEY = 'thoughts.ideas.sort';
+  let sort = $state<Sort>((() => { try { const v = localStorage.getItem(SORT_KEY); return v === 'name' || v === 'status' ? v : 'updated'; } catch { return 'updated'; } })());
+  $effect(() => { const v = sort; try { localStorage.setItem(SORT_KEY, v); } catch { /* private mode */ } });
+  const rankOf = (st: string) => { const i = ORDER.indexOf(st); return i < 0 ? 99 : i; };
+  const byName = (a: any, b: any) => String(a.title ?? '').localeCompare(String(b.title ?? ''));
+  const byUpdated = (a: any, b: any) => String(b.updated ?? '').localeCompare(String(a.updated ?? '')) || byName(a, b);
+  const sorter = $derived(sort === 'name' ? byName : sort === 'status' ? (a: any, b: any) => rankOf(a.status) - rankOf(b.status) || byUpdated(a, b) : byUpdated);
   const shown = $derived(ideas.filter((i) => (!status || i.status === status) && (!area || i.area === area) &&
-    (!q.trim() || fold(`${i.title} ${i.summary} ${(i.tags || []).join(' ')}`).includes(fold(q.trim())))));
+    (!q.trim() || fold(`${i.title} ${i.summary} ${(i.tags || []).join(' ')}`).includes(fold(q.trim())))).sort(sorter));
+
+  // Changing an item's status from its card. The card shows the new status straight away and goes
+  // back if it could not be saved.
+  let saving = $state<Record<string, boolean>>({});
+  async function setStatus(i: any, next: string, sel: HTMLSelectElement) {
+    if (!next || next === i.status || saving[i.path]) return;
+    const prev = i.status;
+    saving[i.path] = true;
+    i.status = next;
+    try {
+      await post('/library/ideas/status', { path: i.path, status: next });
+      toast(t('todob.idea.statusSaved', { title: i.title || '', status: statusLabel(next) }), { kind: 'success', key: 'idea-status:' + i.path,
+        action: { label: t('undo'), run: () => { post('/library/ideas/status', { path: i.path, status: prev }).catch((e) => failed(t('todob.idea.statusFailed'), e)); } } });
+    } catch (e) { i.status = prev; sel.value = prev ?? ''; failed(t('todob.idea.statusFailed'), e); }
+    finally { saving[i.path] = false; }
+  }
   const areas = $derived([...new Set(shown.map((i) => i.area))].sort(byArea));
   // With a work word the page holds more than ideas, so search and the counter speak of items.
   const isWork = $derived(work !== 'ideas');
@@ -88,6 +113,12 @@
         {#each statuses as s}<button class="pill" class:accent={status === s} aria-pressed={status === s} onclick={() => (status = s)}>{statusLabel(s)}</button>{/each}
       </div>
       <span class="grow"></span>
+      <label class="muted sm" for="idea-sort">{t('todob.idea.sort')}</label>
+      <select id="idea-sort" class="sortsel" bind:value={sort}>
+        <option value="updated">{t('todob.idea.sort.updated')}</option>
+        <option value="name">{t('todob.idea.sort.name')}</option>
+        <option value="status">{t('todob.idea.sort.status')}</option>
+      </select>
       <span class="muted sm" role="status">{tn(isWork ? 'todoa.work.count' : 'idea.count', shown.length)}</span>
     </div>
     {#if !shown.length}
@@ -103,12 +134,20 @@
         {#each shown.filter((i) => i.area === a) as i (i.path)}
           <div class="cell">
           <button class="idea surface lit" onclick={() => go({ kind: 'docs', path: i.path })}>
-            <div class="row"><b class="grow" dir="auto">{i.title}</b>{#if i.status}<span class="pill st-{i.status}">{statusLabel(i.status)}</span>{/if}</div>
+            <div class="row"><b class="grow" dir="auto">{i.title}</b><span class="stspace" aria-hidden="true"></span></div>
             <p class="muted" dir="auto">{i.summary}</p>
             {#if i.detailsUnreadable}<p class="warn sm" role="note"><Icon name="warning" size={12} /> {t('todoa.work.unreadable')}</p>{/if}
             <div class="row sm muted"><span class="grow">{when(i.updated)}</span>{#if i.level}<span class="pill"><bdi>{i.level}</bdi></span>{/if}
               {#if i.openTodos}<span class="row" style="gap:4px" title={tn('idea.openTodos', i.openTodos)}><Icon name="todos" size={13} /> <span aria-hidden="true">{fmtNum(i.openTodos)}</span><span class="sr">{tn('idea.openTodos', i.openTodos)}</span></span>{/if}</div>
           </button>
+          <span class="st">
+            <select class="pill st-{i.status}" value={i.status ?? ''} disabled={saving[i.path]} aria-label={t('todob.idea.statusOf', { title: i.title || '' })} title={t('todob.idea.statusHint')}
+              onchange={(e) => setStatus(i, e.currentTarget.value, e.currentTarget)}>
+              {#if !i.status}<option value="" disabled>{t('todob.idea.noStatus')}</option>{/if}
+              {#each ORDER as st (st)}<option value={st}>{statusLabel(st)}</option>{/each}
+              {#if i.status && !ORDER.includes(i.status)}<option value={i.status}>{i.status}</option>{/if}
+            </select>
+          </span>
           <span class="ia"><ItemActions target="idea" name={i.title} item={{ path: i.path, area: i.area, slug: i.slug, title: i.title, status: i.status, summary: i.summary, tags: i.tags, updated: i.updated }} /></span>
           </div>
         {/each}
@@ -131,6 +170,10 @@
   .pill.st-active { background: var(--tint); color: var(--on-tint); }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
   .cell { position: relative; display: grid; }
+  .st { position: absolute; inset-block-start: 12px; inset-inline-end: 12px; }
+  .st select { font: inherit; font-size: var(--fs-xs); font-weight: 500; width: auto; padding: 2px 8px; border-radius: 99px; cursor: pointer; }
+  .stspace { width: 92px; flex: none; }
+  .sortsel { width: auto; font-size: 13px; padding: 4px 8px; }
   .ia { position: absolute; inset-block-end: 8px; inset-inline-end: 8px; }
   .idea { font: inherit; color: inherit; text-align: start; box-sizing: border-box; cursor: pointer; padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; transition: transform .2s; }
   .idea > * { position: relative; }
