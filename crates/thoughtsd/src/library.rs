@@ -26,11 +26,24 @@ pub fn denied(rel: &str) -> bool {
     rel.split(['/', '\\']).any(denied_component)
 }
 
-/// The one way a client-supplied path becomes a real path inside the library:
-/// deny-list first, then `safe_join` (no `..`, no symlink escapes).
+/// Is `p` (a path `safe_join` placed inside `root`) really in a protected folder, whatever name it
+/// was reached by? A link inside the library that leads to `.claude` or `.git`, or a short Windows
+/// name such as `CLAUDE~1`, spells none of the protected names — the real location does.
+fn denied_real(root: &Path, p: &Path) -> bool {
+    let (real_root, real) = (crate::paths::canonical_lenient(root), crate::paths::canonical_lenient(p));
+    // `safe_join` has already kept every link inside the library, so the real path is under the
+    // real root; should it ever not be, that is refused too.
+    real.strip_prefix(&real_root).map_or(true, |rest| denied(&rest.to_string_lossy()))
+}
+
+/// The one way a client-supplied path becomes a real path inside the library: deny-list on the
+/// name as written, `safe_join` (no `..`, no symlink escapes), then the deny-list again on where
+/// the path really leads.
 pub fn resolve(root: &Path, rel: &str) -> anyhow::Result<std::path::PathBuf> {
     if denied(rel) { return Err(crate::tr::err("protected", &[])); }
-    safe_join(root, rel).map_err(|e| if e.downcast_ref::<std::io::Error>().is_some() { e } else { crate::tr::err("invalid.path", &[]) })
+    let p = safe_join(root, rel).map_err(|e| if e.downcast_ref::<std::io::Error>().is_some() { e } else { crate::tr::err("invalid.path", &[]) })?;
+    if denied_real(root, &p) { return Err(crate::tr::err("protected", &[])); }
+    Ok(p)
 }
 
 /// A path the user (or an add-on) wants to create: every part a sensible file or folder name.
@@ -540,6 +553,40 @@ mod tests {
         assert_eq!(read(&d, "notes/a.md").unwrap()["content"], "hello");
         assert!(resolve_mention(&d, "notes/a.md").is_ok());
         for bad in ["/etc/passwd", "../x", "notes/../../x", "~/x", ".git/config", ""] { assert!(resolve_mention(&d, bad).is_err(), "{bad}"); }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// SEC-17: the protected folders stay closed under any name that leads to them.
+    #[cfg(unix)]
+    #[test]
+    fn protected_folders_are_judged_on_where_a_path_really_leads() {
+        let d = tmp();
+        std::fs::create_dir_all(d.join(".claude")).unwrap();
+        std::fs::create_dir_all(d.join(".git")).unwrap();
+        std::fs::create_dir_all(d.join("notes/real")).unwrap();
+        std::fs::write(d.join(".claude/settings.json"), "{}").unwrap();
+        std::fs::write(d.join(".git/config"), "[remote \"origin\"]\n\turl = https://user:token@example.com/x.git\n").unwrap();
+        std::fs::write(d.join("notes/real/a.md"), "a").unwrap();
+        let link = |to: &str, at: &str| std::os::unix::fs::symlink(to, d.join(at)).unwrap();
+        link("../.claude", "notes/cfg");
+        link("../.git", "notes/x");
+        link("../.claude/settings.json", "notes/settings.md");
+        link("real", "notes/alias");
+        // Reading, writing, creating, moving and deleting through the links are all refused…
+        for bad in ["notes/cfg/settings.json", "notes/x/config", "notes/settings.md", "notes/cfg/skills/new/SKILL.md", "notes/cfg", "notes/x"] {
+            assert!(resolve(&d, bad).is_err(), "{bad}");
+            assert!(read(&d, bad).is_err() && read_raw(&d, bad).is_err(), "{bad}");
+            assert!(write(&d, bad, "{\"hooks\":{}}").is_err(), "{bad}");
+            assert!(rename(&d, "notes/real/a.md", bad).is_err() && rename(&d, bad, "notes/moved.md").is_err() && remove(&d, bad).is_err(), "{bad}");
+        }
+        assert!(create(&d, "notes/cfg/hooks.md", "x").is_err());
+        assert!(check_plugin_write(&d, "notes/cfg/settings.json", &["notes".to_string()]).is_err());
+        assert_eq!(std::fs::read_to_string(d.join(".claude/settings.json")).unwrap(), "{}");
+        assert!(!d.join(".claude/skills").exists() && !d.join(".claude/hooks.md").exists());
+        // …while an ordinary link inside the library keeps working.
+        assert_eq!(read(&d, "notes/alias/a.md").unwrap()["content"], "a");
+        write(&d, "notes/alias/b.md", "b").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("notes/real/b.md")).unwrap(), "b");
         std::fs::remove_dir_all(d).unwrap();
     }
 
