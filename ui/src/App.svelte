@@ -169,6 +169,7 @@
   const linkOf = (e: Event) => (e.target as Element | null)?.closest?.('a, area') as HTMLAnchorElement | HTMLAreaElement | null;
   const external = (href: string) => /^(https?:|mailto:)/i.test(href);
   function guardLinks(e: MouseEvent) {
+    linkTip = ''; // a click can remove the link it was over, and its mouseout never comes
     if (e.defaultPrevented) return;
     if (e.type === 'auxclick' && e.button !== 1) return;
     const a = linkOf(e);
@@ -553,6 +554,7 @@
   let firstView = true;
   $effect(() => {
     viewKey;
+    linkTip = '';
     if (!app.ready || !app.settings?.onboarded) return;
     if (firstView) { firstView = false; return; }
     const kind = app.view.kind;
