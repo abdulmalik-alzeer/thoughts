@@ -162,9 +162,15 @@ pub async fn binary(state: &AppState) -> Option<PathBuf> {
     find_binary(&custom, "claude")
 }
 
+/// Set on every assistant process the app starts. A library's own session hook tests it, so the
+/// kit's "bring in the backup when a session starts" only happens in a terminal: inside the app
+/// the daemon does the syncing itself, under its own locks and conflict handling.
+pub const APP_RUN_ENV: &str = "THOUGHTS_APP_RUN";
+
 fn cmd(bin: &Path) -> Command {
     let mut c = crate::proc::command(bin);
     c.env("PATH", shell_path());
+    c.env(APP_RUN_ENV, "1");
     c.stdin(std::process::Stdio::null());
     c.kill_on_drop(true);
     // Its own process group, so stopping a run also ends whatever the assistant started (see `proc::kill_tree`).
@@ -1416,6 +1422,16 @@ mod tests {
         // A flag is used only when the installed program lists it.
         assert!(flag_block(HELP, "--max-budget-usd").is_empty());
         assert!(!flag_block("  --max-budget-usd <amount>   Maximum dollar amount\n", "--max-budget-usd").is_empty());
+    }
+
+    #[test]
+    fn every_assistant_process_is_marked_as_started_by_the_app() {
+        // The kit's session hook tests this name; the two must never drift apart.
+        let c = cmd(Path::new("claude"));
+        let marked = c.as_std().get_envs().any(|(k, v)| k == APP_RUN_ENV && v == Some(std::ffi::OsStr::new("1")));
+        assert!(marked, "the app-run marker is missing from the assistant's environment");
+        let hook = crate::library::STARTER.get_file(".claude/settings.json").unwrap().contents_utf8().unwrap();
+        assert!(hook.contains(&format!("${APP_RUN_ENV}")), "the starter hook no longer tests {APP_RUN_ENV}");
     }
 
     #[test]

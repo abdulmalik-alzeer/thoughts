@@ -20,6 +20,63 @@ use std::path::{Path, PathBuf};
 
 const STARTER_SETTINGS: &str = include_str!("../../../starter/.claude/settings.json");
 
+/// The kit's session hook as shipped up to 0.0.8. It brought in the backup at the start of every
+/// session — app runs included, outside the app's own sync rules. It is still recognised as the
+/// kit's own, and `refresh_starter_hook` swaps it for the current one, which skips app runs.
+const LEGACY_HOOK_COMMAND: &str = "git remote get-url origin >/dev/null 2>&1 && { git pull --rebase --autostash 2>&1 | tail -n 2; } || true";
+
+/// The command of the kit's current session hook, as it is written between the quotes in the file.
+fn starter_hook_in_file() -> Option<String> {
+    let v: Value = serde_json::from_str(STARTER_SETTINGS).ok()?;
+    let quoted = serde_json::to_string(v["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str()?).ok()?;
+    Some(quoted[1..quoted.len() - 1].to_string())
+}
+
+/// The kit's `hooks` setting as 0.0.8 shipped it: the same file with the older command.
+fn legacy_starter_hooks() -> Option<Value> {
+    let v: Value = serde_json::from_str(&STARTER_SETTINGS.replace(&starter_hook_in_file()?, LEGACY_HOOK_COMMAND)).ok()?;
+    v.get("hooks").cloned()
+}
+
+/// A library made with 0.0.8 or earlier still carries the old session hook in
+/// `.claude/settings.json`. Replace just that command with the current one; everything else in the
+/// file stays byte for byte. Returns whether the file was rewritten.
+///
+/// The write goes through `renew_after_app_write`: a folder the user had trusted stays trusted only
+/// if it was trusted just before, nothing else trust looks at changed around the write, and the
+/// file then holds exactly the old text with that one command replaced. In every other case the
+/// record is left alone and the usual question appears. A folder that was not trusted is not
+/// trusted by this.
+pub fn refresh_starter_hook(path: &Path) -> bool { swap_starter_hook(path, || {}) }
+
+/// `meanwhile` runs just before the file is written, between the two looks at the folder: nothing
+/// in the app, but tests change the folder at exactly that moment.
+fn swap_starter_hook(path: &Path, meanwhile: impl FnOnce()) -> bool {
+    let file = path.join(".claude/settings.json");
+    // A plain file only: never write through a link.
+    let plain = |f: &Path| std::fs::symlink_metadata(f).map_or(false, |m| m.is_file());
+    if !plain(&file) { return false; }
+    let Ok(text) = std::fs::read_to_string(&file) else { return false };
+    let Some(current) = starter_hook_in_file() else { return false };
+    if !text.contains(LEGACY_HOOK_COMMAND) || current.contains(LEGACY_HOOK_COMMAND) { return false; }
+    let swapped = text.replace(LEGACY_HOOK_COMMAND, &current);
+    let mut written = false;
+    let renewed = renew_after_app_write(path, &file, Some(swapped.as_bytes()), || {
+        meanwhile();
+        // Someone else wrote the file since it was read: leave their version alone and look again next time.
+        if !plain(&file) || std::fs::read(&file).ok().as_deref() != Some(text.as_bytes()) { anyhow::bail!("the file changed while it was being updated"); }
+        crate::paths::write_atomic(&file, swapped.as_bytes(), false)?;
+        written = true;
+        Ok(())
+    });
+    match renewed {
+        Ok(kept) if written => crate::log::info(format!("updated the starter kit's session hook in {}{}", path.display(), if kept { "" } else { " (the folder's trust record was left as it was)" })),
+        Ok(_) => {}
+        Err(e) => crate::log::warn(format!("could not update the session hook in {}: {e}", file.display())),
+    }
+    written
+}
+
 fn store() -> PathBuf { crate::paths::trusted_file() }
 
 fn canon(p: &Path) -> String { dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().to_string() }
@@ -301,7 +358,9 @@ fn setting_findings(key: &str, value: &Value, starter: &Value) -> Vec<(&'static 
     match key {
         "hooks" => {
             // The starter kit's own hook is known; only what was added to it is listed.
-            let ours = starter.get("hooks").map(hook_pairs).unwrap_or_default();
+            let mut ours = starter.get("hooks").map(hook_pairs).unwrap_or_default();
+            // …and so is the kit's hook as it was up to 0.0.8 (see `refresh_starter_hook`).
+            ours.extend(legacy_starter_hooks().as_ref().map(hook_pairs).unwrap_or_default());
             let added: Vec<(&'static str, String, String)> = hook_pairs(value).into_iter().filter(|p| !ours.contains(p))
                 .map(|(event, cmd)| ("hook", event, cmd)).collect();
             if added.is_empty() { vec![("hook", String::new(), String::new())] } else { added }
@@ -391,12 +450,13 @@ impl Scan {
         use Part::Assistant as A;
         // Claude Code project settings (our own starter hook is known and allowed).
         let starter: Value = serde_json::from_str(STARTER_SETTINGS).unwrap_or_default();
+        let legacy_hooks = legacy_starter_hooks();
         for f in [".claude/settings.json", ".claude/settings.local.json"] {
             let Ok(t) = std::fs::read_to_string(path.join(f)) else { continue };
             let Ok(v) = serde_json::from_str::<Value>(&t) else { self.add(A, "settings_unreadable", f, "", "", Some(format!("{f} could not be read"))); continue };
             let Some(obj) = v.as_object() else { self.add(A, "settings_unreadable", f, "", "", Some(format!("{f} is not a settings object"))); continue };
             for (k, x) in obj {
-                if CLAUDE_SAFE.contains(&k.as_str()) || (k == "hooks" && Some(x) == starter.get("hooks")) { continue; }
+                if CLAUDE_SAFE.contains(&k.as_str()) || (k == "hooks" && (Some(x) == starter.get("hooks") || Some(x) == legacy_hooks.as_ref())) { continue; }
                 // What 0.0.8 called it — nothing for the one key it took for harmless.
                 let old = (k != "cleanupPeriodDays").then(|| format!("Claude \"{k}\" in {f}"));
                 for (kind, name, detail) in setting_findings(k, x, &starter) {
@@ -771,7 +831,11 @@ fn check(path: &Path, scope: Scope) -> Result<(), Untrusted> {
 /// A folder whose `.claude` folders hold anything the starter kit did not put there always has its
 /// state on record — written silently the first time when nothing in it is risky — so that a later
 /// change to those files asks again.
-pub fn require(path: &Path) -> anyhow::Result<()> { Ok(check(path, Scope::Whole)?) }
+pub fn require(path: &Path) -> anyhow::Result<()> {
+    // Before anything runs here: the kit's own session hook must be the one that skips app runs.
+    refresh_starter_hook(path);
+    Ok(check(path, Scope::Whole)?)
+}
 
 /// Before the daemon itself runs git in a library: nothing that makes git run programs (hooks,
 /// filters, aliases, ssh commands…) may have appeared or changed since the folder was trusted.
@@ -903,6 +967,190 @@ mod tests {
         let d = dir("starter");
         std::fs::write(d.join(".claude/settings.json"), STARTER_SETTINGS).unwrap();
         assert!(findings(&d).is_empty());
+    }
+
+    /// `starter/.claude/settings.json` exactly as 0.0.8 shipped it.
+    const SETTINGS_0_0_8: &str = "{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"git remote get-url origin >/dev/null 2>&1 && { git pull --rebase --autostash 2>&1 | tail -n 2; } || true\",\n            \"timeout\": 30,\n            \"statusMessage\": \"Syncing library from remote…\"\n          }\n        ]\n      }\n    ]\n  }\n}\n";
+    const RISKY_SKILL: &str = "---\nname: deploy\nallowed-tools: Bash(*)\n---\nShip it.\n";
+    /// What is on record for a folder, as text (to see that it did not change).
+    fn recorded(d: &Path) -> Option<String> { load().get(&canon(d)).map(|s| format!("{s:?}")) }
+    fn settings_of(d: &Path) -> String { std::fs::read_to_string(d.join(".claude/settings.json")).unwrap() }
+
+    #[test]
+    fn a_library_from_an_older_version_gets_the_new_session_hook_without_being_asked_again() {
+        // Untouched since 0.0.8: still nothing to ask about, and the file becomes the current one.
+        let d = tmp("oldhook");
+        put(&d, ".claude/settings.json", SETTINGS_0_0_8);
+        assert!(findings(&d).is_empty(), "the old hook is still the kit's own");
+        assert!(require(&d).is_ok());
+        assert_eq!(settings_of(&d), STARTER_SETTINGS);
+        assert!(matches!(load().get(&canon(&d)), Some(Stored::Parts(e)) if e.assistant.is_none() && e.git.is_none() && e.files.is_empty()), "nothing of the folder's own left to remember");
+        assert!(!refresh_starter_hook(&d), "a second pass has nothing left to do");
+        assert!(require(&d).is_ok());
+        std::fs::remove_dir_all(d).unwrap();
+
+        // A library the user had trusted, otherwise unchanged: it stays trusted.
+        let d = tmp("oldhook-trusted");
+        put(&d, ".claude/settings.json", SETTINGS_0_0_8);
+        put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        trust(&d).unwrap();
+        assert!(require(&d).is_ok(), "the app's own update must not un-trust the folder");
+        assert_eq!(settings_of(&d), STARTER_SETTINGS);
+        assert!(require(&d).is_ok());
+        // What is on record is the same routine the user trusted, and nothing else.
+        assert!(matches!(load().get(&canon(&d)), Some(Stored::Parts(e)) if e.files.keys().map(String::as_str).collect::<Vec<_>>() == [".claude/skills/deploy/SKILL.md"]));
+        // …and changing that routine afterwards asks, as it always did.
+        put(&d, ".claude/skills/deploy/SKILL.md", &RISKY_SKILL.replace("Ship it.", "Ship it elsewhere."));
+        assert!(question(require(&d)).known);
+        std::fs::remove_dir_all(d).unwrap();
+
+        // The old hook with a hook of the user's beside it: only theirs is listed.
+        let d = tmp("oldhook-plus");
+        put(&d, ".claude/settings.json", &SETTINGS_0_0_8.replacen("\"SessionStart\": [", "\"Stop\": [{\"hooks\": [{\"type\": \"command\", \"command\": \"say done\"}]}],\n    \"SessionStart\": [", 1));
+        let f = findings(&d);
+        assert_eq!(f.iter().map(|x| (x.kind, x.name.as_str(), x.detail.as_str())).collect::<Vec<_>>(), [("hook", "Stop", "say done")]);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn swapping_the_hook_never_trusts_anything_by_itself() {
+        // A folder that was never trusted is not trusted by the swap.
+        let d = tmp("oldhook-untrusted");
+        put(&d, ".claude/settings.json", SETTINGS_0_0_8);
+        put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        assert!(!question(require(&d)).known);
+        assert_eq!(settings_of(&d), STARTER_SETTINGS);
+        assert_eq!(recorded(&d), None);
+        assert!(require(&d).is_err());
+        std::fs::remove_dir_all(d).unwrap();
+
+        // Trusted, and then another assistant file changes while the hook is being swapped (a sync
+        // landing, say): the swap goes through, the change is not waved through with it.
+        let d = tmp("oldhook-race");
+        put(&d, ".claude/settings.json", SETTINGS_0_0_8);
+        put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        trust(&d).unwrap();
+        let decision = recorded(&d);
+        assert!(swap_starter_hook(&d, || put(&d, ".claude/skills/deploy/SKILL.md", &RISKY_SKILL.replace("Ship it.", "Ship it to someone else."))));
+        assert_eq!(settings_of(&d), STARTER_SETTINGS);
+        assert_eq!(recorded(&d), decision, "the stored decision is left exactly as it was");
+        let q = question(require(&d));
+        assert!(q.known && q.changed == ["assistant"] && q.files.contains(&(".claude/skills/deploy/SKILL.md".to_string(), "changed")), "{q:?}");
+        std::fs::remove_dir_all(d).unwrap();
+
+        // A new file appearing at that moment asks as well.
+        let d = tmp("oldhook-race-new");
+        put(&d, ".claude/settings.json", SETTINGS_0_0_8);
+        put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        trust(&d).unwrap();
+        let decision = recorded(&d);
+        assert!(swap_starter_hook(&d, || put(&d, ".claude/skills/deploy/run.sh", "#!/bin/sh\n")));
+        assert_eq!(recorded(&d), decision);
+        assert!(question(require(&d)).files.contains(&(".claude/skills/deploy/run.sh".to_string(), "added")));
+        std::fs::remove_dir_all(d).unwrap();
+
+        // So does something risky appearing in git's part of the folder.
+        let d = tmp("oldhook-race-git");
+        put(&d, ".claude/settings.json", SETTINGS_0_0_8);
+        put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        git(&d, &["init", "-q"]);
+        trust(&d).unwrap();
+        let decision = recorded(&d);
+        assert!(swap_starter_hook(&d, || git(&d, &["config", "core.sshCommand", "sh -c evil"])));
+        assert_eq!(recorded(&d), decision);
+        assert!(question(require(&d)).items.iter().any(|(f, new)| f.kind == "git_setting" && *new));
+        std::fs::remove_dir_all(d).unwrap();
+
+        // The settings file itself is edited at that moment: that edit is kept, not overwritten, and it asks.
+        let d = tmp("oldhook-race-settings");
+        put(&d, ".claude/settings.json", SETTINGS_0_0_8);
+        put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        trust(&d).unwrap();
+        let decision = recorded(&d);
+        let edited = SETTINGS_0_0_8.replacen("{\n", "{\n  \"apiKeyHelper\": \"sh -c evil\",\n", 1);
+        assert!(!swap_starter_hook(&d, || put(&d, ".claude/settings.json", &edited)));
+        assert_eq!(settings_of(&d), edited);
+        assert_eq!(recorded(&d), decision);
+        assert!(question(require(&d)).items.iter().any(|(f, _)| f.name == "apiKeyHelper"));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn only_the_kits_own_hook_line_is_ever_rewritten() {
+        // Other settings beside the old hook are kept byte for byte.
+        let d = tmp("oldhook-edited");
+        let mine = SETTINGS_0_0_8.replacen("{\n", "{\n  \"language\": \"arabic\",\n", 1).replace('\n', "\r\n");
+        put(&d, ".claude/settings.json", &mine);
+        assert!(refresh_starter_hook(&d));
+        let now = settings_of(&d);
+        assert_eq!(now, mine.replace(LEGACY_HOOK_COMMAND, &starter_hook_in_file().unwrap()));
+        assert!(now.contains("\"language\": \"arabic\",\r\n") && !now.contains(LEGACY_HOOK_COMMAND));
+        assert!(serde_json::from_str::<Value>(&now).is_ok() && require(&d).is_ok());
+        // Someone else's hook is left alone, and still asks.
+        let other = r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"git pull"}]}]}}"#;
+        put(&d, ".claude/settings.json", other);
+        assert!(!refresh_starter_hook(&d));
+        assert_eq!(settings_of(&d), other);
+        assert!(require(&d).is_err());
+        // No settings file, or a link in its place: nothing is written.
+        std::fs::remove_file(d.join(".claude/settings.json")).unwrap();
+        assert!(!refresh_starter_hook(&d));
+        #[cfg(unix)]
+        {
+            put(&d, "elsewhere.json", SETTINGS_0_0_8);
+            std::os::unix::fs::symlink(d.join("elsewhere.json"), d.join(".claude/settings.json")).unwrap();
+            assert!(!refresh_starter_hook(&d));
+            assert_eq!(std::fs::read_to_string(d.join("elsewhere.json")).unwrap(), SETTINGS_0_0_8);
+        }
+        // The swap can never loop: the new command does not contain the old one.
+        assert!(!STARTER_SETTINGS.contains(LEGACY_HOOK_COMMAND));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// The hook itself, run the way Claude Code runs it: in an app run it must not touch the library.
+    #[cfg(unix)]
+    #[test]
+    fn the_session_hook_does_nothing_inside_an_app_run() {
+        let v: Value = serde_json::from_str(STARTER_SETTINGS).unwrap();
+        let hook = v["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap().to_string();
+        let root = tmp("hookrun");
+        let git = |dir: &Path, a: &[&str]| {
+            let o = std::process::Command::new("git").current_dir(dir).args(["-c", "user.name=T", "-c", "user.email=t@localhost", "-c", "commit.gpgSign=false"]).args(a)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+            assert!(o.status.success(), "git {a:?}: {}", String::from_utf8_lossy(&o.stderr));
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        };
+        git(&root, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+        git(&root, &["clone", "-q", "origin.git", "a"]);
+        let (a, b) = (root.join("a"), root.join("b"));
+        std::fs::write(a.join("TODO.md"), "one\n").unwrap();
+        git(&a, &["add", "-A"]); git(&a, &["commit", "-q", "-m", "first"]); git(&a, &["push", "-q", "origin", "HEAD:main"]);
+        git(&root, &["clone", "-q", "origin.git", "b"]);
+        // The other computer changes the same line this one has changed and not yet sent.
+        std::fs::write(a.join("TODO.md"), "one, edited there\n").unwrap();
+        git(&a, &["commit", "-q", "-am", "there"]); git(&a, &["push", "-q", "origin", "HEAD:main"]);
+        std::fs::write(b.join("TODO.md"), "one, edited here\n").unwrap();
+        git(&b, &["commit", "-q", "-am", "here"]);
+        let before = git(&b, &["rev-parse", "HEAD"]);
+        let run = |app: bool| {
+            let mut c = std::process::Command::new("sh");
+            c.current_dir(&b).args(["-c", &hook]).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "T").env("GIT_AUTHOR_EMAIL", "t@localhost").env("GIT_COMMITTER_NAME", "T").env("GIT_COMMITTER_EMAIL", "t@localhost")
+                .env_remove(crate::claude::APP_RUN_ENV);
+            if app { c.env(crate::claude::APP_RUN_ENV, "1"); }
+            assert!(c.output().unwrap().status.success(), "the hook must never fail a session");
+        };
+        // Started by the app: nothing is fetched, nothing is rebased, the file is as it was.
+        run(true);
+        assert_eq!(git(&b, &["rev-parse", "HEAD"]), before);
+        assert_eq!(git(&b, &["symbolic-ref", "--short", "HEAD"]), "main");
+        assert!(!b.join(".git/rebase-merge").exists() && !b.join(".git/rebase-apply").exists());
+        assert_eq!(std::fs::read_to_string(b.join("TODO.md")).unwrap(), "one, edited here\n");
+        assert!(git(&b, &["rev-parse", "origin/main"]) != git(&a, &["rev-parse", "HEAD"]), "nothing was fetched");
+        // In a terminal (no marker) it still pulls, as the kit's rules describe.
+        run(false);
+        assert_eq!(git(&b, &["rev-parse", "origin/main"]), git(&a, &["rev-parse", "HEAD"]));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

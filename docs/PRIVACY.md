@@ -140,7 +140,7 @@ If you cannot answer these for the plan you are on, treat client material as not
 
 A library is a folder of text, but a folder can also carry settings and instructions that make the assistant or the sync tool run programs. When you open a library that Thoughts did not create itself — one you downloaded, or received from someone — Thoughts first lists anything in it that could run a program on your computer, or that changes the assistant's standing instructions from the ones Thoughts ships, and asks whether you trust the folder. Nothing in the folder is run until you say yes. If those settings or instructions change later, you are asked again.
 
-Libraries created by Thoughts contain one such setting, which fetches the latest synced copy when a session starts. Only trust a library from someone you would let run software on your computer.
+Libraries created by Thoughts contain one such setting. It fetches the latest synced copy when you start the assistant in the library yourself, outside the app; inside Thoughts it does nothing, because the app does the syncing. Only trust a library from someone you would let run software on your computer.
 
 ## Deleting everything
 

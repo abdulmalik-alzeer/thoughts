@@ -107,6 +107,13 @@ Thoughts.app
   sub-folder is opened as a project, which is checked as a folder of its own.
 - The starter's own SessionStart hook is recognised by exact JSON equality with
   `starter/.claude/settings.json`. Changing that file changes what is treated as known-safe.
+  The hook pulls from the backup only in a terminal session: every assistant process the app
+  starts carries `THOUGHTS_APP_RUN=1` (`claude.rs`), and the hook does nothing when it is set, so
+  inside the app only the daemon's own guarded sync touches the repository. The hook as shipped
+  up to 0.0.8 had no such test; it is still recognised, and `trust::require` replaces that one
+  command in an existing library before anything runs. The write goes through
+  `trust::renew_after_app_write`, so a folder the user trusted stays trusted only when nothing
+  else trust looks at changed around the write; otherwise the usual question appears.
 - Markdown under `.claude/` (skills, commands, agents, and the presets once the init skill has
   moved them to `.claude/presets/`) is standing instruction for the assistant, so it is part of
   the check: each `.claude/**/*.md` file is compared byte-for-byte with the starter's version. A
