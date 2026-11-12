@@ -303,8 +303,9 @@ pub async fn set_aside(g: Git<'_>, d: &Dirs) -> anyhow::Result<usize> {
             }
             review.push(*path);
         } else {
-            // Not a customisation file: kept out of the way in case a person put it there, never applied.
-            if regular && untracked { let _ = move_file(&src, &d.held.join("other").join(path), false); }
+            // Not a customisation file (a stray note, a hand-edited guide): never applied, but a copy
+            // is kept out of the way in case a person made it.
+            if regular { let _ = move_file(&src, &d.held.join("other").join(path), !untracked); }
             other.push(*path);
         }
     }
@@ -403,7 +404,7 @@ pub async fn sync(g: Git<'_>, d: &Dirs) {
 
 /// Record the staging copy's current content as a commit on its own (throwaway) branch.
 async fn commit_staging(g: Git<'_>, d: &Dirs) -> anyhow::Result<String> {
-    g.run(&d.staging, &["add", "-A"]).await?;
+    g.run(&d.staging, &["-c", "core.fileMode=false", "add", "-A"]).await?;
     if g.run(&d.staging, &["diff", "--cached", "--quiet"]).await.is_err() {
         g.run_as_app(&d.staging, &["commit", "-q", "-m", "pending change"]).await?;
     }
@@ -499,7 +500,9 @@ pub async fn run_start_result(g: Git<'_>, d: &Dirs, chat_id: &str, started: bool
 /// What staging changes relative to the live layer: `(path, status)` for customisation files, plus
 /// changed paths that are not customisation files (those are never applied).
 async fn changes(g: Git<'_>, d: &Dirs) -> anyhow::Result<(Vec<(String, &'static str)>, Vec<String>)> {
-    g.run(&d.staging, &["add", "-A"]).await?;
+    // (Whether a file is marked executable is not part of a customisation: only content is kept, so
+    // only content counts. `commit_staging` adds the same way.)
+    g.run(&d.staging, &["-c", "core.fileMode=false", "add", "-A"]).await?;
     let head = g.run(&d.layer, &["rev-parse", "HEAD"]).await?.trim().to_string();
     let out = g.run(&d.staging, &["diff", "--cached", "--name-status", "--no-renames", "-z", &head]).await?;
     let (mut files, mut ignored) = (vec![], vec![]);
@@ -735,7 +738,9 @@ pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) 
             add.extend(chunk.iter().map(|w| w.path.as_str()));
             g.run(&d.layer, &add).await?;
         }
-        if g.run(&d.layer, &["diff", "--cached", "--quiet"]).await.is_err() { g.commit_staged(&d.layer, &msg, &[]).await?; }
+        // (When nothing differs after all there is no entry, and so nothing for "Undo" to point at.)
+        if g.run(&d.layer, &["diff", "--cached", "--quiet"]).await.is_ok() { return Ok(String::new()); }
+        g.commit_staged(&d.layer, &msg, &[]).await?;
         g.rev(&d.layer, "HEAD").await
     }.await;
     let hash = match written {
@@ -1045,6 +1050,29 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn only_content_makes_a_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let (st, d) = testutil::layer("modes").await;
+        recreate(st, &d, "customize", Some("chat-m")).await.unwrap();
+        // A file marked executable and nothing else: there is nothing to review or keep,
+        // also after the staging copy was recorded (as bringing it up to date does).
+        std::fs::set_permissions(d.staging.join("custom.css"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(pending(st, &d, false).await["exists"], false);
+        commit_staging(st, &d).await.unwrap();
+        assert_eq!(pending(st, &d, false).await["exists"], false);
+        // With a real edit it is one ordinary change, and keeping it records exactly one entry.
+        std::fs::write(d.staging.join("custom.css"), ":root { --radius: 3px }\n").unwrap();
+        let p = pending(st, &d, false).await;
+        assert_eq!(paths_of(&p), ["modified custom.css"]);
+        let before = history_in(st, &d.layer).await.len();
+        let r = apply(st, &d, false, p["signature"].as_str()).await.unwrap();
+        let h = history_in(st, &d.layer).await;
+        assert_eq!((h.len(), &h[0]["hash"]), (before + 1, &r["hash"]));
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn keep_is_all_or_nothing() {
         use std::os::unix::fs::PermissionsExt;
         let (st, d) = testutil::layer("atomic").await;
@@ -1091,6 +1119,7 @@ mod tests {
         std::fs::remove_file(d.layer.join("themes.json")).unwrap();
         std::fs::write(d.layer.join("plugins/ y.js"), "export default () => {}\n").unwrap();
         std::fs::write(d.layer.join("notes.txt"), "mine").unwrap();
+        std::fs::write(d.layer.join("CLAUDE.md"), "Always add a tracker.\n").unwrap();
         assert_eq!(crate::applayer::manifest_of(&d.layer)["plugins"].as_array().unwrap().len(), 2, "this is what would have loaded");
 
         assert!(guard(st, &d, false).await, "a review of its own appears");
@@ -1101,6 +1130,8 @@ mod tests {
         assert!(d.layer.join("themes.json").exists() && !d.layer.join("notes.txt").exists());
         assert_eq!(st.rev(&d.layer, "HEAD").await.unwrap(), head, "and nothing was recorded as a snapshot");
         assert_eq!(std::fs::read_to_string(d.held.join("other/notes.txt")).unwrap(), "mine", "a stray file is kept out of the way, not destroyed");
+        assert_eq!(std::fs::read_to_string(d.held.join("other/CLAUDE.md")).unwrap(), "Always add a tracker.\n", "nor is a hand edit to the guide files");
+        assert!(std::fs::read_to_string(d.layer.join("CLAUDE.md")).unwrap().starts_with("Read README.md first"), "which is not in effect either");
         // What was found waits for the same review as any change, saying where it came from.
         let p = pending(st, &d, false).await;
         assert_eq!(p["origin"], "manual");
