@@ -1554,6 +1554,11 @@ pub async fn start_run(
         return Err(crate::tr::err("bypass.chat_only", &[]));
     }
     let mut deny = private_deny_settings(library.as_deref(), &spec.cwd, &private_paths)?;
+    // A library inside another (a pair listed before that was refused), or around it: each one's
+    // private folders are closed to the run as well.
+    for other in crate::libraries::around(&settings, &spec.cwd, &spec.add_dirs, library.as_deref()) {
+        deny = merge_deny(deny, private_deny_settings(Some(&other), &spec.cwd, &settings.private_paths_of(Some(&other)))?);
+    }
     // Reorganize and Wrap work in a second checkout of the library: private folders are off-limits there too.
     if spec.cwd == reorg || crate::wraps::is_copy(&spec.cwd) {
         deny = merge_deny(deny, private_deny_settings(Some(&spec.cwd), &spec.cwd, &private_paths)?);

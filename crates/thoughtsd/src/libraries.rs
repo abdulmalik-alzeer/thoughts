@@ -110,7 +110,7 @@ async fn add_back(State(st): S, Json(b): Json<AddReq>) -> R {
     let (s, id) = {
         let mut cur = st.settings.write().await;
         let mut next = cur.clone();
-        let id = next.list_folder(&folder.to_string_lossy());
+        let id = next.list_folder(&folder.to_string_lossy())?;
         next.save()?;
         *cur = next.clone();
         (next, id)
@@ -168,7 +168,7 @@ pub fn added(old: &Settings, form: Settings, path: &str, name: &str) -> anyhow::
     own.projects.clear();
     own.last_wrap = None;
     let mut s = old.clone();
-    let id = s.open_folder(path, Some(own));
+    let id = s.open_folder(path, Some(own))?;
     if !name.trim().is_empty() { s.rename_library(&id, name)?; }
     Ok(s)
 }
@@ -188,6 +188,21 @@ fn library_holding(s: &Settings, p: &std::path::Path) -> Option<PathBuf> {
     s.library().into_iter().chain(s.libraries.iter().map(|l| PathBuf::from(&l.path)))
         .filter(|l| real.starts_with(crate::paths::canonical_lenient(l)))
         .max_by_key(|l| crate::paths::canonical_lenient(l).components().count())
+}
+
+/// Every listed library (open or not) besides `own` that holds `cwd` or one of `add_dirs`, or sits
+/// inside one of them. Libraries are never added one inside another, but a pair from before that
+/// was refused may be listed: a run in either is then denied the private folders of both.
+pub fn around(s: &Settings, cwd: &std::path::Path, add_dirs: &[PathBuf], own: Option<&std::path::Path>) -> Vec<PathBuf> {
+    let dirs: Vec<PathBuf> = std::iter::once(cwd).chain(add_dirs.iter().map(PathBuf::as_path)).map(crate::paths::canonical_lenient).collect();
+    let own = own.map(crate::paths::canonical_lenient);
+    let mut out: Vec<PathBuf> = vec![];
+    for l in s.library().into_iter().chain(s.libraries.iter().map(|l| PathBuf::from(&l.path))) {
+        let real = crate::paths::canonical_lenient(&l);
+        if own.as_ref() == Some(&real) || out.iter().any(|o| crate::paths::canonical_lenient(o) == real) { continue; }
+        if dirs.iter().any(|d| d.starts_with(&real) || real.starts_with(d)) { out.push(l); }
+    }
+    out
 }
 
 /// Is `lib` the open library or one in the list?
@@ -290,8 +305,8 @@ mod tests {
         let mut s = st.settings.write().await;
         s.onboarded = true;
         s.private_paths = vec!["clients".into()];
-        let a_id = s.open_folder(&a.to_string_lossy(), None);
-        let b_id = s.open_folder(&b.to_string_lossy(), None);
+        let a_id = s.open_folder(&a.to_string_lossy(), None).unwrap();
+        let b_id = s.open_folder(&b.to_string_lossy(), None).unwrap();
         s.private_paths = vec![];
         s.switch_to(&a_id).unwrap();
         (a_id, b_id)
@@ -667,6 +682,78 @@ mod tests {
         std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
     }
 
+    #[tokio::test]
+    async fn a_library_is_never_added_inside_another_or_around_one() {
+        let (st, a) = t::library().await;
+        let root = a.parent().unwrap().to_path_buf();
+        { let mut s = st.settings.write().await; s.onboarded = true; *s = std::mem::take(&mut *s).with_defaults(); }
+        let inner = a.join("clients/acme");
+        t::write(&inner, "CLAUDE.md", "# Rules\n");
+        t::write(&root, "INDEX.md", "# Everything\n");
+        let port = serve(&st).await;
+        for (folder, what) in [(&inner, "inside"), (&root, "around")] {
+            let (code, r) = http(port, "POST", "/api/libraries/add", &json!({"path": folder.to_string_lossy()}).to_string(), None).await;
+            assert_eq!(code, 422, "{what}: {r}");
+            assert!(r["error"].as_str().unwrap().contains("\"library\""), "names the other library: {r}");
+        }
+        // Nor through setup's "add a library", before anything is made.
+        let mut form = serde_json::to_value(&*st.settings.read().await).unwrap();
+        let fresh = a.join("notes/new-library");
+        form["libraryPath"] = json!(fresh.to_string_lossy());
+        let body = json!({"settings": form, "libraryMode": "new", "assistantLater": true, "addLibrary": true});
+        assert_eq!(http(port, "POST", "/api/onboarding", &body.to_string(), None).await.0, 422);
+        assert!(!fresh.exists());
+        // Nor by pointing the library folder of Settings there.
+        let mut v = serde_json::to_value(&*st.settings.read().await).unwrap();
+        v["libraryPath"] = json!(inner.to_string_lossy());
+        assert_eq!(http(port, "PUT", "/api/settings", &v.to_string(), None).await.0, 422);
+        assert_eq!(st.settings.read().await.libraries.len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_nested_pair_listed_earlier_closes_both_libraries_private_folders() {
+        let (st, outer) = t::library().await;
+        let inner = outer.join("team");
+        t::write(&inner, "CLAUDE.md", "# Team rules\n");
+        // A pair from an older settings file: the inner library open, the outer one parked.
+        {
+            let mut s = st.settings.write().await;
+            s.onboarded = true;
+            s.private_paths = vec!["clients".into()];
+            *s = std::mem::take(&mut *s).with_defaults();
+            let parked = s.own();
+            s.libraries.push(crate::settings::Library { id: "lib-inner".into(), name: String::new(), path: inner.to_string_lossy().to_string(), parked: None });
+            s.libraries[0].parked = Some(parked);
+            s.library_path = Some(inner.to_string_lossy().to_string());
+            s.private_paths = vec!["diary".into()];
+            *s = std::mem::take(&mut *s).with_defaults();
+        }
+        let in_inner = t::chat(&st, "about the team").await;
+        st.chats.update(&in_inner, |c| c.library = Some(inner.to_string_lossy().to_string())).await;
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
+        let s2 = seen.clone();
+        t::assistant(&st, move |info| { let s = s2.clone(); async move { s.lock().unwrap().push(info.deny.clone()); true } });
+        let wait = |n: usize| { let seen = seen.clone(); async move { for _ in 0..400 { if seen.lock().unwrap().len() >= n { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; } } };
+        crate::claude::start_run(st.clone(), spec(&in_inner, &inner, vec![]), None).await.unwrap();
+        wait(1).await;
+        let deny = seen.lock().unwrap()[0].clone();
+        let outer_clients = outer.join("clients").to_string_lossy().to_string();
+        assert!(deny.iter().any(|d| d.contains("diary")), "its own: {deny:?}");
+        assert!(deny.iter().any(|d| d.contains(&outer_clients)), "the library around it: {deny:?}");
+        // And the other way round: a run in the outer library is kept out of the inner one's.
+        let outer_id = st.settings.read().await.libraries[0].id.clone();
+        st.settings.write().await.switch_to(&outer_id).unwrap();
+        let in_outer = t::chat(&st, "about everything").await;
+        st.chats.update(&in_outer, |c| c.library = Some(outer.to_string_lossy().to_string())).await;
+        crate::claude::start_run(st.clone(), spec(&in_outer, &outer, vec![]), None).await.unwrap();
+        wait(2).await;
+        let deny = seen.lock().unwrap()[1].clone();
+        assert!(deny.iter().any(|d| d.contains("clients")), "{deny:?}");
+        assert!(deny.iter().any(|d| d.contains(&inner.join("diary").to_string_lossy().to_string())), "the library inside it: {deny:?}");
+        std::fs::remove_dir_all(outer.parent().unwrap()).unwrap();
+    }
+
     #[test]
     fn only_changes_from_a_window_showing_another_library_are_refused() {
         let (a, b) = (Some("lib-a"), Some("lib-b"));
@@ -699,7 +786,7 @@ mod tests {
         assert_eq!(st.chats.meta("0a8-chat").await.unwrap().library.as_deref(), Some(key_a.as_str()));
         assert!(st.chats.meta(&custom_id).await.unwrap().library.is_none(), "customising the app belongs to no library");
         // Another library is opened and the app starts again: they stay where they were tied once.
-        st.settings.write().await.open_folder(&b.to_string_lossy(), None);
+        st.settings.write().await.open_folder(&b.to_string_lossy(), None).unwrap();
         wraps::recover_chats(&st).await;
         assert_eq!(st.chats.meta("0a8-chat").await.unwrap().library.as_deref(), Some(key_a.as_str()));
         assert!(!wraps::Scope::now(&st).await.holds(Some(&key_a)), "not listed while the second library is open");

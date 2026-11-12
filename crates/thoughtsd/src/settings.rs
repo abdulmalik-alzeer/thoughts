@@ -860,31 +860,57 @@ impl Settings {
     /// Open the library in folder `path` — the listed one there, or a new entry — parking the open
     /// one's settings. `own`: the new library's settings when the user just chose them (setup);
     /// otherwise a listed one gets its own back and a new one starts from `for_new`. Returns its id.
-    pub fn open_folder(&mut self, path: &str, own: Option<LibrarySettings>) -> String {
-        let id = self.list_folder(path);
-        // Cannot fail: the id was just found or made.
-        let _ = self.switch_to(&id);
+    pub fn open_folder(&mut self, path: &str, own: Option<LibrarySettings>) -> anyhow::Result<String> {
+        let id = self.list_folder(path)?;
+        self.switch_to(&id)?;
         if let Some(o) = own { self.set_own(o); }
-        id
+        Ok(id)
+    }
+
+    /// A listed library (the open one included) that sits inside folder `path` or holds it — never
+    /// one in that very folder. `except`: a library id to leave out (the open one, when it moves).
+    pub fn nested_library(&self, path: &std::path::Path, except: Option<&str>) -> Option<Library> {
+        let real = crate::paths::canonical_lenient(path);
+        let mut all: Vec<Library> = self.libraries.clone();
+        if let Some(p) = self.library_path.clone().filter(|p| !p.trim().is_empty()) {
+            if self.open_index().is_none() { all.push(Library { id: String::new(), name: String::new(), path: p, parked: None }); }
+        }
+        all.into_iter().filter(|l| except.map_or(true, |e| l.id != e)).find(|l| {
+            let other = crate::paths::canonical_lenient(std::path::Path::new(&l.path));
+            other != real && (other.starts_with(&real) || real.starts_with(&other))
+        })
+    }
+
+    /// Refuse a folder that is inside another listed library or holds one: the outer library's
+    /// private folders would then not be closed to runs in the inner one (and the other way round).
+    fn check_not_nested(&self, path: &str, except: Option<&str>) -> anyhow::Result<()> {
+        match self.nested_library(std::path::Path::new(path), except) {
+            Some(l) => Err(crate::tr::err("libs.nested", &[("name", &l.display_name())])),
+            None => Ok(()),
+        }
     }
 
     /// Put the library in folder `path` on the list without opening it (the one there already, or a
     /// new entry that will start from `for_new`). Returns its id.
-    pub fn list_folder(&mut self, path: &str) -> String {
+    pub fn list_folder(&mut self, path: &str) -> anyhow::Result<String> {
         self.list_open_library();
-        if let Some(l) = self.library_at(std::path::Path::new(path)) { return l.id.clone(); }
+        if let Some(l) = self.library_at(std::path::Path::new(path)) { return Ok(l.id.clone()); }
+        self.check_not_nested(path, None)?;
         let mut id = library_id_for(path);
         while self.libraries.iter().any(|l| l.id == id) { id = format!("lib-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]); }
         self.libraries.push(Library { id: id.clone(), name: String::new(), path: path.to_string(), parked: None });
-        id
+        Ok(id)
     }
 
     /// The open library is now at `path` (its folder was moved or renamed): same entry, same settings.
-    pub fn move_open_library(&mut self, path: &str) {
+    pub fn move_open_library(&mut self, path: &str) -> anyhow::Result<()> {
         self.list_open_library();
+        let open_id = self.library_id();
+        self.check_not_nested(path, open_id.as_deref())?;
         if let Some(i) = self.open_index() { self.libraries[i].path = path.to_string(); }
         self.library_path = Some(path.to_string());
         self.list_open_library();
+        Ok(())
     }
 
     /// Give library `id` a name of the user's choosing (empty: its folder's name).
@@ -1313,7 +1339,7 @@ mod tests {
         let a = s.library_id().unwrap();
         let a_own = s.own();
         // A new library starts with the same kind of backup and line of work, and nothing of A's folder.
-        let b = s.open_folder("/work/Personal", None);
+        let b = s.open_folder("/work/Personal", None).unwrap();
         assert_ne!(a, b);
         assert_eq!(s.library_path.as_deref(), Some("/work/Personal"));
         assert_eq!(s.library_id().as_deref(), Some(b.as_str()));
@@ -1340,11 +1366,20 @@ mod tests {
         assert_eq!(s.settings_of(Path::new("/work/Personal")).unwrap().private_paths, ["diary"]);
         assert_eq!((s.language.as_str(), s.sync.credential_store.as_str()), ("ar", "file"));
         // Opening the folder that is already listed opens that library, not a second entry.
-        assert_eq!(s.open_folder("/work/Personal/", None), b);
+        assert_eq!(s.open_folder("/work/Personal/", None).unwrap(), b);
         assert_eq!(s.libraries.len(), 2);
         assert_eq!(s.private_paths, ["diary"]);
         // Unknown ids are refused and change nothing.
         assert!(s.switch_to("lib-nope").is_err());
+        // One library never goes inside another, nor around one: not opened, not moved there.
+        for nested in ["/work/Acme/clients", "/work/Personal/sub/deeper", "/work", "/"] {
+            assert!(s.open_folder(nested, None).is_err(), "{nested}");
+            assert_eq!(s.nested_library(Path::new(nested), None).is_some(), true, "{nested}");
+        }
+        assert_eq!(s.libraries.len(), 2);
+        assert!(s.move_open_library("/work/Acme/inside").is_err());
+        assert!(s.move_open_library("/work/Personal-2026").is_ok(), "next to the other one is fine");
+        assert!(s.nested_library(Path::new("/work/Acme"), None).is_none(), "a library's own folder is not nested in itself");
         assert_eq!(s.library_id().as_deref(), Some(b.as_str()));
     }
 
@@ -1352,7 +1387,7 @@ mod tests {
     fn libraries_are_named_moved_and_taken_off_the_list_but_never_by_a_general_save() {
         let mut s = with_library("/work/Acme");
         let a = s.library_id().unwrap();
-        let b = s.open_folder("/work/Personal", None);
+        let b = s.open_folder("/work/Personal", None).unwrap();
         s.rename_library(&a, "  Acme\u{7}  &   Co ").unwrap();
         assert_eq!(s.libraries.iter().find(|l| l.id == a).unwrap().display_name(), "Acme & Co");
         assert!(s.rename_library(&a, &"x".repeat(LIBRARY_NAME_MAX + 1)).is_err());
@@ -1372,11 +1407,11 @@ mod tests {
         assert_eq!(s.libraries.len(), 1);
         // A library whose folder moved keeps its entry and its settings.
         s.private_paths = vec!["diary".into()];
-        s.move_open_library("/Volumes/Disk/Personal");
+        s.move_open_library("/Volumes/Disk/Personal").unwrap();
         assert_eq!((s.library_id().as_deref(), s.libraries.len()), (Some(b.as_str()), 1));
         assert_eq!(s.private_paths, ["diary"]);
         // A wrap of a library that is not open is noted in its own settings.
-        let c = s.open_folder("/work/Third", None);
+        let c = s.open_folder("/work/Third", None).unwrap();
         let when = chrono::Utc::now();
         s.set_last_wrap(Some(Path::new("/Volumes/Disk/Personal")), when);
         assert!(s.last_wrap.is_none(), "the open library was not wrapped");

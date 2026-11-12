@@ -784,7 +784,7 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     // address and its key among them: those change through PUT /api/ai/claude/provider only).
     new.sanitize_update(&old)?;
     if let Some(p) = &chosen {
-        if moved || old.library_path.as_deref().map_or(true, |o| o.trim().is_empty()) { new.move_open_library(p); } else { new.open_folder(p, None); }
+        if moved || old.library_path.as_deref().map_or(true, |o| o.trim().is_empty()) { new.move_open_library(p)?; } else { new.open_folder(p, None)?; }
     }
     validate(&new, Some(&old))?;
     // Making "bypass permissions" the default for new chats needs the user's yes (the dialog in Settings).
