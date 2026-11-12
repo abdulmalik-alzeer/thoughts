@@ -341,7 +341,8 @@
   async function remove() {
     if (!(await confirmDialog({ title: t('chat.deleteTitle'), body: t('chat.deleteBody'), confirmLabel: t('delete'), danger: true }))) return;
     try {
-      await del(`/chats/${id}`);
+      // A chat that is already gone (deleted in another window) counts as deleted.
+      await del(`/chats/${id}`).catch((e) => { if (!(e instanceof ApiError && e.status === 404)) throw e; });
       try { localStorage.removeItem(draftKey(id)); } catch { /* ignore */ }
       pendingFiles.delete(id); lastSent.delete(id);
       await refreshChats().catch(() => {});

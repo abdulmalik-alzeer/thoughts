@@ -76,6 +76,13 @@ pub struct Chat {
 /// Current shape of a chat file.
 pub const CHAT_SCHEMA_VERSION: u32 = 1;
 
+/// Is `id` the plain kind of id a chat has: letters, digits and dashes (the app only ever makes
+/// UUIDs)? A chat's id becomes part of file and folder names — one of them deleted recursively —
+/// so anything else (`..`, a slash, an empty id) must never be joined onto a path.
+pub fn valid_id(id: &str) -> bool {
+    (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 /// Everything about a chat except its messages: what lists, the wrap logic and background loops
 /// need. Cheap to copy, however long the conversation is.
 #[derive(Clone, Debug)]
@@ -222,6 +229,8 @@ impl ChatStore {
                 if p.extension().map_or(true, |x| x != "json") { continue; }
                 let parsed = std::fs::read_to_string(&p).map_err(anyhow::Error::from)
                     .and_then(|s| serde_json::from_str::<Chat>(&s).map_err(anyhow::Error::from));
+                // The id inside the file is what later saves are named after: it must be a plain one.
+                let parsed = parsed.and_then(|c| if valid_id(&c.id) { Ok(c) } else { Err(anyhow::anyhow!("its id is not a valid chat id")) });
                 match parsed {
                     Ok(mut c) => {
                         if c.running {
@@ -252,6 +261,7 @@ impl ChatStore {
     }
 
     fn write(dir: &std::path::Path, c: &Chat) -> std::io::Result<()> {
+        if !valid_id(&c.id) { return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a valid chat id")); }
         let text = serde_json::to_vec(c).map_err(std::io::Error::other)?;
         crate::paths::write_atomic(&dir.join(format!("{}.json", c.id)), &text, true)
     }
@@ -316,11 +326,18 @@ impl ChatStore {
         Some(c.meta_only())
     }
 
-    pub async fn remove(&self, id: &str) {
-        self.chats.write().await.remove(id);
+    /// Forget a chat and delete its file and its attachments folder; returns the chat that was
+    /// removed. Nothing is touched unless `id` is a plain id (`valid_id`) *and* a chat in this
+    /// store: the id becomes part of two paths, and one of them is deleted with everything in it.
+    pub async fn remove(&self, id: &str) -> Option<Chat> {
+        if !valid_id(id) { return None; }
+        let chat = self.chats.write().await.remove(id)?;
         self.disk.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         let _ = std::fs::remove_file(self.dir.join(format!("{id}.json")));
-        let _ = std::fs::remove_dir_all(crate::paths::attachments_dir().join(id));
+        // Only a real folder: a link placed there is never followed to whatever it points at.
+        let files = crate::paths::attachments_dir().join(id);
+        if std::fs::symlink_metadata(&files).map_or(false, |m| m.is_dir()) { let _ = std::fs::remove_dir_all(&files); }
+        Some(chat)
     }
 
     /// Every chat, newest first, without messages — safe to call from periodic loops.
@@ -397,6 +414,96 @@ mod tests {
         assert_eq!(on_disk(&d, &id).title, "Renamed");
         s.remove(&id).await;
         assert!(!d.join(format!("{id}.json")).exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// Ids a request could carry to reach outside a chat's own files.
+    fn hostile_ids(neighbour: &str) -> Vec<String> {
+        let mut ids: Vec<String> = ["", ".", "..", "../", "../..", "..\\..", "/", "\\", "a/b", "a\\b", "./a", "~", "%2e%2e", "..%2F", " ", "a b",
+            "a.json", ".hidden", "x\0y", "a\n", "‥", "آ", "C:", "nul.txt"].iter().map(|s| s.to_string()).collect();
+        ids.push(format!("../{neighbour}"));
+        ids.push(format!("../attachments/../{neighbour}"));
+        ids.push(crate::paths::home().join(neighbour).to_string_lossy().to_string());
+        ids.push("a".repeat(65));
+        ids
+    }
+
+    #[test]
+    fn only_plain_ids_are_chat_ids() {
+        for ok in ["a", "old", "c1", &uuid::Uuid::new_v4().to_string(), &uuid::Uuid::new_v4().simple().to_string(), &"a".repeat(64)] { assert!(valid_id(ok), "{ok}"); }
+        for bad in hostile_ids("neighbour") { assert!(!valid_id(&bad), "{bad:?}"); }
+    }
+
+    #[tokio::test]
+    async fn removing_a_chat_never_reaches_outside_its_own_files() {
+        let home = crate::paths::home();
+        let d = dir();
+        let s = ChatStore::load_from(&d);
+        // What a hostile id would point at: a folder next to the app's own, another chat's files, a file among the chats.
+        let neighbour = format!("neighbour-{}", uuid::Uuid::new_v4());
+        std::fs::create_dir_all(home.join(&neighbour).join("sub")).unwrap();
+        std::fs::write(home.join(&neighbour).join("sub/keep.txt"), "keep").unwrap();
+        let other = Chat::default();
+        let other_files = crate::paths::attachments_dir().join(&other.id);
+        std::fs::create_dir_all(&other_files).unwrap();
+        std::fs::write(other_files.join("photo.png"), "keep").unwrap();
+        let other_id = other.id.clone();
+        s.insert(other).await;
+        std::fs::write(d.join("notes.json.bak"), "keep").unwrap();
+        let intact = || {
+            assert!(home.join(&neighbour).join("sub/keep.txt").exists(), "a folder outside the chat was deleted");
+            assert!(other_files.join("photo.png").exists() && d.join(format!("{other_id}.json")).exists(), "another chat's files were deleted");
+            assert!(d.join("notes.json.bak").exists());
+            for sub in ["chats", "attachments", "logs"] { assert!(home.join(sub).is_dir(), "{sub} is gone"); }
+        };
+        for id in hostile_ids(&neighbour) {
+            assert!(s.remove(&id).await.is_none(), "{id:?} was accepted");
+            intact();
+            // Even if such an id were somehow in the store, it is never turned into a path.
+            s.chats.write().await.insert(id.clone(), Chat { id: id.clone(), ..Default::default() });
+            assert!(s.remove(&id).await.is_none(), "{id:?} was accepted");
+            intact();
+            s.chats.write().await.remove(&id);
+            // And a chat with such an id is never written anywhere.
+            s.insert(Chat { id: id.clone(), ..Default::default() }).await;
+            s.chats.write().await.remove(&id);
+            intact();
+        }
+        assert!(!home.join(format!("{neighbour}.json")).exists() && !d.parent().unwrap().join(format!("{neighbour}.json")).exists());
+        // A plain id that is not one of the store's chats removes nothing either (`notes.json.bak` is not `notes.json`, but still).
+        std::fs::write(d.join("stray.json"), "not a chat of this store").unwrap();
+        assert!(s.remove("stray").await.is_none() && d.join("stray.json").exists());
+        // A link where a chat's attachments folder would be is not followed.
+        #[cfg(unix)]
+        {
+            let linked = Chat::default();
+            let lid = linked.id.clone();
+            s.insert(linked).await;
+            std::os::unix::fs::symlink(home.join(&neighbour), crate::paths::attachments_dir().join(&lid)).unwrap();
+            assert!(s.remove(&lid).await.is_some());
+            intact();
+            std::fs::remove_file(crate::paths::attachments_dir().join(&lid)).unwrap();
+        }
+        // The real thing still works: the chat, its file and its attachments go — and only those.
+        assert_eq!(s.remove(&other_id).await.map(|c| c.id), Some(other_id.clone()));
+        assert!(!other_files.exists() && !d.join(format!("{other_id}.json")).exists() && s.get(&other_id).await.is_none());
+        assert!(home.join(&neighbour).join("sub/keep.txt").exists());
+        std::fs::remove_dir_all(home.join(&neighbour)).unwrap();
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_chat_file_with_a_hostile_id_is_skipped_at_startup() {
+        let d = dir();
+        std::fs::write(d.join("evil.json"), r#"{"id":"../../outside","title":"x","running":true}"#).unwrap();
+        std::fs::write(d.join("empty.json"), r#"{"id":"","title":"x"}"#).unwrap();
+        std::fs::write(d.join("fine.json"), r#"{"id":"fine","title":"ok"}"#).unwrap();
+        let s = ChatStore::load_from(&d);
+        assert_eq!(s.unreadable, 2);
+        assert_eq!(s.chats.try_read().unwrap().keys().collect::<Vec<_>>(), ["fine"]);
+        // Nothing was written back under the hostile name, and the files are left for recovery.
+        assert!(!d.parent().unwrap().parent().unwrap().join("outside.json").exists());
+        assert!(d.join("evil.json").exists() && d.join("empty.json").exists());
         std::fs::remove_dir_all(d).unwrap();
     }
 

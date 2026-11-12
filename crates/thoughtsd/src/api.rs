@@ -1375,8 +1375,10 @@ async fn chat_get(State(st): S, Path(id): Path<String>) -> R {
 }
 
 async fn chat_delete(State(st): S, Path(id): Path<String>) -> R {
+    // Only one of the user's own chats: the id comes from the request and names what gets deleted.
+    if !crate::chats::valid_id(&id) || st.chats.meta(&id).await.is_none() { return Err(no_chat().into()); }
     if let Some(k) = st.runs.lock().await.remove(&id) { let _ = k.send(()); }
-    st.chats.remove(&id).await;
+    st.chats.remove(&id).await.ok_or_else(no_chat)?;
     ok()
 }
 
@@ -1451,8 +1453,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let mut prompt = m.text.clone();
     let mut saved = vec![];
     if !m.attachments.is_empty() {
+        if !crate::chats::valid_id(&id) { return Err(no_chat().into()); }
         let dir = paths::attachments_dir().join(&id);
-        if !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') { return Err(no_chat().into()); }
         paths::create_private_dir(&dir)?;
         for a in &m.attachments {
             let name = library::sanitize_file_name(&a.name);
@@ -1510,6 +1512,10 @@ async fn chat_stop(State(st): S, Path(id): Path<String>) -> R {
     if let Some(k) = st.runs.lock().await.remove(&id) { let _ = k.send(()); }
     ok()
 }
+
+#[cfg(test)]
+#[path = "api_chat_tests.rs"]
+mod chat_tests;
 
 // ---------- wrap & reorganize ----------
 
