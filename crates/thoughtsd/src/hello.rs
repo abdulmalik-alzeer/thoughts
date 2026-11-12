@@ -123,7 +123,11 @@ async fn hello(State(st): State<Arc<AppState>>, headers: HeaderMap, Query(q): Qu
     let local = ["127.0.0.1", "localhost"].iter().any(|name| host == *name || host.strip_prefix(name).is_some_and(|rest| rest.starts_with(':')));
     if headers.contains_key(header::ORIGIN) || !local { return (StatusCode::FORBIDDEN, "forbidden").into_response(); }
     let Some(nonce) = q.get("nonce").filter(|n| valid_nonce(n)) else { return (StatusCode::BAD_REQUEST, "bad nonce").into_response() };
-    Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": proof(&st.token, nonce)})).into_response()
+    let mut answer = json!({"ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": proof(&st.token, nonce)});
+    // A program with an access key names it (`key=<its id>`) and gets the same proof under that
+    // key's SHA-256, which only the app that made the key has (`tokens.rs`): it sends the key only then.
+    if let Some(hash) = q.get("key").and_then(|id| st.keys.proof_key(id)) { answer["keyProof"] = json!(proof(&hash, nonce)); }
+    Json(answer).into_response()
 }
 
 #[cfg(test)]

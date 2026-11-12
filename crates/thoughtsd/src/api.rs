@@ -196,7 +196,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/todos", get(todo_list))
         .route("/api/todos/calendar.ics", get(todo_calendar))
         .route("/api/todos/week", get(todo_week))
-        .route("/api/capture", post(capture))
+        .route("/api/capture", post(capture_route))
         .route("/api/todos/:op", post(todo_op))
         // chats
         .route("/api/chats", get(chat_list).post(chat_create))
@@ -236,6 +236,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::layer_api::routes())
         .merge(crate::routines::routes())
         .merge(crate::inbox::routes())
+        .merge(crate::tokens::routes())
         // maintenance: self-check, newer version, moving, removing
         .merge(crate::care_api::routes())
         // bringing in notes the user already has
@@ -307,18 +308,29 @@ fn presented_token<'a>(path: &str, authorization: &'a str, protocols: &'a str) -
     None
 }
 
-async fn auth(State(st): S, req: Request, next: Next) -> Response {
+async fn auth(State(st): S, mut req: Request, next: Next) -> Response {
     // A web page that is not the app has no business here, token or not.
     if let Some(o) = req.headers().get(header::ORIGIN) {
         if !o.to_str().map_or(false, origin_allowed) { return (StatusCode::FORBIDDEN, "origin not allowed").into_response(); }
     }
-    let token_ok = {
+    let presented = {
         let text = |name: header::HeaderName| req.headers().get(name).and_then(|h| h.to_str().ok()).unwrap_or("");
-        presented_token(req.uri().path(), text(header::AUTHORIZATION), text(header::SEC_WEBSOCKET_PROTOCOL))
-            .map_or(false, |t| constant_time_eq(t.as_bytes(), st.token.as_bytes()))
+        presented_token(req.uri().path(), text(header::AUTHORIZATION), text(header::SEC_WEBSOCKET_PROTOCOL)).unwrap_or("").to_string()
     };
-    if !token_ok { return (StatusCode::UNAUTHORIZED, "unauthorized").into_response(); }
-    next.run(req).await
+    if constant_time_eq(presented.as_bytes(), st.token.as_bytes()) { return next.run(req).await; }
+    // An access key made in Settings (FEAT-37): only from a program, never from a web page, and only
+    // on the few routes its scopes open — with nothing in the address that route does not read.
+    if !req.headers().contains_key(header::ORIGIN) && presented.starts_with(crate::tokens::PREFIX) {
+        if let Some(caller) = st.keys.check(&presented) {
+            let Some(to) = crate::tokens::admit(&caller, req.method(), req.uri()) else {
+                return ApiErr(crate::tr::err("key.not_allowed", &[])).into_response();
+            };
+            *req.uri_mut() = to;
+            req.extensions_mut().insert(caller);
+            return next.run(req).await;
+        }
+    }
+    (StatusCode::UNAUTHORIZED, "unauthorized").into_response()
 }
 
 /// A remote's short name: letters, digits, dot, underscore, dash; never starts with a dash.
@@ -1963,6 +1975,19 @@ async fn capture(State(st): S, Json(c): Json<Capture>) -> R {
         }
         _ => Err(crate::tr::err("capture.kind", &[]).into()),
     }
+}
+
+/// `POST /api/capture` as it is routed. A program with an access key (FEAT-37) names a list
+/// plainly (no `.` or `..` steps) and never writes into a private folder, however the folder is
+/// spelled or linked: the add-on rule for todo lists (`todo_op`). A note goes to `inbox/`.
+async fn capture_route(State(st): S, key: Option<axum::Extension<crate::tokens::Caller>>, Json(c): Json<Capture>) -> R {
+    if key.is_some() {
+        let root = lib(&st).await?;
+        let rel = match c.kind.as_str() { "todo" if !c.file.is_empty() => c.file.clone(), "todo" => todos::general(&root), _ => "inbox".to_string() };
+        if paths::clean_rel(&rel).ok().as_deref() != Some(rel.replace('\\', "/").as_str()) { return Err(crate::tr::err("invalid.path", &[]).into()); }
+        if paths::is_private(&root, &rel, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", &rel)]).into()); }
+    }
+    capture(State(st), Json(c)).await
 }
 
 /// Only real todo files, and never one inside a protected folder.

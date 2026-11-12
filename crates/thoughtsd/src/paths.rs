@@ -38,6 +38,10 @@ pub fn lock_file() -> PathBuf { home().join("daemon.lock") }
 /// Fallback secret store (0600) for systems without a working keyring.
 pub fn secrets_file() -> PathBuf { home().join("secrets.json") }
 pub fn trusted_file() -> PathBuf { home().join("trusted.json") }
+/// Access keys for other programs: names, what each may do, and the SHA-256 of each key (`tokens.rs`).
+pub fn tokens_file() -> PathBuf { home().join("tokens.json") }
+/// The daemon's port and nothing else, for programs that hold an access key rather than the app's own.
+pub fn port_file() -> PathBuf { home().join("port") }
 /// The staging copy of the customisation layer (a git worktree of the app layer).
 pub fn app_layer_staging_dir() -> PathBuf { home().join("app-layer-staging") }
 /// Histories of libraries that carry no repository of their own (see `git::history_store`): kept
@@ -225,11 +229,14 @@ pub fn read_daemon_info() -> Option<DaemonInfo> {
 
 pub fn write_daemon_info(info: &DaemonInfo) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(info).map_err(std::io::Error::other)?;
-    write_atomic(&daemon_file(), text.as_bytes(), true)
+    write_atomic(&daemon_file(), text.as_bytes(), true)?;
+    // Programs with an access key read the port here: daemon.json holds the app's own key.
+    write_atomic(&port_file(), format!("{}\n", info.port).as_bytes(), true)
 }
 
 pub fn clear_daemon_info() {
     let _ = std::fs::remove_file(daemon_file());
+    let _ = std::fs::remove_file(port_file());
 }
 
 /// Normalise a library-relative folder path: forward slashes, no leading `./`, no trailing slash.

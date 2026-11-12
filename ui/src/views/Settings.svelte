@@ -22,6 +22,7 @@
   import { fold } from '../lib/CommandPalette.svelte';
   import Maintenance from './Maintenance.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
+  import AccessKeys from './AccessKeys.svelte';
   import { checkAppUpdate } from '../lib/updates';
 
   let { reload }: { reload: () => Promise<void> } = $props();
@@ -35,7 +36,7 @@
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag', 'chatc.set.suggest'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations', 'reorganize'],
-    privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost'],
+    privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'ldc.tab.addons', 'ldc.tab.ready', 'ldc.tab.updates'],
@@ -838,6 +839,7 @@
         {/if}
       </div>
     {/if}
+    {#if vis(c, 'secb.keys.title')}<AccessKeys />{/if}
   {:else if c === 'modules'}
     <div class="card">
       <p class="muted">{t('set.modulesIntro')} {t('ui.set.modKeeps')}</p>

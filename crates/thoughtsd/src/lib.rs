@@ -43,6 +43,7 @@ pub mod state;
 pub mod suggestions;
 pub mod tidy;
 pub mod todos;
+pub mod tokens;
 pub mod tr;
 pub mod traces;
 pub mod transfer;

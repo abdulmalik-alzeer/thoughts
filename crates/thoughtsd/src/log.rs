@@ -47,6 +47,8 @@ pub fn redact(s: &str) -> String {
         (r"\bgh[pousr]_[A-Za-z0-9]{20,}", "[redacted]"),
         (r"\bgithub_pat_[A-Za-z0-9_]{20,}", "[redacted]"),
         (r"\bglpat-[A-Za-z0-9_-]{16,}", "[redacted]"),
+        // The app's access keys for other programs (`tokens.rs`).
+        (r"\bthoughts_[0-9a-f]{8}_[A-Za-z0-9]{20,}", "[redacted]"),
     ].into_iter().map(|(re, rep)| (regex::Regex::new(re).unwrap(), rep)).collect());
     let mut out = s.to_string();
     for (re, rep) in res { out = re.replace_all(&out, *rep).into_owned(); }

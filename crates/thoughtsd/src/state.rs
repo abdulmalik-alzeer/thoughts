@@ -62,6 +62,8 @@ pub struct AppState {
     pub spend_told: std::sync::Mutex<(String, crate::spend::Level)>,
     /// A limit on the plan the assistant reported, and when it was seen (seconds since 1970).
     pub plan_limit: std::sync::Mutex<Option<(crate::spend::PlanLimit, i64)>>,
+    /// Access keys for other programs on this computer (`tokens.rs`).
+    pub keys: crate::tokens::Store,
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
@@ -125,6 +127,7 @@ impl AppState {
             summarising: Default::default(),
             spend_told: std::sync::Mutex::new((month_key(), crate::spend::Level::Off)),
             plan_limit: Default::default(),
+            keys: crate::tokens::Store::load(crate::paths::tokens_file()),
         })
     }
 
@@ -165,6 +168,7 @@ impl AppState {
             summarising: Default::default(),
             spend_told: std::sync::Mutex::new((month_key(), crate::spend::Level::Off)),
             plan_limit: Default::default(),
+            keys: crate::tokens::Store::load(dir.join("tokens.json")),
         }
     }
 

@@ -142,9 +142,21 @@ If you cannot answer these for the plan you are on, treat client material as not
 
 ## The trust question when opening a library
 
-A library is a folder of text, but a folder can also carry settings and instructions that make the assistant or the sync tool run programs. When you open a library that Thoughts did not create itself — one you downloaded, or received from someone — Thoughts first lists anything in it that could run a program on your computer, or that changes the assistant's standing instructions from the ones Thoughts ships, and asks whether you trust the folder. Nothing in the folder is run until you say yes. If those settings or instructions change later, you are asked again.
+A library is a folder of text, but a folder can also carry settings and instructions that make the assistant or the sync tool run programs. When you open a library that Thoughts did not create itself — one you downloaded, or received from someone — Thoughts first lists anything in it that could run a program on your computer, or that changes the assistant's standing instructions from the ones Thoughts ships (in this version or an earlier one, so an update alone never asks), and asks whether you trust the folder. Nothing in the folder is run until you say yes. If those settings or instructions change later, you are asked again.
 
 Libraries created by Thoughts contain one such setting. It fetches the latest synced copy when you start the assistant in the library yourself, outside the app; inside Thoughts it does nothing, because the app does the syncing. Only trust a library from someone you would let run software on your computer.
+
+## Keys for other programs
+
+**Settings → Privacy & cost → Keys for other programs** makes a key for a shortcut, a script or another program on this computer (a launcher such as Raycast, a Shortcuts action on a Mac, a small script). Each key is made for one purpose: adding todos and notes, reading the library, or both.
+
+- A key can never change your settings, start the assistant, trust a folder, install an add-on, sync, or make other keys. Those stay with the app itself.
+- A key that reads sees what an add-on sees: your private folders are left out, under any spelling and through a link. A key that adds cannot write into a private folder either.
+- Keys work only on this computer and only while Thoughts is running. A web page cannot use one.
+- A key is shown once, when it is made. Thoughts keeps only a fingerprint of it, in `tokens.json` in the `.thoughts` folder, so that file never holds a usable key. Remove a key in Settings, and anything using it stops at once.
+- A program finds Thoughts through the file `port` in the `.thoughts` folder (the port number and nothing else), and can ask Thoughts to prove it made the key before it sends it. `scripts/thoughts.sh` in the source code is a small command-line client that does this.
+
+Give a key only to a program you trust with what the key allows: a reading key lets that program read everything outside your private folders.
 
 ## Deleting everything
 
