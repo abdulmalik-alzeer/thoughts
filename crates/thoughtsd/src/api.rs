@@ -175,6 +175,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/file", get(read_file).put(write_file))
         .route("/api/library/raw", get(raw_file))
         .route("/api/library/import", post(import_files).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)))
+        .route("/api/library/picture", post(add_picture).layer(DefaultBodyLimit::max(PICTURE_BODY_LIMIT)))
         .route("/api/library/search", get(search))
         .route("/api/search", get(search_all))
         .route("/api/library/backlinks", get(backlinks))
@@ -245,6 +246,8 @@ const PREFLIGHT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24
 
 /// Uploads are base64 inside JSON: room for a few 25 MB files per request.
 const IMPORT_BODY_LIMIT: usize = 150 * 1024 * 1024;
+/// One picture for a note, base64 inside JSON (see `library::PICTURE_MAX_BYTES`).
+const PICTURE_BODY_LIMIT: usize = library::PICTURE_MAX_BYTES / 3 * 4 + 64 * 1024;
 
 /// May pages served by a local development server (`http://localhost:<port>`) use the API? Only in
 /// a development build, or when whoever starts the daemon says so with `THOUGHTS_DEV_ORIGINS=1`
@@ -1670,6 +1673,25 @@ async fn save_output(State(st): S, Json(o): Json<SaveOutput>) -> R {
     Ok(Json(json!({"path": path})))
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PictureReq { note: String, #[serde(default)] name: String, data_base64: String }
+/// `POST /api/library/picture {note, name, dataBase64}`: a picture pasted or dropped into the note
+/// being edited, saved in an `images` folder beside it under a name of its own → `{path, link}`
+/// (`link` is relative to the note, ready for `![…](link)`). PNG, JPEG, GIF or WebP only, judged by
+/// the content; at most 15 MB. Not open to add-ons (it is not in `PLUGIN_SCOPED`).
+async fn add_picture(State(st): S, Json(req): Json<PictureReq>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st).await?;
+    let b64 = req.data_base64.rsplit(',').next().unwrap_or("").trim();
+    if b64.len() / 4 * 3 > library::PICTURE_MAX_BYTES + 3 { return Err(crate::tr::err("picture.too_large", &[]).into()); }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64)
+        .map_err(|_| crate::tr::err("unreadable", &[("name", &library::sanitize_file_name(&req.name))]))?;
+    let (path, link) = library::save_picture(&root, &req.note, &req.name, &bytes)?;
+    st.emit(json!({"type": "library.changed"}));
+    Ok(Json(json!({"path": path, "link": link})))
+}
+
 async fn todo_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = lib(&st).await?;
     let mut lists = todos::list(&root);
@@ -2931,6 +2953,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_picture_pasted_into_a_note_is_saved_beside_it() {
+        let (st, lib) = t::library().await;
+        t::write(&lib, "ideas/shop/notes/stall.md", "# Stall\n");
+        let pic = |note: &str, data: &str| Json(PictureReq { note: note.into(), name: "image.png".into(), data_base64: data.into() });
+        // A PNG, sent the way the app sends it (a data address is fine too).
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR");
+        let r = add_picture(State(st.clone()), pic("ideas/shop/notes/stall.md", &png)).await.unwrap().0;
+        assert_eq!((r["path"].as_str(), r["link"].as_str()), (Some("ideas/shop/notes/images/image.png"), Some("images/image.png")));
+        let r = add_picture(State(st.clone()), pic("ideas/shop/notes/stall.md", &format!("data:image/png;base64,{png}"))).await.unwrap().0;
+        assert_eq!(r["link"], "images/image-2.png");
+        // The note itself is not touched: the link is written by the editor, as typed text.
+        assert_eq!(t::read(&lib, "ideas/shop/notes/stall.md"), "# Stall\n");
+        // Not a picture, unreadable, too large, or nowhere safe to put it.
+        let svg = base64::engine::general_purpose::STANDARD.encode(b"<svg onload=alert(1)>");
+        assert_eq!(shown(add_picture(State(st.clone()), pic("ideas/shop/notes/stall.md", &svg)).await).status, 422);
+        assert_eq!(shown(add_picture(State(st.clone()), pic("ideas/shop/notes/stall.md", "not base64!")).await).status, 422);
+        let huge = "A".repeat(library::PICTURE_MAX_BYTES / 3 * 4 + 8);
+        assert_eq!(shown(add_picture(State(st.clone()), pic("ideas/shop/notes/stall.md", &huge)).await).status, 413);
+        assert!(add_picture(State(st.clone()), pic(".claude/settings.md", &png)).await.is_err());
+        assert!(add_picture(State(st.clone()), pic("../elsewhere.md", &png)).await.is_err());
+        assert!(!lib.join(".claude/images").exists());
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
     async fn nothing_else_changes_the_library_while_a_wrap_is_being_saved() {
         let (st, lib) = t::library().await;
         let chat = t::chat(&st, "plan the shop").await;
@@ -2955,6 +3002,7 @@ mod tests {
         busy(todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "new task".into(), ..Default::default() })).await);
         busy(todo_op(State(st.clone()), Path("toggle".into()), none(), Json(TodoOp { file: "TODO.md".into(), line: 2, text: "call the bank".into(), ..Default::default() })).await);
         busy(import_files(State(st.clone()), Json(ImportReq { files: vec![ImportFile { name: "a.txt".into(), data_base64: "aGk=".into() }] })).await);
+        busy(add_picture(State(st.clone()), Json(PictureReq { note: "README.md".into(), name: "a.png".into(), data_base64: "iVBORw0KGgo=".into() })).await);
         busy(new_file(State(st.clone()), none(), Json(NewFile { path: "notes/new.md".into(), content: "x".into() })).await);
         busy(move_file(State(st.clone()), none(), Json(MoveFile { from: "README.md".into(), to: "READ.md".into() })).await);
         busy(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "README.md".into(), ..Default::default() })).await);
@@ -3637,7 +3685,7 @@ mod tests {
 
         // Everything else under the library API is closed to a request made for an add-on.
         for path in ["/api/library/restore", "/api/library/undo", "/api/library/history", "/api/library/import", "/api/library/stats",
-                     "/api/library/trust", "/api/library/ideas/status", "/api/todos/calendar.ics", "/api/capture"] {
+                     "/api/library/trust", "/api/library/ideas/status", "/api/todos/calendar.ics", "/api/capture", "/api/library/picture"] {
             assert!(!plugin_scope_allowed(path, "scope=plugin"), "{path}");
             assert!(!plugin_scope_allowed(path, "allow=x&scope=plugin&path=a"), "{path}");
             assert!(plugin_scope_allowed(path, ""), "{path}");

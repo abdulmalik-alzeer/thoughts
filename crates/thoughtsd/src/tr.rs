@@ -167,6 +167,12 @@ const TABLE: &[Entry] = &[
     e("import.empty", "validation", 422, "",
         "No files were chosen.",
         "لم تُختر أي ملفات."),
+    e("picture.type", "validation", 422, "",
+        "Only pictures in the usual formats (PNG, JPEG, GIF or WebP) can be added to a note.",
+        "لا تُضاف إلى الملاحظة إلا الصور بصيغها المعتادة (PNG أو JPEG أو GIF أو WebP)."),
+    e("picture.too_large", "too_large", 413, "",
+        "This picture is larger than 15 MB, too large to add to a note.",
+        "حجم هذه الصورة يتجاوز 15 ميغابايت، وهو أكبر من أن تُضاف إلى ملاحظة."),
     // --- saving over something that changed ---
     e("stale.changed", "stale", 409, "STALE::",
         "This file was changed somewhere else after you opened it. Reload it to see the latest version before saving.",

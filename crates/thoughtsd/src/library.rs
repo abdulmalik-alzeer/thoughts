@@ -265,6 +265,74 @@ fn save_numbered(root: &Path, folder: &str, name: &str, bytes: &[u8]) -> anyhow:
     anyhow::bail!("too many files named {name}")
 }
 
+/// Largest picture that can be pasted or dropped into a note.
+pub const PICTURE_MAX_BYTES: usize = 15 * 1024 * 1024;
+
+/// What kind of picture `bytes` hold, judged by their first bytes (never by the name they came with):
+/// the extension they are saved under. None for anything that is not a PNG, JPEG, GIF or WebP, which
+/// every system's web view shows (SVG is left out: it can carry scripts).
+pub fn picture_kind(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") { Some("png") }
+    else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) { Some("jpg") }
+    else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") { Some("gif") }
+    else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" { Some("webp") }
+    else { None }
+}
+
+/// A picture's name without its extension: letters and digits of any script, `-` and `_`, with
+/// spaces and dots turned into `-`, so the link to it needs no escaping. At most 60 characters, never empty.
+fn picture_stem(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let stem = match base.rsplit_once('.') { Some((s, _)) if !s.is_empty() => s, _ => base };
+    let mut out = String::new();
+    for c in stem.chars() {
+        if c.is_alphanumeric() || c == '_' || c == '-' { out.push(c); }
+        else if (c.is_whitespace() || c == '.') && !out.ends_with('-') { out.push('-'); }
+    }
+    let out: String = out.trim_matches(['-', '_']).chars().take(60).collect();
+    let out = out.trim_end_matches(['-', '_']);
+    // Names Windows keeps for devices cannot be files there, whatever the extension.
+    let reserved = |s: &str| { let u = s.to_uppercase(); ["CON", "PRN", "AUX", "NUL"].contains(&u.as_str())
+        || (u.len() == 4 && (u.starts_with("COM") || u.starts_with("LPT")) && u.as_bytes()[3].is_ascii_digit()) };
+    if out.is_empty() { "picture".into() } else if reserved(out) { format!("picture-{out}") } else { out.into() }
+}
+
+/// Save a picture pasted or dropped into note `note` in an `images` folder beside it, under a name
+/// of its own (`receipt.png`, `receipt-2.png`…; never replacing a file). The same path rules as every
+/// other library write. Returns the library-relative path and the link to write into the note
+/// (relative to the note's folder).
+pub fn save_picture(root: &Path, note: &str, name: &str, bytes: &[u8]) -> anyhow::Result<(String, String)> {
+    use std::io::Write;
+    let note = note.trim().trim_start_matches("./").replace('\\', "/");
+    if !note.to_lowercase().ends_with(".md") { return Err(crate::tr::err("invalid.path", &[])); }
+    if bytes.len() > PICTURE_MAX_BYTES { return Err(crate::tr::err("picture.too_large", &[])); }
+    let Some(ext) = picture_kind(bytes) else { return Err(crate::tr::err("picture.type", &[])) };
+    check_new_path(&note)?;
+    if !resolve(root, &note)?.is_file() { return Err(crate::tr::err("not_found.file", &[])); }
+    let folder = match note.rsplit_once('/') { Some((dir, _)) => format!("{dir}/images"), None => "images".into() };
+    let dir = resolve(root, &folder)?;
+    // `images` taken by a file: refuse rather than guess.
+    if dir.exists() && !dir.is_dir() { return Err(crate::tr::err("invalid.path", &[])); }
+    std::fs::create_dir_all(&dir)?;
+    let stem = picture_stem(name);
+    for n in 1..10_000 {
+        let file = if n == 1 { format!("{stem}.{ext}") } else { format!("{stem}-{n}.{ext}") };
+        let rel = format!("{folder}/{file}");
+        check_new_path(&rel)?;
+        let p = resolve(root, &rel)?;
+        // create_new: fails rather than replaces if the name is taken (also refuses dangling symlinks).
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(bytes) { drop(f); let _ = std::fs::remove_file(&p); return Err(e.into()); }
+                return Ok((rel, format!("images/{file}")));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    anyhow::bail!("too many pictures named {stem}")
+}
+
 /// Split `---\nyaml\n---\nbody`.
 pub fn frontmatter(text: &str) -> (Value, &str) {
     if let Some(rest) = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n")) {
@@ -1429,6 +1497,77 @@ mod tests {
         assert_eq!(import_file(&d, "notes", b"b").unwrap(), "imports/notes (2)");
         assert_eq!(std::fs::read(d.join("imports/report.pdf")).unwrap(), b"1");
         assert!(import_file(&d, "big.bin", &vec![0u8; IMPORT_MAX_BYTES + 1]).is_err());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+
+    #[test]
+    fn pictures_are_saved_beside_their_note_under_names_of_their_own() {
+        let d = tmp();
+        write(&d, "clients/acme/notes/visit.md", "# Visit\n").unwrap();
+        write(&d, "plan.md", "x").unwrap();
+        let save = |note: &str, name: &str, bytes: &[u8]| save_picture(&d, note, name, bytes);
+        assert_eq!(save("clients/acme/notes/visit.md", "image.png", PNG).unwrap(),
+                   ("clients/acme/notes/images/image.png".to_string(), "images/image.png".to_string()));
+        // Never over an existing picture.
+        assert_eq!(save("clients/acme/notes/visit.md", "image.png", PNG).unwrap().1, "images/image-2.png");
+        assert_eq!(std::fs::read(d.join("clients/acme/notes/images/image.png")).unwrap(), PNG);
+        // A note at the top of the library.
+        assert_eq!(save("plan.md", "x.png", PNG).unwrap(), ("images/x.png".to_string(), "images/x.png".to_string()));
+        // The kind comes from the content, not from the name it arrived with.
+        assert_eq!(save("plan.md", "evil.svg", PNG).unwrap().1, "images/evil.png");
+        assert_eq!(save("plan.md", "photo", b"\xFF\xD8\xFF\xE0rest").unwrap().1, "images/photo.jpg");
+        assert_eq!(save("plan.md", "anim.gif", b"GIF89a....").unwrap().1, "images/anim.gif");
+        assert_eq!(save("plan.md", "w.webp", b"RIFF\0\0\0\0WEBPVP8 ").unwrap().1, "images/w.webp");
+        // Names that would need escaping in a link are tidied; Arabic stays.
+        assert_eq!(save("plan.md", "My receipt (March) v1.2.png", PNG).unwrap().1, "images/My-receipt-March-v1-2.png");
+        assert_eq!(save("plan.md", "إيصال الشهر.png", PNG).unwrap().1, "images/إيصال-الشهر.png");
+        assert_eq!(save("plan.md", "../../.git/x.png", PNG).unwrap().1, "images/x-2.png");
+        assert_eq!(save("plan.md", ".claude.png", PNG).unwrap().1, "images/claude.png");
+        assert_eq!(save("plan.md", "", PNG).unwrap().1, "images/picture.png");
+        assert_eq!(save("plan.md", "\u{202e}gnp\u{0}.exe", PNG).unwrap().1, "images/gnp.png");
+        assert_eq!(save("plan.md", "con.png", PNG).unwrap().1, "images/picture-con.png");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn pictures_are_refused_when_they_are_not_pictures_or_have_nowhere_safe_to_go() {
+        let d = tmp();
+        write(&d, "notes/a.md", "x").unwrap();
+        write(&d, "notes/data.csv", "x").unwrap();
+        std::fs::create_dir_all(d.join(".claude")).unwrap();
+        std::fs::write(d.join(".claude/n.md"), "x").unwrap();
+        let code = |r: anyhow::Result<(String, String)>| r.unwrap_err().downcast::<crate::tr::UserErr>().map(|e| e.code).unwrap_or("other");
+        // Not a picture (an SVG, a web page, a program), or too large.
+        for bytes in [&b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>"[..], &b"<html>"[..], &b"MZ\x90\0"[..], &b""[..]] {
+            assert_eq!(code(save_picture(&d, "notes/a.md", "x.png", bytes)), "validation");
+        }
+        let mut big = PNG.to_vec();
+        big.resize(PICTURE_MAX_BYTES + 1, 0);
+        assert_eq!(code(save_picture(&d, "notes/a.md", "x.png", &big)), "too_large");
+        // Only beside a note that is there, never in protected folders or outside the library.
+        assert!(save_picture(&d, "notes/data.csv", "x.png", PNG).is_err());
+        assert!(save_picture(&d, "notes/gone.md", "x.png", PNG).is_err());
+        assert!(save_picture(&d, ".claude/n.md", "x.png", PNG).is_err());
+        assert!(save_picture(&d, "../outside.md", "x.png", PNG).is_err());
+        assert!(save_picture(&d, "/etc/x.md", "x.png", PNG).is_err());
+        assert!(!d.join(".claude/images").exists());
+        // An `images` that is a file is left alone.
+        write(&d, "other/b.md", "x").unwrap();
+        std::fs::write(d.join("other/images"), "not a folder").unwrap();
+        assert!(save_picture(&d, "other/b.md", "x.png", PNG).is_err());
+        assert_eq!(std::fs::read_to_string(d.join("other/images")).unwrap(), "not a folder");
+        #[cfg(unix)]
+        {
+            // An `images` link that leads out of the library is not followed.
+            let out = tmp();
+            write(&d, "linked/c.md", "x").unwrap();
+            std::os::unix::fs::symlink(&out, d.join("linked/images")).unwrap();
+            assert!(save_picture(&d, "linked/c.md", "x.png", PNG).is_err());
+            assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+            std::fs::remove_dir_all(out).unwrap();
+        }
         std::fs::remove_dir_all(d).unwrap();
     }
 }
