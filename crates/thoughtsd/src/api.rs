@@ -791,6 +791,10 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     // Same server-side validation as PUT /api/settings.
     let old = st.settings.read().await.clone();
     if s.sanitize_update(&old)? && old.ai.claude.has_api_token { crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token()); }
+    // Setup has no warning dialog, so it can never switch "bypass permissions" on (same rule as PUT /api/settings).
+    if crate::settings::bypass_needs_confirm(old.ai.claude.permission_mode.as_deref(), s.ai.claude.permission_mode.as_deref()) {
+        return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
+    }
     let remote_url = o.remote_url.trim().to_string();
     if s.git_enabled() && !remote_url.is_empty() { check_remote_url(&remote_url)?; }
     let fresh = o.library_mode != "existing";
@@ -1283,7 +1287,7 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     c.project_id = n.project_id;
     if let Some(k) = n.kind.filter(|k| k == "chat" || k == "customize") { c.kind = k; }
     c.provider = n.provider.unwrap_or(s.ai.primary.clone());
-    c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() });
+    c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() }, None);
     if c.kind == "customize" { c.title = customize_title(ar).into(); }
     c.options.permission_mode = inherited_mode(c.options.permission_mode.take(), &c.kind, n.by_user);
     let id = c.id.clone();
@@ -1321,9 +1325,13 @@ fn check_bypass(kind: &str, current: Option<&str>, wanted: Option<&str>, confirm
     Ok(())
 }
 
-/// "Ask before changes" (`default`) no longer exists; wherever it still arrives it means `plan`.
-fn normalized(mut o: RunOptions) -> RunOptions {
-    o.permission_mode = crate::settings::effective_permission_mode(o.permission_mode.as_deref()).map(String::from);
+/// A chat always carries a real permission mode. Options that name none keep the chat's `current`
+/// one (changing the model must never change what the assistant may do); with none there either
+/// it is the app's default, accept-edits. "Ask before changes" (`default`) no longer exists;
+/// wherever it still arrives it means `plan`.
+fn normalized(mut o: RunOptions, current: Option<&str>) -> RunOptions {
+    let wanted = o.permission_mode.as_deref().filter(|m| !m.is_empty()).or(current);
+    o.permission_mode = Some(crate::settings::effective_permission_mode(wanted).to_string());
     o
 }
 
@@ -1352,7 +1360,7 @@ async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatc
     let c = st.chats.update(&id, |c| {
         if let Some(t) = p.title { c.title = t; }
         if let Some(pid) = p.project_id { c.project_id = pid; }
-        if let Some(o) = p.options { c.options = normalized(o); }
+        if let Some(o) = p.options { c.options = normalized(o, c.options.permission_mode.as_deref()); }
     }).await.ok_or_else(no_chat)?;
     st.emit(json!({"type": "chat.updated", "chat": c.summary()}));
     Ok(Json(c.summary()))
@@ -1435,7 +1443,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let mut um = Msg::new("user", &m.text);
     um.attachments = saved;
     um.tool = (!m.mentions.is_empty()).then(|| json!({"mentions": m.mentions}));
-    let opts = normalized(m.options.unwrap_or(chat.options.clone()));
+    let opts = normalized(m.options.unwrap_or(chat.options.clone()), chat.options.permission_mode.as_deref());
     let updated = st.chats.update(&id, |c| {
         c.messages.push(um.clone());
         c.dirty = true;
@@ -2194,10 +2202,40 @@ mod tests {
         assert!(!translocated("/Applications/Thoughts.app/Contents/MacOS/thoughts"));
         assert_eq!(launchd_job_pid("gui/501/app.thoughts.daemon = {\n\tstate = running\n\tpid = 4242\n}"), Some(4242));
         assert_eq!(launchd_job_pid("state = not running"), None);
-        let o = |p: &str| normalized(RunOptions { permission_mode: Some(p.into()), ..Default::default() }).permission_mode;
+        let o = |p: &str| normalized(RunOptions { permission_mode: Some(p.into()), ..Default::default() }, None).permission_mode;
         assert_eq!(o("default").as_deref(), Some("plan"));
         assert_eq!(o("acceptEdits").as_deref(), Some("acceptEdits"));
-        assert_eq!(o(""), None);
+        // No mode is never stored: it becomes accept-edits, or stays what the chat already had.
+        assert_eq!(o("").as_deref(), Some("acceptEdits"));
+        assert_eq!(normalized(RunOptions::default(), None).permission_mode.as_deref(), Some("acceptEdits"));
+        for current in ["plan", "acceptEdits", "bypassPermissions"] {
+            assert_eq!(normalized(RunOptions { model: Some("opus".into()), ..Default::default() }, Some(current)).permission_mode.as_deref(), Some(current));
+        }
+        assert_eq!(normalized(RunOptions { permission_mode: Some("plan".into()), ..Default::default() }, Some("acceptEdits")).permission_mode.as_deref(), Some("plan"));
+        assert_eq!(normalized(RunOptions::default(), Some("default")).permission_mode.as_deref(), Some("plan"));
+    }
+
+    #[tokio::test]
+    async fn a_new_chat_always_has_a_real_mode_and_changing_the_model_keeps_it() {
+        let st = Arc::new(AppState::for_test());
+        let mode = |v: &Value| v["options"]["permissionMode"].as_str().map(String::from);
+        // A fresh install: accept edits.
+        let made = chat_create(State(st.clone()), Json(NewChat { by_user: true, ..Default::default() })).await.unwrap().0;
+        assert_eq!(mode(&made).as_deref(), Some("acceptEdits"));
+        // Settings left over from before the mode was stored: still accept edits, never "none".
+        st.settings.write().await.ai.claude.permission_mode = None;
+        let made = chat_create(State(st.clone()), Json(NewChat::default())).await.unwrap().0;
+        assert_eq!(mode(&made).as_deref(), Some("acceptEdits"));
+        // The user's default is what a new chat starts with.
+        st.settings.write().await.ai.claude.permission_mode = Some("plan".into());
+        let made = chat_create(State(st.clone()), Json(NewChat { by_user: true, ..Default::default() })).await.unwrap().0;
+        assert_eq!(mode(&made).as_deref(), Some("plan"));
+        // Options without a mode (only the model changes) leave a read-only chat read-only.
+        let id = made["id"].as_str().unwrap().to_string();
+        let patch = ChatPatch { options: Some(RunOptions { model: Some("opus".into()), ..Default::default() }), ..Default::default() };
+        chat_patch(State(st.clone()), Path(id.clone()), Json(patch)).await.unwrap();
+        let c = st.chats.get(&id).await.unwrap();
+        assert_eq!((c.options.permission_mode.as_deref(), c.options.model.as_deref()), (Some("plan"), Some("opus")));
     }
 
     #[test]

@@ -75,10 +75,14 @@ pub fn bypass_needs_confirm(old: Option<&str>, new: Option<&str>) -> bool {
     new == Some(BYPASS) && old != Some(BYPASS)
 }
 
-/// Allow-list for a chat/run permission mode. `None` / empty means "the CLI default". The old
-/// `default` ("ask before changes") is still accepted from files and clients written before it was
-/// removed, and is always treated as `plan` (see `effective_permission_mode`): the app has no way to
-/// answer the CLI's permission questions, so asking only ever meant silently skipping the change.
+/// The mode used wherever none is stored or asked for: the assistant may edit notes.
+pub const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
+
+/// Allow-list for a chat/run permission mode. `None` / empty means "not said": the app's own
+/// default (`DEFAULT_PERMISSION_MODE`), never Claude Code's. The old `default` ("ask before
+/// changes") is still accepted from files and clients written before it was removed, and is always
+/// treated as `plan` (see `effective_permission_mode`): the app has no way to answer the CLI's
+/// permission questions, so asking only ever meant silently skipping the change.
 pub fn check_permission_mode(mode: Option<&str>) -> anyhow::Result<()> {
     match mode {
         None | Some("") | Some("default") => Ok(()),
@@ -87,17 +91,20 @@ pub fn check_permission_mode(mode: Option<&str>) -> anyhow::Result<()> {
     }
 }
 
-/// The mode actually used for a stored or requested one: `default` becomes `plan`.
-pub fn effective_permission_mode(mode: Option<&str>) -> Option<&str> {
+/// The mode actually used for a stored or requested one. It is always a real mode, because a run
+/// started without one takes whatever the user's (or the folder's) own Claude Code settings say —
+/// "bypass permissions" included. Nothing said becomes accept-edits; `default` becomes `plan`.
+pub fn effective_permission_mode(mode: Option<&str>) -> &str {
     match mode {
-        None | Some("") => None,
-        Some("default") => Some("plan"),
-        Some(m) => Some(m),
+        None | Some("") => DEFAULT_PERMISSION_MODE,
+        Some("default") => "plan",
+        Some(m) => m,
     }
 }
 
 fn normalize_permission_mode(mode: &mut Option<String>) {
-    if mode.as_deref() == Some("default") { *mode = Some("plan".into()); }
+    let real = effective_permission_mode(mode.as_deref()).to_string();
+    if mode.as_deref() != Some(real.as_str()) { *mode = Some(real); }
 }
 
 /// Set once at startup when settings.json was written by a newer version of the app: from then on
@@ -419,6 +426,9 @@ impl Settings {
 
         let c = &mut self.ai.claude;
         for v in [&mut c.binary, &mut c.base_url, &mut c.model, &mut c.effort, &mut c.permission_mode, &mut c.mini_wrap_model] { none_if_blank(v); }
+        // A client that names no mode (a partial object, an add-on, a window opened before the
+        // update) keeps the one in force: saving something else never changes what the assistant may do.
+        if c.permission_mode.is_none() { c.permission_mode = old.ai.claude.permission_mode.clone(); }
         check_permission_mode(c.permission_mode.as_deref())?;
         check_cli_value("model", c.model.as_deref())?;
         check_cli_value("effort", c.effort.as_deref())?;
@@ -475,9 +485,12 @@ mod tests {
         for ok in [None, Some(""), Some("default"), Some("acceptEdits"), Some("plan"), Some("bypassPermissions")] { assert!(check_permission_mode(ok).is_ok(), "{ok:?}"); }
         // "Ask before changes" no longer exists: it is read as "plan" wherever it is still stored.
         assert!(!PERMISSION_MODES.contains(&"default"));
-        assert_eq!(effective_permission_mode(Some("default")), Some("plan"));
-        assert_eq!(effective_permission_mode(Some("acceptEdits")), Some("acceptEdits"));
-        assert_eq!(effective_permission_mode(Some("")), None);
+        assert_eq!(effective_permission_mode(Some("default")), "plan");
+        assert_eq!(effective_permission_mode(Some("acceptEdits")), "acceptEdits");
+        // Nothing said is never "whatever Claude Code would do": it is accept-edits.
+        assert_eq!(effective_permission_mode(Some("")), "acceptEdits");
+        assert_eq!(effective_permission_mode(None), "acceptEdits");
+        assert_eq!(effective_permission_mode(Some(BYPASS)), BYPASS);
         assert_eq!(parse(r#"{"ai":{"claude":{"permissionMode":"default"}}}"#).unwrap().ai.claude.permission_mode.as_deref(), Some("plan"));
         for bad in ["auto", "dontAsk", "manual", "Plan", "bypasspermissions", "plan --dangerously-skip-permissions"] {
             assert!(check_permission_mode(Some(bad)).is_err(), "{bad}");
@@ -488,6 +501,43 @@ mod tests {
         assert!(check_cli_value("model", Some("claude-opus-4[1m]")).is_ok());
         assert!(check_cli_value("model", Some("--dangerously-skip-permissions")).is_err());
         assert!(check_cli_value("model", Some("a b")).is_err());
+    }
+
+    #[test]
+    fn the_default_mode_is_accept_edits_and_a_save_never_changes_it_by_accident() {
+        // A fresh install, a file from before the mode was stored, and an explicit null all read as accept-edits.
+        assert_eq!(Settings::default().with_defaults().ai.claude.permission_mode.as_deref(), Some("acceptEdits"));
+        for file in [r#"{}"#, r#"{"onboarded":true,"ai":{"claude":{}}}"#, r#"{"ai":{"claude":{"permissionMode":null}}}"#, r#"{"ai":{"claude":{"permissionMode":""}}}"#] {
+            assert_eq!(parse(file).unwrap().ai.claude.permission_mode.as_deref(), Some("acceptEdits"), "{file}");
+        }
+        // What the user chose is kept as it is.
+        for chosen in ["plan", "acceptEdits", BYPASS] {
+            let file = format!(r#"{{"ai":{{"claude":{{"permissionMode":"{chosen}"}}}}}}"#);
+            assert_eq!(parse(&file).unwrap().ai.claude.permission_mode.as_deref(), Some(chosen));
+        }
+        // Saving something unrelated (here: the language) with no mode in the request keeps the mode in force.
+        for chosen in ["plan", "acceptEdits", BYPASS] {
+            let mut old = Settings::default().with_defaults();
+            old.ai.claude.permission_mode = Some(chosen.into());
+            for sent in [None, Some(String::new()), Some("  ".to_string())] {
+                let mut new = old.clone();
+                new.language = "ar".into();
+                new.ai.claude.permission_mode = sent;
+                new.sanitize_update(&old).unwrap();
+                assert_eq!(new.ai.claude.permission_mode.as_deref(), Some(chosen));
+                assert_eq!(new.language, "ar");
+            }
+        }
+        // First-run setup sends no mode at all: the result is accept-edits, not "unset" and not plan.
+        let old = Settings::default().with_defaults();
+        let mut first: Settings = serde_json::from_str(r#"{"language":"ar","ai":{"claude":{"permissionMode":null}}}"#).unwrap();
+        first.sanitize_update(&old).unwrap();
+        assert_eq!(first.ai.claude.permission_mode.as_deref(), Some("acceptEdits"));
+        // An explicit choice in the request is what gets saved.
+        let mut new = old.clone();
+        new.ai.claude.permission_mode = Some("plan".into());
+        new.sanitize_update(&old).unwrap();
+        assert_eq!(new.ai.claude.permission_mode.as_deref(), Some("plan"));
     }
 
     #[test]

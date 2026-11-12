@@ -43,13 +43,15 @@
   // to answer the questions — so a stored `default` means plan mode. Bypass is confirmed in a dialog.
   const BYPASS = 'bypassPermissions';
   const perms = ['acceptEdits', 'plan', BYPASS] as const;
+  /** The mode a stored value stands for. Nothing stored is accept-edits, exactly as the service reads it. */
+  const realPerm = (m: unknown) => (m == null || m === '' ? 'acceptEdits' : m === 'default' ? 'plan' : String(m));
   const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
   const cloudWords = ['Mobile Documents', 'Library/CloudStorage', 'Dropbox', 'OneDrive', 'Google Drive', 'iCloud'];
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));
     x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null;
-    if (x.ai?.claude && (x.ai.claude.permissionMode == null || x.ai.claude.permissionMode === '' || x.ai.claude.permissionMode === 'default')) x.ai.claude.permissionMode = 'plan';
+    if (x.ai?.claude) x.ai.claude.permissionMode = realPerm(x.ai.claude.permissionMode);
     return x;
   };
   const norm = (x: any) => JSON.stringify(x, (_k, v) => (v === '' || v === undefined ? null : v));
@@ -76,7 +78,7 @@
   const isGit = $derived(String(s.sync.mode).startsWith('git'));
   const syncKind = $derived(isGit ? 'git' : s.sync.mode === 'folder' ? 'folder' : 'none');
   const pm = $derived(s.ai.claude.permissionMode);
-  const permValue = $derived(pm == null || pm === '' || pm === 'default' ? 'plan' : (perms as readonly string[]).includes(pm) ? pm : '');
+  const permValue = $derived((perms as readonly string[]).includes(realPerm(pm)) ? realPerm(pm) : '');
   /** A settings file written by a newer version is never rewritten: everything here is read-only. */
   const readOnly = $derived(!!app.status?.settingsNewer);
   // The look is saved the moment it is chosen (ThemePicker), so it is never part of the unsaved draft.

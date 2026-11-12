@@ -463,6 +463,49 @@ fn merge_deny(a: Option<String>, b: Option<String>) -> Option<String> {
     if all.is_empty() { None } else { Some(json!({"permissions": {"deny": all}}).to_string()) }
 }
 
+/// How a long value reaches the assistant program: on its command line, or in a private file.
+#[derive(Clone, Copy)]
+enum Passed<'a> { Inline(&'a str), File(&'a Path) }
+
+/// The command line of one assistant run (everything after the program name). Built apart from
+/// starting the program, so what a run is started with can be checked without starting one.
+/// `mode` is always passed: a run without `--permission-mode` takes the default from the user's
+/// (or the folder's) own Claude Code settings, which can be "bypass permissions".
+/// `budget` is the spending ceiling, already checked against what the installed program accepts.
+fn run_args(opts: &RunOptions, mode: &str, budget: Option<&str>, resume: Option<&str>, add_dirs: &[PathBuf], rules: Option<Passed>, system: Passed) -> Vec<std::ffi::OsString> {
+    let mut a: Vec<std::ffi::OsString> = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"].iter().map(Into::into).collect();
+    match rules {
+        Some(Passed::Inline(json)) => { a.push("--settings".into()); a.push(json.into()); }
+        Some(Passed::File(f)) => { a.push("--settings".into()); a.push(f.into()); }
+        None => {}
+    }
+    if let Some(r) = resume { a.push("--resume".into()); a.push(r.into()); }
+    if let Some(m) = opts.model.as_ref().filter(|s| !s.is_empty()) { a.push("--model".into()); a.push(m.into()); }
+    if let Some(e) = opts.effort.as_ref().filter(|s| !s.is_empty()) { a.push("--effort".into()); a.push(e.into()); }
+    a.push("--permission-mode".into());
+    a.push(mode.into());
+    if let Some(b) = budget { a.push("--max-budget-usd".into()); a.push(b.into()); }
+    for d in add_dirs { a.push("--add-dir".into()); a.push(d.into()); }
+    match system {
+        Passed::Inline(text) => { a.push("--append-system-prompt".into()); a.push(text.into()); }
+        Passed::File(f) => { a.push("--append-system-prompt-file".into()); a.push(f.into()); }
+    }
+    a
+}
+
+/// The mode a one-shot completion is started with. It has no built-in tools, but the same rule
+/// holds: never leave the choice to Claude Code's own default.
+const ONE_SHOT_MODE: &str = crate::settings::DEFAULT_PERMISSION_MODE;
+
+/// The command line of a one-shot, tool-less completion (see `complete`).
+fn one_shot_args(model: Option<&str>, note: &str) -> Vec<String> {
+    let mut a: Vec<String> = ["-p", "--output-format", "json", "--no-session-persistence", "--tools", "", "--permission-mode", ONE_SHOT_MODE].iter().map(|s| s.to_string()).collect();
+    if let Some(m) = model.filter(|m| !m.is_empty()) { a.push("--model".into()); a.push(m.into()); }
+    a.push("--append-system-prompt".into());
+    a.push(note.into());
+    a
+}
+
 type OnDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'static, ()> + Send>;
 
 /// Record what is in the library as one history entry, when history is on and nothing forbids it
@@ -540,9 +583,13 @@ pub async fn start_run(
         crate::trust::require(dir)?;
     }
     let kind = state.chats.with(&spec.chat_id, |c| c.kind.clone()).await.unwrap_or_default();
+    // Every run gets an explicit mode. A run that names none uses the app's own default (accept
+    // edits), never Claude Code's: that one comes from the user's or the folder's own settings and
+    // can be "bypass permissions". "Ask before changes" is gone: a stored `default` means `plan`.
+    let mode = crate::settings::effective_permission_mode(spec.options.permission_mode.as_deref()).to_string();
     // Skipping every permission check is something the user switches on for a chat of their own —
     // never a wrap, a workflow, a customise run or anything else the app starts itself.
-    if spec.options.permission_mode.as_deref() == Some(crate::settings::BYPASS) && kind != "chat" {
+    if mode == crate::settings::BYPASS && kind != "chat" {
         return Err(crate::tr::err("bypass.chat_only", &[]));
     }
     let mut deny = private_deny_settings(library.as_deref(), &spec.cwd, &settings.private_paths)?;
@@ -556,11 +603,9 @@ pub async fn start_run(
     if !spec.extra_deny.is_empty() {
         deny = merge_deny(deny, Some(json!({"permissions": {"deny": spec.extra_deny}}).to_string()));
     }
-    // "Ask before changes" is gone: a stored `default` means `plan`.
-    let mode = crate::settings::effective_permission_mode(spec.options.permission_mode.as_deref()).map(String::from);
     // A chat or workflow working in the library: the user's own pending edits are recorded first, so
     // the history shows what the assistant changed separately (and each can be undone on its own).
-    let record = library.clone().filter(|l| *l == spec.cwd && matches!(kind.as_str(), "chat" | "workflow") && mode.as_deref() != Some("plan"));
+    let record = library.clone().filter(|l| *l == spec.cwd && matches!(kind.as_str(), "chat" | "workflow") && mode != "plan");
     if let Some(lib) = &record {
         record_library(&state, lib, &crate::git::subject::edit("your changes"), false).await;
     }
@@ -571,7 +616,7 @@ pub async fn start_run(
 
     let hook = state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(hook) = hook {
-        let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: mode.clone(),
+        let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: Some(mode.clone()),
             deny: deny.as_deref().and_then(|d| serde_json::from_str::<Value>(d).ok())
                 .and_then(|v| v["permissions"]["deny"].as_array().cloned()).unwrap_or_default()
                 .iter().filter_map(|r| r.as_str().map(String::from)).collect() };
@@ -594,8 +639,6 @@ pub async fn start_run(
 
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
-    c.current_dir(&spec.cwd)
-        .args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"]);
     // npm's `claude.cmd` on Windows goes through cmd.exe, which cannot carry multi-line or
     // quote-heavy arguments: the rules and the extra instructions travel as files instead.
     let mut temp_files: Vec<PathBuf> = vec![];
@@ -608,19 +651,16 @@ pub async fn start_run(
         temp_files.push(f.clone());
         Ok(f)
     };
-    if let Some(d) = &deny {
-        if via_files { c.arg("--settings").arg(as_file("settings.json", d)?); } else { c.args(["--settings", d]); }
-    }
-    if let Some(r) = &spec.resume { c.args(["--resume", r]); }
-    if let Some(m) = spec.options.model.as_ref().filter(|s| !s.is_empty()) { c.args(["--model", m]); }
-    if let Some(e) = spec.options.effort.as_ref().filter(|s| !s.is_empty()) { c.args(["--effort", e]); }
-    if let Some(p) = &mode { c.args(["--permission-mode", p]); }
-    if let Some(b) = spec.options.max_budget_usd.filter(|b| b.is_finite() && *b > 0.0) {
-        if has_flag(&state, "--max-budget-usd").await { c.args(["--max-budget-usd", &format!("{b:.2}")]); }
-        else { crate::log::warn(format!("run {}: this version of the assistant cannot limit spending; only the time limit applies", spec.chat_id)); }
-    }
-    for d in &spec.add_dirs { c.arg("--add-dir").arg(d); }
-    if via_files { c.arg("--append-system-prompt-file").arg(as_file("system.txt", &sys)?); } else { c.args(["--append-system-prompt", &sys]); }
+    let budget = match spec.options.max_budget_usd.filter(|b| b.is_finite() && *b > 0.0) {
+        Some(b) if has_flag(&state, "--max-budget-usd").await => Some(format!("{b:.2}")),
+        Some(_) => { crate::log::warn(format!("run {}: this version of the assistant cannot limit spending; only the time limit applies", spec.chat_id)); None }
+        None => None,
+    };
+    let rules_file = match &deny { Some(d) if via_files => Some(as_file("settings.json", d)?), _ => None };
+    let sys_file = if via_files { Some(as_file("system.txt", &sys)?) } else { None };
+    let rules = match (&rules_file, &deny) { (Some(f), _) => Some(Passed::File(f)), (None, Some(d)) => Some(Passed::Inline(d)), (None, None) => None };
+    let system = match &sys_file { Some(f) => Passed::File(f), None => Passed::Inline(&sys) };
+    c.current_dir(&spec.cwd).args(run_args(&spec.options, &mode, budget.as_deref(), spec.resume.as_deref(), &spec.add_dirs, rules, system));
     provider_env(&state, &mut c).await;
     c.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -637,8 +677,7 @@ pub async fn start_run(
     let pid = child.id();
     crate::runs::record(pid, &spec.chat_id);
     let started = std::time::Instant::now();
-    crate::log::info(format!("run {} started (pid {}, mode {}, in {})", spec.chat_id, pid.unwrap_or(0),
-        mode.as_deref().unwrap_or("default"), spec.cwd.display()));
+    crate::log::info(format!("run {} started (pid {}, mode {mode}, in {})", spec.chat_id, pid.unwrap_or(0), spec.cwd.display()));
     let prompt = spec.prompt.clone();
     tokio::spawn(async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
@@ -818,9 +857,7 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> 
     crate::settings::check_cli_value("model", model.as_deref())?;
     let mut c = cmd(&bin);
     c.current_dir(crate::paths::home())
-        .args(["-p", "--output-format", "json", "--no-session-persistence", "--tools", ""]);
-    if let Some(m) = model.filter(|m| !m.is_empty()) { c.args(["--model", &m]); }
-    c.args(["--append-system-prompt", language_note(&state.settings.read().await.language)]);
+        .args(one_shot_args(model.as_deref(), language_note(&state.settings.read().await.language)));
     provider_env(state, &mut c).await;
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = c.spawn()?;
@@ -1004,6 +1041,67 @@ mod tests {
         // With the user's own provider key, a refusal is about that key, not the Claude account.
         st.settings.write().await.ai.claude.has_api_token = true;
         assert!(error_msg(&st, "Invalid API key").await.tool.is_none());
+    }
+
+    fn flag<'a>(args: &'a [std::ffi::OsString], name: &str) -> Option<&'a str> {
+        args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).and_then(|v| v.to_str())
+    }
+
+    #[test]
+    fn every_run_is_started_with_an_explicit_permission_mode() {
+        let args = |mode: Option<&str>| {
+            let o = RunOptions { permission_mode: mode.map(String::from), ..Default::default() };
+            run_args(&o, crate::settings::effective_permission_mode(o.permission_mode.as_deref()), None, None, &[], None, Passed::Inline("note"))
+        };
+        // Nothing chosen (a fresh install, an old chat, an add-on that sent no options): accept edits,
+        // never "whatever Claude Code is set to".
+        for unset in [None, Some("")] { assert_eq!(flag(&args(unset), "--permission-mode"), Some("acceptEdits"), "{unset:?}"); }
+        assert_eq!(flag(&args(Some("default")), "--permission-mode"), Some("plan"));
+        for chosen in ["acceptEdits", "plan", "bypassPermissions"] { assert_eq!(flag(&args(Some(chosen)), "--permission-mode"), Some(chosen)); }
+        // The flag is there exactly once, whatever else is passed.
+        let o = RunOptions { model: Some("opus".into()), effort: Some("high".into()), ..Default::default() };
+        let a = run_args(&o, "plan", Some("1.50"), Some("sess-1"), &[PathBuf::from("/x/lib")], Some(Passed::Inline("{}")), Passed::File(Path::new("/t/system.txt")));
+        assert_eq!(a.iter().filter(|x| *x == "--permission-mode").count(), 1);
+        assert_eq!(flag(&a, "--max-budget-usd"), Some("1.50"));
+        assert_eq!((flag(&a, "--model"), flag(&a, "--effort"), flag(&a, "--resume")), (Some("opus"), Some("high"), Some("sess-1")));
+        assert_eq!((flag(&a, "--settings"), flag(&a, "--add-dir"), flag(&a, "--append-system-prompt-file")), (Some("{}"), Some("/x/lib"), Some("/t/system.txt")));
+        assert!(a.starts_with(&["-p".into(), "--output-format".into(), "stream-json".into()]));
+        // One-shot completions (titles, mini-wraps) say their mode too.
+        let one = one_shot_args(Some("haiku"), "note");
+        let at = one.iter().position(|x| x == "--permission-mode").unwrap();
+        assert_eq!(one[at + 1], "acceptEdits");
+        assert!(one.windows(2).any(|w| w[0] == "--tools" && w[1].is_empty()) && one.windows(2).any(|w| w[0] == "--model" && w[1] == "haiku"));
+        assert!(!one_shot_args(None, "note").contains(&"--model".to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_run_with_no_mode_gets_accept_edits_and_the_app_never_bypasses_on_its_own() {
+        let st = Arc::new(AppState::for_test());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Option<String>>::new()));
+        let log = seen.clone();
+        *st.run_hook.lock().unwrap() = Some(Arc::new(move |info: RunInfo| {
+            log.lock().unwrap().push(info.permission_mode.clone());
+            Box::pin(async { true })
+        }));
+        let dir = std::env::temp_dir().join(format!("thoughts-mode-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = |chat: &crate::chats::Chat, mode: Option<&str>| RunSpec { chat_id: chat.id.clone(), prompt: "hi".into(), cwd: dir.clone(), add_dirs: vec![],
+            options: RunOptions { permission_mode: mode.map(String::from), ..Default::default() }, resume: None, append_system: None, extra_deny: vec![] };
+        let chat = crate::chats::Chat::default();
+        st.chats.insert(chat.clone()).await;
+        for mode in [None, Some(""), Some("default"), Some("bypassPermissions")] {
+            start_run(st.clone(), spec(&chat, mode), None).await.unwrap();
+            for _ in 0..200 { if !st.chats.get(&chat.id).await.unwrap().running { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        }
+        assert_eq!(*seen.lock().unwrap(), [Some("acceptEdits".to_string()), Some("acceptEdits".into()), Some("plan".into()), Some("bypassPermissions".into())]);
+        // Anything the app starts itself is refused in bypass mode, and gets accept-edits when it names none.
+        let wrap = crate::chats::Chat { kind: "wrap".into(), ..Default::default() };
+        st.chats.insert(wrap.clone()).await;
+        assert!(start_run(st.clone(), spec(&wrap, Some("bypassPermissions")), None).await.is_err());
+        start_run(st.clone(), spec(&wrap, None), None).await.unwrap();
+        for _ in 0..200 { if seen.lock().unwrap().len() == 5 { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        assert_eq!(seen.lock().unwrap().last().unwrap().as_deref(), Some("acceptEdits"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

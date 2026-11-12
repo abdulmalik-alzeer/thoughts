@@ -101,6 +101,8 @@
       c.options ??= {};
       // "Ask before changes" no longer exists: an older chat that stored it is read-only.
       if (c.options.permissionMode === 'default') c.options.permissionMode = 'plan';
+      // A chat from before every chat stored its mode: it runs with accept-edits, so show that.
+      if (!c.options.permissionMode) c.options.permissionMode = 'acceptEdits';
       chat = c;
       savedPerm = c.options.permissionMode ?? null;
       loadState = 'ok';
@@ -575,7 +577,6 @@
           {#if permModes.length}
             <select bind:value={chat.options.permissionMode} onchange={permChanged} class:bypass={chat.options.permissionMode === BYPASS}
               title={chat.options.permissionMode === BYPASS ? t('perm.bypass.on') : t('chat.permissionTip')} aria-label={t('permission')}>
-              <option value={null}>{t('permission')}: {t('default')}</option>
               {#each permModes as m}<option value={m}>{label('chat3.perm', m)}</option>{/each}
             </select>
           {/if}
