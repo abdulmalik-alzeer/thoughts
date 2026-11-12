@@ -140,9 +140,21 @@ fn build(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
         .focused(true)
         // Text dragged in from another app lands in the box instead of being taken as a file drop.
         .disable_drag_drop_handler();
+    let builder = match browser_args(&app.config().app.windows) {
+        Some(args) => builder.additional_browser_args(&args),
+        None => builder,
+    };
     #[cfg(target_os = "macos")]
     let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
     builder.build()
+}
+
+/// The browser arguments the app window is configured with (`additionalBrowserArgs`, Windows). The
+/// box must start with exactly the same ones: WebView2 runs one browser for all the app's windows
+/// and refuses to create a web view that asks for different arguments, so without them the box
+/// would never open on Windows. (Other systems ignore the arguments.)
+fn browser_args(windows: &[tauri::utils::config::WindowConfig]) -> Option<String> {
+    windows.iter().find(|w| w.label == "main").and_then(|w| w.additional_browser_args.clone())
 }
 
 /// Show and focus the box.
@@ -628,6 +640,22 @@ mod tests {
         for r in reserved() {
             assert_eq!(check_keys(r), Err(Refused::System), "{r} must be written as check_keys writes it");
         }
+    }
+
+    #[test]
+    fn the_box_starts_its_browser_like_the_app_window() {
+        // The Windows config gives the app window browser arguments of its own; the box takes them.
+        let conf: Value = serde_json::from_str(include_str!("../tauri.windows.conf.json")).unwrap();
+        let windows: Vec<tauri::utils::config::WindowConfig> = serde_json::from_value(conf["app"]["windows"].clone()).unwrap();
+        let configured = conf["app"]["windows"][0]["additionalBrowserArgs"].as_str().expect("the Windows app window has browser arguments");
+        assert_eq!(browser_args(&windows).as_deref(), Some(configured));
+        // The other systems' configs set none, and then the box sets none either.
+        for other in [include_str!("../tauri.macos.conf.json"), include_str!("../tauri.linux.conf.json"), include_str!("../tauri.conf.json")] {
+            let conf: Value = serde_json::from_str(other).unwrap();
+            let windows: Vec<tauri::utils::config::WindowConfig> = serde_json::from_value(conf["app"]["windows"].clone()).unwrap();
+            assert_eq!(browser_args(&windows), None);
+        }
+        assert_eq!(browser_args(&[]), None);
     }
 
     #[test]
