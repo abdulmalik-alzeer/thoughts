@@ -27,7 +27,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/history", get(history))
         .route("/api/layer/rollback", post(rollback))
         .route("/api/layer/revert", post(revert))
-        .route("/api/layer/undo-last", post(undo_last))
+        .route("/api/layer/undo-last", post(undo_last).get(undo_preview))
         .route("/api/layer/storage/:plugin", get(storage_get).put(storage_put).layer(DefaultBodyLimit::max(STORAGE_MAX_BYTES + 1024)))
         .route("/api/layer/customize", post(customize))
         .route("/api/layer/pending", get(pending))
@@ -141,6 +141,26 @@ async fn revert(State(st): S, Json(c): Json<Commit>) -> R {
     applayer::revert(&st, &c.hash).await?;
     record_outcome(&st, "undo", &recall_request(&d.home, &c.hash).unwrap_or(subject)).await;
     ok()
+}
+
+/// What `POST /api/layer/undo-last` would undo right now, without undoing anything:
+/// `{exists:false}`, or `{exists:true, manual, hash, summary}`. `manual` means files of the layer
+/// were edited by hand since the last history entry: an undo takes those edits back first, and
+/// there is no entry to name yet (`hash` and `summary` are empty).
+pub async fn undo_preview_in(g: Git<'_>, dir: &std::path::Path) -> Value {
+    let manual = g.run(dir, &["status", "--porcelain"]).await.map_or(false, |out| !out.trim().is_empty());
+    if manual { return json!({"exists": true, "manual": true, "hash": "", "summary": ""}); }
+    match applayer::last_undoable_in(g, dir).await {
+        Some((hash, summary)) => json!({"exists": true, "manual": false, "hash": hash, "summary": summary}),
+        None => json!({"exists": false}),
+    }
+}
+
+/// `GET /api/layer/undo-last` — see `undo_preview_in`. Lets a confirmation name the change before
+/// anything moves (the native Recovery menu asks with it).
+async fn undo_preview(State(st): S) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    Ok(Json(undo_preview_in(Git(Some(&st)), &Dirs::real().layer).await))
 }
 
 /// `POST /api/layer/undo-last` — undo the most recent change that is still in effect.
@@ -445,6 +465,38 @@ async fn update_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_undo_preview_names_exactly_what_an_undo_would_take_back() {
+        let (g, d) = applayer::testutil::layer("undo-preview").await;
+        // A fresh layer has only its starting point: nothing to undo.
+        assert_eq!(undo_preview_in(g, &d.layer).await, json!({"exists": false}));
+        std::fs::write(d.layer.join("custom.css"), "body { color: red }\n").unwrap();
+        g.commit_all(&d.layer, "Make text red").await.unwrap();
+        std::fs::write(d.layer.join("plugins/a.js"), "export default () => {}\n").unwrap();
+        g.commit_all(&d.layer, "Add a plugin").await.unwrap();
+        let before = applayer::history_in(g, &d.layer).await;
+        let p = undo_preview_in(g, &d.layer).await;
+        assert_eq!((p["exists"].clone(), p["manual"].clone(), p["summary"].clone()), (json!(true), json!(false), json!("Add a plugin")));
+        assert_eq!(p["hash"], before[0]["hash"]);
+        // Looking changes nothing.
+        assert_eq!(applayer::history_in(g, &d.layer).await, before);
+        assert!(d.layer.join("plugins/a.js").exists());
+        // The preview and the undo agree, one change after the other.
+        let (hash, summary) = applayer::undo_last_in(g, &d.layer, false).await.unwrap();
+        assert_eq!((json!(hash), json!(summary)), (p["hash"].clone(), p["summary"].clone()));
+        assert_eq!(undo_preview_in(g, &d.layer).await["summary"], "Make text red", "the undo itself is not offered for undoing");
+        // A file edited by hand comes first: that is what an undo would take back now.
+        std::fs::write(d.layer.join("custom.css"), "body { display: none }\n").unwrap();
+        assert_eq!(undo_preview_in(g, &d.layer).await, json!({"exists": true, "manual": true, "hash": "", "summary": ""}));
+        let (_, summary) = applayer::undo_last_in(g, &d.layer, false).await.unwrap();
+        assert_eq!(summary, "Snapshot of manual changes");
+        assert_eq!(std::fs::read_to_string(d.layer.join("custom.css")).unwrap(), "body { color: red }\n", "the hand edit is gone, the kept change is not");
+        // Files the layer ignores (the assistant's own notes) are not "manual changes".
+        std::fs::write(d.layer.join("SUMMARY.md"), "notes").unwrap();
+        assert_eq!(undo_preview_in(g, &d.layer).await["manual"], false);
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
 
     #[test]
     fn a_customise_request_may_carry_both_names_of_its_text() {
