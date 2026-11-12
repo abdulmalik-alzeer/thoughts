@@ -2273,7 +2273,7 @@ mod tests {
             library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone() })).await.unwrap();
             assert_eq!(t::read(&lib, "notes/plan.md"), "first draft\n");
             // A deleted document can be brought back; a whole change can be undone.
-            assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/plan.md".into() })).await.unwrap().0["recoverable"], true);
+            assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/plan.md".into(), ..Default::default() })).await.unwrap().0["recoverable"], true);
             let newest = library_history(State(st.clone()), none()).await.unwrap().0[0]["hash"].as_str().unwrap().to_string();
             library_undo(State(st.clone()), Json(Undo { hash: newest })).await.unwrap();
             assert_eq!(t::read(&lib, "notes/plan.md"), "first draft\n");
