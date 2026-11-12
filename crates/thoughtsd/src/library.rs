@@ -159,12 +159,23 @@ pub fn set_idea_status(root: &Path, rel: &str, status: &str, today: chrono::Naiv
 /// File types an add-on may write.
 pub const PLUGIN_WRITE_EXT: &[&str] = &["md", "json", "csv", "txt"];
 
+/// Files Claude Code reads as standing instructions as soon as the assistant works in their folder,
+/// at any depth: `CLAUDE.md`, `CLAUDE.local.md`, and `AGENTS.md` where there is no `CLAUDE.md`.
+/// Whatever the letter case, and without the trailing dots and spaces some filesystems ignore.
+fn instruction_file(name: &str) -> bool {
+    matches!(name.trim_end_matches(['.', ' ']).to_lowercase().as_str(), "claude.md" | "claude.local.md" | "agents.md")
+}
+
 /// May an add-on write (or delete) library file `rel`? Only a text file, and only inside one of
 /// the library-relative folders it declared (`allow`) — judged on real paths, whatever the spelling.
 pub fn check_plugin_write(root: &Path, rel: &str, allow: &[String]) -> anyhow::Result<()> {
     let ext = rel.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
     if !PLUGIN_WRITE_EXT.contains(&ext.as_str()) { return Err(crate::tr::err("plugin.file_type", &[])); }
     let target = resolve(root, rel)?;
+    // An add-on's own notes must never become instructions for the assistant: not under that name,
+    // and not through a link that leads to such a file.
+    let named = |p: &Path| p.file_name().map_or(false, |n| instruction_file(&n.to_string_lossy()));
+    if named(&target) || named(&crate::paths::canonical_lenient(&target)) { return Err(crate::tr::err("plugin.instructions", &[])); }
     let inside = allow.iter().filter_map(|a| crate::paths::clean_rel(a).ok())
         .any(|a| { let dir = root.join(&a); crate::paths::inside_ci(&target, &dir) && crate::paths::canonical_lenient(&target) != crate::paths::canonical_lenient(&dir) });
     if !inside { return Err(crate::tr::err("plugin.not_allowed", &[("path", rel)])); }
@@ -695,6 +706,15 @@ mod tests {
                     "me/profile.md", ".claude/x.md", "data/.git/x.md"] {
             assert!(check_plugin_write(&d, bad, &allow).is_err(), "{bad}");
         }
+        // SEC-43: files the assistant would read as standing instructions are not an add-on's to write,
+        // move or delete, at any depth and in any letter case; ordinary notes beside them are.
+        for bad in ["billing/CLAUDE.md", "billing/2026/claude.md", "Billing/Claude.Local.md", "data/AGENTS.md", "data/new/CLAUDE.md"] {
+            let err = check_plugin_write(&d, bad, &allow).unwrap_err();
+            assert_eq!(crate::tr::classify(&err).code, "forbidden", "{bad}");
+        }
+        for ok in ["billing/claude-notes.md", "billing/CLAUDE.md.txt", "billing/my-CLAUDE.md", "data/agents.json"] {
+            assert!(check_plugin_write(&d, ok, &allow).is_ok(), "{ok}");
+        }
         // Nothing declared, or a declaration that is not a plain folder: nothing may be written.
         assert!(check_plugin_write(&d, "billing/hours.csv", &[]).is_err());
         assert!(check_plugin_write(&d, "billing/hours.csv", &["../".to_string(), "/".to_string(), "".to_string()]).is_err());
@@ -704,6 +724,10 @@ mod tests {
             std::fs::create_dir_all(d.join("me")).unwrap();
             std::os::unix::fs::symlink(d.join("me"), d.join("Billing/alias")).unwrap();
             assert!(check_plugin_write(&d, "Billing/alias/profile.md", &allow).is_err());
+            // A link that leads to an instruction file is that file.
+            std::fs::write(d.join("Billing/CLAUDE.md"), "the user's own").unwrap();
+            std::os::unix::fs::symlink("CLAUDE.md", d.join("Billing/readme.md")).unwrap();
+            assert!(check_plugin_write(&d, "Billing/readme.md", &allow).is_err());
             // The lower-case spelling reaches the same link only where names ignore case (macOS);
             // on a case-sensitive disk it is simply a new, separate folder inside the allowed one.
             #[cfg(target_os = "macos")]
