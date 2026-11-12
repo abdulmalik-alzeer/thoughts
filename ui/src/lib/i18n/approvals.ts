@@ -118,6 +118,7 @@ export default {
     'appr.hideDetails': 'إخفاء التفاصيل',
     'appr.failed': 'تعذّر إرسال جوابك',
 
+    'appr.allowed.summary_zero': 'لا تسمح هذه المحادثة بأي أمر دون استئذان',
     'appr.allowed.summary_one': 'تسمح هذه المحادثة بأمر واحد دون استئذان',
     'appr.allowed.summary_two': 'تسمح هذه المحادثة بأمرين دون استئذان',
     'appr.allowed.summary_few': 'تسمح هذه المحادثة بـ{n} أمور دون استئذان',

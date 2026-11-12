@@ -54,7 +54,7 @@
   <form class="card" onsubmit={(e) => { e.preventDefault(); add(); }}>
     <label for="pj-name">{t('proj.name')}</label>
     <input id="pj-name" dir="auto" bind:value={name} placeholder={t('proj.namePh')} autocomplete="off" />
-    <label class="check"><input type="checkbox" bind:checked={inside} /> <span>{t('proj.inside')} <bdi><code>projects/</code></bdi></span></label>
+    <label class="check"><input type="checkbox" bind:checked={inside} /> <span>{t('proj.inside')}</span></label>
     {#if !inside}
       <label for="pj-path">{t('proj.folder')}</label>
       <div class="row"><input id="pj-path" class="grow" dir="ltr" bind:value={path} placeholder="~/Documents/Clients/Annual report" autocomplete="off" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('proj.browse')}</button></div>

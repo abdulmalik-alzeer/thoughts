@@ -264,7 +264,7 @@
   });
 
   // Plain headline per action; whatever the background service said goes in the detail.
-  const FAIL: Record<string, string> = { save: 'ui.set.saveFailed', mod: 'ui.set.modFailed', remote: 'ui.set.remoteFailed', token: 'ui.set.keyFailed', login: 'ui.set.loginFailed', reorg: 'ui.set.reorgFailed', search: 'ui.set.searchFailed', signin: 'histb.signin.failed', forget: 'histb.signin.forgetFailed', drive: 'histb.drive.failed', host: 'histb.host.failed' };
+  const FAIL: Record<string, string> = { save: 'ui.set.saveFailed', mod: 'ui.set.modFailed', remote: 'ui.set.remoteFailed', token: 'ui.set.keyFailed', login: 'ui.set.loginFailed', reorg: 'ui.set.reorgFailed', signin: 'histb.signin.failed', forget: 'histb.signin.forgetFailed', drive: 'histb.drive.failed', host: 'histb.host.failed' };
   /** Runs one action with a loading flag; any failure is shown to the user. */
   async function run(key: string, fn: () => Promise<unknown>) {
     if (busy[key]) return;

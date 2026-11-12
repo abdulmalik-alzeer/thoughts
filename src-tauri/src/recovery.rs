@@ -27,7 +27,7 @@ pub(crate) fn arabic() -> bool {
 /// The words of the native dialogs: (English, Arabic). `{name}` parts are filled in by `fill`.
 fn words(key: &str) -> (&'static str, &'static str) {
     match key {
-        "ok" => ("OK", "حسنًا"),
+        "ok" => ("OK", "حسناً"),
         "cancel" => ("Cancel", "إلغاء"),
         "wait" => ("Wait", "انتظر"),
 
@@ -50,7 +50,7 @@ fn words(key: &str) -> (&'static str, &'static str) {
         "undo.done.title" => ("Change undone", "تم التراجع عن التغيير"),
         "undo.done.body" => (
             "“{what}” is no longer part of the app.\n\nChanged your mind? Put it back now, or later from History.",
-            "«{what}» لم يعد جزءًا من التطبيق.\n\nغيّرت رأيك؟ أعِده الآن، أو لاحقًا من «السجل».",
+            "«{what}» لم يعد جزءاً من التطبيق.\n\nغيّرت رأيك؟ أعِده الآن، أو لاحقاً من «السجل».",
         ),
         "back.put" => ("Put it back", "أعِده كما كان"),
         "back.done.title" => ("Put back", "أُعيد كما كان"),
@@ -76,7 +76,7 @@ fn words(key: &str) -> (&'static str, &'static str) {
         "rb.gone.title" => ("That version is no longer listed", "هذه النسخة لم تعد في القائمة"),
         "rb.gone.body" => (
             "The list of versions has changed. Open the Recovery menu again and choose from the new list.",
-            "تغيّرت قائمة النسخ. افتح قائمة «الاستعادة» مجددًا واختر من القائمة الجديدة.",
+            "تغيّرت قائمة النسخ. افتح قائمة «الاستعادة» مجدداً واختر من القائمة الجديدة.",
         ),
         "rb.none.title" => ("Nothing to go back to", "لا شيء للعودة إليه"),
         "rb.none.body" => ("The app has not been changed yet, so there is no earlier version.", "لم يُغيَّر التطبيق بعد، فلا توجد نسخة سابقة."),
@@ -88,11 +88,11 @@ fn words(key: &str) -> (&'static str, &'static str) {
         "rb.more.title" => ("The window is not responding", "النافذة لا تستجيب"),
         "rb.more.body" => (
             "The full list opens in the window, which is not answering right now. Choose a version from the Recovery menu instead, or use Recovery ▸ Open a fresh window first.",
-            "القائمة الكاملة تُفتح في النافذة، وهي لا تستجيب الآن. اختر نسخة من قائمة «الاستعادة» بدلًا من ذلك، أو استخدم أولًا «الاستعادة» ◂ «فتح نافذة جديدة».",
+            "القائمة الكاملة تُفتح في النافذة، وهي لا تستجيب الآن. اختر نسخة من قائمة «الاستعادة» بدلاً من ذلك، أو استخدم أولاً «الاستعادة» ◂ «فتح نافذة جديدة».",
         ),
         "note.safe" => (
             "Customisations are switched off at the moment, so you will not see a difference until you turn them back on (Recovery ▸ Customisations off).",
-            "التخصيصات متوقفة حاليًا، فلن ترى فرقًا حتى تعيد تفعيلها («الاستعادة» ◂ «إيقاف التخصيصات»).",
+            "التخصيصات متوقفة حالياً، فلن ترى فرقاً حتى تعيد تفعيلها («الاستعادة» ◂ «إيقاف التخصيصات»).",
         ),
 
         "pend.none.title" => ("Nothing is waiting", "لا شيء في الانتظار"),
@@ -129,7 +129,7 @@ fn words(key: &str) -> (&'static str, &'static str) {
         "restart.fail.title" => ("The background service could not be restarted", "تعذّرت إعادة تشغيل خدمة الخلفية"),
         "restart.fail.body" => (
             "Quit Thoughts completely and open it again. If that does not help, restart your computer.",
-            "أنهِ Thoughts تمامًا ثم افتحه من جديد. وإن لم ينفع ذلك فأعد تشغيل حاسوبك.",
+            "أنهِ Thoughts تماماً ثم افتحه من جديد. وإن لم ينفع ذلك فأعد تشغيل حاسوبك.",
         ),
 
         "window.fail.title" => ("A new window could not be opened", "تعذّر فتح نافذة جديدة"),

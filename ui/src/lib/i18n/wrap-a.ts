@@ -131,6 +131,7 @@ export default {
     'wrapa.tryAgain': 'حاول من جديد',
     'wrapa.superseded': 'حلّ تلخيص أحدث محلّ هذه الخطة. لم يُحفظ منها شيء.',
     'wrapa.discardedNote': 'تُركت هذه الخطة. لم يُحفظ منها شيء.',
+    'wrapa.changed_zero': 'لم يغيّر هذا التلخيص أي مستند',
     'wrapa.changed_one': 'غيّر هذا التلخيص مستنداً واحداً',
     'wrapa.changed_two': 'غيّر هذا التلخيص مستندين',
     'wrapa.changed_few': 'غيّر هذا التلخيص {n} مستندات',

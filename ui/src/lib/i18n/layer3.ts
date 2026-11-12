@@ -97,6 +97,7 @@ export default {
     'layer3.importTitle': 'هل تريد إضافة هذه الحزمة؟',
     'layer3.importFull': 'مجموعة كاملة من التخصيصات.',
     'layer3.importFeature': 'حزمة ميزة: تُضاف إلى ما لديك ولا تستبدله.',
+    'layer3.importFiles_zero': 'لا تحتوي على أي ملف.',
     'layer3.importFiles_one': 'تحتوي على ملف واحد.',
     'layer3.importFiles_two': 'تحتوي على ملفين.',
     'layer3.importFiles_few': 'تحتوي على {n} ملفات.',

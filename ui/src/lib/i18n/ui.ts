@@ -85,7 +85,7 @@ Object.assign(en, {
 
   'err.wrapInterrupted': 'A Wrap was interrupted before it finished saving. Open it and choose “Finish” or “Undo” — until then, Sync and new Wraps wait.',
   'err.openWrap': 'Open the Wrap',
-  'err.noHistory': 'The history of changes is switched off, so Thoughts keeps only the current copy of your notes and there is nothing to go back to. Turn on “Keep a history of changes on this computer” under Settings → Library & backup.',
+  'err.noHistory': 'The history of changes is switched off, so Thoughts keeps only the current copy of your notes and there is nothing to go back to. Turn on “Keep a history of changes on this computer” under Settings › Library & backup.',
   'err.newerSettings': 'Settings can’t be changed here: they were saved by a newer version of Thoughts.',
 
   'ui.hist.title': 'History',
@@ -113,7 +113,7 @@ Object.assign(en, {
   'ui.home.loadFailed': 'Some of this page could not be loaded.',
   'ui.home.unknown': 'not available',
   'ui.home.openTodos_one': 'Open todo', 'ui.home.openTodos_other': 'Open todos',
-  'ui.home.toWrap_one': 'Chat to wrap — tap to save', 'ui.home.toWrap_other': 'Chats to wrap — tap to save',
+  'ui.home.toWrap_one': 'Chat to wrap — click to save', 'ui.home.toWrap_other': 'Chats to wrap — click to save',
   'ui.home.notes_one': 'Note in library', 'ui.home.notes_other': 'Notes in library',
   'ui.home.sendFailed': 'Your message could not be sent.',
   'ui.home.dismissFailed': 'That suggestion could not be dismissed.',
@@ -128,7 +128,7 @@ Object.assign(en, {
   'ui.todo.toggleFailed': 'The todo could not be updated.',
   'ui.todo.editFailed': 'The todo could not be changed.',
   'ui.todo.deleteFailed': 'The todo could not be deleted.',
-  'ui.todo.emptyTip': 'Add “@due(2026-12-31)” — or use the calendar button on a todo — to get a reminder on the day.',
+  'ui.todo.emptyTip': 'Give a todo a date with its calendar button, and you are reminded on the day.',
   'ui.todo.groupLabel': 'Group by',
   'ui.todo.groupBy.list': 'List', 'ui.todo.groupBy.due': 'Due date', 'ui.todo.groupBy.tag': 'Tag', 'ui.todo.groupBy.none': 'No groups',
   'ui.todo.group.all': 'All todos', 'ui.todo.group.noTag': 'No tag',
@@ -178,7 +178,6 @@ Object.assign(en, {
   'ui.set.keyFailed': 'The key could not be updated.',
   'ui.set.loginFailed': 'Sign-in could not be started.',
   'ui.set.reorgFailed': 'Reorganizing could not be started.',
-  'ui.set.searchFailed': 'The search helper could not be installed.',
 });
 
 Object.assign(ar, {
@@ -188,7 +187,7 @@ Object.assign(ar, {
   'ui.back': 'رجوع', 'ui.forward': 'تقدّم',
   'ui.sc.back': 'الرجوع إلى الصفحة السابقة', 'ui.sc.forward': 'التقدّم إلى الصفحة التالية',
   'ui.pal.appHistory': 'سجل تغييرات التطبيق',
-  'ui.dueNow_one': 'مهمة واحدة موعدها اليوم أو متأخرة', 'ui.dueNow_two': 'مهمتان موعدهما اليوم أو متأخرتان',
+  'ui.dueNow_zero': 'لا مهام موعدها اليوم أو متأخرة', 'ui.dueNow_one': 'مهمة واحدة موعدها اليوم أو متأخرة', 'ui.dueNow_two': 'مهمتان موعدهما اليوم أو متأخرتان',
   'ui.dueNow_few': '{n} مهام موعدها اليوم أو متأخرة', 'ui.dueNow_many': '{n} مهمة موعدها اليوم أو متأخرة', 'ui.dueNow_other': '{n} مهمة موعدها اليوم أو متأخرة',
   'ui.wrapRunning': '«تلخيص وحفظ» يحفظ محادثاتك الآن — وسينتهي تلقائياً.',
   'ui.wrapRunningShort': 'جارٍ الحفظ…',
@@ -207,7 +206,7 @@ Object.assign(ar, {
   'ui.busy.note': 'إن انتظرت فلن ينقطع شيء، ويمكنك المحاولة بعد انتهائه.',
   'ui.busy.wait': 'انتظر', 'ui.busy.anyway': 'نفّذ على أي حال',
   'ui.busy.waiting': 'لم يُثبَّت التحديث بعد — أعد المحاولة عند انتهاء العمل الجاري.',
-  'ui.upd.deb': 'هذه النسخة من Thoughts مثبّتة كحزمة نظام، ولذلك تصلها التحديثات عبر مدير الحزم في نظامك.',
+  'ui.upd.deb': 'ثُبّتت هذه النسخة من Thoughts عن طريق مدير الحزم في نظامك، ولذلك تصلها التحديثات من خلاله.',
   'ui.upd.build': 'التحديثات غير مهيّأة في هذه النسخة من Thoughts.',
   'ui.upd.downgrade': 'هذا إصدار أقدم من Thoughts مما استخدمته سابقاً، ولذلك تُركت تخصيصاتك كما هي تماماً.',
   'ui.upd.removed': 'بعض الإعدادات الافتراضية لم تعد جزءاً من Thoughts. احتفظنا بنسخك منها، ولك أن تعدّلها أو تحذفها.',
@@ -215,7 +214,7 @@ Object.assign(ar, {
 
   'err.wrapInterrupted': 'انقطع «تلخيص وحفظ» قبل أن يكتمل. افتحه واختر «إكمال» أو «تراجع» — وإلى ذلك الحين تتوقف المزامنة وأي تلخيص جديد.',
   'err.openWrap': 'افتح التلخيص',
-  'err.noHistory': 'سجلّ التغييرات متوقف، فلا يحتفظ Thoughts إلا بالنسخة الحالية من ملاحظاتك ولا توجد نسخة سابقة للعودة إليها. فعّل «الاحتفاظ بسجلّ للتغييرات على هذا الجهاز» من الإعدادات ← المكتبة والنسخ الاحتياطي.',
+  'err.noHistory': 'سجلّ التغييرات متوقف، فلا يحتفظ Thoughts إلا بالنسخة الحالية من ملاحظاتك ولا توجد نسخة سابقة للعودة إليها. فعّل «الاحتفاظ بسجلّ للتغييرات على هذا الجهاز» من الإعدادات › المكتبة والنسخ الاحتياطي.',
   'err.newerSettings': 'لا يمكن تغيير الإعدادات من هنا: فقد حُفظت بإصدار أحدث من Thoughts.',
 
   'ui.hist.title': 'السجل',
@@ -243,7 +242,7 @@ Object.assign(ar, {
   'ui.home.loadFailed': 'تعذّر تحميل جزء من هذه الصفحة.',
   'ui.home.unknown': 'غير متاح',
   'ui.home.openTodos_zero': 'مهام مفتوحة', 'ui.home.openTodos_one': 'مهمة مفتوحة', 'ui.home.openTodos_two': 'مهمتان مفتوحتان', 'ui.home.openTodos_few': 'مهام مفتوحة', 'ui.home.openTodos_many': 'مهمة مفتوحة', 'ui.home.openTodos_other': 'مهمة مفتوحة',
-  'ui.home.toWrap_one': 'محادثة بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_two': 'محادثتان بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_few': 'محادثات بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_many': 'محادثة بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_other': 'محادثة بانتظار الحفظ — اضغط للحفظ',
+  'ui.home.toWrap_zero': 'محادثات بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_one': 'محادثة بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_two': 'محادثتان بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_few': 'محادثات بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_many': 'محادثة بانتظار الحفظ — اضغط للحفظ', 'ui.home.toWrap_other': 'محادثة بانتظار الحفظ — اضغط للحفظ',
   'ui.home.notes_zero': 'ملاحظات في المكتبة', 'ui.home.notes_one': 'ملاحظة في المكتبة', 'ui.home.notes_two': 'ملاحظتان في المكتبة', 'ui.home.notes_few': 'ملاحظات في المكتبة', 'ui.home.notes_many': 'ملاحظة في المكتبة', 'ui.home.notes_other': 'ملاحظة في المكتبة',
   'ui.home.sendFailed': 'تعذّر إرسال رسالتك.',
   'ui.home.dismissFailed': 'تعذّر تجاهل هذا الاقتراح.',
@@ -258,12 +257,12 @@ Object.assign(ar, {
   'ui.todo.toggleFailed': 'تعذّر تحديث المهمة.',
   'ui.todo.editFailed': 'تعذّر تعديل المهمة.',
   'ui.todo.deleteFailed': 'تعذّر حذف المهمة.',
-  'ui.todo.emptyTip': 'أضف ⁦@due(2026-12-31)⁩ — أو استخدم زر التقويم بجانب المهمة — ليصلك تذكير في يومها.',
+  'ui.todo.emptyTip': 'حدّد موعد المهمة بزر التقويم بجانبها، ويصلك تذكير في يومها.',
   'ui.todo.groupLabel': 'التجميع حسب',
   'ui.todo.groupBy.list': 'القائمة', 'ui.todo.groupBy.due': 'الموعد', 'ui.todo.groupBy.tag': 'الوسم', 'ui.todo.groupBy.none': 'بلا تجميع',
   'ui.todo.group.all': 'كل المهام', 'ui.todo.group.noTag': 'بلا وسم',
   'ui.todo.group.overdue': 'متأخرة', 'ui.todo.group.today': 'اليوم', 'ui.todo.group.soon': 'خلال 7 أيام', 'ui.todo.group.later': 'لاحقاً', 'ui.todo.group.none': 'بلا موعد', 'ui.todo.group.done': 'منجزة',
-  'ui.todo.count_one': 'مهمة واحدة', 'ui.todo.count_two': 'مهمتان', 'ui.todo.count_few': '{n} مهام', 'ui.todo.count_many': '{n} مهمة', 'ui.todo.count_other': '{n} مهمة',
+  'ui.todo.count_zero': 'لا مهام', 'ui.todo.count_one': 'مهمة واحدة', 'ui.todo.count_two': 'مهمتان', 'ui.todo.count_few': '{n} مهام', 'ui.todo.count_many': '{n} مهمة', 'ui.todo.count_other': '{n} مهمة',
   'ui.todo.resetView': 'استخدم العرض الافتراضي',
   'ui.todo.resetViewHint': 'العودة إلى التجميع والترتيب المحدَّدين في تخصيصك',
   'ui.idea.captureFailed': 'تعذّر الحفظ.',
@@ -277,7 +276,7 @@ Object.assign(ar, {
   'ui.cal.saveFailed': 'تعذّر إنشاء ملف التقويم.',
   'ui.cal.prev': 'الشهر السابق', 'ui.cal.next': 'الشهر التالي',
   'ui.cal.keys': 'استخدم مفاتيح الأسهم للتنقل بين الأيام، و⁦Page Up⁩ و⁦Page Down⁩ لتغيير الشهر، و⁦Enter⁩ لإضافة مهمة في اليوم المحدد.',
-  'ui.cal.dayCount_one': 'مهمة واحدة', 'ui.cal.dayCount_two': 'مهمتان', 'ui.cal.dayCount_few': '{n} مهام', 'ui.cal.dayCount_many': '{n} مهمة', 'ui.cal.dayCount_other': '{n} مهمة',
+  'ui.cal.dayCount_zero': 'لا مهام', 'ui.cal.dayCount_one': 'مهمة واحدة', 'ui.cal.dayCount_two': 'مهمتان', 'ui.cal.dayCount_few': '{n} مهام', 'ui.cal.dayCount_many': '{n} مهمة', 'ui.cal.dayCount_other': '{n} مهمة',
   'ui.cal.dayNone': 'لا مواعيد',
   'ui.cal.more_one': '+{n} أخرى', 'ui.cal.more_other': '+{n} أخرى',
   'ui.cal.addHere': 'أضف مهمة موعدها هذا اليوم',
@@ -289,11 +288,11 @@ Object.assign(ar, {
 
   'ui.rem.todayTitle': 'موعدها اليوم', 'ui.rem.overdueTitle': 'متأخرة',
   'ui.rem.manyTitle_one': 'مهمة واحدة تنتظرك اليوم', 'ui.rem.manyTitle_two': 'مهمتان تنتظرانك اليوم', 'ui.rem.manyTitle_few': '{n} مهام تنتظرك اليوم', 'ui.rem.manyTitle_many': '{n} مهمة تنتظرك اليوم', 'ui.rem.manyTitle_other': '{n} مهمة تنتظرك اليوم',
-  'ui.rem.overdueCount_one': 'واحدة متأخرة', 'ui.rem.overdueCount_two': 'اثنتان متأخرتان', 'ui.rem.overdueCount_few': '{n} متأخرة', 'ui.rem.overdueCount_many': '{n} متأخرة', 'ui.rem.overdueCount_other': '{n} متأخرة',
+  'ui.rem.overdueCount_zero': 'لا متأخرة', 'ui.rem.overdueCount_one': 'واحدة متأخرة', 'ui.rem.overdueCount_two': 'اثنتان متأخرتان', 'ui.rem.overdueCount_few': '{n} متأخرة', 'ui.rem.overdueCount_many': '{n} متأخرة', 'ui.rem.overdueCount_other': '{n} متأخرة',
 
   'ui.set.profession': 'فيمَ تستخدم Thoughts',
   'ui.set.professionNone': 'غير محدَّد',
-  'ui.set.professionHint': 'يغيّر بعض الكلمات لتناسب عملك — مثل «العملاء» أو «الصفوف» بدلاً من «الأفكار». ولا تُعاد تسمية ملفاتك.',
+  'ui.set.professionHint': 'يغيّر بعض الكلمات لتناسب عملك — مثل «العملاء» أو «الفصول» بدلاً من «الأفكار». ولا تُعاد تسمية ملفاتك.',
   'ui.set.credKeychainHint': 'تُحفظ بيانات الدخول في خزنة كلمات المرور في نظامك.',
   'ui.set.credFileHint': 'تُحفظ بيانات الدخول في ملف على هذا الجهاز لا يقرؤه إلا حسابك — لا في خزنة كلمات المرور، وهو غير مشفَّر. وكل من يستطيع استخدام حسابك يستطيع قراءته.',
   'ui.set.showCost': 'إظهار التكلفة التقديرية في المحادثات',
@@ -309,7 +308,6 @@ Object.assign(ar, {
   'ui.set.keyFailed': 'تعذّر تحديث المفتاح.',
   'ui.set.loginFailed': 'تعذّر بدء تسجيل الدخول.',
   'ui.set.reorgFailed': 'تعذّر بدء إعادة التنظيم.',
-  'ui.set.searchFailed': 'تعذّر تثبيت أداة البحث.',
 });
 
 export default { en, ar };

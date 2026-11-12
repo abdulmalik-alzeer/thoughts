@@ -149,6 +149,7 @@ export default {
     'seca.index.remove': 'إزالة من الفهرس',
     'seca.index.keep': 'إبقاؤها',
     'seca.index.more': 'و{n} غيرها',
+    'seca.index.done_zero': 'لم يُزل أي سطر من الفهرس.',
     'seca.index.done_one': 'أُزيل سطر واحد من الفهرس.',
     'seca.index.done_two': 'أُزيل سطران من الفهرس.',
     'seca.index.done_few': 'أُزيلت {n} أسطر من الفهرس.',

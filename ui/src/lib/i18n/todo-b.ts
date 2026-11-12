@@ -93,6 +93,7 @@ export default {
     'todob.archive_many': 'انقل {n} مهمة منجزة إلى «منجز»',
     'todob.archive_other': 'انقل {n} مهمة منجزة إلى «منجز»',
     'todob.archiveHint': 'يجمع المهام المنجزة في هذه القائمة تحت مجموعة المنجز.',
+    'todob.archived_zero': 'لا مهام منجزة لنقلها.',
     'todob.archived_one': 'نُقلت مهمة منجزة واحدة إلى «منجز».',
     'todob.archived_two': 'نُقلت مهمتان منجزتان إلى «منجز».',
     'todob.archived_few': 'نُقلت {n} مهام منجزة إلى «منجز».',

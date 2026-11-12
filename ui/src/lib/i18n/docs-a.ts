@@ -96,7 +96,8 @@ export default {
     'docsa.draftsWaiting_one': 'لديك تغييرات غير محفوظة في «{name}».',
     'docsa.draftsWaiting_two': 'لديك تغييرات غير محفوظة في مستندين، أولهما «{name}».',
     'docsa.draftsWaiting_few': 'لديك تغييرات غير محفوظة في {n} مستندات، أولها «{name}».',
-    'docsa.draftsWaiting_other': 'لديك تغييرات غير محفوظة في {n} مستنداً، أولها «{name}».',
+    'docsa.draftsWaiting_many': 'لديك تغييرات غير محفوظة في {n} مستنداً، أولها «{name}».',
+    'docsa.draftsWaiting_other': 'لديك تغييرات غير محفوظة في {n} مستند، أولها «{name}».',
     'docsa.draftRestoredChanged': 'استعدنا تغييراتك غير المحفوظة. وقد تغيّر الملف منذ ذلك الحين، فقارن بين النسختين قبل الحفظ.',
 
     'docsa.moveTitle': 'نقل «{name}»',

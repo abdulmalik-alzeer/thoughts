@@ -457,7 +457,7 @@
           <div class="row head">
             <b class="grow" dir="auto">{#if sec.overdue}<Icon name="warning" size={13} /> {/if}{sec.title}{#if !l} <span class="muted n">{tn('ui.todo.count', sec.rows.length)}</span>{/if}</b>
             {#if l && l.groups?.length && finishedOutside(l)}<button class="btn ghost sm" onclick={() => archiveList(l)} title={t('todob.archiveHint')}>{tn('todob.archive', finishedOutside(l))}</button>{/if}
-            {#if l}<button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: l.idea ? `${l.idea}/README.md` : l.file })} title={t('todo.openSource')}><bdi>{l.file}</bdi></button>{/if}
+            {#if l}<button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: l.idea ? `${l.idea}/README.md` : l.file })} title={t('todo.openSource')}>{t('wording.todo.openList')}</button>{/if}
           </div>
           {#each sec.rows as r, idx (key(r.l, r.it))}
             {#if l && sort === 'list' && r.it.group && (idx === 0 || r.it.group !== sec.rows[idx - 1]?.it.group)}<div class="group" dir="auto">{r.it.group}</div>{/if}

@@ -28,7 +28,7 @@ export default {
     'runb.denied.appData': 'open the app’s own data (settings, other chats and saved sign-ins), which the assistant is never allowed to read or change',
 
     'runb.why.private': 'It is in a private folder. You can change that under Settings › Privacy & cost.',
-    'runb.why.managed': 'The app looks after this part of the library itself (routines, history and connections). Change routines under Settings › Customisations › Routines.',
+    'runb.why.managed': 'The app looks after this part of the library itself (routines, history and connections). Change routines under Customise › Automatic tasks › Routines.',
     'runb.why.standingRules': 'Wrap and automatic tasks never change the library’s standing rules (CLAUDE.md) or its routines. Ask for that change in an ordinary chat.',
     'runb.why.plan': 'This chat is in Plan mode, which does not change files. Choose Accept edits to let it.',
     'runb.why.webOff': 'Web lookups are off in this chat.',
@@ -63,7 +63,7 @@ export default {
     'runb.denied.appData': 'فتح بيانات التطبيق نفسه (الإعدادات والمحادثات الأخرى وبيانات الدخول المحفوظة)، وهي ما لا يُسمح للمساعد بقراءته أو تعديله أبداً',
 
     'runb.why.private': 'إنه داخل مجلد خاص، ويمكنك تغيير ذلك من «الإعدادات › الخصوصية والتكلفة».',
-    'runb.why.managed': 'يتولّى التطبيق نفسه هذا الجزء من المكتبة (الروتينات والسجل والاتصالات). غيّر الروتينات من «الإعدادات › التخصيصات › الروتينات».',
+    'runb.why.managed': 'يتولّى التطبيق نفسه هذا الجزء من المكتبة (الروتينات والسجل والاتصالات). غيّر الروتينات من «التخصيص › المهام التلقائية › الروتينات».',
     'runb.why.standingRules': 'لا يغيّر «تلخيص وحفظ» ولا المهام التلقائية قواعدَ المكتبة الدائمة (CLAUDE.md) ولا روتيناتها. اطلب هذا التغيير في محادثة عادية.',
     'runb.why.plan': 'هذه المحادثة في «وضع التخطيط»، وهو لا يعدّل الملفات. اختر «قبول التعديلات» لتسمح بذلك.',
     'runb.why.webOff': 'البحث في الويب متوقف في هذه المحادثة.',

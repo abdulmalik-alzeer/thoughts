@@ -205,17 +205,17 @@ fn words(key: &str) -> (&'static str, &'static str) {
         ),
         "refused" => (
             "“{path}” is in a part of the folder Thoughts never opens, so nothing was opened.",
-            "«{path}» في جزء من المجلد لا يفتحه Thoughts أبدًا، فلم يُفتح شيء.",
+            "«{path}» في جزء من المجلد لا يفتحه Thoughts أبداً، فلم يُفتح شيء.",
         ),
         "nolib.title" => ("Thoughts is not set up yet", "لم يُجهَّز Thoughts بعد"),
         "nolib.body" => (
             "Finish setting up Thoughts first. After that, links to your notes open here.",
-            "أكمل تجهيز Thoughts أولًا، وبعدها تُفتح روابط ملاحظاتك هنا.",
+            "أكمل تجهيز Thoughts أولاً، وبعدها تُفتح روابط ملاحظاتك هنا.",
         ),
         "private.title" => ("Open a note from a private folder?", "فتح ملاحظة من مجلد خاص؟"),
         "private.body" => (
             "A link from another app asks to show “{path}”. It is in a folder you marked private.\n\nOpen it only if you made this link yourself or trust where it came from.",
-            "يطلب رابط من تطبيق آخر عرض «{path}»، وهي في مجلد جعلته خاصًا.\n\nلا تفتحها إلا إن كنت أنشأت هذا الرابط بنفسك أو تثق بمصدره.",
+            "يطلب رابط من تطبيق آخر عرض «{path}»، وهي في مجلد جعلته خاصاً.\n\nلا تفتحها إلا إن كنت أنشأت هذا الرابط بنفسك أو تثق بمصدره.",
         ),
         _ => ("", ""),
     }

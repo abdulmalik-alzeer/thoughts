@@ -671,7 +671,7 @@ fn label(ar: bool, key: &str) -> &'static str {
         "check-updates" => ("Check for Updates…", "التحقق من وجود تحديثات…"),
         "capture" | "tray-capture" => ("Quick capture…", "تدوين سريع…"),
         "tray-open" => ("Open Thoughts", "فتح Thoughts"),
-        "tray-quit" => ("Quit Thoughts completely", "إنهاء Thoughts تمامًا"),
+        "tray-quit" => ("Quit Thoughts completely", "إنهاء Thoughts تماماً"),
         "file" => ("File", "ملف"),
         "edit" => ("Edit", "تحرير"),
         "window" => ("Window", "نافذة"),

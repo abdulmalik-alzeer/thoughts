@@ -134,7 +134,7 @@ export default {
     'ldb.discarded': 'Discarded.',
     'ldb.openFailed': 'Couldn’t open that change.',
     'ldb.discardFailed': 'Couldn’t discard that change.',
-    'ldb.setAside': 'Your earlier change “{title}” is still waiting for review. You can come back to it in Customisations.',
+    'ldb.setAside': 'Your earlier change “{title}” is still waiting for review. You can come back to it under Customise.',
     'ldb.setAsideShow': 'Show',
 
     // After an app update
@@ -288,7 +288,7 @@ export default {
     'ldb.discarded': 'تم التجاهل.',
     'ldb.openFailed': 'تعذّر فتح هذا التغيير.',
     'ldb.discardFailed': 'تعذّر تجاهل هذا التغيير.',
-    'ldb.setAside': 'تغييرك السابق «{title}» ما زال بانتظار مراجعتك. يمكنك العودة إليه من «التخصيصات».',
+    'ldb.setAside': 'تغييرك السابق «{title}» ما زال بانتظار مراجعتك. يمكنك العودة إليه من صفحة «التخصيص».',
     'ldb.setAsideShow': 'اعرض',
 
     'ldb.upd.title': 'اختيارات من آخر تحديث للتطبيق',
