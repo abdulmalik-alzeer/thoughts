@@ -537,11 +537,14 @@ pub fn log_entries(text: &str) -> Vec<Value> {
 
 /// Everything an item's page shows, in one read: its note details, front page, key dates, todo
 /// list, meeting notes, notes, deliverables (`outputs/`), log, and any other file in its folder.
-/// Anything under `exclude` (library-relative folders) is left out, as `tree` does.
+/// Anything in an `exclude` folder (library-relative) is left out, judged on where each path
+/// really leads (a link, another letter case) as well as on its name: an item that is in one is
+/// refused, and a file of the item that leads into one is not read.
 pub fn item(root: &Path, rel: &str, exclude: &[String]) -> anyhow::Result<Value> {
     let dir = item_dir(rel)?;
     let readme_rel = format!("{dir}/README.md");
-    if crate::paths::is_under(&readme_rel, exclude) { return Err(crate::tr::err("private", &[("path", &dir)])); }
+    let private = |rel: &str| crate::paths::is_private(root, rel, exclude);
+    if private(&dir) || private(&readme_rel) { return Err(crate::tr::err("private", &[("path", &dir)])); }
     let base = resolve(root, &dir)?;
     let readme = resolve(root, &readme_rel)?;
     let raw = match std::fs::read_to_string(&readme) {
@@ -563,7 +566,7 @@ pub fn item(root: &Path, rel: &str, exclude: &[String]) -> anyhow::Result<Value>
     for e in WalkDir::new(&base).min_depth(1).into_iter().filter_entry(|e| !skip(e) && !hidden.folder(e)).flatten() {
         if !e.file_type().is_file() || e.file_name().to_string_lossy().starts_with('.') { continue; }
         let Some(r) = rel_of(root, e.path()) else { continue };
-        if crate::paths::is_under(&r, exclude) { continue; }
+        if private(&r) { continue; }
         let Some(inner) = r.strip_prefix(&format!("{dir}/")) else { continue };
         let (first, nested) = match inner.split_once('/') { Some((f, _)) => (f.to_lowercase(), true), None => (inner.to_lowercase(), false) };
         let list = match (first.as_str(), nested) {
@@ -584,11 +587,11 @@ pub fn item(root: &Path, rel: &str, exclude: &[String]) -> anyhow::Result<Value>
     other.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
 
     let todo_rel = format!("{dir}/todo.md");
-    let todo_text = if crate::paths::is_under(&todo_rel, exclude) { None } else { std::fs::read_to_string(resolve(root, &todo_rel)?).ok() };
+    let todo_text = if private(&todo_rel) { None } else { std::fs::read_to_string(resolve(root, &todo_rel)?).ok() };
     let log_rel = format!("{dir}/log.md");
-    let log_text = if crate::paths::is_under(&log_rel, exclude) { None } else { std::fs::read_to_string(resolve(root, &log_rel)?).ok() };
+    let log_text = if private(&log_rel) { None } else { std::fs::read_to_string(resolve(root, &log_rel)?).ok() };
     let archive = format!("{dir}/log-archive.md");
-    let archive = (!crate::paths::is_under(&archive, exclude) && resolve(root, &archive)?.is_file()).then_some(archive);
+    let archive = (!private(&archive) && resolve(root, &archive)?.is_file()).then_some(archive);
 
     Ok(json!({
         "path": readme_rel, "dir": dir, "area": area, "slug": slug,
@@ -1235,6 +1238,47 @@ mod tests {
             let err = item(&d, "clients/acme", &[private.to_string()]).unwrap_err();
             assert_eq!(crate::tr::classify(&err).code, "private", "{private}");
         }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// FEAT-17: nothing of a private folder reaches the item's page through a link inside an item
+    /// that is not private, or under another letter case.
+    #[cfg(unix)]
+    #[test]
+    fn links_from_an_item_into_a_private_folder_are_not_followed() {
+        let d = tmp();
+        let link = |to: &str, at: &str| std::os::unix::fs::symlink(to, d.join(at)).unwrap();
+        write(&d, "me/finances/README.md", "---\ntitle: Money\n---\nsalary 9000\n").unwrap();
+        write(&d, "me/finances/secret.md", "---\ntitle: Salary\nsummary: salary 9000\n---\nsalary 9000\n").unwrap();
+        write(&d, "me/finances/todo.md", "- [ ] pay the tax\n").unwrap();
+        write(&d, "me/finances/log.md", "## 2026-01-01 — salary 9000\n").unwrap();
+        write(&d, "me/finances/2026/jan.md", "---\ntitle: January\n---\nsalary 9000\n").unwrap();
+        // An ordinary client whose notes, todo list and log lead into the private folder.
+        write(&d, "clients/beta/README.md", "---\ntitle: Beta\n---\nBody\n").unwrap();
+        write(&d, "clients/beta/notes/own.md", "---\ntitle: Own note\n---\n").unwrap();
+        link("../../../me/finances/secret.md", "clients/beta/notes/link.md");
+        link("../../../me/finances/2026", "clients/beta/notes/year");
+        link("../../me/finances/todo.md", "clients/beta/todo.md");
+        link("../../me/finances/log.md", "clients/beta/log.md");
+        // A client folder that is itself a link to the private folder.
+        link("../me/finances", "clients/gamma");
+        for private in [vec!["me/finances".to_string()], vec!["Me/Finances".to_string()], vec!["me".to_string()]] {
+            let v = item(&d, "clients/beta", &private).unwrap();
+            let text = v.to_string();
+            assert!(!text.contains("salary") && !text.contains("pay the tax") && !text.contains("January"), "{private:?}: {text}");
+            assert_eq!(v["notes"].as_array().unwrap().iter().map(|n| n["path"].as_str().unwrap()).collect::<Vec<_>>(), ["clients/beta/notes/own.md"]);
+            assert_eq!((v["todo"]["exists"].as_bool(), v["todo"]["items"].as_array().unwrap().len()), (Some(false), 0));
+            assert_eq!((v["log"]["exists"].as_bool(), v["log"]["entries"].as_array().unwrap().len()), (Some(false), 0));
+            for path in ["clients/gamma", "clients/gamma/README.md", "CLIENTS/GAMMA"] {
+                let err = item(&d, path, &private).unwrap_err();
+                assert_eq!(crate::tr::classify(&err).code, if path.starts_with("CLIENTS") && !d.join("CLIENTS").exists() { "not_found" } else { "private" }, "{path}");
+            }
+        }
+        // The user's own page (nothing excluded) reads the item's own list and log, as the Todos page does;
+        // links to single files inside notes are still not listed (the file tree leaves them out too).
+        let v = item(&d, "clients/beta", &[]).unwrap();
+        assert_eq!(v["todo"]["items"][0]["title"], "pay the tax");
+        assert!(!v["notes"].as_array().unwrap().iter().any(|n| n["path"] == "clients/beta/notes/link.md"));
         std::fs::remove_dir_all(d).unwrap();
     }
 
