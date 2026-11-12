@@ -112,6 +112,17 @@ pub fn next_due(from: chrono::NaiveDate, every: &str) -> Option<chrono::NaiveDat
 /// The first time after today, counted on from the task's own due date (or from today without one),
 /// so a monthly task that was missed for a while lands on its next real date, not on a backlog.
 pub fn next_occurrence(due: Option<chrono::NaiveDate>, every: &str, today: chrono::NaiveDate) -> Option<chrono::NaiveDate> {
+    // Months are counted from the task's own day each time, so a short month on the way (the 28th
+    // of February for a task on the 31st) does not pull every later date to that day.
+    let months = match every { "month" => Some(1), "quarter" => Some(3), "year" => Some(12), _ => None };
+    if let Some(m) = months {
+        let from = due.unwrap_or(today);
+        for k in 1..=40_000u32 {
+            let d = from.checked_add_months(chrono::Months::new(m * k))?;
+            if d > today { return Some(d); }
+        }
+        return None;
+    }
     let mut d = due.unwrap_or(today);
     // Stepping keeps the weekday or the day of the month; a century of daily steps is still quick.
     for _ in 0..40_000 {
@@ -229,7 +240,8 @@ pub fn toggle(root: &Path, file: &str, line: usize, text: &str) -> anyhow::Resul
 }
 
 /// One line of task text: line breaks become spaces.
-fn one_line(text: &str) -> String { text.replace("\r\n", " ").replace(['\n', '\r'], " ").trim().to_string() }
+/// A task's text on one line, as it is written into the list.
+pub(crate) fn one_line(text: &str) -> String { text.replace("\r\n", " ").replace(['\n', '\r'], " ").trim().to_string() }
 
 pub fn edit(root: &Path, file: &str, line: usize, old: &str, new: &str) -> anyhow::Result<()> {
     let new = one_line(new);
@@ -832,6 +844,8 @@ mod tests {
             ("2026-11-12", "year", "2027-11-12"), ("2026-11-12", "month-end", "2026-11-30"), ("2026-11-30", "month-end", "2026-12-31"),
             // Missed for months: the next date after today, on the same weekday or day of the month.
             ("2026-01-05", "week", "2026-11-16"), ("2025-03-15", "month", "2026-11-15"), ("2026-11-20", "month", "2026-12-20"),
+            // …counted from the task's own day: a short month on the way does not move it to that month's last day.
+            ("2026-01-31", "month", "2026-11-30"), ("2025-08-31", "quarter", "2026-11-30"),
         ] {
             assert_eq!(next_occurrence(Some(day(due)), every, t), Some(day(next)), "{due} {every}");
         }

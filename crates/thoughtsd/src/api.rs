@@ -2176,6 +2176,8 @@ async fn capture(State(st): S, Json(c): Json<Capture>) -> R {
     match c.kind.as_str() {
         "todo" => {
             let text = strip(text, &["todo:", "todo :", "مهمة:", "مهمه:", "مهمة :"]).unwrap_or_else(|| text.to_string());
+            // As the list will hold it (one line), so the answer names the very line Undo takes back.
+            let text = todos::one_line(&text);
             let file = if c.file.is_empty() { todos::general(&root) } else { c.file.clone() };
             check_todo_file(&file)?;
             let today = chrono::Local::now().date_naive();
@@ -2283,7 +2285,7 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<S
                 todos::compose(title, every, due.map(|d| d.format("%Y-%m-%d").to_string()).as_deref())
             } else { t.text.clone() };
             let line = todos::add_to(&root, &file, group, &text)?;
-            json!({"line": line, "text": text.trim()})
+            json!({"line": line, "text": todos::one_line(&text)})
         }
         "edit" => { todos::edit(&root, &file, t.line, &t.text, &t.new_text)?; json!({}) }
         "delete" => json!({"removed": {"line": t.line, "lines": todos::delete(&root, &file, t.line, &t.text)?}}),
@@ -4239,6 +4241,15 @@ mod tests {
         assert_eq!(capture(State(st.clone()), on("Renew the lease tomorrow", "2026-03-09")).await.unwrap().0["due"], "2026-03-10");
         assert_eq!(capture(State(st.clone()), on("Pay the fee tomorrow", "2999-01-01")).await.unwrap().0["due"], tomorrow.as_str());
         assert_eq!(capture(State(st.clone()), on("Book the room tomorrow", "soon")).await.unwrap().0["due"], tomorrow.as_str());
+        // Typed on two lines in the Home box: the task is one line, and the answer names that very
+        // line, so Undo (a delete with the text it was given) takes it back.
+        t::write(&lib, "TODO.md", "# Todo\n\n- [ ] call the bank\n");
+        let v = capture(State(st.clone()), cap("todo", "Buy milk\nand bread")).await.unwrap().0;
+        assert_eq!(v["text"], "Buy milk and bread");
+        let undo = TodoOp { file: "TODO.md".into(), line: v["line"].as_u64().unwrap() as usize, text: v["text"].as_str().unwrap().into(), ..Default::default() };
+        todo_op(State(st.clone()), Path("delete".into()), none(), Json(undo)).await.unwrap();
+        let added = todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "Pay\r\nrent".into(), ..Default::default() })).await.unwrap().0;
+        assert_eq!(added["text"], "Pay rent");
         t::write(&lib, "TODO.md", "# Todo\n\n- [ ] call the bank\n");
         let v = capture(State(st.clone()), cap("note", "ملاحظة: فكرة عن متجر صغير\nبتفاصيل")).await.unwrap().0;
         let path = v["path"].as_str().unwrap();
