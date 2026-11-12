@@ -109,7 +109,8 @@ fn note_error(method: &str, path: &str, status: u16, code: &str, message: &str) 
 /// and no other library endpoint — so history, restore, undo and the calendar export can never be
 /// used on an add-on's behalf, whatever the page that hosts it sends.
 const PLUGIN_SCOPED: &[&str] = &["/api/library/file", "/api/library/tree", "/api/library/raw", "/api/library/search",
-    "/api/library/new", "/api/library/move", "/api/library/delete", "/api/library/version", "/api/library/ideas"];
+    "/api/library/new", "/api/library/move", "/api/library/delete", "/api/library/version", "/api/library/ideas",
+    "/api/library/ideas/status"];
 
 fn plugin_scoped(query: &str) -> bool { query.split('&').any(|kv| kv == "scope=plugin") }
 
@@ -395,10 +396,19 @@ async fn library_edit(st: &AppState) -> anyhow::Result<tokio::sync::OwnedRwLockR
 /// folders closed and, for writes, only lets through paths under the folders in `allow=a,b`.
 struct Scope { plugin: bool, allow: Vec<String> }
 
+/// The folders of `allow=`: `a,b`, or — so that a folder name may itself contain a comma — a JSON
+/// list (`["Smith, Jones/","b/"]`). A value that starts with `[` but is not such a list is read the
+/// plain way.
+fn allow_list(raw: &str) -> Vec<String> {
+    let listed = raw.trim_start().starts_with('[').then(|| serde_json::from_str::<Vec<String>>(raw).ok()).flatten();
+    listed.unwrap_or_else(|| raw.split(',').map(str::to_string).collect())
+        .into_iter().map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()
+}
+
 fn scope_of(q: &HashMap<String, String>) -> Scope {
     Scope {
         plugin: q.get("scope").map(String::as_str) == Some("plugin"),
-        allow: q.get("allow").map(|a| a.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_default(),
+        allow: q.get("allow").map(|a| allow_list(a)).unwrap_or_default(),
     }
 }
 
@@ -1601,6 +1611,7 @@ async fn delete_file(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
 #[serde(default)]
 struct IdeaStatus { path: String, status: String }
 /// Change an idea's status (`{path: "<area>/<slug>/README.md" or "<area>/<slug>", status}`).
+/// Add-ons with `ideas:write` use it too (`?scope=plugin`, see `PLUGIN_SCOPED`).
 async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Json(i): Json<IdeaStatus>) -> R {
     let root = lib(&st).await?;
     let _edit = library_edit(&st).await?;
@@ -4151,6 +4162,22 @@ mod tests {
         }
         assert_eq!(t::read(&lib, "README.md"), "my library\n");
         assert_eq!(t::read(&lib, "Me/Finances/tax.md"), "salary 1\n");
+        // A folder whose name has a comma: the folders then arrive as a JSON list, not split on commas.
+        write_file(State(st.clone()), plugin(&[("allow", r#"["Smith, Jones/","billing/"]"#)]), save("Smith, Jones/notes.md", "met\n")).await.unwrap();
+        assert_eq!(t::read(&lib, "Smith, Jones/notes.md"), "met\n");
+        assert_eq!(shown(write_file(State(st.clone()), plugin(&[("allow", "Smith, Jones/")]), save("Smith, Jones/notes.md", "changed")).await).status, 403);
+        assert_eq!(allow_list("a/, b ,,c"), ["a/", "b", "c"]);
+        assert_eq!(allow_list(r#" ["a, b/", " c "] "#), ["a, b/", "c"]);
+        assert_eq!(allow_list("[drafts]/,x"), ["[drafts]/", "x"], "a folder that only looks like a list is read the plain way");
+        // An idea's status: an add-on may set it (ideas:write is checked by the app), never in a private folder.
+        t::write(&lib, "ideas/shop/README.md", "---\ntitle: Shop\nstatus: seed\n---\n");
+        let set = |path: &str, status: &str| Json(IdeaStatus { path: path.into(), status: status.into() });
+        idea_status(State(st.clone()), plugin(&[]), set("ideas/shop", "active")).await.unwrap();
+        assert!(t::read(&lib, "ideas/shop/README.md").contains("status: active"));
+        assert_eq!(shown(idea_status(State(st.clone()), plugin(&[]), set("Me/Finances", "done")).await).code, "private");
+        assert!(t::read(&lib, "Me/Finances/README.md").contains("status: seed"));
+        idea_status(State(st.clone()), none(), set("Me/Finances", "done")).await.unwrap();
+        assert!(t::read(&lib, "Me/Finances/README.md").contains("status: done"), "the person's own Ideas page is not restricted");
         // Deleting and moving follow the same rule.
         assert_eq!(shown(delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: "README.md".into(), ..Default::default() })).await).status, 403);
         assert_eq!(shown(delete_file(State(st.clone()), plugin(&[]), Json(DeleteFile { path: "billing/hours.csv".into(), ..Default::default() })).await).status, 403);
@@ -4192,13 +4219,14 @@ mod tests {
 
         // Everything else under the library API is closed to a request made for an add-on.
         for path in ["/api/library/restore", "/api/library/undo", "/api/library/history", "/api/library/import", "/api/library/stats",
-                     "/api/library/trust", "/api/library/ideas/status", "/api/todos/calendar.ics", "/api/capture", "/api/library/picture", "/api/inbox", "/api/inbox/prepare"] {
+                     "/api/library/trust", "/api/todos/calendar.ics", "/api/capture", "/api/library/picture", "/api/inbox", "/api/inbox/prepare"] {
             assert!(!plugin_scope_allowed(path, "scope=plugin"), "{path}");
             assert!(!plugin_scope_allowed(path, "allow=x&scope=plugin&path=a"), "{path}");
             assert!(plugin_scope_allowed(path, ""), "{path}");
             assert!(plugin_scope_allowed(path, "path=scope=plugin"), "{path}");
         }
-        for path in ["/api/library/file", "/api/library/delete", "/api/library/new", "/api/library/move", "/api/library/tree", "/api/todos", "/api/chats"] {
+        for path in ["/api/library/file", "/api/library/delete", "/api/library/new", "/api/library/move", "/api/library/tree", "/api/library/ideas",
+                     "/api/library/ideas/status", "/api/todos", "/api/chats"] {
             assert!(plugin_scope_allowed(path, "scope=plugin"), "{path}");
         }
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();

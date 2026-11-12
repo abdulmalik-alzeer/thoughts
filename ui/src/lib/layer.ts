@@ -482,7 +482,9 @@ function writePath(p: Plugin, v: any): string {
   if (!p.write.some((w) => { const f = w.toLowerCase().replace(/\/+$/, ''); return low === f || low.startsWith(f + '/'); })) throw new Error(p.write.length ? `"${path}" is outside the folders this add-on declared (${p.write.join(', ')})` : 'This add-on declared no "write" folders');
   return path;
 }
-const allowQuery = (p: Plugin) => 'scope=plugin&allow=' + encodeURIComponent(p.write.join(','));
+// The folders go as `a,b`; when a folder name itself has a comma they go as a JSON list instead,
+// which the daemon reads when the value starts with `[`.
+const allowQuery = (p: Plugin) => 'scope=plugin&allow=' + encodeURIComponent(p.write.some((w) => w.includes(',')) ? JSON.stringify(p.write) : p.write.join(','));
 /** The `{file, line, text}` reference of a todo, from an item as todos.list() or an item action gave it. */
 function todoRef(v: any): { file: string; line: number; text: string } {
   const it = v && typeof v === 'object' && v.item && typeof v.item === 'object' ? v.item : v;
