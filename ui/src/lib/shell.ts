@@ -5,19 +5,22 @@ import { reconnect } from './api';
 import { toast } from './store.svelte';
 import { t } from './i18n';
 
-export type Work = { saving?: boolean; chats?: string[] };
+/** `elsewhere`: the other libraries in which a chat is still running (the chat list shows the open one's only). */
+export type Work = { saving?: boolean; chats?: string[]; elsewhere?: string[] };
 
 /** Parses `BUSY::{json}` out of an error; null when the error is something else. */
 export function busyWork(e: unknown): Work | null {
   const m = /BUSY::\s*(\{.*\})\s*$/s.exec(e instanceof Error ? e.message : String(e ?? ''));
   if (!m) return null;
-  try { const w = JSON.parse(m[1]); return { saving: !!w.saving, chats: Array.isArray(w.chats) ? w.chats.map(String).slice(0, 8) : [] }; }
+  const list = (v: unknown) => (Array.isArray(v) ? v.map(String).slice(0, 8) : []);
+  try { const w = JSON.parse(m[1]); return { saving: !!w.saving, chats: list(w.chats), elsewhere: list(w.elsewhere) }; }
   catch { return {}; }
 }
 
 /** Says what is still running and asks: wait, or do it anyway? Resolves true for "do it anyway". */
 export async function askBusy(work: Work, action: 'restart' | 'update'): Promise<boolean> {
-  const list = [...(work.saving ? [t('ui.busy.saving')] : []), ...(work.chats ?? []).map((c) => t('ui.busy.chat', { title: c }))];
+  const list = [...(work.saving ? [t('ui.busy.saving')] : []), ...(work.chats ?? []).map((c) => t('ui.busy.chat', { title: c })),
+    ...(work.elsewhere ?? []).map((name) => (name ? t('reviewshell.busy.elsewhere', { library: name }) : t('reviewshell.busy.elsewhereUnnamed')))];
   const choice = await choiceDialog({
     title: t('ui.busy.title'), body: t(action === 'update' ? 'ui.busy.bodyUpdate' : 'ui.busy.bodyRestart'),
     list: list.length ? list : undefined, note: t('ui.busy.note'), cancelLabel: t('ui.busy.wait'),

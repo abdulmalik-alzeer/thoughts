@@ -119,6 +119,8 @@ fn words(key: &str) -> (&'static str, &'static str) {
         "busy.saving" => ("• Wrap is saving chats into your library", "• «تلخيص وحفظ» يحفظ المحادثات في مكتبتك"),
         "busy.chat" => ("• The assistant is working in “{title}”", "• المساعد يعمل في «{title}»"),
         "busy.chat.untitled" => ("• The assistant is working in a chat", "• المساعد يعمل في محادثة"),
+        "busy.elsewhere" => ("• The assistant is working in your library “{library}”", "• المساعد يعمل في مكتبتك «{library}»"),
+        "busy.elsewhere.untitled" => ("• The assistant is working in another of your libraries", "• المساعد يعمل في مكتبة أخرى من مكتباتك"),
         "restart.busy.body" => (
             "Restarting the background service now would stop it:\n{list}\n\nIf you wait, nothing is interrupted.",
             "إعادة تشغيل خدمة الخلفية الآن ستوقفه:\n{list}\n\nإن انتظرت فلن ينقطع شيء.",
@@ -792,6 +794,11 @@ pub(crate) fn work_lines(ar: bool, work: &Value) -> Vec<String> {
     if chats.len() > 6 {
         lines.push("• …".into());
     }
+    // Chats still running in libraries other than the open one (`daemon_work`).
+    for library in work["elsewhere"].as_array().into_iter().flatten().take(6) {
+        let name = one_line(library.as_str().unwrap_or_default(), 60);
+        lines.push(if name.is_empty() { tx(ar, "busy.elsewhere.untitled").to_string() } else { fill(ar, "busy.elsewhere", &[("library", &name)]) });
+    }
     lines
 }
 
@@ -831,7 +838,7 @@ mod tests {
             "back.done.body", "back.fail.body", "rb.ask.title", "rb.ask.body", "rb.go", "rb.done.title", "rb.done.body", "rb.same.title", "rb.same.body",
             "rb.gone.title", "rb.gone.body", "rb.none.title", "rb.none.body", "rb.found.title", "rb.found.body", "rb.more.title", "rb.more.body", "note.safe",
             "pend.none.title", "pend.none.body", "pend.ask.title", "pend.ask.body", "pend.go", "pend.done.title", "pend.done.body", "reload.title", "reload.go",
-            "reload.note", "unsaved.lost", "unsaved.kept", "busy.title", "busy.saving", "busy.chat", "busy.chat.untitled", "restart.busy.body", "restart.anyway",
+            "reload.note", "unsaved.lost", "unsaved.kept", "busy.title", "busy.saving", "busy.chat", "busy.chat.untitled", "busy.elsewhere", "busy.elsewhere.untitled", "restart.busy.body", "restart.anyway",
             "restart.done.title", "restart.done.body", "restart.fail.title", "restart.fail.body", "window.fail.title", "window.fail.body", "quit.title",
             "quit.work", "quit.later", "quit.now", "quit.anyway", "quit.go", "quit.waiting",
         ];
@@ -921,5 +928,13 @@ mod tests {
         let many = json!({"chats": ["1", "2", "3", "4", "5", "6", "7", "8"]});
         assert_eq!(work_lines(true, &many).len(), 7, "six chats and a line that says there are more");
         assert!(work_lines(false, &Value::Null).is_empty());
+        // Chats running in another library are named by the library they run in.
+        let elsewhere = json!({"saving": false, "chats": ["Plan the week"], "elsewhere": ["Work", ""]});
+        assert_eq!(work_lines(false, &elsewhere), [
+            "• The assistant is working in “Plan the week”",
+            "• The assistant is working in your library “Work”",
+            "• The assistant is working in another of your libraries",
+        ]);
+        assert_eq!(work_lines(true, &json!({"elsewhere": ["العمل"]})), ["• المساعد يعمل في مكتبتك «العمل»"]);
     }
 }

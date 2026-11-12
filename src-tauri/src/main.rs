@@ -194,9 +194,11 @@ fn appimage_path() -> Option<std::path::PathBuf> {
     std::env::var_os("APPIMAGE").map(std::path::PathBuf::from).filter(|p| p.is_absolute() && p.is_file())
 }
 
-/// Work a daemon would lose if it were stopped now: `{"saving": bool, "chats": [title, …]}` —
-/// `saving` while a wrap/reorganize holds the library, `chats` the titles of chats with a run in
-/// progress. `None` when it is idle (or does not answer).
+/// Work a daemon would lose if it were stopped now: `{"saving": bool, "chats": [title, …],
+/// "elsewhere": [library name, …]}` — `saving` while a wrap/reorganize holds the library, `chats`
+/// the titles of chats with a run in progress in the open library, `elsewhere` the other libraries
+/// in which a chat is still running (switching libraries does not stop them, and the chat list only
+/// shows the open one's). `None` when it is idle (or does not answer).
 fn daemon_work(i: &thoughtsd::paths::DaemonInfo) -> Option<Value> {
     let get = |path: &str| -> Option<Value> {
         let body = ureq::get(&format!("http://127.0.0.1:{}{}", i.port, path))
@@ -216,10 +218,24 @@ fn daemon_work(i: &thoughtsd::paths::DaemonInfo) -> Option<Value> {
         .filter(|c| c["running"].as_bool().unwrap_or(false))
         .map(|c| c["title"].as_str().unwrap_or("").to_string())
         .collect();
-    (saving || !chats.is_empty()).then(|| json!({"saving": saving, "chats": chats}))
+    let elsewhere = get("/api/libraries").map(|l| running_elsewhere(&l)).unwrap_or_default();
+    (saving || !chats.is_empty() || !elsewhere.is_empty()).then(|| json!({"saving": saving, "chats": chats, "elsewhere": elsewhere}))
 }
 
-/// The error a command rejects with instead of cutting work off: `BUSY::{"saving":…,"chats":[…]}`.
+/// The names of the libraries, other than the open one, with a chat still running in them
+/// (`GET /api/libraries`: `{libraries: [{name, displayName, open, running}, …]}`).
+fn running_elsewhere(libraries: &Value) -> Vec<String> {
+    libraries["libraries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|l| l["open"] != true && l["running"].as_u64().unwrap_or(0) > 0)
+        .map(|l| l["displayName"].as_str().or(l["name"].as_str()).unwrap_or("").to_string())
+        .collect()
+}
+
+/// The error a command rejects with instead of cutting work off:
+/// `BUSY::{"saving":…,"chats":[…],"elsewhere":[…]}` (see `daemon_work`).
 fn busy_error(work: &Value) -> String {
     format!("BUSY::{work}")
 }
@@ -1290,6 +1306,22 @@ mod tests {
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), std::process::id(), Some(daemon), exe), Unproven::Leave);
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 1, Some(daemon), exe), Unproven::Leave);
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 0, Some(daemon), exe), Unproven::Leave);
+    }
+
+    #[test]
+    fn chats_running_in_another_library_count_as_work() {
+        // `GET /api/libraries` as the service answers it: the open library's chats are already in
+        // the chat list, so only the others are named, and only when something runs in them.
+        let libraries = json!({"openId": "a", "libraries": [
+            {"id": "a", "name": "Personal", "displayName": "Personal", "open": true, "running": 1},
+            {"id": "b", "name": "work", "displayName": "Work", "open": false, "running": 2},
+            {"id": "c", "name": "Client", "displayName": "Client", "open": false, "running": 0},
+            {"id": "d", "name": "Old", "open": false, "running": 1},
+        ]});
+        assert_eq!(running_elsewhere(&libraries), ["Work", "Old"]);
+        // A service from before several libraries existed answers with an error, or nothing.
+        assert!(running_elsewhere(&json!({"error": "not found"})).is_empty());
+        assert!(running_elsewhere(&Value::Null).is_empty());
     }
 
     #[cfg(not(windows))]

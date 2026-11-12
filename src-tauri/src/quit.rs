@@ -87,7 +87,8 @@ enum Question {
 }
 
 fn question(work: Option<&Value>, unsaved: &[Unsaved]) -> Question {
-    let running = work.is_some_and(|w| w["saving"] == true || w["chats"].as_array().is_some_and(|c| !c.is_empty()));
+    let listed = |w: &Value, k: &str| w[k].as_array().is_some_and(|c| !c.is_empty());
+    let running = work.is_some_and(|w| w["saving"] == true || listed(w, "chats") || listed(w, "elsewhere"));
     if running {
         Question::Running
     } else if unsaved.iter().any(|u| !u.kept) {
@@ -223,6 +224,9 @@ mod tests {
         assert_eq!(question(Some(&idle), &[]), Question::None);
         assert_eq!(question(Some(&chats), &[]), Question::Running);
         assert_eq!(question(Some(&saving), &[]), Question::Running);
+        // A chat still running in another library is stopped by a quit just the same.
+        assert_eq!(question(Some(&json!({"saving": false, "chats": [], "elsewhere": ["Work"]})), &[]), Question::Running);
+        assert_eq!(question(Some(&json!({"saving": false, "chats": [], "elsewhere": []})), &[]), Question::None);
         // Running work comes first; unsaved work is mentioned in the same question.
         assert_eq!(question(Some(&chats), &[item("Settings", false)]), Question::Running);
         assert_eq!(question(None, &[item("Settings", false)]), Question::Lost);
