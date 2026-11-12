@@ -321,8 +321,38 @@ pub fn pick_main<'a>(names: &[&'a str], chosen: Option<&str>) -> Option<&'a str>
     chosen.and_then(|c| names.iter().copied().find(|n| *n == c)).or_else(|| names.first().copied())
 }
 
-/// The online locations, `[{name, url, main}]`, in the order they were added. `main` marks the
-/// one a sync receives from (see `pick_main`); every location is sent to.
+/// Is `url` a folder rather than an address on a network: a backup kept in a folder on this
+/// computer, an external drive or a network share (see `add_folder_location`)?
+pub fn is_folder_url(url: &str) -> bool {
+    let b = url.as_bytes();
+    url.starts_with('/') || url.starts_with("\\\\") || url.starts_with("file://")
+        || (b.len() > 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
+}
+
+/// What kind of place a location's address names: `folder` (a drive or folder, see
+/// `is_folder_url`), `ssh` (`ssh://…` or `git@host:path`, which signs in with this computer's key)
+/// or `online` (an `https://` address, signing in with a password or access token — or `http://`,
+/// which only a library's own settings can name and which is never sent a password).
+pub fn location_kind(url: &str) -> &'static str {
+    if is_folder_url(url) { "folder" }
+    else if url.starts_with("ssh://") || (!url.contains("://") && url.contains(':')) { "ssh" }
+    else { "online" }
+}
+
+/// The folder a `folder` location's backup is kept in.
+fn folder_path(url: &str) -> PathBuf { PathBuf::from(url.strip_prefix("file://").unwrap_or(url)) }
+
+/// Is the backup kept in the folder `url` there right now? Not when its drive is not plugged in,
+/// its network share is not connected, or the copy was moved away. Never waits long: a network
+/// share that cannot be reached can take a minute to say so.
+pub async fn folder_present(url: &str) -> bool {
+    let path = folder_path(url);
+    let look = tokio::task::spawn_blocking(move || path.join("HEAD").is_file() && path.join("objects").is_dir());
+    matches!(tokio::time::timeout(std::time::Duration::from_secs(5), look).await, Ok(Ok(true)))
+}
+
+/// The online locations, `[{name, url, main, kind}]`, in the order they were added. `main` marks
+/// the one a sync receives from (see `pick_main`); every location is sent to. `kind`: see `location_kind`.
 pub async fn remotes(state: &AppState, dir: &Path) -> Vec<Value> {
     // The configuration lists them in the order they were added; `git remote` would sort by name.
     let out = git(state, dir, &["config", "--local", "--get-regexp", r"^remote\..*\.url$"]).await.unwrap_or_default();
@@ -335,7 +365,13 @@ pub async fn remotes(state: &AppState, dir: &Path) -> Vec<Value> {
     let chosen = state.settings.read().await.sync.main_location.clone();
     let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
     let main = pick_main(&names, chosen.as_deref()).map(String::from);
-    list.iter().map(|(n, u)| json!({"name": n, "url": u, "main": Some(n) == main.as_ref()})).collect()
+    list.iter().map(|(n, u)| json!({"name": n, "url": u, "main": Some(n) == main.as_ref(), "kind": location_kind(u)})).collect()
+}
+
+/// The address and kind of the location `name` in a list from `remotes`.
+fn location_of<'a>(rs: &'a [Value], name: &str) -> (&'a str, &'a str) {
+    let r = rs.iter().find(|r| r["name"] == name);
+    (r.and_then(|r| r["url"].as_str()).unwrap_or(""), r.and_then(|r| r["kind"].as_str()).unwrap_or("online"))
 }
 
 /// The name of the main location in a list from `remotes`.
@@ -369,7 +405,7 @@ async fn syncable_branch(state: &AppState, dir: &Path) -> anyhow::Result<String>
 }
 
 /// Send `branch` to every location. Returns, per location, `None` when it was sent, or why not
-/// (a key of `tr`'s table, see `why_not_sent`).
+/// (a key of `tr`'s table, see `why_not_sent`). A drive that is not plugged in is not tried.
 async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log: &mut Vec<String>) -> Vec<(String, Option<&'static str>)> {
     let mut sent = vec![];
     // The main location first, and only it becomes what the branch follows: "to send" and "to
@@ -379,35 +415,54 @@ async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log:
     order.sort_by_key(|r| r["name"].as_str().map(String::from) != main);
     for r in order {
         let name = r["name"].as_str().unwrap_or_default();
+        let kind = r["kind"].as_str().unwrap_or("online");
+        if kind == "folder" && !folder_present(r["url"].as_str().unwrap_or("")).await {
+            log.push(format!("{name}: not connected"));
+            sent.push((name.to_string(), Some("sync.why.unplugged")));
+            continue;
+        }
         let args: &[&str] = if Some(name) == main.as_deref() { &["push", "-u", "--", name, branch] } else { &["push", "--", name, branch] };
         match git(state, dir, args).await {
             Ok(_) => { log.push(format!("pushed {name}")); sent.push((name.to_string(), None)); }
             Err(e) => {
                 crate::log::warn(format!("sync: push to {name} failed: {e}"));
                 log.push(format!("push {name} failed"));
-                sent.push((name.to_string(), Some(why_not_sent(&e))));
+                sent.push((name.to_string(), Some(why_not_sent(&e, kind))));
             }
         }
     }
     sent
 }
 
-/// The plain reason a location did not take the library, as a key of `tr`'s table.
-fn why_not_sent(e: &anyhow::Error) -> &'static str {
+/// The plain reason a location of `kind` (see `location_kind`) did not take the library, or could
+/// not be reached, as a key of `tr`'s table.
+fn why_not_sent(e: &anyhow::Error, kind: &str) -> &'static str {
+    let m = e.to_string().to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| m.contains(n));
+    // SSH says these before anything else: the server's key, not a sign-in, is what stopped it.
+    if has(&["remote host identification has changed", "host key for", "has changed and you have requested strict checking"]) { return "sync.why.host_changed"; }
+    if has(&["host key verification failed", "no ecdsa host key is known", "no ed25519 host key is known", "no rsa host key is known"]) { return "sync.why.host_key"; }
+    if kind == "folder" {
+        if has(&["no space left", "disk full", "not enough space"]) { return "sync.why.full"; }
+        if has(&["read-only file system", "permission denied", "access is denied", "operation not permitted"]) { return "sync.why.no_write"; }
+        if has(&["does not appear to be a git repository", "not a git repository", "no such file or directory", "could not read from remote"]) { return "sync.why.unplugged"; }
+    }
     match crate::tr::classify_in(false, e).code {
-        "sign_in" => return "sync.why.sign_in",
+        // An SSH location has no password: its key is what the server turned down.
+        "sign_in" => return if kind == "ssh" { "sync.why.ssh_key" } else { "sync.why.sign_in" },
         "offline" => return "sync.why.offline",
         "timeout" => return "sync.why.timeout",
         _ => {}
     }
-    let m = e.to_string().to_lowercase();
-    let has = |needles: &[&str]| needles.iter().any(|n| m.contains(n));
     if has(&["non-fast-forward", "fetch first", "(stale info)", "tip of your current branch is behind"]) { "sync.why.rejected" }
     else if has(&["file size limit", "too large", "exceeds", "larger than"]) { "sync.why.too_large" }
     else { "sync.why.refused" }
 }
 
-/// When each library last reached an online location, and which: `{<library folder>: {at, location}}`.
+/// What is known about each library's backups: `{<library folder>: {at, location, locations:
+/// {<name>: {ok, tried, why}}}}`. `at`/`location`: the last time the library really reached a
+/// location, and which. Per location, `ok` is the last time it took the library, `tried` the last
+/// attempt, and `why` why that attempt failed (a key of `tr`'s table; null when it worked).
 fn backup_state() -> serde_json::Map<String, Value> {
     std::fs::read_to_string(crate::paths::backup_state_file()).ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.as_object().cloned()).unwrap_or_default()
@@ -415,27 +470,119 @@ fn backup_state() -> serde_json::Map<String, Value> {
 
 fn backup_key(dir: &Path) -> String { crate::paths::canonical_lenient(dir).to_string_lossy().to_string() }
 
-/// Remember that the library in `dir` was sent, whole, to the location `name` just now.
-fn note_backup(dir: &Path, name: &str) {
+/// Change what is noted about the library in `dir` (see `backup_state`), one writer at a time.
+fn change_backup_state(dir: &Path, change: impl FnOnce(&mut serde_json::Map<String, Value>)) {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut all = backup_state();
-    all.insert(backup_key(dir), json!({"at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), "location": name}));
+    let mut entry = all.get(&backup_key(dir)).and_then(Value::as_object).cloned().unwrap_or_default();
+    change(&mut entry);
+    all.insert(backup_key(dir), Value::Object(entry));
     crate::log::ok_or_warn("sync: could not note the time of the backup",
         serde_json::to_string_pretty(&all).map_err(std::io::Error::other).and_then(|t| crate::paths::write_atomic(&crate::paths::backup_state_file(), t.as_bytes(), true)));
 }
 
-/// `{at, location}`: the last time the library in `dir` really reached an online location. Null
-/// when it never has (or the note of it is gone).
-pub fn last_backup(dir: &Path) -> Value {
-    backup_state().get(&backup_key(dir)).cloned().unwrap_or(Value::Null)
+/// Note how an attempt to reach each location in `sent` went just now: `None` when it took the
+/// library whole, otherwise why not.
+fn note_attempts(dir: &Path, sent: &[(String, Option<&'static str>)]) {
+    if sent.is_empty() { return; }
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    change_backup_state(dir, |entry| {
+        if let Some((name, _)) = sent.iter().find(|(_, why)| why.is_none()) {
+            entry.insert("at".into(), json!(now));
+            entry.insert("location".into(), json!(name));
+        }
+        let mut locs = entry.get("locations").and_then(Value::as_object).cloned().unwrap_or_default();
+        for (name, why) in sent {
+            let mut l = locs.get(name).and_then(Value::as_object).cloned().unwrap_or_default();
+            l.insert("tried".into(), json!(now));
+            l.insert("why".into(), json!(why));
+            if why.is_none() { l.insert("ok".into(), json!(now)); }
+            locs.insert(name.clone(), Value::Object(l));
+        }
+        entry.insert("locations".into(), Value::Object(locs));
+    });
 }
 
-/// Close a sync. The time is noted for the first location that took the library, and unless
-/// every location took it the sync fails, naming each one and saying why — a sync is never
-/// reported as done while something was not sent. Returns `[{name, sent: true}]`.
+/// Forget what was noted about a location that was removed from the library in `dir`.
+pub fn forget_location_state(dir: &Path, name: &str) {
+    change_backup_state(dir, |entry| {
+        if let Some(locs) = entry.get_mut("locations").and_then(Value::as_object_mut) { locs.remove(name); }
+    });
+}
+
+/// The location `name` lets this computer in again (its sign-in or the server's key was put
+/// right): its last failure no longer stands, and the next sync says how it goes.
+pub fn clear_failure(dir: &Path, name: &str) {
+    change_backup_state(dir, |entry| {
+        if let Some(l) = entry.get_mut("locations").and_then(Value::as_object_mut).and_then(|m| m.get_mut(name)).and_then(Value::as_object_mut) {
+            l.insert("why".into(), Value::Null);
+        }
+    });
+}
+
+/// `{at, location}`: the last time the library in `dir` really reached a location. Null when it
+/// never has (or the note of it is gone).
+pub fn last_backup(dir: &Path) -> Value {
+    match backup_state().get(&backup_key(dir)) {
+        Some(e) if e["at"].is_string() => json!({"at": e["at"], "location": e["location"]}),
+        _ => Value::Null,
+    }
+}
+
+/// After how many days without a backup, while changes wait to be sent, the backup counts as
+/// overdue (`backup_health`).
+pub const STALE_DAYS: i64 = 7;
+
+/// How the backup of the library in `dir` stands, for the window to show plainly:
+/// `{state, staleDays, locations: [{name, kind, main, at, tried, why, whyKey, unsent, present}]}`.
+/// Per location: when it last took the library (`at`), the last attempt and why it failed, how many
+/// recorded changes it does not have yet (`unsent`, plus the changes not recorded yet), and for a
+/// drive whether it is plugged in. `state`: `none` (no location), `failed` (the last attempt at a
+/// location failed), `stale` (changes have waited more than `STALE_DAYS` days, or a location never
+/// received the library), `waiting` (changes not sent yet) or `ok`.
+pub async fn backup_health(state: &AppState, dir: &Path) -> Value {
+    let rs = remotes(state, dir).await;
+    let noted = backup_state().get(&backup_key(dir)).and_then(|e| e.get("locations")).cloned().unwrap_or(Value::Null);
+    let branch = current_branch(state, dir).await.ok();
+    let has_head = head(state, dir).await.is_some();
+    let dirty = git(state, dir, &["status", "--porcelain"]).await.unwrap_or_default().lines().count() as u64;
+    let now = chrono::Utc::now();
+    let when = |v: &Value| v.as_str().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).map(|t| t.with_timezone(&chrono::Utc));
+    let mut overall = if rs.is_empty() { "none" } else { "ok" };
+    let rank = |s: &str| ["ok", "waiting", "stale", "failed", "none"].iter().position(|x| *x == s).unwrap_or(0);
+    let mut out = vec![];
+    for r in &rs {
+        let name = r["name"].as_str().unwrap_or_default();
+        let url = r["url"].as_str().unwrap_or_default();
+        let n = &noted[name];
+        // What this location does not have: the changes after what it last received (all of them
+        // when it never received anything), and those not recorded yet.
+        let unsent = if !has_head { 0 } else {
+            let tracking = branch.as_ref().map(|b| format!("refs/remotes/{name}/{b}"));
+            let known = match &tracking { Some(t) => git(state, dir, &["rev-parse", "--verify", "-q", t]).await.is_ok(), None => false };
+            let range = if known { format!("{}..HEAD", tracking.unwrap_or_default()) } else { "HEAD".into() };
+            git(state, dir, &["rev-list", "--count", &range]).await.ok().and_then(|c| c.trim().parse::<u64>().ok()).unwrap_or(0)
+        } + dirty;
+        let ok = when(&n["ok"]);
+        // The last attempt's reason stands until an attempt works (or it was put right, `clear_failure`).
+        let why_key = n["why"].as_str();
+        let present = if r["kind"] == "folder" { Some(folder_present(url).await) } else { None };
+        let this = if why_key.is_some() { "failed" }
+            else if unsent > 0 && ok.map_or(true, |t| (now - t).num_days() >= STALE_DAYS) { "stale" }
+            else if unsent > 0 { "waiting" } else { "ok" };
+        if rank(this) > rank(overall) { overall = this; }
+        out.push(json!({"name": name, "kind": r["kind"], "main": r["main"], "at": n["ok"], "tried": n["tried"],
+            "whyKey": why_key, "why": why_key.map(|k| crate::tr::text(k, &[])), "unsent": unsent, "present": present, "state": this}));
+    }
+    json!({"state": overall, "staleDays": STALE_DAYS, "locations": out})
+}
+
+/// Close a sync. What happened at each location is noted, and unless every location took the
+/// library the sync fails, naming each one and saying why — a sync is never reported as done
+/// while something was not sent. Returns `[{name, sent: true}]`.
 fn sync_outcome(dir: &Path, sent: &[(String, Option<&'static str>)]) -> anyhow::Result<Vec<Value>> {
-    if let Some((name, _)) = sent.iter().find(|(_, why)| why.is_none()) { note_backup(dir, name); }
+    note_attempts(dir, sent);
     let failed: Vec<&(String, Option<&'static str>)> = sent.iter().filter(|(_, why)| why.is_some()).collect();
     if failed.is_empty() { return Ok(sent.iter().map(|(name, _)| json!({"name": name, "sent": true})).collect()); }
     let ar = crate::tr::arabic();
@@ -450,43 +597,99 @@ fn sync_outcome(dir: &Path, sent: &[(String, Option<&'static str>)]) -> anyhow::
     Err(crate::tr::UserErr { code: "sync_failed", status: 409, message: parts.join(" ") }.into())
 }
 
-/// Commit local changes, pull --rebase from the main location, push to all.
-/// A pull that conflicts is undone and reported as `CONFLICT::<file;file;…>` (see `resolve`).
+/// Receiving from the main location `name` failed with `e`: noted as that location's last attempt,
+/// and said plainly when the reason is a known one (otherwise git's own words follow "pull failed").
+fn not_received(dir: &Path, name: &str, kind: &str, e: anyhow::Error) -> anyhow::Error {
+    let why = why_not_sent(&e, kind);
+    note_attempts(dir, &[(name.to_string(), Some(why))]);
+    crate::log::warn(format!("sync: receiving from {name} failed: {e}"));
+    if why == "sync.why.refused" || why == "sync.why.rejected" || why == "sync.why.too_large" { return anyhow::anyhow!("pull failed: {e}"); }
+    let ar = crate::tr::arabic();
+    let why = crate::tr::text_in(ar, why, &[]);
+    crate::tr::user_err_in(ar, "sync.not_received", &[("name", name), ("why", &why)]).into()
+}
+
+/// Fetch `branch` from the location `name`: the commit it is at there, or `None` when the location
+/// does not have that branch yet. Talks to the network: called without holding the files.
+async fn fetch_tip(state: &AppState, dir: &Path, name: &str, branch: &str) -> anyhow::Result<Option<String>> {
+    match git(state, dir, &["fetch", "-q", "--", name, branch]).await {
+        Ok(_) => Ok(Some(git(state, dir, &["rev-parse", "--verify", "-q", "FETCH_HEAD^{commit}"]).await?.trim().to_string())),
+        Err(e) if e.to_string().contains("couldn't find remote ref") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+async fn is_ancestor(state: &AppState, dir: &Path, a: &str, b: &str) -> bool {
+    git(state, dir, &["merge-base", "--is-ancestor", a, b]).await.is_ok()
+}
+
+/// Commit local changes, take in what the main location has (fetch, then rebase onto it), send to
+/// all. A pull that conflicts is undone and reported as `CONFLICT::<file;file;…>` (see `resolve`).
 /// Fails (`no_location`) when there is nowhere to send the library, and (`sync_failed`, naming the
 /// location and the reason) when any location did not take it: `Ok` means it is backed up.
+///
+/// The library's files are held (`AppState::sync_files`) only while git changes them — recording
+/// them, and putting what arrived together with them. While the sync waits on the network the
+/// files are free, and an edit made meanwhile is recorded before anything that arrived is put in.
+/// A main location that is a drive not plugged in is not received from; the others are still sent to.
 pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
-    let _g = state.git_lock.lock().await;
-    crate::trust::require_git(dir)?;
-    let branch = syncable_branch(state, dir).await?;
-    let committed = commit_all(state, dir, &subject::sync()).await?;
-    let rs = remotes(state, dir).await;
+    let (branch, mut committed, rs) = {
+        let _files = state.sync_files.write().await;
+        let _g = state.git_lock.lock().await;
+        crate::trust::require_git(dir)?;
+        let branch = syncable_branch(state, dir).await?;
+        let committed = commit_all(state, dir, &subject::sync()).await?;
+        (branch, committed, remotes(state, dir).await)
+    };
     // Nothing leaves this computer without a location: that is not a sync that worked.
     if rs.is_empty() { return Err(crate::tr::err("sync.no_location", &[])); }
     let before = head(state, dir).await;
     let mut log = vec![];
     if let Some(primary) = main_of(&rs).as_deref() {
-        match git_ident(state, dir, &["pull", "--rebase", "--autostash", "--", primary, &branch]).await {
-            Ok(_) => log.push(format!("pulled {primary}")),
-            Err(e) if e.to_string().contains("couldn't find remote ref") => log.push(format!("{primary}: new branch")),
-            Err(e) => {
-                // Read the conflict list before undoing the half-finished rebase.
-                let files = unmerged(state, dir).await;
-                let conflict = !files.is_empty() || e.to_string().contains("CONFLICT");
-                if let Err(e2) = git(state, dir, &["rebase", "--abort"]).await {
-                    if conflict { crate::log::error(format!("sync: could not undo the conflicting pull: {e2}")); }
+        let (url, kind) = location_of(&rs, primary);
+        if kind == "folder" && !folder_present(url).await {
+            log.push(format!("{primary}: not connected"));
+        } else if before.is_none() {
+            // A library with nothing recorded yet takes the location's history as it is.
+            let _files = state.sync_files.write().await;
+            let _g = state.git_lock.lock().await;
+            match git_ident(state, dir, &["pull", "--rebase", "--autostash", "--", primary, &branch]).await {
+                Ok(_) => log.push(format!("pulled {primary}")),
+                Err(e) if e.to_string().contains("couldn't find remote ref") => log.push(format!("{primary}: new branch")),
+                Err(e) => return Err(not_received(dir, primary, kind, e)),
+            }
+        } else {
+            let fetched = { let _g = state.git_lock.lock().await; fetch_tip(state, dir, primary, &branch).await };
+            match fetched {
+                Ok(Some(theirs)) => {
+                    let _files = state.sync_files.write().await;
+                    let _g = state.git_lock.lock().await;
+                    // What was saved while the fetch ran is recorded first, like everything before it.
+                    committed |= commit_all(state, dir, &subject::sync()).await?;
+                    if let Err(e) = git_ident(state, dir, &["rebase", "--autostash", &theirs]).await {
+                        // Read the conflict list before undoing the half-finished rebase.
+                        let files = unmerged(state, dir).await;
+                        let conflict = !files.is_empty() || e.to_string().contains("CONFLICT");
+                        if let Err(e2) = git(state, dir, &["rebase", "--abort"]).await {
+                            if conflict { crate::log::error(format!("sync: could not undo the conflicting pull: {e2}")); }
+                        }
+                        if conflict {
+                            crate::log::warn(format!("sync: pull from {primary} conflicts in {} file(s)", files.len()));
+                            anyhow::bail!("CONFLICT::{}", files.join(";"));
+                        }
+                        crate::log::warn(format!("sync: pull from {primary} failed: {e}"));
+                        anyhow::bail!("pull failed: {e}")
+                    }
+                    log.push(format!("pulled {primary}"));
                 }
-                if conflict {
-                    crate::log::warn(format!("sync: pull from {primary} conflicts in {} file(s)", files.len()));
-                    anyhow::bail!("CONFLICT::{}", files.join(";"));
-                }
-                crate::log::warn(format!("sync: pull from {primary} failed: {e}"));
-                anyhow::bail!("pull failed: {e}")
+                Ok(None) => log.push(format!("{primary}: new branch")),
+                Err(e) => return Err(not_received(dir, primary, kind, e)),
             }
         }
     }
     // Did anything arrive from the other devices?
     let received = head(state, dir).await != before;
-    let sent = push_all(state, dir, &rs, &branch, &mut log).await;
+    let sent = { let _g = state.git_lock.lock().await; push_all(state, dir, &rs, &branch, &mut log).await };
     crate::log::info(format!("sync: {}", log.join(", ")));
     let locations = sync_outcome(dir, &sent)?;
     Ok(json!({"committed": committed, "log": log, "received": received, "locations": locations, "lastBackup": last_backup(dir)}))
@@ -533,32 +736,44 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
         "theirs" => "theirs",
         _ => return Err(crate::tr::err("git.strategy", &[])),
     };
-    let _g = state.git_lock.lock().await;
-    crate::trust::require_git(dir)?;
-    let branch = syncable_branch(state, dir).await?;
-    let committed = commit_all(state, dir, &subject::sync()).await?;
-    let rs = remotes(state, dir).await;
-    let primary = main_of(&rs).ok_or_else(|| crate::tr::err("git.no_remote", &[]))?;
-    if head(state, dir).await.is_none() { anyhow::bail!("there is nothing in this library's history yet"); }
+    // As in `sync`: the files are held while git changes them, and free while it waits on the network.
+    let (branch, mut committed, rs, primary) = {
+        let _files = state.sync_files.write().await;
+        let _g = state.git_lock.lock().await;
+        crate::trust::require_git(dir)?;
+        let branch = syncable_branch(state, dir).await?;
+        let committed = commit_all(state, dir, &subject::sync()).await?;
+        let rs = remotes(state, dir).await;
+        let primary = main_of(&rs).ok_or_else(|| crate::tr::err("git.no_remote", &[]))?;
+        if head(state, dir).await.is_none() { anyhow::bail!("there is nothing in this library's history yet"); }
+        (branch, committed, rs, primary)
+    };
+    let (url, kind) = location_of(&rs, &primary);
+    if kind == "folder" && !folder_present(url).await {
+        return Err(not_received(dir, &primary, kind, anyhow::anyhow!("not a git repository: the drive is not connected")));
+    }
 
     let mut log = vec![];
     let mut backup: Option<String> = None;
-    match git(state, dir, &["fetch", "--", &primary, &branch]).await {
-        Ok(_) => {
-            let ancestor = |a: &'static str, b: &'static str| async move { git(state, dir, &["merge-base", "--is-ancestor", a, b]).await.is_ok() };
-            if ancestor("FETCH_HEAD", "HEAD").await {
+    let fetched = { let _g = state.git_lock.lock().await; fetch_tip(state, dir, &primary, &branch).await };
+    match fetched {
+        Ok(Some(theirs)) => {
+            let _files = state.sync_files.write().await;
+            let _g = state.git_lock.lock().await;
+            committed |= commit_all(state, dir, &subject::sync()).await?;
+            if is_ancestor(state, dir, &theirs, "HEAD").await {
                 log.push(format!("{primary}: nothing new"));
             } else {
                 // Only a real clash needs a safety copy: a fast-forward or a clean merge loses nothing.
-                let clean = ancestor("HEAD", "FETCH_HEAD").await
-                    || git(state, dir, &["merge-tree", "--write-tree", "HEAD", "FETCH_HEAD"]).await.is_ok();
+                let clean = is_ancestor(state, dir, "HEAD", &theirs).await
+                    || git(state, dir, &["merge-tree", "--write-tree", "HEAD", &theirs]).await.is_ok();
                 if !clean {
                     let b = make_backup(state, dir).await?;
                     crate::log::info(format!("sync: resolving conflict keeping {strategy}; local state kept as {b}"));
                     log.push(format!("backup {b}"));
                     backup = Some(b);
                 }
-                if let Err(e) = git_ident(state, dir, &["merge", "--no-edit", "-X", side, "FETCH_HEAD"]).await {
+                if let Err(e) = git_ident(state, dir, &["merge", "--no-edit", "-X", side, &theirs]).await {
                     // What -X cannot settle (one side deleted or renamed the file): take the chosen side whole.
                     let files = unmerged(state, dir).await;
                     if files.is_empty() {
@@ -571,7 +786,7 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
                         let b = make_backup(state, dir).await?;
                         log.push(format!("backup {b}"));
                         backup = Some(b);
-                        let _ = git_ident(state, dir, &["merge", "--no-edit", "-X", side, "FETCH_HEAD"]).await;
+                        let _ = git_ident(state, dir, &["merge", "--no-edit", "-X", side, &theirs]).await;
                     }
                     for f in &files {
                         if git(state, dir, &["checkout", &format!("--{side}"), "--", f]).await.is_err() {
@@ -590,10 +805,10 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
                 log.push(format!("merged {primary} keeping {strategy}"));
             }
         }
-        Err(e) if e.to_string().contains("couldn't find remote ref") => log.push(format!("{primary}: new branch")),
-        Err(e) => anyhow::bail!("pull failed: {e}"),
+        Ok(None) => log.push(format!("{primary}: new branch")),
+        Err(e) => return Err(not_received(dir, &primary, kind, e)),
     }
-    let sent = push_all(state, dir, &rs, &branch, &mut log).await;
+    let sent = { let _g = state.git_lock.lock().await; push_all(state, dir, &rs, &branch, &mut log).await };
     crate::log::info(format!("sync: {}", log.join(", ")));
     let locations = sync_outcome(dir, &sent)?;
     Ok(json!({"committed": committed, "backup": backup, "strategy": strategy, "log": log, "locations": locations, "lastBackup": last_backup(dir)}))
@@ -889,6 +1104,136 @@ pub fn host_of(url: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
+/// The sign-in saved for `host` (see `host_of`): the username it was saved with (empty when only an
+/// access token was given) and where it is kept, `keychain` or `file`. Never the password itself.
+pub fn saved_sign_in(host: &str) -> Option<(String, &'static str)> {
+    for k in crate::askpass::keys_for(host) {
+        if let Some(raw) = crate::secrets::get("thoughts-git", &k) {
+            let v: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+            return Some((v["username"].as_str().unwrap_or_default().to_string(), "keychain"));
+        }
+    }
+    file_sign_in(&crate::paths::git_credentials_file(), host).map(|u| (u, "file"))
+}
+
+/// The username of the line for `host` in the credentials file (`https://user:pass@host`).
+fn file_sign_in(f: &Path, host: &str) -> Option<String> {
+    let text = std::fs::read_to_string(f).ok()?;
+    let decode = |s: &str| {
+        let b = s.as_bytes();
+        let mut out = vec![];
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] == b'%' && i + 2 < b.len() {
+                if let Some(v) = std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()) { out.push(v); i += 3; continue; }
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        String::from_utf8_lossy(&out).to_string()
+    };
+    text.lines().find_map(|l| {
+        let (cred, h) = l.trim().strip_prefix("https://")?.rsplit_once('@')?;
+        (h.trim_end_matches('/') == host).then(|| decode(cred.split(':').next().unwrap_or_default()))
+    })
+}
+
+/// Take out every line of the credentials file that signs in to `host`.
+fn forget_credential_file(f: &Path, host: &str) -> anyhow::Result<()> {
+    let Ok(existing) = std::fs::read_to_string(f) else { return Ok(()) };
+    let lines: Vec<&str> = existing.lines().filter(|l| !l.trim_end_matches('/').ends_with(&format!("@{host}"))).collect();
+    if lines.len() == existing.lines().count() { return Ok(()); }
+    let text = if lines.is_empty() { String::new() } else { lines.join("\n") + "\n" };
+    crate::paths::write_atomic(f, text.as_bytes(), true)?;
+    Ok(())
+}
+
+/// Forget the sign-in saved for `host`, wherever it is kept: the system keychain, the private
+/// password file and the entry an older version saved under the bare host (without the port) —
+/// unless one of the hosts in `keep` still signs in with that one.
+pub fn forget_sign_in(host: &str, keep: &[String]) -> anyhow::Result<()> {
+    let needed: std::collections::BTreeSet<String> = keep.iter().filter(|h| *h != host).flat_map(|h| crate::askpass::keys_for(h)).collect();
+    for k in crate::askpass::keys_for(host) {
+        if k != host && needed.contains(&k) { continue; }
+        crate::secrets::delete("thoughts-git", &k)?;
+        forget_credential_file(&crate::paths::git_credentials_file(), &k)?;
+    }
+    Ok(())
+}
+
+/// Ask the location `name` whether it lets this computer in, without sending or receiving
+/// anything: `None` when it does, otherwise why not (a key of `tr`'s table).
+pub async fn check_location(state: &AppState, dir: &Path, name: &str, kind: &str) -> Option<&'static str> {
+    if kind == "folder" {
+        let url = remotes(state, dir).await.iter().find(|r| r["name"] == name).and_then(|r| r["url"].as_str().map(String::from)).unwrap_or_default();
+        if !folder_present(&url).await { return Some("sync.why.unplugged"); }
+    }
+    match git(state, dir, &["ls-remote", "-q", "--heads", name]).await {
+        Ok(_) => None,
+        Err(e) => Some(why_not_sent(&e, kind)),
+    }
+}
+
+/// A name for the backup kept in a folder: the library folder's own name, cut down to what every
+/// drive accepts (FAT and exFAT drives, Windows, network shares).
+fn backup_folder_name(library: &Path) -> String {
+    let raw = library.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let clean: String = raw.chars().filter(|c| !c.is_control() && !"<>:\"/\\|?*".contains(*c)).take(60).collect();
+    let clean = clean.trim().trim_matches('.').trim().to_string();
+    format!("{}.git", if clean.is_empty() { "Thoughts" } else { &clean })
+}
+
+/// Does `path` hold a backup the way the app keeps one in a folder (a bare repository)?
+fn is_bare_repo(path: &Path) -> bool {
+    path.join("HEAD").is_file() && path.join("objects").is_dir() && path.join("refs").is_dir() && !path.join(".git").exists()
+}
+
+/// Make the folder `folder` (on an external drive, a network share or elsewhere on this computer)
+/// a backup location named `name` of the library in `dir`. The backup is kept inside it as one
+/// folder, `<library name>.git` (a bare repository), created when it is not there yet. One that is
+/// already there is used again when it is an earlier backup of this same library — after a
+/// reinstall, or on a new computer whose library is still empty, where the next Sync brings the
+/// library back from it. A backup of a different library is never mixed in. Returns its path.
+pub async fn add_folder_location(state: &AppState, dir: &Path, name: &str, folder: &Path) -> anyhow::Result<PathBuf> {
+    let shown = folder.display().to_string();
+    if !folder.is_absolute() || !folder.is_dir() { return Err(crate::tr::err("backup.folder_missing", &[("path", &shown)])); }
+    let real = crate::paths::canonical_lenient(folder);
+    if crate::paths::inside_ci(&real, dir) { return Err(crate::tr::err("backup.folder_in_library", &[])); }
+    if let Some(service) = crate::cloud::service_of(&real) {
+        let service = if service.is_empty() { crate::tr::text("backup.some_drive", &[]) } else { service.to_string() };
+        return Err(crate::tr::err("backup.folder_in_cloud", &[("service", &service)]));
+    }
+    // The user may have chosen the backup itself rather than the folder holding it.
+    let repo = if is_bare_repo(&real) { real.clone() } else { real.join(backup_folder_name(dir)) };
+    if crate::paths::inside_ci(&repo, dir) { return Err(crate::tr::err("backup.folder_in_library", &[])); }
+    let repo_s = repo.to_string_lossy().to_string();
+    let _g = state.git_lock.lock().await;
+    if repo.exists() {
+        if !is_bare_repo(&repo) {
+            return Err(crate::tr::err("backup.folder_taken", &[("name", &repo.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default())]));
+        }
+        // An earlier backup is only taken on when it is this library's: it shares its history (or
+        // one of the two is still empty).
+        let theirs = git(state, dir, &["ls-remote", "-q", "--heads", &repo_s]).await.map_err(|_| crate::tr::err("backup.folder_unreadable", &[]))?;
+        if !theirs.trim().is_empty() && head(state, dir).await.is_some() {
+            let branch = current_branch(state, dir).await?;
+            let related = match fetch_tip(state, dir, &repo_s, &branch).await {
+                Ok(Some(tip)) => git(state, dir, &["merge-base", "HEAD", &tip]).await.is_ok(),
+                _ => false,
+            };
+            if !related { return Err(crate::tr::err("backup.folder_other_library", &[])); }
+        }
+    } else {
+        git(state, &real, &["init", "--bare", "-q", "-b", "main", &repo_s]).await.map_err(|e| {
+            crate::log::warn(format!("backup: could not create a backup in {shown}: {e}"));
+            crate::tr::err("backup.folder_unwritable", &[])
+        })?;
+    }
+    git(state, dir, &["remote", "add", "--", name, &repo_s]).await?;
+    crate::log::info("backup: a folder was added as a backup location");
+    Ok(repo)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1077,7 +1422,7 @@ mod tests {
 
     #[test]
     fn why_a_location_did_not_take_the_library() {
-        let why = |raw: &str| why_not_sent(&anyhow::anyhow!("git push -u -- origin main: {raw}"));
+        let why = |raw: &str| why_not_sent(&anyhow::anyhow!("git push -u -- origin main: {raw}"), "online");
         assert_eq!(why("remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/a/b.git/'"), "sync.why.sign_in");
         assert_eq!(why("fatal: could not read Username for 'https://github.com': terminal prompts disabled"), "sync.why.sign_in");
         assert_eq!(why("fatal: unable to access 'https://x/': Could not resolve host: x"), "sync.why.offline");
@@ -1085,9 +1430,20 @@ mod tests {
         assert_eq!(why("! [rejected] main -> main (non-fast-forward)"), "sync.why.rejected");
         assert_eq!(why("remote: error: File big.pdf is 150.00 MB; this exceeds GitHub's file size limit of 100.00 MB"), "sync.why.too_large");
         assert_eq!(why("remote: error: GH006: Protected branch update failed for refs/heads/main."), "sync.why.refused");
-        assert_eq!(why_not_sent(&crate::tr::err("git.timeout", &[])), "sync.why.timeout");
+        assert_eq!(why_not_sent(&crate::tr::err("git.timeout", &[]), "online"), "sync.why.timeout");
+        // An SSH location: the server's key comes first, and a refused key is not about a password.
+        let ssh = |raw: &str| why_not_sent(&anyhow::anyhow!("git push -u -- origin main: {raw}"), "ssh");
+        assert_eq!(ssh("Host key verification failed.\nfatal: Could not read from remote repository."), "sync.why.host_key");
+        assert_eq!(ssh("@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed."), "sync.why.host_changed");
+        assert_eq!(ssh("git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."), "sync.why.ssh_key");
+        // A drive or folder.
+        let drive = |raw: &str| why_not_sent(&anyhow::anyhow!("git push -u -- usb main: {raw}"), "folder");
+        assert_eq!(drive("fatal: '/Volumes/Backup/notes.git' does not appear to be a git repository\nfatal: Could not read from remote repository."), "sync.why.unplugged");
+        assert_eq!(drive("error: unable to create temporary object directory: No space left on device"), "sync.why.full");
+        assert_eq!(drive("error: insufficient permission for adding an object to repository database ./objects\nPermission denied"), "sync.why.no_write");
         // Every reason has its sentence in both languages.
-        for key in ["sync.why.sign_in", "sync.why.offline", "sync.why.timeout", "sync.why.rejected", "sync.why.too_large", "sync.why.refused"] {
+        for key in ["sync.why.sign_in", "sync.why.offline", "sync.why.timeout", "sync.why.rejected", "sync.why.too_large", "sync.why.refused",
+                    "sync.why.unplugged", "sync.why.full", "sync.why.no_write", "sync.why.host_key", "sync.why.host_changed", "sync.why.ssh_key"] {
             assert!(!crate::tr::text_in(false, key, &[]).contains("unexpected") && crate::tr::text_in(true, key, &[]) != crate::tr::text_in(false, key, &[]), "{key}");
         }
     }
@@ -1541,5 +1897,157 @@ mod tests {
         assert_eq!(fill(url), None, "the port is part of what git matches");
         assert_eq!(fill("https://git.example.com/sara/notes.git").as_deref(), Some("bare"));
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    // ---------- drives, backup health, saved sign-ins (hist-b) ----------
+
+    /// A library with one recorded change, as its own repository, and an empty folder standing in
+    /// for an external drive.
+    fn library_and_drive(name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        let root = tmp(name);
+        let (lib, drive) = (root.join("Notes"), root.join("Backup Drive"));
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&drive).unwrap();
+        sh(&lib, &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Tester"), ("user.email", "tester@example.com")] { sh(&lib, &["config", k, v]); }
+        write(&lib, "notes.md", "first\n");
+        sh(&lib, &["add", "-A"]);
+        sh(&lib, &["commit", "-q", "-m", "first"]);
+        (root, dunce::canonicalize(lib).unwrap(), dunce::canonicalize(drive).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_drive_that_is_not_plugged_in_is_said_plainly_and_the_other_locations_still_get_the_library() {
+        let (root, lib, drive) = library_and_drive("drive");
+        let st = AppState::for_test();
+        let repo = add_folder_location(&st, &lib, "usb", &drive).await.unwrap();
+        assert_eq!(repo, drive.join("Notes.git"));
+        assert_eq!(remotes(&st, &lib).await[0]["kind"], "folder");
+        assert_eq!(backup_health(&st, &lib).await["state"], "stale", "never backed up");
+        sync(&st, &lib).await.unwrap();
+        assert_eq!(sh(&repo, &["rev-parse", "main"]), sh(&lib, &["rev-parse", "HEAD"]));
+        let h = backup_health(&st, &lib).await;
+        assert_eq!((h["state"].clone(), h["locations"][0]["present"].clone(), h["locations"][0]["unsent"].clone()), (json!("ok"), json!(true), json!(0)));
+        // A second location, online in real life (a folder here, which stays connected).
+        let other = root.join("other.git");
+        std::fs::create_dir_all(&other).unwrap();
+        sh(&other, &["init", "-q", "--bare", "-b", "main"]);
+        sh(&lib, &["remote", "add", "online", other.to_str().unwrap()]);
+
+        // The drive is unplugged: its folder is gone.
+        let away = root.join("unplugged");
+        std::fs::rename(&drive, &away).unwrap();
+        write(&lib, "notes.md", "second\n");
+        let err = sync(&st, &lib).await.unwrap_err();
+        let shown = crate::tr::classify_in(false, &err);
+        assert_eq!(shown.code, "sync_failed");
+        assert!(shown.message.contains("\"online\"") && shown.message.contains("not sent to \"usb\": the drive or folder is not connected"), "{}", shown.message);
+        assert_eq!(sh(&other, &["rev-parse", "main"]), sh(&lib, &["rev-parse", "HEAD"]), "the main location was a drive away: the other one still got the library");
+        let h = backup_health(&st, &lib).await;
+        let usb = h["locations"].as_array().unwrap().iter().find(|l| l["name"] == "usb").unwrap().clone();
+        assert_eq!((h["state"].clone(), usb["whyKey"].clone(), usb["present"].clone(), usb["unsent"].clone()), (json!("failed"), json!("sync.why.unplugged"), json!(false), json!(1)));
+        assert!(usb["why"].as_str().unwrap().starts_with("the drive or folder is not connected"));
+        // Plugged in again: everything goes through.
+        std::fs::rename(&away, &drive).unwrap();
+        sync(&st, &lib).await.unwrap();
+        assert_eq!(sh(&repo, &["rev-parse", "main"]), sh(&lib, &["rev-parse", "HEAD"]));
+        assert_eq!(backup_health(&st, &lib).await["state"], "ok");
+        // Removed and added again later: the backup already there is used again.
+        sh(&lib, &["remote", "remove", "usb"]);
+        forget_location_state(&lib, "usb");
+        assert_eq!(add_folder_location(&st, &lib, "usb", &drive).await.unwrap(), repo);
+        // Choosing the backup folder itself works as well.
+        sh(&lib, &["remote", "remove", "usb"]);
+        assert_eq!(add_folder_location(&st, &lib, "usb", &repo).await.unwrap(), repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_drive_brings_a_library_back_and_never_mixes_in_another_one() {
+        let (root, lib, drive) = library_and_drive("restore");
+        let st = AppState::for_test();
+        add_folder_location(&st, &lib, "usb", &drive).await.unwrap();
+        sync(&st, &lib).await.unwrap();
+        // A new computer: an empty library folder of the same name, given a history, and the drive.
+        let fresh = root.join("new computer").join("Notes");
+        std::fs::create_dir_all(&fresh).unwrap();
+        init(&st, &fresh).await.unwrap();
+        add_folder_location(&st, &fresh, "usb", &drive).await.unwrap();
+        let v = sync(&st, &fresh).await.unwrap();
+        assert_eq!(v["received"], true);
+        assert_eq!(read(&fresh, "notes.md"), "first\n", "the library came back from the drive");
+        // A different library that happens to have the same name is refused.
+        let stranger = root.join("someone else").join("Notes");
+        std::fs::create_dir_all(&stranger).unwrap();
+        sh(&stranger, &["init", "-q", "-b", "main"]);
+        write(&stranger, "theirs.md", "not yours\n");
+        sh(&stranger, &["add", "-A"]);
+        sh(&stranger, &["-c", "user.name=T", "-c", "user.email=t@e", "commit", "-q", "-m", "theirs"]);
+        let e = crate::tr::classify_in(false, &add_folder_location(&st, &stranger, "usb", &drive).await.unwrap_err());
+        assert!(e.message.contains("a different library"), "{}", e.message);
+        assert!(sh(&stranger, &["remote"]).is_empty(), "nothing was added");
+        // Something in the way that is not a backup is not touched.
+        let busy = root.join("busy drive");
+        std::fs::create_dir_all(busy.join("Notes.git")).unwrap();
+        write(&busy, "Notes.git/photo.jpg", "x");
+        assert!(add_folder_location(&st, &lib, "two", &busy).await.is_err());
+        assert_eq!(read(&busy, "Notes.git/photo.jpg"), "x");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn backup_health_says_when_changes_have_waited_too_long() {
+        let (root, lib, drive) = library_and_drive("health");
+        let st = AppState::for_test();
+        assert_eq!(backup_health(&st, &lib).await["state"], "none");
+        add_folder_location(&st, &lib, "usb", &drive).await.unwrap();
+        sync(&st, &lib).await.unwrap();
+        // A change recorded after the backup: waiting, not yet a warning.
+        write(&lib, "notes.md", "changed\n");
+        commit_all(&st, &lib, "edit: x").await.unwrap();
+        let h = backup_health(&st, &lib).await;
+        assert_eq!((h["state"].clone(), h["locations"][0]["unsent"].clone()), (json!("waiting"), json!(1)));
+        // The last backup was more than a week ago: overdue.
+        let old = (chrono::Utc::now() - chrono::Duration::days(STALE_DAYS + 1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        change_backup_state(&lib, |e| { e["locations"]["usb"]["ok"] = json!(old); e["locations"]["usb"]["tried"] = json!(old); });
+        assert_eq!(backup_health(&st, &lib).await["state"], "stale");
+        // Nothing to send, however old the backup: fine.
+        sync(&st, &lib).await.unwrap();
+        change_backup_state(&lib, |e| { e["locations"]["usb"]["ok"] = json!(old); e["locations"]["usb"]["tried"] = json!(old); });
+        assert_eq!(backup_health(&st, &lib).await["state"], "ok");
+        // A failure that was put right (a sign-in updated, a server trusted) no longer counts.
+        note_attempts(&lib, &[("usb".to_string(), Some("sync.why.sign_in"))]);
+        assert_eq!(backup_health(&st, &lib).await["state"], "failed");
+        clear_failure(&lib, "usb");
+        assert_eq!(backup_health(&st, &lib).await["state"], "ok");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_sign_in_in_the_password_file_is_read_and_forgotten_by_its_site() {
+        let d = tmp("credfile");
+        let f = d.join("git-credentials");
+        save_credential_file(&f, "git.example.com:3000", "sara@firm.com", "p@ss/1").unwrap();
+        save_credential_file(&f, "github.com", "me", "two").unwrap();
+        assert_eq!(file_sign_in(&f, "git.example.com:3000").as_deref(), Some("sara@firm.com"));
+        assert_eq!(file_sign_in(&f, "git.example.com"), None);
+        forget_credential_file(&f, "git.example.com:3000").unwrap();
+        assert_eq!(file_sign_in(&f, "git.example.com:3000"), None);
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "https://me:two@github.com\n");
+        forget_credential_file(&f, "github.com").unwrap();
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn locations_are_told_apart_by_their_address() {
+        for (url, kind) in [("https://github.com/a/b.git", "online"), ("http://github.com/a/b.git", "online"), ("ssh://git@host/x.git", "ssh"),
+                            ("git@github.com:a/b.git", "ssh"), ("/Volumes/Backup/Notes.git", "folder"), ("D:\\Backups\\Notes.git", "folder"),
+                            ("D:/Backups/Notes.git", "folder"), ("\\\\server\\share\\Notes.git", "folder")] {
+            assert_eq!(location_kind(url), kind, "{url}");
+        }
+        assert_eq!(backup_folder_name(Path::new("/Users/sara/My: Notes?")), "My Notes.git");
+        assert_eq!(backup_folder_name(Path::new("/Users/sara/ملاحظاتي")), "ملاحظاتي.git");
+        assert_eq!(backup_folder_name(Path::new("/")), "Thoughts.git");
     }
 }

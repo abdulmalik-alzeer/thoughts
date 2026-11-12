@@ -287,6 +287,10 @@ pub struct SyncSettings {
     /// The user said to send the library to an online location although its folder is one a cloud
     /// drive also syncs ("use it anyway"). Without this that combination is refused.
     pub allow_cloud: bool,
+    /// Which of the two backups the app sends to is chosen: "online" ("Online location") or
+    /// "drive" ("Drive or folder"). Both are the "git-…" modes; this only decides how Settings
+    /// shows the choice and what it offers to add. Every location, of either kind, is sent to.
+    pub target: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -356,7 +360,7 @@ impl Default for AiSettings {
 
 impl Default for SyncSettings {
     fn default() -> Self {
-        Self { mode: "git-manual".into(), credential_store: "keychain".into(), main_location: None, allow_cloud: false }
+        Self { mode: "git-manual".into(), credential_store: "keychain".into(), main_location: None, allow_cloud: false, target: "online".into() }
     }
 }
 
@@ -559,6 +563,7 @@ impl Settings {
             anyhow::bail!("the search extension address must start with https://");
         }
 
+        if self.sync.target != "drive" { self.sync.target = "online".into(); }
         // A location's short name, or nothing (the same shape the API accepts when one is added).
         self.sync.main_location = self.sync.main_location.take().map(|n| n.trim().to_string())
             .filter(|n| (1..=40).contains(&n.len()) && !n.starts_with('-') && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));

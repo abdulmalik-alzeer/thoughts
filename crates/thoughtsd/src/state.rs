@@ -23,6 +23,12 @@ pub struct AppState {
     /// Held while a wrap or reorganize is changing the library (apply through commit), so nothing
     /// else syncs or shuts the daemon down halfway.
     pub library_lock: Arc<Mutex<()>>,
+    /// Taken for writing by a sync while git changes the library's files (recording them, taking in
+    /// what arrived), and for reading by a short edit while it writes, so the two never overlap.
+    /// While a sync waits on the network it holds neither, and edits go through (see `api::library_edit`).
+    pub sync_files: Arc<RwLock<()>>,
+    /// A sync started from the window holds `library_lock` (see `api::sync_guard`).
+    pub syncing: AtomicBool,
     /// settings.json was damaged at startup and has been moved aside.
     pub settings_recovered: AtomicBool,
     /// Automatic mini-wraps are paused after a sign-in or network failure, until any run succeeds.
@@ -102,6 +108,8 @@ impl AppState {
             interrupted: Mutex::new(interrupted),
             usage: Mutex::new(usage),
             library_lock: Arc::new(Mutex::new(())),
+            sync_files: Default::default(),
+            syncing: AtomicBool::new(false),
             settings_recovered: AtomicBool::new(settings_recovered),
             mini_wraps_blocked: AtomicBool::new(false),
             mini_wrap_backoff: Mutex::new(HashMap::new()),
@@ -140,6 +148,8 @@ impl AppState {
             interrupted: Mutex::new(vec![]),
             usage: Mutex::new(BTreeMap::new()),
             library_lock: Arc::new(Mutex::new(())),
+            sync_files: Default::default(),
+            syncing: AtomicBool::new(false),
             settings_recovered: AtomicBool::new(false),
             mini_wraps_blocked: AtomicBool::new(false),
             mini_wrap_backoff: Mutex::new(HashMap::new()),

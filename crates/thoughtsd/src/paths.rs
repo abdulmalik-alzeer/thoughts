@@ -43,7 +43,7 @@ pub fn app_layer_staging_dir() -> PathBuf { home().join("app-layer-staging") }
 /// Histories of libraries that carry no repository of their own (see `git::history_store`): kept
 /// here, outside the library, so a cloud drive that syncs the library never sees them.
 pub fn history_dir() -> PathBuf { home().join("history") }
-/// When each library was last backed up to an online location, and where (see `git::note_backup`).
+/// When each library was last backed up to an online location, and where (see `git::note_attempts`).
 pub fn backup_state_file() -> PathBuf { home().join("backup-state.json") }
 
 /// Folders under the app's home that an assistant run may read but never write, whatever mode it

@@ -30,12 +30,36 @@ pub fn file_delete(file: &Path, service: &str, account: &str) -> anyhow::Result<
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(test)))]
 fn note_fallback(e: &dyn std::fmt::Display) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| crate::log::warn(format!("system keyring unavailable ({e}); storing secrets in a private file under ~/.thoughts instead")));
 }
 
+/// Under test the system keyring is never reached: the real one is shared with the user's
+/// installed app. Every test in the process shares this one store in memory instead (tests use
+/// names of their own).
+#[cfg(test)]
+pub(crate) static TEST_STORE: std::sync::Mutex<BTreeMap<String, String>> = std::sync::Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+pub fn set(service: &str, account: &str, value: &str) -> anyhow::Result<()> {
+    TEST_STORE.lock().unwrap_or_else(|e| e.into_inner()).insert(key(service, account), value.to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+pub fn get(service: &str, account: &str) -> Option<String> {
+    TEST_STORE.lock().unwrap_or_else(|e| e.into_inner()).get(&key(service, account)).cloned()
+}
+
+#[cfg(test)]
+pub fn delete(service: &str, account: &str) -> anyhow::Result<()> {
+    TEST_STORE.lock().unwrap_or_else(|e| e.into_inner()).remove(&key(service, account));
+    Ok(())
+}
+
+#[cfg(not(test))]
 pub fn set(service: &str, account: &str, value: &str) -> anyhow::Result<()> {
     let r = keyring::Entry::new(service, account).and_then(|e| e.set_password(value));
     #[cfg(target_os = "linux")]
@@ -46,6 +70,7 @@ pub fn set(service: &str, account: &str, value: &str) -> anyhow::Result<()> {
     Ok(r?)
 }
 
+#[cfg(not(test))]
 pub fn get(service: &str, account: &str) -> Option<String> {
     let r = keyring::Entry::new(service, account).and_then(|e| e.get_password());
     #[cfg(target_os = "linux")]
@@ -54,6 +79,7 @@ pub fn get(service: &str, account: &str) -> Option<String> {
 }
 
 /// Missing is fine; anything else is an error worth surfacing.
+#[cfg(not(test))]
 pub fn delete(service: &str, account: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     file_delete(&crate::paths::secrets_file(), service, account)?;

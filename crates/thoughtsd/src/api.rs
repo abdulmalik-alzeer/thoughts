@@ -216,7 +216,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/git/resolve", post(git_resolve))
         .route("/api/git/remotes", post(remote_add))
         .route("/api/git/remotes/:name", delete(remote_remove))
-        .route("/api/git/credentials", post(save_cred))
+        .route("/api/git/credentials", post(save_cred).get(sign_ins).delete(forget_cred))
+        .route("/api/git/hostkey", get(host_keys).post(trust_host))
         // projects
         .route("/api/projects", get(project_list).post(project_add))
         .route("/api/projects/:id", delete(project_remove))
@@ -364,6 +365,22 @@ async fn lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
 async fn library_free(st: &AppState) -> anyhow::Result<()> {
     if st.library_busy() { return Err(crate::tr::err("busy", &[])); }
     wraps::require_no_interrupted(st).await
+}
+
+/// Longest a short edit waits for a sync to finish changing the library's files.
+const EDIT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// `library_free` for a short edit (saving a note, ticking a todo, an import…), whose answer is kept
+/// for as long as the edit writes. A sync started from the window does not turn the edit away: it
+/// changes the files only for moments (recording them, putting in what arrived), and the edit waits
+/// those out; while the sync waits on the network the edit goes straight through, and is recorded
+/// before anything that arrived is put in. A wrap or a reorganize, which can take its changes back,
+/// still turns it away at once, as does a cut-off wrap waiting for a decision.
+async fn library_edit(st: &AppState) -> anyhow::Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+    let files = tokio::time::timeout(EDIT_WAIT, st.sync_files.clone().read_owned()).await.map_err(|_| crate::tr::err("busy.sync", &[]))?;
+    if st.library_busy() && !st.syncing.load(std::sync::atomic::Ordering::SeqCst) { return Err(crate::tr::err("busy", &[])); }
+    wraps::require_no_interrupted(st).await?;
+    Ok(files)
 }
 
 /// Requests made on behalf of an add-on carry `scope=plugin`: the daemon then keeps private
@@ -563,7 +580,7 @@ struct PrivateIndex { path: String }
 /// `POST /api/library/private-index {path}` → `{removed}`: take those lines out of the index, in place.
 async fn private_index_remove(State(st): S, Json(b): Json<PrivateIndex>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let dir = private_folder(&st, &b.path).await?;
     let removed = library::remove_index_lines(&root, &dir)?;
     if removed > 0 { st.emit(json!({"type": "library.changed"})); }
@@ -629,7 +646,8 @@ fn validate(s: &Settings, old: Option<&Settings>) -> anyhow::Result<()> { valida
 
 /// `validate`, with the question "does a cloud drive sync this folder?" answered by `synced`.
 fn validate_with(s: &Settings, old: Option<&Settings>, synced: impl Fn(&str) -> bool) -> anyhow::Result<()> {
-    if !s.sync_enabled() || s.sync.allow_cloud { return Ok(()); }
+    // A drive only ever gets what this computer sends it: it never brings changes into the folder.
+    if !s.sync_enabled() || s.sync.allow_cloud || s.sync.target == "drive" { return Ok(()); }
     let Some(p) = &s.library_path else { return Ok(()) };
     if old.map_or(false, |o| o.sync_enabled() && o.library_path.as_deref().map(str::trim) == Some(p.trim())) { return Ok(()); }
     if synced(p) { return Err(crate::tr::err("library.cloud", &[])); }
@@ -1416,7 +1434,7 @@ struct WriteFile {
 }
 async fn write_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(w): Json<WriteFile>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     scope_of(&q).check_write(&st, &root, &w.path).await?;
     let hash = library::write_checked(&root, &w.path, &w.content, w.base_hash.as_deref())?;
     st.emit(json!({"type": "library.changed"}));
@@ -1431,7 +1449,7 @@ struct NewFile { path: String, content: String }
 /// Create a file (never replacing one). `{path, content?}` → `{ok, path, hash}`.
 async fn new_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(n): Json<NewFile>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let rel = n.path.trim().replace('\\', "/");
     scope_of(&q).check_write(&st, &root, &rel).await?;
     let hash = library::create(&root, &rel, &n.content)?;
@@ -1446,7 +1464,7 @@ struct MoveFile { from: String, to: String }
 /// Move or rename a file or folder (never onto something that exists). `{from, to}` → `{ok, path}`.
 async fn move_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(m): Json<MoveFile>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let to = m.to.trim().replace('\\', "/");
     let scope = scope_of(&q);
     scope.check_write(&st, &root, &m.from).await?;
@@ -1489,7 +1507,7 @@ struct DeleteFile { path: String, recursive: bool }
 /// and just after, so the file can be brought back from History. → `{ok, recoverable}`.
 async fn delete_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(d): Json<DeleteFile>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let scope = scope_of(&q);
     scope.check_write(&st, &root, &d.path).await?;
     if d.recursive && scope.plugin { return Err(crate::tr::err("plugin.not_allowed", &[("path", &d.path)]).into()); }
@@ -1511,7 +1529,7 @@ struct IdeaStatus { path: String, status: String }
 /// Change an idea's status (`{path: "<area>/<slug>/README.md" or "<area>/<slug>", status}`).
 async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Json(i): Json<IdeaStatus>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let rel = i.path.trim().trim_matches('/').replace('\\', "/");
     let rel = if rel.to_lowercase().ends_with(".md") { rel } else { format!("{rel}/README.md") };
     if !rel.ends_with("/README.md") { return Err(crate::tr::err("invalid.path", &[]).into()); }
@@ -1554,7 +1572,7 @@ struct NewMeeting { path: String, title: String, date: String }
 /// a new, dated meeting note in the item's `meetings/` folder (see `library::new_meeting`).
 async fn item_meeting(State(st): S, Json(m): Json<NewMeeting>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let today = chrono::Local::now().date_naive();
     let date = match m.date.trim() {
         "" => today,
@@ -1681,7 +1699,7 @@ struct ImportReq { files: Vec<ImportFile> }
 /// Copy files chosen by the user into `<library>/imports/` (basename only, never overwriting).
 async fn import_files(State(st): S, Json(req): Json<ImportReq>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     if req.files.is_empty() { return Err(crate::tr::err("import.empty", &[]).into()); }
     // Decode and check everything first, so one bad file doesn't leave a half-finished import.
     let mut decoded = vec![];
@@ -1707,7 +1725,7 @@ struct SaveOutput { folder: String, name: String, data_base64: String }
 /// note (Word) saved in the library, next to the note's other outputs; never replaces a file.
 async fn save_output(State(st): S, Json(o): Json<SaveOutput>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let b64 = o.data_base64.rsplit(',').next().unwrap_or("").trim();
     if b64.len() / 4 * 3 > library::IMPORT_MAX_BYTES + 3 { return Err(crate::tr::err("too_large", &[("name", &o.name)]).into()); }
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|_| crate::tr::err("unreadable", &[("name", &o.name)]))?;
@@ -1725,7 +1743,7 @@ struct PictureReq { note: String, #[serde(default)] name: String, data_base64: S
 /// the content; at most 15 MB. Not open to add-ons (it is not in `PLUGIN_SCOPED`).
 async fn add_picture(State(st): S, Json(req): Json<PictureReq>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let b64 = req.data_base64.rsplit(',').next().unwrap_or("").trim();
     if b64.len() / 4 * 3 > library::PICTURE_MAX_BYTES + 3 { return Err(crate::tr::err("picture.too_large", &[]).into()); }
     let bytes = base64::engine::general_purpose::STANDARD.decode(b64)
@@ -1794,7 +1812,7 @@ struct Capture { kind: String, text: String, file: String }
 /// A leading "todo:" / «مهمة:» or "note:" / «ملاحظة:» is dropped.
 async fn capture(State(st): S, Json(c): Json<Capture>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let text = c.text.trim();
     let strip = |t: &str, prefixes: &[&str]| -> Option<String> {
         prefixes.iter().find_map(|p| {
@@ -1851,7 +1869,7 @@ struct TodoOp {
 }
 async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<String, String>>, Json(t): Json<TodoOp>) -> R {
     let root = lib(&st).await?;
-    library_free(&st).await?;
+    let _edit = library_edit(&st).await?;
     let file = if t.file.is_empty() { todos::general(&root) } else { t.file.clone() };
     let to_file = if t.to_file.is_empty() { file.clone() } else { t.to_file.clone() };
     let plugin = scope_of(&q).plugin;
@@ -2413,23 +2431,36 @@ async fn git_status(State(st): S) -> R {
     v["mode"] = json!(s.sync.mode);
     // History is its own switch: `on` is the setting, `ready` whether there is one to read yet.
     v["history"] = json!({"on": s.history_enabled(), "ready": v["repo"]});
-    // `{at, location}`: the last time the library really reached an online location (null: never).
+    // `{at, location}`: the last time the library really reached a location (null: never).
     v["lastBackup"] = git::last_backup(&l);
+    // How the backup stands, per location (see `git::backup_health`).
+    if s.sync_enabled() && v["repo"] == true { v["health"] = git::backup_health(&st, &l).await; }
     // `{synced, service}`: is the library folder one a cloud drive keeps in sync?
     v["cloud"] = cloud_json(crate::cloud::service_of(&l));
     Ok(Json(v))
 }
+
+/// A sync started from the window, for as long as it runs: it holds the library (no wrap,
+/// reorganize or second sync starts meanwhile) and says that it is a sync that holds it, so short
+/// edits wait for it instead of being turned away (`library_edit`).
+struct SyncHold { st: Arc<AppState>, _lib: tokio::sync::OwnedMutexGuard<()> }
+impl Drop for SyncHold {
+    fn drop(&mut self) { self.st.syncing.store(false, std::sync::atomic::Ordering::SeqCst); }
+}
+
 /// What a sync needs before it may touch the library: sync switched on, no wrap or reorganize in
 /// the middle of changing it (`BUSY::`), no cut-off wrap still waiting for a decision
 /// (`WRAP_INTERRUPTED::<chatId>` — syncing would publish the half-applied wrap and take away its
 /// undo), and no assistant at work in it (`BUSY::`).
-async fn sync_guard(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, tokio::sync::OwnedMutexGuard<()>)> {
+async fn sync_guard(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, SyncHold)> {
     let l = lib(st).await?;
     if !st.settings.read().await.sync_enabled() { return Err(crate::tr::err("git.off", &[])); }
     let guard = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    st.syncing.store(true, std::sync::atomic::Ordering::SeqCst);
+    let hold = SyncHold { st: st.clone(), _lib: guard };
     wraps::require_no_interrupted(st).await?;
     if st.run_active_in(&l) { return Err(crate::tr::err("busy.run", &[])); }
-    Ok((l, guard))
+    Ok((l, hold))
 }
 
 /// `POST /api/git/sync`: record, receive from the main location, send to every location →
@@ -2458,12 +2489,22 @@ async fn git_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct Remote { name: String, url: String, username: String, token: String }
+struct Remote { name: String, url: String, username: String, token: String, folder: String }
+/// `POST /api/git/remotes {name, url, username, token}` adds an online location (saving its
+/// sign-in when one is given); `{name, folder}` adds a drive or folder instead
+/// (`git::add_folder_location`) → `{ok, path}`, the backup's own folder.
 async fn remote_add(State(st): S, Json(r): Json<Remote>) -> R {
     let l = lib(&st).await?;
     let name = if r.name.trim().is_empty() { "origin".to_string() } else { r.name.trim().to_string() };
-    let url = r.url.trim();
     check_remote_name(&name)?;
+    let folder = r.folder.trim();
+    if !folder.is_empty() {
+        let path = paths::expand_tilde(folder)?;
+        git::ensure_history(&st, &l).await?;
+        let repo = git::add_folder_location(&st, &l, &name, &path).await?;
+        return Ok(Json(json!({"ok": true, "path": repo.display().to_string()})));
+    }
+    let url = r.url.trim();
     check_remote_url(url)?;
     let host = git::host_of(url);
     if !r.token.is_empty() { if let Some(h) = &host { check_host(h)?; } }
@@ -2475,18 +2516,131 @@ async fn remote_add(State(st): S, Json(r): Json<Remote>) -> R {
     }
     ok()
 }
+
+/// The hosts the online locations of the library in `dir` sign in to, other than `except`.
+async fn hosts_in_use(st: &AppState, dir: &std::path::Path, except: Option<&str>) -> Vec<String> {
+    git::remotes(st, dir).await.iter().filter(|r| Some(r["name"].as_str().unwrap_or_default()) != except)
+        .filter_map(|r| r["url"].as_str().and_then(git::host_of)).collect()
+}
+
+/// `DELETE /api/git/remotes/:name`: the location is no longer sent to. The copy kept there is not
+/// touched. Its saved sign-in is forgotten unless another location still signs in to the same site.
 async fn remote_remove(State(st): S, Path(name): Path<String>) -> R {
     check_remote_name(&name)?;
-    git::git(&st, &lib(&st).await?, &["remote", "remove", "--", &name]).await?;
+    let l = lib(&st).await?;
+    let host = git::remotes(&st, &l).await.iter().find(|r| r["name"] == name.as_str()).and_then(|r| r["url"].as_str().and_then(git::host_of));
+    git::git(&st, &l, &["remote", "remove", "--", &name]).await?;
+    git::forget_location_state(&l, &name);
+    if let Some(h) = host {
+        let rest = hosts_in_use(&st, &l, None).await;
+        if !rest.contains(&h) {
+            crate::log::ok_or_warn("backup: could not forget the sign-in of a removed location", git::forget_sign_in(&h, &rest));
+        }
+    }
     ok()
 }
-#[derive(Deserialize)]
-struct Cred { host: String, username: String, token: String }
+
+/// `GET /api/git/credentials` → `[{host, locations: [name], saved, username, store, insecure}]`:
+/// per site the library's online locations sign in to, whether a sign-in is saved for it, under
+/// which username and where (`keychain` | `file`). Never a password. `insecure`: the address is
+/// `http://`, which is never sent one.
+async fn sign_ins(State(st): S) -> R {
+    let l = lib(&st).await?;
+    let mut out: Vec<Value> = vec![];
+    for r in git::remotes(&st, &l).await {
+        let url = r["url"].as_str().unwrap_or_default();
+        let Some(host) = (r["kind"] == "online").then(|| git::host_of(url)).flatten() else { continue };
+        let name = r["name"].clone();
+        let insecure = !url.to_ascii_lowercase().starts_with("https://");
+        if let Some(e) = out.iter_mut().find(|e| e["host"] == host.as_str() && e["insecure"] == insecure) {
+            if let Some(list) = e["locations"].as_array_mut() { list.push(name); }
+            continue;
+        }
+        let saved = if insecure { None } else { git::saved_sign_in(&host) };
+        out.push(json!({"host": host, "locations": [name], "saved": saved.is_some(), "insecure": insecure,
+            "username": saved.as_ref().map(|(u, _)| u.clone()), "store": saved.map(|(_, s)| s)}));
+    }
+    Ok(Json(json!(out)))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Cred { host: String, location: String, username: String, token: String }
+/// `POST /api/git/credentials {location | host, username, token}`: save the sign-in for the site of
+/// that location (or that host). With a location, it is asked straight away whether it lets this
+/// computer in → `{ok, works, why}` (`works` null when nothing was asked).
 async fn save_cred(State(st): S, Json(c): Json<Cred>) -> R {
-    let host = c.host.trim();
-    check_host(host)?;
     if c.username.chars().any(char::is_control) || c.token.chars().any(char::is_control) { return Err(crate::tr::err("invalid.credential", &[]).into()); }
-    git::save_credential(&st, host, &c.username, &c.token).await?;
+    if c.token.is_empty() { return Err(crate::tr::err("signin.empty", &[]).into()); }
+    let location = c.location.trim();
+    let (host, dir) = if location.is_empty() {
+        (c.host.trim().to_string(), None)
+    } else {
+        check_remote_name(location)?;
+        let l = lib(&st).await?;
+        let url = git::remotes(&st, &l).await.iter().find(|r| r["name"] == location).and_then(|r| r["url"].as_str().map(String::from))
+            .ok_or_else(|| crate::tr::err("signin.no_location", &[]))?;
+        if !url.to_ascii_lowercase().starts_with("https://") { return Err(crate::tr::err("signin.not_online", &[]).into()); }
+        (git::host_of(&url).unwrap_or_default(), Some(l))
+    };
+    check_host(&host)?;
+    git::save_credential(&st, &host, c.username.trim(), &c.token).await?;
+    let Some(l) = dir else { return Ok(Json(json!({"ok": true, "works": null, "why": null}))) };
+    let why = git::check_location(&st, &l, location, "online").await;
+    if why.is_none() { git::clear_failure(&l, location); }
+    Ok(Json(json!({"ok": true, "works": why.is_none(), "why": why.map(|k| crate::tr::text(k, &[]))})))
+}
+
+/// `DELETE /api/git/credentials?host=`: forget the sign-in saved for that site, wherever it is kept.
+async fn forget_cred(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let host = q.get("host").map(|h| h.trim().to_string()).unwrap_or_default();
+    check_host(&host)?;
+    let keep = match lib(&st).await { Ok(l) => hosts_in_use(&st, &l, None).await, Err(_) => vec![] };
+    git::forget_sign_in(&host, &keep)?;
+    crate::log::info("backup: a saved sign-in was forgotten");
+    ok()
+}
+
+/// The server an SSH location named in `q` (`?location=`) connects to.
+async fn ssh_server(st: &AppState, q: &HashMap<String, String>) -> anyhow::Result<(std::path::PathBuf, String, String, u16)> {
+    let name = q.get("location").map(|n| n.trim().to_string()).unwrap_or_default();
+    check_remote_name(&name)?;
+    let l = lib(st).await?;
+    let url = git::remotes(st, &l).await.iter().find(|r| r["name"] == name.as_str()).and_then(|r| r["url"].as_str().map(String::from))
+        .ok_or_else(|| crate::tr::err("signin.no_location", &[]))?;
+    let (host, port) = crate::sshhost::target(&url).ok_or_else(|| crate::tr::err("hostkey.not_ssh", &[]))?;
+    Ok((l, name, host, port))
+}
+
+/// The plain name of an SSH key type: `ED25519`, `ECDSA`, `RSA`…
+fn key_label(kind: &str) -> String {
+    let k = kind.trim_start_matches("sk-").trim_start_matches("ssh-");
+    let k = if k.starts_with("ecdsa") { "ecdsa" } else { k.split('@').next().unwrap_or(k) };
+    k.to_uppercase()
+}
+
+/// `GET /api/git/hostkey?location=` → `{host, port, keys: [{type, fingerprint}]}`: the keys the
+/// server of that SSH location presents, for the user to compare with the ones its owner publishes.
+async fn host_keys(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let (_, _, host, port) = ssh_server(&st, &q).await?;
+    let keys = crate::sshhost::scan(&host, port).await?;
+    Ok(Json(json!({"host": host, "port": port,
+        "keys": keys.iter().map(|k| json!({"type": key_label(&k.kind), "fingerprint": k.fingerprint})).collect::<Vec<_>>()})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct TrustHost { fingerprint: String }
+/// `POST /api/git/hostkey?location= {fingerprint}`: the user compared and trusts that key. The server
+/// is asked again, and only the key with exactly that fingerprint is added to this computer's list of
+/// known servers — if the server now shows another, nothing is added.
+async fn trust_host(State(st): S, Query(q): Query<HashMap<String, String>>, Json(t): Json<TrustHost>) -> R {
+    let (l, name, host, port) = ssh_server(&st, &q).await?;
+    let keys = crate::sshhost::scan(&host, port).await?;
+    let key = keys.iter().find(|k| k.fingerprint == t.fingerprint.trim()).ok_or_else(|| crate::tr::err("hostkey.changed_meanwhile", &[]))?;
+    crate::sshhost::trust_in(&crate::sshhost::known_hosts_file(), &host, port, key)?;
+    crate::log::info("backup: a server's key was added to the known servers at the user's request");
+    git::clear_failure(&l, &name);
     ok()
 }
 
@@ -4078,5 +4232,146 @@ mod tests {
         let cid = custom.id.clone();
         st.chats.insert(custom).await;
         assert_eq!(shown(chat_patch(State(st.clone()), Path(cid), Json(patch(true))).await).status, 403);
+    }
+
+    // ---------- backup locations (hist-b) ----------
+
+    fn remote(name: &str, url: &str, username: &str, token: &str) -> Json<Remote> {
+        Json(Remote { name: name.into(), url: url.into(), username: username.into(), token: token.into(), ..Default::default() })
+    }
+
+    #[tokio::test]
+    async fn a_saved_sign_in_can_be_seen_updated_and_forgotten_and_goes_with_its_last_location() {
+        let (st, lib) = t::library().await;
+        // Port 9 on this computer answers nobody, so asking a location is quick and never signs in.
+        remote_add(State(st.clone()), remote("origin", "https://127.0.0.1:9/sara/notes.git", "sara", "token-1")).await.unwrap();
+        remote_add(State(st.clone()), remote("second", "https://127.0.0.1:9/sara/other.git", "", "")).await.unwrap();
+        remote_add(State(st.clone()), remote("lab", "https://localhost:9/lab.git", "", "token-lab")).await.unwrap();
+        remote_add(State(st.clone()), remote("keyed", "git@localhost:sara/notes.git", "", "")).await.unwrap();
+        t::sh(&lib, &["remote", "add", "plain", "http://localhost:9/plain.git"]);
+        // A password saved by an older version under the bare host, without the port.
+        crate::secrets::set("thoughts-git", "127.0.0.1", r#"{"username":"old","secret":"older"}"#).unwrap();
+
+        let list = sign_ins(State(st.clone())).await.unwrap().0;
+        let find = |host: &str, insecure: bool| list.as_array().unwrap().iter().find(|e| e["host"] == host && e["insecure"] == insecure).cloned().unwrap();
+        let both = find("127.0.0.1:9", false);
+        assert_eq!((both["locations"].clone(), both["saved"].clone(), both["username"].clone(), both["store"].clone()),
+                   (json!(["origin", "second"]), json!(true), json!("sara"), json!("keychain")));
+        assert_eq!(find("localhost:9", false)["username"], "", "only a token was given");
+        // A plain http:// address is shown as such and never offered a password; an SSH one has none.
+        assert_eq!((find("localhost:9", true)["saved"].clone(), find("localhost:9", true)["locations"].clone()), (json!(false), json!(["plain"])));
+        assert_eq!(list.as_array().unwrap().len(), 3);
+        assert!(!list.to_string().contains("token-"), "a password never leaves the service");
+
+        // Updating checks the location at once and says plainly how that went.
+        let upd = |loc: &str, token: &str| Json(Cred { location: loc.into(), username: "sara".into(), token: token.into(), ..Default::default() });
+        let v = save_cred(State(st.clone()), upd("origin", "token-2")).await.unwrap().0;
+        assert_eq!(v["works"], false);
+        assert!(v["why"].as_str().unwrap().contains("could not be reached"), "{v}");
+        assert!(crate::secrets::get("thoughts-git", "127.0.0.1:9").unwrap().contains("token-2"));
+        assert_eq!(shown(save_cred(State(st.clone()), upd("origin", "")).await).code, "validation");
+        assert_eq!(shown(save_cred(State(st.clone()), upd("keyed", "x")).await).code, "validation");
+        assert_eq!(shown(save_cred(State(st.clone()), upd("gone", "x")).await).status, 404);
+
+        // Removing one of two locations on a site keeps the sign-in; removing the last forgets it,
+        // and the older bare-host entry with it.
+        remote_remove(State(st.clone()), Path("origin".into())).await.unwrap();
+        assert!(git::saved_sign_in("127.0.0.1:9").is_some());
+        remote_remove(State(st.clone()), Path("second".into())).await.unwrap();
+        assert_eq!(git::saved_sign_in("127.0.0.1:9"), None);
+        assert_eq!(crate::secrets::get("thoughts-git", "127.0.0.1"), None);
+        assert!(git::saved_sign_in("localhost:9").is_some(), "another site's sign-in is left alone");
+        // "Forget sign-in".
+        forget_cred(State(st.clone()), q(&[("host", "localhost:9")])).await.unwrap();
+        assert_eq!(git::saved_sign_in("localhost:9"), None);
+        assert_eq!(sign_ins(State(st.clone())).await.unwrap().0.as_array().unwrap().iter().find(|e| e["host"] == "localhost:9" && e["insecure"] == false).unwrap()["saved"], false);
+        assert_eq!(shown(forget_cred(State(st.clone()), q(&[("host", "-x")])).await).code, "validation");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_edit_waits_for_a_sync_to_finish_changing_files_and_then_goes_through() {
+        let (st, lib) = t::library().await;
+        // A sync started from the window: it holds the library and says so.
+        let held = st.library_lock.clone().try_lock_owned().unwrap();
+        st.syncing.store(true, std::sync::atomic::Ordering::SeqCst);
+        // While it waits on the network the files are free: a save goes straight through.
+        write_file(State(st.clone()), none(), save("notes/a.md", "typed while sending")).await.unwrap();
+        assert_eq!(t::read(&lib, "notes/a.md"), "typed while sending");
+        // While it changes the files the save waits — and is done the moment the sync lets go.
+        let files = st.sync_files.clone().write_owned().await;
+        let (st2, done) = (st.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
+        let done2 = done.clone();
+        let edit = tokio::spawn(async move {
+            let r = todo_op(State(st2), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "added while syncing".into(), ..Default::default() })).await;
+            done2.store(true, std::sync::atomic::Ordering::SeqCst);
+            r.map(|_| ()).map_err(|e| e.0.to_string())
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!done.load(std::sync::atomic::Ordering::SeqCst), "the edit waits");
+        drop(files);
+        edit.await.unwrap().unwrap();
+        assert!(t::read(&lib, "TODO.md").contains("added while syncing"));
+        // And a sync waits for an edit that is writing before it touches the files.
+        let writing = st.sync_files.clone().read_owned().await;
+        let got = tokio::time::timeout(std::time::Duration::from_millis(200), st.sync_files.clone().write_owned()).await;
+        assert!(got.is_err(), "the sync waits for the edit");
+        drop(writing);
+        // A wrap (or reorganize) holding the library still turns an edit away at once.
+        st.syncing.store(false, std::sync::atomic::Ordering::SeqCst);
+        let e = shown(write_file(State(st.clone()), none(), save("notes/b.md", "x")).await);
+        assert_eq!((e.status, e.code), (423, "busy"));
+        drop(held);
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sync_from_the_window_lets_edits_through_and_never_overlaps_one() {
+        let (st, lib) = t::library().await;
+        let root = lib.parent().unwrap().to_path_buf();
+        let backup = root.join("backup.git");
+        std::fs::create_dir_all(&backup).unwrap();
+        t::sh(&backup, &["init", "-q", "--bare", "-b", "main"]);
+        t::sh(&lib, &["remote", "add", "origin", backup.to_str().unwrap()]);
+        // An edit is in the middle of writing: the sync does not record anything until it is done.
+        let writing = st.sync_files.clone().read_owned().await;
+        let st2 = st.clone();
+        let sync = tokio::spawn(async move { git_sync(State(st2)).await.map(|v| v.0).map_err(|e| e.0.to_string()) });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!sync.is_finished());
+        assert!(st.syncing.load(std::sync::atomic::Ordering::SeqCst), "the library is held by a sync");
+        t::write(&lib, "notes/late.md", "finished writing\n");
+        drop(writing);
+        let v = sync.await.unwrap().unwrap();
+        assert_eq!(v["locations"][0]["sent"], true);
+        assert_eq!(t::sh(&backup, &["show", "main:notes/late.md"]), "finished writing", "what the edit wrote went with the sync");
+        assert!(!st.syncing.load(std::sync::atomic::Ordering::SeqCst) && !st.library_busy());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_drive_can_be_chosen_as_the_backup() {
+        let (st, lib) = t::library().await;
+        let root = lib.parent().unwrap().to_path_buf();
+        let drive = root.join("Backup Drive");
+        std::fs::create_dir_all(&drive).unwrap();
+        let add = |name: &str, folder: &std::path::Path| Json(Remote { name: name.into(), folder: folder.to_string_lossy().to_string(), ..Default::default() });
+        let v = remote_add(State(st.clone()), add("usb", &drive)).await.unwrap().0;
+        assert_eq!(v["path"].as_str().map(std::path::PathBuf::from), Some(drive.join("library.git")));
+        let st_v = git_status(State(st.clone())).await.unwrap().0;
+        assert_eq!((st_v["remotes"][0]["kind"].clone(), st_v["health"]["state"].clone()), (json!("folder"), json!("stale")), "added, not backed up yet");
+        git_sync(State(st.clone())).await.unwrap();
+        assert_eq!(git_status(State(st.clone())).await.unwrap().0["health"]["state"], "ok");
+        // Not a folder inside the library, nor one that is not there.
+        assert_eq!(shown(remote_add(State(st.clone()), add("inside", &lib.join("ideas"))).await).code, "validation");
+        assert_eq!(shown(remote_add(State(st.clone()), add("nowhere", &root.join("unplugged"))).await).code, "validation");
+        // Settings: a drive never fights a cloud drive over the library's files, so it is not refused there.
+        let mut s = Settings::default();
+        s.library_path = Some("/Users/sara/Documents/Thoughts".into());
+        s.sync.target = "drive".into();
+        assert!(validate_with(&s, None, |_| true).is_ok());
+        s.sync.target = "online".into();
+        assert!(validate_with(&s, None, |_| true).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
