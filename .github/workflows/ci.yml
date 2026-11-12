@@ -4,7 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # The release workflow runs this first and only builds when it passes.
+  # The release workflow calls this, but only when the tagged commit has no passing run of this
+  # workflow yet (see the "ci-status" job in release.yml). The same commit is not tested twice.
   workflow_call:
 
 concurrency:
@@ -28,15 +29,20 @@ jobs:
         os: [macos-latest, ubuntu-22.04, windows-latest]
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Bounded and retried: a slow package mirror must not stall the job (scripts/ci/apt-install.sh).
       - name: Linux system packages (Tauri, keyring)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
-            libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
-            libdbus-1-dev pkg-config git
+        timeout-minutes: 12
+        run: >-
+          bash scripts/ci/apt-install.sh
+          libwebkit2gtk-4.1-dev build-essential curl wget file
+          libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          libdbus-1-dev pkg-config git
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
@@ -44,7 +50,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # Restored everywhere, saved from main only: a cache saved by a tag or a pull request can
+      # be read by nobody else and only pushes the useful ones out of the 10 GB the repository gets.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
       - name: Daemon tests
         run: cargo test -p thoughtsd
@@ -53,16 +63,21 @@ jobs:
       - name: Check the desktop shell
         run: cargo check -p thoughts
 
-  # Type and template checks for the UI.
+  # Type and template checks for the UI, and the tests of the release pipeline's own scripts.
   ui-check:
     name: UI check (svelte-check)
     runs-on: ubuntu-22.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 20
           cache: npm
+      - name: Release pipeline scripts
+        run: node --test scripts/release/release.test.mjs
       - run: npm ci
       - run: npm run check
 
@@ -71,16 +86,20 @@ jobs:
   clippy:
     name: Clippy (not blocking)
     runs-on: ubuntu-22.04
+    timeout-minutes: 20
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Linux system packages (keyring)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libdbus-1-dev pkg-config
+        timeout-minutes: 12
+        run: bash scripts/ci/apt-install.sh libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
           components: clippy
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo clippy -p thoughtsd -- -D warnings

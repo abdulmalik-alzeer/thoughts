@@ -8,14 +8,27 @@
 //
 // With none of them set it writes `{}`, and the build is the same as a local one.
 // No secret is read or written here: the public key and the thumbprint are not secret.
-import { writeFileSync } from 'node:fs';
+//
+// The workflow calls it twice. Before compiling, for the updater settings (they are compiled
+// into the app). Then, after compiling, with `--add-windows-signing`: the Windows certificate is
+// only imported once every dependency's build code has finished running, so only then is there a
+// thumbprint to add to the file the bundle step reads.
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const env = (k) => (process.env[k] || '').trim();
-const conf = {};
+const out = join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'release.conf.json');
+const addWindowsSigning = process.argv.includes('--add-windows-signing');
 
-if (env('UPDATER_PUBKEY') && env('UPDATER_ENDPOINT')) {
+let conf = {};
+if (addWindowsSigning) {
+  if (!existsSync(out)) {
+    console.error('release.conf.json does not exist yet: run this script without --add-windows-signing first.');
+    process.exit(1);
+  }
+  conf = JSON.parse(readFileSync(out, 'utf8'));
+} else if (env('UPDATER_PUBKEY') && env('UPDATER_ENDPOINT')) {
   conf.bundle = { createUpdaterArtifacts: true };
   conf.plugins = { updater: { pubkey: env('UPDATER_PUBKEY'), endpoints: [env('UPDATER_ENDPOINT')] } };
 }
@@ -30,6 +43,5 @@ if (env('WINDOWS_CERTIFICATE_THUMBPRINT')) {
   };
 }
 
-const out = join(dirname(fileURLToPath(import.meta.url)), '..', 'src-tauri', 'release.conf.json');
 writeFileSync(out, JSON.stringify(conf, null, 2) + '\n');
 console.log(`release.conf.json: updater ${conf.plugins ? 'on' : 'off'}, Windows signing ${conf.bundle?.windows ? 'on' : 'off'}`);
