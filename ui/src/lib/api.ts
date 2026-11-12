@@ -8,6 +8,10 @@ type Info = { port: number; token: string };
 let info: Info | null = null;
 const listeners = new Set<(e: any) => void>();
 let ws: WebSocket | null = null;
+/** The library this window shows, sent with every request (`x-thoughts-library`): a change meant
+ *  for a library that is no longer open is then refused, instead of landing in the one opened since. */
+let libraryId = '';
+export function setLibraryId(id: string) { libraryId = String(id || ''); }
 
 export const inTauri = () => typeof (window as any).__TAURI_INTERNALS__ !== 'undefined';
 
@@ -196,7 +200,7 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
   try {
     r = await fetch(`http://127.0.0.1:${info!.port}/api${path}`, {
       method: opts.method || (opts.body !== undefined ? 'POST' : 'GET'),
-      headers: { Authorization: `Bearer ${info!.token}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${info!.token}`, 'Content-Type': 'application/json', ...(libraryId ? { 'X-Thoughts-Library': libraryId } : {}) },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
     });
   } catch {
@@ -227,6 +231,8 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
         return api<T>(path, opts);
       }
     }
+    // Another library was opened meanwhile: this window reloads into it (lib/libraries.svelte.ts).
+    if (data?.code === 'library_switched') listeners.forEach((l) => { try { l({ type: 'library.switched', stale: true }); } catch { /* a listener's own trouble */ } });
     throw new ApiError(await friendly(msg), r.status, codeOf(msg) || String(data?.code ?? ''), data);
   }
   return data as T;

@@ -6,12 +6,15 @@
   import { api, on, post } from '../lib/api';
   import { go, toast } from '../lib/store.svelte';
   import { confirmDialog } from '../lib/dialog.svelte';
-  import { t, fmtDate, fmtMoney } from '../lib/i18n';
+  import { t, tn, fmtDate, fmtMoney } from '../lib/i18n';
   import { errCode, failed } from '../lib/errors';
   import { whenText } from '../lib/layer';
   import { runTask } from '../lib/automatic';
 
   let tasks = $state<any[]>([]);
+  // Each task belongs to the library it was allowed in, and runs there: only this library's are shown.
+  const shown = $derived(tasks.filter((w) => w.here !== false));
+  const elsewhere = $derived(tasks.length - shown.length);
   let phase = $state<'loading' | 'ok' | 'error' | 'none'>('loading');
   let error = $state('');
   let busy = $state<Record<string, boolean>>({});
@@ -90,9 +93,10 @@
 
 {#if phase === 'loading'}<p class="muted sm" role="status">{t('shell.loading')}</p>
 {:else if phase === 'error'}<p class="err" role="alert">{t('layer.wf.loadFailed')} <bdi>{error}</bdi> <button type="button" class="btn ghost" onclick={load}>{t('shell.retry')}</button></p>
-{:else if !tasks.length}<p class="muted sm">{t('layer.wf.empty')}</p>
+{:else if !shown.length}<p class="muted sm">{t('layer.wf.empty')}</p>
+  {#if elsewhere}<p class="muted sm">{tn('libs.tasksElsewhere', elsewhere)}</p>{/if}
 {:else}
-  {#each tasks as w (w.file)}
+  {#each shown as w (w.file)}
     {@const b = !!busy[w.file]}
     <div class="wf">
       <div class="row wrap">
@@ -113,6 +117,7 @@
         {/if}
       </div>
       {#if w.duplicateName}<div class="sm note" role="note">{t('auto.sameName')}</div>{/if}
+      {#if w.orphaned}<div class="sm note" role="note">{t('libs.taskOrphan')} <button type="button" class="link" disabled={b} onclick={() => allow(w)}>{t('libs.allowHere')}</button></div>{/if}
       <div class="muted sm">{whenText(w.trigger)}{#if w.nextRun && w.approved !== false} · {t('layer.wf.next', { when: when(w.nextRun) })}{/if}</div>
       <div class="sm" class:muted={!bad(w.last)} class:warn={bad(w.last)}>
         {#if w.last}
@@ -153,6 +158,7 @@
       </details>
     </div>
   {/each}
+  {#if elsewhere}<p class="muted sm">{tn('libs.tasksElsewhere', elsewhere)}</p>{/if}
 {/if}
 
 <style>

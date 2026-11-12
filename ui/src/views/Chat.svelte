@@ -38,6 +38,7 @@
   import { enqueue, restored, sendNowOrAfterStop, take, waiting as queuedBy, type Mention } from '../lib/chatQueue.svelte';
   import ApprovalCard from './ApprovalCard.svelte';
   import ChatAllowed from './ChatAllowed.svelte';
+  import LibraryGone from '../lib/LibraryGone.svelte';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
 
@@ -699,6 +700,7 @@
     {#if chat.interrupted}
       <div class="banner row" role="status"><Icon name="warning" size={14} /> <span class="grow">{t('layer.chat.interrupted')}</span></div>
     {/if}
+    <LibraryGone library={chat.library} />
     <!-- Always on screen while every permission check is off: it does not depend on the picker below being there. -->
     {#if savedPerm === BYPASS}
       <div class="banner alert row" role="status"><Icon name="warning" size={15} /> <span class="grow">{t('chata.bypassOn')}</span>

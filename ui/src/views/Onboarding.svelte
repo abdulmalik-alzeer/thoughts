@@ -12,12 +12,17 @@
   import Logo from '../lib/Logo.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
   import { fmtSize } from '../lib/content/util';
+  import { libs, switchLibrary } from '../lib/libraries.svelte';
 
-  let { done }: { done: (setupChatId: string | null) => void } = $props();
+  // `adding`: another library is added to an app that is already set up (the library switcher). Only
+  // the library's own screens are shown; the app's language, look and assistant are not asked again.
+  let { done, adding = false, cancel }: { done: (setupChatId: string | null, name?: string) => void; adding?: boolean; cancel?: () => void } = $props();
 
   // Four steps: Welcome · Assistant · Your notes (folder + backup) · Review (privacy + look).
   const steps = ['welcome', 'ai', 'library', 'ready'] as const;
-  let step = $state(0);
+  let step = $state(adding ? 2 : 0);
+  /** The first step shown: adding a library starts at its folder. */
+  const first = adding ? 2 : 0;
   let busy = $state(false);
   let checking = $state(false);
   let working = $state<Record<string, boolean>>({});
@@ -43,6 +48,8 @@
   const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
   // The assistant can be connected later (FEAT-08): the library is made now, its setup waits.
   let later = $state(false);
+  // Adding a library to an app whose assistant is not connected: its setup waits, as on first use.
+  if (adding) { const c = app.status?.claude ?? {}; later = !(c.installed && (c.loggedIn || app.settings?.ai?.claude?.hasApiToken)); }
   // "I already have one" on a folder of notes (FEAT-09): use it where it is (with the user's yes to
   // what is added), or keep it as it is and bring a copy into a new library.
   let adoptChoice = $state<'' | 'adopt' | 'copy'>('');
@@ -57,6 +64,20 @@
   s.sync.mode = 'none';
   s.keepHistory = true;
   s.libraryPath = app.status?.home ? app.status.home + '/Thoughts' : '~/Thoughts';
+  // Adding a library: nothing of the open library's own comes along (its private folders, its
+  // features), and its name suggests its folder until a folder is chosen.
+  let libName = $state('');
+  let pathTouched = false;
+  const homeDir = app.status?.home ? String(app.status.home) : '~';
+  if (adding) { s.privatePaths = []; s.modules = {}; }
+  $effect(() => {
+    const n = libName.replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (adding && !pathTouched) s.libraryPath = homeDir + '/' + (n || t('libs.addDefault'));
+  });
+  const norm = (p: string) => p.replace(/[\\/]+$/, '');
+  /** The typed folder is already one of the user's libraries: it is opened, not added again. */
+  const listedHere = $derived(adding ? libs.list.find((l) => norm(l.path) === norm(String(s.libraryPath ?? '').trim())) : undefined);
+  function openListed() { const l = listedHere; if (!l) return; cancel?.(); if (!l.open) switchLibrary(l.id); }
   // First screen in the system's language: Arabic systems start in Arabic (an explicit choice wins on a re-run).
   const LANG_KEY = 'thoughts.ob.lang';
   const lsGet = (k: string) => { try { return localStorage.getItem(k); } catch { return null; } };
@@ -150,6 +171,7 @@
     const from = typedPath;
     adoptChoice = 'copy';
     libraryMode = 'new';
+    pathTouched = true;
     importFrom = from;
     const home = app.status?.home ? String(app.status.home) : '~';
     const fresh = home + '/Thoughts';
@@ -206,6 +228,7 @@
       const { open } = await import('@tauri-apps/plugin-dialog');
       const p = await open({ directory: true });
       if (typeof p !== 'string') return;
+      pathTouched = true;
       if (libraryMode !== 'new') { s.libraryPath = p; return; }
       // A new library goes straight into an empty folder, and into a "Thoughts" folder inside one that
       // holds other things. A folder that already holds a library is opened, not started over.
@@ -252,6 +275,7 @@
     if (step === 2) {
       const p = String(s.libraryPath ?? '').trim();
       if (!p) return t('ob.needFolder');
+      if (listedHere) return t('libs.already', { name: listedHere.displayName });
       if (!fullPath(p)) return t('ob.needFullPath');
       if (probe === 'busy') return t('sa.folder.checking');
       if (libraryMode === 'new') {
@@ -308,6 +332,7 @@
         assistantLater: waitsForAssistant,
         adopt: adopting && adoptYes,
         importFrom: bringing ? importFrom.trim() : '',
+        addLibrary: adding, libraryName: adding ? libName.trim() : '',
       });
       try { app.settings = await api('/settings'); applyTheme(); } catch { /* the app reloads settings on its own */ }
       // The library exists now: the chosen drive becomes its backup location (the first sync, at
@@ -318,7 +343,7 @@
         catch (e) { failed(t('histb.drive.failed'), e); }
       }
       // A setup that waits for the assistant is offered again once one is connected; start at Home.
-      done(r.waiting ? null : r.setupChatId);
+      done(r.waiting ? null : r.setupChatId, libName.trim());
     } catch (e) {
       failed(t('ob3.finishFailed'), e);
     } finally { busy = false; }
@@ -326,6 +351,7 @@
 
   // Enter in a text box moves on, like the Next button (never from a checkbox, a list or the notes box).
   function onKey(e: KeyboardEvent) {
+    if (adding && cancel && e.key === 'Escape' && !busy && !e.defaultPrevented) { e.preventDefault(); cancel(); return; }
     if (e.key !== 'Enter' || e.isComposing || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
     const el = e.target;
     if (!(el instanceof HTMLInputElement) || !['text', 'password', 'url', 'email', 'search', ''].includes(el.type)) return;
@@ -338,9 +364,10 @@
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="ob" onkeydown={onKey}>
   <div class="drag" data-tauri-drag-region></div>
-  <p class="prog" role="status">{t('ob3.stepOf', { n: step + 1, total: steps.length })} · <b>{t('ob.step.' + steps[step])}</b></p>
+  <p class="prog" role="status">{t('ob3.stepOf', { n: step - first + 1, total: steps.length - first })} · <b>{t('ob.step.' + steps[step])}</b></p>
   <ol class="steps" aria-label={t('ob.stepsLabel')}>
-    {#each steps as name, i}
+    {#each steps.slice(first) as name, j}
+      {@const i = j + first}
       <li class="st" class:on={i === step} class:past={i < step} aria-current={i === step ? 'step' : undefined}>{t('ob.step.' + name)}</li>
     {/each}
   </ol>
@@ -403,16 +430,38 @@
         </div>
       {/if}
     {:else if step === 2}
-      <h1 tabindex="-1">{t('ob.libTitle')}</h1>
+      {#if adding}
+        <h1 tabindex="-1">{t('libs.addTitle')}</h1>
+        <p>{t('libs.addBody')}</p>
+        <label for="ob-libname">{t('libs.nameLabel')}</label>
+        <input id="ob-libname" dir="auto" bind:value={libName} placeholder={t('libs.namePh')} maxlength="60" autocomplete="off" />
+        <label for="ob-prof2">{t('layer.prof.label')}</label>
+        <select id="ob-prof2" bind:value={profession}>
+          <option value="">{t('layer.prof.choose')}</option>
+          {#each professions as p}<option value={p}>{t('layer.prof.' + p)}</option>{/each}
+        </select>
+        {#if profession === 'other'}
+          <label for="ob-prof2-other">{t('sa.prof.otherLabel')}</label>
+          <input id="ob-prof2-other" dir="auto" bind:value={professionOther} placeholder={t('sa.prof.otherPh')} maxlength="160" autocomplete="off" />
+        {/if}
+        <h2>{t('ob.libTitle')}</h2>
+      {:else}
+        <h1 tabindex="-1">{t('ob.libTitle')}</h1>
+      {/if}
       <p>{t('ob.libBody')}</p>
       <div class="opts">
         <button type="button" class="opt" class:sel={libraryMode === 'new'} aria-pressed={libraryMode === 'new'} onclick={() => (libraryMode = 'new')}><b>{t('ob.libNew')}</b><span class="muted">{t('ob.libNewHint')}</span></button>
         <button type="button" class="opt" class:sel={libraryMode === 'existing'} aria-pressed={libraryMode === 'existing'} onclick={() => (libraryMode = 'existing')}><b>{t('ob.libExisting')}</b><span class="muted">{t('ob.libExistingHint')}</span></button>
       </div>
       <label for="ob-path">{t('ob.folder')}</label>
-      <div class="row"><input id="ob-path" class="grow" dir="ltr" bind:value={s.libraryPath} autocomplete="off" aria-describedby="ob-path-says" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.browse')}</button></div>
+      <div class="row"><input id="ob-path" class="grow" dir="ltr" bind:value={s.libraryPath} oninput={() => (pathTouched = true)} autocomplete="off" aria-describedby="ob-path-says" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.browse')}</button></div>
       <div id="ob-path-says" role="status">
-        {#if libraryMode === 'new'}
+        {#if listedHere}
+          <div class="card status">
+            <p class="row"><Icon name="info" size={16} /> <b>{t('libs.already', { name: listedHere.displayName })}</b></p>
+            <div class="row gap-top"><button type="button" class="btn primary" onclick={openListed}>{t('libs.openIt')}</button></div>
+          </div>
+        {:else if libraryMode === 'new'}
           {#if here === 'missing'}<p class="muted sm">{t('sa.folder.new')}</p>
           {:else if here === 'empty'}<p class="muted sm">{t('sa.folder.empty')}</p>
           {:else if here === 'starter'}<p class="okline"><Icon name="check" size={15} /> <span>{t('sa.folder.starter')}</span></p>
@@ -603,18 +652,21 @@
       <dl class="sum">
         <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}{#if adopting}{' · '}{t('sb.adopt.sum')}{/if}</dd>
         {#if bringing}<dt>{t('sb.bring.sum')}</dt><dd><code><bdi>{importFrom.trim()}</bdi></code></dd>{/if}
-        <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}{#if waitsForAssistant}{' · '}{t('sb.later.sum')}{/if}</dd>
+        {#if !adding}<dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}{#if waitsForAssistant}{' · '}{t('sb.later.sum')}{/if}</dd>
+        {:else if libName.trim()}<dt>{t('libs.nameLabel')}</dt><dd dir="auto">{libName.trim()}</dd>{/if}
         <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isDrive && driveFolder} · <bdi>{driveFolder}</bdi>{:else if isGit && !isDrive && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if s.sync.mode === 'folder' && !inCloud} · {t('sa.sum.notCloud')}{/if}</dd>
         <dt>{t('hista.historyTitle')}</dt><dd>{t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</dd>
       </dl>
-      <h2>{t('ob.lookTitle')}</h2>
-      <ThemePicker bind:theme={s.theme} bind:mode={s.mode} />
-      <details class="adv">
-        <summary>{t('ob3.moreOptions')}</summary>
-        <label class="check"><input type="checkbox" bind:checked={s.notifications} /> {t('ob.notify')}</label>
-        <label class="check"><input type="checkbox" bind:checked={s.daemon.keepRunning} /> {t('ob.keepRunning')}</label>
-        <label class="check"><input type="checkbox" bind:checked={s.daemon.runAtLogin} /> {t('ob.runAtLogin')}</label>
-      </details>
+      {#if !adding}
+        <h2>{t('ob.lookTitle')}</h2>
+        <ThemePicker bind:theme={s.theme} bind:mode={s.mode} />
+        <details class="adv">
+          <summary>{t('ob3.moreOptions')}</summary>
+          <label class="check"><input type="checkbox" bind:checked={s.notifications} /> {t('ob.notify')}</label>
+          <label class="check"><input type="checkbox" bind:checked={s.daemon.keepRunning} /> {t('ob.keepRunning')}</label>
+          <label class="check"><input type="checkbox" bind:checked={s.daemon.runAtLogin} /> {t('ob.runAtLogin')}</label>
+        </details>
+      {/if}
       <p class="muted">{t('ob.wrapDef')}</p>
       {#if waitsForAssistant && (libraryMode === 'new' || adopting)}<p class="muted">{t(adopting ? 'sb.later.readyAdopt' : 'sb.later.readyNew')}</p>
       {:else if libraryMode === 'new'}<p class="muted">{t('ob.readyNew')}</p>{/if}
@@ -622,7 +674,8 @@
   </div>
 
   <div class="row nav">
-    {#if step > 0}<button type="button" class="btn" disabled={busy} onclick={() => step--}>{t('back')}</button>{/if}
+    {#if step > first}<button type="button" class="btn" disabled={busy} onclick={() => step--}>{t('back')}</button>{/if}
+    {#if adding && cancel}<button type="button" class="btn ghost" disabled={busy} onclick={cancel}>{t('libs.cancelAdd')}</button>{/if}
     <span class="grow why" id="ob-why" role="status">{#if blocker && step < steps.length - 1}{blocker}{/if}</span>
     {#if step < steps.length - 1}
       <button type="button" class="btn primary" disabled={!!blocker} aria-describedby="ob-why" onclick={() => step++}>{t('next')}</button>

@@ -16,6 +16,9 @@
   import { matchShortcut, keys, tip, isMac, isTyping } from './lib/shortcuts';
   import { confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
+  import LibrarySwitcher from './lib/LibrarySwitcher.svelte';
+  import LibraryAdd from './lib/LibraryAdd.svelte';
+  import { libraryPaletteItems, startLibraries } from './lib/libraries.svelte';
   import Chat from './views/Chat.svelte';
   import ChatList from './views/ChatList.svelte';
   import Ideas from './views/Ideas.svelte';
@@ -99,6 +102,7 @@
       loadLayer().catch((e) => toast(t('shell.layerFailed'), { kind: 'error', detail: e.message })),
     ]);
     checkLibrary();
+    startLibraries();
     startReminders();
     // A change staged earlier (or by an import / app update) is still waiting for a decision.
     checkPending(true);
@@ -678,6 +682,7 @@
       add('theme.' + id, t('shell.pal.theme', { name }), g.look, 'palette', { keywords: 'theme سمة' });
     for (const [m, icon] of [['light', 'sun'], ['dark', 'moon'], ['system', 'system']])
       add('mode.' + m, t('shell.pal.mode', { name: t(m) }), g.look, icon, { keywords: 'appearance mode day night مظهر' });
+    items.push(...libraryPaletteItems(g.act));
     for (const c of app.commands) items.push({ id: 'plugin:' + c.id, title: c.title, group: c.plugin ? addonTag(c.plugin) : g.plug, icon: c.icon || 'plugin', run: () => { command('plugin:' + c.id); c.run(); } });
     for (const c of app.chats.slice(0, 40)) items.push({ id: 'chat:' + c.id, title: c.title, group: g.chat, icon: 'chat', run: () => command('chat.open', { chatId: c.id }) });
     for (const i of ideas) items.push({ id: 'idea:' + i.path, title: i.title, group: g.idea, icon: 'ideas', keywords: i.summary, run: () => { openItem(i.path); } });
@@ -720,6 +725,7 @@
         {#if app.safeMode}<span class="pill accent" title={t('shell.safe.pillTip')}>{t('shell.safe.pill')}</span>{/if}
         <button class="iconbtn" aria-label={t('shell.sidebarHide')} title={tip(t('shell.sidebarHide'), 'sidebar.toggle')} onclick={() => command('sidebar.toggle')}><Icon name="sidebar" class="flip-rtl" /></button>
       </div>
+      <LibrarySwitcher />
       <form class="search" role="search" onsubmit={submitSearch}
         onfocusout={(e) => { if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) closeSearch(); }}>
         <Icon name="search" size={14} />
@@ -953,6 +959,7 @@
 {#if showTour}<Tour close={() => (showTour = false)} note={setupAtWork ? t('sa.tour.meanwhile') : ''} />{/if}
 {#if showRecent}<RecentMessages close={() => (showRecent = false)} />{/if}
 {#if app.showPalette}<CommandPalette items={paletteItems} close={() => (app.showPalette = false)} />{/if}
+{#if app.ready && app.settings?.onboarded}<LibraryAdd />{/if}
 
 <Toasts />
 {#if linkTip}<div class="linktip no-print" aria-hidden="true" dir="ltr">{linkTip}</div>{/if}
