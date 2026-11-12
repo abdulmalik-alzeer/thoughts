@@ -116,7 +116,9 @@ fn plugin_scoped(query: &str) -> bool { query.split('&').any(|kv| kv == "scope=p
 /// May a request for `path` with this query string go through? (See `PLUGIN_SCOPED`.)
 fn plugin_scope_allowed(path: &str, query: &str) -> bool {
     if !plugin_scoped(query) { return true; }
-    let guarded = path.starts_with("/api/library/") || path == "/api/todos/calendar.ics" || path == "/api/capture" || path.starts_with("/api/inbox");
+    let guarded = path.starts_with("/api/library/") || path == "/api/todos/calendar.ics" || path == "/api/capture" || path.starts_with("/api/inbox")
+        // The changes a Wrap or a Reorganize makes show documents' contents, private folders included.
+        || (path.starts_with("/api/wrap/") && path.ends_with("/changes")) || (path.starts_with("/api/reorganize/") && path.matches('/').count() == 3);
     !guarded || PLUGIN_SCOPED.contains(&path)
 }
 
@@ -207,6 +209,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/wrap/:id/undo-preview", get(wrap_undo_preview))
         .route("/api/wrap/:id/discard", post(wrap_discard))
         .route("/api/wrap/:id/undo", post(wrap_undo))
+        .route("/api/wrap/:id/plan", post(wrap_plan))
+        .route("/api/wrap/:id/save", post(wrap_save))
+        .route("/api/wrap/:id/changes", get(wrap_changes))
         .route("/api/reorganize", post(reorg_start))
         .route("/api/reorganize/:id", get(reorg_diff))
         .route("/api/reorganize/:id/:op", post(reorg_finish))
@@ -2398,7 +2403,25 @@ mod chatc_tests;
 // ---------- wrap & reorganize ----------
 
 async fn wrap_status(State(st): S) -> R { Ok(Json(wraps::status(&st).await)) }
-async fn wrap_start(State(st): S) -> R { Ok(Json(json!({"chatId": wraps::start(st.clone()).await?}))) }
+/// `{choose: true}`: with more than one chat waiting, the person first ticks which ones to save.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct WrapStart { choose: bool }
+async fn wrap_start(State(st): S, body: Option<Json<WrapStart>>) -> R {
+    let choose = body.map_or(false, |b| b.0.choose);
+    Ok(Json(json!({"chatId": wraps::start(st.clone(), choose).await?})))
+}
+/// Make or revise a Wrap's plan: the chats it is for, the person's corrections of their summaries, a note.
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct WrapPlan { chat_ids: Vec<String>, summaries: std::collections::HashMap<String, String>, note: String }
+async fn wrap_plan(State(st): S, Path(id): Path<String>, Json(p): Json<WrapPlan>) -> R {
+    wraps::plan(st.clone(), &id, &p.chat_ids, &p.summaries, &p.note).await?; ok()
+}
+/// Keep the changes a Wrap wrote into its working copy (`WRAP_CONFLICT::<file;…>` when they clash with later edits).
+async fn wrap_save(State(st): S, Path(id): Path<String>) -> R { wraps::save(st.clone(), &id).await?; ok() }
+/// What a Wrap changes (waiting for review) or changed (saved), document by document.
+async fn wrap_changes(State(st): S, Path(id): Path<String>) -> R { Ok(Json(wraps::changes(&st, &id).await?)) }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
@@ -3227,6 +3250,8 @@ mod tests {
         let chat = t::chat(&st, "plan the shop").await;
         let other = t::chat(&st, "another conversation").await;
         let wrap = t::wrap_ready(&st, &[chat.clone()]).await;
+        // A Wrap that writes in the library itself (as it does when no working copy can be made).
+        st.chats.update(&wrap, |c| c.meta["direct"] = serde_json::json!(true)).await;
         // The assistant is "working" until the test lets it go, then fails.
         let gate = Arc::new(tokio::sync::Notify::new());
         let (g, lib2, wid) = (gate.clone(), lib.clone(), wrap.clone());
@@ -3257,7 +3282,7 @@ mod tests {
         busy(git_resolve(State(st.clone()), Json(Resolve { strategy: "mine".into() })).await);
         busy(chat_send(State(st.clone()), Path(other.clone()), Json(SendBody { text: "write a note".into(), ..Default::default() })).await);
         busy(enable_module(State(st.clone()), Path("docs".into())).await);
-        busy(wrap_start(State(st.clone())).await);
+        busy(wrap_start(State(st.clone()), None).await);
         busy(shutdown(State(st.clone()), axum::body::Bytes::new()).await);
         // Reading is never blocked.
         assert!(todo_list(State(st.clone()), none()).await.is_ok());
@@ -3389,7 +3414,7 @@ mod tests {
         let interrupted = |r: R| { let e = shown(r); assert_eq!((e.message.as_str(), e.status, e.code), (format!("WRAP_INTERRUPTED::{wrap}").as_str(), 409, "wrap_interrupted")); };
         interrupted(git_sync(State(st.clone())).await);
         interrupted(git_resolve(State(st.clone()), Json(Resolve { strategy: "mine".into() })).await);
-        interrupted(wrap_start(State(st.clone())).await);
+        interrupted(wrap_start(State(st.clone()), None).await);
         interrupted(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: snap.clone(), ..Default::default() })).await);
         interrupted(library_undo(State(st.clone()), Json(Undo { hash: snap.clone() })).await);
         let status = status(State(st.clone())).await.unwrap().0;

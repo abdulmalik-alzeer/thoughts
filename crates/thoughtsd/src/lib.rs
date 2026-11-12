@@ -8,6 +8,7 @@ pub mod api;
 pub mod applayer;
 pub mod askpass;
 pub mod care_api;
+pub mod changes;
 pub mod chats;
 pub mod claude;
 pub mod cloud;

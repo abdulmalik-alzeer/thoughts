@@ -305,7 +305,7 @@ pub async fn current_branch(state: &AppState, dir: &Path) -> anyhow::Result<Stri
 
 /// Branches the app creates for its own bookkeeping. They never leave this machine.
 pub fn internal_branch(name: &str) -> bool {
-    name == "staging" || name.starts_with("reorganize/") || name.starts_with("backup/")
+    name == "staging" || name.starts_with("reorganize/") || name.starts_with("backup/") || name.starts_with("wrap/")
 }
 
 /// Files with unresolved conflicts in a stopped merge or rebase.
@@ -1507,7 +1507,7 @@ mod tests {
 
     #[tokio::test]
     async fn internal_branches_are_never_synced() {
-        for (b, internal) in [("reorganize/20260101-000000", true), ("backup/20260101-000000", true), ("staging", true), ("main", false), ("backups", false), ("my/staging", false)] {
+        for (b, internal) in [("reorganize/20260101-000000", true), ("backup/20260101-000000", true), ("staging", true), ("wrap/0b6c2c6e-3f43-4a51-9d2e-6c1d8f2f0a11", true), ("main", false), ("backups", false), ("my/staging", false)] {
             assert_eq!(internal_branch(b), internal, "{b}");
         }
         let (root, mine, remote) = diverged();

@@ -1479,9 +1479,9 @@ pub async fn start_run(
     let reorg = crate::paths::reorganize_worktree();
     for dir in std::iter::once(&spec.cwd).chain(spec.add_dirs.iter()) {
         if *dir == layer || *dir == staging { continue; }
-        if *dir == reorg {
-            // A second checkout of the library. It holds the *recorded* state, which is only as
-            // trusted as the folder on disk if its assistant files are the very same ones.
+        if *dir == reorg || crate::wraps::is_copy(dir) {
+            // A second checkout of the library (Reorganize's, or a Wrap's). It holds the *recorded*
+            // state, which is only as trusted as the folder on disk if its assistant files are the very same ones.
             let lib = library.as_deref().ok_or_else(|| crate::tr::err("library.none", &[]))?;
             crate::trust::require(lib)?;
             let differing = crate::trust::differing_assistant_files(lib, dir);
@@ -1521,8 +1521,8 @@ pub async fn start_run(
         return Err(crate::tr::err("bypass.chat_only", &[]));
     }
     let mut deny = private_deny_settings(library.as_deref(), &spec.cwd, &settings.private_paths)?;
-    // Reorganize works in a second checkout of the library: private folders are off-limits there too.
-    if spec.cwd == reorg {
+    // Reorganize and Wrap work in a second checkout of the library: private folders are off-limits there too.
+    if spec.cwd == reorg || crate::wraps::is_copy(&spec.cwd) {
         deny = merge_deny(deny, private_deny_settings(Some(&spec.cwd), &spec.cwd, &settings.private_paths)?);
     }
     // Only the run that sets up a brand-new library may write its `.claude` folder (it installs the presets).
