@@ -39,6 +39,16 @@
     });
   } catch (_) { /* nothing to remove */ }
 
+  // When did the person last press or type something in THIS frame? The host only lets an add-on
+  // start a chat or move to another page right after that. Script cannot make these events with
+  // `isTrusted` set (it can for `submit`, through requestSubmit(), so that one does not count; a
+  // person submitting a form pressed a key or a button first anyway).
+  var lastInput = 0;
+  ['pointerdown', 'mousedown', 'touchstart', 'keydown', 'click', 'drop'].forEach(function (type) {
+    window.addEventListener(type, function (e) { if (e.isTrusted) lastInput = now(); }, true);
+  });
+  function active() { return now() - lastInput < 5000; }
+
   // A form can never be sent anywhere from here (`form-action 'none'`); cancelling the browser's own
   // submit keeps every engine the same: the add-on's `submit` listeners run, the page stays put.
   window.addEventListener('submit', function (e) { e.preventDefault(); }, true);
@@ -54,7 +64,7 @@
     return new Promise(function (resolve, reject) {
       var id = 't' + (++seq);
       pending.set(id, { resolve: resolve, reject: reject });
-      host.postMessage({ k: key, id: id, method: method, args: args || [] }, '*');
+      host.postMessage({ k: key, id: id, method: method, args: args || [], ua: active() }, '*');
     });
   }
 

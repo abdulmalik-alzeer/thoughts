@@ -22,8 +22,9 @@ export type ToastItem = { id: number; text: string; kind: 'info' | 'success' | '
 export type ToastLogItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; detail?: string; at: number; key?: string };
 
 /** `render(el)` mounts the plugin's sandboxed frame into `el` and returns a cleanup function. */
-export type PluginView = { id: string; title: string; icon?: string; plugin?: string; render: (el: HTMLElement) => any };
-export type PluginCommand = { id: string; title: string; icon?: string; plugin?: string; run: () => void };
+/** `id` is unique in the app (it carries the add-on's file name); `short` is the id the add-on chose. */
+export type PluginView = { id: string; short?: string; title: string; icon?: string; plugin?: string; render: (el: HTMLElement) => any };
+export type PluginCommand = { id: string; short?: string; title: string; icon?: string; plugin?: string; run: () => void };
 export type HomeWidget = { id: string; title: string; plugin: string; render: (el: HTMLElement) => any };
 export type HomeChip = { id: string; label: string; prompt: string; plugin?: string };
 export type ItemAction = { target: 'todo' | 'idea'; id: string; label: string; plugin: string; run: (item: any) => void };

@@ -240,7 +240,9 @@ The sidebar. All keys optional; create the file when you first need it.
 ```
 
 - Page ids: `home`, `chats`, `ideas`, `todos`, `docs`, `projects`, `me`, plus the `id` of any page
-  a plugin added with `ui.addView`.
+  a plugin added with `ui.addView`. A plugin page can also be named `<plugin file>:<id>`
+  (`hours.js:board`), which stays exact when two plugins use the same `id`; an `id` that is also an
+  app page's (`todos`) always means the app's page.
 - `hidden` — pages not shown in the sidebar. `home` can never be hidden, and Settings and Help
   always stay. Hiding a page deletes nothing; the user's data is untouched.
 - `order` — pages in this order first; the rest follow in their usual order.
@@ -292,9 +294,9 @@ export default function (thoughts) {
 | `thoughts.ideas.setStatus(path, status)` | Sets an item's status (`path` as given by `ideas.list()`); statuses are `seed`, `active`, `parked`, `done`, `dropped` | `ideas:write` |
 | `thoughts.storage.get()` | Promise of the plugin's own saved object (`{}` the first time) | `storage` |
 | `thoughts.storage.set(obj)` | Saves `obj` (a plain JSON object, at most 256 KB) in place of what was saved before | `storage` |
-| `thoughts.chat.start(prompt)` | Opens a new chat with that prompt | `chat:start` |
-| `thoughts.ui.toast(msg)` | Shows a short message | none |
-| `thoughts.ui.go(view)` | Opens a page: `"home"`, `"todos"`, `"ideas"`, `"docs"`, `"projects"`, `"settings"`, or the `id` of a view you added | none |
+| `thoughts.chat.start(prompt)` | Opens a new chat with that prompt. Only right after the user pressed something of this plugin (a button in its page or widget, one of its commands or item actions), a few seconds apart, at most 20 an hour | `chat:start` |
+| `thoughts.ui.toast(msg)` | Shows a short message, under the plugin's name (at most three in ten seconds) | none |
+| `thoughts.ui.go(view)` | Opens a page: `"home"`, `"todos"`, `"ideas"`, `"docs"`, `"projects"`, `"settings"`, or the `id` of a view you added. Only right after the user pressed something of this plugin | none |
 | `thoughts.ui.addView({ id, title, icon?, render(el) })` | Adds a page to the sidebar; `render` fills the element `el` | none |
 | `thoughts.ui.addCommand({ id, title, run })` | Adds a command to the command palette | none |
 | `thoughts.ui.addHomeWidget({ id, title, render(el) })` | Adds a box to the Home screen (place it with `widget:<id>` in `home.json`) | none |
@@ -363,6 +365,8 @@ Writing a good plugin:
 - Forms work as usual: listen for `submit` and call `event.preventDefault()`. Nothing is ever sent
   anywhere by the browser, and links do not open other pages: a plugin page that replaces itself
   with another page is switched off.
+- Wherever the plugin shows up, the app says which plugin it is: its toasts, its pages and its
+  commands carry the plugin's name. Do not imitate the app's own messages or settings.
 - Never wait for something in a loop (`while (!ready) {}`): code that does not give control back
   freezes the app. Use `await` and events.
 

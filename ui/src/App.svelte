@@ -3,7 +3,7 @@
   import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
-  import { loadLayer, retryLayer, checkPending, openReview, safeCrashText } from './lib/layer';
+  import { loadLayer, retryLayer, checkPending, openReview, addonTag, safeCrashText, viewLabel } from './lib/layer';
   import { failed } from './lib/errors';
   import { lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
@@ -588,7 +588,9 @@
 
   // Sidebar items: built-ins, "Me" and plugin views — then `nav.json` (hidden / order / labels) from the
   // customisation layer. Home can never be hidden; Settings and Help live in the footer, outside this list.
-  type NavItem = { id: string; label: string; icon: string; active: boolean; custom?: boolean; run: () => void };
+  // `custom`: a page an add-on put there (`from` is the add-on's file, `alias` the short id it chose).
+  type NavItem = { id: string; label: string; icon: string; active: boolean; custom?: boolean; alias?: string; from?: string; run: () => void };
+  const APP_PAGES = ['home', 'chats', 'ideas', 'todos', 'docs', 'projects', 'inbox', 'me'];
   const navItems = $derived.by((): NavItem[] => {
     const m = app.settings?.modules ?? {};
     const items: NavItem[] = [];
@@ -596,11 +598,17 @@
     add('home'); add('chats'); add('ideas'); add('todos', m.todos !== false); add('docs', m.docs !== false); add('projects', m.builds !== false);
     if (inbox.count > 0 || app.view.kind === 'inbox') items.push({ id: 'inbox', label: navLabel('inbox', t('inbox.nav')), icon: 'inbox', active: app.view.kind === 'inbox', run: () => { go({ kind: 'inbox' }); } });
     if (m.me) items.push({ id: 'me', label: navLabel('me'), icon: 'me', active: meOpen, run: () => { go({ kind: 'docs', path: 'me/README.md' }); } });
-    for (const v of app.pluginViews) items.push({ id: v.id, label: navLabel(v.id, v.title), icon: v.icon || 'plugin', custom: true, active: app.view.kind === 'plugin' && app.view.id === v.id, run: () => { go({ kind: 'plugin', id: v.id }); } });
+    // An add-on's page is keyed by an id that carries the add-on's name, so two add-ons (or an add-on and
+    // the app) can use the same short id; `nav.json` may name it by either.
+    for (const v of app.pluginViews) items.push({ id: v.id, alias: v.short && !APP_PAGES.includes(v.short) ? v.short : undefined, from: v.plugin, label: viewLabel(v), icon: v.icon || 'plugin', custom: true, active: app.view.kind === 'plugin' && app.view.id === v.id, run: () => { go({ kind: 'plugin', id: v.id }); } });
     const hidden = new Set((app.nav?.hidden ?? []).filter((id) => id !== 'home'));
-    const list = items.filter((i) => !hidden.has(i.id));
-    const order = app.nav?.order ?? [];
-    return [...order.map((id) => list.find((i) => i.id === id)).filter((i): i is NavItem => !!i), ...list.filter((i) => !order.includes(i.id))];
+    const list = items.filter((i) => !hidden.has(i.id) && !(i.alias && hidden.has(i.alias)));
+    const first: NavItem[] = [];
+    for (const id of app.nav?.order ?? []) {
+      const it = list.find((i) => i.id === id) ?? list.find((i) => i.alias === id && !first.includes(i));
+      if (it && !first.includes(it)) first.push(it);
+    }
+    return [...first, ...list.filter((i) => !first.includes(i))];
   });
 
   // ---------- focus and announcement on navigation ----------
@@ -641,7 +649,8 @@
     const add = (id: string, title: string, group: string, icon: string, extra: Partial<PaletteItem> = {}) =>
       items.push({ id, title, group, icon, keys: keys(id) || undefined, run: () => command(id), ...extra });
     add('chat.new', t('newChat'), g.act, 'plus');
-    navItems.forEach((it, i) => items.push({ id: (it.custom ? 'view:' : 'nav.') + it.id, title: it.label, group: g.go, icon: it.icon, keys: keys('nav.' + (i + 1)) || undefined, run: it.run }));
+    // What an add-on added says so, with the add-on's name, wherever it is listed.
+    navItems.forEach((it, i) => items.push({ id: (it.custom ? 'view:' : 'nav.') + it.id, title: it.label, group: it.custom ? addonTag(it.from) : g.go, icon: it.icon, keys: keys('nav.' + (i + 1)) || undefined, run: it.run }));
     add('settings', t('settings'), g.go, 'settings');
     add('help', t('shell.help'), g.go, 'help', { keywords: 'help shortcuts privacy cost مساعدة اختصارات خصوصية' });
     add('wrap.start', t('shell.pal.wrap'), g.act, 'wrap', { keywords: 'wrap save حفظ تلخيص' });
@@ -666,7 +675,7 @@
       add('theme.' + id, t('shell.pal.theme', { name }), g.look, 'palette', { keywords: 'theme سمة' });
     for (const [m, icon] of [['light', 'sun'], ['dark', 'moon'], ['system', 'system']])
       add('mode.' + m, t('shell.pal.mode', { name: t(m) }), g.look, icon, { keywords: 'appearance mode day night مظهر' });
-    for (const c of app.commands) items.push({ id: 'plugin:' + c.id, title: c.title, group: g.plug, icon: c.icon || 'plugin', run: () => { command('plugin:' + c.id); c.run(); } });
+    for (const c of app.commands) items.push({ id: 'plugin:' + c.id, title: c.title, group: c.plugin ? addonTag(c.plugin) : g.plug, icon: c.icon || 'plugin', run: () => { command('plugin:' + c.id); c.run(); } });
     for (const c of app.chats.slice(0, 40)) items.push({ id: 'chat:' + c.id, title: c.title, group: g.chat, icon: 'chat', run: () => command('chat.open', { chatId: c.id }) });
     for (const i of ideas) items.push({ id: 'idea:' + i.path, title: i.title, group: g.idea, icon: 'ideas', keywords: i.summary, run: () => { openItem(i.path); } });
     return items;
@@ -744,8 +753,9 @@
       </form>
       <nav aria-label={t('shell.mainNav')}>
         {#each navItems as it, i (it.id)}
-          <button class="nav" class:active={it.active} aria-current={it.active ? 'page' : undefined} title={tip(it.label, 'nav.' + (i + 1))} onclick={it.run}>
+          <button class="nav" class:active={it.active} aria-current={it.active ? 'page' : undefined} title={tip(it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label, 'nav.' + (i + 1))} onclick={it.run}>
             <Icon name={it.icon} /><span class="grow ell" dir="auto">{it.label}</span>
+            {#if it.custom}<span class="addon" aria-hidden="true"><Icon name="plugin" size={12} /></span><span class="sr-only">({addonTag(it.from)})</span>{/if}
             {#if it.id === 'inbox' && inbox.count > 0}<span class="badge" title={tn('inbox.badge', inbox.count)}><span aria-hidden="true">{fmtNum(inbox.count)}</span><span class="sr-only">{tn('inbox.badge', inbox.count)}</span></span>{/if}
             {#if it.id === 'todos' && app.dueToday > 0}<span class="badge" title={tn('ui.dueNow', app.dueToday)}><span aria-hidden="true">{fmtNum(app.dueToday)}</span><span class="sr-only">{tn('ui.dueNow', app.dueToday)}</span></span>{/if}
           </button>
@@ -823,8 +833,9 @@
       <button class="iconbtn" aria-label={t('shell.sidebarShow')} title={tip(t('shell.sidebarShow'), 'sidebar.toggle')} onclick={() => command('sidebar.toggle')}><Icon name="sidebar" class="flip-rtl" /></button>
       <nav aria-label={t('shell.mainNav')}>
         {#each navItems as it, i (it.id)}
-          <button class="iconbtn rb" class:on={it.active} aria-current={it.active ? 'page' : undefined} aria-label={it.label} title={tip(it.label, 'nav.' + (i + 1))} onclick={it.run}>
+          <button class="iconbtn rb" class:on={it.active} aria-current={it.active ? 'page' : undefined} aria-label={it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label} title={tip(it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label, 'nav.' + (i + 1))} onclick={it.run}>
             <Icon name={it.icon} />
+            {#if it.custom}<span class="rmark" aria-hidden="true"></span>{/if}
             {#if it.id === 'inbox' && inbox.count > 0}<span class="rdot" aria-hidden="true"></span><span class="sr-only">— {tn('inbox.badge', inbox.count)}</span>{/if}
             {#if it.id === 'todos' && app.dueToday > 0}<span class="rdot" aria-hidden="true"></span><span class="sr-only">— {tn('ui.dueNow', app.dueToday)}</span>{/if}
           </button>
@@ -960,6 +971,9 @@
     font-size: var(--fs-xs); padding: 3px 9px; border-radius: 6px; background: var(--panel); color: var(--fg); border: var(--border-w) solid var(--hairline); box-shadow: var(--shadow); }
   .wrap { flex-wrap: wrap; }
   .rdot { position: absolute; top: 4px; inset-inline-end: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); }
+  /* A page an add-on added: a small hollow square in the corner (rail), a small puzzle piece (sidebar). */
+  .rmark { position: absolute; bottom: 4px; inset-inline-end: 4px; width: 6px; height: 6px; border: 1.5px solid currentColor; border-radius: 1px; opacity: .8; }
+  .nav .addon { flex: none; display: inline-flex; opacity: .75; }
   .badge { flex: none; font-size: var(--fs-xxs); font-weight: 600; min-width: 18px; text-align: center; padding: 0 5px; border-radius: 99px; background: var(--accent); color: var(--accent-fg); }
   :global([data-theme="contrast"]) .nav.active .badge { background: var(--accent-fg); color: var(--accent); }
   .sidebar {

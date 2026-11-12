@@ -47,8 +47,11 @@
 // * Everything a plugin registered is disposed when the layer reloads; a plugin that throws is
 //   switched off on its own; the freeze guard below turns customisations off after a session in
 //   which add-on code never gave control back.
+// * What an add-on shows carries its name (toasts, its pages, its commands). It can start a chat or
+//   move to another page only right after the person pressed something of its own, and chats have an
+//   hourly ceiling per add-on.
 import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
-import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig } from './store.svelte';
+import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
 import { confirmDialog, promptDialog } from './dialog.svelte';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang } from './i18n';
@@ -134,7 +137,7 @@ const shortName = (file: string) => String(file).replace(/\.(js|html)$/i, '');
 type Surface = { kind: 'view' | 'widget' | 'html'; id: string };
 type Plugin = {
   name: string; kind: 'plugin' | 'view'; code: string; perms: Set<string>; dead: boolean;
-  disposers: (() => void)[]; frames: Set<Frame>; warned: Set<string>; lastChat: number;
+  disposers: (() => void)[]; frames: Set<Frame>; warned: Set<string>;
   /** Library-relative folders (each ending in "/") this plugin may create and change files in. */
   write: string[];
   /** What the plugin says it is for; used as the accessible name of its frames. */
@@ -185,15 +188,29 @@ const EVENTS: Record<string, string[]> = {
 };
 const VIEWS = ['home', 'chats', 'chat', 'ideas', 'todos', 'docs', 'projects', 'settings', 'help', 'plugin'];
 
-// ---------- limits ----------
+// ---------- limits on what an add-on may do unasked ----------
 // Kept per add-on NAME for the whole session, so reloading the layer does not reset them.
+/** How many chats one add-on may start in an hour. */
+const CHATS_PER_HOUR = 20;
 const rateLog = new Map<string, number[]>();
+/** When the person last ran one of this add-on's commands or item actions from the app itself. */
+const pressed = new Map<string, number>();
+const told = new Set<string>();
 /** The times noted under `key` that are younger than `within` ms (the list is kept: push to it to note one more). */
 function recent(key: string, within: number): number[] {
   const now = Date.now();
   const list = (rateLog.get(key) ?? []).filter((x) => now - x < within);
   rateLog.set(key, list);
   return list;
+}
+/** Refuse something an add-on tried without being asked to; the person is told once per session. */
+function refused(p: Plugin, why: 'chatUnasked' | 'chatBudget'): Error {
+  const k = p.name + ':' + why;
+  if (!told.has(k)) {
+    told.add(k);
+    toast(t('lua.' + why, { name: shortName(p.name), n: CHATS_PER_HOUR }), { kind: 'error', key: 'limit:' + k, duration: 0 });
+  }
+  return Object.assign(new Error(why === 'chatBudget' ? `chat.start: this add-on already started ${CHATS_PER_HOUR} chats in the last hour` : 'chat.start: only right after the person pressed something in this add-on'), { code: 'limit' });
 }
 
 function destroyFrame(f: Frame) {
@@ -511,16 +528,37 @@ function dryAnswer(method: string): any {
 
 const plain = (v: any) => { try { return JSON.parse(JSON.stringify(v ?? null)); } catch { return null; } };
 
-function register<T extends { id: string; plugin?: string }>(p: Plugin, key: 'pluginViews' | 'commands' | 'homeWidgets' | 'homeChips' | 'itemActions', item: T) {
+// Two add-ons may both call something `board`, and an add-on may call a page `todos`. What the
+// add-on chose is kept as `short` (the name `nav.json`, `ui.go` and `ui.remove` use); the `id` of a
+// page or a command, which the sidebar, the palette and the open view are keyed by, also carries the
+// add-on's file name, so it is unique in the app. Widgets, chips and item actions are keyed by add-on
+// and id where they are drawn, and `home.json` places widgets by their short id.
+const ownId = (p: Plugin, id: string) => `${p.name}:${id}`;
+const shortOf = (x: any): string => x.short ?? x.id;
+function register<T extends { id: string; plugin?: string; short?: string }>(p: Plugin, key: 'pluginViews' | 'commands' | 'homeWidgets' | 'homeChips' | 'itemActions', item: T) {
   const list = app[key] as any[];
-  (app as any)[key] = [...list.filter((x) => !(x.id === item.id && x.plugin === p.name)), item];
-  p.disposers.push(() => unregister(p, key, item.id));
+  (app as any)[key] = [...list.filter((x) => !(x.plugin === p.name && shortOf(x) === shortOf(item))), item];
+  p.disposers.push(() => unregister(p, key, shortOf(item)));
 }
-function unregister(p: Plugin, key: string, id: string) {
-  (app as any)[key] = ((app as any)[key] as any[]).filter((x) => !(x.id === id && x.plugin === p.name));
+function unregister(p: Plugin, key: string, short: string) {
+  (app as any)[key] = ((app as any)[key] as any[]).filter((x) => !(x.plugin === p.name && shortOf(x) === short));
 }
 
-async function handle(f: Frame, method: string, args: any[]): Promise<any> {
+/** The sidebar name of an add-on's page: `nav.json` may rename it by its full id or by its short one. */
+export function viewLabel(v: PluginView): string {
+  const pick = (id?: string) => { const l = id ? app.nav?.labels?.[id] : undefined; return l && (lang() === 'ar' ? l.ar || l.en : l.en || l.ar); };
+  return String(pick(v.id) || (v.short && ![...VIEWS, 'me', 'inbox'].includes(v.short) && pick(v.short)) || v.title || v.short || v.id).slice(0, 60);
+}
+/** Whose page or command this is, in words: "Add-on · hours". */
+export const addonTag = (file?: string) => (file ? t('lua.tag', { name: shortName(file) }) : t('shell.pal.plugin'));
+/** The open add-on page for a view id — also an id from before pages carried their add-on's name. */
+export function findView(id: string): PluginView | undefined {
+  return app.pluginViews.find((x) => x.id === id) ?? app.pluginViews.find((x) => x.short === id || x.id === 'view:' + id);
+}
+
+/** `asked`: the person pressed or typed something in this very frame a moment ago (its runtime says
+ *  so, see plugin-frame.js), or just ran one of the add-on's commands or item actions. */
+async function handle(f: Frame, method: string, args: any[], asked = false): Promise<any> {
   const p = f.plugin;
   if (p.dead) throw new Error('This add-on was switched off');
   if (p.kind === 'view' && !READ_ONLY.has(method)) throw new Error(`"${method}" is not available to HTML views`);
@@ -529,7 +567,9 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
   if (perm && !p.perms.has(perm)) throw denied(p, perm);
   if (app.preview && WRITES.has(method)) throw previewOnly();
   const a = Array.isArray(args) ? args : [];
-  const invoke = (cb: any) => (...x: any[]) => { if (!p.dead) deliver(f, { type: 'invoke', cb, args: x.map(plain) }); };
+  asked ||= Date.now() - (pressed.get(p.name) ?? 0) < 10_000;
+  // Running a command or an item action is the person asking this add-on for something.
+  const invoke = (cb: any) => (...x: any[]) => { if (!p.dead) { pressed.set(p.name, Date.now()); deliver(f, { type: 'invoke', cb, args: x.map(plain) }); } };
   switch (method) {
     case 'library.list': return ((await api('/library/tree?scope=plugin&exclude=private')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
     case 'library.read': { const d = await api(`/library/file?scope=plugin&path=${encodeURIComponent(cleanPath(a[0]))}`); return String(d.content ?? ''); }
@@ -593,8 +633,14 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
     case 'chat.start': {
       const prompt = str(a[0], 8000).trim();
       if (!prompt) throw new Error('chat.start(prompt): prompt is empty');
-      if (Date.now() - p.lastChat < 5000) throw new Error('chat.start: wait a few seconds between chats');
-      p.lastChat = Date.now();
+      // A chat costs the person money and attention. An add-on may start one only when they have just
+      // pressed something of its own (never from a timer, or from the end of the chat before), a few
+      // seconds apart, and no more than CHATS_PER_HOUR in an hour.
+      if (!asked) throw refused(p, 'chatUnasked');
+      const started = recent('chat:' + p.name, 3_600_000);
+      if (started.length && Date.now() - started[started.length - 1] < 5000) throw new Error('chat.start: wait a few seconds between chats');
+      if (started.length >= CHATS_PER_HOUR) throw refused(p, 'chatBudget');
+      started.push(Date.now());
       // Never `byUser`: an add-on's prompt must not inherit a "bypass permissions" default.
       const c = await post('/chats', {});
       await post(`/chats/${c.id}/send`, { text: prompt });
@@ -602,11 +648,28 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
       go({ kind: 'chat', id: c.id });
       return { chatId: c.id };
     }
-    case 'ui.toast': { const k = a[1]?.kind; toast(str(a[0], 500), { kind: k === 'error' || k === 'success' ? k : 'info' }); return null; }
+    case 'ui.toast': {
+      // Always under the add-on's name, and no more than three in any ten seconds.
+      const shown = recent('toast:' + p.name, 10_000);
+      if (shown.length >= 3) return null;
+      shown.push(Date.now());
+      const k = a[1]?.kind;
+      toast(t('lua.says', { name: shortName(p.name), text: str(a[0], 500) }), { kind: k === 'error' || k === 'success' ? k : 'info' });
+      return null;
+    }
     case 'ui.go': {
-      const own = typeof a[0] === 'string' && app.pluginViews.find((x) => x.id === a[0] || x.id === 'view:' + a[0]);
-      if (own) return await go({ kind: 'plugin', id: own.id });
-      const v = typeof a[0] === 'string' ? { kind: a[0] } : { kind: str(a[0]?.kind, 40), id: a[0]?.id != null ? str(a[0].id, 200) : undefined, path: a[0]?.path != null ? str(a[0].path, 500) : undefined };
+      // Moving the person to another page is for when they asked: right after a press, once a second at most.
+      if (!asked) throw Object.assign(new Error('ui.go: only right after the person pressed something in this add-on'), { code: 'limit' });
+      const moved = recent('go:' + p.name, 1000);
+      if (moved.length) throw Object.assign(new Error('ui.go: wait a moment between moves'), { code: 'limit' });
+      moved.push(Date.now());
+      // A page of this add-on first, then the app's own pages, then another add-on's page of that name.
+      const name = typeof a[0] === 'string' ? a[0] : '';
+      const mine = name && app.pluginViews.find((x) => x.plugin === p.name && shortOf(x) === name);
+      if (mine) return await go({ kind: 'plugin', id: mine.id });
+      const other = name && !VIEWS.includes(name) && findView(name);
+      if (other) return await go({ kind: 'plugin', id: other.id });
+      const v = name ? { kind: name } : { kind: str(a[0]?.kind, 40), id: a[0]?.id != null ? str(a[0].id, 200) : undefined, path: a[0]?.path != null ? str(a[0].path, 500) : undefined };
       if (!VIEWS.includes(v.kind)) throw new Error(`ui.go: unknown view "${v.kind}"`);
       return await go(v);
     }
@@ -620,13 +683,13 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
   if (method !== 'ui.remove' && !id) throw new Error(`${method}: "id" is missing`);
   switch (method) {
     case 'ui.addView':
-      register(p, 'pluginViews', { id, title: str(s.title, 60), icon: s.icon ? str(s.icon, 30) : undefined, plugin: p.name, render: (el: HTMLElement) => mountSurface(p, { kind: 'view', id }, el) });
+      register(p, 'pluginViews', { id: ownId(p, id), short: id, title: str(s.title, 60), icon: s.icon ? str(s.icon, 30) : undefined, plugin: p.name, render: (el: HTMLElement) => mountSurface(p, { kind: 'view', id }, el) });
       return null;
     case 'ui.addHomeWidget':
       register(p, 'homeWidgets', { id, title: str(s.title, 60), plugin: p.name, render: (el: HTMLElement) => mountSurface(p, { kind: 'widget', id }, el) });
       return null;
     case 'ui.addCommand':
-      register(p, 'commands', { id, title: str(s.title, 80), icon: s.icon ? str(s.icon, 30) : undefined, plugin: p.name, run: invoke(s.cb) });
+      register(p, 'commands', { id: ownId(p, id), short: id, title: str(s.title, 80), icon: s.icon ? str(s.icon, 30) : undefined, plugin: p.name, run: invoke(s.cb) });
       return null;
     case 'ui.addHomeChip':
       register(p, 'homeChips', { id, label: str(s.label, 40), prompt: str(s.prompt, 4000), plugin: p.name });
@@ -694,12 +757,12 @@ function onMessage(e: MessageEvent) {
     return;
   }
   if (m.type === 'failed') {
-    if (m.code === 'permission') return; // the user was already told which permission is missing
+    if (m.code === 'permission' || m.code === 'limit' || m.code === 'preview') return; // the person was already told
     fail(p, new Error(m.code === 'hang' ? t('lua.hang') : str(m.error, 2000)));
   } else if (m.type === 'size') {
     if (f.surface?.kind === 'widget') f.el.style.height = Math.max(24, Math.min(900, Number(m.height) || 0)) + 'px';
   } else if (rpc) {
-    handle(frame, m.method, m.args).then(
+    handle(frame, m.method, m.args, m.k === frame.key && m.ua === true).then(
       (result) => reply(frame, { id: m.id, result }),
       (err) => reply(frame, { id: m.id, error: String(err?.message ?? err), code: err?.code }),
     );
@@ -835,7 +898,7 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
   app.todosCfg = todosConfig(m.todos);
   const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
   const mk = (it: LayerItem, code: string): Plugin =>
-    ({ name: it.name, kind: it.kind, code: String(code ?? ''), perms: new Set(it.permissions), write: it.write, description: it.description, dead: false, disposers: [], frames: new Set(), warned: new Set(), lastChat: 0 });
+    ({ name: it.name, kind: it.kind, code: String(code ?? ''), perms: new Set(it.permissions), write: it.write, description: it.description, dead: false, disposers: [], frames: new Set(), warned: new Set() });
   const views: any[] = Array.isArray(m.views) ? m.views : [];
   const list: any[] = Array.isArray(m.plugins) ? m.plugins : [];
   const items: LayerItem[] = [...list.map((x) => describe(x, 'plugin', manifest)), ...views.map((x) => describe(x, 'view', manifest))];
@@ -998,7 +1061,7 @@ export async function dryLoadStaged(): Promise<LayerItem[]> {
       let f: Frame | null = null;
       const timer = setTimeout(() => finish(t('layer3.dryTimeout')), 8000);
       function finish(err: string | null) { clearTimeout(timer); if (f) destroyFrame(f); f = null; resolve(err); }
-      const p: Plugin = { name: it.name, kind, code: String(src.code ?? ''), perms: new Set(), write: [], description: '', dead: false, disposers: [], frames: new Set(), warned: new Set(), lastChat: 0, dry: { done: finish } };
+      const p: Plugin = { name: it.name, kind, code: String(src.code ?? ''), perms: new Set(), write: [], description: '', dead: false, disposers: [], frames: new Set(), warned: new Set(), dry: { done: finish } };
       try { f = createFrame(p, null, background()); } catch (e: any) { finish(String(e?.message ?? e)); }
     });
     out.push(error ? { ...it, error } : it);

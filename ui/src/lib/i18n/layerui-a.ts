@@ -3,6 +3,11 @@
 // (layerui-a).
 export default {
   en: {
+    'lua.says': 'Add-on “{name}”: {text}',
+    'lua.tag': 'Add-on · {name}',
+    'lua.pageFrom': 'This page comes from the add-on',
+    'lua.chatUnasked': 'The add-on “{name}” tried to start a chat on its own and was stopped. An add-on can only start a chat right after you press something in it.',
+    'lua.chatBudget': 'The add-on “{name}” has started {n} chats in the last hour, so it has to wait before it can start another.',
     'lua.hang': 'It kept the app busy without ever finishing, so it was stopped.',
     'lua.left': 'It tried to replace its own page with a different one, which add-ons are not allowed to do.',
     'lua.frozeItem': 'Thoughts stopped responding the last time this was run, so it was not run again.',
@@ -28,6 +33,11 @@ export default {
     'lua.packSave': 'Save pack',
   },
   ar: {
+    'lua.says': 'إضافة «{name}»: {text}',
+    'lua.tag': 'إضافة · {name}',
+    'lua.pageFrom': 'هذه الصفحة من الإضافة',
+    'lua.chatUnasked': 'حاولت الإضافة «{name}» بدء محادثة من تلقاء نفسها فمُنعت. لا تستطيع أي إضافة بدء محادثة إلا بعد أن تضغط أنت على شيء فيها.',
+    'lua.chatBudget': 'بدأت الإضافة «{name}» {n} محادثة خلال الساعة الماضية، لذا عليها الانتظار قبل أن تبدأ محادثة أخرى.',
     'lua.hang': 'أبقت التطبيق مشغولاً دون أن تنتهي، فأُوقِفت.',
     'lua.left': 'حاولت استبدال صفحتها بصفحة أخرى، وهذا غير مسموح للإضافات.',
     'lua.frozeItem': 'توقّف التطبيق عن الاستجابة عند تشغيلها في المرة الماضية، فلم تُشغَّل من جديد.',
