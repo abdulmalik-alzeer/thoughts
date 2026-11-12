@@ -36,11 +36,17 @@ On a subscription the practical effect of heavy use is reaching your plan's usag
 
 ## The "estimated cost" figure in the app
 
-After a run, the assistant reports how much text was processed, and Thoughts shows what that amount would cost at the provider's pay-as-you-go rates. It appears beside a chat and as a month total in Settings.
+After a run, the assistant reports how much text was processed, and Thoughts shows what that amount would cost at the provider's pay-as-you-go rates. The month total, which includes the automatic summaries, is in Settings. A chat's own figure appears beside it (on a subscription, only if you switch on “Show estimated cost” in Settings).
 
 - **On a subscription, this is not a bill.** Your use is covered by your plan. Nothing extra is charged because of this number. Read it as a measure of how heavy a conversation was.
 - **On an API key, it is an approximation** of what the provider will charge. The provider's own usage page is the authority; the figure in the app can differ from it.
 - The figure is calculated on your computer from what the assistant reports. Thoughts does not bill you and does not send this number anywhere.
+
+## A monthly spending limit
+
+Under Settings → Privacy you can set the most you want to spend in a month, and the point at which you are warned (80% by default). At the warning point Thoughts tells you. At the limit, anything that runs without you watching stops until next month or until you raise the limit: automatic tasks, and the automatic summaries. Chats you start yourself are never stopped. The limit uses the same estimated figure as above, so on an API key the provider's own limit remains the real ceiling.
+
+If you are on a Claude plan and reach its usage limit, Thoughts says so in plain words, with the time it resets, instead of showing an error.
 
 ## Keeping usage down
 

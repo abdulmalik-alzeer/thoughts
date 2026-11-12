@@ -12,6 +12,8 @@
   import { failed } from '../lib/errors';
   import { lastBackupText } from '../lib/backup.svelte';
   import { cloudFor } from '../lib/cloud.svelte';
+  import ProviderPresets from './ProviderPresets.svelte';
+  import SpendingGuard from './SpendingGuard.svelte';
   import { restartService } from '../lib/shell';
   import { keepLibraryToMe, libraryOpenToOthers, offerIndexCleanup } from '../lib/privacy';
   import ThemePicker from './ThemePicker.svelte';
@@ -32,7 +34,7 @@
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations', 'reorganize'],
-    privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
+    privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'layer.appUpdates'],
@@ -59,7 +61,7 @@
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));
-    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true; x.releaseCheck ??= false;
+    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true; x.releaseCheck ??= false; x.spending ??= { monthlyLimitUsd: null, warnPercent: 80 };
     if (x.ai?.claude) x.ai.claude.permissionMode = realPerm(x.ai.claude.permissionMode);
     return x;
   };
@@ -130,6 +132,8 @@
     if (!whole(s.idleMinutes)) e.idleMinutes = t('set.errWhole');
     if (!whole(s.wrapNagThreshold)) e.wrapNagThreshold = t('set.errWhole');
     if (permValue === '') e.permission = t('set.errPerm');
+    const sp = s.spending;
+    if (sp && sp.monthlyLimitUsd != null && !(Number(sp.monthlyLimitUsd) >= 1 && Number(sp.monthlyLimitUsd) <= 100000 && Number.isInteger(Number(sp.warnPercent)) && sp.warnPercent >= 50 && sp.warnPercent <= 95)) e.spending = t('runc.spend.err');
     if (isGit && inCloud && !s.sync.allowCloud && !cloudAlready) e.sync = t('hista.online.cloudClash');
     return e;
   });
@@ -405,7 +409,13 @@
     });
   }
 
-  const testProvider = () => run('provtest', async () => { provTest = null; provTest = await post('/ai/claude/provider/test'); });
+  /** Can a test be made: a key is typed, or the one saved for this very address is there. */
+  const canTest = $derived(!provErr && (!!apiToken.trim() || (hasKey && dest(savedUrl) === dest(provUrl))));
+  // What is typed is tried as it stands, saved or not; with nothing typed, the saved set-up is.
+  const testProvider = () => run('provtest', async () => {
+    provTest = null;
+    provTest = await post('/ai/claude/provider/test', provDirty ? { baseUrl: provUrl.trim() || null, token: apiToken.trim() || null } : undefined);
+  });
 
   async function browseLibrary() {
     try {
@@ -662,6 +672,7 @@
         {#if vis(c, 'set.provider', 'set.baseUrl', 'set.apiKey')}
           <h3>{t('set.provider')}</h3>
           <p class="muted sm">{t('set.providerHint')} {t('runa.prov.how')}</p>
+          <ProviderPresets url={provUrl} disabled={readOnly} onpick={(u) => { provUrl = u; provTest = null; }} />
           <label for="st-base">{t('set.baseUrl')}</label>
           <input id="st-base" dir="ltr" bind:value={provUrl} placeholder="https://api.anthropic.com" aria-invalid={!!provErr} aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly} />
           <label for="st-key">{t('set.apiKey')} {#if hasKey}<span class="pill accent">{t('set.keyOn')}</span>{/if}</label>
@@ -669,11 +680,11 @@
           {#if provErr}<p class="err" id="st-err-provider" role="alert">{provErr}</p>{/if}
           <div class="row wrap gap-top">
             <button type="button" class="btn primary" disabled={!provDirty || !!provErr || busy.token || readOnly} aria-busy={busy.token} onclick={saveProvider}>{t('runa.prov.save')}</button>
-            <button type="button" class="btn" disabled={provDirty || !(provKind === 'anthropicKey' || provKind === 'service') || busy.provtest} aria-busy={busy.provtest} onclick={testProvider}>{busy.provtest ? t('runa.prov.testing') : t('runa.prov.test')}</button>
+            <button type="button" class="btn" disabled={!canTest || busy.provtest} aria-busy={busy.provtest} onclick={testProvider}>{busy.provtest ? t('runa.prov.testing') : t('runa.prov.test')}</button>
             <button type="button" class="btn danger" disabled={provKind === 'account' || busy.token || readOnly} onclick={removeProvider}>{t('runa.prov.remove')}</button>
           </div>
           {#if provTest}<p class="sm" class:err={!provTest.ok} role="status" dir="auto">{provTest.ok ? t('runa.prov.testOk') : provTest.message}</p>{/if}
-          <p class="muted sm">{t('runa.prov.testHint')}</p>
+          <p class="muted sm">{t('runc.prov.testHint')}</p>
           <p class="muted sm">{t('set.apiKeyHint')}</p>
         {/if}
       </details>
@@ -811,6 +822,7 @@
           <p class="muted sm">{t('set.costNone')}</p>
         {/if}
         <p class="muted sm">{t('set.costHint')}</p>
+        {#if vis(c, 'runc.spend.title')}<SpendingGuard bind:value={s.spending} disabled={readOnly} error={errors.spending ?? ''} />{/if}
         {#if vis(c, 'ui.set.showCost')}
           <label class="check"><input type="checkbox" checked={app.showCost} onchange={(e) => setShowCost(e.currentTarget.checked)} aria-describedby="st-cost-hint" /> {t('ui.set.showCost')}</label>
           <p class="muted sm" id="st-cost-hint">{t('ui.set.showCostHint')}</p>

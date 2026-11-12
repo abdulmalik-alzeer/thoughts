@@ -92,8 +92,10 @@ export function fmtHijri(d: string | number | Date, opts: Intl.DateTimeFormatOpt
 }
 
 /** A US-dollar amount (the assistant's usage is billed in dollars) in the app language's number style. */
-export const fmtMoney = (usd: number) =>
-  new Intl.NumberFormat(lang() === 'ar' ? 'ar-SA-u-nu-latn' : 'en', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: usd > 0 && usd < 1 ? 3 : 2 }).format(usd);
+export const fmtMoney = (amount: number) => {
+  const usd = amount || 0; // never "-$0.00": a stored -0 (or nothing) is simply no amount
+  return new Intl.NumberFormat(lang() === 'ar' ? 'ar-SA-u-nu-latn' : 'en', { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: usd > 0 && usd < 1 ? 3 : 2 }).format(usd);
+};
 
 export function ago(when: string | number): string {
   const m = Math.max(0, Math.round((Date.now() - new Date(when).getTime()) / 60000));

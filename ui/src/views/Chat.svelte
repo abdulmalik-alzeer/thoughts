@@ -363,6 +363,20 @@
     catch (e) { failed(t('chat3.optionsFailed'), e); return false; }
   }
 
+  // The model menu lists what the assistant program and past answers name; "Other…" takes any name
+  // the person knows (a full model name, a service's own).
+  const MODEL_OTHER = '__other__';
+  async function modelChanged(e: Event & { currentTarget: HTMLSelectElement }) {
+    const el = e.currentTarget, v = el.value, before = chat.options.model ?? '';
+    if (v !== MODEL_OTHER) { chat.options.model = v || null; await saveOpts(); return; }
+    const typed = (await promptDialog({ title: t('runc.model.otherTitle'), body: t('runc.model.otherBody'), placeholder: t('runc.model.otherPlaceholder'), confirmLabel: t('save') }))?.trim();
+    el.value = before; // until a name is accepted the menu shows what was there
+    if (!typed) return;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,119}$/.test(typed)) { notify(t('runc.model.otherBad'), { kind: 'error', key: 'model-name' }); return; }
+    chat.options.model = typed;
+    if (await saveOpts()) el.value = typed;
+  }
+
   // The permission mode as the service has it. "Bypass permissions" is only switched on after the
   // user agreed to the warning (the service refuses it otherwise).
   const BYPASS = 'bypassPermissions';
@@ -642,10 +656,11 @@
           aria-controls={mentionHits.length ? 'mention-list' : undefined} aria-activedescendant={mentionHits.length ? `mention-${mentionIdx}` : undefined}></textarea>
         <div class="row controls">
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
-          <select bind:value={chat.options.model} onchange={() => saveOpts()} title={t('model')} aria-label={t('model')}>
-            <option value={null}>{t('model')}: {t('default')}</option>
+          <select value={chat.options.model ?? ''} onchange={modelChanged} title={t('model')} aria-label={t('model')}>
+            <option value="">{t('model')}: {t('default')}</option>
             {#each opts.models as m}<option value={m}>{m}</option>{/each}
             {#if chat.options.model && !opts.models.includes(chat.options.model)}<option value={chat.options.model}>{chat.options.model}</option>{/if}
+            <option value={MODEL_OTHER}>{t('runc.model.other')}</option>
           </select>
           {#if opts.efforts.length}
             <select bind:value={chat.options.effort} onchange={() => saveOpts()} title={t('effort')} aria-label={t('effort')}>

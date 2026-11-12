@@ -237,7 +237,6 @@ mod tests {
         st.usage.lock().await.insert(month_key(), -0.0);
         let shown = serde_json::to_string(&st.month_cost().await).unwrap();
         assert_eq!(shown, "0.0");
-        assert_eq!(serde_json::to_string(&-0.0f64.max(0.0)).unwrap_or_default().starts_with('-'), false);
         assert_eq!(crate::spend::usage_json(&st).await["monthCostUsd"].to_string(), "0.0");
     }
 }

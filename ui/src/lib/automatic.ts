@@ -19,7 +19,7 @@ export async function runTask(w: { file: string; hash: string }): Promise<boolea
 
 const NOTICE: Record<string, string> = {
   failed: 'auto.notice.failed', timeLimit: 'auto.notice.timeLimit', spendLimit: 'auto.notice.spendLimit',
-  interrupted: 'auto.notice.interrupted', notStarted: 'auto.notice.notStarted', skipped: 'auto.notice.skipped',
+  interrupted: 'auto.notice.interrupted', notStarted: 'auto.notice.notStarted', skipped: 'auto.notice.skipped', monthLimit: 'auto.notice.monthLimit',
 };
 
 /** The daemon's `workflow.result` event: a task the user did not start by hand failed, hit a limit, or was skipped. */

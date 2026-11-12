@@ -27,6 +27,7 @@
   import Review from './views/Review.svelte';
   import WrapNag from './views/WrapNag.svelte';
   import WrapWaiting from './views/WrapWaiting.svelte';
+  import UsageBanner from './views/UsageBanner.svelte';
   import PluginView from './views/PluginView.svelte';
   import Reorganize from './views/Reorganize.svelte';
   import Tour from './views/Tour.svelte';
@@ -231,6 +232,9 @@
           await refreshChats();
           await refreshWrap();
         }
+        // The month's figure and the limits follow what the assistant reports, without a reload.
+        if (e.type === 'usage.changed' && app.status && e.usage) app.status = { ...app.status, usage: e.usage };
+        if (e.type === 'limit.changed' && app.status) app.status = { ...app.status, planLimit: e.planLimit ?? null };
         if (e.type === 'chat.done' && app.settings?.notifications && !document.hasFocus()) notify('Thoughts', t('shell.chatFinished', { title: e.title || t('shell.aChat') }));
         if (e.type === 'workflow.result') workflowNotice(e, notify);
         if (e.type === 'notify') { toast(`${e.title}: ${e.body}`); if (app.settings?.notifications && !document.hasFocus()) notify(e.title, e.body); }
@@ -849,6 +853,7 @@
           <button class="btn" disabled={authBusy} aria-busy={authBusy} onclick={checkSignIn}><Icon name="retry" size={14} /> {t('auth.check')}</button>
         </div>
       {/if}
+      <UsageBanner />
       <WrapWaiting />
       {#if app.safeMode}
         <div class="safe no-print" role={app.safeReason === 'crash' ? 'alert' : 'status'}>
