@@ -87,10 +87,11 @@ pub fn compute(i: &Input) -> Vec<Value> {
             "Add a Home widget that lists my overdue todos (open todos whose @due date has passed), oldest first, at most 7, each showing its title and due date, with a link to the Todos page. Use a plugin with only the todos:read permission.".into()));
     }
 
-    // (b) Types the same opening on Home again and again.
+    // (b) Types the same opening on Home again and again. Only what was typed counts: pressing a
+    // button the user already has (`home.chip:`) is no reason to offer that button.
     let mut counts: BTreeMap<String, (usize, String)> = BTreeMap::new();
     for (_, e) in recent(14) {
-        let Some(text) = e.strip_prefix("home.prompt:").or_else(|| e.strip_prefix("home.chip:")) else { continue };
+        let Some(text) = e.strip_prefix("home.prompt:") else { continue };
         let prefix = prompt_prefix(text);
         if prefix.chars().count() < 3 { continue; }
         let entry = counts.entry(prefix.to_lowercase()).or_insert((0, prefix));
@@ -199,6 +200,9 @@ mod tests {
         assert!(compute(&Input { chips: &chips, ..input(&ev) }).is_empty());
         let old: Vec<_> = (15..20).map(|d| ago(d, "home.prompt:Draft an invoice now")).collect();
         assert!(compute(&input(&old)).is_empty());
+        // Using buttons that already exist, built-in or the user's own, suggests nothing.
+        let taps: Vec<_> = (0..6).flat_map(|d| [ago(d, "home.chip:todo"), ago(d, "home.chip:new idea"), ago(d, "home.chip:check-in"), ago(d, "home.chip:Plan my week")]).collect();
+        assert!(compute(&input(&taps)).is_empty());
     }
 
     #[test]
@@ -232,7 +236,7 @@ mod tests {
         let mut all = ev.clone();
         all.push(ago(40, "view.home"));
         all.extend((0..5).map(|d| ago(d, "view.todos")));
-        all.extend((0..5).map(|d| ago(d, "home.chip:New idea: something")));
+        all.extend((0..5).map(|d| ago(d, "home.prompt:New idea: something")));
         all.sort_by_key(|e| e.0);
         let s = compute(&Input { overdue: 4, enabled_views: &["docs"], ..input(&all) });
         assert_eq!(s.len(), MAX_AT_ONCE);
