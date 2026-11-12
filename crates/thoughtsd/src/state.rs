@@ -91,6 +91,7 @@ impl AppState {
         // Never under test: unit tests share one process and one settings file.
         if !cfg!(test) { crate::settings::set_read_only(loaded.newer); }
         crate::tr::set_language(&settings.language);
+        crate::claude::set_reports(settings.assistant_reports);
         let usage: BTreeMap<String, f64> = match std::fs::read_to_string(crate::paths::usage_file()) {
             Ok(t) => serde_json::from_str(&t).unwrap_or_default(),
             // First run with the ledger: start this month from the chats created in it.

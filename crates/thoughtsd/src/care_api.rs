@@ -242,6 +242,7 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
         next.projects.extend(new_projects.iter().cloned());
         next.save()?;
         crate::tr::set_language(&next.language);
+        crate::claude::set_reports(next.assistant_reports);
         *guard = next;
         drop(guard);
         st.emit(json!({"type": "settings.changed"}));

@@ -248,6 +248,7 @@ pub fn merged_settings(cur: &Settings, from: &Settings) -> Settings {
     n.profession = from.profession.clone();
     n.accessibility = from.accessibility.clone();
     n.release_check = from.release_check;
+    n.assistant_reports = from.assistant_reports;
     n.auto_summaries = from.auto_summaries;
     n.calendar = from.calendar.clone();
     n.daemon.keep_running = from.daemon.keep_running;

@@ -216,6 +216,8 @@ fn the_command_line_carries_model_effort_pictures_folders_and_the_session() {
     assert!(set(&a, "sandbox_workspace_write.writable_roots=[\"/Users/a/My Library\"]"), "{a:?}");
     assert!(set(&a, "experimental_resume=\"/Users/a/.codex/sessions/2026/11/12/rollout-2026-11-12T07-44-49-4d9f38d8-5b5a-4ab0-8b60-f28ad604edb9.jsonl\""));
     assert_eq!(a.last().unwrap(), "-");
+    // SEC-50: Codex's own usage statistics are off unless the user allowed the assistant's reports.
+    assert!(!crate::claude::sends_reports() && set(&a, "analytics.enabled=false"), "{a:?}");
     // Read-only: the folders named for writing mean nothing, and none are given.
     let ro = strs(&exec_args(&Plan { writable: &lib, ..plan("read-only", true) }));
     assert!(!ro.iter().any(|x| x.contains("writable_roots")));
@@ -328,6 +330,20 @@ fn signed_out_offline_limited_and_refused_are_told_apart() {
     assert!(refused_by_sandbox(Some(1), "rm: notes: Read-only file system"));
     assert!(!refused_by_sandbox(Some(0), "Operation not permitted is a phrase in this note"));
     assert!(!refused_by_sandbox(Some(2), "grep: no such file"));
+}
+
+/// UX-13: whatever Codex says, the chat shows a plain sentence; its own words are only detail.
+#[test]
+fn an_unexplained_codex_failure_is_said_in_plain_words() {
+    let st = AppState::for_test();
+    let m = error_msg(&st, "The model `gpt-9` does not exist");
+    assert_eq!(m.text, crate::tr::text("assistant.failed", &[]));
+    let tool = m.tool.unwrap();
+    assert_eq!((tool["code"].as_str(), tool["provider"].as_str()), (Some(crate::claude::ASSISTANT_ERROR), Some(ID)));
+    assert_eq!(tool["detail"], "The model `gpt-9` does not exist");
+    // A known meaning gets its own sentence.
+    let busy = error_msg(&st, "unexpected status 529: overloaded");
+    assert_eq!((busy.text, busy.tool.unwrap()["reason"].as_str().map(String::from)), (crate::tr::text("assistant.overloaded", &[]), Some("overloaded".into())));
 }
 
 /// A Codex folder of its own with sessions in it, and one more somewhere else behind a link.

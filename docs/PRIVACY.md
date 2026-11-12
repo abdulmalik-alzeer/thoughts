@@ -10,7 +10,7 @@ This page describes what the Thoughts app does with your information. It is a de
 - When you chat, the conversation and the files the assistant reads to answer you are sent to the AI provider you signed in with.
 - Sync uploads your library to the place you chose, and nowhere else.
 - Dictation and meeting recordings are turned into text on your Mac; the sound is never sent anywhere.
-- The app contains no analytics, tracking or advertising. The assistant program it runs is made by another company and sends that company usage statistics and error reports of its own: see [What the assistant program sends on its own](#what-the-assistant-program-sends-on-its-own).
+- The app contains no analytics, tracking or advertising. The assistant program it runs is made by another company and can send that company usage statistics and error reports of its own; Thoughts asks it not to unless you allow it: see [What the assistant program sends on its own](#what-the-assistant-program-sends-on-its-own).
 
 ## What stays on your computer
 
@@ -95,12 +95,12 @@ To suggest improvements (for example the monthly tune-up described in [Making Th
 ### What the assistant program sends on its own
 
 The assistant is a separate program made by another company: Claude Code by Anthropic and, if you
-choose it, Codex by OpenAI. Besides your conversations, it sends its maker some information of its
-own, under that company's terms and privacy policy, not Thoughts':
+choose it, Codex by OpenAI. Besides your conversations, it can send its maker some information of
+its own, under that company's terms and privacy policy, not Thoughts':
 
-- **Claude Code** sends Anthropic usage statistics: how fast and how reliably it works, and which of
+- **Claude Code** can send Anthropic usage statistics: how fast and how reliably it works, and which of
   its features are used, never your notes, your messages or file names. When you sign in with a
-  Claude Pro, Max or Ultra plan it also sends reports of its own errors, with personal details
+  Claude Pro, Max or Ultra plan it can also send reports of its own errors, with personal details
   removed before they leave. Now and then it may ask you to rate a session; a rating sends only the
   rating. Anthropic describes all of this in
   [Claude Code data usage](https://code.claude.com/docs/en/data-usage), and its privacy policy is at
@@ -108,17 +108,19 @@ own, under that company's terms and privacy policy, not Thoughts':
 - **Codex** can send OpenAI usage statistics of its own; its settings have a switch for them. OpenAI's
   privacy policy is at [openai.com/policies/privacy-policy](https://openai.com/policies/privacy-policy/).
 
-What Thoughts can and cannot do about it:
+What Thoughts does about it:
 
-- Thoughts starts these programs as they are. It cannot see or stop what they send, and this version
-  has no switch of its own for it.
-- You can switch Claude Code's off in Claude Code's own settings: in the file `settings.json` in the
-  `.claude` folder in your home folder, add `"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"` under
-  `"env"` (this also stops the session ratings). That covers your ordinary chats. The runs Thoughts
-  starts by itself (Wrap, automatic summaries, automatic tasks, setup and Reorganize) never read your
-  personal Claude Code settings, so for them it stays on.
-- For Codex, switch analytics off in Codex's own settings; OpenAI's
-  [configuration reference](https://developers.openai.com/codex/config-reference) says how.
+- **Settings › Privacy & cost › Send the assistant program's usage statistics and error reports** is
+  off unless you switch it on. While it is off, every Claude Code that Thoughts starts (chats, Wrap,
+  automatic summaries, automatic tasks, setup and Reorganize) gets `DISABLE_TELEMETRY` and
+  `DISABLE_ERROR_REPORTING`, which Anthropic documents as switching off its usage statistics (and with
+  them the session ratings) and its error reports; and every Codex run gets `analytics.enabled =
+  false`, which OpenAI documents as switching off its usage statistics. Claude Code still updates
+  itself as usual. A change applies from the next answer.
+- Switched on, Thoughts adds nothing: each program then does what its own settings say.
+- Thoughts cannot see what these programs send, so it relies on them keeping to those switches.
+  Claude Code or Codex that you run yourself, outside Thoughts, follows its own settings, not this
+  one; to switch it off there too, see Anthropic's and OpenAI's pages above.
 
 The diagnostics shown under Settings are produced on your computer and go nowhere unless you copy and send them yourself. Passwords and keys are removed from them, your home and library folders are replaced by placeholders, and the address of a backup location keeps only the name of the site. Read them through before you post them anywhere public all the same.
 
@@ -164,7 +166,7 @@ This section is practical guidance, not legal advice. Thoughts cannot tell you w
 | A chat goes quiet, or you start another one (unless "Summarise chats automatically" is off) | The text of that chat, once more, to be summarised | The AI provider, through your own account |
 | Sync is on | The whole library with its history, private folders included | The backup location you entered |
 | You export, print or share an output yourself | That file | Wherever you send it |
-| The assistant program runs (Claude Code; Codex if you chose it) | Its own usage statistics and error reports, unless you switched them off in its settings | Anthropic (or OpenAI) and the services they use |
+| The assistant program runs (Claude Code; Codex if you chose it) | Its own usage statistics and error reports, only if you allowed them under Settings › Privacy & cost | Anthropic (or OpenAI) and the services they use |
 | You dictate or record a meeting in the Mac app | Nothing: speech is turned into text on your Mac | — |
 | You read, search or edit in the app without chatting | Nothing | — |
 

@@ -168,10 +168,29 @@ pub async fn binary(state: &AppState) -> Option<PathBuf> {
 /// the daemon does the syncing itself, under its own locks and conflict handling.
 pub const APP_RUN_ENV: &str = "THOUGHTS_APP_RUN";
 
+/// May the assistant programs the app starts send their makers their own usage statistics and
+/// error reports (`Settings::assistant_reports`)? Off until the settings say otherwise; kept up to
+/// date wherever the settings are loaded or saved, like the UI language.
+static SEND_REPORTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_reports(on: bool) { SEND_REPORTS.store(on, std::sync::atomic::Ordering::Relaxed); }
+
+pub fn sends_reports() -> bool { SEND_REPORTS.load(std::sync::atomic::Ordering::Relaxed) }
+
+/// What Claude Code's environment carries when it may not send its own reports
+/// (code.claude.com/docs/en/env-vars): `DISABLE_TELEMETRY` stops its usage statistics (and with
+/// them the session-rating questions), `DISABLE_ERROR_REPORTING` its error reports. Not
+/// `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, which would also stop Claude Code updating itself.
+/// When reports are allowed nothing is added, so a user's own opt-out still holds.
+pub fn quiet_env(send: bool) -> &'static [(&'static str, &'static str)] {
+    if send { &[] } else { &[("DISABLE_TELEMETRY", "1"), ("DISABLE_ERROR_REPORTING", "1")] }
+}
+
 fn cmd(bin: &Path) -> Command {
     let mut c = crate::proc::command(bin);
     c.env("PATH", shell_path());
     c.env(APP_RUN_ENV, "1");
+    for (name, value) in quiet_env(sends_reports()) { c.env(name, value); }
     c.stdin(std::process::Stdio::null());
     c.kill_on_drop(true);
     // Its own process group, so stopping a run also ends whatever the assistant started (see `proc::kill_tree`).
@@ -2504,6 +2523,24 @@ mod tests {
         // Windows: a real program before the npm shim, then PATHEXT; never the bare shell script.
         assert_eq!(candidates("claude", true, ".COM;.EXE;.BAT;.CMD;;junk"), ["claude.exe", "claude.cmd", "claude.com", "claude.bat"]);
         assert_eq!(candidates("git", true, ""), ["git.exe", "git.cmd"]);
+    }
+
+    /// SEC-50: unless the user allowed it, every Claude Code the app starts is told not to send
+    /// its own usage statistics and error reports; allowed, nothing is added (a user's own opt-out holds).
+    #[test]
+    fn the_assistant_is_started_without_its_own_reports_unless_allowed() {
+        let env_of = |c: &Command| -> Vec<(String, String)> {
+            c.as_std().get_envs().filter_map(|(k, v)| Some((k.to_string_lossy().to_string(), v?.to_string_lossy().to_string()))).collect()
+        };
+        assert_eq!(quiet_env(false), [("DISABLE_TELEMETRY", "1"), ("DISABLE_ERROR_REPORTING", "1")]);
+        assert!(quiet_env(true).is_empty());
+        // Claude Code's own updates are never stopped by it.
+        assert!(!quiet_env(false).iter().any(|(k, _)| *k == "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" || k.contains("UPDATE")));
+        // Off by default: the command every run, summary and check is built from carries them.
+        assert!(!sends_reports());
+        let env = env_of(&cmd(Path::new("claude")));
+        for (k, v) in quiet_env(false) { assert!(env.contains(&(k.to_string(), v.to_string())), "{k} missing from {env:?}"); }
+        assert!(env.iter().any(|(k, _)| k == APP_RUN_ENV));
     }
 
     #[test]

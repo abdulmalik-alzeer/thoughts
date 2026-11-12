@@ -476,6 +476,9 @@ pub fn exec_args(p: &Plan) -> Vec<OsString> {
     if !p.mcp { kv.push("mcp_servers={}".into()); }
     if !p.own_setup { kv.push("notify=[]".into()); }
     if !p.network { kv.push("sandbox_workspace_write.network_access=false".into()); }
+    // Codex's own usage statistics, unless the user allowed the assistant's reports (Settings ›
+    // Privacy & cost): `analytics.enabled` (developers.openai.com/codex/config-reference).
+    if !crate::claude::sends_reports() { kv.push("analytics.enabled=false".into()); }
     if p.sandbox == "workspace-write" && !p.writable.is_empty() {
         let roots: Vec<String> = p.writable.iter().map(|d| d.to_string_lossy().to_string()).collect();
         kv.push(format!("sandbox_workspace_write.writable_roots={}", serde_json::to_string(&roots).unwrap_or_default()));
@@ -730,15 +733,22 @@ pub fn problem(text: &str) -> Problem {
     Problem::Other
 }
 
-/// The chat message for a run that failed with `text`: in plain words when the reason is known
-/// (marked, so the chat offers the way forward), Codex's own words otherwise.
+/// The chat message for a run that failed with `text`: always in plain words — marked when the
+/// reason is known, so the chat offers the way forward — with Codex's own words as detail
+/// ("Show details").
 fn error_msg(state: &AppState, text: &str) -> Msg {
-    let detail: String = text.chars().take(600).collect();
+    let detail: String = text.chars().take(2000).collect();
     let (key, code) = match problem(text) {
         Problem::SignedOut => { crate::log::warn("Codex refused a run: not signed in, or the sign-in has expired"); note_auth_failed(state); ("codex.signed_out", "signedOut") }
         Problem::Limit => { crate::log::warn("Codex refused a run: the plan's usage limit is reached"); ("codex.limit", "codexLimit") }
         Problem::Network => ("codex.network", "network"),
-        Problem::Other => return Msg::new("error", text),
+        // Anything else: what its words mean, as for Claude Code (busy, too long, step limit…).
+        Problem::Other => {
+            let key = crate::claude::run_problem(text);
+            let mut m = Msg::new("error", crate::tr::text(key, &[]));
+            m.tool = Some(json!({"code": crate::claude::ASSISTANT_ERROR, "provider": ID, "reason": key.trim_start_matches("assistant."), "detail": detail}));
+            return m;
+        }
     };
     let mut m = Msg::new("error", crate::tr::text(key, &[]).trim_start_matches("CODEX_SIGNED_OUT::").to_string());
     m.tool = Some(json!({"code": code, "provider": ID, "detail": detail}));

@@ -80,9 +80,9 @@ the assistant merge the two.
 Your files stay on your computer. Thoughts talks to the AI when you chat or ask it to do
 something, and once more after a chat goes quiet, to write the short summary that Wrap works
 from (you can switch that off in Settings › Privacy & cost). It syncs only where you tell it to.
-Thoughts itself has no analytics or tracking; the assistant program it runs (Claude Code) sends
-Anthropic usage statistics and error reports of its own, which the privacy guide explains how to
-switch off. You can mark folders the assistant must not read. The details in plain language, including what to check before using it with
+Thoughts itself has no analytics or tracking, and it asks the assistant program it runs (Claude Code)
+not to send Anthropic usage statistics and error reports of its own, unless you allow that under
+Settings › Privacy & cost. You can mark folders the assistant must not read. The details in plain language, including what to check before using it with
 confidential client data: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## More to read

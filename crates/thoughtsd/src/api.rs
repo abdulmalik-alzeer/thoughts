@@ -824,6 +824,7 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
         return Err(e.into());
     }
     crate::tr::set_language(&new.language);
+    crate::claude::set_reports(new.assistant_reports);
     *cur = new.clone();
     drop(cur);
     // The same library in a new place (the user said so): its chats follow it.
@@ -1283,6 +1284,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     s.onboarded = true;
     s.save()?;
     crate::tr::set_language(&s.language);
+    crate::claude::set_reports(s.assistant_reports);
     *st.settings.write().await = s.clone();
     if o.add_library {
         crate::log::info(format!("libraries: a library was added and opened ({} listed)", s.libraries.len()));

@@ -37,7 +37,7 @@
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['codex.set.which', 'set.account', 'codex.set.title', 'codex.set.limitsTitle', 'set.perm', 'set.wrapNag', 'chatc.set.suggest'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
-    privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
+    privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'wording.reports.title', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'ldc.tab.addons', 'ldc.tab.ready', 'ldc.tab.updates'],
@@ -64,7 +64,7 @@
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));
-    x.privatePaths ??= []; x.strictPrivate ??= false; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true; x.releaseCheck ??= false; x.spending ??= { monthlyLimitUsd: null, warnPercent: 80 };
+    x.privatePaths ??= []; x.strictPrivate ??= false; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true; x.releaseCheck ??= false; x.assistantReports ??= false; x.spending ??= { monthlyLimitUsd: null, warnPercent: 80 };
     if (x.ai?.claude) x.ai.claude.permissionMode = realPerm(x.ai.claude.permissionMode);
     return x;
   };
@@ -967,6 +967,14 @@
         <h3>{t('wrapa.set.auto')}</h3>
         <p class="muted sm" id="st-autosum-hint">{t('wrapa.set.autoHint')}</p>
         <label class="check"><input type="checkbox" bind:checked={s.autoSummaries} aria-describedby="st-autosum-hint" /> {t('wrapa.set.auto')}</label>
+      </div>
+    {/if}
+    {#if vis(c, 'wording.reports.title')}
+      <!-- SEC-50: what the assistant program sends its maker on its own; off unless switched on. -->
+      <div class="card">
+        <h3>{t('wording.reports.title')}</h3>
+        <p class="muted sm" id="st-reports-hint">{t('wording.reports.hint')}</p>
+        <label class="check"><input type="checkbox" bind:checked={s.assistantReports} aria-describedby="st-reports-hint" /> {t('wording.reports.toggle')}</label>
       </div>
     {/if}
     {#if vis(c, 'layer.signalsTitle')}

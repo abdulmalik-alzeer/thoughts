@@ -54,6 +54,10 @@ pub struct Settings {
     /// Ask once a week whether a newer version has been published (`release.rs`). Off unless the
     /// user switches it on: it is a request to the internet the app does not otherwise make.
     pub release_check: bool,
+    /// Let the assistant programs the app starts (Claude Code, Codex) send their makers their own
+    /// usage statistics and error reports. Off unless the user switches it on: every run is then
+    /// started with those switched off (`claude::quiet_env`, `codex::exec_args`).
+    pub assistant_reports: bool,
     /// The monthly spending guard (see `spend.rs`).
     pub spending: SpendingSettings,
     /// Quick capture from anywhere (the desktop app's keyboard shortcut).
@@ -478,6 +482,7 @@ impl Default for Settings {
             accessibility: Accessibility::default(),
             calendar: CalendarSettings::default(),
             release_check: false,
+            assistant_reports: false,
             spending: SpendingSettings::default(),
             capture: CaptureSettings::default(),
             libraries: vec![],
@@ -1320,6 +1325,8 @@ mod tests {
         assert_eq!(s.accessibility, Accessibility::default());
         assert!(!s.release_check, "the version check is off unless switched on");
         assert!(serde_json::from_str::<Settings>(r#"{"releaseCheck":true}"#).unwrap().release_check);
+        assert!(!s.assistant_reports, "the assistant's own reports are off unless switched on");
+        assert!(serde_json::from_str::<Settings>(r#"{"assistantReports":true}"#).unwrap().assistant_reports);
         assert!(!s.ai.claude.suggest_next, "suggested next messages are off unless switched on");
         // A file from a test build that stored the old switch, untouched (false = on), gets off as well.
         let old: Settings = serde_json::from_str(r#"{"ai":{"claude":{"suggestionsOff":false}}}"#).unwrap();
