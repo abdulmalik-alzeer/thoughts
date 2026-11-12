@@ -31,8 +31,33 @@ static DAEMON_LOCK: Mutex<()> = Mutex::new(());
 struct UpdaterConfigured(bool);
 
 /// The live daemon and the version it reports, if one answers.
+///
+/// "Something answers on the port in daemon.json" is not enough: that file outlives a daemon that
+/// was killed, and any program may have taken the port since. The responder has to prove it knows
+/// the token (`thoughtsd::hello`); only then is the token sent to it, by this or any later call.
 fn daemon_alive() -> Option<(thoughtsd::paths::DaemonInfo, Option<String>)> {
+    use thoughtsd::hello::Probe;
     let info = thoughtsd::paths::read_daemon_info()?;
+    match thoughtsd::hello::probe(info.port, &info.token) {
+        Probe::Daemon(version) => Some((info, Some(version))),
+        Probe::Legacy => legacy_daemon(info),
+        Probe::Nobody => None,
+    }
+}
+
+/// A daemon left running by an app older than 0.0.9 cannot answer the challenge. It still has to
+/// be found, so that it can be replaced once it is idle (`ensure_daemon`), but it is believed only
+/// when a daemon process demonstrably exists: the daemon lock is held, and daemon.json is still the
+/// file that was read (a daemon that has just started removes a stale one before anything else).
+/// With the lock free there is no daemon at all, and whatever answers on that port is someone else.
+fn legacy_daemon(info: thoughtsd::paths::DaemonInfo) -> Option<(thoughtsd::paths::DaemonInfo, Option<String>)> {
+    if let Ok(Some(_free)) = thoughtsd::acquire_lock(&thoughtsd::paths::lock_file()) {
+        return None;
+    }
+    let now = thoughtsd::paths::read_daemon_info()?;
+    if now.port != info.port || now.token != info.token {
+        return None;
+    }
     let body = ureq::get(&format!("http://127.0.0.1:{}/api/ping", info.port))
         .set("Authorization", &format!("Bearer {}", info.token))
         .timeout(Duration::from_millis(800))
@@ -40,10 +65,18 @@ fn daemon_alive() -> Option<(thoughtsd::paths::DaemonInfo, Option<String>)> {
         .ok()?
         .into_string()
         .unwrap_or_default();
-    let version = serde_json::from_str::<Value>(&body)
-        .ok()
-        .and_then(|v| v["version"].as_str().map(String::from));
-    Some((info, version))
+    let version = serde_json::from_str::<Value>(&body).ok().and_then(|v| v["version"].as_str().map(String::from))?;
+    // This version and every later one answer the challenge: claiming to be one of them is a lie.
+    legacy_version(&version, VERSION).then_some((info, Some(version)))
+}
+
+/// Whether `reported` is a version from before the challenge existed, that is, older than this app.
+fn legacy_version(reported: &str, ours: &str) -> bool {
+    let parts = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse().ok()).collect() };
+    match (parts(reported), parts(ours)) {
+        (Some(r), Some(o)) => r.len() == 3 && r < o,
+        _ => false,
+    }
 }
 
 /// The AppImage this app was started from (`$APPIMAGE`), if any.
@@ -841,5 +874,14 @@ mod tests {
         // Only Windows and Android serve the bundle over http(s)://tauri.localhost.
         assert_eq!(nav_allowed(&url("http://tauri.localhost/index.html"), None), cfg!(any(windows, target_os = "android")));
         assert!(!nav_allowed(&url("http://tauri.localhost:8080/"), None));
+    }
+
+    #[test]
+    fn only_an_older_daemon_may_skip_the_challenge() {
+        assert!(legacy_version("0.0.8", "0.0.9") && legacy_version("0.0.1", "0.1.0") && legacy_version("0.9.9", "1.0.0"));
+        // The same version or a newer one knows the challenge; anything unparsable is not believed.
+        for v in ["0.0.9", "0.0.10", "1.0.0", "", "0.0", "0.0.8-beta", "latest", "0.0.8.1"] {
+            assert!(!legacy_version(v, "0.0.9"), "{v}");
+        }
     }
 }

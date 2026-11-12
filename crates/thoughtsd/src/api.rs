@@ -176,7 +176,9 @@ pub fn router(state: Arc<AppState>) -> Router {
             .allow_origin(tower_http::cors::AllowOrigin::predicate(|o: &HeaderValue, _| o.to_str().map_or(false, origin_allowed)))
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]));
-    api.with_state(state)
+    // Added after the layers, so it is the one route that needs no token: a client uses it to check
+    // who is answering on this port before it sends the token anywhere (see `hello.rs`).
+    api.merge(crate::hello::routes()).with_state(state)
 }
 
 /// Uploads are base64 inside JSON: room for a few 25 MB files per request.

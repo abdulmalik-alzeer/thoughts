@@ -10,6 +10,7 @@ pub mod askpass;
 pub mod chats;
 pub mod claude;
 pub mod git;
+pub mod hello;
 pub mod layer_api;
 pub mod library;
 pub mod log;
@@ -68,6 +69,10 @@ pub async fn run() -> anyhow::Result<()> {
         // A filesystem without locking should not keep the app from working.
         Err(e) => { log::warn(format!("could not take the daemon lock ({e}); continuing without it")); None }
     };
+    // Holding the lock means no other daemon is alive, so a daemon.json still lying here was left
+    // by one that died. Remove it now: until this daemon has written its own, nothing should point
+    // a client at a port that anyone may have taken since.
+    if _lock.is_some() { paths::clear_daemon_info(); }
     log::info(format!("daemon {} starting (pid {}, {})", env!("CARGO_PKG_VERSION"), std::process::id(), std::env::consts::OS));
     // Assistant processes that outlived a crashed daemon are ended before anything new starts.
     let reaped = runs::reap_stale(&paths::runs_file());
@@ -115,25 +120,11 @@ pub async fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Whether the daemon that owns `token` is answering on `port`. The token is not sent: the
+/// responder has to prove it knows it (see `hello`).
 pub async fn ping(port: u16, token: &str) -> bool {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let Ok(Ok(mut s)) = tokio::time::timeout(
-        std::time::Duration::from_millis(800),
-        tokio::net::TcpStream::connect(("127.0.0.1", port)),
-    )
-    .await
-    else {
-        return false;
-    };
-    let req = format!(
-        "GET /api/ping HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
-    );
-    if s.write_all(req.as_bytes()).await.is_err() {
-        return false;
-    }
-    let mut buf = vec![0u8; 256];
-    matches!(tokio::time::timeout(std::time::Duration::from_millis(800), s.read(&mut buf)).await,
-        Ok(Ok(n)) if n > 12 && buf[..n].starts_with(b"HTTP/1.1 200"))
+    let token = token.to_string();
+    matches!(tokio::task::spawn_blocking(move || hello::probe(port, &token)).await, Ok(hello::Probe::Daemon(_)))
 }
 
 #[cfg(test)]
