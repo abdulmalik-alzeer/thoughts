@@ -95,9 +95,14 @@ Thoughts.app
   moved them to `.claude/presets/`) is standing instruction for the assistant, so it is part of
   the check: each `.claude/**/*.md` file is compared byte-for-byte with the starter's version. A
   file that differs or has no starter counterpart is a finding, and its bytes are part of the
-  fingerprint. Editing a starter skill therefore changes the baseline for every library, and a
-  library whose skills the tune-up routine has adjusted asks for trust again. The fingerprint is
-  always computed, including when nothing is found.
+  fingerprint. Editing a starter skill therefore changes the baseline for every library. The
+  fingerprint is always computed, including when nothing is found.
+- No assistant run may write under `.claude/` (`claude::protective_deny`); the one exception is
+  the first-time set-up run, which installs the presets. So the tune-up and wrap routines never
+  adjust a skill themselves: they describe the change and send the user to Settings →
+  Customisations → Routines, where the app writes the routine after the user has reviewed it and
+  renews the trust record (`routines.rs`). Every run is told this as well (`claude::managed_note`),
+  because libraries made before 0.0.9 carry routines that still say "edit that skill's file".
 - Skills and presets are markdown only, with no `allowed-tools` or hooks in skill frontmatter.
   Nothing in the starter adds executable content.
 - Reorganize works in a copy of the library; that copy is trust-checked like any other folder and

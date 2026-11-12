@@ -821,6 +821,10 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     let remote_url = o.remote_url.trim().to_string();
     if s.sync_enabled() && !remote_url.is_empty() { check_remote_url(&remote_url)?; }
     let fresh = o.library_mode != "existing";
+    // An existing folder that is still an untouched copy of the starter kit has never been set up.
+    // Its own instructions tell every chat to offer set-up first — which no chat can finish, since
+    // only the set-up run may write `.claude/`. So the app runs set-up for it, as for a new library.
+    let needs_setup = fresh || awaits_setup(&path);
     if fresh {
         library::create_from_starter(&path)?;
         // Trim rituals for modules that were not chosen (the AI re-adds them on demand).
@@ -865,7 +869,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     *st.settings.write().await = s.clone();
     applayer::ensure(&st).await?;
 
-    if !fresh {
+    if !needs_setup {
         return Ok(Json(json!({"ok": true, "setupChatId": null})));
     }
     let on = |m: &str| s.modules.get(m).copied().unwrap_or(false);
@@ -922,6 +926,16 @@ async fn begin_history(st: &AppState, s: &Settings, path: &std::path::Path, fres
     if !s.history_enabled() { return Ok(()); }
     if s.sync_enabled() && git::repo_of(path) == git::Repo::Missing && git::enclosing_repo(path).is_none() { git::init(st, path).await?; }
     if fresh { git::ensure_history(st, path).await.map(|_| ()) } else { git::start_history(st, path).await }
+}
+
+/// Is `path` a library that was never set up: does it still hold the starter kit's own set-up
+/// routine, byte for byte? (A routine someone has changed is not run with the right to write `.claude/`.)
+fn awaits_setup(path: &std::path::Path) -> bool {
+    let rel = ".claude/skills/init-library/SKILL.md";
+    match (std::fs::read(path.join(rel)), library::STARTER.get_file(rel)) {
+        (Ok(have), Some(want)) => have == want.contents(),
+        _ => false,
+    }
 }
 
 /// The line of the setup prompt that tells the assistant who it is setting the library up for.
@@ -1022,18 +1036,14 @@ fn provider_test_result(r: anyhow::Result<String>) -> Value {
     }
 }
 
-/// Opens Claude Code's browser login flow.
+/// Opens Claude Code's browser login flow. One attempt at a time: asking again ends the attempt
+/// before it, and an attempt nobody finishes is ended after ten minutes (`claude::watch_login`).
 async fn claude_login(State(st): S) -> R {
     let bin = claude::binary(&st).await.ok_or_else(|| crate::tr::err("assistant.missing", &[]))?;
     let mut c = crate::proc::command(bin);
-    c.args(["auth", "login"]).env("PATH", claude::shell_path())
+    c.args(["auth", "login"]).env("PATH", claude::shell_path()).kill_on_drop(true)
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-    let mut child = c.spawn()?;
-    tokio::spawn(async move {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(600), child.wait()).await;
-        st.forget_auth();
-        st.emit(json!({"type": "auth.changed"}));
-    });
+    claude::watch_login(st.clone(), c.spawn()?, claude::LOGIN_TIMEOUT);
     ok()
 }
 
@@ -2870,6 +2880,22 @@ mod tests {
         chat_patch(State(st.clone()), Path(id.clone()), Json(patch)).await.unwrap();
         let c = st.chats.get(&id).await.unwrap();
         assert_eq!((c.options.permission_mode.as_deref(), c.options.model.as_deref()), (Some("plan"), Some("opus")));
+    }
+
+    #[test]
+    fn an_untouched_starter_folder_still_awaits_setup() {
+        let d = std::env::temp_dir().join(format!("thoughts-unset-{}", uuid::Uuid::new_v4()));
+        library::create_from_starter(&d).unwrap();
+        assert!(awaits_setup(&d));
+        // Someone changed the set-up routine: it is not run with the right to write `.claude/`.
+        let f = d.join(".claude/skills/init-library/SKILL.md");
+        std::fs::write(&f, "do something else").unwrap();
+        assert!(!awaits_setup(&d));
+        // Set-up has been done (the routine removes itself): an ordinary library.
+        std::fs::remove_file(&f).unwrap();
+        assert!(!awaits_setup(&d));
+        assert!(!awaits_setup(&d.join("no-such-folder")));
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

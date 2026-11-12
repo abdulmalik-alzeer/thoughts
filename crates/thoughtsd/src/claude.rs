@@ -12,24 +12,24 @@ use tokio::process::Command;
 /// How long a one-shot completion (mini-wrap, title) may take before it is abandoned.
 pub const COMPLETE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// PATH from the user's login shell — GUI apps on macOS start with a bare PATH.
+/// PATH as the user's own terminal has it — GUI apps on macOS start with a bare PATH — followed
+/// by the folders programs are commonly installed in.
 pub fn shell_path() -> &'static str {
     static P: OnceLock<String> = OnceLock::new();
     P.get_or_init(|| {
         let base = std::env::var("PATH").unwrap_or_default();
         let mut parts: Vec<String> = vec![];
         #[cfg(unix)]
-        {
-            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
-            if let Ok(o) = crate::proc::std_command(shell).args(["-lc", "printf %s \"$PATH\""]).output() {
-                parts.extend(String::from_utf8_lossy(&o.stdout).split(':').map(String::from));
-            }
-        }
+        parts.extend(terminal_path(&std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()), &[]));
         parts.extend(base.split(if cfg!(windows) { ';' } else { ':' }).map(String::from));
         if let Some(h) = dirs::home_dir() {
             for d in [".local/bin", ".claude/local", ".npm-global/bin", ".cargo/bin", ".bun/bin"] {
                 parts.push(h.join(d).to_string_lossy().into());
             }
+            // Should the shell not have told us (a start-up file that hangs or fails): where version
+            // managers keep what they install.
+            let nvm = std::env::var_os("NVM_DIR").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| h.join(".nvm"));
+            for d in version_manager_dirs(&h, &nvm) { parts.push(d.to_string_lossy().into()); }
         }
         #[cfg(not(windows))]
         for d in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
@@ -47,6 +47,64 @@ pub fn shell_path() -> &'static str {
         parts.retain(|p| !p.is_empty() && seen.insert(p.clone()));
         parts.join(if cfg!(windows) { ";" } else { ":" })
     })
+}
+
+/// How long the user's shell gets to say what its PATH is.
+#[cfg(unix)]
+const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+/// Printed on both sides of the PATH, because start-up files may print things of their own.
+#[cfg(unix)]
+const PATH_MARK: &str = "__THOUGHTS_PATH__";
+
+/// The PATH `shell` sets up for a terminal window. nvm, fnm, asdf and their like add their folders
+/// in the start-up file of *interactive* shells (`~/.zshrc`, `~/.bashrc`), which a plain login
+/// shell (`-lc`) never reads — so the shell is first asked as an interactive login shell, and as a
+/// plain login shell only when that fails or takes too long. `env` is added to the shell's
+/// environment (tests point it at start-up files of their own).
+#[cfg(unix)]
+fn terminal_path(shell: &str, env: &[(&str, &str)]) -> Vec<String> {
+    for flags in ["-ilc", "-lc"] {
+        let mut c = crate::proc::std_command(shell);
+        c.args([flags, &format!("printf '%s%s%s' {PATH_MARK} \"$PATH\" {PATH_MARK}")]);
+        for (k, v) in env { c.env(k, v); }
+        let found = crate::proc::std_output_timeout(&mut c, SHELL_TIMEOUT).ok().and_then(|o| marked_path(&String::from_utf8_lossy(&o.stdout)));
+        if let Some(p) = found { return p; }
+    }
+    vec![]
+}
+
+/// The PATH between the two marks in what the shell printed, whatever else is around it.
+#[cfg(unix)]
+fn marked_path(out: &str) -> Option<Vec<String>> {
+    let start = out.find(PATH_MARK)? + PATH_MARK.len();
+    let end = start + out[start..].find(PATH_MARK)?;
+    let dirs: Vec<String> = out[start..end].split(':').map(str::trim).filter(|d| !d.is_empty()).map(String::from).collect();
+    (!dirs.is_empty()).then_some(dirs)
+}
+
+/// Folders (that exist) where version managers keep the programs they install: nvm's default Node
+/// version, and the shim folders of fnm, asdf, mise, Volta, nodenv and n.
+fn version_manager_dirs(home: &Path, nvm: &Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = nvm_bin(nvm).into_iter().collect();
+    for d in [".local/share/fnm/aliases/default/bin", "Library/Application Support/fnm/aliases/default/bin", ".fnm/aliases/default/bin",
+              ".asdf/shims", ".local/share/mise/shims", ".volta/bin", ".nodenv/shims", "n/bin"] {
+        out.push(home.join(d));
+    }
+    out.retain(|d| d.is_dir());
+    out
+}
+
+/// The `bin` folder of the Node version nvm uses by default: the installed version its `default`
+/// alias names, or else the newest one installed.
+fn nvm_bin(nvm: &Path) -> Option<PathBuf> {
+    let number = |name: &str| -> Option<Vec<u64>> { name.trim().trim_start_matches('v').split('.').map(|n| n.parse().ok()).collect() };
+    let mut versions: Vec<(Vec<u64>, PathBuf)> = std::fs::read_dir(nvm.join("versions/node")).ok()?.flatten()
+        .filter_map(|e| Some((number(&e.file_name().to_string_lossy())?, e.path()))).collect();
+    versions.sort();
+    // The alias may be a whole version ("v20.11.1"), part of one ("20"), or a name ("lts/*", "node") — a name means the newest.
+    let wanted = std::fs::read_to_string(nvm.join("alias/default")).ok().and_then(|a| number(&a));
+    let pick = wanted.and_then(|w| versions.iter().rev().find(|(v, _)| v.starts_with(&w))).or(versions.last())?;
+    Some(pick.1.join("bin"))
 }
 
 pub fn find_binary(custom: &Option<String>, name: &str) -> Option<PathBuf> {
@@ -529,12 +587,27 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
         if working_in(dir) { continue; }
         match dir.file_name().and_then(|n| n.to_str()) {
             // Files the user attached to *this* chat must stay readable; everyone else's are closed.
+            // A deny rule cannot make an exception, so every other chat's folder is named — with as
+            // few rules as it takes: nothing in the whole folder can be edited (the two rules below),
+            // which leaves reading and the shell to close per folder.
             Some("attachments") => {
                 let p = rule_path(dir);
                 deny.push(format!("Edit({p})"));
                 deny.push(format!("Edit({p}/**)"));
-                for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-                    if e.file_name().to_string_lossy() != chat_id { closed(&e.path(), &mut deny); }
+                let others: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+                    .filter(|e| e.file_name().to_string_lossy() != chat_id).map(|e| e.path()).collect();
+                if others.len() > MAX_CLOSED_FOLDERS {
+                    // More folders than the rules file may name (Claude Code ignores a settings file
+                    // over 2 MB — and with it every rule): close the whole folder, this chat's included.
+                    crate::log::warn(format!("{} chats have attachments: more than can be closed one by one, so no chat's attachments can be read by the assistant", others.len()));
+                    closed(dir, &mut deny);
+                } else {
+                    for o in &others {
+                        let p = rule_path(o);
+                        deny.push(format!("Read({p})"));
+                        deny.push(format!("Read({p}/**)"));
+                        deny.push(format!("Bash(*{}*)", o.to_string_lossy().replace('\\', "/")));
+                    }
                 }
             }
             // The search add-on is a tool the assistant may use, but not rewrite.
@@ -555,6 +628,26 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
     let mut seen = std::collections::HashSet::new();
     deny.retain(|r| seen.insert(r.clone()));
     deny
+}
+
+/// The most other chats' attachment folders a run's rules name one by one (about 270 bytes each,
+/// far below the 2 MB a settings file may have).
+pub const MAX_CLOSED_FOLDERS: usize = 3000;
+/// The largest rules document a run is started with. Claude Code does not read a settings file
+/// over 2 MB, and a run without its rules must never start.
+pub const MAX_RULES_BYTES: usize = 1_500_000;
+
+/// What every run that may not write `.claude/` (all but first-time setup) is told about it. The
+/// routines of libraries made before 0.0.9 still say "edit that skill's file"; this is how such a
+/// run learns that it cannot, and what to do instead.
+pub fn managed_note(kind: &str) -> Option<&'static str> {
+    if kind == "setup" { return None; }
+    Some("The `.claude` folder here (routines, also called skills, and settings) is kept by the Thoughts app: you can read it, but any \
+        attempt to create, edit or delete something inside it is refused. Do not try, and never say such a change was made. When a routine \
+        (tune-up or wrap, for example) tells you to edit a skill file, describe the agreed change in one or two plain sentences instead and \
+        ask the user to open Settings → Customisations → Routines in the app, choose that routine, and paste your sentences into the box that \
+        asks the assistant for a draft; they review the result and keep it there. Changes to CLAUDE.md and to files under `routines/` are \
+        yours to make as before.")
 }
 
 /// What every run is told about the user's language.
@@ -639,18 +732,221 @@ fn merge_deny(a: Option<String>, b: Option<String>) -> Option<String> {
 #[derive(Clone, Copy)]
 enum Passed<'a> { Inline(&'a str), File(&'a Path) }
 
+/// Short-lived private files handed to one assistant run (its rules, and on Windows its extra
+/// instructions). They are removed when this is dropped: when the run is over, could not start,
+/// or is cut off by the daemon stopping.
+#[derive(Default)]
+struct TempFiles(Vec<PathBuf>);
+
+impl TempFiles {
+    fn add(&mut self, dir: &Path, name: &str, text: &str) -> std::io::Result<PathBuf> {
+        crate::paths::create_private_dir(dir)?;
+        let f = dir.join(format!("{}-{name}", uuid::Uuid::new_v4().simple()));
+        crate::paths::write_atomic(&f, text.as_bytes(), true)?;
+        self.0.push(f.clone());
+        Ok(f)
+    }
+}
+
+impl Drop for TempFiles {
+    fn drop(&mut self) { for f in &self.0 { let _ = std::fs::remove_file(f); } }
+}
+
+/// Remove what an earlier daemon left in the run folder (it died before its runs were over).
+/// Called at start, before any run of this daemon exists.
+pub fn clear_run_tmp(dir: &Path) -> usize {
+    std::fs::read_dir(dir).into_iter().flatten().flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .filter(|e| std::fs::remove_file(e.path()).is_ok()).count()
+}
+
+const MINUTE: std::time::Duration = std::time::Duration::from_secs(60);
+/// A run nobody is watching that prints nothing for this long has stalled.
+pub const IDLE_LIMIT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
+/// The longest a run nobody is watching may take.
+pub const TOTAL_LIMIT: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+/// After its final answer the program should exit by itself; it gets this long.
+pub const AFTER_RESULT: std::time::Duration = std::time::Duration::from_secs(2 * 60);
+/// A program that closed its output gets this long to exit.
+const EXIT_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long a run may stay silent, and how long it may take altogether, before it is ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RunLimits {
+    /// No output at all for this long: the program has stalled.
+    pub idle: Option<std::time::Duration>,
+    /// The longest the run may take from start to finish.
+    pub total: Option<std::time::Duration>,
+    /// How long the program may linger after its final answer.
+    pub after_result: std::time::Duration,
+}
+
+/// The limits for a run of this kind of chat.
+/// - A chat or a customise run is watched by the person who started it, who has the Stop button.
+/// - An automatic task has a time limit of its own (`workflows.rs`); silence still means it stalled.
+/// - Everything else the app runs (wrap, reorganize, set-up, adding a feature) holds something up
+///   while it runs — the library, most of all — so it may neither stall nor go on for ever.
+pub fn run_limits(kind: &str) -> RunLimits {
+    match kind {
+        "chat" | "customize" => RunLimits { idle: None, total: None, after_result: AFTER_RESULT },
+        "workflow" => RunLimits { idle: Some(IDLE_LIMIT), total: None, after_result: AFTER_RESULT },
+        _ => RunLimits { idle: Some(IDLE_LIMIT), total: Some(TOTAL_LIMIT), after_result: AFTER_RESULT },
+    }
+}
+
+impl RunLimits {
+    /// The limit a run has gone past, if any. `running` = since it started, `silent` = since its
+    /// last output, `result` = its final answer once it has given one.
+    fn exceeded(&self, running: std::time::Duration, silent: std::time::Duration, result: Option<bool>) -> Option<Ended> {
+        if let Some(ok) = result { return (silent >= self.after_result).then_some(Ended::Result(ok)); }
+        if let Some(t) = self.total.filter(|t| running >= *t) { return Some(Ended::TooLong(t)); }
+        if let Some(i) = self.idle.filter(|i| silent >= *i) { return Some(Ended::Stalled(i)); }
+        None
+    }
+
+    /// How long until the limits need looking at again.
+    fn next_check(&self, running: std::time::Duration, silent: std::time::Duration, has_result: bool) -> std::time::Duration {
+        let mut wait = std::time::Duration::from_secs(3600);
+        if has_result { wait = wait.min(self.after_result.saturating_sub(silent)); }
+        else {
+            if let Some(t) = self.total { wait = wait.min(t.saturating_sub(running)); }
+            if let Some(i) = self.idle { wait = wait.min(i.saturating_sub(silent)); }
+        }
+        wait.max(std::time::Duration::from_millis(10))
+    }
+}
+
+/// How a run came to its end.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Ended {
+    /// The program gave its final answer (`true` = it succeeded).
+    Result(bool),
+    /// It exited without one.
+    NoResult,
+    /// It was stopped: by the user, or by the app.
+    Stopped,
+    /// It printed nothing for this long and was ended.
+    Stalled(std::time::Duration),
+    /// It went on for longer than this and was ended.
+    TooLong(std::time::Duration),
+    /// Its output could no longer be read, and it was ended.
+    Lost(String),
+}
+
+/// What `follow` reports.
+struct Followed { ended: Ended, exit: std::io::Result<std::process::ExitStatus>, stderr: String }
+
+/// Follow a started assistant program to its end. Every line it prints goes to `on_line`, which
+/// answers `Some(success)` for the final result. And it does end: when `kill` fires (the Stop
+/// button), when it goes past `limits`, when its output can no longer be read, or when it has
+/// closed its output and still does not exit. The kill switch is honoured the whole time,
+/// including after the output is over — the process (and everything it started) is always gone
+/// when this returns.
+async fn follow<F, Fut>(child: &mut tokio::process::Child, kill: &mut tokio::sync::oneshot::Receiver<()>, limits: RunLimits, mut on_line: F) -> Followed
+where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Option<bool>> {
+    let pid = child.id();
+    // What it says on stderr is collected on the side, and can be read even if that stream never closes.
+    let err_text = Arc::new(std::sync::Mutex::new(String::new()));
+    let mut err_task = child.stderr.take().map(|e| {
+        let text = err_text.clone();
+        tokio::spawn(async move {
+            let (mut reader, mut raw) = (BufReader::new(e), Vec::new());
+            while matches!(reader.read_until(b'\n', &mut raw).await, Ok(n) if n > 0) {
+                let mut t = text.lock().unwrap_or_else(|e| e.into_inner());
+                if t.len() < 4000 { t.push_str(String::from_utf8_lossy(&raw).trim_end()); t.push('\n'); }
+                raw.clear();
+            }
+        })
+    });
+    let (started, mut last_output, mut result, mut past_limit) = (std::time::Instant::now(), std::time::Instant::now(), None, false);
+    let mut ended = match child.stdout.take() {
+        None => Ended::Lost("the program has no output to read".into()),
+        Some(out) => {
+            // Bytes, not text: one line that is not valid UTF-8 must not end the run.
+            let (mut reader, mut raw) = (BufReader::new(out), Vec::new());
+            loop {
+                let wait = limits.next_check(started.elapsed(), last_output.elapsed(), result.is_some());
+                tokio::select! {
+                    _ = &mut *kill => break Ended::Stopped,
+                    n = reader.read_until(b'\n', &mut raw) => match n {
+                        Ok(0) => break result.map_or(Ended::NoResult, Ended::Result),
+                        Ok(_) => {
+                            last_output = std::time::Instant::now();
+                            let line = String::from_utf8_lossy(&raw).trim().to_string();
+                            raw.clear();
+                            if !line.is_empty() { if let Some(r) = on_line(line).await { result = Some(r); } }
+                        }
+                        Err(e) => break Ended::Lost(e.to_string()),
+                    },
+                    _ = tokio::time::sleep(wait) => {
+                        if let Some(why) = limits.exceeded(started.elapsed(), last_output.elapsed(), result) { past_limit = true; break why; }
+                    }
+                }
+            }
+        }
+    };
+    // The output is over. A program that finished exits at once; wait for that — but it can still
+    // be stopped, and it does not get for ever.
+    let mut exit = None;
+    if !past_limit && matches!(ended, Ended::Result(_) | Ended::NoResult) {
+        tokio::select! {
+            e = child.wait() => exit = Some(e),
+            _ = &mut *kill => { if result.is_none() { ended = Ended::Stopped; } }
+            _ = tokio::time::sleep(EXIT_GRACE) => {}
+        }
+    }
+    let exit = match exit {
+        Some(e) => e,
+        None => {
+            // The whole group: the assistant's own children (shells, tools) must not live on.
+            if let Some(pid) = pid { crate::proc::kill_tree(pid); }
+            let _ = child.kill().await;
+            child.wait().await
+        }
+    };
+    // A helper that still holds stderr open must not hold the run open.
+    if let Some(t) = err_task.as_mut() {
+        if tokio::time::timeout(std::time::Duration::from_secs(3), &mut *t).await.is_err() { t.abort(); }
+    }
+    let stderr = err_text.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    Followed { ended, exit, stderr }
+}
+
+/// How long one sign-in attempt may stay open.
+pub const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Look after a sign-in attempt (`claude auth login`, waiting for the browser). There is only ever
+/// one: starting another ends the one before it, and an attempt nobody finishes is ended after
+/// `limit`. Only the program itself is ended, never what it opened (the browser).
+pub fn watch_login(state: Arc<AppState>, mut child: tokio::process::Child, limit: std::time::Duration) {
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let previous = state.login.lock().unwrap_or_else(|e| e.into_inner()).replace(stop);
+    if let Some(p) = previous { let _ = p.send(()); }
+    tokio::spawn(async move {
+        let replaced = tokio::select! {
+            _ = child.wait() => false,
+            _ = tokio::time::sleep(limit) => false,
+            _ = stopped => true,
+        };
+        // Ended and reaped, whichever way it went (a no-op when it has already exited).
+        let _ = child.kill().await;
+        // A newer attempt is in charge now: it will say how things stand when it is over.
+        if replaced { return; }
+        state.forget_auth();
+        state.emit(json!({"type": "auth.changed"}));
+    });
+}
+
 /// The command line of one assistant run (everything after the program name). Built apart from
 /// starting the program, so what a run is started with can be checked without starting one.
 /// `mode` is always passed: a run without `--permission-mode` takes the default from the user's
 /// (or the folder's) own Claude Code settings, which can be "bypass permissions".
 /// `budget` is the spending ceiling, already checked against what the installed program accepts.
-fn run_args(opts: &RunOptions, mode: &str, budget: Option<&str>, resume: Option<&str>, add_dirs: &[PathBuf], rules: Option<Passed>, system: Passed) -> Vec<std::ffi::OsString> {
+/// `rules` is the private file holding the run's deny rules: they are never put on the command line,
+/// where their size would count against the system's limit for arguments (and anyone could read them).
+fn run_args(opts: &RunOptions, mode: &str, budget: Option<&str>, resume: Option<&str>, add_dirs: &[PathBuf], rules: Option<&Path>, system: Passed) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"].iter().map(Into::into).collect();
-    match rules {
-        Some(Passed::Inline(json)) => { a.push("--settings".into()); a.push(json.into()); }
-        Some(Passed::File(f)) => { a.push("--settings".into()); a.push(f.into()); }
-        None => {}
-    }
+    if let Some(f) = rules { a.push("--settings".into()); a.push(f.into()); }
     if let Some(r) = resume { a.push("--resume".into()); a.push(r.into()); }
     if let Some(m) = opts.model.as_ref().filter(|s| !s.is_empty()) { a.push("--model".into()); a.push(m.into()); }
     if let Some(e) = opts.effort.as_ref().filter(|s| !s.is_empty()) { a.push("--effort".into()); a.push(e.into()); }
@@ -798,8 +1094,10 @@ pub async fn start_run(
     if let Some(lib) = &record {
         record_library(&state, lib, &crate::git::subject::edit("your changes"), false).await;
     }
-    let lang = language_note(&settings.language);
-    let sys = match &spec.append_system { Some(s) => format!("{s}\n\n{lang}"), None => lang.to_string() };
+    // What the run is told on top of its prompt: the caller's own instructions, that `.claude/` is
+    // not its to change (all runs but first-time setup), and the user's language.
+    let sys = [spec.append_system.as_deref(), managed_note(&kind), Some(language_note(&settings.language))]
+        .into_iter().flatten().collect::<Vec<_>>().join("\n\n");
     let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };
     let id = spec.chat_id.clone();
 
@@ -828,38 +1126,39 @@ pub async fn start_run(
 
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
-    // npm's `claude.cmd` on Windows goes through cmd.exe, which cannot carry multi-line or
-    // quote-heavy arguments: the rules and the extra instructions travel as files instead.
-    let mut temp_files: Vec<PathBuf> = vec![];
-    let via_files = cfg!(windows) && is_cmd_shim(&bin);
-    let mut as_file = |name: &str, text: &str| -> std::io::Result<PathBuf> {
-        let dir = crate::paths::run_tmp_dir();
-        crate::paths::create_private_dir(&dir)?;
-        let f = dir.join(format!("{}-{name}", uuid::Uuid::new_v4().simple()));
-        crate::paths::write_atomic(&f, text.as_bytes(), true)?;
-        temp_files.push(f.clone());
-        Ok(f)
-    };
     let budget = match spec.options.max_budget_usd.filter(|b| b.is_finite() && *b > 0.0) {
         Some(b) if has_flag(&state, "--max-budget-usd").await => Some(format!("{b:.2}")),
         Some(_) => { crate::log::warn(format!("run {}: this version of the assistant cannot limit spending; only the time limit applies", spec.chat_id)); None }
         None => None,
     };
-    let rules_file = match &deny { Some(d) if via_files => Some(as_file("settings.json", d)?), _ => None };
-    let sys_file = if via_files { Some(as_file("system.txt", &sys)?) } else { None };
-    let rules = match (&rules_file, &deny) { (Some(f), _) => Some(Passed::File(f)), (None, Some(d)) => Some(Passed::Inline(d)), (None, None) => None };
+    // The rules always travel in a private file, never on the command line: they grow with the
+    // library (private folders, other chats' attachments), and one argument may only be so long.
+    // npm's `claude.cmd` on Windows goes through cmd.exe, which cannot carry multi-line or
+    // quote-heavy arguments at all: there the extra instructions travel as a file as well.
+    let mut temp = TempFiles::default();
+    let tmp_dir = crate::paths::run_tmp_dir();
+    let via_files = cfg!(windows) && is_cmd_shim(&bin);
+    let rules_file = match &deny {
+        Some(d) if d.len() > MAX_RULES_BYTES => {
+            crate::log::error(format!("run {}: not started — its rules are too large to hand over ({} bytes)", spec.chat_id, d.len()));
+            anyhow::bail!("the assistant was not started: its safety rules have grown too large to hand over");
+        }
+        Some(d) => Some(temp.add(&tmp_dir, "settings.json", d)?),
+        None => None,
+    };
+    let sys_file = if via_files { Some(temp.add(&tmp_dir, "system.txt", &sys)?) } else { None };
     let system = match &sys_file { Some(f) => Passed::File(f), None => Passed::Inline(&sys) };
-    c.current_dir(&spec.cwd).args(run_args(&spec.options, &mode, budget.as_deref(), spec.resume.as_deref(), &spec.add_dirs, rules, system));
+    c.current_dir(&spec.cwd).args(run_args(&spec.options, &mode, budget.as_deref(), spec.resume.as_deref(), &spec.add_dirs, rules_file.as_deref(), system));
     provider.apply(&mut c);
     c.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = c.spawn().map_err(|e| {
         crate::log::error(format!("run {}: could not start the assistant: {e}", spec.chat_id));
-        for f in &temp_files { let _ = std::fs::remove_file(f); }
         e
     })?;
-    let (Some(mut stdin), Some(stdout), Some(stderr)) = (child.stdin.take(), child.stdout.take(), child.stderr.take()) else {
+    let Some(mut stdin) = child.stdin.take() else {
+        if let Some(pid) = child.id() { crate::proc::kill_tree(pid); }
         anyhow::bail!("could not connect to the assistant process");
     };
     // Remember the process, so a daemon that dies uncleanly can be cleaned up after.
@@ -881,52 +1180,52 @@ pub async fn start_run(
         state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
     }
 
+    let limits = run_limits(&kind);
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        let mut err_lines = BufReader::new(stderr).lines();
-        let err_task = tokio::spawn(async move {
-            let mut buf = String::new();
-            while let Ok(Some(l)) = err_lines.next_line().await {
-                if buf.len() < 4000 { buf.push_str(&l); buf.push('\n'); }
+        // Removed when the run is over, however it ends.
+        let _temp = temp;
+        let (st, cid) = (state.clone(), id.clone());
+        let f = follow(&mut child, &mut kill_rx, limits, move |line| {
+            let (st, cid) = (st.clone(), cid.clone());
+            async move {
+                let ev = serde_json::from_str::<Value>(&line).ok()?;
+                handle_event(&st, &cid, &ev).await
             }
-            buf
-        });
-        let mut ok = false;
-        let mut got_result = false;
-        loop {
-            tokio::select! {
-                _ = &mut kill_rx => {
-                    // The whole group: the assistant's own children (shells, tools) must not live on.
-                    if let Some(pid) = pid { crate::proc::kill_tree(pid); }
-                    let _ = child.kill().await;
-                    push(&state, &id, Msg::new("system", stopped)).await;
-                    break;
-                }
-                line = lines.next_line() => {
-                    let Ok(Some(line)) = line else { break };
-                    let Ok(ev) = serde_json::from_str::<Value>(&line) else { continue };
-                    if let Some(r) = handle_event(&state, &id, &ev).await {
-                        got_result = true;
-                        ok = r;
-                    }
-                }
-            }
-        }
-        let exit = child.wait().await;
+        }).await;
+        // The daemon is stopping (and has ended this process): the run was cut off, not finished.
+        // It stays marked as running, so the next start tells the user it was interrupted.
+        if state.stopping.load(std::sync::atomic::Ordering::Relaxed) { return; }
         crate::runs::forget(pid);
-        for f in &temp_files { let _ = std::fs::remove_file(f); }
-        let stderr_text = err_task.await.unwrap_or_default();
-        if !got_result && !stderr_text.trim().is_empty() {
-            push(&state, &id, error_msg(&state, stderr_text.trim()).await).await;
-        }
         let secs = started.elapsed().as_secs();
+        let ok = f.ended == Ended::Result(true);
+        let mins = |d: &std::time::Duration| (d.as_secs() / MINUTE.as_secs()).max(1).to_string();
+        // Ended by the app for going past a limit, or because it could no longer be followed: said
+        // in the chat in plain words, and as a notification where nothing else announces the failure.
+        let ended_by_app = match &f.ended {
+            Ended::Stalled(d) => Some(crate::tr::text("run.stalled", &[("minutes", &mins(d))])),
+            Ended::TooLong(d) => Some(crate::tr::text("run.too_long", &[("minutes", &mins(d))])),
+            Ended::Lost(_) => Some(crate::tr::text("run.lost", &[])),
+            _ => None,
+        };
+        match (&f.ended, ended_by_app) {
+            (_, Some(text)) => {
+                crate::log::error(format!("run {id} ended by the app after {secs}s: {:?}", f.ended));
+                push(&state, &id, Msg::new("error", &text)).await;
+                if !matches!(kind.as_str(), "wrap" | "workflow") { state.notify(&crate::tr::text("run.ended_title", &[]), &text); }
+            }
+            (Ended::Stopped, _) => push(&state, &id, Msg::new("system", stopped)).await,
+            (Ended::NoResult, _) if !f.stderr.trim().is_empty() => push(&state, &id, error_msg(&state, f.stderr.trim()).await).await,
+            _ => {}
+        }
         if ok {
             state.note_run_ok();
             crate::log::info(format!("run {id} finished ok in {secs}s"));
         } else {
-            let status = exit.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
-            let first: String = stderr_text.lines().next().unwrap_or("").chars().take(300).collect();
-            crate::log::warn(format!("run {id} did not finish ({status}, {secs}s{}){}", if got_result { ", assistant reported an error" } else { ", no result" },
+            let status = f.exit.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
+            let first: String = f.stderr.lines().next().unwrap_or("").chars().take(300).collect();
+            crate::log::warn(format!("run {id} did not finish ({status}, {secs}s, {}){}", match f.ended {
+                    Ended::Result(_) => "assistant reported an error", Ended::NoResult => "no result", Ended::Stopped => "stopped",
+                    Ended::Stalled(_) => "stalled", Ended::TooLong(_) => "took too long", Ended::Lost(_) => "output lost" },
                 if first.is_empty() { String::new() } else { format!(": {first}") }));
         }
         finish(state, id, ok, record, on_done).await;
@@ -1387,11 +1686,11 @@ mod tests {
         for chosen in ["acceptEdits", "plan", "bypassPermissions"] { assert_eq!(flag(&args(Some(chosen)), "--permission-mode"), Some(chosen)); }
         // The flag is there exactly once, whatever else is passed.
         let o = RunOptions { model: Some("opus".into()), effort: Some("high".into()), ..Default::default() };
-        let a = run_args(&o, "plan", Some("1.50"), Some("sess-1"), &[PathBuf::from("/x/lib")], Some(Passed::Inline("{}")), Passed::File(Path::new("/t/system.txt")));
+        let a = run_args(&o, "plan", Some("1.50"), Some("sess-1"), &[PathBuf::from("/x/lib")], Some(Path::new("/t/rules.json")), Passed::File(Path::new("/t/system.txt")));
         assert_eq!(a.iter().filter(|x| *x == "--permission-mode").count(), 1);
         assert_eq!(flag(&a, "--max-budget-usd"), Some("1.50"));
         assert_eq!((flag(&a, "--model"), flag(&a, "--effort"), flag(&a, "--resume")), (Some("opus"), Some("high"), Some("sess-1")));
-        assert_eq!((flag(&a, "--settings"), flag(&a, "--add-dir"), flag(&a, "--append-system-prompt-file")), (Some("{}"), Some("/x/lib"), Some("/t/system.txt")));
+        assert_eq!((flag(&a, "--settings"), flag(&a, "--add-dir"), flag(&a, "--append-system-prompt-file")), (Some("/t/rules.json"), Some("/x/lib"), Some("/t/system.txt")));
         assert!(a.starts_with(&["-p".into(), "--output-format".into(), "stream-json".into()]));
         // One-shot completions (titles, mini-wraps) say their mode too.
         let one = one_shot_args(Some("haiku"), "note");
@@ -1429,6 +1728,248 @@ mod tests {
         for _ in 0..200 { if seen.lock().unwrap().len() == 5 { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
         assert_eq!(seen.lock().unwrap().last().unwrap().as_deref(), Some("acceptEdits"));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_rules_travel_in_a_private_file_that_goes_when_the_run_is_over() {
+        let home = std::env::temp_dir().join(format!("thoughts-rules-{}", uuid::Uuid::new_v4()));
+        let att = home.join("attachments");
+        for i in 0..400 { std::fs::create_dir_all(att.join(format!("3f0c1c5e-6b1a-4c1e-9d3e-{i:012}"))).unwrap(); }
+        std::fs::create_dir_all(att.join("this-chat")).unwrap();
+        let lib = Path::new("/home/u/Library");
+        let deny = protective_deny(lib, &[], &home, "this-chat", false);
+        let h = rule_path(&home);
+        // Every other chat's folder is closed for reading and for the shell; editing is closed for all of them at once.
+        let other = format!("{h}/attachments/3f0c1c5e-6b1a-4c1e-9d3e-000000000007");
+        assert!(deny.contains(&format!("Read({other})")) && deny.contains(&format!("Read({other}/**)")));
+        assert!(deny.iter().any(|d| d.starts_with("Bash(*") && d.contains("3f0c1c5e-6b1a-4c1e-9d3e-000000000007")));
+        assert!(deny.contains(&format!("Edit({h}/attachments/**)")) && !deny.contains(&format!("Edit({other}/**)")));
+        assert!(!deny.iter().any(|d| d.contains("this-chat")), "this chat's own files stay readable");
+        assert_eq!(deny.iter().filter(|d| d.contains("3f0c1c5e-6b1a-4c1e-9d3e-000000000007")).count(), 3);
+        // 400 chats with attachments: far more than one command-line argument may carry on Linux
+        // (128 KiB) — which is why the document is handed over as a file, never as an argument.
+        let doc = json!({"permissions": {"deny": deny}}).to_string();
+        assert!(doc.len() < MAX_RULES_BYTES);
+        let tmp = home.join("run-tmp");
+        let file = {
+            let mut temp = TempFiles::default();
+            let f = temp.add(&tmp, "settings.json", &doc).unwrap();
+            assert_eq!(std::fs::read_to_string(&f).unwrap(), doc);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+                assert_eq!(std::fs::metadata(&tmp).unwrap().permissions().mode() & 0o777, 0o700);
+            }
+            let args = run_args(&RunOptions::default(), "acceptEdits", None, None, &[], Some(&f), Passed::Inline("note"));
+            assert_eq!(flag(&args, "--settings"), f.to_str());
+            assert!(args.iter().all(|a| a.len() < 4096), "nothing long is left on the command line");
+            f
+        };
+        assert!(!file.exists(), "the rules file is removed when the run is over");
+        // What a daemon that died left behind is cleared at the next start.
+        std::fs::write(tmp.join("left-settings.json"), "{}").unwrap();
+        assert_eq!(clear_run_tmp(&tmp), 1);
+        assert_eq!(clear_run_tmp(&home.join("no-such-folder")), 0);
+        // Past what a rules file can name one by one, the whole folder is closed instead of none of it.
+        assert!(MAX_CLOSED_FOLDERS * 300 < MAX_RULES_BYTES);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn runs_that_cannot_write_dot_claude_are_told_so() {
+        for kind in ["chat", "wrap", "workflow", "customize", "module", "reorganize", ""] {
+            let note = managed_note(kind).unwrap();
+            assert!(note.contains(".claude") && note.contains("Routines") && note.contains("refused"), "{kind}");
+        }
+        // First-time setup is the one run that may write there (it installs the presets).
+        assert_eq!(managed_note("setup"), None);
+        // The note matches what the rules enforce: `.claude` is closed for every kind but setup.
+        let home = std::env::temp_dir().join(format!("thoughts-note-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let lib = Path::new("/home/u/Library");
+        assert!(protective_deny(lib, &[], &home, "c", false).iter().any(|d| d == "Edit(./.claude/**)"));
+        assert!(!protective_deny(lib, &[], &home, "c", true).iter().any(|d| d.contains(".claude")));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn limits_depend_on_who_is_watching() {
+        let secs = std::time::Duration::from_secs;
+        // The user is in front of a chat and has Stop.
+        for kind in ["chat", "customize"] { assert_eq!((run_limits(kind).idle, run_limits(kind).total), (None, None), "{kind}"); }
+        // Automatic tasks have a time limit of their own; silence still ends them.
+        assert_eq!((run_limits("workflow").idle, run_limits("workflow").total), (Some(IDLE_LIMIT), None));
+        // Everything else the app runs may neither stall nor go on for ever.
+        for kind in ["wrap", "reorganize", "setup", "module"] { assert_eq!((run_limits(kind).idle, run_limits(kind).total), (Some(IDLE_LIMIT), Some(TOTAL_LIMIT)), "{kind}"); }
+        let l = RunLimits { idle: Some(secs(60)), total: Some(secs(600)), after_result: secs(30) };
+        assert_eq!(l.exceeded(secs(100), secs(59), None), None);
+        assert_eq!(l.exceeded(secs(100), secs(60), None), Some(Ended::Stalled(secs(60))));
+        assert_eq!(l.exceeded(secs(600), secs(1), None), Some(Ended::TooLong(secs(600))));
+        // Once the answer is in, only lingering counts — and it ends as the answer it gave.
+        assert_eq!(l.exceeded(secs(900), secs(10), Some(true)), None);
+        assert_eq!(l.exceeded(secs(900), secs(30), Some(true)), Some(Ended::Result(true)));
+        // A watched chat is never ended for silence or length.
+        assert_eq!(run_limits("chat").exceeded(secs(86_400), secs(86_400), None), None);
+        assert_eq!(l.next_check(secs(100), secs(20), false), secs(40));
+        assert_eq!(l.next_check(secs(590), secs(20), false), secs(10));
+        assert_eq!(l.next_check(secs(590), secs(20), true), secs(10));
+    }
+
+    /// Start `script` under `sh` the way assistant runs are started (own group, piped).
+    #[cfg(unix)]
+    fn sh(script: &str) -> tokio::process::Child {
+        let mut c = cmd(Path::new("/bin/sh"));
+        c.args(["-c", script]).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        c.spawn().unwrap()
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_run_always_ends_stalled_too_long_stopped_or_unreadable() {
+        let ms = std::time::Duration::from_millis;
+        let none = RunLimits { idle: None, total: None, after_result: std::time::Duration::from_secs(60) };
+        let collect = |seen: Arc<std::sync::Mutex<Vec<String>>>| move |line: String| {
+            let seen = seen.clone();
+            async move { let done = line.contains("\"result\""); seen.lock().unwrap().push(line); done.then_some(true) }
+        };
+        let lines = || Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let never = || tokio::sync::oneshot::channel::<()>();
+
+        // An ordinary run: every line arrives, the result is reported, the exit status is its own.
+        let (seen, (_keep, mut kill)) = (lines(), never());
+        let mut c = sh(r#"echo '{"type":"a"}'; echo; echo '{"type":"result"}'; echo oops >&2"#);
+        let f = follow(&mut c, &mut kill, none, collect(seen.clone())).await;
+        assert_eq!(f.ended, Ended::Result(true));
+        assert!(f.exit.unwrap().success() && f.stderr.trim() == "oops");
+        assert_eq!(*seen.lock().unwrap(), [r#"{"type":"a"}"#, r#"{"type":"result"}"#]);
+
+        // No result, and a line that is not valid text in between: the run is read to its end all the same.
+        let (seen, (_keep, mut kill)) = (lines(), never());
+        let mut c = sh(r#"printf '\377\376 bad\n'; echo after; exit 3"#);
+        let f = follow(&mut c, &mut kill, none, collect(seen.clone())).await;
+        assert_eq!((f.ended, f.exit.unwrap().code()), (Ended::NoResult, Some(3)));
+        assert_eq!(seen.lock().unwrap().len(), 2);
+        assert_eq!(seen.lock().unwrap()[1], "after");
+
+        // Silent for longer than allowed: ended, together with what it started.
+        let (seen, (_keep, mut kill)) = (lines(), never());
+        let mut c = sh("echo start; sleep 41 & sleep 41");
+        let pid = c.id().unwrap();
+        let began = std::time::Instant::now();
+        let f = follow(&mut c, &mut kill, RunLimits { idle: Some(ms(300)), total: None, after_result: ms(300) }, collect(seen.clone())).await;
+        assert_eq!(f.ended, Ended::Stalled(ms(300)));
+        assert!(began.elapsed() < std::time::Duration::from_secs(10) && !alive(pid));
+        assert!(!std::process::Command::new("pgrep").args(["-g", &pid.to_string()]).output().unwrap().status.success(), "its children were left running");
+
+        // Busy but endless: the total limit ends it.
+        let (seen, (_keep, mut kill)) = (lines(), never());
+        let mut c = sh("while true; do echo tick; sleep 0.05; done");
+        let f = follow(&mut c, &mut kill, RunLimits { idle: Some(ms(5000)), total: Some(ms(400)), after_result: ms(300) }, collect(seen.clone())).await;
+        assert_eq!(f.ended, Ended::TooLong(ms(400)));
+        assert!(!seen.lock().unwrap().is_empty());
+
+        // It gave its answer but never exits: ended after a moment, and the answer stands.
+        let (seen, (_keep, mut kill)) = (lines(), never());
+        let mut c = sh(r#"echo '{"type":"result"}'; sleep 42"#);
+        let f = follow(&mut c, &mut kill, RunLimits { idle: None, total: None, after_result: ms(300) }, collect(seen.clone())).await;
+        assert_eq!(f.ended, Ended::Result(true));
+
+        // The Stop button, while it is working…
+        let (seen, (stop, mut kill)) = (lines(), never());
+        let mut c = sh("echo working; sleep 43");
+        let pid = c.id().unwrap();
+        tokio::spawn(async move { tokio::time::sleep(ms(200)).await; let _ = stop.send(()); });
+        let f = follow(&mut c, &mut kill, none, collect(seen.clone())).await;
+        assert_eq!(f.ended, Ended::Stopped);
+        assert!(!alive(pid));
+
+        // …and when it has closed its output but is still there: Stop still ends it (it used to be ignored from here on).
+        let (seen, (stop, mut kill)) = (lines(), never());
+        let mut c = sh("exec >&- 2>&-; sleep 44");
+        let pid = c.id().unwrap();
+        let began = std::time::Instant::now();
+        tokio::spawn(async move { tokio::time::sleep(ms(300)).await; let _ = stop.send(()); });
+        let f = follow(&mut c, &mut kill, none, collect(seen.clone())).await;
+        assert_eq!(f.ended, Ended::Stopped);
+        assert!(began.elapsed() < std::time::Duration::from_secs(10) && !alive(pid));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn only_one_sign_in_attempt_is_ever_open() {
+        let st = Arc::new(AppState::for_test());
+        let mut events = st.events.subscribe();
+        let attempt = || { let mut c = crate::proc::command("sleep"); c.arg("45").kill_on_drop(true); c.spawn().unwrap() };
+        let gone = |pid: u32| async move {
+            for _ in 0..100 { if !alive(pid) { return true; } tokio::time::sleep(std::time::Duration::from_millis(30)).await; }
+            false
+        };
+        // Three clicks: each ends the attempt before it.
+        let (a, b, c) = (attempt(), attempt(), attempt());
+        let (pa, pb, pc) = (a.id().unwrap(), b.id().unwrap(), c.id().unwrap());
+        watch_login(st.clone(), a, std::time::Duration::from_secs(60));
+        watch_login(st.clone(), b, std::time::Duration::from_secs(60));
+        assert!(gone(pa).await && alive(pb));
+        // The last one is left alone until its time is up, then ended as well — and the app looks at the sign-in again.
+        watch_login(st.clone(), c, std::time::Duration::from_millis(400));
+        assert!(gone(pb).await);
+        assert!(alive(pc));
+        assert!(gone(pc).await);
+        let ev = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+        assert_eq!(ev["type"], "auth.changed");
+        assert!(events.try_recv().is_err(), "an attempt that was replaced says nothing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn version_managers_are_found_through_the_interactive_shell_and_by_folder() {
+        // What start-up files print around the value does not matter.
+        assert_eq!(marked_path(&format!("Welcome back!\n{PATH_MARK}/a/bin:/b/bin:{PATH_MARK}\nbye")), Some(vec!["/a/bin".to_string(), "/b/bin".into()]));
+        assert_eq!(marked_path("no marks at all"), None);
+        assert_eq!(marked_path(&format!("{PATH_MARK}{PATH_MARK}")), None);
+
+        let d = std::env::temp_dir().join(format!("thoughts-path-{}", uuid::Uuid::new_v4()));
+        let d = crate::paths::canonical_lenient(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // nvm puts its folder on the PATH in ~/.zshrc, which only an interactive shell reads. With
+        // start-up files of its own (ZDOTDIR), zsh shows the difference: a plain login shell never
+        // sees the folder, the way the PATH is asked for now does.
+        if Path::new("/bin/zsh").exists() {
+            let nvm_bin_dir = d.join("nvm/versions/node/v22.3.0/bin");
+            std::fs::write(d.join(".zshrc"), format!("echo 'a greeting printed by the start-up file'\nexport PATH=\"{}:$PATH\"\n", nvm_bin_dir.display())).unwrap();
+            let zdot = d.to_string_lossy().to_string();
+            let mut plain = crate::proc::std_command("/bin/zsh");
+            plain.args(["-lc", "printf %s \"$PATH\""]).env("ZDOTDIR", &zdot);
+            let plain = String::from_utf8_lossy(&crate::proc::std_output_timeout(&mut plain, SHELL_TIMEOUT).unwrap().stdout).to_string();
+            assert!(!plain.contains(&*nvm_bin_dir.to_string_lossy()), "a login shell that is not interactive does not read .zshrc");
+            let found = terminal_path("/bin/zsh", &[("ZDOTDIR", &zdot)]);
+            assert_eq!(found.first().map(String::as_str), nvm_bin_dir.to_str(), "{found:?}");
+            assert!(found.iter().all(|p| !p.contains("greeting")));
+        }
+        // A shell that cannot be asked gives nothing (and does not hang).
+        assert!(terminal_path("/nonexistent/shell", &[]).is_empty());
+
+        // Should the shell not tell: nvm's default version (or its newest), and the shim folders that exist.
+        let (home, nvm) = (d.join("home"), d.join("home/.nvm"));
+        for v in ["v18.19.0", "v20.11.1", "v20.9.0", "v22.3.0", "not-a-version"] { std::fs::create_dir_all(nvm.join("versions/node").join(v).join("bin")).unwrap(); }
+        assert_eq!(nvm_bin(&nvm), Some(nvm.join("versions/node/v22.3.0/bin")));
+        std::fs::create_dir_all(nvm.join("alias")).unwrap();
+        for (alias, want) in [("20\n", "v20.11.1"), ("v18.19.0", "v18.19.0"), ("lts/*", "v22.3.0"), ("node", "v22.3.0"), ("16", "v22.3.0")] {
+            std::fs::write(nvm.join("alias/default"), alias).unwrap();
+            assert_eq!(nvm_bin(&nvm), Some(nvm.join("versions/node").join(want).join("bin")), "{alias}");
+        }
+        assert_eq!(nvm_bin(&d.join("no-nvm-here")), None);
+        std::fs::create_dir_all(home.join(".asdf/shims")).unwrap();
+        std::fs::create_dir_all(home.join(".local/share/fnm/aliases/default/bin")).unwrap();
+        let dirs = version_manager_dirs(&home, &nvm);
+        assert_eq!(dirs, [nvm.join("versions/node/v22.3.0/bin"), home.join(".local/share/fnm/aliases/default/bin"), home.join(".asdf/shims")]);
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

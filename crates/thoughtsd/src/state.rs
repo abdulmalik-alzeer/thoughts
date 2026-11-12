@@ -45,6 +45,10 @@ pub struct AppState {
     pub auth_failed: AtomicBool,
     /// When the CLI last said "signed in", so a chat does not ask it again before every message.
     pub auth_ok_at: std::sync::Mutex<Option<std::time::Instant>>,
+    /// The daemon is stopping: runs that end from here on were cut off by that, not finished.
+    pub stopping: AtomicBool,
+    /// Ends the sign-in attempt in progress (`claude auth login`), so there is only ever one.
+    pub login: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
@@ -100,6 +104,8 @@ impl AppState {
             complete_hook: Default::default(),
             auth_failed: AtomicBool::new(false),
             auth_ok_at: Default::default(),
+            stopping: AtomicBool::new(false),
+            login: Default::default(),
         })
     }
 
@@ -133,6 +139,8 @@ impl AppState {
             complete_hook: Default::default(),
             auth_failed: AtomicBool::new(false),
             auth_ok_at: Default::default(),
+            stopping: AtomicBool::new(false),
+            login: Default::default(),
         }
     }
 

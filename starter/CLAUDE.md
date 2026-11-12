@@ -151,4 +151,4 @@ Be a thinking partner: build on the user's ideas, but raise weaknesses, counter-
 - Set `updated:` on meaningful edits and keep the item's INDEX line in step.
 - Keep `## Current state` to 10 lines; history belongs in log.md.
 - No stray files in item folders — everything fits README / log / todo / notes / meetings / outputs.
-- Conventions here may change: the tune-up and wrap routines propose small improvements, and apply them to this file or to a skill only after the user agrees.
+- Conventions here may change: the tune-up and wrap routines propose small improvements, and apply them to this file only after the user agrees. The routines themselves (the skills under `.claude/`) are kept by the Thoughts app and are not yours to edit: the user changes a routine under Settings → Customisations → Routines.
