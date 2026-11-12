@@ -1874,8 +1874,9 @@ fn kept_by_backstop(rel: &str) -> bool {
 #[derive(Clone, Debug, PartialEq)]
 enum Kept {
     Bytes(Vec<u8>),
-    /// A link under a kept name (a file name, or the name of a kept folder), by where it points. It is
-    /// never followed; a new or changed one goes when the run is over, and one the run removed comes back.
+    /// A link under a kept name (a file name, or the name of a kept folder), or to a folder, by where
+    /// it points. It is never followed; a new or changed one goes when the run is over, and one the run
+    /// removed comes back.
     Link(PathBuf),
     /// A file over `KEPT_MAX`: left alone, before and after.
     Untouched,
@@ -1904,26 +1905,28 @@ impl StandingSnapshot {
         Self { root: root.to_path_buf(), files: Self::scan(root, keep, links), keep, links }
     }
 
-    /// Every kept file under `root`, by library-relative path, and every link under a kept name — a
-    /// kept file's (`notes/CLAUDE.md`) or a kept folder's (`.claude`, in any letter case `keep`
-    /// covers). Links are never followed and `.git` is not entered; a very large library is looked
-    /// through only so far.
+    /// Every kept file under `root`, by library-relative path, and the links a later session could
+    /// read through: one under a kept name — a kept file's (`notes/CLAUDE.md`) or a kept folder's
+    /// (`.claude`, in any letter case `keep` covers) — and one to a folder (or to nothing yet), whatever
+    /// its name, since that folder may hold such files. Links are never followed (only where one points
+    /// is looked at) and `.git` is not entered. The whole tree is looked through, however large: a
+    /// cut-off would let a run hide a kept name behind enough other files. Only kept files are held
+    /// in memory.
     fn scan(root: &Path, keep: fn(&str) -> bool, links: fn(&str) -> bool) -> std::collections::BTreeMap<String, Kept> {
         let mut out = std::collections::BTreeMap::new();
-        let (mut stack, mut entries) = (vec![(root.to_path_buf(), String::new(), 0usize)], 0usize);
-        while let Some((dir, rel, depth)) = stack.pop() {
+        let mut stack = vec![(root.to_path_buf(), String::new())];
+        while let Some((dir, rel)) = stack.pop() {
             for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
-                entries += 1;
-                if entries > 200_000 { return out; }
                 let name = e.file_name().to_string_lossy().to_string();
                 let r = if rel.is_empty() { name.clone() } else { format!("{rel}/{name}") };
                 let Ok(ft) = e.file_type() else { continue };
                 if ft.is_symlink() {
-                    if links(&r) || links(&format!("{r}/x")) { out.insert(r, Kept::Link(std::fs::read_link(e.path()).unwrap_or_default())); }
+                    let folder = std::fs::metadata(e.path()).map_or(true, |m| m.is_dir());
+                    if folder || links(&r) || links(&format!("{r}/x")) { out.insert(r, Kept::Link(std::fs::read_link(e.path()).unwrap_or_default())); }
                     continue;
                 }
                 if ft.is_dir() {
-                    if !name.eq_ignore_ascii_case(".git") && depth < 24 { stack.push((e.path(), r, depth + 1)); }
+                    if !name.eq_ignore_ascii_case(".git") { stack.push((e.path(), r)); }
                 } else if keep(&r) {
                     let small = ft.is_file() && e.metadata().map_or(false, |m| m.len() <= KEPT_MAX);
                     let kept = if small { std::fs::read(e.path()).map(Kept::Bytes).unwrap_or(Kept::Untouched) } else { Kept::Untouched };

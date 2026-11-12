@@ -325,7 +325,10 @@ when Codex is chosen.
   (`codex::keep_for`, `StandingSnapshot::take_guarded`). Links under any of those names (a file's,
   or a kept folder's such as `.Codex`) are recorded by where they point and never followed; a new or
   changed one goes when the run is over and the chat says so — also in an ordinary chat, which may
-  edit AGENTS.md but never put a link in its place. The Claude Code backstop does the same. Codex itself keeps a
+  edit AGENTS.md but never put a link in its place. So does any new or changed link to a folder (or
+  to nothing yet), whatever its name: the folder may hold such files. The scan looks through the
+  whole tree (links are never followed, `.git` is not entered); there is no cut-off a run could hide
+  a kept name behind. The Claude Code backstop does the same. Codex itself keeps a
   writable folder's top-level `.git` read-only and gives sandboxed commands no network (checked
   with `codex debug seatbelt`, which runs no model). No spending ceiling: automatic tasks on Codex
   have only their time limits, and Codex runs are not in the month's cost.
