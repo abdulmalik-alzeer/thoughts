@@ -3,15 +3,15 @@
 import { inTauri } from './api';
 
 /** `granted`: notifications appear · `blocked`: the system does not allow them (or was never asked)
- *  · `unknown`: this window cannot tell (browser preview, no notification support). */
-export type NotifState = 'granted' | 'blocked' | 'unknown';
+ *  · `unknown`: this window cannot tell (browser preview, no notification support)
+ *  · `sent`: a test notification went out, but this window cannot tell whether the system showed it.
+ *  The desktop app can never tell: its notification plugin answers "granted" on macOS, Windows and
+ *  Linux without asking the system, so its answer is not shown as the computer's. */
+export type NotifState = 'granted' | 'blocked' | 'unknown' | 'sent';
 
 export async function notifState(): Promise<NotifState> {
   try {
-    if (inTauri()) {
-      const n = await import('@tauri-apps/plugin-notification');
-      return (await n.isPermissionGranted()) ? 'granted' : 'blocked';
-    }
+    if (inTauri()) return 'unknown';
     if (typeof Notification !== 'undefined') return Notification.permission === 'granted' ? 'granted' : Notification.permission === 'denied' ? 'blocked' : 'unknown';
   } catch { /* not available */ }
   return 'unknown';
@@ -22,8 +22,8 @@ export async function askNotify(): Promise<NotifState> {
   try {
     if (inTauri()) {
       const n = await import('@tauri-apps/plugin-notification');
-      if (await n.isPermissionGranted()) return 'granted';
-      return (await n.requestPermission()) === 'granted' ? 'granted' : 'blocked';
+      if (!(await n.isPermissionGranted())) await n.requestPermission();
+      return 'unknown';
     }
     if (typeof Notification !== 'undefined') {
       const p = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
@@ -48,13 +48,16 @@ export async function openNotifySettings(): Promise<boolean> {
   try { await (await import('@tauri-apps/plugin-opener')).openUrl(url); return true; } catch { return false; }
 }
 
-/** Send one notification now (asking first if needed). Resolves the permission it found. */
+/** Send one notification now (asking first if needed). Resolves the permission it found, or `sent`
+ *  in the desktop app, which cannot tell whether the system showed it. */
 export async function testNotify(title: string, body: string): Promise<NotifState> {
   const st = await askNotify();
+  if (inTauri()) {
+    try { (await import('@tauri-apps/plugin-notification')).sendNotification({ title, body }); }
+    catch { return 'unknown'; }
+    return 'sent';
+  }
   if (st !== 'granted') return st;
-  try {
-    if (inTauri()) { (await import('@tauri-apps/plugin-notification')).sendNotification({ title, body }); }
-    else new Notification(title, { body });
-  } catch { return 'unknown'; }
+  try { new Notification(title, { body }); } catch { return 'unknown'; }
   return 'granted';
 }

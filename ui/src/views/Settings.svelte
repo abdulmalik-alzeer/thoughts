@@ -672,6 +672,9 @@
           {#if s.notifications && notif === 'blocked'}
             <p class="note grow" role="status"><Icon name="warning" size={15} /> <span>{t('shellui.notif.blocked')}</span></p>
             {#if notifySettingsUrl()}<button type="button" class="btn" onclick={async () => { if (!(await openNotifySettings())) toast(t('nativea.notif.openFailed'), { kind: 'error' }); }}>{t('nativea.notif.open')}</button>{/if}
+          {:else if notif === 'sent'}
+            <span class="muted sm grow" role="status">{t('revui.notif.sent')}</span>
+            {#if notifySettingsUrl()}<button type="button" class="btn" onclick={async () => { if (!(await openNotifySettings())) toast(t('nativea.notif.openFailed'), { kind: 'error' }); }}>{t('nativea.notif.open')}</button>{/if}
           {:else if notif === 'granted'}
             <span class="muted sm grow">{t('shellui.notif.allowed')}</span>
           {:else}<span class="grow"></span>{/if}
