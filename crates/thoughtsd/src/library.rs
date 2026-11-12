@@ -97,6 +97,24 @@ pub fn remove(root: &Path, rel: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Delete a file, or a folder with everything in it (the user confirmed that). A folder holding
+/// something the file API never touches (`.git`, `.claude`, …) is refused as a whole, so nothing
+/// protected goes with it; symlinks inside are removed as links, never followed. Never the library
+/// itself. (With history on, the caller records the library first, as for `remove`.)
+pub fn remove_all(root: &Path, rel: &str) -> anyhow::Result<()> {
+    if rel.trim().trim_matches(['/', '\\']).is_empty() { return Err(crate::tr::err("invalid.path", &[])); }
+    let p = resolve(root, rel)?;
+    let meta = std::fs::symlink_metadata(&p).map_err(|_| crate::tr::err("not_found.file", &[]))?;
+    if !meta.is_dir() { return remove(root, rel); }
+    if crate::paths::canonical_lenient(&p) == crate::paths::canonical_lenient(root) { return Err(crate::tr::err("invalid.path", &[])); }
+    for e in WalkDir::new(&p).min_depth(1).follow_links(false) {
+        let e = e?;
+        if e.file_name().to_str().map_or(true, denied_component) { return Err(crate::tr::err("folder.protected", &[])); }
+    }
+    std::fs::remove_dir_all(&p)?;
+    Ok(())
+}
+
 /// Set `status:` (and today's date as `updated:`) in the note details at the top of an idea's
 /// README, leaving every other line — and the file's line endings — exactly as they were.
 pub fn set_idea_status(root: &Path, rel: &str, status: &str, today: chrono::NaiveDate) -> anyhow::Result<()> {
@@ -567,6 +585,41 @@ mod tests {
         write_checked(&d, "notes/a.md", "v4", None).unwrap();
         write_checked(&d, "notes/b.md", "new", Some("")).unwrap();
         assert_eq!(std::fs::read_to_string(d.join("notes/a.md")).unwrap(), "v4");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn folders_are_deleted_with_their_contents_but_never_protected_ones() {
+        let d = tmp();
+        create(&d, "clients/acme/README.md", "# Acme").unwrap();
+        create(&d, "clients/acme/notes/a.md", "a").unwrap();
+        create(&d, "clients/keep.md", "keep").unwrap();
+        remove_all(&d, "clients/acme").unwrap();
+        assert!(!d.join("clients/acme").exists());
+        assert!(d.join("clients/keep.md").exists());
+        // A plain file goes the ordinary way.
+        remove_all(&d, "clients/keep.md").unwrap();
+        assert!(!d.join("clients/keep.md").exists());
+        // Anything protected inside stops the whole delete, and nothing is removed.
+        create(&d, "work/x/README.md", "x").unwrap();
+        std::fs::create_dir_all(d.join("work/x/deep/.git")).unwrap();
+        std::fs::write(d.join("work/x/deep/.git/HEAD"), "ref").unwrap();
+        assert!(remove_all(&d, "work/x").is_err());
+        assert!(d.join("work/x/README.md").exists() && d.join("work/x/deep/.git/HEAD").exists());
+        // Never the library itself, nothing outside it, nothing missing.
+        for bad in ["", "/", ".", "./", "work/..", "../x", "nope", ".git", ".claude"] { assert!(remove_all(&d, bad).is_err(), "{bad:?}"); }
+        assert!(d.join("work/x/README.md").exists());
+        // A symlink inside is removed as a link; what it points to stays.
+        #[cfg(unix)]
+        {
+            let outside = tmp();
+            std::fs::write(outside.join("precious.md"), "p").unwrap();
+            create(&d, "links/README.md", "l").unwrap();
+            std::os::unix::fs::symlink(&outside, d.join("links/out")).unwrap();
+            remove_all(&d, "links").unwrap();
+            assert!(!d.join("links").exists() && outside.join("precious.md").exists());
+            std::fs::remove_dir_all(outside).unwrap();
+        }
         std::fs::remove_dir_all(d).unwrap();
     }
 

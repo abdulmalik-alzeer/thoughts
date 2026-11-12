@@ -1067,19 +1067,22 @@ async fn move_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct DeleteFile { path: String }
-/// Delete a file (or an empty folder). When history is on the library is recorded just before and
-/// just after, so the file can be brought back from History. → `{ok, recoverable}`.
+struct DeleteFile { path: String, recursive: bool }
+/// Delete a file, or an empty folder; `recursive: true` deletes a folder with everything in it (the
+/// user confirmed that; never for an add-on). When history is on the library is recorded just before
+/// and just after, so the file can be brought back from History. → `{ok, recoverable}`.
 async fn delete_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(d): Json<DeleteFile>) -> R {
     let root = lib(&st).await?;
     library_free(&st)?;
-    scope_of(&q).check_write(&st, &root, &d.path).await?;
+    let scope = scope_of(&q);
+    scope.check_write(&st, &root, &d.path).await?;
+    if d.recursive && scope.plugin { return Err(crate::tr::err("plugin.not_allowed", &[("path", &d.path)]).into()); }
     // Fail on a bad or missing path before anything is recorded.
     let target = library::resolve(&root, &d.path)?;
     if std::fs::symlink_metadata(&target).is_err() { return Err(crate::tr::err("not_found.file", &[]).into()); }
     let recoverable = history_lib(&st).await.is_ok() && wraps::interrupted_wrap(&st).await.is_none();
     if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("changes before deleting {}", d.path)), true).await; }
-    library::remove(&root, &d.path)?;
+    if d.recursive { library::remove_all(&root, &d.path)?; } else { library::remove(&root, &d.path)?; }
     if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("deleted {}", d.path)), true).await; }
     st.emit(json!({"type": "library.changed"}));
     st.emit(json!({"type": "todos.changed"}));
@@ -1839,7 +1842,7 @@ mod tests {
         busy(import_files(State(st.clone()), Json(ImportReq { files: vec![ImportFile { name: "a.txt".into(), data_base64: "aGk=".into() }] })).await);
         busy(new_file(State(st.clone()), none(), Json(NewFile { path: "notes/new.md".into(), content: "x".into() })).await);
         busy(move_file(State(st.clone()), none(), Json(MoveFile { from: "README.md".into(), to: "READ.md".into() })).await);
-        busy(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "README.md".into() })).await);
+        busy(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "README.md".into(), ..Default::default() })).await);
         busy(idea_status(State(st.clone()), Json(IdeaStatus { path: "ideas/shop".into(), status: "active".into() })).await);
         busy(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
         busy(library_undo(State(st.clone()), Json(Undo { hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
@@ -1890,7 +1893,7 @@ mod tests {
         // Nothing was recorded or published: the undo point is intact.
         assert_eq!(t::sh(&lib, &["rev-parse", "HEAD"]), snap);
         // Deleting a file meanwhile works, but records nothing either.
-        let v = delete_file(State(st.clone()), none(), Json(DeleteFile { path: "TODO.md".into() })).await.unwrap().0;
+        let v = delete_file(State(st.clone()), none(), Json(DeleteFile { path: "TODO.md".into(), ..Default::default() })).await.unwrap().0;
         assert_eq!(v["recoverable"], false);
         assert_eq!(t::sh(&lib, &["rev-parse", "HEAD"]), snap);
 
@@ -1966,7 +1969,7 @@ mod tests {
         assert_eq!(t::read(&lib, "notes/plan.md"), "second draft\n");
         // A deleted file — even one never recorded before — can be brought back from history.
         write_file(State(st.clone()), none(), save("notes/scratch.md", "never synced\n")).await.unwrap();
-        let v = delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/scratch.md".into() })).await.unwrap().0;
+        let v = delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/scratch.md".into(), ..Default::default() })).await.unwrap().0;
         assert_eq!(v["recoverable"], true);
         assert!(!lib.join("notes/scratch.md").exists());
         let h = library_history(State(st.clone()), q(&[("path", "notes/scratch.md")])).await.unwrap().0;
@@ -1974,6 +1977,17 @@ mod tests {
         let before = h[1]["hash"].as_str().unwrap().to_string();
         library_restore(State(st.clone()), Json(Restore { path: "notes/scratch.md".into(), hash: before })).await.unwrap();
         assert_eq!(t::read(&lib, "notes/scratch.md"), "never synced\n");
+        // A folder goes with everything in it when asked, and comes back from history the same way.
+        write_file(State(st.clone()), none(), save("old/project/README.md", "# Old\n")).await.unwrap();
+        write_file(State(st.clone()), none(), save("old/project/notes/a.md", "a\n")).await.unwrap();
+        assert_eq!(shown(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "old".into(), ..Default::default() })).await).status, 422);
+        assert!(lib.join("old/project/notes/a.md").exists());
+        let v = delete_file(State(st.clone()), none(), Json(DeleteFile { path: "old".into(), recursive: true })).await.unwrap().0;
+        assert_eq!(v["recoverable"], true);
+        assert!(!lib.join("old").exists());
+        let gone = library_history(State(st.clone()), q(&[("limit", "1")])).await.unwrap().0[0]["hash"].as_str().unwrap().to_string();
+        library_undo(State(st.clone()), Json(Undo { hash: gone })).await.unwrap();
+        assert_eq!(t::read(&lib, "old/project/notes/a.md"), "a\n");
         // Protected files have no history view; bad entries are refused.
         assert_eq!(shown(library_version(State(st.clone()), q(&[("path", ".git/config"), ("hash", &first)])).await).status, 403);
         assert_eq!(shown(library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", "HEAD")])).await).status, 422);
@@ -1986,7 +2000,7 @@ mod tests {
             assert!(e.message.starts_with("NO_HISTORY::") && e.code == "no_history", "{}", e.message);
         }
         // Deleting still works, just without a way back.
-        assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/scratch.md".into() })).await.unwrap().0["recoverable"], false);
+        assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/scratch.md".into(), ..Default::default() })).await.unwrap().0["recoverable"], false);
         assert_eq!(shown(git_sync(State(st.clone())).await).code, "sync_off");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
@@ -2025,10 +2039,19 @@ mod tests {
         assert_eq!(t::read(&lib, "README.md"), "my library\n");
         assert_eq!(t::read(&lib, "Me/Finances/tax.md"), "salary 1\n");
         // Deleting and moving follow the same rule.
-        assert_eq!(shown(delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: "README.md".into() })).await).status, 403);
-        assert_eq!(shown(delete_file(State(st.clone()), plugin(&[]), Json(DeleteFile { path: "billing/hours.csv".into() })).await).status, 403);
+        assert_eq!(shown(delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: "README.md".into(), ..Default::default() })).await).status, 403);
+        assert_eq!(shown(delete_file(State(st.clone()), plugin(&[]), Json(DeleteFile { path: "billing/hours.csv".into(), ..Default::default() })).await).status, 403);
         assert_eq!(shown(move_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(MoveFile { from: "billing/hours.csv".into(), to: "hours.csv".into() })).await).status, 403);
-        delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: "billing/hours.csv".into() })).await.unwrap();
+        // An add-on never deletes a whole folder, even one it may write in.
+        t::write(&lib, "billing/2026/feb.json", "{}");
+        t::write(&lib, "billing/old.json/x.json", "{}");
+        for dir in ["billing/2026", "billing/old.json"] {
+            let e = shown(delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: dir.into(), recursive: true })).await);
+            assert!([403, 422].contains(&e.status), "{dir}: {}", e.message);
+        }
+        assert!(lib.join("billing/old.json/x.json").exists());
+        assert!(lib.join("billing/2026/feb.json").exists());
+        delete_file(State(st.clone()), plugin(&[("allow", "billing/")]), Json(DeleteFile { path: "billing/hours.csv".into(), ..Default::default() })).await.unwrap();
         assert!(lib.join("README.md").exists() && !lib.join("billing/hours.csv").exists());
         // Tasks: lists in a private folder are invisible to an add-on and cannot be changed by one.
         t::write(&lib, "Me/Finances/todo.md", "- [ ] pay tax\n");
