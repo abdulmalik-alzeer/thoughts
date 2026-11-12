@@ -51,6 +51,7 @@
   import { command, go, track } from './store.svelte';
   import { api } from './api';
   import { prettyName } from './content/util';
+  import { imeKey } from './ime';
 
   let { items, close }: { items: PaletteItem[]; close: () => void } = $props();
 
@@ -111,7 +112,7 @@
   }
 
   function onKey(e: KeyboardEvent) {
-    if (e.isComposing) return;
+    if (imeKey(e)) return;
     if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
     else if (e.key === 'Home' && !q) { e.preventDefault(); active = 0; }

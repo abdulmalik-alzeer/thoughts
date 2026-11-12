@@ -730,6 +730,7 @@
               <span class="dot" class:run={c.running} class:unw={!c.running && c.unwrapped} title={dotLabel(c) || undefined}></span>
               <span class="grow ell"><bdi>{c.title}</bdi></span>
               {#if c.interrupted}<span class="cut" title={t('layer.chat.interrupted')}><Icon name="warning" size={12} /><span class="sr-only">({t('layer.chat.interruptedShort')})</span></span>{/if}
+              {#if c.bypass}<span class="cut" style="color: var(--danger)" title={t('perm.bypass.on')}><Icon name="shield" size={12} /><span class="sr-only">({t('perm.bypass.on')})</span></span>{/if}
               {#if dotLabel(c)}<span class="sr-only">({dotLabel(c)})</span>{/if}
             </button>
           {/each}

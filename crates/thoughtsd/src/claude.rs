@@ -1252,9 +1252,12 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
         "stream_event" => {
             let e = &ev["event"];
             if e["type"] == "content_block_delta" {
+                // Kept by the store as well (and numbered), for a view that opens in the middle of the answer.
                 if let Some(t) = e["delta"]["text"].as_str() {
-                    state.emit(json!({"type": "chat.delta", "chatId": id, "text": t}));
+                    let seq = state.chats.add_partial(id, t, false);
+                    state.emit(json!({"type": "chat.delta", "chatId": id, "text": t, "seq": seq}));
                 } else if let Some(t) = e["delta"]["thinking"].as_str() {
+                    state.chats.add_partial(id, t, true);
                     state.emit(json!({"type": "chat.thinking", "chatId": id, "text": t}));
                 }
             }

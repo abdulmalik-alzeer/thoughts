@@ -13,6 +13,7 @@
   import { capturePrefix, captureKind, normalizeCapture } from '../lib/capture';
   import Icon from '../lib/Icon.svelte';
   import Emblem from '../lib/Emblem.svelte';
+  import { imeKey } from '../lib/ime';
 
   let { projects, newChat, startWrap }: { projects: any[]; newChat: (pid?: string | null) => void; startWrap: () => void } = $props();
 
@@ -243,7 +244,7 @@
   }
 
   function keydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!sending) submit(); }
+    if (e.key === 'Enter' && !e.shiftKey && !imeKey(e)) { e.preventDefault(); if (!sending) submit(); }
   }
 </script>
 

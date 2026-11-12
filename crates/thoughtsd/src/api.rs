@@ -1543,8 +1543,13 @@ fn normalized(mut o: RunOptions, current: Option<&str>) -> RunOptions {
 fn no_chat() -> anyhow::Error { crate::tr::err("not_found.chat", &[]) }
 
 async fn chat_get(State(st): S, Path(id): Path<String>) -> R {
-    // Serialised straight from the store: the chat is not copied first.
-    Ok(Json(st.chats.with(&id, |c| serde_json::to_value(c)).await.ok_or_else(no_chat)??))
+    // Serialised straight from the store: the chat is not copied first. While it is being answered,
+    // what the assistant has written so far comes along (taken at the same moment as the messages),
+    // so a view that opens in the middle of an answer starts from its beginning.
+    let (chat, partial) = st.chats.with(&id, |c| (serde_json::to_value(c), c.running.then(|| st.chats.partial(&id).unwrap_or_default()))).await.ok_or_else(no_chat)?;
+    let mut v = chat?;
+    if let Some(p) = partial { v["partial"] = json!({"text": p.text, "seq": p.seq, "thinking": p.thinking}); }
+    Ok(Json(v))
 }
 
 async fn chat_delete(State(st): S, Path(id): Path<String>) -> R {
@@ -1585,7 +1590,10 @@ async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatc
         if let Some(o) = p.options { c.options = normalized(o, c.options.permission_mode.as_deref()); }
     }).await.ok_or_else(no_chat)?;
     st.emit(json!({"type": "chat.updated", "chat": c.summary()}));
-    Ok(Json(c.summary()))
+    // The options as they now are: what the view shows must be what was saved, not what it asked for.
+    let mut v = c.summary();
+    v["options"] = json!(c.options);
+    Ok(Json(v))
 }
 
 #[derive(Deserialize)]

@@ -3,6 +3,7 @@
   import { t } from './i18n';
   import { trapFocus } from './focus';
   import TrustBody from './TrustBody.svelte';
+  import { imeKey } from './ime';
 
   let value = $state('');
   $effect(() => { if (dialogs.current) value = dialogs.current.value ?? ''; });
@@ -28,7 +29,7 @@
       {#if d.kind === 'prompt'}
         <!-- svelte-ignore a11y_autofocus -->
         <input bind:value placeholder={d.placeholder ?? ''} aria-labelledby="dlg-title" dir="auto" autofocus
-          onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); ok(); } }} />
+          onkeydown={(e) => { if (e.key === 'Enter' && !imeKey(e)) { e.preventDefault(); ok(); } }} />
       {/if}
       <div class="row end">
         <button class="btn" onclick={cancel}>{d.cancelLabel ?? t('cancel')}</button>

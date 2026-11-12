@@ -25,6 +25,7 @@
   import { openReview } from '../lib/layer';
   import WrapPanel from './WrapPanel.svelte';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, readAsDataURL } from '../lib/content/util';
+  import { imeKey } from '../lib/ime';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
 
@@ -97,8 +98,23 @@
     announceTimer = setTimeout(() => (announce = ''), 4000);
   }
 
+  // ---- the answer being written ----
+  // The service numbers every piece of text within a run and keeps the pieces of the message in
+  // progress, so this view can join in the middle of an answer: `load` brings what there is so
+  // far, and events that arrive while it is fetching are kept and gone through again afterwards.
+  let streamSeq = 0;          // number of the last piece in `streaming`
+  let loads = 0;              // fetches of this chat on their way
+  let heldEvents: any[] = []; // what arrived meanwhile
+
+  function applyPartial(p: any) {
+    if (!chat.running) { streaming = ''; thinking = ''; streamSeq = 0; return; }
+    if (!p) return; // an older service does not send it: keep what is on screen
+    streaming = String(p.text ?? ''); streamSeq = Number(p.seq) || 0; thinking = String(p.thinking ?? '');
+  }
+
   async function load(initial = false) {
     if (initial) loadState = 'loading';
+    loads++;
     try {
       const c = await api(`/chats/${id}`);
       c.options ??= {};
@@ -106,8 +122,15 @@
       if (c.options.permissionMode === 'default') c.options.permissionMode = 'plan';
       // A chat from before every chat stored its mode: it runs with accept-edits, so show that.
       if (!c.options.permissionMode) c.options.permissionMode = 'acceptEdits';
-      chat = c;
       savedPerm = c.options.permissionMode ?? null;
+      // A mode picked while its warning is still on screen stays picked.
+      if (pendingPerm !== undefined) c.options.permissionMode = pendingPerm;
+      chat = c;
+      applyPartial(c.partial);
+      // What arrived while this copy was on its way: anything it does not have yet is added.
+      const again = heldEvents;
+      heldEvents = [];
+      for (const e of again) onEvent(e, true);
       loadState = 'ok';
       // Seen: the "cut off" marker stays on screen for this visit but no longer follows the chat around.
       if (c.interrupted && initial) post(`/chats/${id}/ack-interrupted`).catch(() => {});
@@ -122,6 +145,45 @@
       if (chat && !initial) return failed(t('chat3.refreshFailed'), e); // keep what is on screen; a refresh failed
       loadError = e?.message ?? String(e);
       loadState = e instanceof ApiError && e.status === 404 ? 'missing' : 'error';
+    } finally {
+      loads--;
+      if (!loads) heldEvents = [];
+    }
+  }
+
+  /** One event about this chat. `again`: it arrived while the chat was being fetched and is gone
+   *  through a second time, now that the fetched copy is on screen. */
+  function onEvent(e: any, again = false) {
+    if (e.type === 'chat.message') {
+      // A message that arrives again under the same id replaces the one shown: a failure the
+      // service recovered from by itself becomes a quiet note.
+      const at = chat.messages.findIndex((m: any) => m.id === e.message.id);
+      // The fetched copy already had it. (It is only ever replaced by the note that follows a recovered failure, never the reverse.)
+      if (at >= 0 && again) { if (e.message.tool?.code !== 'sessionLost') chat.messages[at] = e.message; return; }
+      if (at >= 0) chat.messages[at] = e.message; else chat.messages.push(e.message);
+      if (e.message.role === 'assistant') streaming = '';
+      if (e.message.role !== 'user') thinking = '';
+      scrollDown(e.message.role === 'user');
+    } else if (e.type === 'chat.delta') {
+      const seq = typeof e.seq === 'number' ? e.seq : streamSeq + 1;
+      if (seq === streamSeq + 1) { streaming += e.text; streamSeq = seq; scrollDown(); }
+      // Pieces in between never arrived: take the service's copy rather than show a text with holes.
+      else if (seq > streamSeq + 1 && !again && !loads) load();
+    } else if (e.type === 'chat.thinking') {
+      if (!again) thinking += e.text;
+    } else if (e.type === 'chat.done') {
+      if (again && !chat.running) return; // the fetched copy is from after the end
+      streaming = ''; thinking = ''; streamSeq = 0;
+      escHint = false;
+      if (!again) say(t('chat3.answerDone'));
+      load();
+    } else if (e.type === 'chat.updated') {
+      if (again) return;
+      // While a send is on its way the chat counts as working, whatever an update in between says.
+      chat.running = e.chat.running || sending;
+      chat.title = e.chat.title;
+      // A wrap or reorganize says where it stands (preview, saving, ready to review).
+      if (e.chat.phase && chat.meta && typeof chat.meta === 'object') chat.meta.phase = e.chat.phase;
     }
   }
 
@@ -146,30 +208,9 @@
     const off = on((e) => {
       if (e.type === 'resync') { load(); return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
-      if (!chat) return;
-      if (e.type === 'chat.message') {
-        // A message that arrives again under the same id replaces the one shown: a failure the
-        // service recovered from by itself becomes a quiet note.
-        const at = chat.messages.findIndex((m: any) => m.id === e.message.id);
-        if (at >= 0) chat.messages[at] = e.message; else chat.messages.push(e.message);
-        if (e.message.role === 'assistant') streaming = '';
-        if (e.message.role !== 'user') thinking = '';
-        scrollDown(e.message.role === 'user');
-      } else if (e.type === 'chat.delta') {
-        streaming += e.text;
-        scrollDown();
-      } else if (e.type === 'chat.thinking') {
-        thinking += e.text;
-      } else if (e.type === 'chat.done') {
-        streaming = ''; thinking = '';
-        escHint = false;
-        say(t('chat3.answerDone'));
-        load();
-      } else if (e.type === 'chat.updated') {
-        // While a send is on its way the chat counts as working, whatever an update in between says.
-        chat.running = e.chat.running || sending;
-        chat.title = e.chat.title;
-      }
+      // While the chat is being fetched, events are kept: the copy on its way may or may not include them.
+      if (loads) heldEvents.push(e);
+      if (chat) onEvent(e);
     });
     return () => { off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); };
   });
@@ -233,7 +274,7 @@
     if (mentionHits.length) {
       if (e.key === 'ArrowDown') { e.preventDefault(); mentionIdx = (mentionIdx + 1) % mentionHits.length; return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); mentionIdx = (mentionIdx - 1 + mentionHits.length) % mentionHits.length; return; }
-      if ((e.key === 'Enter' || e.key === 'Tab') && !e.isComposing) { e.preventDefault(); pickMention(mentionHits[mentionIdx]); return; }
+      if ((e.key === 'Enter' || e.key === 'Tab') && !imeKey(e)) { e.preventDefault(); pickMention(mentionHits[mentionIdx]); return; }
     }
     if (e.key === 'Escape') {
       if (mentionQ !== null) { e.preventDefault(); mentionQ = null; }
@@ -246,7 +287,7 @@
       return;
     }
     // Enter sends, Shift+Enter makes a new line (Cmd/Ctrl+Enter also sends). Never while an IME is composing.
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+    if (e.key === 'Enter' && !e.shiftKey && !imeKey(e)) { e.preventDefault(); send(); }
   }
 
   function oninput() {
@@ -323,19 +364,35 @@
   // The permission mode as the service has it. "Bypass permissions" is only switched on after the
   // user agreed to the warning (the service refuses it otherwise).
   const BYPASS = 'bypassPermissions';
-  let savedPerm: string | null = null;
+  let savedPerm = $state<string | null>(null);
+  let pendingPerm: string | null | undefined; // picked, with its warning still on screen
   async function permChanged() {
-    const want = chat.options.permissionMode ?? null;
+    const want: string | null = chat.options.permissionMode ?? null;
     const turnsOn = want === BYPASS && savedPerm !== BYPASS;
     if (turnsOn) {
+      pendingPerm = want;
       const yes = await confirmDialog({
         title: t('perm.bypass.title'), body: `${t('perm.bypass.body')}\n\n${t('perm.bypass.chat')}`,
         note: t('perm.bypass.note'), confirmLabel: t('perm.bypass.confirm'), danger: true,
       });
+      pendingPerm = undefined;
       if (!yes) { chat.options.permissionMode = savedPerm; return; }
+      // The chat may have been fetched afresh while the warning was up (an answer finished):
+      // what gets saved is the mode that was confirmed, not whatever the fresh copy holds.
+      chat.options.permissionMode = want;
     }
-    if (await saveOpts(turnsOn)) savedPerm = want;
-    else chat.options.permissionMode = savedPerm;
+    try {
+      const saved = await patch(`/chats/${id}`, { options: chat.options, confirmBypass: turnsOn });
+      savedPerm = saved?.options?.permissionMode ?? want;
+    } catch (e) { failed(t('chat3.optionsFailed'), e); }
+    // Whatever happened, the picker shows the mode the service has.
+    chat.options.permissionMode = savedPerm;
+  }
+
+  /** From the warning banner: back to the ordinary mode, without needing the picker. */
+  async function bypassOff() {
+    chat.options.permissionMode = 'acceptEdits';
+    await permChanged();
   }
 
   async function moveTo(pid: string) {
@@ -431,6 +488,11 @@
     {#if chat.interrupted}
       <div class="banner row" role="status"><Icon name="warning" size={14} /> <span class="grow">{t('layer.chat.interrupted')}</span></div>
     {/if}
+    <!-- Always on screen while every permission check is off: it does not depend on the picker below being there. -->
+    {#if savedPerm === BYPASS}
+      <div class="banner alert row" role="status"><Icon name="warning" size={15} /> <span class="grow">{t('chata.bypassOn')}</span>
+        <button class="btn" onclick={bypassOff}>{t('chata.bypassOff')}</button></div>
+    {/if}
 
     <div class="msgs-wrap">
       <FindBar root={() => scroller} where={'chat:' + id} anchors=":scope > .msg.user, :scope > .msg.ai" />
@@ -514,6 +576,15 @@
     {#if chat.kind === 'reorganize' && !chat.running && chat.meta?.phase === 'review'}
       <div class="approve card row"><span class="grow">{t('chat.reorgReady')}</span>
         <button class="btn primary" onclick={() => go({ kind: 'reorganize', id })}>{t('chat.reviewChanges')}</button></div>
+    {/if}
+
+    <!-- Wrap, Reorganize and Setup have no message box, so their Stop lives here. -->
+    {#if !canCompose && chat.running}
+      <div class="runbar card row" role="status">
+        <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="grow">{t(chat.kind === 'wrap' ? (phase === 'applying' ? 'chata.run.wrapApply' : 'chata.run.wrapPreview') : chat.kind === 'reorganize' ? 'chata.run.reorganize' : 'chata.run.setup')}</span>
+        <button class="btn danger" onclick={stop} title={t('chata.stopRun')}><Icon name="stop" size={13} /> {t('stop')}</button>
+      </div>
     {/if}
 
     {#if canCompose}
@@ -683,5 +754,20 @@
   .dropzone { position: absolute; inset: 0 12px 8px; z-index: 10; pointer-events: none; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-weight: 500; color: var(--accent); border: 2px dashed var(--accent); border-radius: var(--radius-lg); background: color-mix(in srgb, var(--bg) 88%, transparent); }
 
   .approve { margin-bottom: 8px; }
+  .runbar { margin-bottom: 8px; gap: 10px; font-size: var(--fs-sm); }
+  .banner.alert { border-style: solid; border-color: var(--danger); }
+  .banner.alert > :global(.icon) { color: var(--danger); flex: none; }
   .sm { font-size: var(--fs-xs); }
+
+  /* On paper: the whole conversation from the first message, not the screenful the window shows.
+     The list stops being a scroll box, and everything that is only for working in the chat goes. */
+  @media print {
+    .wrap { display: block; height: auto; max-width: none; padding: 0; }
+    .msgs-wrap, .msgs { display: block; overflow: visible; }
+    .msgs { padding: 12px 0 0; }
+    .msgs > :global(*) { margin-bottom: 10px; }
+    .bubble { max-width: 100%; box-shadow: none; }
+    header select, header .btn, .cost, .acts, .jump, .composer, .runbar, .approve, .dropzone, .banner .btn, .working, .think, .hint { display: none !important; }
+    .tooldetail pre { max-height: none; overflow: visible; }
+  }
 </style>

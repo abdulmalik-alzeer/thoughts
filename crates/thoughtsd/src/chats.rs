@@ -132,6 +132,10 @@ impl ChatMeta {
             "updated": self.updated, "running": self.running, "interrupted": self.interrupted,
             "unwrapped": self.is_unwrapped(), "hasMiniWrap": self.has_mini_wrap,
             "messageCount": self.message_count,
+            // Where a wrap or reorganize stands (preview, applying, review…), so an open view follows it.
+            "phase": self.meta["phase"],
+            // Every permission check is off in this chat: lists mark it, not only the chat's own picker.
+            "bypass": self.kind == "chat" && self.options.permission_mode.as_deref() == Some(crate::settings::BYPASS),
         })
     }
 }
@@ -241,6 +245,22 @@ pub struct ChatStore {
     last_error_event: std::sync::Mutex<Option<std::time::Instant>>,
     /// Chats for which a message is being turned into a run right now (see `claim_send`).
     sending: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// chat id -> the answer in progress (see `Partial`).
+    partial: std::sync::Mutex<HashMap<String, Partial>>,
+}
+
+/// The part of an answer the assistant has written so far but not yet completed as a message. It
+/// lives in memory only, for a view that opens (or reconnects) in the middle of an answer.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Partial {
+    /// The text of the message being written.
+    pub text: String,
+    /// How many pieces of text this run has produced so far (`text` holds the ones since the last
+    /// completed message). Each `chat.delta` event carries its number, so a view can tell which
+    /// pieces a copy fetched from here already includes.
+    pub seq: u64,
+    /// The latest of the assistant's reasoning, as shown in the "thinking" line.
+    pub thinking: String,
 }
 
 /// Proof that this request is the only one starting a run for a chat; given back when dropped.
@@ -285,7 +305,7 @@ impl ChatStore {
             }
         }
         let store = Self { chats: RwLock::new(map), dir: dir.to_path_buf(), unreadable, disk: Default::default(),
-            events: Default::default(), last_error_event: Default::default(), sending: Default::default() };
+            events: Default::default(), last_error_event: Default::default(), sending: Default::default(), partial: Default::default() };
         if let Ok(m) = store.chats.try_read() {
             for id in &cut_off {
                 if let Some(c) = m.get(id) {
@@ -343,6 +363,43 @@ impl ChatStore {
         self.sending.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string()).then(|| SendClaim { store: self, id: id.to_string() })
     }
 
+    /// A piece of the answer being written has arrived (`thinking`: of the reasoning shown while
+    /// the assistant works). Returns the piece's number within this run.
+    pub fn add_partial(&self, id: &str, piece: &str, thinking: bool) -> u64 {
+        /// The "thinking" line shows only its last words: no need to keep more than this.
+        const THINKING_KEEP: usize = 2000;
+        // Not for a chat that has just been deleted while its run was still winding down.
+        if self.chats.try_read().map_or(false, |m| !m.contains_key(id)) { return 0; }
+        let mut all = self.partial.lock().unwrap_or_else(|e| e.into_inner());
+        let p = all.entry(id.to_string()).or_default();
+        if thinking {
+            p.thinking.push_str(piece);
+            if p.thinking.len() > THINKING_KEEP * 2 {
+                let mut cut = p.thinking.len() - THINKING_KEEP;
+                while !p.thinking.is_char_boundary(cut) { cut += 1; }
+                p.thinking.drain(..cut);
+            }
+        } else {
+            p.text.push_str(piece);
+            p.seq += 1;
+        }
+        p.seq
+    }
+
+    /// The answer in progress in this chat, if a run has written any of it yet.
+    pub fn partial(&self, id: &str) -> Option<Partial> {
+        self.partial.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
+    }
+
+    /// A message has been added to the chat: what was being written is now that message (the chat
+    /// view drops its own copy at the same moments).
+    fn settle_partial(&self, id: &str, role: &str) {
+        if let Some(p) = self.partial.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) {
+            if role == "assistant" { p.text.clear(); }
+            if role != "user" { p.thinking.clear(); }
+        }
+    }
+
     pub async fn get(&self, id: &str) -> Option<Chat> {
         self.chats.read().await.get(id).cloned()
     }
@@ -360,9 +417,12 @@ impl ChatStore {
     pub async fn update<F: FnOnce(&mut Chat)>(&self, id: &str, f: F) -> Option<ChatMeta> {
         let mut w = self.chats.write().await;
         let c = w.get_mut(id)?;
-        let was_running = c.running;
+        let (was_running, had) = (c.running, c.messages.len());
         f(c);
         c.note_session();
+        // A run starting or ending leaves nothing half-written; a new message completes what was being written.
+        if c.running != was_running { self.partial.lock().unwrap_or_else(|e| e.into_inner()).remove(id); }
+        else if c.messages.len() > had { if let Some(m) = c.messages.last() { self.settle_partial(id, &m.role); } }
         let streaming = was_running && c.running;
         let due = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get(id).map_or(true, |d| d.last.elapsed() >= PERSIST_DEBOUNCE);
         if !streaming || due {
@@ -380,6 +440,7 @@ impl ChatStore {
         if !valid_id(id) { return None; }
         let chat = self.chats.write().await.remove(id)?;
         self.disk.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        self.partial.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         let _ = std::fs::remove_file(self.dir.join(format!("{id}.json")));
         // Only a real folder: a link placed there is never followed to whatever it points at.
         let files = crate::paths::attachments_dir().join(id);
@@ -551,6 +612,47 @@ mod tests {
         // Nothing was written back under the hostile name, and the files are left for recovery.
         assert!(!d.parent().unwrap().parent().unwrap().join("outside.json").exists());
         assert!(d.join("evil.json").exists() && d.join("empty.json").exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_answer_in_progress_is_kept_until_it_becomes_a_message() {
+        let d = dir();
+        let s = ChatStore::load_from(&d);
+        let c = Chat::default();
+        let id = c.id.clone();
+        s.insert(c).await;
+        assert_eq!(s.partial(&id), None);
+        s.update(&id, |c| c.running = true).await;
+        // Pieces are numbered through the whole run.
+        assert_eq!(s.add_partial(&id, "Thinking about ", true), 0);
+        assert_eq!((s.add_partial(&id, "Hel", false), s.add_partial(&id, "lo ", false), s.add_partial(&id, "there", false)), (1, 2, 3));
+        assert_eq!(s.partial(&id).unwrap(), Partial { text: "Hello there".into(), seq: 3, thinking: "Thinking about ".into() });
+        // A tool call ends the thinking line but not the text; the user's own message ends neither.
+        s.update(&id, |c| c.messages.push(Msg::new("user", "hi"))).await;
+        assert_eq!(s.partial(&id).unwrap().thinking, "Thinking about ");
+        s.update(&id, |c| c.messages.push(Msg::new("tool", "Read: a.md"))).await;
+        assert_eq!(s.partial(&id).unwrap(), Partial { text: "Hello there".into(), seq: 3, thinking: String::new() });
+        // The completed message replaces the text; the numbering goes on, so an old piece is never taken for a new one.
+        s.update(&id, |c| c.messages.push(Msg::new("assistant", "Hello there"))).await;
+        assert_eq!(s.partial(&id).unwrap(), Partial { text: String::new(), seq: 3, thinking: String::new() });
+        assert_eq!(s.add_partial(&id, "Next", false), 4);
+        // An update that adds no message (a title, the cost) leaves it alone.
+        s.update(&id, |c| c.title = "Greeting".into()).await;
+        assert_eq!(s.partial(&id).unwrap().text, "Next");
+        // Nothing is left over when the run ends, and the next run counts from one again.
+        s.update(&id, |c| c.running = false).await;
+        assert_eq!(s.partial(&id), None);
+        s.update(&id, |c| c.running = true).await;
+        assert_eq!(s.add_partial(&id, "Again", false), 1);
+        // The thinking line never grows without bound, and is cut between characters.
+        for _ in 0..3000 { s.add_partial(&id, "فكرة ", true); }
+        let t = s.partial(&id).unwrap().thinking;
+        assert!(t.len() <= 4100 && t.ends_with("فكرة "), "{}", t.len());
+        // It is memory only: the chat file never carries it.
+        assert!(!std::fs::read_to_string(d.join(format!("{id}.json"))).unwrap().contains("Again"));
+        s.remove(&id).await;
+        assert_eq!((s.add_partial(&id, "late", false), s.partial(&id)), (0, None), "a deleted chat keeps nothing");
         std::fs::remove_dir_all(d).unwrap();
     }
 

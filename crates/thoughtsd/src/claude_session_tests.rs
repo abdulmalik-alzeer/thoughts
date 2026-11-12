@@ -1,4 +1,5 @@
-//! How a run that cannot resume its session is recognised (see `error_msg`, `is_session_lost`).
+//! How a run that cannot resume its session is recognised (see `error_msg`, `is_session_lost`),
+//! and how the answer being written is kept for a view that opens in the middle of it.
 
 use super::*;
 use crate::chats::Chat;
@@ -52,4 +53,27 @@ async fn a_failed_run_shows_the_reason_the_cli_listed() {
     let ev = json!({"type": "result", "subtype": "success", "is_error": true, "result": "Credit balance is too low", "errors": ["ignored"]});
     handle_event(&state, &id, &ev).await;
     assert_eq!(state.chats.get(&id).await.unwrap().messages.last().unwrap().text, "Credit balance is too low");
+}
+
+#[tokio::test]
+async fn pieces_of_an_answer_are_numbered_and_kept_until_the_message_is_complete() {
+    let state = AppState::for_test();
+    let id = chat(&state).await;
+    state.chats.update(&id, |c| c.running = true).await;
+    let mut rx = state.events.subscribe();
+    let delta = |d: Value| json!({"type": "stream_event", "event": {"type": "content_block_delta", "delta": d}});
+    handle_event(&state, &id, &delta(json!({"type": "thinking_delta", "thinking": "Looking at the notes"}))).await;
+    handle_event(&state, &id, &delta(json!({"type": "text_delta", "text": "The shop "}))).await;
+    handle_event(&state, &id, &delta(json!({"type": "text_delta", "text": "should sell candles."}))).await;
+    let events: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let pieces: Vec<(&str, Option<u64>)> = events.iter().filter(|e| e["type"] == "chat.delta").map(|e| (e["text"].as_str().unwrap(), e["seq"].as_u64())).collect();
+    assert_eq!(pieces, [("The shop ", Some(1)), ("should sell candles.", Some(2))]);
+    let p = state.chats.partial(&id).unwrap();
+    assert_eq!((p.text.as_str(), p.seq, p.thinking.as_str()), ("The shop should sell candles.", 2, "Looking at the notes"));
+    // The completed message takes the place of the pieces.
+    let whole = json!({"type": "assistant", "message": {"content": [{"type": "text", "text": "The shop should sell candles."}]}});
+    handle_event(&state, &id, &whole).await;
+    let p = state.chats.partial(&id).unwrap();
+    assert_eq!((p.text.as_str(), p.seq, p.thinking.as_str()), ("", 2, ""));
+    assert_eq!(state.chats.get(&id).await.unwrap().messages.last().unwrap().text, "The shop should sell candles.");
 }

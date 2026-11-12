@@ -387,3 +387,60 @@ async fn any_other_failure_is_shown_and_not_sent_again() {
     assert!(!c.running);
     std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
 }
+
+#[tokio::test]
+async fn a_view_that_opens_mid_answer_gets_what_was_written_so_far() {
+    let (st, lib) = t::library().await;
+    let chat = t::chat(&st, "hello").await;
+    let get = || async { chat_get(State(st.clone()), Path(chat.clone())).await.unwrap().0 };
+    assert!(get().await.get("partial").is_none(), "nothing is being written in a chat at rest");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (g, weak) = (gate.clone(), Arc::downgrade(&st));
+    t::assistant(&st, move |info| { let (g, st) = (g.clone(), weak.upgrade().unwrap()); async move {
+        st.chats.add_partial(&info.chat_id, "weighing the options", true);
+        st.chats.add_partial(&info.chat_id, "The answer ", false);
+        st.chats.add_partial(&info.chat_id, "so far", false);
+        g.notified().await;
+        claude::push(&st, &info.chat_id, Msg::new("assistant", "The answer so far, and the rest.")).await;
+        true
+    } });
+    let mut rx = st.events.subscribe();
+    chat_send(State(st.clone()), Path(chat.clone()), say("go")).await.unwrap();
+    // Running, but nothing written yet: the view is told so rather than left guessing.
+    for _ in 0..500 { if st.chats.partial(&chat).map_or(false, |p| p.seq == 2) { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+    let v = get().await;
+    assert_eq!(v["running"], true);
+    assert_eq!(v["partial"], json!({"text": "The answer so far", "seq": 2, "thinking": "weighing the options"}));
+    gate.notify_one();
+    t::event(&mut rx, &st, "chat.done").await;
+    let v = get().await;
+    assert!(v.get("partial").is_none() && v["running"] == false);
+    assert_eq!(v["messages"].as_array().unwrap().last().unwrap()["text"], "The answer so far, and the rest.");
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn saving_options_answers_with_what_was_saved_and_lists_mark_bypass() {
+    let st = Arc::new(AppState::for_test());
+    let chat = Chat::default();
+    let id = chat.id.clone();
+    st.chats.insert(chat).await;
+    let patch = |mode: &str, confirm: bool| Json(ChatPatch { options: Some(RunOptions { permission_mode: Some(mode.into()), model: Some("opus".into()), ..Default::default() }), confirm_bypass: confirm, ..Default::default() });
+    let v = chat_patch(State(st.clone()), Path(id.clone()), patch("plan", false)).await.unwrap().0;
+    assert_eq!((v["options"]["permissionMode"].as_str(), v["options"]["model"].as_str(), v["bypass"].as_bool()), (Some("plan"), Some("opus"), Some(false)));
+    // Refused without the confirmation: nothing changes, and the list does not mark the chat.
+    assert_eq!(shown(chat_patch(State(st.clone()), Path(id.clone()), patch("bypassPermissions", false)).await).code, "confirm_needed");
+    assert_eq!(st.chats.meta(&id).await.unwrap().summary()["bypass"], false);
+    let v = chat_patch(State(st.clone()), Path(id.clone()), patch("bypassPermissions", true)).await.unwrap().0;
+    assert_eq!((v["options"]["permissionMode"].as_str(), v["bypass"].as_bool()), (Some("bypassPermissions"), Some(true)));
+    let listed = chat_list(State(st.clone())).await.unwrap().0;
+    assert_eq!(listed.as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).unwrap()["bypass"], true);
+    // Only an ordinary chat can be in that state, whatever its stored options say.
+    let mut wrap = Chat { kind: "wrap".into(), ..Default::default() };
+    wrap.options.permission_mode = Some("bypassPermissions".into());
+    assert_eq!(wrap.summary()["bypass"], false);
+    // A wrap's summary says where it stands; a chat without such a thing says nothing.
+    assert_eq!(wrap.summary()["phase"], Value::Null);
+    wrap.meta = json!({"phase": "applying"});
+    assert_eq!(wrap.summary()["phase"], "applying");
+}

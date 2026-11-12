@@ -245,7 +245,21 @@ html.native.os-macos:has(.shell), html.native.os-macos:has(.shell) body { backgr
    sidebar, banners, toasts and dialogs) so a content view can call window.print() and get a clean page. */
 @media print {
   .no-print { display: none !important; }
-  html, body { height: auto; background: #fff; }
+  /* Paper is white whatever the theme: Night must not put its light text on it. Every colour in
+     the app comes from these variables, so on paper they are plain ink on white (the derived ones
+     — hairlines, fills, tints — follow). Backgrounds are printed as shown, so text that sits on a
+     filled shape (a chat bubble, a pill) keeps its contrast instead of turning white on white. */
+  :root, [data-theme][data-mode] {
+    --bg: #fff !important; --panel: #fff !important; --panel-2: #f3f3f3 !important; --sidebar: #fff !important;
+    --fg: #111 !important; --muted: #444 !important; --border: #bbb !important; --code-bg: #f3f3f3 !important;
+    --accent: #1f3b57 !important; --accent-fg: #fff !important; --accent-2: #5c4a14 !important;
+    --danger: #a1140c !important; --ok: #14532d !important;
+    --shadow: none !important; --shadow-lg: none !important; --glow: none !important;
+    color-scheme: light !important;
+  }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  html, body { height: auto; background: #fff; color: var(--fg); }
+  .scroll { overflow: visible !important; }
   .shell { display: block !important; height: auto !important; }
   .main { overflow: visible !important; background: none !important; }
   .view, .page > *, .home > section { animation: none !important; }
