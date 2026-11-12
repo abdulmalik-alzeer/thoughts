@@ -37,6 +37,8 @@ pub struct AppState {
     pub run_dirs: std::sync::Mutex<HashMap<String, std::path::PathBuf>>,
     /// Stands in for the assistant program (see `claude::RunHook`). Tests set it; the app never does.
     pub run_hook: std::sync::Mutex<Option<crate::claude::RunHook>>,
+    /// Stands in for the assistant's one-shot answers (see `claude::CompleteHook`). Tests set it; the app never does.
+    pub complete_hook: std::sync::Mutex<Option<crate::claude::CompleteHook>>,
     /// The assistant's last run was refused for lack of a valid sign-in, whatever the CLI's own
     /// status says (a sign-in that expired still reads as "logged in" there). Cleared by any run
     /// that works, a fresh sign-in, or "check again".
@@ -95,6 +97,7 @@ impl AppState {
             settings_newer: AtomicBool::new(loaded.newer),
             run_dirs: Default::default(),
             run_hook: Default::default(),
+            complete_hook: Default::default(),
             auth_failed: AtomicBool::new(false),
             auth_ok_at: Default::default(),
         })
@@ -127,6 +130,7 @@ impl AppState {
             settings_newer: AtomicBool::new(false),
             run_dirs: Default::default(),
             run_hook: Default::default(),
+            complete_hook: Default::default(),
             auth_failed: AtomicBool::new(false),
             auth_ok_at: Default::default(),
         }

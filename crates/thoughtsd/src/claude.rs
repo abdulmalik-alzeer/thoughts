@@ -474,6 +474,10 @@ pub struct RunInfo {
 /// Set on `AppState::run_hook` by tests, so the wrap / chat machinery can be exercised without the CLI.
 pub type RunHook = Arc<dyn Fn(RunInfo) -> futures::future::BoxFuture<'static, bool> + Send + Sync>;
 
+/// Stands in for a one-shot answer (`complete`): given the prompt and the model, the text.
+/// Set on `AppState::complete_hook` by tests, so summaries can be exercised without the CLI.
+pub type CompleteHook = Arc<dyn Fn(String, Option<String>) -> futures::future::BoxFuture<'static, anyhow::Result<String>> + Send + Sync>;
+
 /// An absolute path as a Claude Code permission pattern (`//path`, `//c/path` on Windows).
 pub fn rule_path(p: &Path) -> String {
     let abs = p.to_string_lossy().replace('\\', "/");
@@ -748,6 +752,20 @@ pub async fn start_run(
     // Who pays for this run. An address without a key stops here: nothing is recorded, nothing starts.
     let provider = provider_env(&state).await?;
     let kind = state.chats.with(&spec.chat_id, |c| c.kind.clone()).await.unwrap_or_default();
+    if let Some(lib) = &library {
+        // A library that holds half a wrap waits for the user's decision: anything written into it
+        // now would be thrown away with the wrap if it is undone. (Finishing that wrap is the exception.)
+        if spec.cwd == *lib || (kind != "customize" && spec.add_dirs.contains(lib)) {
+            if let Some(cut) = crate::wraps::interrupted_wrap(&state).await.filter(|id| *id != spec.chat_id) {
+                return Err(crate::tr::err("wrap.interrupted", &[("id", &cut)]));
+            }
+        }
+        // Whatever works with the library belongs to it (see `wraps::Scope`).
+        if kind != "customize" {
+            let key = lib.to_string_lossy().to_string();
+            state.chats.update(&spec.chat_id, |c| if c.library.is_none() { c.library = Some(key); }).await;
+        }
+    }
     // Every run gets an explicit mode. A run that names none uses the app's own default (accept
     // edits), never Claude Code's: that one comes from the user's or the folder's own settings and
     // can be "bypass permissions". "Ask before changes" is gone: a stored `default` means `plan`.
@@ -1038,6 +1056,8 @@ fn tool_label(name: &str, input: &Value) -> String {
 
 /// One-shot, tool-less completion (used for mini-wraps and titles).
 pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> anyhow::Result<String> {
+    let hook = state.complete_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some(hook) = hook { return hook(prompt.to_string(), model).await; }
     let provider = provider_env(state).await?;
     let bin = binary(state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     crate::settings::check_cli_value("model", model.as_deref())?;

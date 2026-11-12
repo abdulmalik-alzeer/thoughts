@@ -482,6 +482,8 @@ fn limited(chat: &str) -> bool { LIMITED.lock().unwrap_or_else(|e| e.into_inner(
 /// Something that must not be interrupted, or another workflow, is running.
 async fn busy(state: &AppState) -> bool {
     state.library_busy() || state.chats.list().await.iter().any(|c| c.running && (c.kind == "workflow" || c.kind == "wrap" || c.kind == "reorganize"))
+        // A wrap that was cut off: nothing new is written into the library until the user has decided.
+        || crate::wraps::interrupted_wrap(state).await.is_some()
 }
 
 async fn start(state: &Arc<AppState>, w: &Workflow, budget: f64) -> anyhow::Result<String> {

@@ -28,6 +28,9 @@ pub struct Settings {
     pub idle_minutes: u64,
     /// Popup when this many chats are unwrapped.
     pub wrap_nag_threshold: usize,
+    /// Summarise a chat in the background once it goes quiet or another one starts. Off = a chat's
+    /// text is only sent for a summary when the user presses Wrap.
+    pub auto_summaries: bool,
     pub projects: Vec<Project>,
     pub last_wrap: Option<chrono::DateTime<chrono::Utc>>,
     pub search: SearchSettings,
@@ -252,6 +255,7 @@ impl Default for Settings {
             notifications: true,
             idle_minutes: 15,
             wrap_nag_threshold: 5,
+            auto_summaries: true,
             projects: vec![],
             last_wrap: None,
             search: SearchSettings::default(),

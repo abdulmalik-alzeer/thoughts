@@ -158,6 +158,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/wrap/:id/apply", post(wrap_apply))
         .route("/api/wrap/:id/rollback", post(wrap_rollback))
         .route("/api/wrap/:id/keep", post(wrap_keep))
+        .route("/api/wrap/:id/undo-preview", get(wrap_undo_preview))
+        .route("/api/wrap/:id/discard", post(wrap_discard))
+        .route("/api/wrap/:id/undo", post(wrap_undo))
         .route("/api/reorganize", post(reorg_start))
         .route("/api/reorganize/:id", get(reorg_diff))
         .route("/api/reorganize/:id/:op", post(reorg_finish))
@@ -278,9 +281,11 @@ async fn lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
 
 /// Nothing else may change the library while a wrap or a reorganize is being applied: a wrap that
 /// fails puts the library back exactly as it was, which would erase anything written meanwhile.
-fn library_free(st: &AppState) -> anyhow::Result<()> {
+/// The same holds while a wrap that was cut off waits for the user's decision
+/// (`WRAP_INTERRUPTED::<chatId>`): undoing it must not take later work with it.
+async fn library_free(st: &AppState) -> anyhow::Result<()> {
     if st.library_busy() { return Err(crate::tr::err("busy", &[])); }
-    Ok(())
+    wraps::require_no_interrupted(st).await
 }
 
 /// Requests made on behalf of an add-on carry `scope=plugin`: the daemon then keeps private
@@ -530,6 +535,12 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     crate::tr::set_language(&new.language);
     *cur = new.clone();
     drop(cur);
+    // The same library in a new place (the user said so): its chats follow it.
+    if q.get("library").map(String::as_str) == Some("moved") {
+        if let (Some(was), Some(now)) = (&old.library_path, &new.library_path) {
+            if was != now { wraps::library_moved(&st, was, now).await; }
+        }
+    }
     st.emit(json!({"type": "settings.changed"}));
     Ok(Json(serde_json::to_value(new)?))
 }
@@ -926,7 +937,7 @@ async fn enable_module(State(st): S, Path(id): Path<String>) -> R {
     // Check everything before switching the feature on, so a refusal leaves nothing half-enabled.
     let path = if m.add_prompt.is_empty() { None } else {
         let p = lib(&st).await?;
-        library_free(&st)?;
+        library_free(&st).await?;
         crate::trust::require(&p)?;
         Some(p)
     };
@@ -1087,7 +1098,7 @@ struct WriteFile {
 }
 async fn write_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(w): Json<WriteFile>) -> R {
     let root = lib(&st).await?;
-    library_free(&st)?;
+    library_free(&st).await?;
     scope_of(&q).check_write(&st, &root, &w.path).await?;
     let hash = library::write_checked(&root, &w.path, &w.content, w.base_hash.as_deref())?;
     st.emit(json!({"type": "library.changed"}));
@@ -1100,7 +1111,7 @@ struct NewFile { path: String, content: String }
 /// Create a file (never replacing one). `{path, content?}` → `{ok, path, hash}`.
 async fn new_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(n): Json<NewFile>) -> R {
     let root = lib(&st).await?;
-    library_free(&st)?;
+    library_free(&st).await?;
     let rel = n.path.trim().replace('\\', "/");
     scope_of(&q).check_write(&st, &root, &rel).await?;
     let hash = library::create(&root, &rel, &n.content)?;
@@ -1114,7 +1125,7 @@ struct MoveFile { from: String, to: String }
 /// Move or rename a file or folder (never onto something that exists). `{from, to}` → `{ok, path}`.
 async fn move_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(m): Json<MoveFile>) -> R {
     let root = lib(&st).await?;
-    library_free(&st)?;
+    library_free(&st).await?;
     let to = m.to.trim().replace('\\', "/");
     let scope = scope_of(&q);
     scope.check_write(&st, &root, &m.from).await?;
@@ -1133,7 +1144,7 @@ struct DeleteFile { path: String, recursive: bool }
 /// and just after, so the file can be brought back from History. → `{ok, recoverable}`.
 async fn delete_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(d): Json<DeleteFile>) -> R {
     let root = lib(&st).await?;
-    library_free(&st)?;
+    library_free(&st).await?;
     let scope = scope_of(&q);
     scope.check_write(&st, &root, &d.path).await?;
     if d.recursive && scope.plugin { return Err(crate::tr::err("plugin.not_allowed", &[("path", &d.path)]).into()); }
@@ -1155,7 +1166,7 @@ struct IdeaStatus { path: String, status: String }
 /// Change an idea's status (`{path: "<area>/<slug>/README.md" or "<area>/<slug>", status}`).
 async fn idea_status(State(st): S, Json(i): Json<IdeaStatus>) -> R {
     let root = lib(&st).await?;
-    library_free(&st)?;
+    library_free(&st).await?;
     let rel = i.path.trim().trim_matches('/').replace('\\', "/");
     let rel = if rel.to_lowercase().ends_with(".md") { rel } else { format!("{rel}/README.md") };
     if !rel.ends_with("/README.md") { return Err(crate::tr::err("invalid.path", &[]).into()); }
@@ -1263,7 +1274,7 @@ struct ImportReq { files: Vec<ImportFile> }
 /// Copy files chosen by the user into `<library>/imports/` (basename only, never overwriting).
 async fn import_files(State(st): S, Json(req): Json<ImportReq>) -> R {
     let root = lib(&st).await?;
-    library_free(&st)?;
+    library_free(&st).await?;
     if req.files.is_empty() { return Err(crate::tr::err("import.empty", &[]).into()); }
     // Decode and check everything first, so one bad file doesn't leave a half-finished import.
     let mut decoded = vec![];
@@ -1315,7 +1326,7 @@ fn check_todo_file(file: &str) -> anyhow::Result<()> {
 struct TodoOp { file: String, line: usize, text: String, new_text: String }
 async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<String, String>>, Json(t): Json<TodoOp>) -> R {
     let root = lib(&st).await?;
-    library_free(&st)?;
+    library_free(&st).await?;
     let file = if t.file.is_empty() { todos::general(&root) } else { t.file.clone() };
     check_todo_file(&file)?;
     if scope_of(&q).plugin {
@@ -1340,7 +1351,9 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<S
 
 async fn chat_list(State(st): S) -> R {
     // Summaries only: no chat's messages are copied to build the list.
-    Ok(Json(json!(st.chats.list().await.iter().map(|c| c.summary()).collect::<Vec<_>>())))
+    // Chats started in another library wait there: they are listed again when it is opened.
+    let scope = wraps::Scope::now(&st).await;
+    Ok(Json(json!(st.chats.list().await.iter().filter(|c| scope.holds(c.library.as_deref())).map(|c| c.summary()).collect::<Vec<_>>())))
 }
 
 #[derive(Deserialize, Default)]
@@ -1363,6 +1376,8 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     c.provider = n.provider.unwrap_or(s.ai.primary.clone());
     c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() }, None);
     if c.kind == "customize" { c.title = customize_title(ar).into(); }
+    // A chat belongs to the library it was started in (customising the app belongs to none).
+    if c.kind == "chat" { c.library = s.library_path.clone(); }
     c.options.permission_mode = inherited_mode(c.options.permission_mode.take(), &c.kind, n.by_user);
     let id = c.id.clone();
     let v = serde_json::to_value(&c)?;
@@ -1582,6 +1597,10 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         check_bypass(&chat.kind, chat.options.permission_mode.as_deref(), o.permission_mode.as_deref(), m.confirm_bypass)?;
     }
     if let Some(lib) = st.settings.read().await.library() { crate::trust::require(&lib)?; }
+    // Its session, and the wrap it will be saved by, live in the library it was started in.
+    if !wraps::Scope::now(&st).await.holds(chat.library.as_deref()) {
+        return Err(crate::tr::err("chat.other_library", &[("path", chat.library.as_deref().unwrap_or_default())]).into());
+    }
     if chat.provider != "claude" { bail!("Codex support arrives in the next milestone"); }
     // Say "not signed in" before the message is saved, not as a failed answer afterwards.
     claude::require_signed_in(&st).await?;
@@ -1602,6 +1621,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     if let Some(l) = &library {
         let touches_library = cwd == *l || (chat.kind != "customize" && add_dirs.contains(l));
         if touches_library && st.library_busy() { return Err(crate::tr::err("busy", &[]).into()); }
+        // Nor while a wrap that was cut off waits to be finished or undone.
+        if touches_library { wraps::require_no_interrupted(&st).await?; }
     }
     if !cwd.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &cwd.display().to_string())]).into()); }
     // Fail on an untrusted folder before anything is saved (the run start checks again).
@@ -1709,8 +1730,14 @@ async fn wrap_start(State(st): S) -> R { Ok(Json(json!({"chatId": wraps::start(s
 #[serde(default)]
 struct Note { note: String, instructions: String }
 async fn wrap_apply(State(st): S, Path(id): Path<String>, Json(n): Json<Note>) -> R { wraps::apply(st.clone(), &id, &n.note).await?; ok() }
-/// Undo the partial changes of a wrap that was cut off by a restart.
-async fn wrap_rollback(State(st): S, Path(id): Path<String>) -> R { wraps::rollback(&st, &id).await?; ok() }
+/// Undo the partial changes of a wrap that was cut off by a restart → `{ok, reverted, kept: [path]}`.
+async fn wrap_rollback(State(st): S, Path(id): Path<String>) -> R { Ok(Json(wraps::rollback(&st, &id).await?)) }
+/// What undoing a cut-off wrap would change → `{known, precise, files: [{path, change}], kept: [path]}`.
+async fn wrap_undo_preview(State(st): S, Path(id): Path<String>) -> R { Ok(Json(wraps::undo_preview(&st, &id).await?)) }
+/// Drop a plan that was not approved. Nothing was written; its chats stay to be wrapped.
+async fn wrap_discard(State(st): S, Path(id): Path<String>) -> R { wraps::discard(&st, &id).await?; ok() }
+/// Undo a wrap that was saved (a new history entry); its chats wait to be wrapped again.
+async fn wrap_undo(State(st): S, Path(id): Path<String>) -> R { wraps::undo(&st, &id).await?; ok() }
 /// Keep the partial changes of a wrap that was cut off, as they are (its chats stay to be wrapped again).
 async fn wrap_keep(State(st): S, Path(id): Path<String>) -> R { wraps::keep_partial(&st, &id).await?; ok() }
 async fn reorg_start(State(st): S, Json(n): Json<Note>) -> R { Ok(Json(json!({"chatId": wraps::reorganize_start(st.clone(), &n.instructions).await?}))) }
@@ -2141,7 +2168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cut_off_wrap_blocks_sync_until_it_is_finished_or_undone() {
+    async fn a_cut_off_wrap_blocks_every_change_until_it_is_finished_or_undone() {
         let (st, lib) = t::library().await;
         let chat = t::chat(&st, "plan the shop").await;
         let wrap = t::wrap_ready(&st, &[chat]).await;
@@ -2162,14 +2189,35 @@ mod tests {
         assert_eq!(status["wrapInterrupted"], wrap.as_str());
         // Nothing was recorded or published: the undo point is intact.
         assert_eq!(t::sh(&lib, &["rev-parse", "HEAD"]), snap);
-        // Deleting a file meanwhile works, but records nothing either.
-        let v = delete_file(State(st.clone()), none(), Json(DeleteFile { path: "TODO.md".into(), ..Default::default() })).await.unwrap().0;
-        assert_eq!(v["recoverable"], false);
-        assert_eq!(t::sh(&lib, &["rev-parse", "HEAD"]), snap);
+        // Nothing is written into the library either — by hand or by the assistant — until the user
+        // has decided: undoing the wrap must never take later work with it.
+        let other = t::chat(&st, "another conversation").await;
+        t::assistant(&st, |_| async { panic!("nothing may run in a library that holds half a wrap") });
+        interrupted(write_file(State(st.clone()), none(), save("notes/today.md", "typed while the wrap waits")).await);
+        interrupted(new_file(State(st.clone()), none(), Json(NewFile { path: "notes/new.md".into(), content: "x".into() })).await);
+        interrupted(move_file(State(st.clone()), none(), Json(MoveFile { from: "README.md".into(), to: "READ.md".into() })).await);
+        interrupted(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "TODO.md".into(), ..Default::default() })).await);
+        interrupted(idea_status(State(st.clone()), Json(IdeaStatus { path: "ideas/shop".into(), status: "active".into() })).await);
+        interrupted(import_files(State(st.clone()), Json(ImportReq { files: vec![ImportFile { name: "a.txt".into(), data_base64: "aGk=".into() }] })).await);
+        interrupted(todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "new task".into(), ..Default::default() })).await);
+        interrupted(chat_send(State(st.clone()), Path(other.clone()), Json(SendBody { text: "write a note".into(), ..Default::default() })).await);
+        interrupted(enable_module(State(st.clone()), Path("docs".into())).await);
+        assert_eq!(st.chats.meta(&other).await.unwrap().message_count, 1, "the refused message was not added to the chat");
+        assert!(!lib.join("notes").exists() && !lib.join("imports").exists() && lib.join("TODO.md").exists());
+        // Reading is never blocked, and the person can see what undoing would change.
+        assert!(read_file(State(st.clone()), q(&[("path", "README.md")])).await.is_ok());
+        let preview = wrap_undo_preview(State(st.clone()), Path(wrap.clone())).await.unwrap().0;
+        assert_eq!(preview["files"], json!([{"path": "ideas/shop/README.md", "change": "edited"}, {"path": "ideas/shop/log.md", "change": "added"}]));
+        assert_eq!(preview["kept"], json!([]));
 
-        wrap_rollback(State(st.clone()), Path(wrap.clone())).await.unwrap();
+        let undone = wrap_rollback(State(st.clone()), Path(wrap.clone())).await.unwrap().0;
+        assert_eq!((undone["reverted"].as_u64(), undone["kept"].as_array().map(Vec::len)), (Some(2), Some(0)));
         assert_eq!(t::read(&lib, "ideas/shop/README.md"), "---\ntitle: Shop\nstatus: seed\n---\nOriginal idea.\n");
         assert!(!lib.join("ideas/shop/log.md").exists() && lib.join("TODO.md").exists());
+        // Decided: the library can be changed again.
+        write_file(State(st.clone()), none(), save("notes/today.md", "typed after the wrap was undone")).await.unwrap();
+        std::fs::remove_file(lib.join("notes/today.md")).unwrap();
+        std::fs::remove_dir(lib.join("notes")).unwrap();
         // Sync is allowed again (this library has no backup location, so it only records).
         let v = git_sync(State(st.clone())).await.unwrap().0;
         assert_eq!(v["committed"], false);
@@ -2178,6 +2226,36 @@ mod tests {
     }
 
     async fn status_of(st: &Arc<AppState>) -> Value { status(State(st.clone())).await.unwrap().0 }
+
+    #[tokio::test]
+    async fn chats_are_listed_and_continued_only_in_their_own_library() {
+        let (st, lib) = t::library().await;
+        let listed = |v: Value| v.as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let made = chat_create(State(st.clone()), Json(NewChat { by_user: true, ..Default::default() })).await.unwrap().0;
+        let chat = made["id"].as_str().unwrap().to_string();
+        assert_eq!(st.chats.meta(&chat).await.unwrap().library.as_deref(), Some(lib.to_string_lossy().as_ref()));
+        // Customising the app belongs to no library.
+        let made = chat_create(State(st.clone()), Json(NewChat { by_user: true, kind: Some("customize".into()), ..Default::default() })).await.unwrap().0;
+        let custom = made["id"].as_str().unwrap().to_string();
+        assert_eq!(st.chats.meta(&custom).await.unwrap().library, None);
+        assert_eq!(listed(chat_list(State(st.clone())).await.unwrap().0).len(), 2);
+
+        // Another library is opened: the chat waits in its own, and cannot be continued from here.
+        let other = lib.parent().unwrap().join("other-library");
+        std::fs::create_dir_all(&other).unwrap();
+        st.settings.write().await.library_path = Some(other.to_string_lossy().to_string());
+        assert_eq!(listed(chat_list(State(st.clone())).await.unwrap().0), [custom.clone()]);
+        t::assistant(&st, |_| async { panic!("a chat must not run in a library it was not started in") });
+        let e = shown(chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "carry on".into(), ..Default::default() })).await);
+        assert_eq!(e.status, 409);
+        assert!(e.message.contains(lib.to_string_lossy().as_ref()), "{}", e.message);
+        assert_eq!(st.chats.meta(&chat).await.unwrap().message_count, 0);
+
+        // Back in its library it is there again.
+        st.settings.write().await.library_path = Some(lib.to_string_lossy().to_string());
+        assert!(listed(chat_list(State(st.clone())).await.unwrap().0).contains(&chat));
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
 
     #[tokio::test]
     async fn sync_waits_for_the_assistant_and_its_work_gets_its_own_history_entry() {

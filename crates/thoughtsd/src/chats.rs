@@ -67,6 +67,12 @@ pub struct Chat {
     pub mini_wrap: Option<String>,
     pub mini_wrap_at: Option<DateTime<Utc>>,
     pub wrapped_at: Option<DateTime<Utc>>,
+    /// What earlier wraps already saved from this chat (a summary), so the next one only adds what is new.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrapped_summary: Option<String>,
+    /// The library folder this chat belongs to. None = not tied to a library (customising the app).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library: Option<String>,
     /// Has activity since the last mini-wrap.
     pub dirty: bool,
     pub running: bool,
@@ -102,6 +108,7 @@ pub struct ChatMeta {
     pub options: RunOptions,
     pub has_mini_wrap: bool,
     pub wrapped_at: Option<DateTime<Utc>>,
+    pub library: Option<String>,
     pub dirty: bool,
     pub running: bool,
     pub interrupted: bool,
@@ -148,6 +155,8 @@ impl Default for Chat {
             mini_wrap: None,
             mini_wrap_at: None,
             wrapped_at: None,
+            wrapped_summary: None,
+            library: None,
             dirty: false,
             running: false,
             interrupted: false,
@@ -171,7 +180,7 @@ impl Chat {
             id: self.id.clone(), title: self.title.clone(), project_id: self.project_id.clone(), kind: self.kind.clone(),
             provider: self.provider.clone(), session_id: self.session_id.clone(), created: self.created, updated: self.updated,
             options: self.options.clone(), has_mini_wrap: self.mini_wrap.is_some(), wrapped_at: self.wrapped_at,
-            dirty: self.dirty, running: self.running, interrupted: self.interrupted, cost_usd: self.cost_usd,
+            library: self.library.clone(), dirty: self.dirty, running: self.running, interrupted: self.interrupted, cost_usd: self.cost_usd,
             meta: self.meta.clone(), message_count: self.messages.len(),
             has_user_message: self.messages.iter().any(|m| m.role == "user"),
         }
