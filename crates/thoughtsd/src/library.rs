@@ -477,16 +477,54 @@ pub fn read_raw(root: &Path, rel: &str) -> anyhow::Result<(Vec<u8>, &'static str
     Ok((std::fs::read(&p)?, mime_for(rel)))
 }
 
-/// After a new library has been set up: the starter's root `presets/` folder is only kept when it
-/// has not already been installed under `.claude/presets/`.
-pub fn remove_leftover_presets(root: &Path) -> bool {
-    let (left, installed) = (root.join("presets"), root.join(".claude/presets"));
-    if !installed.is_dir() || !left.is_dir() || std::fs::symlink_metadata(&left).map_or(true, |m| m.file_type().is_symlink()) { return false; }
-    match std::fs::remove_dir_all(&left) {
-        Ok(()) => true,
-        Err(e) => { crate::log::warn(format!("could not remove the leftover presets folder: {e}")); false }
+/// Move the kit's presets from the top of a library to `.claude/presets/`: out of the user's way,
+/// still there if they change their line of work. A preset already installed there is kept and the
+/// copy at the top removed. Only the kit's own file names are touched; anything else in a folder
+/// called `presets` stays where it is. Returns whether anything was moved or removed.
+pub fn install_presets(root: &Path) -> bool {
+    let (top, home) = (root.join("presets"), root.join(".claude/presets"));
+    let is = |p: &Path, dir: bool| std::fs::symlink_metadata(p).map_or(false, |m| if dir { m.is_dir() } else { m.is_file() });
+    // A real folder only: a link named `presets` is somebody else's business.
+    let Some(kit) = STARTER.get_dir("presets").filter(|_| is(&top, true)) else { return false };
+    let (mut changed, mut dirs, mut stack) = (false, vec![], vec![kit]);
+    while let Some(d) = stack.pop() {
+        stack.extend(d.dirs());
+        dirs.push(d.path().to_path_buf());
+        for f in d.files() {
+            let Ok(rel) = f.path().strip_prefix("presets") else { continue };
+            let (from, to) = (top.join(rel), home.join(rel));
+            if !is(&from, false) { continue; }
+            let done = if std::fs::symlink_metadata(&to).is_ok() { std::fs::remove_file(&from) } else {
+                to.parent().map_or(Ok(()), std::fs::create_dir_all)
+                    // A rename can fail across volumes: copy, then remove.
+                    .and_then(|_| std::fs::rename(&from, &to).or_else(|_| std::fs::copy(&from, &to).and_then(|_| std::fs::remove_file(&from))))
+            };
+            match done {
+                Ok(()) => changed = true,
+                Err(e) => crate::log::warn(format!("could not tidy the preset {}: {e}", rel.display())),
+            }
+        }
     }
+    // Deepest first; a folder that still holds something of the user's is not empty and stays.
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    for d in dirs { let _ = std::fs::remove_dir(root.join(d)); }
+    changed
 }
+
+/// What the app clears away once the assistant has finished setting a new library up: the one-time
+/// setup routine, both welcome pages (English and Arabic), and the kit's presets folder at the top.
+/// The assistant is told to leave all of this to the app: it cannot write under `.claude/` itself.
+pub fn finish_setup(root: &Path) {
+    let _ = std::fs::remove_dir_all(root.join(SETUP_ROUTINE));
+    for page in ["START-HERE.md", "START-HERE.ar.md"] { let _ = std::fs::remove_file(root.join(page)); }
+    install_presets(root);
+}
+
+/// The kit's one-time setup routine. While it is there, the library has not been set up.
+pub const SETUP_ROUTINE: &str = ".claude/skills/init-library";
+
+/// Has this library still to be set up? (Its setup routine is removed when setup finishes.)
+pub fn awaits_setup(root: &Path) -> bool { root.join(SETUP_ROUTINE).join("SKILL.md").is_file() }
 
 /// Library files containing every word of `q` (see `crate::search`), best first.
 pub fn search(root: &Path, q: &str, limit: usize, exclude: &[String]) -> Vec<Value> {
@@ -517,11 +555,91 @@ pub fn stats(root: &Path) -> Value {
 /// The starter library kit, embedded in the program.
 pub static STARTER: include_dir::Dir = include_dir::include_dir!("$CARGO_MANIFEST_DIR/../../starter");
 
-/// Copy the embedded starter kit into `dest` (must be empty or missing).
-pub fn create_from_starter(dest: &Path) -> anyhow::Result<()> {
-    if dest.exists() && std::fs::read_dir(dest)?.next().is_some() {
-        anyhow::bail!("{} is not empty — choose an empty folder or 'use existing library'", dest.display());
+/// What a folder is, as far as starting a new library in it goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FolderState {
+    /// Nothing there yet: it will be created.
+    Missing,
+    /// A folder with nothing in it (an empty repository counts).
+    Empty,
+    /// A copy of the starter kit that nobody has changed or set up — what a setup that stopped
+    /// half-way leaves behind. Setup can simply run on it again.
+    Starter,
+    /// A Thoughts library with content of its own.
+    Library,
+    /// A folder with other things in it.
+    Files,
+    /// Something that is not a folder.
+    NotFolder,
+}
+
+impl FolderState {
+    pub fn as_str(self) -> &'static str {
+        match self { Self::Missing => "missing", Self::Empty => "empty", Self::Starter => "starter", Self::Library => "library", Self::Files => "files", Self::NotFolder => "notFolder" }
     }
+    /// May a new library be started here?
+    pub fn free(self) -> bool { matches!(self, Self::Missing | Self::Empty | Self::Starter) }
+}
+
+/// Files an operating system drops into folders by itself.
+fn os_dropping(name: &str) -> bool { matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini") || name.starts_with("._") }
+
+pub fn folder_state(dest: &Path) -> FolderState {
+    let Ok(meta) = std::fs::metadata(dest) else {
+        // A dangling link is something, just not a folder.
+        return if std::fs::symlink_metadata(dest).is_ok() { FolderState::NotFolder } else { FolderState::Missing };
+    };
+    if !meta.is_dir() { return FolderState::NotFolder; }
+    let Ok(rd) = std::fs::read_dir(dest) else { return FolderState::Files };
+    let empty = rd.flatten().all(|e| { let n = e.file_name(); let n = n.to_string_lossy(); os_dropping(&n) || n == ".git" });
+    if empty { return FolderState::Empty; }
+    if untouched_starter(dest) { return FolderState::Starter; }
+    if dest.join("CLAUDE.md").is_file() || dest.join("INDEX.md").is_file() { return FolderState::Library; }
+    FolderState::Files
+}
+
+/// Is `dest` a copy of the starter kit with nothing added and nothing changed? Files the kit ships
+/// may be missing (setup removes the routines of features that were not chosen); a `.git` folder
+/// at the top is not looked into.
+fn untouched_starter(dest: &Path) -> bool {
+    if !dest.join("CLAUDE.md").is_file() { return false; }
+    let walk = WalkDir::new(dest).min_depth(1).follow_links(false).into_iter().filter_entry(|e| !(e.depth() == 1 && e.file_name() == ".git"));
+    for (seen, e) in walk.enumerate() {
+        // The kit is a few dozen files: anything much bigger is not a copy of it.
+        let Ok(e) = e else { return false };
+        if seen > 2000 { return false; }
+        let Some(rel) = rel_of(dest, e.path()) else { return false };
+        let kind = e.file_type();
+        if kind.is_dir() {
+            if STARTER.get_dir(&rel).is_none() { return false; }
+        } else if kind.is_file() {
+            if os_dropping(&e.file_name().to_string_lossy()) { continue; }
+            let Some(f) = STARTER.get_file(&rel) else { return false };
+            let same = e.metadata().map_or(false, |m| m.len() == f.contents().len() as u64) && std::fs::read(e.path()).map_or(false, |b| b == f.contents());
+            if !same { return false; }
+        } else {
+            return false; // a link, or something stranger
+        }
+    }
+    true
+}
+
+/// May a new library be started in `dest`? Yes when nothing is there, the folder is empty, or it
+/// holds an untouched copy of the starter kit. Otherwise the error says what is in the way.
+pub fn check_new_library(dest: &Path) -> anyhow::Result<FolderState> {
+    let (state, path) = (folder_state(dest), dest.display().to_string());
+    match state {
+        FolderState::Library => Err(crate::tr::err("library.exists", &[("path", &path)])),
+        FolderState::Files => Err(crate::tr::err("library.not_empty", &[("path", &path)])),
+        FolderState::NotFolder => Err(crate::tr::err("library.not_folder", &[("path", &path)])),
+        free => Ok(free),
+    }
+}
+
+/// Copy the embedded starter kit into `dest`: a folder that is missing, empty, or already an
+/// untouched copy of the kit (so a setup that failed late can be tried again on the same folder).
+pub fn create_from_starter(dest: &Path) -> anyhow::Result<()> {
+    check_new_library(dest)?;
     // Notes are personal: the library folder opens for its owner alone, like the app's own data.
     // (A new folder in the home folder is otherwise readable by every account on a Mac.)
     crate::paths::create_private_dir(dest)?;
@@ -918,15 +1036,117 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
 
+    fn kit_files(root: &Path, under: &str) -> Vec<String> {
+        let mut out: Vec<String> = WalkDir::new(root.join(under)).into_iter().flatten().filter(|e| e.file_type().is_file())
+            .filter_map(|e| rel_of(root, e.path())).collect();
+        out.sort();
+        out
+    }
+
     #[test]
-    fn leftover_presets_are_removed_only_when_installed() {
+    fn setup_leaves_no_welcome_pages_setup_routine_or_presets_at_the_top() {
         let d = tmp();
-        std::fs::create_dir_all(d.join("presets/accountant")).unwrap();
-        assert!(!remove_leftover_presets(&d));
-        assert!(d.join("presets").exists());
+        create_from_starter(&d).unwrap();
+        assert!(awaits_setup(&d));
+        let shipped = kit_files(&d, "presets");
+        assert!(shipped.len() >= 12 && shipped.iter().any(|p| p.starts_with("presets/ar/")), "{shipped:?}");
+        assert!(d.join("START-HERE.md").exists() && d.join("START-HERE.ar.md").exists());
+        finish_setup(&d);
+        assert!(!awaits_setup(&d) && !d.join(SETUP_ROUTINE).exists());
+        assert!(!d.join("START-HERE.md").exists() && !d.join("START-HERE.ar.md").exists(), "both welcome pages go");
+        assert!(!d.join("presets").exists(), "nothing of the kit's presets stays at the top");
+        // Every preset is now under .claude/presets, byte for byte, in the same sub-folders.
+        let installed = kit_files(&d, ".claude/presets");
+        assert_eq!(installed, shipped.iter().map(|p| format!(".claude/{p}")).collect::<Vec<_>>());
+        for p in &shipped {
+            assert_eq!(std::fs::read(d.join(".claude").join(p)).unwrap(), STARTER.get_file(p).unwrap().contents(), "{p}");
+        }
+        // The rest of the kit is untouched, and a second pass changes nothing.
+        assert!(d.join("CLAUDE.md").exists() && d.join(".claude/skills/wrap/SKILL.md").exists());
+        finish_setup(&d);
+        assert_eq!(kit_files(&d, ".claude/presets"), installed);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn tidying_presets_never_touches_what_is_not_the_kits() {
+        // The assistant already installed them (the routine run in a terminal): the top copy goes.
+        let d = tmp();
+        create_from_starter(&d).unwrap();
         std::fs::create_dir_all(d.join(".claude/presets")).unwrap();
-        assert!(remove_leftover_presets(&d));
-        assert!(!d.join("presets").exists() && d.join(".claude/presets").exists());
+        std::fs::write(d.join(".claude/presets/legal.md"), "installed earlier").unwrap();
+        // The user keeps something of their own in a folder with the same name.
+        std::fs::write(d.join("presets/my-own-template.md"), "mine").unwrap();
+        std::fs::create_dir_all(d.join("presets/drafts")).unwrap();
+        std::fs::write(d.join("presets/drafts/x.md"), "mine too").unwrap();
+        assert!(install_presets(&d));
+        assert_eq!(std::fs::read_to_string(d.join(".claude/presets/legal.md")).unwrap(), "installed earlier", "an installed preset is never replaced");
+        assert!(d.join(".claude/presets/ar/legal.md").exists() && !d.join("presets/legal.md").exists() && !d.join("presets/ar").exists());
+        assert_eq!(kit_files(&d, "presets"), ["presets/drafts/x.md", "presets/my-own-template.md"]);
+        assert!(!install_presets(&d), "nothing left to do");
+        std::fs::remove_dir_all(&d).unwrap();
+        // No presets folder, or a link in its place: nothing happens.
+        let d = tmp();
+        assert!(!install_presets(&d));
+        #[cfg(unix)]
+        {
+            let elsewhere = tmp();
+            std::fs::write(elsewhere.join("legal.md"), "not ours").unwrap();
+            std::os::unix::fs::symlink(&elsewhere, d.join("presets")).unwrap();
+            assert!(!install_presets(&d));
+            assert!(elsewhere.join("legal.md").exists() && !d.join(".claude").exists());
+            std::fs::remove_dir_all(elsewhere).unwrap();
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_new_library_goes_into_a_free_folder_or_an_untouched_copy_of_the_kit() {
+        let d = tmp();
+        let lib = d.join("Thoughts");
+        assert_eq!(folder_state(&lib), FolderState::Missing);
+        create_from_starter(&lib).unwrap();
+        assert_eq!(folder_state(&lib), FolderState::Starter);
+        // A setup that stopped half-way: routines of features not chosen were removed, history was
+        // started, the system left its own droppings. Trying again on the same folder works.
+        std::fs::remove_dir_all(lib.join(".claude/skills/check-in")).unwrap();
+        std::fs::create_dir_all(lib.join(".git/objects")).unwrap();
+        std::fs::write(lib.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(lib.join(".DS_Store"), [0u8; 4]).unwrap();
+        assert_eq!(check_new_library(&lib).unwrap(), FolderState::Starter);
+        create_from_starter(&lib).unwrap();
+        assert!(lib.join(".claude/skills/check-in/SKILL.md").exists(), "the kit is whole again");
+        // Once anything in it has changed, or something was added, it is a library of its own.
+        std::fs::write(lib.join("INDEX.md"), "# My index\n").unwrap();
+        assert_eq!(folder_state(&lib), FolderState::Library);
+        let err = create_from_starter(&lib).unwrap_err();
+        assert_eq!(crate::tr::classify(&err).code, "library_exists");
+        assert_eq!(std::fs::read_to_string(lib.join("INDEX.md")).unwrap(), "# My index\n", "nothing was overwritten");
+        create_from_starter(&d.join("again")).unwrap();
+        std::fs::write(d.join("again/notes.md"), "mine").unwrap();
+        assert_eq!(folder_state(&d.join("again")), FolderState::Library);
+        // A set-up library (routine and welcome pages gone, presets moved) is a library too.
+        create_from_starter(&d.join("done")).unwrap();
+        finish_setup(&d.join("done"));
+        assert_eq!(folder_state(&d.join("done")), FolderState::Library);
+        // Other folders: empty ones are free (an empty repository too), anything else is refused untouched.
+        std::fs::create_dir_all(d.join("empty/.git")).unwrap();
+        std::fs::write(d.join("empty/.DS_Store"), [0u8; 4]).unwrap();
+        assert_eq!(check_new_library(&d.join("empty")).unwrap(), FolderState::Empty);
+        std::fs::create_dir_all(d.join("photos")).unwrap();
+        std::fs::write(d.join("photos/a.jpg"), [1u8; 4]).unwrap();
+        assert_eq!(folder_state(&d.join("photos")), FolderState::Files);
+        assert_eq!(crate::tr::classify(&create_from_starter(&d.join("photos")).unwrap_err()).code, "validation");
+        assert_eq!(std::fs::read_dir(d.join("photos")).unwrap().count(), 1);
+        assert_eq!(folder_state(&d.join("photos/a.jpg")), FolderState::NotFolder);
+        assert!(create_from_starter(&d.join("photos/a.jpg")).is_err());
+        #[cfg(unix)]
+        {
+            // A link inside is not the kit's.
+            create_from_starter(&d.join("linked")).unwrap();
+            std::os::unix::fs::symlink(d.join("photos"), d.join("linked/more")).unwrap();
+            assert_eq!(folder_state(&d.join("linked")), FolderState::Library);
+        }
         std::fs::remove_dir_all(d).unwrap();
     }
 

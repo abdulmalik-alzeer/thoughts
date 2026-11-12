@@ -78,8 +78,12 @@ Thoughts.app
   and `presets/ar/` (Arabic) that the init skill applies once and then moves to
   `.claude/presets/`. `library.rs` embeds the whole `starter/` folder with `include_dir!` and
   extracts all of it, so a file added under `starter/` is copied into new libraries without a
-  code change. `START-HERE.md` and `START-HERE.ar.md` are both copied; the init skill deletes
-  both when setup finishes.
+  code change. `START-HERE.md` and `START-HERE.ar.md` are both copied. When setup runs in the app
+  the assistant is told to leave the clearing up to the app (it cannot write under `.claude/`):
+  after a run that succeeded, `library::finish_setup` removes the init skill and both welcome
+  pages and moves `presets/` to `.claude/presets/`. After a run that failed or was stopped
+  nothing is removed, and the setup chat offers to run it again
+  (`POST /api/onboarding/setup/:id`). Run in a terminal, the init skill does all of this itself.
 
 ### Trust model
 

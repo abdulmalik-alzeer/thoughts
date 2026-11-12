@@ -93,6 +93,41 @@ pub fn enclosing_repo(dir: &Path) -> Option<PathBuf> {
 /// (A library's own `.gitignore` files are honoured as well.)
 const KEPT_EXCLUDE: &str = "# Written by Thoughts.\n.DS_Store\nThumbs.db\ndesktop.ini\n.*.icloud\n.dropbox\n.dropbox.cache/\n.dropbox.attr\n.~lock.*\n~$*\n.*.tmp\n";
 
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to behave, on its own thread only, like a computer that has no git.
+    pub(crate) static TEST_NO_GIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Is there a git that can really run here? On a Mac without Apple's command-line tools
+/// `/usr/bin/git` is only a placeholder: running it does nothing useful and makes macOS ask to
+/// install the developer tools — every time. So the app looks first and, when git is not there,
+/// says so plainly (`git.missing`) instead of running the placeholder. A yes is remembered while
+/// the app runs; a no is looked at again after a few seconds, so installing git is noticed.
+pub fn usable() -> bool {
+    #[cfg(test)]
+    if TEST_NO_GIT.with(|c| c.get()) { return false; }
+    #[cfg(target_os = "macos")]
+    {
+        use std::time::{Duration, Instant};
+        static SEEN: std::sync::Mutex<Option<(bool, Instant)>> = std::sync::Mutex::new(None);
+        let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+        match *seen {
+            Some((true, _)) => return true,
+            Some((false, at)) if at.elapsed() < Duration::from_secs(5) => return false,
+            _ => {}
+        }
+        // A git from somewhere else (Homebrew, MacPorts…) is the real thing; Apple's needs its tools installed.
+        let own = ["/opt/homebrew/bin/git", "/usr/local/bin/git"].iter().any(|p| Path::new(p).exists())
+            || crate::claude::find_binary(&None, "git").map_or(false, |p| p != Path::new("/usr/bin/git"));
+        let yes = own || crate::proc::std_output_timeout(crate::proc::std_command("xcode-select").arg("-p"), Duration::from_secs(15)).map_or(false, |o| o.status.success());
+        *seen = Some((yes, Instant::now()));
+        yes
+    }
+    #[cfg(not(target_os = "macos"))]
+    { true }
+}
+
 /// Run git in `dir` and return its raw output. Hardened against a library's own configuration, never
 /// waits for a terminal, and never runs longer than `timeout_for(args)`: a stalled command is killed
 /// (with any helper it started) and reported as a plain error, so nothing stays locked behind it.
@@ -103,6 +138,7 @@ pub async fn git_raw(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Res
 
 /// `git_raw` on a repository named by the caller (creating one is the only time it is not `repo_of`).
 async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+    if !usable() { return Err(crate::tr::err("git.missing", &[])); }
     let store = state.settings.read().await.sync.credential_store.clone();
     let mut c = crate::proc::command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
     c.current_dir(dir).env("PATH", crate::claude::shell_path()).env("GIT_TERMINAL_PROMPT", "0");
