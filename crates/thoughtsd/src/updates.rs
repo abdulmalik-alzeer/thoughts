@@ -61,24 +61,49 @@ fn write_status(home: &Path, v: &Value) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `{from, to, applied:[path], conflicts:[{path, from}], removed:[path], downgrade}` — the outcome
-/// of the last app update. `conflicts` stay listed until the user resolves each one.
+/// `{from, to, applied:[path], conflicts:[{path, from}], kept:[{path, from}], removed:[path],
+/// downgrade}` — the outcome of the last app update. `conflicts` stay listed until the user decides
+/// about each one. `kept` are the built-in files whose new version the user turned down ("Keep
+/// mine"): the choice can be revisited (use the new version, or merge) for as long as it applies.
 pub fn status(home: &Path) -> Value {
     let mut v = std::fs::read_to_string(status_file(home)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .filter(|v| v["conflicts"].is_array())
         .unwrap_or_else(|| json!({"from": env!("CARGO_PKG_VERSION"), "to": env!("CARGO_PKG_VERSION"), "applied": [], "conflicts": []}));
     if !v["removed"].is_array() { v["removed"] = json!([]); }
+    if !v["kept"].is_array() { v["kept"] = json!([]); }
     if !v["downgrade"].is_boolean() { v["downgrade"] = json!(false); }
     v
 }
 
-/// `status`, with `merging: true` on the conflict for `merging`: the user chose "let the assistant
-/// merge" for that file, and the merged version is being prepared or is waiting for review. The
-/// conflict itself stays on record until that version is kept.
-pub fn status_merging(home: &Path, merging: Option<&str>) -> Value {
+/// `status`, with `merging: true` on each conflict (or kept file) in `merging`: the user chose "let
+/// the assistant merge" for that file, and the merged version is being prepared or is waiting for
+/// review. The question itself stays on record until that version is kept.
+pub fn status_merging(home: &Path, merging: &[String]) -> Value {
     let mut v = status(home);
-    if let (Some(path), Some(list)) = (merging, v["conflicts"].as_array_mut()) {
-        for c in list.iter_mut().filter(|c| c["path"] == path) { c["merging"] = json!(true); }
+    for key in ["conflicts", "kept"] {
+        if let Some(list) = v[key].as_array_mut() {
+            for c in list.iter_mut().filter(|c| merging.iter().any(|m| c["path"] == m.as_str())) { c["merging"] = json!(true); }
+        }
+    }
+    v
+}
+
+/// Each open question and each kept file of `status`, with what the new built-in version changes
+/// compared with the one the user's copy started from (`changes`, in the review's terms, see
+/// `staging::effects`; `null` when that cannot be said for this file).
+pub fn explained(mut v: Value, home: &Path, shipped: &[(&str, &str)]) -> Value {
+    let to = v["to"].as_str().unwrap_or_default().to_string();
+    for key in ["conflicts", "kept"] {
+        let Some(list) = v[key].as_array_mut() else { continue };
+        for c in list.iter_mut() {
+            let path = c["path"].as_str().unwrap_or_default().to_string();
+            let from = c["from"].as_str().unwrap_or_default().to_string();
+            let old = std::fs::read_to_string(base_dir(home, &from).join(&path)).ok();
+            let changes = shipped_text(&path, shipped)
+                .and_then(|new| crate::staging::effects::file_effects(&path, old.as_deref(), Some(&new)));
+            c["changes"] = json!(changes);
+            if c["to"].is_null() { c["to"] = json!(to); }
+        }
     }
     v
 }
@@ -122,9 +147,10 @@ pub async fn check_with(g: Git<'_>, d: &Dirs, version: &str, shipped: &[(&str, &
     let had_status = status_file(&d.home).exists();
     let earlier = status(&d.home);
     let open: Vec<Value> = if had_status { earlier["conflicts"].as_array().cloned().unwrap_or_default() } else { vec![] };
+    let kept: Vec<Value> = if had_status { earlier["kept"].as_array().cloned().unwrap_or_default() } else { vec![] };
     if let Some(f) = from.as_deref().filter(|f| older(version, f)) {
         // An older app was started on a newer install: touch nothing, remember nothing, just say so.
-        let st = json!({"from": f, "to": version, "applied": [], "conflicts": open, "removed": [], "downgrade": true});
+        let st = json!({"from": f, "to": version, "applied": [], "conflicts": open, "kept": kept, "removed": [], "downgrade": true});
         if !had_status || earlier != st { write_status(&d.home, &st)?; }
         return Ok(false);
     }
@@ -170,9 +196,16 @@ pub async fn check_with(g: Git<'_>, d: &Dirs, version: &str, shipped: &[(&str, &
             crate::applayer::mark_system_head(g, &d.layer).await;
         }
     }
+    // A new version the user turned down earlier stays on offer while it still applies: the file is
+    // still shipped, still differs from what this version ships, and is not an open question again.
+    let kept: Vec<Value> = kept.into_iter().filter(|k| {
+        let path = k["path"].as_str().unwrap_or_default();
+        let Some((_, new)) = shipped.iter().find(|(p, _)| *p == path) else { return false };
+        !conflicts.iter().any(|c| c["path"] == path) && std::fs::read(d.layer.join(path)).ok().map(|b| sha(&b)) != Some(sha(new.as_bytes()))
+    }).collect();
     store_base(&d.home, version, shipped)?;
     if let Some(from) = &from {
-        write_status(&d.home, &json!({"from": from, "to": version, "applied": applied, "conflicts": conflicts, "removed": removed, "downgrade": false}))?;
+        write_status(&d.home, &json!({"from": from, "to": version, "applied": applied, "conflicts": conflicts, "kept": kept, "removed": removed, "downgrade": false}))?;
     }
     Ok(!applied.is_empty())
 }
@@ -181,20 +214,31 @@ fn shipped_text(path: &str, shipped: &[(&str, &str)]) -> Option<String> {
     shipped.iter().find(|(p, _)| *p == path).map(|(_, t)| t.to_string())
 }
 
-/// The status with the conflict on `path` removed; fails when there is no such conflict.
-fn take_conflict(home: &Path, path: &str) -> anyhow::Result<Value> {
+/// The status with the question about `path` removed (an open conflict, or a new version the user
+/// kept their own file over), and that entry; fails when there is no such question.
+fn take_conflict(home: &Path, path: &str) -> anyhow::Result<(Value, Value)> {
     let mut st = status(home);
-    let list = st["conflicts"].as_array().cloned().unwrap_or_default();
-    if !list.iter().any(|c| c["path"] == path) { anyhow::bail!("there is no update conflict for {path}"); }
-    st["conflicts"] = json!(list.into_iter().filter(|c| c["path"] != path).collect::<Vec<_>>());
-    Ok(st)
+    let mut found = None;
+    for key in ["conflicts", "kept"] {
+        let list = st[key].as_array().cloned().unwrap_or_default();
+        if let Some(c) = list.iter().find(|c| c["path"] == path) { found.get_or_insert(c.clone()); }
+        st[key] = json!(list.into_iter().filter(|c| c["path"] != path).collect::<Vec<_>>());
+    }
+    let entry = found.ok_or_else(|| anyhow::anyhow!("there is no update conflict for {path}"))?;
+    Ok((st, entry))
 }
 
-/// Resolve a conflict by keeping the user's file (`keep`) or taking the new default (`new`).
+/// Settle the question about `path` by keeping the user's file (`keep`, which can be revisited
+/// later) or taking the new default (`new`).
 pub async fn resolve(g: Git<'_>, d: &Dirs, shipped: &[(&str, &str)], path: &str, choice: &str) -> anyhow::Result<()> {
-    let st = take_conflict(&d.home, path)?;
+    let (mut st, entry) = take_conflict(&d.home, path)?;
     match choice {
-        "keep" => {}
+        "keep" => {
+            if shipped_text(path, shipped).is_none() { anyhow::bail!("{path} is not a built-in file"); }
+            let mut kept = st["kept"].as_array().cloned().unwrap_or_default();
+            kept.push(json!({"path": path, "from": entry["from"].as_str().or(st["from"].as_str()).unwrap_or_default(), "to": st["to"]}));
+            st["kept"] = json!(kept);
+        }
         "new" => {
             let text = shipped_text(path, shipped).ok_or_else(|| anyhow::anyhow!("{path} is not a built-in file"))?;
             // Anything in the live layer that was never reviewed is taken out first, not recorded along.
@@ -210,20 +254,19 @@ pub async fn resolve(g: Git<'_>, d: &Dirs, shipped: &[(&str, &str)], path: &str,
     write_status(&d.home, &st)
 }
 
-/// Forget the conflict on `path`: the merged version the assistant prepared has been kept. (Until
-/// then the conflict stays listed, so a merge that fails, is stopped, is discarded or is replaced by
+/// Forget the question about `path`: the merged version the assistant prepared has been kept.
+/// (Until then it stays listed, so a merge that fails, is stopped, is discarded or is replaced by
 /// another request leaves the question open and "use the new version" still possible.)
 pub fn clear_conflict(home: &Path, path: &str) -> anyhow::Result<()> {
-    write_status(home, &take_conflict(home, path)?)
+    write_status(home, &take_conflict(home, path)?.0)
 }
 
-/// The customise prompt for an AI merge of one conflicting file.
+/// The customise prompt for an AI merge of one conflicting (or kept) file.
 pub fn merge_prompt(d: &Dirs, shipped: &[(&str, &str)], path: &str) -> anyhow::Result<String> {
-    let st = take_conflict(&d.home, path)?;
+    let (st, entry) = take_conflict(&d.home, path)?;
     let new = shipped_text(path, shipped).ok_or_else(|| anyhow::anyhow!("{path} is not a built-in file"))?;
     // A conflict carried over from an earlier update is merged against the base it started from.
-    let from = status(&d.home)["conflicts"].as_array().into_iter().flatten().find(|c| c["path"] == path)
-        .and_then(|c| c["from"].as_str()).or(st["from"].as_str()).unwrap_or_default().to_string();
+    let from = entry["from"].as_str().or(st["from"].as_str()).unwrap_or_default().to_string();
     let old = std::fs::read_to_string(base_dir(&d.home, &from).join(path)).unwrap_or_default();
     Ok(format!(
         "A new version of the app ships a new built-in `{path}`, and I have also changed my own copy. Merge the two into `{path}` \
@@ -290,8 +333,8 @@ mod tests {
         let prompt = merge_prompt(&d, v2, "custom.css").unwrap();
         assert!(prompt.contains("/* v1 */") && prompt.contains("/* v2 */"));
         assert_eq!(status(&d.home)["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]), "still listed while the merge is prepared and reviewed");
-        assert_eq!(status_merging(&d.home, Some("custom.css"))["conflicts"], json!([{"path": "custom.css", "from": "1.0.0", "merging": true}]));
-        assert_eq!(status_merging(&d.home, Some("home.json"))["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]));
+        assert_eq!(status_merging(&d.home, &["custom.css".into()])["conflicts"], json!([{"path": "custom.css", "from": "1.0.0", "merging": true}]));
+        assert_eq!(status_merging(&d.home, &["home.json".into()])["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]));
         // The built-in refresh is the app's own entry: it is not offered for undoing.
         let top = &crate::applayer::history_in(st, &d.layer).await[0];
         assert_eq!((&top["kind"], &top["undoable"]), (&json!("system"), &json!(false)));
@@ -300,6 +343,51 @@ mod tests {
         clear_conflict(&d.home, "custom.css").unwrap();
         assert_eq!(status(&d.home)["conflicts"], json!([]));
         assert!(resolve(st, &d, v2, "custom.css", "new").await.is_err(), "already resolved");
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_update_question_says_what_is_new_and_keep_mine_can_be_revisited() {
+        let (st, d) = testutil::layer("explain").await;
+        let v1: &[(&str, &str)] = &[("custom.css", "/* v1 */\n"), ("home.json", "{\"chips\":[]}\n")];
+        for (p, t) in v1 { std::fs::write(d.layer.join(p), t).unwrap(); }
+        st.commit_all(&d.layer, "v1 defaults").await.unwrap();
+        check_with(st, &d, "1.0.0", v1).await.unwrap();
+        // The user changes both; the new version adds a shortcut and a colour.
+        std::fs::write(d.layer.join("custom.css"), "/* mine */\n").unwrap();
+        std::fs::write(d.layer.join("home.json"), "{\"chips\":[{\"label\":\"Mine\",\"prompt\":\"m\"}]}\n").unwrap();
+        st.commit_all(&d.layer, "mine").await.unwrap();
+        let v2: &[(&str, &str)] = &[("custom.css", "/* v2 */\n:root { --accent: #0a5c8a }\n"),
+            ("home.json", "{\"chips\":[{\"label\":\"Weekly review\",\"prompt\":\"Review my week\"}]}\n")];
+        check_with(st, &d, "2.0.0", v2).await.unwrap();
+        // Each question says what the new version brings, compared with the one the user started from.
+        let s = explained(status(&d.home), &d.home, v2);
+        let home = s["conflicts"].as_array().unwrap().iter().find(|c| c["path"] == "home.json").unwrap().clone();
+        assert_eq!(home["changes"], json!([{"area": "home", "op": "chipAdded", "label": "Weekly review", "prompt": "Review my week"}]));
+        assert_eq!(home["to"], "2.0.0");
+        let css = s["conflicts"].as_array().unwrap().iter().find(|c| c["path"] == "custom.css").unwrap().clone();
+        assert_eq!(css["changes"][0]["report"]["kind"], "colours");
+        // "Keep mine" is remembered, not forgotten: the new version can still be taken later.
+        resolve(st, &d, v2, "home.json", "keep").await.unwrap();
+        let s = status(&d.home);
+        assert_eq!(s["kept"], json!([{"path": "home.json", "from": "1.0.0", "to": "2.0.0"}]));
+        assert!(!s["conflicts"].as_array().unwrap().iter().any(|c| c["path"] == "home.json"));
+        assert_eq!(explained(s, &d.home, v2)["kept"][0]["changes"][0]["label"], "Weekly review");
+        assert_eq!(status_merging(&d.home, &["home.json".into()])["kept"][0]["merging"], true);
+        assert!(merge_prompt(&d, v2, "home.json").unwrap().contains("Review my week"), "a kept file can be merged too");
+        // A later version that does not touch it again leaves the offer standing.
+        check_with(st, &d, "2.1.0", v2).await.unwrap();
+        assert_eq!(status(&d.home)["kept"][0]["path"], "home.json");
+        resolve(st, &d, v2, "home.json", "new").await.unwrap();
+        assert_eq!(std::fs::read_to_string(d.layer.join("home.json")).unwrap(), v2[1].1);
+        assert_eq!(status(&d.home)["kept"], json!([]));
+        assert!(resolve(st, &d, v2, "home.json", "new").await.is_err(), "settled");
+        // Once the user's own file equals the new default, there is nothing left to offer.
+        resolve(st, &d, v2, "custom.css", "keep").await.unwrap();
+        std::fs::write(d.layer.join("custom.css"), v2[0].1).unwrap();
+        st.commit_all(&d.layer, "by hand").await.unwrap();
+        check_with(st, &d, "2.2.0", v2).await.unwrap();
+        assert_eq!(status(&d.home)["kept"], json!([]));
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 

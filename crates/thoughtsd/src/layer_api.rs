@@ -34,6 +34,10 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/pending/apply", post(pending_apply))
         .route("/api/layer/pending/accept", post(pending_accept))
         .route("/api/layer/pending/discard", post(pending_discard))
+        .route("/api/layer/pending/details", get(pending_details))
+        .route("/api/layer/drafts", get(draft_list))
+        .route("/api/layer/drafts/open", post(draft_open))
+        .route("/api/layer/drafts/discard", post(draft_discard))
         .route("/api/layer/export", get(export))
         .route("/api/layer/import", post(import).layer(DefaultBodyLimit::max(8 * 1024 * 1024)))
         .route("/api/workflows", get(workflow_list))
@@ -261,6 +265,41 @@ async fn pending_discard(State(st): S) -> R {
     ok()
 }
 
+/// `GET /api/layer/pending/details` — what each file of the open change changes, line by line
+/// (see `staging::details`).
+async fn pending_details(State(st): S) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    Ok(Json(staging::details(Git(Some(&st)), &Dirs::real()).await))
+}
+
+/// `GET /api/layer/drafts` — the other changes in progress, set aside (see `staging::drafts_list`).
+async fn draft_list() -> R {
+    let _g = LAYER_LOCK.lock().await;
+    Ok(Json(staging::drafts_list(&Dirs::real())))
+}
+
+#[derive(Deserialize)]
+struct DraftRef { id: String }
+
+/// `POST /api/layer/drafts/open {id}` — open that change for review; the one that was open is set
+/// aside in its place. → the review of the change now open.
+async fn draft_open(State(st): S, Json(r): Json<DraftRef>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let (d, ar) = (Dirs::real(), arabic(&st).await);
+    staging::open_draft(Git(Some(&st)), &d, &r.id).await?;
+    st.emit(json!({"type": "layer.pending"}));
+    Ok(Json(staging::pending(Git(Some(&st)), &d, ar).await))
+}
+
+/// `POST /api/layer/drafts/discard {id}` — throw away a change that is set aside.
+async fn draft_discard(State(st): S, Json(r): Json<DraftRef>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let x = staging::drop_draft(Git(Some(&st)), &Dirs::real(), &r.id).await?;
+    if x.meta.origin.is_empty() || x.meta.origin == "customize" { record_outcome(&st, "discard", &x.meta.request).await; }
+    st.emit(json!({"type": "layer.pending"}));
+    Ok(Json(json!({"ok": true, "origin": x.meta.origin})))
+}
+
 /// `GET /api/layer/export?name=&description=&paths=a,b` — the whole layer, or with `paths` (files,
 /// or folders ending in `/`) a feature pack of just those.
 async fn export(Query(q): Query<HashMap<String, String>>) -> R {
@@ -436,8 +475,11 @@ async fn update_status(State(st): S) -> R {
     let d = Dirs::real();
     let p = staging::pending(Git(Some(&st)), &d, arabic(&st).await).await;
     // (While the assistant is still writing there may be nothing staged yet.)
-    let merging = staging::load_meta(&d).filter(|m| m.origin == "update" && (p["exists"] == true || p["running"] == true)).map(|m| m.resolves);
-    Ok(Json(updates::status_merging(&d.home, merging.as_deref().filter(|m| !m.is_empty()))))
+    let mut merging: Vec<String> = staging::load_meta(&d).filter(|m| m.origin == "update" && (p["exists"] == true || p["running"] == true)).map(|m| m.resolves).into_iter().collect();
+    // A merge set aside for another change is still the answer to its question.
+    merging.extend(staging::merges_set_aside(&d));
+    merging.retain(|m| !m.is_empty());
+    Ok(Json(updates::explained(updates::status_merging(&d.home, &merging), &d.home, applayer::SHIPPED)))
 }
 
 #[derive(Deserialize)]
@@ -452,11 +494,11 @@ async fn update_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
         let id = crate::api::start_customize(st.clone(), prompt, "update", Some(title)).await?;
         // The conflict stays on record until the merged file is kept (see `pending_apply`).
         staging::set_resolves(&d, &r.path);
-        return Ok(Json(json!({"ok": true, "chatId": id, "status": updates::status_merging(&d.home, Some(&r.path))})));
+        return Ok(Json(json!({"ok": true, "chatId": id, "status": updates::explained(updates::status_merging(&d.home, &[r.path.clone()]), &d.home, applayer::SHIPPED)})));
     }
     updates::resolve(Git(Some(&st)), &d, applayer::SHIPPED, &r.path, &r.choice).await?;
     if r.choice == "new" { st.emit(json!({"type": "layer.changed"})); }
-    Ok(Json(json!({"ok": true, "status": updates::status(&d.home)})))
+    Ok(Json(json!({"ok": true, "status": updates::explained(updates::status(&d.home), &d.home, applayer::SHIPPED)})))
 }
 
 #[cfg(test)]

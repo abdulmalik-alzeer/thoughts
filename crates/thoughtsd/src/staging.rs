@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub mod validate;
+pub mod effects;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default, rename_all = "camelCase")]
@@ -21,6 +22,11 @@ pub struct Meta {
     pub outside_changes: Vec<String>,
     /// How many more it changed inside the user's private folders. Their names are not kept.
     pub outside_private: usize,
+    /// Which of `outside_changes` the run itself may have made: a step of its own that writes, or a
+    /// command, names the file. The others changed while it worked (the user, another chat).
+    pub outside_run: Vec<String>,
+    /// The same, counted, for the private folders.
+    pub outside_private_run: usize,
     /// What the library and the live layer looked like when the run started. Files in private
     /// folders are listed under a fingerprint of their name, never the name itself.
     pub library_before: BTreeMap<String, String>,
@@ -163,21 +169,59 @@ fn harden(d: &Dirs, _library: Option<&Path>) -> anyhow::Result<()> {
 /// `private` folders are listed under a fingerprint of their name (`/<hash>`, which no real path
 /// looks like): a change to them is still noticed, but what they are called is not written down.
 pub async fn snapshot(g: Git<'_>, dir: &Path, private: &[String]) -> BTreeMap<String, String> {
-    let out = g.run(dir, &["status", "--porcelain", "-uall", "-z"]).await.unwrap_or_default();
     let mut map = BTreeMap::new();
+    for (xy, path) in uncommitted(g, dir).await {
+        let stamp = std::fs::metadata(dir.join(&path)).ok().map(|m| {
+            let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |x| x.as_nanos());
+            format!("{}:{t}", m.len())
+        }).unwrap_or_default();
+        map.insert(snapshot_key(dir, &path, private), format!("{xy}:{stamp}"));
+    }
+    map
+}
+
+/// `(status, path)` of every uncommitted path in a git folder.
+async fn uncommitted(g: Git<'_>, dir: &Path) -> Vec<(String, String)> {
+    let out = g.run(dir, &["status", "--porcelain", "-uall", "-z"]).await.unwrap_or_default();
+    let mut list = vec![];
     let mut it = out.split('\0');
     while let Some(entry) = it.next() {
         if entry.len() < 4 { continue; }
         let (xy, path) = (&entry[..2], &entry[3..]);
         if xy.contains('R') || xy.contains('C') { it.next(); }
-        let stamp = std::fs::metadata(dir.join(path)).ok().map(|m| {
-            let t = m.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |x| x.as_nanos());
-            format!("{}:{t}", m.len())
-        }).unwrap_or_default();
-        let key = if crate::paths::is_private(dir, path, private) { format!("/{}", &crate::updates::sha(path.as_bytes())[..16]) } else { path.to_string() };
-        map.insert(key, format!("{xy}:{stamp}"));
+        list.push((xy.to_string(), path.to_string()));
     }
-    map
+    list
+}
+
+/// How `snapshot` lists a path: as it is, or for a file in a private folder by a fingerprint.
+fn snapshot_key(dir: &Path, path: &str, private: &[String]) -> String {
+    if crate::paths::is_private(dir, path, private) { format!("/{}", &crate::updates::sha(path.as_bytes())[..16]) } else { path.to_string() }
+}
+
+/// The steps of a run that can change a file, as one text: what its writing tools (Write, Edit,
+/// MultiEdit, NotebookEdit) and its commands were given. `messages` are the chat's, oldest first;
+/// only those after the last message the user sent belong to the run.
+fn run_steps(messages: &[crate::chats::Msg]) -> String {
+    fn strings(v: &Value, out: &mut String) {
+        match v {
+            Value::String(s) => { out.push_str(s); out.push('\n'); }
+            Value::Array(a) => a.iter().for_each(|x| strings(x, out)),
+            Value::Object(o) => o.values().for_each(|x| strings(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = String::new();
+    for msg in messages.iter().rev().take_while(|m| m.role != "user").filter(|m| m.role == "tool") {
+        let Some(tool) = &msg.tool else { continue };
+        if ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"].contains(&tool["name"].as_str().unwrap_or_default()) { strings(&tool["input"], &mut out); }
+    }
+    out.replace('\\', "/")
+}
+
+/// Does a step of the run name `path` (inside `dir`)? Then the run may have changed it.
+fn named_by(steps: &str, dir: &Path, path: &str) -> bool {
+    !steps.is_empty() && (steps.contains(path) || steps.contains(&dir.join(path).to_string_lossy().replace('\\', "/")))
 }
 
 /// Paths whose state differs between two snapshots.
@@ -189,14 +233,22 @@ pub fn snapshot_diff(before: &BTreeMap<String, String>, after: &BTreeMap<String,
 }
 
 /// Get staging ready for a run of customise chat `chat_id` and return the folder the run works in.
-/// A follow-up message in the chat that owns the pending change keeps building on it; anything
-/// else starts from the live layer again.
+/// A follow-up message in the chat that made a change keeps building on that change, also when it
+/// was set aside for another one (which is then set aside in its turn); anything else starts from
+/// the live layer again.
 pub async fn prepare_run(state: &AppState, chat_id: &str) -> anyhow::Result<PathBuf> {
     let d = Dirs::real();
     let g = Git(Some(state));
     crate::applayer::ensure_in(g, &d).await?;
     sync(g, &d).await;
-    let reuse = staged(&d) && load_meta(&d).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id) && m.stale_at.is_empty());
+    let mine = |d: &Dirs| staged(d) && load_meta(d).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id));
+    if !mine(&d) {
+        if let Some(x) = drafts(&d).into_iter().rev().find(|x| x.meta.chat_id.as_deref() == Some(chat_id)) {
+            if let Ok(Some(a)) = open_draft(g, &d, &x.id).await { announce(g, &a.draft); }
+            sync(g, &d).await;
+        }
+    }
+    let reuse = mine(&d) && load_meta(&d).map_or(false, |m| m.stale_at.is_empty());
     if !reuse { replace_for(g, &d, "customize", chat_id).await?; }
     let (library, private) = { let s = state.settings.read().await; (s.library(), s.private_paths.clone()) };
     // The staging copy is the app's own folder (exempt from the trust check like the layer itself);
@@ -216,13 +268,37 @@ pub async fn after_run(state: &AppState, ok: bool) {
     let g = Git(Some(state));
     let Some(mut m) = load_meta(&d) else { return };
     let (library, private) = { let s = state.settings.read().await; (s.library(), s.private_paths.clone()) };
-    let (mut outside, mut hidden) = (vec![], 0usize);
+    let steps = match &m.chat_id { Some(id) => state.chats.with(id, |c| run_steps(&c.messages)).await.unwrap_or_default(), None => String::new() };
+    let (outside, hidden, by_run, hidden_by_run, in_layer) = outside_of_run(g, &d, &m, library.as_deref(), &private, &steps).await;
+    record_outside(&mut m, outside, hidden, by_run, hidden_by_run, in_layer);
+    m.run = if ok { "done" } else { "interrupted" }.into();
+    m.accepted.clear();
+    let _ = save_meta(&d, &m);
+    state.emit(json!({"type": "layer.pending"}));
+}
+
+/// What changed outside the staging copy while a run worked: `(library files, how many in private
+/// folders, which of those files the run's own steps name, how many private ones they name, files
+/// of the live layer)`.
+async fn outside_of_run(g: Git<'_>, d: &Dirs, m: &Meta, library: Option<&Path>, private: &[String], steps: &str)
+    -> (Vec<String>, usize, Vec<String>, usize, Vec<String>) {
+    let (mut outside, mut hidden, mut by_run, mut hidden_by_run) = (vec![], 0usize, vec![], 0usize);
     if let Some(l) = library {
-        let (secret, named): (Vec<String>, Vec<String>) = snapshot_diff(&m.library_before, &snapshot(g, &l, &private).await).into_iter().partition(|p| p.starts_with('/'));
+        let (secret, named): (Vec<String>, Vec<String>) = snapshot_diff(&m.library_before, &snapshot(g, l, private).await).into_iter().partition(|p| p.starts_with('/'));
         hidden = secret.len();
+        // A private file can only be recognised in the steps by its real name, which is looked up now
+        // and never written down (one that was deleted has no name left to find).
+        let names: std::collections::HashMap<String, String> = uncommitted(g, l).await.into_iter().map(|(_, p)| (snapshot_key(l, &p, private), p)).collect();
+        hidden_by_run = secret.iter().filter(|k| names.get(*k).map_or(false, |p| named_by(steps, l, p))).count();
+        by_run = named.iter().filter(|p| named_by(steps, l, p)).cloned().collect();
         outside = named;
     }
     let in_layer = snapshot_diff(&m.layer_before, &snapshot(g, &d.layer, &[]).await);
+    by_run.extend(in_layer.iter().filter(|p| named_by(steps, &d.layer, p)).map(|p| format!("app-layer/{p}")));
+    (outside, hidden, by_run, hidden_by_run, in_layer)
+}
+
+fn record_outside(m: &mut Meta, mut outside: Vec<String>, hidden: usize, by_run: Vec<String>, hidden_by_run: usize, in_layer: Vec<String>) {
     if !outside.is_empty() || hidden > 0 || !in_layer.is_empty() {
         // What the user's files are called is their business: the log gets a count, and names only for the app's own files.
         crate::log::warn(format!("layer: a customise run changed {} library file(s) outside its staging copy{}", outside.len() + hidden,
@@ -232,10 +308,9 @@ pub async fn after_run(state: &AppState, ok: bool) {
     m.outside_changes.extend(outside);
     m.outside_changes.sort(); m.outside_changes.dedup();
     m.outside_private += hidden;
-    m.run = if ok { "done" } else { "interrupted" }.into();
-    m.accepted.clear();
-    let _ = save_meta(&d, &m);
-    state.emit(json!({"type": "layer.pending"}));
+    m.outside_run.extend(by_run);
+    m.outside_run.sort(); m.outside_run.dedup();
+    m.outside_private_run += hidden_by_run;
 }
 
 /// The system prompt of every customise run.
@@ -411,17 +486,93 @@ async fn commit_staging(g: Git<'_>, d: &Dirs) -> anyhow::Result<String> {
     g.rev(&d.staging, "HEAD").await
 }
 
-// ---------- a new request never costs the change it replaces unless it really starts ----------
+// ---------- several changes in progress ----------
+//
+// One change is open at a time: the staging copy, which the review shows and Keep applies. Every
+// other change in progress is set aside as a draft: its prepared files as a commit in the layer's
+// repository (held by a ref of its own, so git never cleans it away) and everything known about it
+// (`Meta`, the summary), written down in `layer-drafts.json`. A new request, an imported pack or an
+// update merge sets the open change aside instead of replacing it, and opening a draft sets aside
+// the one that was open. Nothing is thrown away unless the user discards it.
 
-/// A pending change taken out of the way for a new request (see `replace_for`).
-pub struct Aside { commit: String, meta: Meta, summary: Option<String> }
+/// A change in progress that is not the open one (see above).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Draft {
+    pub id: String,
+    pub commit: String,
+    pub meta: Meta,
+    pub summary: Option<String>,
+    /// When it was set aside (RFC 3339).
+    pub set_aside: String,
+}
+
+fn drafts_file(d: &Dirs) -> PathBuf { d.home.join("layer-drafts.json") }
+fn draft_ref(id: &str) -> String { format!("refs/thoughts/drafts/{id}") }
+fn valid_draft_id(id: &str) -> bool { (1..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric()) }
+
+/// The changes that are set aside, oldest first.
+pub fn drafts(d: &Dirs) -> Vec<Draft> {
+    std::fs::read_to_string(drafts_file(d)).ok().and_then(|t| serde_json::from_str::<Vec<Draft>>(&t).ok()).unwrap_or_default()
+        .into_iter().filter(|x| valid_draft_id(&x.id) && crate::applayer::valid_hash(&x.commit)).collect()
+}
+
+fn save_drafts(d: &Dirs, list: &[Draft]) -> anyhow::Result<()> {
+    if list.is_empty() { let _ = std::fs::remove_file(drafts_file(d)); return Ok(()); }
+    crate::paths::write_atomic(&drafts_file(d), serde_json::to_string_pretty(list)?.as_bytes(), true)?;
+    Ok(())
+}
+
+async fn keep_draft(g: Git<'_>, d: &Dirs, x: &Draft) -> anyhow::Result<()> {
+    g.run(&d.layer, &["update-ref", &draft_ref(&x.id), &x.commit]).await?;
+    let mut list = drafts(d);
+    list.retain(|y| y.id != x.id);
+    list.push(x.clone());
+    save_drafts(d, &list)
+}
+
+async fn forget_draft(g: Git<'_>, d: &Dirs, id: &str) {
+    let mut list = drafts(d);
+    list.retain(|y| y.id != id);
+    if let Err(e) = save_drafts(d, &list) { crate::log::warn(format!("layer: could not update the list of changes in progress: {e}")); }
+    let _ = g.run(&d.layer, &["update-ref", "-d", &draft_ref(id)]).await;
+}
+
+/// A draft's title: the first line of its summary, with nothing in it that would not show.
+fn title_of(x: &Draft) -> String {
+    let s = x.summary.as_deref().unwrap_or_default();
+    if s.trim().is_empty() { String::new() } else { subject_of(&validate::show_hidden(s.trim(), true)) }
+}
+
+/// The changes waiting set aside, newest first: `[{id, title, origin, setAside, created, chatId, resolves}]`.
+pub fn drafts_list(d: &Dirs) -> Value {
+    json!(drafts(d).iter().rev().map(|x| json!({
+        "id": x.id, "title": title_of(x), "origin": if x.meta.origin.is_empty() { "customize" } else { &x.meta.origin },
+        "setAside": x.set_aside, "created": x.meta.created, "chatId": x.meta.chat_id, "resolves": x.meta.resolves,
+    })).collect::<Vec<_>>())
+}
+
+/// The built-in files whose update merge is waiting set aside.
+pub fn merges_set_aside(d: &Dirs) -> Vec<String> {
+    drafts(d).into_iter().filter(|x| x.meta.origin == "update" && !x.meta.resolves.is_empty()).map(|x| x.meta.resolves).collect()
+}
+
+/// Tell the user a change is now waiting set aside (the UI says so, with a way back to it).
+fn announce(g: Git<'_>, x: &Draft) {
+    if let Some(st) = g.0 { st.emit(json!({"type": "layer.drafts", "setAside": title_of(x), "id": x.id})); }
+}
+
+/// The open change, set aside for another one (see `put_aside`).
+#[derive(Debug)]
+pub struct Aside { draft: Draft, superseded: bool }
 
 fn replaced() -> &'static std::sync::Mutex<std::collections::HashMap<(PathBuf, String), Aside>> {
     static SLOT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<(PathBuf, String), Aside>>> = std::sync::OnceLock::new();
     SLOT.get_or_init(Default::default)
 }
 
-/// Save the pending change (when there is one worth keeping) so it can be brought back.
+/// Set the open change aside as a draft, when there is one worth keeping. It is written down at
+/// once, so it survives whatever happens next (the app closing, say).
 pub async fn put_aside(g: Git<'_>, d: &Dirs) -> Option<Aside> {
     if chat_running(g, &load_meta(d).filter(|_| staged(d))?).await { return None; }
     // Judged against the app as it is now, like everything else about a pending change.
@@ -429,27 +580,48 @@ pub async fn put_aside(g: Git<'_>, d: &Dirs) -> Option<Aside> {
     let meta = load_meta(d)?;
     if changes(g, d).await.ok()?.0.is_empty() { return None; }
     let commit = commit_staging(g, d).await.ok()?;
-    Some(Aside { commit, meta, summary: std::fs::read_to_string(d.staging.join("SUMMARY.md")).ok() })
+    let p = d.staging.join("SUMMARY.md");
+    let summary = std::fs::symlink_metadata(&p).ok().filter(|m| m.is_file() && m.len() < 64 * 1024).and_then(|_| std::fs::read_to_string(&p).ok());
+    let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let draft = Draft { id, commit, meta, summary, set_aside: chrono::Utc::now().to_rfc3339() };
+    if let Err(e) = keep_draft(g, d, &draft).await { crate::log::warn(format!("layer: could not write down the change that was set aside: {e}")); }
+    Some(Aside { draft, superseded: false })
 }
 
-/// Bring a saved pending change back as the staging copy.
-pub async fn put_back(g: Git<'_>, d: &Dirs, a: Aside) {
+/// Make draft `x` the open change again (whatever the staging copy holds now is dropped: callers
+/// set it aside first when it matters). If that fails, `x` stays set aside: nothing is lost.
+async fn reopen(g: Git<'_>, d: &Dirs, x: &Draft) -> anyhow::Result<()> {
     remove(g, d).await;
     let path = d.staging.to_string_lossy().to_string();
-    if let Err(e) = g.run(&d.layer, &["worktree", "add", "-f", "-B", "staging", &path, &a.commit]).await {
-        crate::log::warn(format!("layer: could not bring back the change that was waiting for review: {e}"));
-        return;
+    if let Err(e) = g.run(&d.layer, &["worktree", "add", "-f", "-B", "staging", &path, &x.commit]).await {
+        crate::log::warn(format!("layer: could not bring back a change that was waiting for review: {e}"));
+        return Err(e);
     }
-    if let Some(s) = &a.summary { let _ = std::fs::write(d.staging.join("SUMMARY.md"), s); }
-    let _ = save_meta(d, &a.meta);
+    if let Some(s) = &x.summary { let _ = std::fs::write(d.staging.join("SUMMARY.md"), s); }
+    save_meta(d, &x.meta)?;
+    forget_draft(g, d, &x.id).await;
+    Ok(())
 }
 
-/// A pending change that was put aside is now gone for good (the request that replaced it is under
-/// way). Changes that were found in the live layer are not dropped with it: nobody has decided about
-/// them yet, so they go back to the holding folder and are offered for review again later.
+/// Bring a change that was set aside back as the open one (the request that set it aside never
+/// started).
+pub async fn put_back(g: Git<'_>, d: &Dirs, a: Aside) { let _ = reopen(g, d, &a.draft).await; }
+
+/// The request that set `a` aside is under way. `a` keeps waiting as a draft — unless the request
+/// takes its place (a follow-up in the chat that made it, when it could no longer be kept), or it
+/// holds changes found in the live layer: nobody has decided about those yet, so they go back to the
+/// holding folder and are offered for review on their own again as soon as nothing else is open.
 pub async fn let_go(g: Git<'_>, d: &Dirs, a: Aside) {
-    if a.meta.origin != "manual" { return; }
-    let Ok(out) = g.run(&d.layer, &["diff", "--name-status", "--no-renames", "-z", "HEAD", &a.commit]).await else { return };
+    let x = a.draft;
+    if a.superseded { forget_draft(g, d, &x.id).await; return; }
+    if x.meta.origin != "manual" {
+        if !drafts(d).iter().any(|y| y.id == x.id) {
+            if let Err(e) = keep_draft(g, d, &x).await { crate::log::warn(format!("layer: could not write down the change that was set aside: {e}")); }
+        }
+        announce(g, &x);
+        return;
+    }
+    let Ok(out) = g.run(&d.layer, &["diff", "--name-status", "--no-renames", "-z", "HEAD", &x.commit]).await else { return };
     if crate::paths::create_private_dir(&d.held).is_err() { return; }
     let mut held: Held = std::fs::read_to_string(held_index(d)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     let mut it = out.split('\0');
@@ -460,22 +632,27 @@ pub async fn let_go(g: Git<'_>, d: &Dirs, a: Aside) {
             if !held.deleted.iter().any(|p| p == path) { held.deleted.push(path.to_string()); }
         } else if !dest.exists() {
             // (A newer copy already waiting there wins.)
-            let Ok(text) = g.run(&d.layer, &["show", &format!("{}:{path}", a.commit)]).await else { continue };
+            let Ok(text) = g.run(&d.layer, &["show", &format!("{}:{path}", x.commit)]).await else { continue };
             if let Some(parent) = dest.parent() { let _ = std::fs::create_dir_all(parent); }
             let _ = std::fs::write(&dest, text);
         }
     }
     if held.found.is_empty() { held.found = chrono::Utc::now().to_rfc3339(); }
-    if let Ok(t) = serde_json::to_string_pretty(&held) { let _ = crate::paths::write_atomic(&held_index(d), t.as_bytes(), true); }
+    let Ok(t) = serde_json::to_string_pretty(&held) else { return };
+    if crate::paths::write_atomic(&held_index(d), t.as_bytes(), true).is_ok() { forget_draft(g, d, &x.id).await; }
 }
 
-/// Start a fresh staging copy for a request of chat `chat_id`. The change that was waiting is not
-/// thrown away yet: it is kept until `run_start_result` says whether the request's run started.
+/// Start a fresh staging copy for a request of chat `chat_id`. The change that was open is set
+/// aside, and `run_start_result` later says whether it stays set aside (the request's run started)
+/// or comes back as the open one (it never did).
 pub async fn replace_for(g: Git<'_>, d: &Dirs, origin: &str, chat_id: &str) -> anyhow::Result<()> {
     if let Some(m) = load_meta(d) {
         if chat_running(g, &m).await && m.chat_id.as_deref() != Some(chat_id) { return Err(still_preparing()); }
     }
-    let aside = put_aside(g, d).await;
+    // Only a follow-up in the chat that made the open change gets here with it still open, and only
+    // when that change no longer fits the app (see `prepare_run`): the new run takes its place.
+    let own = load_meta(d).filter(|_| staged(d)).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id));
+    let aside = put_aside(g, d).await.map(|a| Aside { superseded: own, ..a });
     if let Err(e) = recreate(g, d, origin, Some(chat_id)).await {
         if let Some(a) = aside { put_back(g, d, a).await; }
         return Err(e);
@@ -487,12 +664,34 @@ pub async fn replace_for(g: Git<'_>, d: &Dirs, origin: &str, chat_id: &str) -> a
 }
 
 /// The run for `chat_id`'s request started (`started`), or never did: then the staging copy made
-/// for it is dropped and the change it replaced is waiting for review again.
+/// for it is dropped and the change it set aside is open again.
 pub async fn run_start_result(g: Git<'_>, d: &Dirs, chat_id: &str, started: bool) {
     let aside = replaced().lock().unwrap_or_else(|e| e.into_inner()).remove(&(d.staging.clone(), chat_id.to_string()));
     let Some(a) = aside else { return };
     // Put back only when the staging copy is still the one made for this request.
     if !started && load_meta(d).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id)) { put_back(g, d, a).await; } else { let_go(g, d, a).await; }
+}
+
+/// Open the draft `id` for review. The change that was open is set aside in its place (and
+/// returned); if `id` cannot be opened, that one stays open.
+pub async fn open_draft(g: Git<'_>, d: &Dirs, id: &str) -> anyhow::Result<Option<Aside>> {
+    let x = drafts(d).into_iter().find(|x| x.id == id).ok_or_else(|| crate::tr::err("not_found.draft", &[]))?;
+    if let Some(m) = load_meta(d).filter(|_| staged(d)) {
+        if chat_running(g, &m).await { return Err(still_preparing()); }
+    }
+    let current = put_aside(g, d).await;
+    if let Err(e) = reopen(g, d, &x).await {
+        if let Some(c) = current { put_back(g, d, c).await; }
+        return Err(e);
+    }
+    Ok(current)
+}
+
+/// Throw away a change that is set aside, without opening it. Returns what it was.
+pub async fn drop_draft(g: Git<'_>, d: &Dirs, id: &str) -> anyhow::Result<Draft> {
+    let x = drafts(d).into_iter().find(|x| x.id == id).ok_or_else(|| crate::tr::err("not_found.draft", &[]))?;
+    forget_draft(g, d, &x.id).await;
+    Ok(x)
 }
 
 // ---------- what is pending ----------
@@ -583,6 +782,20 @@ pub async fn pending(g: Git<'_>, d: &Dirs, arabic: bool) -> Value {
     }
     let Ok((files, ignored)) = changes(g, d).await else { return json!({"exists": false}) };
     if files.is_empty() { return json!({"exists": false, "running": running}); }
+    // Everything below is read from the staged files one after the other. It is read again when the
+    // files changed meanwhile, so that what the review shows is what its signature stands for.
+    let mut out = Value::Null;
+    for _ in 0..3 {
+        let before = signature_of(&read_staged(d, &files));
+        out = describe_staged(d, &m, &files, ignored.clone(), running, arabic);
+        if out["signature"] == before.as_str() { break; }
+    }
+    out
+}
+
+/// The review of what is staged (see `pending`).
+fn describe_staged(d: &Dirs, m: &Meta, files: &[(String, &'static str)], ignored: Vec<String>, running: bool, arabic: bool) -> Value {
+    let files = files.to_vec();
     let mut summary = read_summary(d);
     if summary.is_empty() {
         let names = files.iter().map(|(p, _)| p.as_str()).take(6).collect::<Vec<_>>().join(", ");
@@ -601,16 +814,47 @@ pub async fn pending(g: Git<'_>, d: &Dirs, arabic: bool) -> Value {
         .then(|| validate::css_report(&text_of(&d.layer.join("custom.css")), &text_of(&d.staging.join("custom.css"))));
     let pack = (m.origin == "import" && !(m.pack_name.is_empty() && m.pack_description.is_empty()))
         .then(|| json!({"name": m.pack_name, "description": m.pack_description}));
+    // What it does, item by item, read from the files (half-finished files say nothing yet).
+    let described = if running { json!({"effects": [], "installed": []}) } else { effects::describe(&d.layer, &d.staging, &files) };
     json!({
         "workflowChanged": workflow_changed, "workflows": workflows,
         "exists": true, "summary": summary,
         "files": files.iter().map(|(p, s)| json!({"path": p, "status": s})).collect::<Vec<_>>(),
         "pluginChanged": plugin_changed, "origin": if m.origin.is_empty() { "customize" } else { &m.origin },
         "outsideChanges": m.outside_changes, "outsidePrivate": m.outside_private, "ignored": ignored, "chatId": m.chat_id, "running": running,
+        "outsideByRun": m.outside_run, "outsidePrivateByRun": m.outside_private_run,
         "problems": problems, "request": m.request,
         "stale": !m.stale_at.is_empty(), "incomplete": incomplete, "incompleteAccepted": incomplete && m.accepted == signature,
         "css": css, "pack": pack, "resolves": m.resolves, "signature": signature,
+        "effects": described["effects"], "installed": described["installed"],
     })
+}
+
+/// For "Show details" in the review: what each staged file changes, line by line, against the app
+/// as it is now: `{signature, files:[{path, status, diff, cut}]}`. `diff` is the difference as git
+/// shows it, from its first changed part on, with anything that would not show written out; `cut`
+/// says it was too long to show in full.
+pub async fn details(g: Git<'_>, d: &Dirs) -> Value {
+    const FILE_MAX: usize = 60_000;
+    const TOTAL_MAX: usize = 400_000;
+    let none = json!({"signature": "", "files": []});
+    if load_meta(d).filter(|_| staged(d)).is_none() { return none; }
+    let Ok((files, _)) = changes(g, d).await else { return none };
+    let Ok(head) = g.rev(&d.layer, "HEAD").await else { return none };
+    let mut total = 0usize;
+    let mut out = vec![];
+    for (path, status) in &files {
+        let raw = g.run(&d.staging, &["--literal-pathspecs", "diff", "--cached", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames", "-U3", &head, "--", path]).await.unwrap_or_default();
+        // The header lines repeat the file name and git's own bookkeeping: the review shows the change itself.
+        let body: String = raw.lines().skip_while(|l| !(l.starts_with("@@") || l.starts_with("Binary files"))).collect::<Vec<_>>().join("\n");
+        let shown = validate::show_hidden(&body, true);
+        let room = FILE_MAX.min(TOTAL_MAX.saturating_sub(total));
+        let cut = shown.chars().count() > room;
+        let diff: String = if cut { shown.chars().take(room).collect() } else { shown };
+        total += diff.chars().count();
+        out.push(json!({"path": path, "status": status, "diff": diff, "cut": cut}));
+    }
+    json!({"signature": signature_of(&read_staged(d, &files)), "files": out})
 }
 
 /// `{path, name, trigger, prompt, valid}` for a staged workflow file, taken verbatim from the file
@@ -993,12 +1237,14 @@ mod tests {
         let back = pending(st, &d, false).await;
         assert_eq!(back["exists"], true);
         for key in ["signature", "summary", "files", "chatId", "request", "origin"] { assert_eq!(back[key], a[key], "{key}"); }
-        // When B does start, A is replaced as before; and a later failure of something else changes nothing.
+        // When B does start, A is not lost either: it waits set aside (see `several_changes_wait…`);
+        // and a later failure of something else changes nothing.
         replace_for(st, &d, "update", "chat-c").await.unwrap();
         run_start_result(st, &d, "chat-c", true).await;
         run_start_result(st, &d, "chat-c", false).await;
         assert_eq!(pending(st, &d, false).await["exists"], false);
         assert_eq!(load_meta(&d).unwrap().origin, "update");
+        assert_eq!(titles(&d), ["Change A"]);
         // A pack that cannot be staged does not cost the waiting change either.
         std::fs::write(d.staging.join("custom.css"), ":root { --radius: 4px }\n").unwrap();
         let waiting = pending(st, &d, false).await;
@@ -1173,6 +1419,143 @@ mod tests {
         let h = history_in(st, &d.layer).await;
         assert!(h[0]["summary"].as_str().unwrap().starts_with("Undo: ") && !h.iter().any(|e| e["summary"] == "Snapshot of manual changes"));
         assert!(!d.layer.join("plugins/z.js").exists() && d.held.join("files/plugins/z.js").exists());
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    fn titles(d: &Dirs) -> Vec<String> {
+        drafts_list(d).as_array().unwrap().iter().map(|x| x["title"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn several_changes_wait_and_each_is_kept_on_its_own() {
+        let (st, d) = testutil::layer("drafts").await;
+        // A: a colour change, waiting for review.
+        recreate(st, &d, "customize", Some("chat-a")).await.unwrap();
+        std::fs::write(d.staging.join("custom.css"), ":root { --accent: #0a5c8a }\n").unwrap();
+        std::fs::write(d.staging.join("SUMMARY.md"), "Calmer colours\n\nA bluer accent.\n").unwrap();
+        // B is asked for: A is not replaced, it waits set aside.
+        replace_for(st, &d, "customize", "chat-b").await.unwrap();
+        run_start_result(st, &d, "chat-b", true).await;
+        assert_eq!(titles(&d), ["Calmer colours"]);
+        let a = &drafts_list(&d)[0];
+        assert_eq!((&a["origin"], &a["chatId"]), (&json!("customize"), &json!("chat-a")));
+        std::fs::write(d.staging.join("views/board.html"), "<p>board</p>").unwrap();
+        std::fs::write(d.staging.join("SUMMARY.md"), "A board page\n").unwrap();
+        // A pack is imported: B waits too.
+        let pack = json!({"format": "thoughts-pack", "version": 1, "kind": "feature", "name": "Sand", "files": {"themes.json": "[{\"id\":\"sand\",\"name\":\"Sand\"}]"}});
+        crate::packs::import(st, &d, &pack, false).await.unwrap();
+        assert_eq!(titles(&d), ["A board page", "Calmer colours"], "newest first");
+        assert_eq!(pending(st, &d, false).await["origin"], "import");
+        // They are written down and their files are kept by git: a restart or a clean-up loses nothing.
+        st.run(&d.layer, &["gc", "-q", "--prune=now"]).await.unwrap();
+        // A is opened (the pack waits in its place) and kept on its own.
+        let id = |t: &str| drafts_list(&d).as_array().unwrap().iter().find(|x| x["title"] == t).unwrap()["id"].as_str().unwrap().to_string();
+        assert!(open_draft(st, &d, &id("Calmer colours")).await.unwrap().is_some());
+        let p = pending(st, &d, false).await;
+        assert_eq!((paths_of(&p), &p["chatId"], &p["summary"]), (vec!["modified custom.css".to_string()], &json!("chat-a"), &json!("Calmer colours\n\nA bluer accent.")));
+        assert_eq!(titles(&d).len(), 2);
+        assert!(titles(&d)[0].contains("Sand"));
+        apply(st, &d, false, p["signature"].as_str()).await.unwrap();
+        // B comes next, carried over onto the app with A in it: keeping B keeps only B.
+        open_draft(st, &d, &id("A board page")).await.unwrap();
+        let p = pending(st, &d, false).await;
+        assert_eq!(paths_of(&p), ["added views/board.html"]);
+        apply(st, &d, false, p["signature"].as_str()).await.unwrap();
+        assert!(d.layer.join("views/board.html").exists() && std::fs::read_to_string(d.layer.join("custom.css")).unwrap().contains("#0a5c8a"));
+        // The pack is thrown away without being opened; then nothing is left, not even its ref.
+        let gone = drop_draft(st, &d, &drafts(&d)[0].id).await.unwrap();
+        assert_eq!(gone.meta.origin, "import");
+        assert!(drafts(&d).is_empty() && !drafts_file(&d).exists());
+        assert_eq!(st.run(&d.layer, &["for-each-ref", "refs/thoughts/"]).await.unwrap().trim(), "");
+        assert!(open_draft(st, &d, "nothere").await.unwrap_err().to_string().contains("no longer waiting"));
+        assert!(drop_draft(st, &d, "nothere").await.is_err());
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn setting_aside_and_opening_never_loses_a_change() {
+        let (st, d) = testutil::layer("drafts-safe").await;
+        // An empty staging copy is not worth keeping: nothing is set aside.
+        recreate(st, &d, "customize", Some("chat-e")).await.unwrap();
+        assert!(put_aside(st, &d).await.is_none() && drafts(&d).is_empty());
+        // A request that never starts puts the change back as the open one, and nothing is left set aside.
+        std::fs::write(d.staging.join("custom.css"), ":root { --radius: 3px }\n").unwrap();
+        let sig = pending(st, &d, false).await["signature"].clone();
+        replace_for(st, &d, "customize", "chat-f").await.unwrap();
+        assert_eq!(drafts(&d).len(), 1, "written down while the request starts");
+        run_start_result(st, &d, "chat-f", false).await;
+        assert!(drafts(&d).is_empty());
+        assert_eq!(pending(st, &d, false).await["signature"], sig);
+        // An update merge set aside is still known as the answer to its question.
+        set_resolves(&d, "custom.css");
+        let mut m = load_meta(&d).unwrap();
+        m.origin = "update".into();
+        save_meta(&d, &m).unwrap();
+        replace_for(st, &d, "customize", "chat-g").await.unwrap();
+        run_start_result(st, &d, "chat-g", true).await;
+        assert_eq!(merges_set_aside(&d), ["custom.css"]);
+        // A follow-up in the chat whose change no longer fits starts over: that change is not kept waiting.
+        std::fs::write(d.staging.join("home.json"), "{\"chips\":[]}").unwrap();
+        replace_for(st, &d, "customize", "chat-g").await.unwrap();
+        run_start_result(st, &d, "chat-g", true).await;
+        assert_eq!(drafts(&d).len(), 1, "only the merge is still waiting");
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_review_says_what_each_change_does() {
+        let (st, d) = testutil::layer("effects").await;
+        std::fs::write(d.layer.join("plugins/calm.js"), "export default () => {}\n").unwrap();
+        st.commit_all(&d.layer, "An add-on").await.unwrap();
+        recreate(st, &d, "customize", Some("chat-x")).await.unwrap();
+        std::fs::write(d.staging.join("custom.css"), ":root { --accent: #0a5c8a }\n").unwrap();
+        std::fs::write(d.staging.join("nav.json"), r#"{"hidden":["projects"],"labels":{"ideas":{"en":"Clients","ar":"العملاء"}}}"#).unwrap();
+        let p = pending(st, &d, false).await;
+        let fx = p["effects"].as_array().unwrap();
+        assert!(fx.iter().any(|e| e["area"] == "nav" && e["op"] == "hidden" && e["what"] == "projects"));
+        assert!(fx.iter().any(|e| e["area"] == "nav" && e["op"] == "renamed" && e["en"] == "Clients"));
+        assert!(fx.iter().any(|e| e["area"] == "style" && e["report"]["kind"] == "colours"));
+        assert!(!fx.iter().any(|e| e["area"] == "addon"), "an add-on the change does not touch is not part of it");
+        assert_eq!(p["installed"][0]["name"], "calm.js");
+        // "Show details": each file's difference, bound to the same signature.
+        let det = details(st, &d).await;
+        assert_eq!(det["signature"], p["signature"]);
+        let css = det["files"].as_array().unwrap().iter().find(|f| f["path"] == "custom.css").unwrap().clone();
+        let diff = css["diff"].as_str().unwrap();
+        assert!(diff.starts_with("@@") && diff.contains("+:root { --accent: #0a5c8a }") && diff.contains("-/* Your overrides. */"), "{diff}");
+        assert_eq!(css["cut"], false);
+        // Characters that would not show are written out there too.
+        std::fs::write(d.staging.join("custom.css"), "/* a\u{202E}b */\n").unwrap();
+        assert!(details(st, &d).await["files"][0]["diff"].as_str().unwrap().contains("[U+202E]"));
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn outside_changes_say_which_ones_the_run_made() {
+        let (g, d) = testutil::layer("outside-run").await;
+        let lib = d.home.join("Library");
+        for dir in ["notes", "clients"] { std::fs::create_dir_all(lib.join(dir)).unwrap(); }
+        g.run(&lib, &["init", "-q", "-b", "main"]).await.unwrap();
+        let private = vec!["clients".to_string()];
+        let mut m = Meta { library_before: snapshot(g, &lib, &private).await, layer_before: snapshot(g, &d.layer, &[]).await, ..Default::default() };
+        // While the run works: the user edits a note, and the run writes one note and one private file.
+        for f in ["notes/mine.md", "notes/theirs.md", "clients/acme.md", "clients/other.md"] { std::fs::write(lib.join(f), "x").unwrap(); }
+        let tool = |name: &str, input: Value| { let mut x = crate::chats::Msg::new("tool", name); x.tool = Some(json!({"name": name, "input": input})); x };
+        let abs = lib.join("notes/theirs.md").to_string_lossy().to_string();
+        let messages = vec![
+            tool("Write", json!({"file_path": lib.join("notes/mine.md")})),   // an earlier run
+            crate::chats::Msg::new("user", "make it blue"),
+            tool("Read", json!({"file_path": lib.join("notes/mine.md")})),    // reading changes nothing
+            tool("Bash", json!({"command": format!("echo hi > {abs}")})),
+            tool("Edit", json!({"file_path": lib.join("clients/acme.md"), "old_string": "", "new_string": "x"})),
+        ];
+        let steps = run_steps(&messages);
+        let (outside, hidden, by_run, hidden_by_run, in_layer) = outside_of_run(g, &d, &m, Some(&lib), &private, &steps).await;
+        assert_eq!((outside.clone(), hidden, by_run.clone(), hidden_by_run, in_layer.clone()),
+            (vec!["notes/mine.md".to_string(), "notes/theirs.md".to_string()], 2, vec!["notes/theirs.md".to_string()], 1, vec![]));
+        record_outside(&mut m, outside, hidden, by_run, hidden_by_run, in_layer);
+        assert_eq!((m.outside_changes.len(), m.outside_run.clone(), m.outside_private, m.outside_private_run), (2, vec!["notes/theirs.md".to_string()], 2, 1));
+        assert!(!serde_json::to_string(&m).unwrap().contains("acme"), "private names are still not written down");
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
