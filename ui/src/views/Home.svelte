@@ -412,7 +412,7 @@
   <section class="hero">
     <div class="lead">
       <div class="eyebrow">{today}</div>
-      <h1 class="display">{greeting}{app.settings?.userName ? `, ${app.settings.userName}` : ''}.</h1>
+      <h1 class="display">{app.settings?.userName ? t('coord.greetName', { greeting, name: app.settings.userName }) : t('coord.greet', { greeting })}</h1>
       <p class="sub">{t('heroSub')}</p>
       <div class="ask surface">
         <textarea bind:this={askEl} bind:value={ask} onkeydown={keydown} rows="2" placeholder={t('askPlaceholder')} aria-label={t('askPlaceholder')} dir="auto"></textarea>

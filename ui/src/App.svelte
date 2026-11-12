@@ -797,7 +797,7 @@
           {#each list as c (c.id)}
             <button class="chat" class:active={app.view.id === c.id} aria-current={app.view.id === c.id ? 'page' : undefined} title={c.title} onclick={() => go({ kind: 'chat', id: c.id })}>
               <span class="dot" class:run={c.running} class:unw={!c.running && c.unwrapped} title={dotLabel(c) || undefined}></span>
-              <span class="grow ell"><bdi>{c.title}</bdi></span>
+              <span class="grow ell" dir="auto">{c.title}</span>
               {#if c.pinned}<span class="cut" title={t('chatb.pinned')}><Icon name="pin" size={12} /><span class="sr-only">({t('chatb.pinned')})</span></span>{/if}
               {#if c.interrupted}<span class="cut" title={t('layer.chat.interrupted')}><Icon name="warning" size={12} /><span class="sr-only">({t('layer.chat.interruptedShort')})</span></span>{/if}
               {#if c.bypass}<span class="cut" style="color: var(--danger)" title={t('perm.bypass.on')}><Icon name="shield" size={12} /><span class="sr-only">({t('perm.bypass.on')})</span></span>{/if}
@@ -809,7 +809,7 @@
           <div class="group">{t('shell.system')}</div>
           {#each system as c (c.id)}
             <button class="chat" class:active={app.view.id === c.id} aria-current={app.view.id === c.id ? 'page' : undefined} title={c.title} onclick={() => go({ kind: 'chat', id: c.id })}>
-              <span class="dot" class:run={c.running} title={c.running ? t('shell.dot.running') : undefined}></span><span class="grow ell muted"><bdi>{c.title}</bdi></span>
+              <span class="dot" class:run={c.running} title={c.running ? t('shell.dot.running') : undefined}></span><span class="grow ell muted" dir="auto">{c.title}</span>
               {#if c.running}<span class="sr-only">({t('shell.dot.running')})</span>{/if}
             </button>
           {/each}

@@ -74,6 +74,10 @@ pub fn pauses_mini_wraps(err: &str) -> bool {
 }
 
 fn tr<'a>(ar: bool, en: &'a str, arabic: &'a str) -> &'a str { if ar { arabic } else { en } }
+
+/// The date in a Wrap's title. In Arabic the digits, dashes and colon would be reordered by the
+/// right-to-left text around them ("21:09 11-11-2026"), so the date is kept as one left-to-right run.
+fn wrap_title_date(ar: bool, date: &str) -> String { if ar { format!("\u{2066}{date}\u{2069}") } else { date.to_string() } }
 async fn is_ar(state: &AppState) -> bool { state.settings.read().await.language == "ar" }
 
 /// Which chats belong to the library that is open now. A chat is tied to the library it was
@@ -477,7 +481,7 @@ pub async fn start(state: Arc<AppState>, choose: bool) -> anyhow::Result<String>
     if pending.is_empty() { return Err(crate::tr::err("wrap.nothing", &[])); }
     let ar = is_ar(&state).await;
     let choosing = choose && pending.len() > 1;
-    let mut wrap = Chat { title: format!("{} — {}", tr(ar, "Wrap", "تلخيص وحفظ"), chrono::Local::now().format("%Y-%m-%d %H:%M")), kind: "wrap".into(),
+    let mut wrap = Chat { title: format!("{} — {}", tr(ar, "Wrap", "تلخيص وحفظ"), wrap_title_date(ar, &chrono::Local::now().format("%Y-%m-%d %H:%M").to_string())), kind: "wrap".into(),
         library: scope.key(), ..Default::default() };
     // `offered`: the chats this Wrap may cover; `chatIds`: the ones its plan is for.
     wrap.meta = json!({"chatIds": pending.iter().map(|c| &c.id).collect::<Vec<_>>(), "phase": if choosing { "choosing" } else { "preparing" }, "previewAt": Utc::now(),
@@ -2159,6 +2163,13 @@ pub(crate) mod testutil {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_arabic_wrap_title_keeps_its_date_in_reading_order() {
+        assert_eq!(wrap_title_date(false, "2026-11-11 21:09"), "2026-11-11 21:09");
+        let ar = wrap_title_date(true, "2026-11-11 21:09");
+        assert!(ar.starts_with('\u{2066}') && ar.ends_with('\u{2069}') && ar.contains("2026-11-11 21:09"));
+    }
     use super::testutil as t;
 
     /// What a wrap that dies halfway leaves behind: an edit, a deletion, new files.

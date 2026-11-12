@@ -135,7 +135,7 @@
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <div class="opt" id={'pal-opt-' + i} role="option" tabindex="-1" aria-selected={i === active}
           onclick={() => run(it)} onmousemove={() => (active = i)}>
-          <Icon name={it.icon ?? 'right'} size={15} class={it.icon ? '' : 'flip-rtl'} />
+          <Icon name={it.icon ?? 'right'} size={15} class={!it.icon || it.icon === 'left' || it.icon === 'right' || it.icon === 'arrow' ? 'flip-rtl' : ''} />
           <span class="grow ell" dir="auto">{it.title}</span>
           {#if it.group}<span class="grp">{it.group}</span>{/if}
           {#if it.keys}<kbd dir="ltr">{it.keys}</kbd>{/if}
