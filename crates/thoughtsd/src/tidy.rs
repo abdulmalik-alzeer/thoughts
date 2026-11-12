@@ -60,8 +60,8 @@ pub fn plan(all: &[ChatMeta], days: u32, now: DateTime<Utc>) -> (Vec<String>, Pr
     let mut ids = vec![];
     if days == 0 { return (ids, p); }
     let limit = now - Duration::days(days as i64);
-    let newest_wrap = all.iter().filter(|c| c.kind == "wrap" && c.meta["phase"] == "done").max_by_key(|c| c.updated).map(|c| c.id.as_str());
-    for c in all.iter().filter(|c| c.updated < limit && !c.running && Some(c.id.as_str()) != newest_wrap) {
+    let newest = newest_wraps(all);
+    for c in all.iter().filter(|c| c.updated < limit && !c.running && !newest.contains(&c.id.as_str())) {
         if c.pinned { p.pinned += 1; }
         else if c.is_unwrapped() { p.unsaved += 1; }
         else if removable(c) {
@@ -72,14 +72,37 @@ pub fn plan(all: &[ChatMeta], days: u32, now: DateTime<Utc>) -> (Vec<String>, Pr
     (ids, p)
 }
 
+/// The newest finished Wrap of each library: each holds the undo of its own library's last save.
+fn newest_wraps(all: &[ChatMeta]) -> Vec<&str> {
+    let mut newest: std::collections::HashMap<Option<&str>, &ChatMeta> = std::collections::HashMap::new();
+    for c in all.iter().filter(|c| c.kind == "wrap" && c.meta["phase"] == "done") {
+        let e = newest.entry(c.library.as_deref()).or_insert(c);
+        if c.updated > e.updated { *e = c; }
+    }
+    newest.values().map(|c| c.id.as_str()).collect()
+}
+
+/// Is this chat, as it is now, one that a clean-up at `now` removes (after `days` days; 0 = only
+/// the chats nobody wrote in)?
+fn due(m: &ChatMeta, days: u32, now: DateTime<Utc>) -> bool {
+    (days > 0 && removable(m) && m.updated < now - Duration::days(days as i64))
+        || (is_empty_chat(m) && m.updated < now - Duration::hours(EMPTY_AFTER_HOURS))
+}
+
 /// Delete these chats (each with its files and what the assistant kept of it). A chat that is
 /// running is left alone. Returns (deleted, skipped).
-pub async fn delete_chats(st: &AppState, ids: &[String]) -> (usize, usize) {
+pub async fn delete_chats(st: &AppState, ids: &[String]) -> (usize, usize) { delete_where(st, ids, |_| true).await }
+
+/// `delete_chats` for the chats that `still` holds for at the moment each one goes: a list made a
+/// while ago may name a chat that was pinned, written in or reopened since.
+async fn delete_where(st: &AppState, ids: &[String], still: impl Fn(&ChatMeta) -> bool) -> (usize, usize) {
     let (mut done, mut skipped) = (0, 0);
     let mut gone = vec![];
     for id in ids {
+        // No message is turned into a run while the chat is looked at and removed.
+        let Some(_claim) = st.chats.claim_send(id) else { skipped += 1; continue };
         match st.chats.meta(id).await {
-            Some(m) if m.running => skipped += 1,
+            Some(m) if m.running || !still(&m) => skipped += 1,
             Some(_) => if crate::api::remove_chat(st, id).await { done += 1; gone.push(id.clone()) } else { skipped += 1 },
             None => skipped += 1,
         }
@@ -98,7 +121,9 @@ pub async fn sweep(st: &AppState) -> usize {
     let empty: Vec<String> = all.iter().filter(|c| is_empty_chat(c) && c.updated < stale && !ids.contains(&c.id)).map(|c| c.id.clone()).collect();
     ids.extend(empty);
     if ids.is_empty() { return 0; }
-    let (done, _) = delete_chats(st, &ids).await;
+    // Removing chats takes a while (each one's assistant files go with it): what was looked at
+    // above is looked at again for each chat just before it goes.
+    let (done, _) = delete_where(st, &ids, |m| due(m, days, now)).await;
     if done > 0 { crate::log::info(format!("tidy: {done} old or empty chat(s) removed")); }
     done
 }
@@ -223,6 +248,45 @@ mod tests {
         assert!(!kept(&st, &one) && kept(&st, &two));
         assert!(!transcript.exists() && other.exists());
         std::fs::remove_file(other).unwrap();
+    }
+
+    #[tokio::test]
+    async fn each_library_keeps_the_undo_of_its_own_last_wrap() {
+        let st = AppState::for_test();
+        let wrap = |days: i64, lib: &str| { let mut w = old(days, Chat { kind: "wrap".into(), library: Some(lib.into()), ..Default::default() }); w.meta = json!({"phase": "done"}); w };
+        let a_old = put(&st, wrap(200, "/libs/a")).await;
+        let a_last = put(&st, wrap(100, "/libs/a")).await;
+        // Library B's last save is older than A's: it is still B's only undo.
+        let b_last = put(&st, wrap(150, "/libs/b")).await;
+        let (ids, _) = plan(&st.chats.list().await, 30, Utc::now());
+        assert_eq!(ids, vec![a_old.clone()]);
+        assert_eq!(sweep(&st).await, 0, "off: nothing goes");
+        set_retention(&st, 30).await.unwrap();
+        assert!(!kept(&st, &a_old) && kept(&st, &a_last) && kept(&st, &b_last));
+    }
+
+    #[tokio::test]
+    async fn a_chat_that_changed_after_the_list_was_made_is_not_removed() {
+        let st = AppState::for_test();
+        let now = Utc::now();
+        let (pinned, written, sending) = (put(&st, saved(said("a"))).await, put(&st, saved(said("b"))).await, put(&st, saved(said("c"))).await);
+        let empty = put(&st, old(2, Chat::default())).await;
+        let (ids, _) = plan(&st.chats.list().await, 30, now);
+        let mut ids = ids;
+        ids.push(empty.clone());
+        assert_eq!(ids.len(), 4);
+        // Meanwhile: one is pinned, one gets a new message, one has a message on its way, the empty one is opened again.
+        st.chats.update(&pinned, |c| c.pinned = true).await;
+        st.chats.update(&written, |c| { c.messages.push(Msg::new("user", "more")); c.updated = Utc::now(); }).await;
+        st.chats.update(&empty, |c| c.updated = Utc::now()).await;
+        let claim = st.chats.claim_send(&sending).unwrap();
+        let (done, skipped) = delete_where(&st, &ids, |m| due(m, 30, now)).await;
+        assert_eq!((done, skipped), (0, 4));
+        for k in [&pinned, &written, &sending, &empty] { assert!(kept(&st, k)); }
+        drop(claim);
+        // Once nothing stands in the way, the one still due goes.
+        assert_eq!(delete_where(&st, &ids, |m| due(m, 30, now)).await, (1, 3));
+        assert!(!kept(&st, &sending));
     }
 
     #[tokio::test]

@@ -2341,7 +2341,8 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
         let free = st.chats.list().await.into_iter().find(|m| crate::tidy::is_empty_chat(m) && m.title_is_default() && m.project_id == mine && m.library == c.library && !m.archived);
         if let Some(m) = free {
             let (title, options) = (c.title.clone(), c.options.clone());
-            if let Some(meta) = st.chats.update(&m.id, |e| { e.title = title; e.options = options; }).await {
+            // Opened again now: the clean-up of chats nobody wrote in counts from here.
+            if let Some(meta) = st.chats.update(&m.id, |e| { e.title = title; e.options = options; e.updated = chrono::Utc::now(); }).await {
                 st.emit(json!({"type": "chat.updated", "chat": meta.summary()}));
             }
             if let Some(v) = st.chats.with(&m.id, |c| serde_json::to_value(c)).await { return Ok(Json(v?)); }
