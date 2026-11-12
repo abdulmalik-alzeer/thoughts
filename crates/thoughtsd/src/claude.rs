@@ -608,6 +608,18 @@ pub fn model_choices(aliases: Vec<String>, seen: &[String], chosen: [Option<Stri
     out
 }
 
+/// The model for background summaries. The user's own choice wins. Otherwise Anthropic's cheap
+/// alias `haiku` is asked for only where Anthropic answers (the Claude account or an Anthropic
+/// key); another service may not know it, so it gets the model the user chose for chats, or its
+/// own default (`None`).
+pub fn background_model(c: &crate::settings::ClaudeSettings) -> Option<String> {
+    if let Some(m) = c.mini_wrap_model.clone().filter(|m| !m.trim().is_empty()) { return Some(m); }
+    match provider_of(c) {
+        Provider::Service(_) | Provider::Incomplete => c.model.clone(),
+        Provider::Account | Provider::AnthropicKey => Some("haiku".into()),
+    }
+}
+
 const MODELS_SEEN_MAX: usize = 8;
 
 fn models_seen_file() -> PathBuf { crate::paths::home().join("models-seen.json") }
@@ -2379,5 +2391,19 @@ mod tests {
         assert_eq!(seen(&mut rx), 1);
         finish(st.clone(), "gone".into(), true, None, false, None).await;
         assert_eq!(seen(&mut rx), 0);
+    }
+
+    #[test]
+    fn background_summaries_ask_only_for_models_the_provider_can_know() {
+        let mut c = crate::settings::ClaudeSettings::default();
+        assert_eq!(background_model(&c).as_deref(), Some("haiku"));
+        c.has_api_token = true;
+        assert_eq!(background_model(&c).as_deref(), Some("haiku"), "an Anthropic key is Anthropic");
+        c.base_url = Some("https://openrouter.ai/api".into());
+        assert_eq!(background_model(&c), None, "another service gets its own default, not Anthropic's alias");
+        c.model = Some("vendor/model-x".into());
+        assert_eq!(background_model(&c).as_deref(), Some("vendor/model-x"));
+        c.mini_wrap_model = Some("vendor/small".into());
+        assert_eq!(background_model(&c).as_deref(), Some("vendor/small"), "the user's own choice always wins");
     }
 }

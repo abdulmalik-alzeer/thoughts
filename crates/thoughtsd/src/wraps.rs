@@ -45,6 +45,9 @@ pub struct Backoff {
     pub chat_updated: DateTime<Utc>,
 }
 
+/// Failures in a row after which Settings says background summaries are not working.
+const FAILING_AFTER: u32 = 3;
+
 /// Wait after the n-th consecutive failure: 1 min, 2, 4, … capped at 1 hour.
 pub fn backoff_delay(failures: u32) -> std::time::Duration {
     let mins = 1u64.checked_shl(failures.saturating_sub(1)).unwrap_or(u64::MAX).min(60);
@@ -253,7 +256,7 @@ fn summary_prompt(earlier: Option<&str>, before: &[String], part: usize, parts: 
 async fn complete_summary(state: &AppState, prompt: &str, fallback: bool) -> anyhow::Result<String> {
     let (mini, main) = {
         let s = state.settings.read().await;
-        (s.ai.claude.mini_wrap_model.clone().or(Some("haiku".into())), s.ai.claude.model.clone())
+        (claude::background_model(&s.ai.claude), s.ai.claude.model.clone())
     };
     let empty = || anyhow::anyhow!("the assistant returned an empty summary");
     let first = match claude::complete(state, prompt, mini.clone()).await {
@@ -345,8 +348,10 @@ pub async fn status(state: &AppState) -> Value {
         Some(id) => state.chats.meta(id).await.map_or(false, |w| w.meta["snapshot"].is_string() && w.meta["canRollback"] != false),
         None => false,
     };
+    // Background summaries that keep failing (three tries in a row for some chat) are said so in Settings.
+    let failing = state.mini_wrap_backoff.lock().await.values().any(|b| b.failures >= FAILING_AFTER);
     let s = state.settings.read().await;
-    json!({"count": chats.len(), "chats": chats, "threshold": s.wrap_nag_threshold, "lastWrap": s.last_wrap,
+    json!({"count": chats.len(), "chats": chats, "summariesFailing": failing && s.auto_summaries, "threshold": s.wrap_nag_threshold, "lastWrap": s.last_wrap,
            "busy": state.library_busy(), "miniWrapsPaused": state.mini_wraps_blocked.load(Ordering::Relaxed),
            "interrupted": interrupted, "interruptedCanUndo": can_undo})
 }
@@ -2245,6 +2250,19 @@ mod tests {
         crate::spend::set_plan_limit(&st, None);
         mini_wrap_auto(&st, &chat, updated).await;
         assert_eq!(asked.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn summaries_that_keep_failing_are_flagged_for_settings() {
+        let st = Arc::new(AppState::for_test());
+        assert_eq!(status(&st).await["summariesFailing"], false);
+        let now = Utc::now();
+        for _ in 0..2 { backoff_record_failure(&mut *st.mini_wrap_backoff.lock().await, "c1", now, now); }
+        assert_eq!(status(&st).await["summariesFailing"], false, "two failures can be a bad minute");
+        backoff_record_failure(&mut *st.mini_wrap_backoff.lock().await, "c1", now, now);
+        assert_eq!(status(&st).await["summariesFailing"], true);
+        st.settings.write().await.auto_summaries = false;
+        assert_eq!(status(&st).await["summariesFailing"], false, "switched off: nothing is failing");
     }
 
     #[tokio::test]
