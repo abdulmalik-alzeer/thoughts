@@ -30,7 +30,6 @@
   let remoteAck = $state(false);
   let useApi = $state(false);
   let apiToken = $state('');
-  let wantSearch = $state(false);
   let profession = $state('');
   const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
 
@@ -164,7 +163,6 @@
         apiToken: useApi ? apiToken.trim() : '',
         profession: profession ? t('layer.prof.' + profession) : '',
       });
-      if (wantSearch) post('/extensions/search/install').catch((e) => failed(t('ob3.searchFailed'), e));
       try { app.settings = await api('/settings'); applyTheme(); } catch { /* the app reloads settings on its own */ }
       done(r.setupChatId);
     } catch (e) {
@@ -364,8 +362,6 @@
         <label class="check"><input type="checkbox" bind:checked={s.notifications} /> {t('ob.notify')}</label>
         <label class="check"><input type="checkbox" bind:checked={s.daemon.keepRunning} /> {t('ob.keepRunning')}</label>
         <label class="check"><input type="checkbox" bind:checked={s.daemon.runAtLogin} /> {t('ob.runAtLogin')}</label>
-        <label class="check"><input type="checkbox" bind:checked={wantSearch} /> {t('ob.wantSearch')}</label>
-        <p class="muted sm">{t('ob.wantSearchHint')}</p>
       </details>
       <p class="muted">{t('ob.wrapDef')}</p>
       {#if libraryMode === 'new'}<p class="muted">{t('ob.readyNew')}</p>{/if}

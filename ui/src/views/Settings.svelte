@@ -12,6 +12,7 @@
   import { restartService } from '../lib/shell';
   import ThemePicker from './ThemePicker.svelte';
   import Customise from './Customise.svelte';
+  import { fold } from '../lib/CommandPalette.svelte';
 
   let { reload }: { reload: () => Promise<void> } = $props();
 
@@ -33,7 +34,7 @@
     general: [],
     accessibility: [],
     ai: ['set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle', 'set.provider', 'set.baseUrl', 'set.apiKey'],
-    git: ['set.gitWhen', 'set.credStore', 'set.remotes', 'set.searchExt'],
+    git: ['set.gitWhen', 'set.credStore', 'set.remotes'],
     privacy: [],
     modules: [],
     daemon: ['set.restart'],
@@ -67,7 +68,6 @@
   let loadErr = $state<Record<string, string>>({});
   let loading = $state<Record<string, boolean>>({ modules: true });
   let busy = $state<Record<string, boolean>>({});
-  let ext = $state<any>(null);
   let apiToken = $state('');
   let remote = $state({ name: '', url: '', username: '', token: '' });
   let privErr = $state('');
@@ -107,9 +107,9 @@
   const invalid = $derived(Object.keys(errors).length > 0);
 
   // ----- search -----
-  const q = $derived(query.trim().toLowerCase());
-  const hit = (k: string) => t(k).toLowerCase().includes(q);
-  const catAll = (c: Cat) => !q || t('set.cat.' + c).toLowerCase().includes(q);
+  const q = $derived(fold(query.trim()));
+  const hit = (k: string) => fold(t(k)).includes(q);
+  const catAll = (c: Cat) => !q || fold(t('set.cat.' + c)).includes(q);
   const vis = (c: Cat, ...keys: string[]) => catAll(c) || keys.some(hit);
   const catShown = (c: Cat) => vis(c, ...basic[c], ...adv[c]);
   const shown = $derived(q ? cats.filter(catShown) : [tab]);
@@ -126,7 +126,6 @@
 
   onMount(() => {
     api('/ai/claude/options').then((o) => (opts = o)).catch(() => {});
-    api('/extensions').then((e) => (ext = e)).catch(() => {});
     loadGit(); loadModules();
     app.leaveGuard = leaveGuard;
   });
@@ -402,11 +401,6 @@
     await run('reorg', async () => { const r = await post('/reorganize', { instructions }); go({ kind: 'chat', id: r.chatId }); });
   }
 
-  async function installSearch() {
-    if (!(await confirmDialog({ title: t('set.searchExt'), body: t('set.searchConfirm'), list: [ext.search.repo], confirmLabel: t('set.install') }))) return;
-    await run('search', async () => { await post('/extensions/search/install'); ext = await api('/extensions'); toast(t('set.searchInstalled')); });
-  }
-
   async function restart() {
     if (busy.restart) return;
     busy.restart = true;
@@ -660,11 +654,6 @@
           {#if remote.url.trim() && !validRemote}<p class="err" role="alert">{t('set.errRemote')}</p>{/if}
           <p class="note"><Icon name="warning" size={15} /> <span>{t('set.uploadBody')}</span></p>
           <button type="button" class="btn" onclick={addRemote} disabled={!validRemote || busy.remote}>{t('set.addRemote')}</button>
-        {/if}
-        {#if ext && vis(c, 'set.searchExt')}
-          <h3>{t('set.searchExt')}</h3>
-          <p class="muted sm">{t('set.searchHint', { files: fmtNum(ext.search.files ?? 0), threshold: fmtNum(ext.search.threshold ?? 0) })}</p>
-          {#if ext.search.installed}<span class="pill accent">{t('set.installed')}</span>{:else}<button type="button" class="btn" disabled={busy.search} onclick={installSearch}>{busy.search ? t('set.installing') : t('set.install')}</button>{/if}
         {/if}
       </details>
     {/if}
