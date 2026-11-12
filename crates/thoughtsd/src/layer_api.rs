@@ -144,14 +144,11 @@ async fn revert(State(st): S, Json(c): Json<Commit>) -> R {
 }
 
 /// What `POST /api/layer/undo-last` would undo right now, without undoing anything:
-/// `{exists:false}`, or `{exists:true, manual, hash, summary}`. `manual` means files of the layer
-/// were edited by hand since the last history entry: an undo takes those edits back first, and
-/// there is no entry to name yet (`hash` and `summary` are empty).
+/// `{exists:false}`, or `{exists:true, hash, summary}`. Files changed outside the app do not count:
+/// they are never in use (`staging::set_aside` takes them out before anything is loaded or undone).
 pub async fn undo_preview_in(g: Git<'_>, dir: &std::path::Path) -> Value {
-    let manual = g.run(dir, &["status", "--porcelain"]).await.map_or(false, |out| !out.trim().is_empty());
-    if manual { return json!({"exists": true, "manual": true, "hash": "", "summary": ""}); }
     match applayer::last_undoable_in(g, dir).await {
-        Some((hash, summary)) => json!({"exists": true, "manual": false, "hash": hash, "summary": summary}),
+        Some((hash, summary)) => json!({"exists": true, "hash": hash, "summary": summary}),
         None => json!({"exists": false}),
     }
 }
@@ -477,7 +474,7 @@ mod tests {
         g.commit_all(&d.layer, "Add a plugin").await.unwrap();
         let before = applayer::history_in(g, &d.layer).await;
         let p = undo_preview_in(g, &d.layer).await;
-        assert_eq!((p["exists"].clone(), p["manual"].clone(), p["summary"].clone()), (json!(true), json!(false), json!("Add a plugin")));
+        assert_eq!((p["exists"].clone(), p["summary"].clone()), (json!(true), json!("Add a plugin")));
         assert_eq!(p["hash"], before[0]["hash"]);
         // Looking changes nothing.
         assert_eq!(applayer::history_in(g, &d.layer).await, before);
@@ -486,15 +483,48 @@ mod tests {
         let (hash, summary) = applayer::undo_last_in(g, &d.layer, false).await.unwrap();
         assert_eq!((json!(hash), json!(summary)), (p["hash"].clone(), p["summary"].clone()));
         assert_eq!(undo_preview_in(g, &d.layer).await["summary"], "Make text red", "the undo itself is not offered for undoing");
-        // A file edited by hand comes first: that is what an undo would take back now.
+        // A file changed outside the app is never in use, so it does not change what an undo
+        // names, and the undo takes back exactly that change.
         std::fs::write(d.layer.join("custom.css"), "body { display: none }\n").unwrap();
-        assert_eq!(undo_preview_in(g, &d.layer).await, json!({"exists": true, "manual": true, "hash": "", "summary": ""}));
-        let (_, summary) = applayer::undo_last_in(g, &d.layer, false).await.unwrap();
-        assert_eq!(summary, "Snapshot of manual changes");
-        assert_eq!(std::fs::read_to_string(d.layer.join("custom.css")).unwrap(), "body { color: red }\n", "the hand edit is gone, the kept change is not");
-        // Files the layer ignores (the assistant's own notes) are not "manual changes".
-        std::fs::write(d.layer.join("SUMMARY.md"), "notes").unwrap();
-        assert_eq!(undo_preview_in(g, &d.layer).await["manual"], false);
+        let p = undo_preview_in(g, &d.layer).await;
+        assert_eq!(p["summary"], "Make text red");
+        let (hash, summary) = applayer::undo_last_in(g, &d.layer, false).await.unwrap();
+        assert_eq!((json!(hash), json!(summary)), (p["hash"].clone(), p["summary"].clone()));
+        assert_ne!(std::fs::read_to_string(d.layer.join("custom.css")).unwrap(), "body { display: none }\n", "the outside edit is not in use");
+        assert_eq!(undo_preview_in(g, &d.layer).await, json!({"exists": false}));
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    /// The native Recovery menu's "Put it back" undoes the entry its action just added (an undo, or
+    /// a "went back" entry). Afterwards the app is as it was, and the history says so: the change is
+    /// in effect again and is what the next "Undo last app change" names.
+    #[tokio::test]
+    async fn putting_back_undoes_exactly_the_entry_just_added() {
+        let (g, d) = applayer::testutil::layer("put-back").await;
+        std::fs::write(d.layer.join("custom.css"), "body { color: red }\n").unwrap();
+        g.commit_all(&d.layer, "Make text red").await.unwrap();
+        std::fs::write(d.layer.join("plugins/a.js"), "export default () => {}\n").unwrap();
+        g.commit_all(&d.layer, "Add a plugin").await.unwrap();
+        let newest = |h: &[Value]| h[0]["hash"].as_str().unwrap().to_string();
+        // Undo, then put it back.
+        let named = undo_preview_in(g, &d.layer).await;
+        applayer::revert_in(g, &d.layer, named["hash"].as_str().unwrap()).await.unwrap();
+        assert!(!d.layer.join("plugins/a.js").exists());
+        let after = applayer::history_in(g, &d.layer).await;
+        applayer::revert_in(g, &d.layer, &newest(&after)).await.unwrap();
+        assert!(d.layer.join("plugins/a.js").exists(), "the change is back");
+        let p = undo_preview_in(g, &d.layer).await;
+        assert_eq!((p["summary"].clone(), p["hash"].clone()), (named["summary"].clone(), named["hash"].clone()), "and it is the one an undo names again");
+        // Go back to the starting point, then put it back.
+        let start = applayer::history_in(g, &d.layer).await.last().unwrap()["hash"].as_str().unwrap().to_string();
+        applayer::rollback_in(g, &d.layer, &start).await.unwrap();
+        assert!(!d.layer.join("plugins/a.js").exists());
+        assert_ne!(std::fs::read_to_string(d.layer.join("custom.css")).unwrap_or_default(), "body { color: red }\n");
+        let after = applayer::history_in(g, &d.layer).await;
+        applayer::revert_in(g, &d.layer, &newest(&after)).await.unwrap();
+        assert_eq!(std::fs::read_to_string(d.layer.join("custom.css")).unwrap(), "body { color: red }\n");
+        assert!(d.layer.join("plugins/a.js").exists());
+        assert_eq!(undo_preview_in(g, &d.layer).await["summary"], "Add a plugin");
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
