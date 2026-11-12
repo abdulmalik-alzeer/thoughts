@@ -974,7 +974,7 @@ async fn onboarding_folder(Json(p): Json<FolderProbe>) -> R {
         Ok(path) if !typed.is_empty() && path.is_absolute() => path,
         _ => return Ok(Json(json!({"state": "invalid", "cloud": false}))),
     };
-    Ok(Json(json!({"state": library::folder_state(&path).as_str(), "cloud": cloud_folder(&path.to_string_lossy())})))
+    Ok(Json(json!({"state": library::folder_state(&path).as_str(), "cloud": crate::cloud::service_of(&path).is_some()})))
 }
 
 /// Can "start when I log in" be switched on from where the app is running now? Asked before setup
