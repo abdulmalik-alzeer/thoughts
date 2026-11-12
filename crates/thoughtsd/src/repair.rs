@@ -578,6 +578,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_damaged_history_kept_by_the_app_starts_again_and_the_old_one_is_set_aside() {
+        let st = AppState::for_test();
+        let lib = dunce::canonicalize(std::env::temp_dir()).unwrap().join(format!("thoughts-repair-kept-{}", uuid::Uuid::new_v4()));
+        write(&lib, "notes.md", "one\n");
+        git::start_history(&st, &lib).await.unwrap();
+        let Repo::Kept(store) = git::repo_of(&lib) else { panic!("expected a history kept by the app") };
+        // Its record of where it stands is unreadable: git no longer recognises it at all.
+        std::fs::write(store.join("HEAD"), "not a reference").unwrap();
+        write(&lib, "notes.md", "edited since\n");
+        assert_eq!(problems(&check(&st, &lib, false).await.unwrap()), ["damaged"]);
+        assert_eq!(repair(&st, &lib).await.unwrap()["rebuild"], true);
+        let r = rebuild(&st, &lib).await.unwrap();
+        assert_eq!((r["rebuilt"].as_bool(), r["fromLocation"].as_bool()), (Some(true), Some(false)));
+        // The folder is untouched (nothing of git's in it), the new history starts from it, the old one is beside it.
+        assert_eq!(read(&lib, "notes.md"), "edited since\n");
+        assert!(!lib.join(".git").exists());
+        assert_eq!(check(&st, &lib, true).await.unwrap()["ok"], true);
+        assert_eq!(git::git(&st, &lib, &["log", "--format=%s"]).await.unwrap().trim(), git::subject::start());
+        let name = store.file_name().unwrap().to_string_lossy().to_string();
+        let aside: Vec<PathBuf> = std::fs::read_dir(store.parent().unwrap()).unwrap().flatten().map(|e| e.path())
+            .filter(|p| p.file_name().map_or(false, |n| n.to_string_lossy().starts_with(&format!("{name}-damaged-")))).collect();
+        assert_eq!(aside.len(), 1);
+        assert!(aside[0].join("objects").is_dir());
+        std::fs::remove_dir_all(&aside[0]).unwrap();
+        std::fs::remove_dir_all(&store).unwrap();
+        std::fs::remove_dir_all(&lib).unwrap();
+    }
+
+    #[tokio::test]
     async fn a_rebuild_takes_the_history_from_the_online_location_or_changes_nothing() {
         let st = AppState::for_test();
         let d = library();
