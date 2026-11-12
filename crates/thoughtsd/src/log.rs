@@ -39,11 +39,14 @@ pub fn redact(s: &str) -> String {
         (r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]"),
         // token=…, api_key=…, password=… in query strings, env dumps and JSON.
         (r#"(?i)((?:[a-z_]*token|api[_-]?key|password|secret)["']?\s*[=:]\s*["']?)[^\s&"',;}]+"#, "${1}[redacted]"),
-        // Credentials inside URLs: https://user:pass@host
-        (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@", "${1}[redacted]@"),
+        // Whoever a URL signs in as: https://user:pass@host, and https://token@host just the same
+        // (an access token is often given as the user name alone).
+        (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@", "${1}[redacted]@"),
         // Provider keys wherever they appear.
         (r"\bsk-[A-Za-z0-9_-]{16,}", "[redacted]"),
         (r"\bgh[pousr]_[A-Za-z0-9]{20,}", "[redacted]"),
+        (r"\bgithub_pat_[A-Za-z0-9_]{20,}", "[redacted]"),
+        (r"\bglpat-[A-Za-z0-9_-]{16,}", "[redacted]"),
     ].into_iter().map(|(re, rep)| (regex::Regex::new(re).unwrap(), rep)).collect());
     let mut out = s.to_string();
     for (re, rep) in res { out = re.replace_all(&out, *rep).into_owned(); }
@@ -129,6 +132,14 @@ mod tests {
         }
         assert_eq!(redact("git push https://alice:hunter2pass@github.com/a/b.git"), "git push https://[redacted]@github.com/a/b.git");
         assert_eq!(redact("GET /x?token=abc&y=1"), "GET /x?token=[redacted]&y=1");
+        // A token used as the URL's user name, and the newer token shapes on their own (SEC-34).
+        assert_eq!(redact("fatal: unable to access 'https://glpat-AbCdEf0123456789xyzz@gitlab.com/me/lib.git/'"), "fatal: unable to access 'https://[redacted]@gitlab.com/me/lib.git/'");
+        assert_eq!(redact("push to ssh://git@example.com/me/lib.git failed"), "push to ssh://[redacted]@example.com/me/lib.git failed");
+        for token in ["glpat-AbCdEf0123456789xyzz", "github_pat_11ABCDEFG0abcdefghijkl_mnopqrstuvwxyz0123456789"] {
+            assert_eq!(redact(&format!("using {token} now")), "using [redacted] now");
+        }
+        // A plain address, and an @ further along a path, are not sign-in details.
+        assert_eq!(redact("see https://example.com/users/@sara and write to sara@example.com"), "see https://example.com/users/@sara and write to sara@example.com");
         // Ordinary lines are left alone.
         for plain in ["sync: pulled origin, pushed origin", "wrap 12 applying (3 chats)", "https://github.com/a/b.git"] { assert_eq!(redact(plain), plain); }
     }

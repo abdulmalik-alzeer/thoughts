@@ -68,6 +68,35 @@ fn scrub(text: &str) -> String {
     t.chars().take(300).collect()
 }
 
+/// Text on its way into the diagnostics report, which people paste into public places: on top of
+/// `redact`, nothing in it says who the user is or where their things are. The library folder
+/// becomes `(library)`, the home folder `~`, and an address keeps its site but loses the path (a
+/// private repository's name) — `https://github.com/…`, `git@github.com:…`.
+fn for_report(text: &str, home: Option<&std::path::Path>, library: Option<&std::path::Path>) -> String {
+    static ADDRESS: std::sync::OnceLock<[regex::Regex; 2]> = std::sync::OnceLock::new();
+    let [url, scp] = ADDRESS.get_or_init(|| [
+        regex::Regex::new(r#"(?i)\b((?:https?|ssh|git)://[^/\s'"]+)/[^\s'"]+"#).unwrap(),
+        regex::Regex::new(r#"\b([A-Za-z0-9._-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}):[^\s'"]+"#).unwrap(),
+    ]);
+    let mut t = crate::log::redact(text);
+    // Longest first, so a library inside the home folder is not left as `~/Its Name`.
+    let mut places: Vec<(String, &str)> = vec![];
+    for (p, word) in [(library, "(library)"), (home, "~")] {
+        let Some(p) = p else { continue };
+        for form in [p.to_string_lossy().to_string(), dunce::canonicalize(p).map(|c| c.to_string_lossy().to_string()).unwrap_or_default()] {
+            if form.len() > 3 { places.push((form.replace('\\', "/"), word)); places.push((form, word)); }
+        }
+    }
+    // An error noted earlier already has `~` for the home folder (`scrub`): the library inside it then reads `~/Its Name`.
+    if let Some(rest) = library.zip(home).and_then(|(l, h)| l.strip_prefix(h).ok()).map(|r| r.to_string_lossy().replace('\\', "/")).filter(|r| !r.is_empty()) {
+        places.push((format!("~/{rest}"), "(library)"));
+    }
+    places.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+    for (p, word) in places { t = t.replace(&p, word); }
+    let t = url.replace_all(&t, "${1}/…");
+    scp.replace_all(&t, "${1}:…").into_owned()
+}
+
 fn note_error(method: &str, path: &str, status: u16, code: &str, message: &str) {
     let mut q = recent_errors().lock().unwrap_or_else(|e| e.into_inner());
     if q.len() >= KEEP_ERRORS { q.pop_front(); }
@@ -418,7 +447,8 @@ fn redacted_settings(s: &Settings) -> Value {
 
 /// What a user sends when asking for help: app version, system, the assistant's version, how the
 /// library's history stands (counts only, no file names), settings with everything personal
-/// removed, the last few errors, and the recent log (secrets removed).
+/// removed, the last few errors, and the recent log — both with secrets, the home and library
+/// folders and the paths of addresses removed (`for_report`).
 async fn diagnostics(State(st): S) -> R {
     let s = st.settings.read().await.clone();
     let git_state = match s.library().filter(|l| l.is_dir()) {
@@ -431,7 +461,11 @@ async fn diagnostics(State(st): S) -> R {
         Some(_) => json!({"repo": false, "off": true}),
         None => json!({"repo": false, "libraryMissing": s.library_path.is_some()}),
     };
-    let errors: Vec<Value> = recent_errors().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned().collect();
+    // The error list and the log are scrubbed again here, where the library's location is known.
+    let (home, library) = (dirs::home_dir(), s.library());
+    let clean = |t: &str| for_report(t, home.as_deref(), library.as_deref());
+    let errors: Vec<Value> = recent_errors().lock().unwrap_or_else(|e| e.into_inner()).iter().cloned()
+        .map(|mut e| { if let Some(t) = e["error"].as_str().map(clean) { e["error"] = json!(t); } e }).collect();
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "platform": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
@@ -441,7 +475,7 @@ async fn diagnostics(State(st): S) -> R {
         "settings": redacted_settings(&s),
         "errors": errors,
         "busy": st.library_busy(),
-        "log": crate::log::tail(400),
+        "log": clean(&crate::log::tail(400)),
     })))
 }
 
@@ -2270,6 +2304,25 @@ mod tests {
         server.abort();
     }
 
+    /// SEC-34: what the diagnostics report says about places and addresses.
+    #[test]
+    fn report_text_names_no_folder_and_no_repository() {
+        let (home, lib) = (std::path::Path::new("/Users/sara"), std::path::Path::new("/Users/sara/Client Notes"));
+        let r = |t: &str| for_report(t, Some(home), Some(lib));
+        assert_eq!(r("history: could not record /Users/sara/Client Notes/acme/README.md"), "history: could not record (library)/acme/README.md");
+        assert_eq!(r("reading /Users/sara/.thoughts/settings.json"), "reading ~/.thoughts/settings.json");
+        assert_eq!(r("an error noted earlier, home already shortened: ~/Client Notes/acme/todo.md"), "an error noted earlier, home already shortened: (library)/acme/todo.md");
+        assert_eq!(r("sync: push to origin failed: fatal: repository 'https://github.com/sara/private-clients.git/' not found"),
+            "sync: push to origin failed: fatal: repository 'https://github.com/…' not found");
+        assert_eq!(r("fatal: Could not read from remote repository git@github.com:sara/private-clients.git"), "fatal: Could not read from remote repository git@github.com:…");
+        assert_eq!(r("push ssh://git@example.com:2222/sara/lib.git"), "push ssh://[redacted]@example.com:2222/…");
+        // What helps someone help stays: the site, times, counts, plain words.
+        assert_eq!(r("2026-11-12 10:00:01.123 WARN  sync: pull from origin conflicts in 2 file(s)"), "2026-11-12 10:00:01.123 WARN  sync: pull from origin conflicts in 2 file(s)");
+        assert_eq!(r("could not reach https://github.com"), "could not reach https://github.com");
+        // No library set, no home known: still no secrets and no repository paths.
+        assert_eq!(for_report("token=abc at https://x.example/a/b", None, None), "token=[redacted] at https://x.example/…");
+    }
+
     #[test]
     fn token_sources() {
         assert_eq!(presented_token("/api/status", "Bearer abc", ""), Some("abc"));
@@ -2985,6 +3038,15 @@ mod tests {
         assert_eq!((d["git"]["branch"].as_str(), d["git"]["changedFiles"].as_u64()), (Some("main"), Some(0)));
         assert!(d["errors"].is_array() && d["log"].is_string() && d["assistant"]["installed"].is_boolean());
         assert!(!d.to_string().contains(&lib.display().to_string()));
+        // SEC-34: an error that names the library, the home folder and a private repository's
+        // address reaches the report without any of them.
+        let home = dirs::home_dir().unwrap();
+        note_error("POST", "/api/git/sync", 400, "error", &format!("git push: fatal: unable to access 'https://glpat-AbCdEf0123456789xyzz@gitlab.com/sara/clients.git/': failed in {}/notes ({}/x)", lib.display(), home.display()));
+        let d = diagnostics(State(st.clone())).await.unwrap().0;
+        let last = d["errors"].as_array().unwrap().last().unwrap()["error"].as_str().unwrap().to_string();
+        assert_eq!(last, "git push: fatal: unable to access 'https://[redacted]@gitlab.com/…': failed in (library)/notes (~/x)");
+        let text = d.to_string();
+        assert!(!text.contains(&lib.display().to_string()) && !text.contains("sara/clients") && !text.contains("glpat-"), "{text}");
         // The calendar export is a real iCalendar file.
         todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "file the return @due(2026-12-31)".into(), ..Default::default() })).await.unwrap();
         let r = todo_calendar(State(st.clone())).await.ok().unwrap();

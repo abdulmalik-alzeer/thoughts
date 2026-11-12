@@ -71,7 +71,7 @@ Thoughts never downloads or installs anything by itself: when a newer version ex
 
 To suggest improvements (for example the monthly tune-up described in [Making Thoughts your own](CUSTOMISING.md)), the app keeps a small record on your computer of which screens you open and which customisations you kept or discarded. That record never leaves your computer on its own. If you accept a tune-up suggestion, a short summary of it is included in the request to the assistant, like anything else you send in a chat.
 
-The diagnostics shown under Settings are produced on your computer, with passwords and keys removed, and go nowhere unless you copy and send them yourself.
+The diagnostics shown under Settings are produced on your computer and go nowhere unless you copy and send them yourself. Passwords and keys are removed from them, your home and library folders are replaced by placeholders, and the address of a backup location keeps only the name of the site. Read them through before you post them anywhere public all the same.
 
 ## Private folders
 
