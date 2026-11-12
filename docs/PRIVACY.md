@@ -44,6 +44,8 @@ This is sent through your own account with the provider (by default, your Claude
 
 The same applies to everything the assistant does for you without a chat window in front of you: **Wrap**, automatic tasks you have approved, and customisation requests.
 
+**Automatic summaries.** So that Wrap is quick, Thoughts prepares a short summary of each chat in the background: once the chat has been quiet for a while (15 minutes unless you change it), or when you start another chat, the text of that chat is sent to the AI provider a second time and a few lines come back. This happens without you pressing anything, for every chat in your library, including ones you never mean to wrap. The summary is kept on your computer with the chat. To stop it, switch off **Settings → Privacy → Summarise chats automatically**: a chat is then only read again when you press Wrap.
+
 Nothing is sent to an AI provider when you are only reading, searching or editing your library in the app.
 
 ## What sync does
@@ -93,6 +95,7 @@ This section is practical guidance, not legal advice. Thoughts cannot tell you w
 | When | What leaves | Where it goes |
 |---|---|---|
 | You send a chat message, press Wrap, or an automatic task runs | Your message and attachments, and the contents of any library file the assistant opens for that request | The AI provider, through your own account |
+| A chat goes quiet, or you start another one (unless "Summarise chats automatically" is off) | The text of that chat, once more, to be summarised | The AI provider, through your own account |
 | Sync is on | The whole library with its history, private folders included | The backup location you entered |
 | You export, print or share an output yourself | That file | Wherever you send it |
 | You read, search or edit in the app without chatting | Nothing | — |

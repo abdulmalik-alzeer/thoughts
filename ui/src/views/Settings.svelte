@@ -7,7 +7,7 @@
   import { recheckSignIn } from '../lib/auth';
   import { isolatedKeys, tip } from '../lib/shortcuts';
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
-  import { fmtMoney, fmtNum, t } from '../lib/i18n';
+  import { fmtMoney, fmtNum, t, tn } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { restartService } from '../lib/shell';
   import ThemePicker from './ThemePicker.svelte';
@@ -25,7 +25,7 @@
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations', 'reorganize'],
-    privacy: ['set.privTitle', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
+    privacy: ['set.privTitle', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'layer.appUpdates'],
@@ -51,7 +51,7 @@
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));
-    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null; x.keepHistory ??= true;
+    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null; x.autoSummaries ??= true; x.keepHistory ??= true;
     if (x.ai?.claude) x.ai.claude.permissionMode = realPerm(x.ai.claude.permissionMode);
     return x;
   };
@@ -191,11 +191,35 @@
     s.ai.claude.permissionMode = BYPASS;
     autoSave();
   }
+  // ----- opening another library: chats stay with the one they were started in -----
+  /** Asked before the library folder changes. False = stay; otherwise whether the old library moved here. */
+  async function askLibrarySwitch(): Promise<false | { moved: boolean }> {
+    const was = String(app.settings?.libraryPath ?? '').trim();
+    const now = String(s.libraryPath ?? '').trim();
+    if (!was || !now || was === now) return { moved: false };
+    // The old folder is gone: only the person knows whether they moved it or this is another library.
+    if (app.status?.libraryMissing && app.chats.length) {
+      const c = await choiceDialog({
+        title: t('wrapa.lib.movedTitle'), body: t('wrapa.lib.movedBody'),
+        choices: [{ id: 'different', label: t('wrapa.lib.different') }, { id: 'same', label: t('wrapa.lib.same'), primary: true }],
+      });
+      return c ? { moved: c === 'same' } : false;
+    }
+    if (app.wrap.count > 0 && !(await confirmDialog({ title: t('wrapa.lib.title'), body: tn('wrapa.lib.body', app.wrap.count), confirmLabel: t('wrapa.lib.confirm') }))) return false;
+    return { moved: false };
+  }
+
   /** Write the draft. The service refuses to switch bypass on without the confirmation sent here. */
   async function persist() {
+    const lib = await askLibrarySwitch();
+    if (!lib) { s.libraryPath = base.libraryPath; return; }
     const confirm = turnsBypassOn();
     const sent = norm(s);
-    await saveSettings(payload(), confirm ? `?confirm=${BYPASS}` : '');
+    const query = new URLSearchParams();
+    if (confirm) query.set('confirm', BYPASS);
+    if (lib.moved) query.set('library', 'moved');
+    const qs = query.toString();
+    await saveSettings(payload(), qs ? `?${qs}` : '');
     bypassOk = false;
     // A change typed while this was being saved stays in the draft and goes with the next save.
     if (norm(s) === sent) s = fresh();
@@ -699,6 +723,13 @@
         {/each}
         {#if privErr}<p class="err" role="alert">{privErr}</p>{/if}
         <div class="row gap-top"><button type="button" class="btn" onclick={addPrivate}><Icon name="plus" size={14} /> {t('set.privAdd')}</button></div>
+      </div>
+    {/if}
+    {#if vis(c, 'wrapa.set.auto')}
+      <div class="card">
+        <h3>{t('wrapa.set.auto')}</h3>
+        <p class="muted sm" id="st-autosum-hint">{t('wrapa.set.autoHint')}</p>
+        <label class="check"><input type="checkbox" bind:checked={s.autoSummaries} aria-describedby="st-autosum-hint" /> {t('wrapa.set.auto')}</label>
       </div>
     {/if}
     {#if vis(c, 'layer.signalsTitle')}

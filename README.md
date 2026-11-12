@@ -64,8 +64,9 @@ assistant merge the two.
 
 ## Privacy
 
-Your files stay on your computer. Thoughts talks to the AI only when you chat, and syncs only
-where you tell it to. There is no analytics or tracking. You can mark folders the assistant must
+Your files stay on your computer. Thoughts talks to the AI when you chat or ask it to do
+something, and once more after a chat goes quiet, to write the short summary that Wrap works
+from (you can switch that off in Settings → Privacy). It syncs only where you tell it to. There is no analytics or tracking. You can mark folders the assistant must
 not read. The details in plain language, including what to check before using it with
 confidential client data: [docs/PRIVACY.md](docs/PRIVACY.md).
 
