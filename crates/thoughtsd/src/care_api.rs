@@ -74,7 +74,7 @@ async fn run_fix(st: &AppState, id: &str) -> anyhow::Result<()> {
             next.save()?;
             *cur = next;
             drop(cur);
-            crate::log::info("self-check: history sync switched to folder sync (the library is in a cloud folder)");
+            crate::log::info("self-check: the backup was switched from an online location to the cloud folder the library is in");
             st.emit(json!({"type": "settings.changed"}));
         }
         "finish-history" | "unlock-history" => {
