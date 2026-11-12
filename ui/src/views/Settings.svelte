@@ -1,6 +1,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
+  import { askNotify, notifState, testNotify, type NotifState } from '../lib/notifyPerm';
   import { api, del, inTauri, post, reloadApp } from '../lib/api';
   import { a11y, app, applyTheme, go, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
   import { recheckSignIn } from '../lib/auth';
@@ -140,11 +141,32 @@
     finally { busy[key] = false; }
   }
 
-  function payload() {
-    const x = structuredClone($state.snapshot(s));
+  function trimmed(v: any) {
+    const x = structuredClone($state.snapshot(v));
     const c = x.ai.claude;
     for (const k of ['binary', 'model', 'effort', 'permissionMode', 'miniWrapModel', 'baseUrl']) c[k] = typeof c[k] === 'string' && c[k].trim() ? c[k].trim() : null;
     x.libraryPath = String(x.libraryPath ?? '').trim();
+    return x;
+  }
+  /** Leaf values of `draft` that differ from `from` (a list counts as one value). */
+  function changes(draft: any, from: any, path: string[] = [], out: [string[], any][] = []): [string[], any][] {
+    const obj = (v: any) => !!v && typeof v === 'object' && !Array.isArray(v);
+    for (const k of new Set([...Object.keys(draft ?? {}), ...Object.keys(from ?? {})])) {
+      const a = draft?.[k], b = from?.[k];
+      if (obj(a) && obj(b)) changes(a, b, [...path, k], out);
+      else if (norm(a) !== norm(b)) out.push([[...path, k], a]);
+    }
+    return out;
+  }
+  /** Only what the user changed, laid over the settings as they are now: a value nobody touched
+   *  here (the theme, zoom, a mode only shown under another name) is sent back exactly as it is. */
+  function payload() {
+    const x = structuredClone($state.snapshot(app.settings));
+    for (const [path, v] of changes(trimmed(s), trimmed(base))) {
+      let o = x;
+      for (const k of path.slice(0, -1)) o = o[k] ??= {};
+      o[path[path.length - 1]] = v === undefined ? null : structuredClone(v);
+    }
     return x;
   }
 
@@ -163,27 +185,51 @@
     if (!(await askBypass())) return;
     bypassOk = true;
     s.ai.claude.permissionMode = BYPASS;
+    autoSave();
   }
   /** Write the draft. The service refuses to switch bypass on without the confirmation sent here. */
   async function persist() {
     const confirm = turnsBypassOn();
+    const sent = norm(s);
     await saveSettings(payload(), confirm ? `?confirm=${BYPASS}` : '');
     bypassOk = false;
-    s = fresh(); base = fresh();
-    toast(t('set.saved'), { kind: 'success' });
+    // A change typed while this was being saved stays in the draft and goes with the next save.
+    if (norm(s) === sent) s = fresh();
+    base = fresh();
+    flashSaved();
   }
 
-  async function save() {
-    if (readOnly) return;
-    if (invalid) return toast(t('set.fixFirst'), { kind: 'error' });
-    if (turnsBypassOn() && !bypassOk) { if (!(await askBypass())) return; bypassOk = true; }
-    await run('save', persist);
+  // ----- every change applies at once -----
+  // A change is saved when the control commits it: a switch or a choice at once, a text box when you
+  // leave it or press Enter. Only invalid input, or a save the service refused, waits in the bar below.
+  let queue: Promise<void> = Promise.resolve();
+  let saveFailed = $state(false);
+  let justSaved = $state(false);
+  let savedTimer: ReturnType<typeof setTimeout> | undefined;
+  function flashSaved() { justSaved = true; clearTimeout(savedTimer); savedTimer = setTimeout(() => (justSaved = false), 2500); }
+  async function saveNow() {
+    if (readOnly || !isDirty() || invalid) return;
+    if (turnsBypassOn() && !bypassOk) return; // only ever after the warning (see pickPerm)
+    busy.save = true;
+    try { await persist(); saveFailed = false; }
+    catch (e) { saveFailed = true; failed(t('ui.set.saveFailed'), e); }
+    finally { busy.save = false; }
   }
+  /** Save the draft (after any save still running). Bubbled `change` events land here. */
+  function autoSave(): Promise<void> { queue = queue.then(saveNow, saveNow); return queue; }
 
-  function discard() { s = structuredClone($state.snapshot(base)); bypassOk = false; applyTheme(); }
+  function discard() { s = structuredClone($state.snapshot(base)); bypassOk = false; saveFailed = false; applyTheme(); }
+
+  /** Text typed into a field that only acts on its own button (a key, a backup address): not a setting, so not saved by itself. */
+  const unsent = () => [
+    ...(apiToken.trim() ? [t('set.apiKey')] : []),
+    ...(remote.url.trim() || remote.username.trim() || remote.token ? [t('shellui.set.typedRemote')] : []),
+  ];
 
   // Leaving with unsaved edits: navigation waits for this (`app.leaveGuard`, awaited inside `go()`).
   async function leaveGuard(): Promise<boolean> {
+    await queue; // a change being saved right now finishes first
+    if (!(await leaveTyped())) return false;
     if (!isDirty() || readOnly) return true;
     const bad = invalid;
     const choice = await choiceDialog({
@@ -196,9 +242,35 @@
     try { await persist(); return true; }
     catch (e) { failed(t('ui.set.saveFailed'), e); return false; }
   }
-  onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; });
+  /** A typed key or backup address would be lost without a word: say so first. */
+  async function leaveTyped(): Promise<boolean> {
+    const typed = unsent();
+    if (!typed.length || readOnly) return true;
+    const choice = await choiceDialog({
+      title: t('shellui.set.typedTitle'), body: t('shellui.set.typedBody'), list: typed, cancelLabel: t('layer.keepEditing'),
+      choices: [{ id: 'leave', label: t('shellui.set.typedLeave'), danger: true }, ...(apiToken.trim() ? [{ id: 'key', label: t('set.storeKey'), primary: true }] : [])],
+    });
+    if (choice === 'key') { await saveToken(); if (apiToken.trim()) return false; }
+    else if (choice !== 'leave') return false;
+    apiToken = ''; remote = { name: '', url: '', username: '', token: '' };
+    return true;
+  }
+  onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; clearTimeout(savedTimer); });
 
-  function onBeforeUnload(e: BeforeUnloadEvent) { if (isDirty()) { e.preventDefault(); e.returnValue = ''; } }
+  function onBeforeUnload(e: BeforeUnloadEvent) { if (isDirty() || unsent().length) { e.preventDefault(); e.returnValue = ''; } }
+
+  // ----- notifications: the switch is only half of it; the computer has to allow them too -----
+  let notif = $state<NotifState>('unknown');
+  const refreshNotif = () => notifState().then((v) => (notif = v));
+  onMount(() => { refreshNotif(); window.addEventListener('focus', refreshNotif); return () => window.removeEventListener('focus', refreshNotif); });
+  async function onNotifySwitch(on: boolean) { if (on) notif = await askNotify(); }
+  async function sendTest() {
+    busy.notif = true;
+    try {
+      notif = await testNotify(t('shellui.notif.testTitle'), t('shellui.notif.testBody'));
+      if (notif === 'unknown') toast(t('shellui.notif.cannot'), { kind: 'error' });
+    } finally { busy.notif = false; }
+  }
 
   const resets: Partial<Record<Cat, { list: string[]; apply: () => void }>> = {
     general: { list: ['theme', 'mode', 'set.notify'], apply: () => {
@@ -218,7 +290,7 @@
     const r = resets[c];
     if (!r) return;
     const ok = await confirmDialog({ title: t('set.resetTitle', { name: t('set.cat.' + c) }), body: t('set.resetBody'), list: r.list.map((k) => t(k)), confirmLabel: t('set.reset'), danger: true });
-    if (ok) r.apply();
+    if (ok) { r.apply(); autoSave(); }
   }
 
   async function syncServerFields() {
@@ -251,7 +323,7 @@
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const p = await open({ directory: true, defaultPath: s.libraryPath || undefined });
-      if (typeof p === 'string') s.libraryPath = p;
+      if (typeof p === 'string') { s.libraryPath = p; autoSave(); }
     } catch { toast(t('set.browseFail'), { kind: 'error' }); }
   }
 
@@ -330,11 +402,13 @@
     }
     if (s.privatePaths.includes(rel)) { privErr = t('set.privDup'); return; }
     s.privatePaths = [...s.privatePaths, rel];
+    autoSave();
   }
 
   async function removePrivate(p: string) {
     if (!(await confirmDialog({ title: t('set.privRemoveTitle'), body: t('set.privRemoveBody'), list: [p], confirmLabel: t('set.remove'), danger: true }))) return;
     s.privatePaths = s.privatePaths.filter((x: string) => x !== p);
+    autoSave();
   }
 </script>
 
@@ -371,7 +445,15 @@
       {/if}
       {#if vis(c, 'theme', 'mode')}<ThemePicker bind:theme={s.theme} bind:mode={s.mode} />{/if}
       {#if vis(c, 'set.notify')}
-        <label class="check"><input type="checkbox" bind:checked={s.notifications} /> {t('set.notify')}</label>
+        <label class="check"><input type="checkbox" bind:checked={s.notifications} onchange={(e) => onNotifySwitch(e.currentTarget.checked)} aria-describedby="st-notif-state" /> {t('set.notify')}</label>
+        <div class="row wrap notif" id="st-notif-state">
+          {#if s.notifications && notif === 'blocked'}
+            <p class="note grow" role="status"><Icon name="warning" size={15} /> <span>{t('shellui.notif.blocked')}</span></p>
+          {:else if notif === 'granted'}
+            <span class="muted sm grow">{t('shellui.notif.allowed')}</span>
+          {:else}<span class="grow"></span>{/if}
+          <button type="button" class="btn ghost" disabled={busy.notif} aria-busy={busy.notif} onclick={sendTest}><Icon name="bell" size={14} /> {t('shellui.notif.test')}</button>
+        </div>
       {/if}
     </div>
   {:else if c === 'accessibility'}
@@ -641,25 +723,28 @@
       {/if}
     {/each}
   </nav>
-  <div class="content">
+  <div class="content" onchange={() => autoSave()}>
     {#if readOnly}
       <div class="ro card" role="status"><Icon name="lock" size={16} /><span>{t('ui.settingsNewer')}</span></div>
     {/if}
-    {#each shown as c (c)}
+    {#each shown as c, i (c)}
       <section aria-labelledby={'st-h-' + c}>
-        <h2 class="title" id={'st-h-' + c}>{t('set.cat.' + c)}</h2>
+        <div class="row titlerow">
+          <h2 class="title grow" id={'st-h-' + c}>{t('set.cat.' + c)}</h2>
+          {#if i === 0}<span class="saved" role="status">{#if justSaved}<Icon name="check" size={14} /> {t('shellui.set.saved')}{:else if busy.save}{t('set.saving')}{/if}</span>{/if}
+        </div>
         <fieldset class="lockable" disabled={readOnly}>{@render section(c)}</fieldset>
       </section>
     {:else}
       <p class="muted none" role="status">{t('set.noMatch', { q: query.trim() })}</p>
     {/each}
 
-    {#if dirty && !readOnly}
+    {#if dirty && !readOnly && (invalid || saveFailed)}
       <div class="savebar" role="region" aria-label={t('set.unsaved')}>
         <span class="dot" aria-hidden="true"></span>
-        <span class="grow" role="status">{t('set.unsaved')}{#if invalid} — {t('set.fixFirst')}{/if}</span>
-        <button type="button" class="btn" disabled={busy.save} onclick={discard}>{t('set.discard')}</button>
-        <button type="button" class="btn primary" disabled={busy.save || invalid} aria-busy={busy.save} onclick={save}>{busy.save ? t('set.saving') : t('save')}</button>
+        <span class="grow" role="status">{invalid ? t('shellui.set.fixToSave') : t('shellui.set.notSaved')}</span>
+        <button type="button" class="btn" disabled={busy.save} onclick={discard}>{t('shellui.set.undo')}</button>
+        {#if !invalid}<button type="button" class="btn primary" disabled={busy.save} aria-busy={busy.save} onclick={() => autoSave()}>{busy.save ? t('set.saving') : t('shell.retry')}</button>{/if}
       </div>
     {/if}
   </div>
@@ -684,6 +769,10 @@
   :global([data-theme="contrast"]) .cat.on .ci { background: var(--accent-fg); color: var(--accent); }
   .content { padding: 6px 28px 28px; max-width: 760px; min-width: 0; }
   .title { font-size: 20px; margin: 4px 0 14px; }
+  .titlerow { align-items: baseline; }
+  .saved { font-size: var(--fs-xs); color: var(--ok); display: inline-flex; align-items: center; gap: 4px; min-height: 1em; }
+  .notif { margin-top: 4px; }
+  .notif .note { margin: 0; }
   section + section { margin-top: 26px; }
   h3 { font-size: 14px; font-weight: 600; margin: 18px 0 6px; }
   .card > h3:first-child { margin-top: 0; }
