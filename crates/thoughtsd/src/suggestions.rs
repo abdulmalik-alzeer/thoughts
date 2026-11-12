@@ -137,7 +137,7 @@ pub fn compute(i: &Input) -> Vec<Value> {
         let (day_en, at) = if i.arabic { ("Thursday", "15:00") } else { ("Friday", "16:00") };
         out.push(item("weekly-review", i.arabic,
             ("Add a weekly review every Friday", "You wrap up your chats regularly. An automatic task can gather what you decided, what is still open and what is due next week, every Friday."),
-            ("أضف ملخص الأسبوع مهمةً تلقائية كل خميس", "أنت تحفظ خلاصة محادثاتك بانتظام. يمكن لملخص أسبوعي أن يجمع لك ما قرّرته وما بقي مفتوحاً وما يحين موعده في الأسبوع القادم، تلقائياً."),
+            ("أضف المراجعة الأسبوعية مهمةً تلقائية كل خميس", "أنت تحفظ خلاصة محادثاتك بانتظام. يمكن للمراجعة الأسبوعية أن تجمع لك ما قرّرته وما بقي مفتوحاً وما يحين موعده في الأسبوع القادم، تلقائياً."),
             format!("Add a workflow that runs every {day_en} at {at} and writes a short weekly review into my library: what I decided this week, what is still open, and the todos due next week. Put it where my library's conventions say reviews or logs belong.")));
     }
 

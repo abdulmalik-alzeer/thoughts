@@ -411,8 +411,10 @@ when Codex is chosen.
   the user has approved each one. Schedules: day, week, weekdays, month (day 1–28 or last).
 - **Learning** is local only: usage events and keep/discard/undo outcomes in
   `~/.thoughts/usage-events.jsonl`, used for suggestions and the monthly tune-up.
-- **Updates** replace the app itself and never touch the library. The app checks for a new
-  version and tells the user; it does not install silently. Each release ships a hash manifest;
+- **Updates** replace the app itself and never touch the library. With an updater key the app
+  checks for a new version and installs it only when the user agrees; without one (every build
+  so far) "Check for Updates…" and the opt-in weekly check only point to the download page. It
+  never installs silently. Each release ships a hash manifest;
   customised files are compared three ways (original, yours, new). Only files changed on both
   sides ask the user: keep mine, use new, or let the assistant merge (previewed like any change).
   Defaults removed or renamed upstream are reported and left in place, an unresolved conflict is
@@ -422,9 +424,13 @@ when Codex is chosen.
 
 [PRIVACY.md](PRIVACY.md), [CUSTOMISING.md](CUSTOMISING.md), [HISTORY.md](HISTORY.md) and
 [COST.md](COST.md) describe this behaviour for end users, with Arabic versions in `docs/ar/`.
-Keep both languages true when the behaviour changes. The Arabic glossary (Wrap «تلخيص وحفظ»,
-History «السجل», Keep / Discard / Try it «اعتماد / تجاهل / تجربة», add-on «إضافة», pack «حزمة»,
-automatic task «مهمة تلقائية») must match the UI strings.
+Keep both languages true when the behaviour changes. [GLOSSARY.md](GLOSSARY.md) gives every
+product term one name in each language (Wrap «تلخيص وحفظ», History «السجل», Try it · Keep ·
+Discard «تجربة · اعتماد · تجاهل», automatic task «مهمة تلقائية», the app always "Thoughts"…)
+and the writing rules; the UI strings, the service's messages (`tr.rs`), the native menus, the
+starter kit and these guides follow it. Errors the service raises for a person go through
+`tr::err`, or `tr::err_detail` when git's or a program's own words should stay available under
+"Show details".
 
 The first-run test plan for each platform and the list of things nobody has verified yet are in
 [RELEASING.md](RELEASING.md#first-run-test-plan).

@@ -10,7 +10,7 @@ This page describes what the Thoughts app does with your information. It is a de
 - When you chat, the conversation and the files the assistant reads to answer you are sent to the AI provider you signed in with.
 - Sync uploads your library to the place you chose, and nowhere else.
 - Dictation and meeting recordings are turned into text on your Mac; the sound is never sent anywhere.
-- The app contains no analytics, tracking or advertising.
+- The app contains no analytics, tracking or advertising. The assistant program it runs is made by another company and sends that company usage statistics and error reports of its own: see [What the assistant program sends on its own](#what-the-assistant-program-sends-on-its-own).
 
 ## What stays on your computer
 
@@ -28,7 +28,7 @@ When you delete a chat in Thoughts, the assistant's transcript of that conversat
 
 The part of Thoughts that runs in the background only accepts connections from your own computer.
 
-A library that Thoughts creates can be opened only by your own user account on the computer. A folder you already had keeps whatever access it had: on a computer with several accounts, **Settings → Privacy** tells you when other accounts can open your library folder, and offers to close it to them.
+A library that Thoughts creates can be opened only by your own user account on the computer. A folder you already had keeps whatever access it had: on a computer with several accounts, **Settings › Privacy & cost** tells you when other accounts can open your library folder, and offers to close it to them.
 
 ### Saved passwords
 
@@ -50,7 +50,7 @@ The same applies to everything the assistant does for you without a chat window 
 
 **Web lookups.** In a chat you can switch on **Web lookups** (next to the permission mode; off for every new chat, and the app asks first). The assistant may then search the web and open web pages for that chat without asking. What it searches for, and the addresses of the pages it opens, go to the search service and to those websites; the search goes through your AI provider. Pages can contain instructions written to mislead the assistant, and it may send what it has read in that chat, your notes included, to the sites it opens or searches. So while web lookups are on, it cannot run commands on your computer, use tools you connected to Claude Code, or change the library's standing rules (CLAUDE.md) and routines in that chat. Wrap, automatic tasks and summaries never use the web.
 
-**Automatic summaries.** So that Wrap is quick, Thoughts prepares a short summary of each chat in the background: once the chat has been quiet for a while (15 minutes unless you change it), or when you start another chat, the text of that chat is sent to the AI provider a second time and a few lines come back. This happens without you pressing anything, for every chat in your library, including ones you never mean to wrap. The summary is kept on your computer with the chat. To stop it, switch off **Settings → Privacy → Summarise chats automatically**: a chat is then only read again when you press Wrap.
+**Automatic summaries.** So that Wrap is quick, Thoughts prepares a short summary of each chat in the background: once the chat has been quiet for a while (15 minutes unless you change it), or when you start another chat, the text of that chat is sent to the AI provider a second time and a few lines come back. This happens without you pressing anything, for every chat in your library, including ones you never mean to wrap. The summary is kept on your computer with the chat. To stop it, switch off **Settings › Privacy & cost → Summarise chats automatically**: a chat is then only read again when you press Wrap.
 
 **Codex.** If you choose Codex under Settings › Assistant (or move a chat to it), the same kinds of text go to OpenAI instead, through your ChatGPT plan or OpenAI key, under the terms of that account. Codex is not told about the chats that stay with Claude Code, and the other way round; moving a chat passes its conversation (or a summary of it) on to the other one.
 
@@ -73,7 +73,7 @@ In the Mac app, Thoughts can turn speech into text: the microphone button in the
 
 Sync is off unless you turn it on. When it is on, Thoughts uploads your whole library, including its history of earlier versions, to the location you entered, and downloads changes from it. Who can see it there depends on that service and how you set it up. Chats and settings are not part of the library and are not synced.
 
-To take them to another computer, use **Settings → Maintenance → Move to another computer**. It saves one file in your Downloads folder with your chats (and their attachments), settings, customisations and what your add-ons saved (an hours tracker's entries, for example). The file never contains passwords, your provider key or anything that unlocks an account, but your chats are in it as plain text: keep it somewhere safe and delete it once you have imported it.
+To take them to another computer, use **Settings › Maintenance › Move to another computer**. It saves one file in your Downloads folder with your chats (and their attachments), settings, customisations and what your add-ons saved (an hours tracker's entries, for example). The file never contains passwords, your provider key or anything that unlocks an account, but your chats are in it as plain text: keep it somewhere safe and delete it once you have imported it.
 
 If you keep your library inside a folder that another service backs up (iCloud Drive, Dropbox and the like), that service copies it too. That is between you and that service.
 
@@ -83,8 +83,8 @@ Thoughts does not collect usage statistics, crash reports or any other informati
 
 Checking for a newer version is the one time Thoughts contacts the internet on its own behalf, and only in these cases:
 
-- **When you choose "Check for Updates…"** (in the menu, or under Settings → Customisations).
-- **Once a week, if you switch on "Check once a week for a newer version"** under Settings → Maintenance. It is off unless you switch it on.
+- **When you choose "Check for Updates…"** (in the menu, under Customise › App updates, or under Settings › Maintenance).
+- **Once a week, if you switch on "Check once a week for a newer version"** under Settings › Maintenance. It is off unless you switch it on.
 
 Either way it asks GitHub, where Thoughts is published (`api.github.com`), for the number of the latest version. The request carries nothing about you, your library or your settings: no account, no cookie, no identifier, only the address it asks for and the name "Thoughts" as the program asking. Like any connection, it lets GitHub see your internet address. A copy with the built-in updater switched on asks the download page in the same way when you check.
 
@@ -92,11 +92,39 @@ Thoughts never downloads or installs anything by itself: when a newer version ex
 
 To suggest improvements (for example the monthly tune-up described in [Making Thoughts your own](CUSTOMISING.md)), the app keeps a small record on your computer of which screens you open and which customisations you kept or discarded. That record never leaves your computer on its own. If you accept a tune-up suggestion, a short summary of it is included in the request to the assistant, like anything else you send in a chat.
 
+### What the assistant program sends on its own
+
+The assistant is a separate program made by another company: Claude Code by Anthropic and, if you
+choose it, Codex by OpenAI. Besides your conversations, it sends its maker some information of its
+own, under that company's terms and privacy policy, not Thoughts':
+
+- **Claude Code** sends Anthropic usage statistics: how fast and how reliably it works, and which of
+  its features are used, never your notes, your messages or file names. When you sign in with a
+  Claude Pro, Max or Ultra plan it also sends reports of its own errors, with personal details
+  removed before they leave. Now and then it may ask you to rate a session; a rating sends only the
+  rating. Anthropic describes all of this in
+  [Claude Code data usage](https://code.claude.com/docs/en/data-usage), and its privacy policy is at
+  [anthropic.com/legal/privacy](https://www.anthropic.com/legal/privacy).
+- **Codex** can send OpenAI usage statistics of its own; its settings have a switch for them. OpenAI's
+  privacy policy is at [openai.com/policies/privacy-policy](https://openai.com/policies/privacy-policy/).
+
+What Thoughts can and cannot do about it:
+
+- Thoughts starts these programs as they are. It cannot see or stop what they send, and this version
+  has no switch of its own for it.
+- You can switch Claude Code's off in Claude Code's own settings: in the file `settings.json` in the
+  `.claude` folder in your home folder, add `"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"` under
+  `"env"` (this also stops the session ratings). That covers your ordinary chats. The runs Thoughts
+  starts by itself (Wrap, automatic summaries, automatic tasks, setup and Reorganize) never read your
+  personal Claude Code settings, so for them it stays on.
+- For Codex, switch analytics off in Codex's own settings; OpenAI's
+  [configuration reference](https://developers.openai.com/codex/config-reference) says how.
+
 The diagnostics shown under Settings are produced on your computer and go nowhere unless you copy and send them yourself. Passwords and keys are removed from them, your home and library folders are replaced by placeholders, and the address of a backup location keeps only the name of the site. Read them through before you post them anywhere public all the same.
 
 ## Private folders
 
-In **Settings → Privacy** you can mark folders in your library as private.
+In **Settings › Privacy & cost** you can mark folders in your library as private.
 
 What is enforced, by the app's background service:
 
@@ -104,7 +132,7 @@ What is enforced, by the app's background service:
 - Add-ons (the small tools and views created through Customise) cannot read private folders.
 - The assistant is told, in its instructions for every run, which folders are private and to leave them alone, also when a note or a web page asks otherwise. Those instructions are handed over in a file only your account can read, so other people using this computer cannot see your private folders' names.
 - Wrap and automatic tasks cannot run commands at all, so for them the block has no way around it.
-- **Strict private folders** (Settings → Privacy, off unless you switch it on) closes the remaining route in chats. While you have private folders, no chat runs a command on its own: an ordinary chat asks you before each command, with a warning that a command is not checked against your private folders, and other chats cannot run commands at all. The cost: the assistant cannot move, rename or delete files, run scripts or install anything without asking you each time. Chats in Bypass permissions are not affected.
+- **Strict private folders** (Settings › Privacy & cost, off unless you switch it on) closes the remaining route in chats. While you have private folders, no chat runs a command on its own: an ordinary chat asks you before each command, with a warning that a command is not checked against your private folders, and other chats cannot run commands at all. The cost: the assistant cannot move, rename or delete files, run scripts or install anything without asking you each time. Chats in Bypass permissions are not affected.
 
 What it does not do:
 
@@ -136,6 +164,7 @@ This section is practical guidance, not legal advice. Thoughts cannot tell you w
 | A chat goes quiet, or you start another one (unless "Summarise chats automatically" is off) | The text of that chat, once more, to be summarised | The AI provider, through your own account |
 | Sync is on | The whole library with its history, private folders included | The backup location you entered |
 | You export, print or share an output yourself | That file | Wherever you send it |
+| The assistant program runs (Claude Code; Codex if you chose it) | Its own usage statistics and error reports, unless you switched them off in its settings | Anthropic (or OpenAI) and the services they use |
 | You dictate or record a meeting in the Mac app | Nothing: speech is turned into text on your Mac | — |
 | You read, search or edit in the app without chatting | Nothing | — |
 
@@ -169,7 +198,7 @@ Libraries created by Thoughts contain one such setting. It fetches the latest sy
 
 ## Keys for other programs
 
-**Settings → Privacy & cost → Keys for other programs** makes a key for a shortcut, a script or another program on this computer (a launcher such as Raycast, a Shortcuts action on a Mac, a small script). Each key is made for one purpose: adding todos and notes, reading the library, or both.
+**Settings › Privacy & cost › Keys for other programs** makes a key for a shortcut, a script or another program on this computer (a launcher such as Raycast, a Shortcuts action on a Mac, a small script). Each key is made for one purpose: adding todos and notes, reading the library, or both.
 
 - A key can never change your settings, start the assistant, trust a folder, install an add-on, sync, or make other keys. Those stay with the app itself.
 - A key that reads sees what an add-on sees: your private folders are left out, under any spelling and through a link. A key that adds cannot write into a private folder either.
@@ -181,7 +210,7 @@ Give a key only to a program you trust with what the key allows: a reading key l
 
 ## Deleting everything
 
-1. **The app and its data.** The quickest way is **Settings → Maintenance → Remove Thoughts from this computer**: it removes chats, attachments, settings, customisations, the saved passwords and key, and the login item, then quits; your library stays. Then remove the app itself. By hand: quit Thoughts completely, remove the app, and delete the `.thoughts` folder in your home folder. This removes chats, attachments, settings and customisations. Also remove its entry from the things that open when you log in. See [Uninstall](../README.md#uninstall).
+1. **The app and its data.** The quickest way is **Settings › Maintenance › Remove Thoughts from this computer**: it removes chats, attachments, settings, customisations, the saved passwords and key, and the login item, then quits; your library stays. Then remove the app itself. By hand: quit Thoughts completely, remove the app, and delete the `.thoughts` folder in your home folder. This removes chats, attachments, settings and customisations. Also remove its entry from the things that open when you log in. See [Uninstall](../README.md#uninstall).
 2. **Your library.** Delete the library folder. Until you do, it stays exactly as it is, readable with any text editor.
 3. **Saved passwords.** In your computer's password store (Keychain Access on a Mac), delete the entries named `thoughts-git` and `thoughts-ai`. A password saved with the file option is removed with the `.thoughts` folder.
 4. **Synced copies.** Delete the copy at the location you synced to, using that service.

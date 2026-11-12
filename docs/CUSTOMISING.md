@@ -86,13 +86,13 @@ An add-on that asks for nothing can still add pages, boxes on Home, commands, an
 
 ### Undo, any time
 
-Every change you keep is recorded. Under **Customise → History** you can undo any single change, or go back to how the app was at an earlier point, however long ago: **Show older changes** at the end of the list goes all the way back to where your app started. Undoing is itself recorded, so you can change your mind again. The starting point and the entries the app makes for itself (when an update refreshes its own files) cannot be undone on their own; you can still go back to them.
+Every change you keep is recorded. Under **Customise › History** you can undo any single change, or go back to how the app was at an earlier point, however long ago: **Show older changes** at the end of the list goes all the way back to where your app started. Undoing is itself recorded, so you can change your mind again. The starting point and the entries the app makes for itself (when an update refreshes its own files) cannot be undone on their own; you can still go back to them.
 
 If a customisation ever leaves the app unusable, even with a blank or frozen window, the **Recovery** menu in the menu bar still works, because the desktop app does it itself: undo the last change, go back to an earlier version, discard a change waiting for review, switch customisations off (they stay off until you switch them back on), reload, or open a fresh window. Each step says what it will change and asks first, and afterwards offers to put things back. Customisations cannot remove that menu.
 
 ### Your add-ons, one at a time
 
-Under **Customise → Add-ons** every add-on and page you have is listed with what it may do.
+Under **Customise › Add-ons** every add-on and page you have is listed with what it may do.
 
 - **Switch off** stops one from loading without removing it, and **Switch on** brings it back. Useful when one misbehaves.
 - **Remove** takes it out of the app.
@@ -100,11 +100,11 @@ Under **Customise → Add-ons** every add-on and page you have is listed with wh
 
 Each of these is one entry in History and can be undone, even when later changes built on the add-on.
 
-What an add-on saved (an hours tracker's entries, for example) stays on this computer when you remove the add-on, so undoing the removal brings it back with its data. Thoughts also keeps up to twelve earlier copies of each add-on's saved data (the newest few, then one a day), so one bad save never loses it: open **Earlier copies** to put one back. The saved data travels with you in the move file (**Settings → Maintenance → Move to another computer**).
+What an add-on saved (an hours tracker's entries, for example) stays on this computer when you remove the add-on, so undoing the removal brings it back with its data. Thoughts also keeps up to twelve earlier copies of each add-on's saved data (the newest few, then one a day), so one bad save never loses it: open **Earlier copies** to put one back. The saved data travels with you in the move file (**Settings › Maintenance › Move to another computer**).
 
 ### Ready-made packs
 
-Under **Customise → Ready-made** are packs that come with Thoughts: billable hours, a status board, a new-client form, overdue todos on Home, a weekly review, todos grouped by date and a sand theme. Choosing one opens the same review as any other pack. Nothing is switched on until you keep it, and nothing is downloaded.
+Under **Customise › Ready-made** are packs that come with Thoughts: billable hours, a status board, a new-client form, overdue todos on Home, a weekly review, todos grouped by date and a sand theme. Choosing one opens the same review as any other pack. Nothing is switched on until you keep it, and nothing is downloaded.
 
 ### The monthly tune-up
 
@@ -127,13 +127,20 @@ Only import packs from people you trust: a pack can change how the app behaves.
 
 ### What happens when Thoughts is updated
 
-Thoughts tells you when a new version is ready. An update never touches your library.
+An update never touches your library.
+
+Thoughts does not install new versions by itself yet: that needs a signed build, and this one is
+not. To hear about a new version, switch on **Check once a week for a newer version** under
+**Settings › Maintenance**, or choose **Check for Updates…** in the menu. Thoughts then tells you
+when a newer version is out and opens its download page, and you install it the way you installed
+this one. While the project's repository is private, the check cannot see new versions and says
+it cannot tell.
 
 For your customisations, Thoughts compares three things: the original, your version, and the new version.
 
 - Parts only you changed stay as you made them.
 - Parts only the new version changed are updated.
-- Where both you and the new version changed the same thing, Thoughts tells you once and lists those parts together under **Customise → App updates**. For each one it says what the new version changes (for example "Adds the Home shortcut Weekly review"), and you choose:
+- Where both you and the new version changed the same thing, Thoughts tells you once and lists those parts together under **Customise › App updates**. For each one it says what the new version changes (for example "Adds the Home shortcut Weekly review"), and you choose:
   - **Keep mine** — your version stays; you do not get the new behaviour for that part. The part stays listed, so you can still take the new version or merge later.
   - **Use the new version** — the new version replaces yours.
   - **Let the assistant merge** — the assistant combines the two and shows you a review first, like any other change.

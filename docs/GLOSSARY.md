@@ -105,8 +105,10 @@ rather than word-for-word translations of the English.
 | Process the inbox | معالجة صندوق الوارد | Files every inbox capture where it belongs. |
 | Interview me | حاورني | Questions that fill in the profile (Me). |
 
-«مراجعة» is not the name of any routine: in the app it only means looking at a change before
-keeping it (see below).
+«مراجعة» is not the name of any routine. In the app it means looking at a change before keeping it
+(see below), and it names the weekly review of your week («المراجعة الأسبوعية», a ready-made
+automatic task); nothing else. A user's own work (a contract review, a trial balance) uses the word
+freely.
 
 ## Customising the app
 
@@ -119,6 +121,8 @@ keeping it (see below).
 | Keep these changes (a Wrap) | أبقِ هذه التغييرات | A Wrap's changes, looked at before they enter the library. |
 | Add-on · Page · Look · Layout | إضافة · صفحة · المظهر · الترتيب | Kinds of customisation. |
 | Automatic task | مهمة تلقائية | Something the assistant does on a schedule. Never *job*. |
+| Weekly review | المراجعة الأسبوعية | The ready-made automatic task that writes up the week, on Thursday in Arabic. |
+| Monthly tune-up (of the app) | الضبط الشهري للتطبيق | Home's monthly suggestion for one customisation. |
 | Pack · Ready-made packs | حزمة · حزم جاهزة | A file of customisations to share or import. |
 | App updates | تحديثات التطبيق | Where a new release and the user's changes meet. |
 | Go back to an earlier version | العودة إلى نسخة سابقة | Puts the whole app back to an earlier point (History › App changes, or the Recovery menu). |

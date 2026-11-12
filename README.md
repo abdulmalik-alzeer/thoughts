@@ -46,29 +46,43 @@ See [Making Thoughts your own](docs/CUSTOMISING.md).
 
 1. Install [Claude Code](https://claude.com/claude-code) and sign in once. This needs a Claude
    plan that includes Claude Code, or an API key; see [what it costs to run](docs/COST.md).
-2. Get the **Thoughts .dmg** (see below) and drag it into Applications.
+2. Get Thoughts (see below). On a Mac, open the `.dmg` and drag Thoughts into Applications.
 3. Open Thoughts. A short setup creates your library and walks you through the basics.
 
 ### Where it runs today
 
-Thoughts runs on **macOS**. The build available today is for **Apple Silicon** Macs (M1 or later)
-and is shared privately while the app is in early testing; it is not signed yet, so macOS asks you
-to confirm the first launch. Intel Macs can [build from source](docs/DEVELOPMENT.md). Windows and
-Linux versions are in progress and have not been released.
+Thoughts is in early testing, and its repository is still private. There is no public download
+yet: copies are shared by hand, and links to its releases (and the instructions for getting the
+source) only work for people who have been given access.
+
+- **macOS** is where Thoughts is used today, on Apple Silicon Macs (M1 or later). Each release is
+  set up to make one app for Apple Silicon and Intel Macs, but it has not been run on an Intel Mac
+  yet.
+- **Windows** (an installer) and **Linux** (a `.deb` package and an AppImage) come out of the same
+  release but have never been run on a real computer. Treat them as experiments.
+
+Nothing is signed yet, so macOS and Windows ask you to confirm the first launch.
 
 ## Updates
 
-Thoughts tells you when a new version is ready. Your library is never touched by an update. If
-you've customized the app, Thoughts compares what you changed with the original and only asks
-where both you and the new version changed the same thing: keep mine, use new, or let the
-assistant merge the two.
+Your library is never touched by an update. Thoughts does not install new versions by itself yet:
+that needs a signed build. Switch on **Check once a week for a newer version** under
+Settings › Maintenance (off unless you switch it on), or choose **Check for Updates…** in the
+menu: when a newer version is out, Thoughts opens its download page and you install it over this
+one. While the repository is private, the check cannot see new versions and says it cannot tell.
+
+If you've customised the app, the new version compares what you changed with the original and
+only asks where both you and the new version changed the same thing: keep mine, use new, or let
+the assistant merge the two.
 
 ## Privacy
 
 Your files stay on your computer. Thoughts talks to the AI when you chat or ask it to do
 something, and once more after a chat goes quiet, to write the short summary that Wrap works
-from (you can switch that off in Settings → Privacy). It syncs only where you tell it to. There is no analytics or tracking. You can mark folders the assistant must
-not read. The details in plain language, including what to check before using it with
+from (you can switch that off in Settings › Privacy & cost). It syncs only where you tell it to.
+Thoughts itself has no analytics or tracking; the assistant program it runs (Claude Code) sends
+Anthropic usage statistics and error reports of its own, which the privacy guide explains how to
+switch off. You can mark folders the assistant must not read. The details in plain language, including what to check before using it with
 confidential client data: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## More to read
@@ -80,7 +94,7 @@ confidential client data: [docs/PRIVACY.md](docs/PRIVACY.md).
 
 ## Uninstall
 
-The simplest way: **Settings → Maintenance → Remove Thoughts from this computer**. It removes the
+The simplest way: **Settings › Maintenance › Remove Thoughts from this computer**. It removes the
 data folder, the saved passwords and key, and the login item, then quits. Then drag the app to
 the Trash.
 
@@ -99,7 +113,7 @@ entry and offers to delete the data folder.
 
 **Your library folder is never touched.** It stays where you put it, readable with any text
 editor, until you delete it yourself. Saved passwords and synced copies are covered in
-[Privacy → Deleting everything](docs/PRIVACY.md#deleting-everything).
+[Privacy › Deleting everything](docs/PRIVACY.md#deleting-everything).
 
 ---
 

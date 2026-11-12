@@ -17,7 +17,11 @@ first time; after that the [checklist](#release-checklist) is enough.
 - Nothing is signed yet. No signing certificate, no notarisation, no updater key exists. The
   release workflow works without them and produces unsigned installers.
 - The in-app updater is built in but switched off until an updater key is configured (below).
-  Until then "Check for Updates…" says updates are not configured in this build.
+  Until then "Check for Updates…" (and the weekly check under Settings › Maintenance, off by
+  default) asks GitHub for the number of the latest published release and, when it is newer,
+  offers its download page. While the repository is private that request finds nothing, so the
+  app says it cannot tell. The user guides (README, CUSTOMISING) say the same; change them
+  together.
 
 ## How a release is built
 
@@ -324,8 +328,9 @@ it) so that local and unconfigured builds stay updater-free. The endpoint is thi
 `TAURI_SIGNING_PRIVATE_KEY` to finish.
 
 **How it behaves in the app.** If the build has no public key or no endpoint, the updater is
-not loaded and the app reports "updates are not configured in this build". If it has both, the
-app checks `latest.json`, and installs only an update whose signature matches the public key.
+not loaded: "Check for Updates…" then asks GitHub for the latest release number and offers its
+download page (a Linux package says its updates come from the package manager). If it has both,
+the app checks `latest.json`, and installs only an update whose signature matches the public key.
 
 Things to know:
 

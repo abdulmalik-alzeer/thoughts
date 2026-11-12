@@ -1,9 +1,9 @@
 // The user guides (docs/*.md and docs/ar/*.md), bundled into the app at build time so Help can show
-// them without any file on the user's computer. Developer documents are left out; so is the change
-// log, which has its own view ("What's new").
+// them without any file on the user's computer. Developer documents (the glossary among them) are
+// left out; so is the change log, which has its own view ("What's new").
 import { lang } from './i18n';
 
-const NOT_GUIDES = /^(DEVELOPMENT|RELEASING|REVIEW[-\w.]*|CHANGELOG)$/i;
+const NOT_GUIDES = /^(DEVELOPMENT|RELEASING|REVIEW[-\w.]*|CHANGELOG|GLOSSARY)$/i;
 const ORDER = ['PRIVACY', 'COST', 'HISTORY', 'CUSTOMISING'];
 
 const en = import.meta.glob('../../../docs/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;

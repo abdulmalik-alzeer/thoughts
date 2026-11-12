@@ -6,11 +6,11 @@ Thoughts keeps every earlier version of your library, so a change you regret can
 
 ## History is on for every library
 
-The history of changes is its own switch. It is on from the start, whichever backup you chose (**No backup**, **Cloud folder**, **Online location** or **Drive or folder**), and you can turn it off and on again with **Keep a history of changes on this computer** under Settings → Library & backup.
+The history of changes is its own switch. It is on from the start, whichever backup you chose (**No backup**, **Cloud folder**, **Online location** or **Drive or folder**), and you can turn it off and on again with **Keep a history of changes on this computer** under Settings › Library & backup.
 
 - **Where it is kept.** On this computer, in Thoughts' own data folder, outside your library folder. Nothing is added to your notes. A cloud drive that syncs your library (iCloud Drive, Dropbox and the like) never sees the history, so it cannot damage it. The one exception is a library that was set up with an **Online location** from the beginning: its history sits inside the library folder, which is how that kind of backup normally works.
 - **It is not a backup.** The history lets you undo changes. It does not protect your notes if this computer is lost or damaged; for that, choose a backup. With **Online location** or **Drive or folder** the history is sent along with the library, so there it is always kept.
-- **It needs a free tool called Git.** If Git is not installed, History says so and Settings → Library & backup offers to install it. The history starts by itself once Git is there. Until then a change cannot be undone.
+- **It needs a free tool called Git.** If Git is not installed, History says so and Settings › Library & backup offers to install it. The history starts by itself once Git is there. Until then a change cannot be undone.
 - **A library from before version 0.0.9** that used **No backup** or **Cloud folder** had no history. It gets one the first time the new version starts: the library as it stands becomes the first entry, labelled **Start**. Your files are not touched, and nothing from before that day can be recovered.
 - **If you move or rename the library folder** and choose it again in Settings, a new history starts for it at its new place.
 
@@ -82,7 +82,7 @@ Sometimes the history is left in a state where nothing can be saved or synced: a
 
 ## Backup locations
 
-With **Online location** or **Drive or folder** as the backup (Settings → Library & backup), Thoughts sends your library, with its history, to every location in the list: when you press **Sync**, or after every Wrap if you chose that. You can mix both kinds. Changes from your other computers are received from the location marked **main**.
+With **Online location** or **Drive or folder** as the backup (Settings › Library & backup), Thoughts sends your library, with its history, to every location in the list: when you press **Sync**, or after every Wrap if you chose that. You can mix both kinds. Changes from your other computers are received from the location marked **main**.
 
 **A drive or folder.** Choose **Drive or folder**, then **Choose a drive or folder…** and pick a folder on an external drive, a USB stick or a network folder. Thoughts keeps the backup there in one folder named after your library (for example `Notes.git`). It is not a copy you open and read: it is the library and its history in the form Thoughts can bring back.
 

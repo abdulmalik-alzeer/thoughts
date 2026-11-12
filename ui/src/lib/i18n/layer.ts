@@ -118,7 +118,7 @@ export default {
     'layer.signalsToggle': 'Keep these notes and show suggestions',
 
     // app updates
-    'layer.appUpdatesHint': 'New versions are checked when the app starts. Your customisations are kept: anything you changed yourself is never overwritten without asking.',
+    'layer.appUpdatesHint': 'When you install a new version, your customisations are kept: anything you changed yourself is never overwritten without asking. To hear about new versions, switch on the weekly check under Settings › Maintenance.',
     'layer.upd.check': 'Check for updates',
     'layer.upd.desktopOnly': 'Updates are only available in the desktop app.',
     'layer.upd.notConfigured': 'Updates aren’t set up in this build yet.',
@@ -286,7 +286,7 @@ export default {
     'layer.packTooBig': 'هذا الملف أكبر من أن يكون حزمة تخصيصات.',
 
     'layer.workflowsHint': 'مهام ينفّذها مساعدك وحده، في موعد محدد أو بعد حدث معيّن. كل تنفيذ يظهر ضمن محادثاتك.',
-    'layer.wf.empty': 'لا مهام تلقائية بعد. اطلب واحدة من الأعلى — مثلاً «اكتب لي ملخص الأسبوع كل خميس».',
+    'layer.wf.empty': 'لا مهام تلقائية بعد. اطلب واحدة من الأعلى — مثلاً «اكتب مراجعتي الأسبوعية كل خميس».',
     'layer.wf.loadFailed': 'تعذّر تحميل المهام التلقائية.',
     'layer.wf.daily': 'كل يوم الساعة {time}',
     'layer.wf.weekly': 'أسبوعياً، يوم {day} الساعة {time}',
@@ -311,7 +311,7 @@ export default {
     'layer.signalsBody': 'يدوّن التطبيق الصفحات التي تفتحها والأزرار السريعة التي تستخدمها — ولا يدوّن أبداً ما تكتبه — ليقترح عليك تحسينات صغيرة. تبقى هذه الملاحظات على هذا الجهاز ولا تُرسل إلينا، ولا يطّلع المساعد إلا على ملخص قصير لأعدادها حين تقبل اقتراحاً يعتمد عليها، مثل الصيانة الشهرية.',
     'layer.signalsToggle': 'احتفظ بهذه الملاحظات واعرض الاقتراحات',
 
-    'layer.appUpdatesHint': 'يُتحقق من الإصدارات الجديدة عند تشغيل التطبيق. تخصيصاتك محفوظة: ما غيّرته بنفسك لا يُستبدل أبداً دون سؤالك.',
+    'layer.appUpdatesHint': 'حين تثبّت إصداراً جديداً تبقى تخصيصاتك محفوظة: ما غيّرته بنفسك لا يُستبدل أبداً دون سؤالك. ولتعرف بصدور الإصدارات الجديدة، فعّل التحقق الأسبوعي من الإعدادات › الصيانة.',
     'layer.upd.check': 'التحقق من التحديثات',
     'layer.upd.desktopOnly': 'التحديثات متاحة في تطبيق سطح المكتب فقط.',
     'layer.upd.notConfigured': 'التحديثات غير مهيأة في هذه النسخة بعد.',
