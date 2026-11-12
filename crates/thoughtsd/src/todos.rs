@@ -176,7 +176,20 @@ fn load(p: &Path, file: &str) -> anyhow::Result<String> {
     }
 }
 
+/// Todo lists are changed one at a time: each change reads a list, edits it and writes it back,
+/// and two at the same moment (the Todos page, quick capture, an add-on, the tray) would otherwise
+/// each write over the other's. Held only around that file work, never across an `.await`, and no
+/// other lock is taken while it is held, so it cannot wait on (or hold up) the library's own locks.
+static LISTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn lists_held() -> std::sync::MutexGuard<'static, ()> { LISTS.lock().unwrap_or_else(|e| e.into_inner()) }
+
 fn rewrite<T, F: FnOnce(&mut Vec<String>) -> anyhow::Result<T>>(root: &Path, file: &str, f: F) -> anyhow::Result<T> {
+    let _one = lists_held();
+    rewrite_held(root, file, f)
+}
+
+/// `rewrite` for a caller that holds the lists already (`lists_held`).
+fn rewrite_held<T, F: FnOnce(&mut Vec<String>) -> anyhow::Result<T>>(root: &Path, file: &str, f: F) -> anyhow::Result<T> {
     let p = resolve(root, file)?;
     let text = load(&p, file)?;
     let trailing = text.ends_with('\n') || text.is_empty();
@@ -332,19 +345,21 @@ fn move_block_within(lines: &mut Vec<String>, line: usize, group: &str) -> usize
 /// Move a task with its notes to the end of a group, in the same list or another one → its new line.
 /// Into another list, it is added there first and only then removed here, so a failure never loses it.
 pub fn move_to(root: &Path, file: &str, line: usize, text: &str, to_file: &str, group: &str) -> anyhow::Result<usize> {
+    // Both lists are held for the whole move: nothing changes either of them in between.
+    let _one = lists_held();
     if to_file == file {
-        return rewrite(root, file, |lines| { check_line(lines, line, text)?; Ok(move_block_within(lines, line, group)) });
+        return rewrite_held(root, file, |lines| { check_line(lines, line, text)?; Ok(move_block_within(lines, line, group)) });
     }
     let src: Vec<String> = load(&resolve(root, file)?, file)?.lines().map(String::from).collect();
     check_line(&src, line, text)?;
     let block = src[line..end_of_task(&src, line)].to_vec();
-    let at = rewrite(root, to_file, |lines| {
+    let at = rewrite_held(root, to_file, |lines| {
         if lines.is_empty() { lines.push("# Todo".into()); lines.push(String::new()); }
         let at = group_insert_point(lines, group);
         insert_block(lines, at, block.clone());
         Ok(at)
     })?;
-    let removed = rewrite(root, file, |lines| {
+    let removed = rewrite_held(root, file, |lines| {
         check_line(lines, line, text)?;
         let end = end_of_task(lines, line);
         if lines[line..end] != block[..] { return Err(crate::tr::err("stale.todo", &[])); }
@@ -353,7 +368,7 @@ pub fn move_to(root: &Path, file: &str, line: usize, text: &str, to_file: &str, 
     });
     if let Err(e) = removed {
         // The source changed in the meantime: take the copy back out of the other list.
-        let _ = rewrite(root, to_file, |lines| {
+        let _ = rewrite_held(root, to_file, |lines| {
             if lines.get(at..at + block.len()) == Some(&block[..]) { lines.drain(at..at + block.len()); }
             Ok(())
         });
@@ -841,6 +856,30 @@ mod tests {
     }
     fn read(d: &Path, f: &str) -> String { std::fs::read_to_string(d.join(f)).unwrap() }
     fn day(s: &str) -> chrono::NaiveDate { chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap() }
+
+    #[test]
+    fn edits_made_at_the_same_moment_are_all_kept() {
+        let d = tmp(&[("TODO.md", "# Todo\n\n- [ ] move me\n  - with my note\n"), ("ideas/shop/todo.md", "# Shop\n")]);
+        // Eight windows, add-ons and the tray adding at once, while a task moves between the two lists.
+        let adders: Vec<_> = (0..8).map(|i| { let d = d.clone(); std::thread::spawn(move || {
+            for n in 0..40 { add(&d, if n % 2 == 0 { "TODO.md" } else { "ideas/shop/todo.md" }, &format!("task {i}-{n}")).unwrap(); }
+        }) }).collect();
+        let mover = { let d = d.clone(); std::thread::spawn(move || {
+            let line = parse(&read(&d, "TODO.md")).iter().find(|t| t["text"] == "move me").unwrap()["line"].as_u64().unwrap() as usize;
+            move_to(&d, "TODO.md", line, "move me", "ideas/shop/todo.md", "").unwrap();
+        }) };
+        for t in adders { t.join().unwrap(); }
+        mover.join().unwrap();
+        let (general, shop) = (read(&d, "TODO.md"), read(&d, "ideas/shop/todo.md"));
+        for i in 0..8 { for n in 0..40 {
+            let (here, there) = if n % 2 == 0 { (&general, &shop) } else { (&shop, &general) };
+            let line = format!("- [ ] task {i}-{n}\n");
+            assert!(here.contains(&line) && !there.contains(&line), "task {i}-{n} lost or misplaced");
+        } }
+        // The moved task is in one list only, with its note.
+        assert!(shop.contains("- [ ] move me\n  - with my note\n") && !general.contains("move me"));
+        std::fs::remove_dir_all(d).unwrap();
+    }
 
     #[test]
     fn repeat_markers_and_next_dates() {
