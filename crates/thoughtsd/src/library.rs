@@ -350,7 +350,7 @@ pub fn frontmatter(text: &str) -> (Value, &str) {
         if let Some(end) = rest.find("\n---") {
             let yaml = &rest[..end];
             let body = rest[end + 4..].trim_start_matches(['\r', '\n']);
-            let v: Value = serde_yaml::from_str::<serde_yaml::Value>(yaml)
+            let v: Value = yaml_serde::from_str::<yaml_serde::Value>(yaml)
                 .ok().and_then(|y| serde_json::to_value(y).ok()).unwrap_or(Value::Null);
             return (v, body);
         }
