@@ -4,6 +4,7 @@
 use crate::chats::{Msg, RunOptions};
 use crate::state::AppState;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -321,6 +322,129 @@ async fn provider_env(state: &AppState) -> anyhow::Result<ProviderEnv> {
     provider_env_for(&provider, key).map_err(|e| { crate::log::warn(format!("assistant not started: {e}")); e })
 }
 
+/// A ready-made way to reach a service that speaks the same language as Anthropic's API: its
+/// address and how its key is sent. The user picks one in Settings, pastes the key, and tests it.
+pub struct Preset {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub name_ar: &'static str,
+    /// The address to use; empty for Anthropic itself.
+    pub base_url: &'static str,
+    /// How the key travels: "x-api-key" (Anthropic's own) or "bearer" (what gateways take).
+    pub key_header: &'static str,
+    pub hint: &'static str,
+    pub hint_ar: &'static str,
+    /// Where the person gets a key (a page in their browser).
+    pub keys_url: &'static str,
+}
+
+pub const PRESETS: &[Preset] = &[
+    Preset { id: "anthropic", name: "Anthropic API key", name_ar: "مفتاح Anthropic API", base_url: "", key_header: "x-api-key",
+        hint: "A key from console.anthropic.com. You pay Anthropic for what you use, instead of using a Claude plan.",
+        hint_ar: "مفتاح من console.anthropic.com. تدفع لشركة Anthropic مقابل ما تستخدمه بدلاً من اشتراك Claude.",
+        keys_url: "https://console.anthropic.com/settings/keys" },
+    Preset { id: "openrouter", name: "OpenRouter", name_ar: "OpenRouter", base_url: "https://openrouter.ai/api", key_header: "bearer",
+        hint: "One key for many models from many companies. Pick a model it offers in Settings › Assistant › Model.",
+        hint_ar: "مفتاح واحد لنماذج كثيرة من شركات مختلفة. اختر نموذجاً تقدّمه الخدمة من «الإعدادات › المساعد › النموذج».",
+        keys_url: "https://openrouter.ai/keys" },
+    Preset { id: "gateway", name: "A service on this computer", name_ar: "خدمة على هذا الجهاز", base_url: "http://localhost:4000", key_header: "bearer",
+        hint: "For a gateway such as LiteLLM running on your own computer. Change the address if yours uses another one.",
+        hint_ar: "لبوابة مثل LiteLLM تعمل على جهازك. غيّر العنوان إن كان عنوان بوابتك مختلفاً.",
+        keys_url: "" },
+];
+
+/// What `GET /api/ai/claude/presets` returns.
+pub fn presets_json() -> Value {
+    json!(PRESETS.iter().map(|p| json!({
+        "id": p.id, "name": p.name, "nameAr": p.name_ar, "baseUrl": p.base_url, "keyHeader": p.key_header,
+        "hint": p.hint, "hintAr": p.hint_ar, "keysUrl": p.keys_url,
+    })).collect::<Vec<_>>())
+}
+
+/// Which of the problems a connection test can meet the failure text of an attempt is, in plain words
+/// (`tr.rs`). `refused` = the service did not accept the key. The service's own words are kept only
+/// when none of the known problems fits, with anything shaped like a key blanked out.
+pub fn explain_test_failure(text: &str) -> (bool, String) {
+    let t = text.to_lowercase();
+    let has = |ks: &[&str]| ks.iter().any(|k| t.contains(k));
+    let (refused, key) = if is_auth_failure(text) { (true, "provider.key_refused") }
+        else if has(&["credit balance", "insufficient", "payment required", "402", "billing", "quota"]) { (false, "provider.test_credit") }
+        else if has(&["429", "rate limit", "rate_limit", "too many requests"]) { (false, "provider.test_limit") }
+        else if has(&["timed out", "no answer within"]) && !has(&["etimedout"]) { (false, "provider.test_timeout") }
+        else if t.contains("model") && has(&["not found", "may not exist", "does not exist", "unknown model", "invalid model", "not_found_error", "do not have access", "not have access"]) { (false, "provider.test_model") }
+        else if has(&["enotfound", "econnrefused", "econnreset", "etimedout", "ehostunreach", "enetunreach", "unable to connect", "connection error", "could not resolve", "getaddrinfo", "fetch failed", "certificate", "self signed", "self-signed", "ssl", "tls"]) { (false, "provider.test_unreachable") }
+        else if has(&["404", "not found"]) { (false, "provider.test_address") }
+        else {
+            let one_line: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let masked = regex::Regex::new(r"(sk|key|or)-[A-Za-z0-9_\-]{8,}").unwrap().replace_all(&one_line, "…").to_string();
+            let mut detail: String = masked.chars().take(240).collect();
+            if masked.chars().count() > 240 { detail.push('…'); }
+            return (false, crate::tr::text("provider.test_other", &[("detail", &detail)]));
+        };
+    (refused, crate::tr::text(key, &[]))
+}
+
+/// Try the connection: one very short question (one word back), so the cost is a fraction of a cent.
+/// With `typed` (an address and a key not saved yet) it tries exactly those, so a mistake is found
+/// before it is saved; otherwise the saved set-up. Returns `{ok}` or `{ok:false, refused, message}`,
+/// the message in plain words.
+pub async fn test_connection(state: &AppState, typed: Option<(Option<&str>, Option<&str>)>) -> Value {
+    test_result(try_connection(state, typed).await)
+}
+
+/// What a connection test reports: `{ok}`, or what went wrong in plain words.
+pub fn test_result(r: anyhow::Result<()>) -> Value {
+    match r {
+        Ok(()) => json!({"ok": true}),
+        Err(e) => {
+            // Our own sentences (a missing key, an address that does not pass) are shown as they are.
+            if e.chain().any(|c| c.downcast_ref::<crate::tr::UserErr>().is_some()) {
+                return json!({"ok": false, "refused": false, "message": crate::tr::classify(&e).message});
+            }
+            let raw = e.to_string();
+            let (refused, message) = explain_test_failure(&raw);
+            crate::log::warn(format!("connection test failed ({})", raw.chars().take(200).collect::<String>()));
+            json!({"ok": false, "refused": refused, "message": message})
+        }
+    }
+}
+
+async fn try_connection(state: &AppState, typed: Option<(Option<&str>, Option<&str>)>) -> anyhow::Result<()> {
+    let (saved, mini, main) = {
+        let s = state.settings.read().await;
+        (s.ai.claude.clone(), s.ai.claude.mini_wrap_model.clone(), s.ai.claude.model.clone())
+    };
+    let (provider, key) = match typed {
+        None => { let p = provider_of(&saved); let k = if p.uses_key() { saved_key() } else { None }; (p, k) }
+        Some((url, token)) => {
+            let url = url.map(str::trim).filter(|u| !u.is_empty());
+            if let Some(u) = url { crate::settings::check_base_url(u)?; }
+            let token = token.map(str::trim).filter(|k| !k.is_empty()).map(String::from);
+            // No key typed: the saved one, which belongs to the saved address and no other.
+            let keep = token.is_none() && saved.has_api_token && destination(saved.base_url.as_deref()) == destination(url);
+            let key = if keep { saved_key() } else { token };
+            let p = match (destination(url), key.is_some()) {
+                (None, false) => Provider::Account,
+                (None, true) => Provider::AnthropicKey,
+                (Some(u), true) => Provider::Service(u.to_string()),
+                (Some(_), false) => return Err(crate::tr::err("provider.key_needed", &[])),
+            };
+            (p, key)
+        }
+    };
+    let env = provider_env_for(&provider, key)?;
+    // Anthropic's own cheapest model; another service gets the model the user chose for it, else
+    // whatever the assistant program uses by default (which the service may not know: that is a
+    // true answer, and the first chat would have failed the same way).
+    let model = match &provider {
+        Provider::Service(_) => main.or(mini),
+        _ => mini.or(Some("haiku".into())),
+    };
+    let answer = complete_with(state, "Reply with the single word OK.", model, Some(env)).await?;
+    if answer.trim().is_empty() { anyhow::bail!("the service answered with nothing"); }
+    Ok(())
+}
+
 /// What `set_provider` did.
 #[derive(Debug, PartialEq)]
 pub struct ProviderSaved {
@@ -434,14 +558,39 @@ async fn auth_failure(state: &AppState, text: &str) -> Option<(String, &'static 
     Some((signed_out_text(), "signedOut"))
 }
 
-/// Pull the choices for a flag out of `claude --help`, so the UI never ships a
-/// stale static list. Returns models (aliases), efforts and permission modes.
-pub async fn options(state: &AppState) -> Value {
-    let Some(bin) = binary(state).await else { return json!({}) };
-    let help = cmd(&bin).arg("--help").output().await.ok()
+/// `claude --help` of the installed assistant program. Asked once per program (and again when the
+/// program file changes, or after an hour), never without a time limit: opening a chat must not
+/// wait on it again and again.
+pub async fn help_text(state: &AppState) -> String {
+    static HELP: std::sync::Mutex<Option<(PathBuf, Option<std::time::SystemTime>, std::time::Instant, String)>> = std::sync::Mutex::new(None);
+    let Some(bin) = binary(state).await else { return String::new() };
+    let modified = std::fs::metadata(&bin).and_then(|m| m.modified()).ok();
+    let cached = HELP.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        .filter(|(b, m, at, _)| *b == bin && *m == modified && at.elapsed() < std::time::Duration::from_secs(3600)).map(|(_, _, _, h)| h);
+    if let Some(h) = cached { return h; }
+    let mut c = cmd(&bin);
+    c.arg("--help");
+    let h = crate::proc::output_timeout(&mut c, std::time::Duration::from_secs(15)).await.ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    if !h.is_empty() { *HELP.lock().unwrap_or_else(|e| e.into_inner()) = Some((bin, modified, std::time::Instant::now(), h.clone())); }
+    h
+}
+
+/// Pull the choices for a flag out of `claude --help`, so the UI never ships a
+/// stale static list. Returns models, efforts and permission modes.
+///
+/// Models are the aliases the program names in its own help, then the full model names this
+/// installation has really answered with (`models_seen`), then the ones the user chose in Settings:
+/// no list of model names is written into the app.
+pub async fn options(state: &AppState) -> Value {
+    if binary(state).await.is_none() { return json!({}) }
+    let help = help_text(state).await;
+    let (own, mini, dest) = {
+        let s = state.settings.read().await;
+        (s.ai.claude.model.clone(), s.ai.claude.mini_wrap_model.clone(), destination(s.ai.claude.base_url.as_deref()).unwrap_or("").to_string())
+    };
     json!({
-        "models": quoted(&flag_block(&help, "--model")),
+        "models": model_choices(quoted(&flag_block(&help, "--model")), &models_seen(&dest), [own, mini]),
         "efforts": paren_list(&flag_block(&help, "--effort")),
         // Only the modes the daemon accepts, in a stable order. The last one (bypassPermissions) is
         // only switched on after the user confirmed it.
@@ -449,25 +598,54 @@ pub async fn options(state: &AppState) -> Value {
     })
 }
 
-/// Does the installed assistant program accept `flag`? Read from its own `--help` (remembered for
-/// an hour per program), never assumed.
+/// The model menu: the program's own aliases first, then names seen in real answers, then the
+/// user's own picks, each once.
+pub fn model_choices(aliases: Vec<String>, seen: &[String], chosen: [Option<String>; 2]) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for m in aliases.into_iter().chain(seen.iter().cloned()).chain(chosen.into_iter().flatten()) {
+        if !m.trim().is_empty() && crate::settings::check_cli_value("model", Some(&m)).is_ok() && !out.contains(&m) { out.push(m); }
+    }
+    out
+}
+
+const MODELS_SEEN_MAX: usize = 8;
+
+fn models_seen_file() -> PathBuf { crate::paths::home().join("models-seen.json") }
+
+/// Full model names this installation has answered with through `dest` (a service address, or
+/// "" for Anthropic and the Claude account), newest first. A service's names are never offered
+/// for another service.
+pub fn models_seen(dest: &str) -> Vec<String> {
+    let map: BTreeMap<String, Vec<String>> = std::fs::read_to_string(models_seen_file()).ok()
+        .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    map.get(dest).cloned().unwrap_or_default()
+}
+
+/// Remember the model names a run reported (its start-up line, the usage it lists), for the model menu.
+async fn note_models(state: &AppState, names: impl IntoIterator<Item = String>) {
+    let dest = destination(state.settings.read().await.ai.claude.base_url.as_deref()).unwrap_or("").to_string();
+    let fresh: Vec<String> = names.into_iter()
+        .filter(|n| n.len() <= 80 && n.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()) && !n.contains('<') && crate::settings::check_cli_value("model", Some(n)).is_ok())
+        .collect();
+    if fresh.is_empty() { return; }
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map: BTreeMap<String, Vec<String>> = std::fs::read_to_string(models_seen_file()).ok()
+        .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let list = map.entry(dest).or_default();
+    let before = list.clone();
+    for n in fresh.into_iter().rev() { list.retain(|x| *x != n); list.insert(0, n); }
+    list.truncate(MODELS_SEEN_MAX);
+    if *list == before { return; }
+    if let Ok(text) = serde_json::to_string_pretty(&map) {
+        crate::log::ok_or_warn("could not remember the model names", crate::paths::write_atomic(&models_seen_file(), text.as_bytes(), true));
+    }
+}
+
+/// Does the installed assistant program accept `flag`? Read from its own `--help` (remembered),
+/// never assumed.
 pub async fn has_flag(state: &AppState, flag: &str) -> bool {
-    static HELP: std::sync::Mutex<Option<(PathBuf, std::time::Instant, String)>> = std::sync::Mutex::new(None);
-    let Some(bin) = binary(state).await else { return false };
-    let cached = HELP.lock().unwrap_or_else(|e| e.into_inner()).clone()
-        .filter(|(b, at, _)| *b == bin && at.elapsed() < std::time::Duration::from_secs(3600)).map(|(_, _, h)| h);
-    let help = match cached {
-        Some(h) => h,
-        None => {
-            let mut c = cmd(&bin);
-            c.arg("--help");
-            let h = crate::proc::output_timeout(&mut c, std::time::Duration::from_secs(15)).await.ok()
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-            if !h.is_empty() { *HELP.lock().unwrap_or_else(|e| e.into_inner()) = Some((bin, std::time::Instant::now(), h.clone())); }
-            h
-        }
-    };
-    !flag_block(&help, flag).is_empty()
+    !flag_block(&help_text(state).await, flag).is_empty()
 }
 
 /// The help text belonging to one flag: its line plus indented continuation lines.
@@ -1005,8 +1183,15 @@ pub(crate) async fn record_library_locked(state: &AppState, lib: &Path, subject:
     crate::log::ok_or_warn("history: could not record the library", crate::git::commit_all(state, lib, subject).await);
 }
 
+/// Can this run change the library (so views that show it must reload afterwards)? Its own folder
+/// or a folder it was given beside it is the library, and it is not read-only (plan mode) or the
+/// app-layer's own run.
+fn touches_library(library: Option<&Path>, cwd: &Path, add_dirs: &[PathBuf], kind: &str, mode: &str) -> bool {
+    kind != "customize" && mode != "plan" && library.map_or(false, |l| cwd == l || add_dirs.iter().any(|d| d == l))
+}
+
 /// Everything that happens once a run is over, however it ended.
-async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathBuf>, on_done: Option<OnDone>) {
+async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathBuf>, touches_library: bool, on_done: Option<OnDone>) {
     state.runs.lock().await.remove(&id);
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     let done = state.chats.update(&id, |c| { c.running = false; c.updated = chrono::Utc::now(); }).await;
@@ -1014,8 +1199,11 @@ async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathB
     if let (Some(lib), Some(ch)) = (&record, &done) {
         let what = if ch.kind == "workflow" { format!("workflow {}", ch.title) } else { ch.title.clone() };
         record_library(&state, lib, &crate::git::subject::assistant(&what), true).await;
-        state.emit(json!({"type": "library.changed"}));
     }
+    // Views that show the library (todos, ideas, documents, the sidebar badge) reload. A chat that
+    // works in a project folder with the library alongside can edit it as well, so this is not
+    // limited to runs whose own folder is the library.
+    if record.is_some() || touches_library { state.emit(json!({"type": "library.changed"})); }
     if let Some(ch) = done {
         state.emit(json!({"type": "chat.done", "chatId": id, "ok": ok, "title": ch.title, "chat": ch.summary()}));
     }
@@ -1115,6 +1303,7 @@ pub async fn start_run(
     if let Some(lib) = &record {
         record_library(&state, lib, &crate::git::subject::edit("your changes"), false).await;
     }
+    let touches_library = touches_library(library.as_deref(), &spec.cwd, &spec.add_dirs, &kind, &mode);
     // What the run is told on top of its prompt: the caller's own instructions, that `.claude/` is
     // not its to change (all runs but first-time setup), and the user's language.
     let sys = [spec.append_system.as_deref(), managed_note(&kind), Some(language_note(&settings.language))]
@@ -1140,7 +1329,7 @@ pub async fn start_run(
                 _ = &mut kill_rx => { push(&state, &id, Msg::new("system", stopped)).await; false }
                 ok = hook(info) => ok,
             };
-            finish(state, id, ok, record, on_done).await;
+            finish(state, id, ok, record, touches_library, on_done).await;
         });
         return Ok(());
     }
@@ -1249,7 +1438,7 @@ pub async fn start_run(
                     Ended::Stalled(_) => "stalled", Ended::TooLong(_) => "took too long", Ended::Lost(_) => "output lost" },
                 if first.is_empty() { String::new() } else { format!(": {first}") }));
         }
-        finish(state, id, ok, record, on_done).await;
+        finish(state, id, ok, record, touches_library, on_done).await;
     });
     Ok(())
 }
@@ -1267,6 +1456,14 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
             if let Some(sid) = ev["session_id"].as_str() {
                 let sid = sid.to_string();
                 state.chats.update(id, |c| c.session_id = Some(sid)).await;
+            }
+            if let Some(m) = ev["model"].as_str() { note_models(state, [m.to_string()]).await; }
+            None
+        }
+        // The plan's limit, as the assistant reports it (close to it, reached, or fine again).
+        "rate_limit_event" => {
+            if provider_of(&state.settings.read().await.ai.claude) == Provider::Account {
+                if let Some(l) = crate::spend::limit_from_event(ev) { crate::spend::set_plan_limit(state, l); }
             }
             None
         }
@@ -1328,6 +1525,7 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
                 if sid.is_some() { c.session_id = sid; }
             }).await;
             state.add_usage(cost).await;
+            if let Some(used) = ev["modelUsage"].as_object() { note_models(state, used.keys().cloned()).await; }
             if is_err {
                 // Without a `result` text the CLI lists what went wrong under `errors`.
                 let listed: Vec<&str> = ev["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -1343,6 +1541,28 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+/// `tool.code` of the chat message for a run the Claude plan's usage limit stopped.
+pub const PLAN_LIMIT: &str = "planLimit";
+
+/// A run failed with `text`. When that says the plan's usage limit is reached (on the Claude
+/// account, not on a key of the user's own), remember it for the banner and return the plain
+/// sentence to show instead, with the time it resets when the assistant said.
+async fn note_plan_limit(state: &AppState, text: &str) -> Option<String> {
+    let l = crate::spend::limit_from_text(text)?;
+    if provider_of(&state.settings.read().await.ai.claude) != Provider::Account { return None; }
+    let resets = l.resets_at;
+    crate::log::warn("the assistant refused a run: the plan's usage limit is reached");
+    crate::spend::set_plan_limit(state, Some(l));
+    Some(match resets.and_then(|t| chrono::DateTime::from_timestamp(t, 0)) {
+        Some(t) => {
+            let local = t.with_timezone(&chrono::Local);
+            let when = if local.date_naive() == chrono::Local::now().date_naive() { local.format("%H:%M").to_string() } else { local.format("%Y-%m-%d %H:%M").to_string() };
+            crate::tr::text("plan.limit", &[("when", &when)])
+        }
+        None => crate::tr::text("plan.limit_unknown", &[]),
+    })
 }
 
 /// `tool.code` of the chat message for a run that could not resume its session.
@@ -1366,6 +1586,11 @@ async fn error_msg(state: &AppState, text: &str) -> Msg {
         m.tool = Some(json!({"code": SESSION_LOST, "detail": text.chars().take(600).collect::<String>()}));
         return m;
     }
+    if let Some(plain) = note_plan_limit(state, text).await {
+        let mut m = Msg::new("error", plain);
+        m.tool = Some(json!({"code": PLAN_LIMIT, "detail": text.chars().take(600).collect::<String>()}));
+        return m;
+    }
     match auth_failure(state, text).await {
         Some((plain, code)) => {
             let mut m = Msg::new("error", plain);
@@ -1385,9 +1610,15 @@ fn tool_label(name: &str, input: &Value) -> String {
 
 /// One-shot, tool-less completion (used for mini-wraps and titles).
 pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> anyhow::Result<String> {
+    complete_with(state, prompt, model, None).await
+}
+
+/// `complete`, optionally through a provider that is not the saved one (`env`): how the connection
+/// test tries a key and an address before they are saved.
+async fn complete_with(state: &AppState, prompt: &str, model: Option<String>, env: Option<ProviderEnv>) -> anyhow::Result<String> {
     let hook = state.complete_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(hook) = hook { return hook(prompt.to_string(), model).await; }
-    let provider = provider_env(state).await?;
+    let provider = match env { Some(e) => e, None => provider_env(state).await? };
     let bin = binary(state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     crate::settings::check_cli_value("model", model.as_deref())?;
     let mut c = cmd(&bin);
@@ -1416,8 +1647,16 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> 
     };
     let v: Value = serde_json::from_slice(&out.stdout)
         .map_err(|_| anyhow::anyhow!("claude: {}", String::from_utf8_lossy(&out.stderr)))?;
+    one_shot_outcome(state, &v).await
+}
+
+/// What a one-shot answer (the assistant's JSON) comes to: its text, or the reason it failed. Its
+/// cost counts towards the month either way: summaries, titles and drafts cost money like any run.
+async fn one_shot_outcome(state: &AppState, v: &Value) -> anyhow::Result<String> {
+    state.add_usage(v["total_cost_usd"].as_f64().unwrap_or(0.0)).await;
     if v["is_error"].as_bool().unwrap_or(false) {
         let text = v["result"].as_str().unwrap_or("error");
+        if let Some(plain) = note_plan_limit(state, text).await { anyhow::bail!("{plain}"); }
         auth_failure(state, text).await;
         anyhow::bail!("{text}");
     }
@@ -2010,5 +2249,135 @@ mod tests {
     fn language_note_follows_setting() {
         assert!(language_note("ar").contains("Arabic"));
         assert!(language_note("en").contains("English"));
+    }
+
+    #[test]
+    fn a_connection_test_names_the_problem_in_plain_words() {
+        let say = |t: &str| explain_test_failure(t);
+        let (refused, m) = say(r#"API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#);
+        assert!(refused && m.contains("did not accept the saved key"), "{m}");
+        assert!(say("API Error: Unable to connect to API (ENOTFOUND)").1.contains("could not be reached"));
+        assert!(say("API Error: Unable to connect to API (ConnectionRefused) connection error").1.contains("could not be reached"));
+        assert!(say("API Error: 404 page not found").1.contains("not at this address"));
+        assert!(say("There's an issue with the selected model (haiku). It may not exist or you may not have access to it.").1.contains("does not know the model"));
+        assert!(say("API Error: 402 Credit balance is too low").1.contains("no credit"));
+        assert!(say("API Error: 429 rate_limit_error").1.contains("slow down"));
+        assert!(say("the assistant timed out (no answer within 120 seconds)").1.contains("did not answer in time"));
+        let (refused, m) = say("API Error: 529 Overloaded sk-ant-api03-abcdefghijklmnop");
+        assert!(!refused && m.contains("529") && !m.contains("abcdefgh"), "a key-shaped word is blanked out: {m}");
+        // Arabic has every sentence too (the table test checks the placeholders match).
+        for key in ["provider.test_unreachable", "provider.test_address", "provider.test_model", "provider.test_credit", "provider.test_limit", "provider.test_timeout"] {
+            let ar = crate::tr::text_in(true, key, &[]);
+            assert!(ar.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)), "{key}");
+        }
+        // The ready-made services: Anthropic first, a bearer key for every gateway, every address valid.
+        assert_eq!(PRESETS[0].id, "anthropic");
+        for p in PRESETS {
+            assert!(p.base_url.is_empty() || crate::settings::check_base_url(p.base_url).is_ok(), "{}", p.id);
+            assert_eq!(p.key_header, if p.base_url.is_empty() { "x-api-key" } else { "bearer" }, "{}", p.id);
+            assert!(!p.hint_ar.is_empty() && !p.name_ar.is_empty());
+        }
+        // The key header a preset names is the one the run is started with.
+        let e = provider_env_for(&Provider::Service("https://openrouter.ai/api".into()), Some("k".into())).unwrap();
+        assert!(e.set.iter().any(|(n, _)| *n == "ANTHROPIC_AUTH_TOKEN"));
+        let e = provider_env_for(&Provider::AnthropicKey, Some("k".into())).unwrap();
+        assert!(e.set.iter().any(|(n, _)| *n == "ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
+    fn test_results_are_one_shape() {
+        assert_eq!(test_result(Ok(())), json!({"ok": true}));
+        let none = test_result(Err(crate::tr::err("provider.key_needed", &[])));
+        assert_eq!((none["ok"].as_bool(), none["refused"].as_bool()), (Some(false), Some(false)));
+        assert!(none["message"].as_str().unwrap().contains("Enter the key"));
+        let bad_url = test_result(Err(crate::settings::check_base_url("http://example.com").unwrap_err()));
+        assert!(bad_url["message"].as_str().unwrap().contains("https://"));
+    }
+
+    #[test]
+    fn the_address_refusals_are_plain_in_both_languages() {
+        for (url, key) in [("api.example.com", "provider.url_scheme"), ("https://a b", "provider.url_blank"), ("https://u@x.com", "provider.url_login"),
+                           ("https://", "provider.url_host"), ("http://example.com", "provider.url_http")] {
+            let e = crate::settings::check_base_url(url).unwrap_err();
+            let u = crate::tr::classify(&e);
+            assert_eq!(u.message, crate::tr::text_in(false, key, &[]), "{url}");
+            assert_eq!(u.status, 422);
+            assert!(!u.message.contains("provider address"), "no jargon: {}", u.message);
+            assert!(crate::tr::text_in(true, key, &[]).chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)), "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_model_menu_is_what_the_program_says_what_it_answered_with_and_what_the_user_chose() {
+        // Only names the program or an answer gave: nothing is written into the app.
+        let menu = model_choices(vec!["fable".into(), "opus".into()], &["claude-opus-4-5-20251101".into(), "opus".into()], [Some("haiku".into()), Some("bad name".into())]);
+        assert_eq!(menu, ["fable", "opus", "claude-opus-4-5-20251101", "haiku"]);
+        let st = AppState::for_test();
+        // Names an answer reports are remembered per service, newest first, each once, capped.
+        note_models(&st, ["claude-sonnet-4-5".to_string(), "<synthetic>".to_string(), "--bad".to_string()]).await;
+        note_models(&st, ["claude-opus-4-5".to_string()]).await;
+        note_models(&st, ["claude-sonnet-4-5".to_string()]).await;
+        assert_eq!(models_seen(""), ["claude-sonnet-4-5", "claude-opus-4-5"]);
+        assert!(models_seen("https://gateway.example.com").is_empty(), "another service never sees them");
+        for i in 0..12 { note_models(&st, [format!("m-{i}")]).await; }
+        assert_eq!(models_seen("").len(), MODELS_SEEN_MAX);
+        assert_eq!(models_seen("")[0], "m-11");
+        // A run's own report is where they come from.
+        handle_event(&st, "no-such-chat", &json!({"type": "system", "subtype": "init", "model": "claude-haiku-9"})).await;
+        assert_eq!(models_seen("")[0], "claude-haiku-9");
+        // On a service, its names are kept apart.
+        st.settings.write().await.ai.claude.base_url = Some("https://gw.example.com".into());
+        handle_event(&st, "no-such-chat", &json!({"type": "result", "subtype": "success", "modelUsage": {"vendor/model-x": {}}})).await;
+        assert_eq!(models_seen("https://gw.example.com"), ["vendor/model-x"]);
+    }
+
+    #[tokio::test]
+    async fn background_answers_count_towards_the_month_and_a_plan_limit_is_explained() {
+        let st = AppState::for_test();
+        assert_eq!(one_shot_outcome(&st, &json!({"result": " Summary. ", "total_cost_usd": 0.004})).await.unwrap(), "Summary.");
+        assert_eq!(one_shot_outcome(&st, &json!({"result": "x", "total_cost_usd": 0.006})).await.unwrap(), "x");
+        assert!((st.month_cost().await - 0.01).abs() < 1e-9, "both summaries are in the month's figure");
+        // A failed answer still cost something.
+        assert!(one_shot_outcome(&st, &json!({"is_error": true, "result": "API Error: 529 Overloaded", "total_cost_usd": 0.01})).await.is_err());
+        assert!((st.month_cost().await - 0.02).abs() < 1e-9);
+        // The plan's limit: said in plain words, remembered for the banner, cleared by a run that works.
+        let reset = chrono::Utc::now().timestamp() + 7200;
+        let e = one_shot_outcome(&st, &json!({"is_error": true, "result": format!("Claude AI usage limit reached|{reset}")})).await.unwrap_err();
+        assert!(e.to_string().contains("usage limit") && e.to_string().contains("resets at"), "{e}");
+        assert_eq!(crate::spend::plan_limit_json(&st)["reached"], true);
+        let m = error_msg(&st, &format!("Claude AI usage limit reached|{reset}")).await;
+        assert_eq!(m.tool.as_ref().unwrap()["code"], PLAN_LIMIT);
+        one_shot_outcome(&st, &json!({"result": "ok"})).await.unwrap();
+        assert!(crate::spend::plan_limit_json(&st).is_null());
+        // Not on a key of the user's own: that limit is the service's, and the plan has nothing to do with it.
+        st.settings.write().await.ai.claude.has_api_token = true;
+        let e = one_shot_outcome(&st, &json!({"is_error": true, "result": "Claude AI usage limit reached|1"})).await.unwrap_err();
+        assert!(e.to_string().contains("usage limit reached|1"));
+        assert!(crate::spend::plan_limit_json(&st).is_null());
+    }
+
+    #[test]
+    fn a_run_that_can_edit_the_library_announces_it_whatever_folder_it_runs_in() {
+        let lib = PathBuf::from("/home/u/Library");
+        let proj = PathBuf::from("/home/u/proj");
+        assert!(touches_library(Some(&lib), &lib, &[], "chat", "acceptEdits"));
+        // The audit's case: a project chat with the library beside it.
+        assert!(touches_library(Some(&lib), &proj, &[lib.clone()], "chat", "acceptEdits"));
+        assert!(touches_library(Some(&lib), &proj, &[lib.clone()], "chat", "bypassPermissions"));
+        assert!(!touches_library(Some(&lib), &proj, &[lib.clone()], "chat", "plan"), "read-only changes nothing");
+        assert!(!touches_library(Some(&lib), &proj, &[], "chat", "acceptEdits"), "no access to the library");
+        assert!(!touches_library(Some(&lib), &proj, &[lib.clone()], "customize", "acceptEdits"));
+        assert!(!touches_library(None, &proj, &[lib.clone()], "chat", "acceptEdits"));
+    }
+
+    #[tokio::test]
+    async fn finishing_a_project_chat_tells_the_views_the_library_changed() {
+        let st = Arc::new(AppState::for_test());
+        let mut rx = st.events.subscribe();
+        let seen = |rx: &mut tokio::sync::broadcast::Receiver<Value>| { let mut n = 0; while let Ok(e) = rx.try_recv() { if e["type"] == "library.changed" { n += 1; } } n };
+        finish(st.clone(), "gone".into(), true, None, true, None).await;
+        assert_eq!(seen(&mut rx), 1);
+        finish(st.clone(), "gone".into(), true, None, false, None).await;
+        assert_eq!(seen(&mut rx), 0);
     }
 }

@@ -49,6 +49,13 @@ pub struct AppState {
     pub stopping: AtomicBool,
     /// Ends the sign-in attempt in progress (`claude auth login`), so there is only ever one.
     pub login: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    /// Background summaries in flight (chat ids), plus `"sweep"` while a "new chat" pass is queued
+    /// or running, so the same chat is never summarised twice at once.
+    pub summarising: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// The spending level already announced this month: (month, level).
+    pub spend_told: std::sync::Mutex<(String, crate::spend::Level)>,
+    /// A limit on the plan the assistant reported, and when it was seen (seconds since 1970).
+    pub plan_limit: std::sync::Mutex<Option<(crate::spend::PlanLimit, i64)>>,
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
@@ -80,7 +87,8 @@ impl AppState {
                 let spent: f64 = chats.chats.try_read().map(|m| m.values()
                     .filter(|c| c.created.with_timezone(&chrono::Local).format("%Y-%m").to_string() == now.format("%Y-%m").to_string())
                     .map(|c| c.cost_usd).sum()).unwrap_or(0.0);
-                BTreeMap::from([(month_key(), spent)])
+                // An empty sum is -0.0, which shows as "-$0.00"; no amount is ever below zero.
+                BTreeMap::from([(month_key(), if spent > 0.0 { spent } else { 0.0 })])
             }
         };
         Ok(Self {
@@ -106,6 +114,9 @@ impl AppState {
             auth_ok_at: Default::default(),
             stopping: AtomicBool::new(false),
             login: Default::default(),
+            summarising: Default::default(),
+            spend_told: std::sync::Mutex::new((month_key(), crate::spend::Level::Off)),
+            plan_limit: Default::default(),
         })
     }
 
@@ -141,6 +152,9 @@ impl AppState {
             auth_ok_at: Default::default(),
             stopping: AtomicBool::new(false),
             login: Default::default(),
+            summarising: Default::default(),
+            spend_told: std::sync::Mutex::new((month_key(), crate::spend::Level::Off)),
+            plan_limit: Default::default(),
         }
     }
 
@@ -156,16 +170,21 @@ impl AppState {
     /// Record what a finished run cost against the current month.
     pub async fn add_usage(&self, cost_usd: f64) {
         if !(cost_usd.is_finite() && cost_usd > 0.0) { return; }
-        let mut u = self.usage.lock().await;
-        *u.entry(month_key()).or_insert(0.0) += cost_usd;
-        if let Ok(text) = serde_json::to_string_pretty(&*u) {
-            let _ = crate::paths::write_atomic(&crate::paths::usage_file(), text.as_bytes(), true);
+        {
+            let mut u = self.usage.lock().await;
+            *u.entry(month_key()).or_insert(0.0) += cost_usd;
+            if let Ok(text) = serde_json::to_string_pretty(&*u) {
+                let _ = crate::paths::write_atomic(&crate::paths::usage_file(), text.as_bytes(), true);
+            }
         }
+        // The window shows the new figure, and the spending guard may have something to say.
+        crate::spend::after_cost(self).await;
     }
 
     /// This calendar month's AI spend in USD.
     pub async fn month_cost(&self) -> f64 {
-        self.usage.lock().await.get(&month_key()).copied().unwrap_or(0.0)
+        // `+ 0.0` turns a stored -0.0 (written by 0.0.8 on a fresh install) into 0.
+        self.usage.lock().await.get(&month_key()).copied().unwrap_or(0.0).max(0.0) + 0.0
     }
 
     /// Is a wrap or reorganize changing the library right now?
@@ -184,6 +203,8 @@ impl AppState {
     /// A run finished successfully: sign-in and network evidently work again.
     pub fn note_run_ok(&self) {
         self.mini_wraps_blocked.store(false, Ordering::Relaxed);
+        // Something went through, so a refusal for the plan's limit is over (a warning stays until its reset).
+        if self.plan_limit.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(false, |(l, _)| l.reached) { crate::spend::set_plan_limit(self, None); }
         if self.auth_failed.swap(false, Ordering::Relaxed) { self.emit(serde_json::json!({"type": "auth.changed", "loggedIn": true})); }
     }
 
@@ -204,3 +225,19 @@ impl AppState {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_month_with_nothing_spent_is_zero_never_minus_zero() {
+        let st = AppState::for_test();
+        // 0.0.8 stored the sum of no chats, which Rust makes -0.0 and the window then showed as "-$0.00".
+        st.usage.lock().await.insert(month_key(), -0.0);
+        let shown = serde_json::to_string(&st.month_cost().await).unwrap();
+        assert_eq!(shown, "0.0");
+        assert_eq!(serde_json::to_string(&-0.0f64.max(0.0)).unwrap_or_default().starts_with('-'), false);
+        assert_eq!(crate::spend::usage_json(&st).await["monthCostUsd"].to_string(), "0.0");
+    }
+}

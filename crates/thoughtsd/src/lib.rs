@@ -30,6 +30,7 @@ pub mod runs;
 pub mod search;
 pub mod secrets;
 pub mod settings;
+pub mod spend;
 pub mod staging;
 pub mod state;
 pub mod suggestions;

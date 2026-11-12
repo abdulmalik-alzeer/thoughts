@@ -48,6 +48,35 @@ pub struct Settings {
     /// Ask once a week whether a newer version has been published (`release.rs`). Off unless the
     /// user switches it on: it is a request to the internet the app does not otherwise make.
     pub release_check: bool,
+    /// The monthly spending guard (see `spend.rs`).
+    pub spending: SpendingSettings,
+}
+
+/// A monthly spending limit the user sets, in US dollars. `None` = no limit. At `warn_percent` of it
+/// the app says so; at the limit it stops starting things nobody is watching.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SpendingSettings {
+    pub monthly_limit_usd: Option<f64>,
+    pub warn_percent: u8,
+}
+
+impl Default for SpendingSettings {
+    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80 } }
+}
+
+impl SpendingSettings {
+    pub const MIN_LIMIT: f64 = 1.0;
+    pub const MAX_LIMIT: f64 = 100_000.0;
+    /// Refuse an amount or warning point that makes no sense; round the amount to whole cents.
+    pub fn sanitize(&mut self) -> anyhow::Result<()> {
+        if let Some(l) = self.monthly_limit_usd {
+            if !l.is_finite() || !(Self::MIN_LIMIT..=Self::MAX_LIMIT).contains(&l) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
+            self.monthly_limit_usd = Some((l * 100.0).round() / 100.0);
+        }
+        if !(50..=95).contains(&self.warn_percent) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
+        Ok(())
+    }
 }
 
 /// Calendar preferences: the first day of the week and the weekend (`None` = from the library's
@@ -189,19 +218,18 @@ pub fn check_cli_value(what: &str, v: Option<&str>) -> anyhow::Result<()> {
 /// `https://…` anywhere, or plain `http://` only for this machine (localhost / 127.0.0.1).
 pub fn check_base_url(url: &str) -> anyhow::Result<()> { base_url_host(url).map(|_| ()) }
 
-/// The host of a provider address that passes validation.
+/// The host of a provider address that passes validation. The refusals are worded for the person
+/// (`tr.rs`), in both languages.
 fn base_url_host(url: &str) -> anyhow::Result<&str> {
-    if url.chars().any(|c| c.is_whitespace() || c.is_control()) { anyhow::bail!("the provider address may not contain spaces"); }
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) { return Err(crate::tr::err("provider.url_blank", &[])); }
     let (https, rest) = if let Some(r) = url.strip_prefix("https://") { (true, r) }
         else if let Some(r) = url.strip_prefix("http://") { (false, r) }
-        else { anyhow::bail!("the provider address must start with https://") };
+        else { return Err(crate::tr::err("provider.url_scheme", &[])) };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.contains('@') { anyhow::bail!("the provider address may not contain a username or password"); }
+    if authority.contains('@') { return Err(crate::tr::err("provider.url_login", &[])); }
     let host = authority.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(authority, |(h, _)| h);
-    if host.is_empty() { anyhow::bail!("the provider address has no host"); }
-    if !https && host != "localhost" && host != "127.0.0.1" {
-        anyhow::bail!("the provider address must use https:// (http:// is only allowed for localhost)");
-    }
+    if host.is_empty() { return Err(crate::tr::err("provider.url_host", &[])); }
+    if !https && host != "localhost" && host != "127.0.0.1" { return Err(crate::tr::err("provider.url_http", &[])); }
     Ok(host)
 }
 
@@ -313,6 +341,7 @@ impl Default for Settings {
             accessibility: Accessibility::default(),
             calendar: CalendarSettings::default(),
             release_check: false,
+            spending: SpendingSettings::default(),
         }
     }
 }
@@ -518,6 +547,8 @@ impl Settings {
             if !p.is_absolute() || !named_claude { anyhow::bail!("the assistant program must be a full path to a file named claude"); }
             if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) { anyhow::bail!("the assistant program was not found at {b}"); }
         }
+
+        self.spending.sanitize()?;
 
         self.search.extension_repo = self.search.extension_repo.trim().to_string();
         if self.search.extension_repo == RETIRED_EXTENSION_REPO { self.search.extension_repo.clear(); }

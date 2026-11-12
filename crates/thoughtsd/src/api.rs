@@ -154,6 +154,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/claude/token", post(save_ai_token))
         .route("/api/ai/claude/provider", axum::routing::put(save_provider).delete(remove_provider))
         .route("/api/ai/claude/provider/test", post(test_provider))
+        .route("/api/ai/claude/presets", get(provider_presets))
         .route("/api/ai/claude/login", post(claude_login))
         .route("/api/ai/claude/recheck", post(claude_recheck))
         .route("/api/git/install", post(git_install))
@@ -406,7 +407,8 @@ async fn status(State(st): S) -> R {
         "library": s.library_path, "claude": claude::status(&st).await,
         "git": git_tool_status().await,
         "interrupted": st.interrupted.lock().await.iter().map(|(id, title)| json!({"chatId": id, "title": title})).collect::<Vec<_>>(),
-        "usage": {"monthCostUsd": st.month_cost().await},
+        "usage": crate::spend::usage_json(&st).await,
+        "planLimit": crate::spend::plan_limit_json(&st),
         "settingsRecovered": st.settings_recovered.load(std::sync::atomic::Ordering::Relaxed),
         "settingsRestored": st.settings_restored.load(std::sync::atomic::Ordering::Relaxed),
         "settingsNewer": st.settings_newer.load(std::sync::atomic::Ordering::Relaxed),
@@ -1318,23 +1320,15 @@ async fn remove_provider(State(st): S) -> R {
     Ok(Json(json!({"ok": true, "provider": "account"})))
 }
 
-/// Send one very short message through the provider as it is set up now, so a wrong key or
-/// address shows here instead of inside the first chat. `{ok, refused, message}`.
-async fn test_provider(State(st): S) -> R {
-    let model = st.settings.read().await.ai.claude.mini_wrap_model.clone().or(Some("haiku".into()));
-    Ok(Json(provider_test_result(claude::complete(&st, "Reply with the single word OK.", model).await)))
-}
+/// The ready-made services Settings offers (address and how the key is sent).
+async fn provider_presets() -> R { Ok(Json(claude::presets_json())) }
 
-/// What the provider test reports: plain words when the key was refused, the service's own words otherwise.
-fn provider_test_result(r: anyhow::Result<String>) -> Value {
-    match r {
-        Ok(_) => json!({"ok": true}),
-        Err(e) => {
-            let shown = crate::tr::classify(&e);
-            if claude::is_auth_failure(&e.to_string()) { json!({"ok": false, "refused": true, "message": claude::key_refused_text()}) }
-            else { json!({"ok": false, "refused": false, "message": shown.message}) }
-        }
-    }
+/// Try the connection with one very short message, so a wrong key or address shows here instead of
+/// inside the first chat. With a body (`baseUrl`, `token`, as for saving) it tries what was typed
+/// and not saved yet; without, the saved set-up. `{ok}` or `{ok:false, refused, message}`.
+async fn test_provider(State(st): S, body: Option<Json<ProviderBody>>) -> R {
+    let typed = body.filter(|b| b.base_url.is_some() || b.token.is_some());
+    Ok(Json(claude::test_connection(&st, typed.as_ref().map(|b| (b.base_url.as_deref(), b.token.as_deref()))).await))
 }
 
 /// Opens Claude Code's browser login flow. One attempt at a time: asking again ends the attempt
@@ -3869,15 +3863,15 @@ mod tests {
 
     #[test]
     fn the_provider_test_says_plainly_when_the_key_was_refused() {
-        assert_eq!(provider_test_result(Ok("OK".into())), json!({"ok": true}));
-        let refused = provider_test_result(Err(anyhow::Error::msg(r#"API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#)));
+        assert_eq!(claude::test_result(Ok(())), json!({"ok": true}));
+        let refused = claude::test_result(Err(anyhow::Error::msg(r#"API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#)));
         assert_eq!((refused["ok"].as_bool(), refused["refused"].as_bool()), (Some(false), Some(true)));
         assert!(refused["message"].as_str().unwrap().contains("did not accept the saved key"), "{refused}");
-        let other = provider_test_result(Err(anyhow::anyhow!("API Error: 529 Overloaded")));
+        let other = claude::test_result(Err(anyhow::anyhow!("API Error: 529 Overloaded")));
         assert_eq!((other["ok"].as_bool(), other["refused"].as_bool()), (Some(false), Some(false)));
         assert!(other["message"].as_str().unwrap().contains("529"));
         // An address without a key is explained, not reported as a refused key.
-        let none = provider_test_result(Err(crate::tr::err("provider.incomplete", &[])));
+        let none = claude::test_result(Err(crate::tr::err("provider.incomplete", &[])));
         assert_eq!(none["refused"].as_bool(), Some(false));
         assert!(none["message"].as_str().unwrap().contains("without a key"));
     }

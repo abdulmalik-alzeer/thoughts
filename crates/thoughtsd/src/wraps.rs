@@ -123,15 +123,26 @@ pub async fn idle_loop(state: Arc<AppState>) {
 
 /// When a new chat starts, the others are "done for now": mini-wrap them.
 pub fn on_new_chat(state: Arc<AppState>, except: String) {
+    // One pass at a time: chats made in quick succession would each start the same summaries again.
+    // The pass looks at every dirty chat when it runs, so one already queued covers the newcomer.
+    if !state.summarising.lock().unwrap_or_else(|e| e.into_inner()).insert(SWEEP.into()) { return; }
     tokio::spawn(async move {
-        if !state.settings.read().await.auto_summaries { return; }
-        let scope = Scope::now(&state).await;
-        for c in state.chats.list().await {
-            if c.id != except && c.kind == "chat" && c.dirty && !c.running && scope.holds(c.library.as_deref()) {
-                mini_wrap_auto(&state, &c.id, c.updated).await;
-            }
-        }
+        sweep(&state, &except).await;
+        state.summarising.lock().unwrap_or_else(|e| e.into_inner()).remove(SWEEP);
     });
+}
+
+/// Marks a "new chat" pass in `AppState::summarising` (a chat id never looks like this).
+const SWEEP: &str = "<sweep>";
+
+async fn sweep(state: &Arc<AppState>, except: &str) {
+    if !state.settings.read().await.auto_summaries { return; }
+    let scope = Scope::now(state).await;
+    for c in state.chats.list().await {
+        if c.id != except && c.kind == "chat" && c.dirty && !c.running && scope.holds(c.library.as_deref()) {
+            mini_wrap_auto(state, &c.id, c.updated).await;
+        }
+    }
 }
 
 /// May an automatic mini-wrap for this chat run now? Clears the backoff when the chat has new messages.
@@ -154,8 +165,15 @@ fn backoff_record_failure(map: &mut HashMap<String, Backoff>, chat_id: &str, cha
 /// instead of retried every minute.
 async fn mini_wrap_auto(state: &AppState, id: &str, updated: DateTime<Utc>) {
     if state.mini_wraps_blocked.load(Ordering::Relaxed) { return; }
+    // Nobody is watching a background summary, so it never goes past the month's spending limit,
+    // and it does not try while the plan says its limit is reached.
+    if crate::spend::reached(state).await || crate::spend::plan_limit_json(state)["reached"] == true { return; }
     if !backoff_allows(&mut *state.mini_wrap_backoff.lock().await, id, updated, Utc::now()) { return; }
-    match mini_wrap(state, id).await {
+    // The same chat is never summarised twice at once (the idle timer and a new chat can meet).
+    if !state.summarising.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string()) { return; }
+    let result = mini_wrap(state, id).await;
+    state.summarising.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    match result {
         Ok(()) => { state.mini_wrap_backoff.lock().await.remove(id); }
         Err(e) => {
             let wait = backoff_record_failure(&mut *state.mini_wrap_backoff.lock().await, id, updated, Utc::now());
@@ -2177,6 +2195,56 @@ mod tests {
         for _ in 0..400 { if !asked.lock().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
         assert_eq!(asked.lock().unwrap().len(), 1);
         assert!(crate::settings::Settings::default().auto_summaries);
+    }
+
+    #[tokio::test]
+    async fn one_chat_is_never_summarised_twice_at_once_and_a_burst_of_new_chats_is_one_pass() {
+        let st = Arc::new(AppState::for_test());
+        let chat = said(&st, "Busy chat", &[("user", "something to keep".to_string())]).await;
+        let asked = summaries(&st, |_, _| Ok("a summary".into()));
+        // A pass is already queued: the newcomer adds nothing.
+        st.summarising.lock().unwrap().insert(SWEEP.into());
+        on_new_chat(st.clone(), "another".into());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(asked.lock().unwrap().is_empty());
+        st.summarising.lock().unwrap().clear();
+        // The chat is being summarised right now (the idle timer, say): a second request waits.
+        st.summarising.lock().unwrap().insert(chat.clone());
+        let updated = st.chats.with(&chat, |c| c.updated).await.unwrap();
+        mini_wrap_auto(&st, &chat, updated).await;
+        assert!(asked.lock().unwrap().is_empty());
+        st.summarising.lock().unwrap().clear();
+        // Three new chats in a row: one pass, one summary; the guard is free again afterwards.
+        for _ in 0..3 { on_new_chat(st.clone(), "another".into()); }
+        for _ in 0..400 { if !asked.lock().unwrap().is_empty() && st.summarising.lock().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        assert!(st.summarising.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn background_summaries_stop_at_the_spending_limit_and_while_the_plan_is_limited() {
+        let st = Arc::new(AppState::for_test());
+        let chat = said(&st, "Quiet chat", &[("user", "something to keep".to_string())]).await;
+        let asked = summaries(&st, |_, _| Ok("a summary".into()));
+        let updated = st.chats.with(&chat, |c| c.updated).await.unwrap();
+        st.settings.write().await.spending.monthly_limit_usd = Some(5.0);
+        st.add_usage(5.0).await;
+        mini_wrap_auto(&st, &chat, updated).await;
+        assert!(asked.lock().unwrap().is_empty(), "past the monthly limit nothing is sent");
+        // The user's own Wrap is theirs: the limit does not stop it.
+        assert!(summarise(&st, &chat, true).await.unwrap().is_some());
+        assert_eq!(asked.lock().unwrap().len(), 1);
+        // A raised limit lets the background work go on.
+        st.chats.update(&chat, |c| { c.dirty = true; c.mini_wrap = None; }).await;
+        st.settings.write().await.spending.monthly_limit_usd = Some(50.0);
+        let now = Utc::now().timestamp();
+        crate::spend::set_plan_limit(&st, Some(crate::spend::PlanLimit { reached: true, window: None, resets_at: Some(now + 3600) }));
+        let updated = st.chats.with(&chat, |c| c.updated).await.unwrap();
+        mini_wrap_auto(&st, &chat, updated).await;
+        assert_eq!(asked.lock().unwrap().len(), 1, "the plan's limit is reached: not even tried");
+        crate::spend::set_plan_limit(&st, None);
+        mini_wrap_auto(&st, &chat, updated).await;
+        assert_eq!(asked.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

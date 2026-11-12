@@ -668,6 +668,14 @@ pub async fn run_loop(state: Arc<AppState>) {
                 let seen = st.entry(l.file.clone()).or_default();
                 note_start(seen, now);
                 changed = true;
+                // Nobody watches an automatic task, so it never starts past the month's spending limit.
+                // It counts as missed, not failed: it is not tried again, and the next one comes as scheduled.
+                if crate::spend::reached(&state).await {
+                    crate::log::warn(format!("workflow {}: not started, this month's spending limit is reached", l.file));
+                    seen.chat_id = None;
+                    settle(seen, "monthLimit", 0.0, now);
+                    announce(&state, l, "monthLimit", None, false, Some(now));
+                } else {
                 match start(&state, &l.workflow, seen.budget()).await {
                     Ok(id) => seen.chat_id = Some(id),
                     Err(e) => {
@@ -676,6 +684,7 @@ pub async fn run_loop(state: Arc<AppState>) {
                         settle(seen, "notStarted", 0.0, now);
                         announce(&state, l, "notStarted", None, seen.retry_at.is_some(), Some(now));
                     }
+                }
                 }
             }
         }
@@ -975,6 +984,18 @@ mod tests {
             assert_eq!(s.chat_id, None);
             assert_eq!(s.results[0], RunResult { started: Some(now), ended: Some(at(2026, 11, 10, 9, 5)), outcome: out.into(), chat_id: Some("c".into()), manual: false, cost_usd: 0.3 });
         }
+    }
+
+    #[test]
+    fn a_run_held_back_by_the_spending_limit_is_missed_not_failed() {
+        let mut seen = Seen::default();
+        let now = at(2026, 3, 2, 9, 0);
+        note_start(&mut seen, now);
+        settle(&mut seen, "monthLimit", 0.0, now);
+        assert_eq!(seen.results[0].outcome, "monthLimit");
+        assert!(seen.retry_at.is_none(), "it is not tried again in ten minutes: the limit still stands");
+        assert!(seen.chat_id.is_none());
+        assert_eq!(seen.last_run, Some(now), "the schedule moves on to its next time");
     }
 
     #[test]
