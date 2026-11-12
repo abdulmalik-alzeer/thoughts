@@ -360,8 +360,9 @@ Writing a good plugin:
 - A plugin that throws is switched off and the user is told, so handle empty lists and failed
   calls (`try`/`catch` around `await`).
 - `id`s are lowercase with dashes and unique within the plugin.
-- Links do not open other pages: a plugin page that replaces itself with another page is switched
-  off.
+- Forms work as usual: listen for `submit` and call `event.preventDefault()`. Nothing is ever sent
+  anywhere by the browser, and links do not open other pages: a plugin page that replaces itself
+  with another page is switched off.
 - Never wait for something in a loop (`while (!ready) {}`): code that does not give control back
   freezes the app. Use `await` and events.
 

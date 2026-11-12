@@ -626,6 +626,8 @@ fn open_main_window(app: &tauri::AppHandle, recovered: bool) -> tauri::Result<ta
         }
     }
     let window = builder.build()?;
+    #[cfg(target_os = "macos")]
+    disable_webrtc(&window);
     *MAIN_LABEL.lock().unwrap_or_else(|e| e.into_inner()) = config.label;
     if let Some(o) = old {
         let _ = o.destroy();
@@ -956,6 +958,26 @@ fn nav_allowed(url: &tauri::Url, dev: Option<&tauri::Url>) -> bool {
         }
         _ => false,
     }
+}
+
+/// Switch peer connections (WebRTC) off in the app's web view. The app never uses them, and for an
+/// add-on they would be a way to the network that no content-security policy governs: the STUN or
+/// TURN server is chosen by the page, and its name is looked up (SEC-24). The switch is a WebKit
+/// preference without a public name; it is only used when this system's WebKit has it. Frames
+/// created after this (every add-on frame is) have no `RTCPeerConnection` at all.
+#[cfg(target_os = "macos")]
+fn disable_webrtc(win: &tauri::WebviewWindow) {
+    let _ = win.with_webview(|wv| unsafe {
+        use objc2::{msg_send, runtime::AnyObject, sel};
+        let view = wv.inner() as *mut AnyObject;
+        if view.is_null() { return; }
+        let conf: *mut AnyObject = msg_send![view, configuration];
+        if conf.is_null() { return; }
+        let prefs: *mut AnyObject = msg_send![conf, preferences];
+        if prefs.is_null() { return; }
+        let has: bool = msg_send![prefs, respondsToSelector: sel!(_setPeerConnectionEnabled:)];
+        if has { let _: () = msg_send![prefs, _setPeerConnectionEnabled: false]; }
+    });
 }
 
 fn main() {

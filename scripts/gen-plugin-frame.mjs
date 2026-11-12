@@ -21,9 +21,11 @@ export function genPluginFrame() {
     .replace(/\r\n?/g, '\n')
     .replace(/<\/(script)/gi, '<\\/$1');
   const hash = createHash('sha256').update(runtime, 'utf8').digest('base64');
+  // `webrtc 'block'` is the directive meant to stop peer connections; engines that do not know it yet
+  // ignore it (the runtime removes the constructors itself, and the macOS shell switches WebRTC off).
   const csp = `default-src 'none'; script-src 'sha256-${hash}' blob:; worker-src blob:; ` +
     `style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; ` +
-    `frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'`;
+    `frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'; webrtc 'block'`;
   const html = `<!doctype html>
 <html>
 <head>

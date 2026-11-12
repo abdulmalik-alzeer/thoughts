@@ -27,7 +27,22 @@
   var noop = function () {};
 
   // ---- before any add-on code ----
-  // Following a link would replace the add-on's page (and the host would switch it off).
+  // Peer connections are a way to the network that the frame's content-security policy does not
+  // govern (a STUN or TURN server of the page's choosing is contacted, and its name is looked up).
+  // No add-on needs them, so the constructors are removed from this page. This is only a second
+  // line (an engine that lets the page reach into an empty frame of its own would hand them back).
+  // What really closes the door is the engine: the macOS shell switches WebRTC off for the whole
+  // window, Linux's engine has it off unless an app turns it on, and the policy says `webrtc 'block'`.
+  try {
+    Object.getOwnPropertyNames(window).forEach(function (n) {
+      if (/^(webkit|moz)?RTC/.test(n)) { try { delete window[n]; } catch (_) { /* fixed */ } if (n in window) { try { window[n] = undefined; } catch (_) { /* fixed */ } } }
+    });
+  } catch (_) { /* nothing to remove */ }
+
+  // A form can never be sent anywhere from here (`form-action 'none'`); cancelling the browser's own
+  // submit keeps every engine the same: the add-on's `submit` listeners run, the page stays put.
+  window.addEventListener('submit', function (e) { e.preventDefault(); }, true);
+  // Likewise a link: following one would replace the add-on's page (and the host would switch it off).
   window.addEventListener('click', function (e) {
     var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
     if (a && (a.getAttribute('href') || '').charAt(0) !== '#') e.preventDefault();

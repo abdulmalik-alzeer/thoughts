@@ -4,9 +4,10 @@
 //
 // ── How plugin code runs (Plugin API v1) ────────────────────────────────────────────────────────
 // * Plugin code never runs in the app window. Every `plugins/*.js` module and every `views/*.html`
-//   page is loaded into its own <iframe sandbox="allow-scripts"> (no allow-same-origin → opaque
-//   origin). From there it cannot read the app's DOM, module state, localStorage or the Tauri bridge,
-//   and the frame's own content-security policy forbids all network access (`connect-src 'none'`).
+//   page is loaded into its own <iframe sandbox="allow-scripts allow-forms"> (no allow-same-origin →
+//   opaque origin). From there it cannot read the app's DOM, module state, localStorage or the Tauri
+//   bridge, and the frame's own content-security policy forbids all network access (`connect-src
+//   'none'`; forms can be filled in and raise `submit`, but `form-action 'none'` sends them nowhere).
 //   The daemon token lives only in a private variable of lib/api.ts and is never sent to a frame.
 // * The frame document is the static page public/plugin-frame.html, which runs public/plugin-frame.js
 //   and carries its own strict content-security policy (see `frameSrc`; on Windows it is handed over
@@ -410,7 +411,9 @@ function frameKey(): string {
 function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Frame {
   if (viaSrcdoc() && frameHtml === null) throw new Error('The add-on frame is not ready yet');
   const el = document.createElement('iframe');
-  el.setAttribute('sandbox', 'allow-scripts');
+  // allow-forms: without it Chromium (Windows) never raises `submit`. Nothing can be sent anywhere:
+  // the frame's policy says `form-action 'none'` and its runtime cancels the browser's own submit.
+  el.setAttribute('sandbox', 'allow-scripts allow-forms');
   el.setAttribute('referrerpolicy', 'no-referrer');
   el.setAttribute('title', p.description || shortName(p.name));
   el.style.cssText = surface
