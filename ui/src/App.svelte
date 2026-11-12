@@ -646,7 +646,6 @@
 
   const interrupted = $derived(((app.status?.interrupted ?? []) as { chatId: string; title: string }[]).filter((r) => !dismissedRuns.includes(r.chatId)).slice(0, 3));
 
-  function kindLabel(k: string) { const key = 'shell.kind.' + k; const s = t(key); return s === key ? k : s; }
   function dotLabel(c: any) { return c.running ? t('shell.dot.running') : c.unwrapped ? t('shell.dot.unwrapped') : ''; }
 
   const paletteItems = $derived.by((): PaletteItem[] => {
@@ -684,7 +683,7 @@
       add('mode.' + m, t('shell.pal.mode', { name: t(m) }), g.look, icon, { keywords: 'appearance mode day night مظهر' });
     items.push(...libraryPaletteItems(g.act));
     for (const c of app.commands) items.push({ id: 'plugin:' + c.id, title: c.title, group: c.plugin ? addonTag(c.plugin) : g.plug, icon: c.icon || 'plugin', run: () => { command('plugin:' + c.id); c.run(); } });
-    for (const c of app.chats.slice(0, 40)) items.push({ id: 'chat:' + c.id, title: c.title, group: g.chat, icon: 'chat', run: () => command('chat.open', { chatId: c.id }) });
+    for (const c of app.chats.filter((c) => !c.archived).slice(0, 40)) items.push({ id: 'chat:' + c.id, title: c.title, group: g.chat, icon: 'chat', run: () => command('chat.open', { chatId: c.id }) });
     for (const i of ideas) items.push({ id: 'idea:' + i.path, title: i.title, group: g.idea, icon: 'ideas', keywords: i.summary, run: () => { openItem(i.path); } });
     return items;
   });

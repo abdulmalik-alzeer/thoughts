@@ -522,13 +522,20 @@
   const MODEL_OTHER = '__other__';
   async function modelChanged(e: Event & { currentTarget: HTMLSelectElement }) {
     const el = e.currentTarget, v = el.value, before = chat.options.model ?? '';
-    if (v !== MODEL_OTHER) { chat.options.model = v || null; await saveOpts(); return; }
+    // A save that fails puts the menu back on the model the service still has.
+    if (v !== MODEL_OTHER) { chat.options.model = v || null; if (!(await saveOpts())) { chat.options.model = before || null; el.value = before; } return; }
     const typed = (await promptDialog({ title: t('runc.model.otherTitle'), body: t('runc.model.otherBody'), placeholder: t('runc.model.otherPlaceholder'), confirmLabel: t('save') }))?.trim();
     el.value = before; // until a name is accepted the menu shows what was there
     if (!typed) return;
     if (!/^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,119}$/.test(typed)) { notify(t('runc.model.otherBad'), { kind: 'error', key: 'model-name' }); return; }
     chat.options.model = typed;
-    if (await saveOpts()) el.value = typed;
+    if (await saveOpts()) el.value = typed; else chat.options.model = before || null;
+  }
+
+  async function effortChanged(v: string | null) {
+    const before = chat.options.effort ?? null;
+    chat.options.effort = v;
+    if (!(await saveOpts())) chat.options.effort = before;
   }
 
   // The permission mode as the service has it. "Bypass permissions" is only switched on after the
@@ -589,12 +596,17 @@
     return t(`runb.denied.${what}`, { target: ISOLATE[0] + target + ISOLATE[1] });
   }
 
-  async function moveTo(pid: string) {
+  async function moveTo(el: HTMLSelectElement) {
+    const pid = el.value;
     try {
       await patch(`/chats/${id}`, { projectId: pid || null });
       chat.projectId = pid || null;
       refreshChats().catch(() => {});
-    } catch (e) { failed(t('chat3.moveFailed'), e); }
+    } catch (e) {
+      // The group did not change: the menu goes back to the one the chat is still in.
+      el.value = chat.projectId ?? '';
+      failed(t('chat3.moveFailed'), e);
+    }
   }
 
   async function rename() {
@@ -669,7 +681,7 @@
     <header class="row">
       <h1 class="h grow"><button class="title ell" onclick={rename} title={t('chat.rename')} aria-label={t('chat.renameAria', { title: chat.title })} dir="auto">{chat.title}</button></h1>
       {#if chat.kind === 'chat'}
-        <select value={chat.projectId ?? ''} onchange={(e) => moveTo((e.target as HTMLSelectElement).value)} title={t('chat.group')} aria-label={t('chat.group')}>
+        <select value={chat.projectId ?? ''} onchange={(e) => moveTo(e.currentTarget)} title={t('chat.group')} aria-label={t('chat.group')}>
           <option value="">{t('library')}</option>
           {#each projects as p}<option value={p.id}>{p.name}</option>{/each}
         </select>
@@ -889,7 +901,7 @@
           <ChatOptions options={chat.options} models={opts.models} efforts={opts.efforts} modes={permModes} {label}
             permPrefix={onCodex ? 'codex.perm' : 'chat3.perm'} hintPrefix={onCodex ? 'codex.perm' : 'set.perm'} effortPrefix={onCodex ? 'codex.effort' : 'chat.effort'}
             {programs} program={chat.provider} onprogram={programs.every((p) => p.ok) && !chat.running ? moveProgram : undefined}
-            onmodel={modelChanged} extraModel={{ value: MODEL_OTHER, label: t('runc.model.other') }} oneffort={(v) => { chat.options.effort = v; saveOpts(); }}
+            onmodel={modelChanged} extraModel={{ value: MODEL_OTHER, label: t('runc.model.other') }} oneffort={effortChanged}
             onperm={(v) => { chat.options.permissionMode = v; permChanged(); }} />
           {#if chat.kind === 'chat' && savedPerm !== BYPASS}
             <label class="btn ghost webtoggle" class:on={!!chat.options.web} title={t('runb.web.tip')}>

@@ -263,12 +263,13 @@ fn shown(role: &str) -> bool { role == "user" || role == "assistant" }
 
 /// Ordinary chats whose title or messages contain every term. Each match names the message by
 /// its position among the shown messages (`msg`), so the chat view can jump to it.
+/// Archived chats are left out: they are found under Chats › Archived only.
 pub fn chats<'a>(all: impl Iterator<Item = &'a crate::chats::Chat>, terms: &[String], limit: usize) -> Vec<Value> {
     if terms.is_empty() { return vec![]; }
     let mut cache = chat_cache().lock().unwrap_or_else(|e| e.into_inner());
     let mut seen: HashSet<String> = HashSet::new();
     let mut out: Vec<(i64, chrono::DateTime<chrono::Utc>, Value)> = vec![];
-    for c in all.filter(|c| c.kind == "chat") {
+    for c in all.filter(|c| c.kind == "chat" && !c.archived) {
         seen.insert(c.id.clone());
         let fresh = cache.get(&c.id).map_or(false, |e| e.updated == c.updated && e.count == c.messages.len() && e.title == c.title);
         if !fresh {
@@ -442,6 +443,11 @@ mod tests {
         let r = chats(all.iter(), &terms("احمد"), 10);
         assert_eq!((r.len(), r[0]["titleHit"].as_bool()), (1, Some(true)));
         assert!(chats(all.iter(), &terms("wrap"), 10).is_empty());
+        // An archived chat is not found; brought back, it is found again.
+        let mut old = Chat { title: "Archived quince".into(), archived: true, ..Default::default() };
+        assert!(chats([old.clone()].iter(), &terms("quince"), 10).is_empty());
+        old.archived = false;
+        assert_eq!(chats([old].iter(), &terms("quince"), 10).len(), 1);
         // A new message is picked up.
         a.messages.push(Msg::new("user", "zebra"));
         a.updated = chrono::Utc::now();
