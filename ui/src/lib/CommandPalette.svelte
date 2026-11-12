@@ -12,12 +12,15 @@
     run: () => void;
   };
 
-  /** Folds text for matching: case, Latin accents, and the Arabic spellings people type interchangeably
-   *  (أ إ آ ٱ → ا, ى → ي, ة → ه, ؤ → و, ئ → ي), without tashkeel or tatweel. */
+  /** Folds text for matching: case, Latin accents, Arabic and Persian digits, and the Arabic spellings
+   *  people type interchangeably (أ إ آ ٱ → ا, ى ی → ي, ة → ه, ؤ → و, ئ → ي, ک → ك), without tashkeel or
+   *  tatweel. The daemon's search folds the same way (crates/thoughtsd/src/search.rs). */
   export function fold(text: string): string {
-    return text.normalize('NFKD').replace(/[\u0300-\u036f\u064b-\u065f\u0670\u0640]/g, '')
-      .replace(/[\u0623\u0625\u0622\u0671]/g, '\u0627').replace(/\u0649/g, '\u064a').replace(/\u0629/g, '\u0647')
-      .replace(/\u0624/g, '\u0648').replace(/\u0626/g, '\u064a').toLowerCase();
+    return text.normalize('NFKD').replace(/[\u0300-\u036f\u064b-\u065f\u0670\u0610-\u061a\u0640]/g, '')
+      .replace(/[\u0623\u0625\u0622\u0671]/g, '\u0627').replace(/[\u0649\u06cc]/g, '\u064a').replace(/\u0629/g, '\u0647')
+      .replace(/\u0624/g, '\u0648').replace(/\u0626/g, '\u064a').replace(/\u06a9/g, '\u0643')
+      .replace(/[\u0660-\u0669\u06f0-\u06f9]/g, (d) => String((d.charCodeAt(0) - 0x0660) % 0x90))
+      .toLowerCase();
   }
 
   /** Fuzzy match: 0 = no match; higher is better. Substring beats scattered letters. */
@@ -45,7 +48,9 @@
   import Icon from './Icon.svelte';
   import { t } from './i18n';
   import { trapFocus } from './focus';
-  import { track } from './store.svelte';
+  import { command, go, track } from './store.svelte';
+  import { api } from './api';
+  import { prettyName } from './content/util';
 
   let { items, close }: { items: PaletteItem[]; close: () => void } = $props();
 
@@ -53,14 +58,39 @@
   let active = $state(0);
   let listEl = $state<HTMLElement | null>(null);
 
+  // Every library file, most recently changed first, so any note can be opened from here.
+  let files = $state<PaletteItem[]>([]);
+  api('/library/tree').then((all: any[]) => {
+    const list = (Array.isArray(all) ? all : []).filter((f) => f?.path && !String(f.path).endsWith('/') && !f.dir && f.type !== 'dir')
+      .sort((a, b) => String(b.modified ?? '').localeCompare(String(a.modified ?? '')));
+    files = list.map((f) => {
+      const path = String(f.path);
+      return { id: 'file:' + path, title: prettyName(path), group: t('srch.palFile'), icon: 'docs', keywords: path,
+        run: () => command('doc.open', { path }) };
+    });
+  }).catch(() => { /* the palette still works without the file list */ });
+
+  const RECENT = 5;
   const shown = $derived.by(() => {
-    if (!q.trim()) return items.slice(0, 60);
-    return items
-      .map((it, i) => ({ it, i, s: Math.max(fuzzy(q, it.title), fuzzy(q, it.keywords ?? '') * 0.6, fuzzy(q, it.group ?? '') * 0.3) }))
-      .filter((x) => x.s > 0)
-      .sort((a, b) => b.s - a.s || a.i - b.i)
-      .slice(0, 60)
-      .map((x) => x.it);
+    const query = q.trim();
+    if (!query) {
+      // Commands first, then the notes changed most recently.
+      const recent = files.slice(0, RECENT).map((f) => ({ ...f, group: t('srch.palRecent') }));
+      return [...items.slice(0, 60 - recent.length), ...recent];
+    }
+    const scored = items.map((it, i) => ({ it, i, s: Math.max(fuzzy(q, it.title), fuzzy(q, it.keywords ?? '') * 0.6, fuzzy(q, it.group ?? '') * 0.3) }));
+    // Files rank a little below commands with the same score; among equals the newest wins (list order).
+    const known = new Set(items.map((it) => it.id.replace(/^idea:/, 'file:')));
+    files.forEach((f, i) => {
+      if (known.has(f.id)) return;
+      const s = Math.max(fuzzy(q, f.title), fuzzy(q, f.keywords ?? '') * 0.8) * 0.9;
+      if (s > 0) scored.push({ it: f, i: items.length + i, s });
+    });
+    const list = scored.filter((x) => x.s > 0).sort((a, b) => b.s - a.s || a.i - b.i).slice(0, 59).map((x) => x.it);
+    // Always offer a search of the text inside notes and chats.
+    list.push({ id: 'search:all', title: t('srch.palSearchAll', { q: query }), group: t('search'), icon: 'search',
+      run: () => go({ kind: 'docs', path: '?' + query }) });
+    return list;
   });
 
   $effect(() => { q; active = 0; });

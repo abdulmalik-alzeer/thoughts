@@ -12,6 +12,9 @@
   import Versions from './docs/Versions.svelte';
   import FolderPicker from './docs/FolderPicker.svelte';
   import Conflict from './docs/Conflict.svelte';
+  import FindBar from '../lib/FindBar.svelte';
+  import SearchResults from '../lib/SearchResults.svelte';
+  import { fold } from '../lib/CommandPalette.svelte';
 
   let { path }: { path?: string } = $props();
 
@@ -32,7 +35,6 @@
   let imgUrl = $state<string | null>(null);
   let pdfUrl = $state<string | null>(null);
   let pdfError = $state('');
-  let searchError = $state('');
   let showVersions = $state(false);
   let menu = $state(false);
   let menuBtn = $state<HTMLButtonElement>();
@@ -136,10 +138,9 @@
     finally { loading = false; }
   }
 
-  async function runSearch() {
-    searchError = ''; searched = path ?? '';
-    try { results = await api(`/library/search?q=${encodeURIComponent(path!.slice(1))}`); track('search'); }
-    catch (e) { results = []; searchError = errDetail(e) || t('docs3.searchFailed'); }
+  /** Show the search page for the `?words` route; the page (SearchResults) looks the words up itself. */
+  function runSearch() {
+    searched = path ?? ''; results = [];
   }
   // Files at the top of the library that are there for the assistant (and the user's orientation),
   // grouped under "About this library" instead of sitting among the user's own folders.
@@ -763,7 +764,7 @@
   type Node = { name: string; path: string; dirs: Node[]; files: any[]; count: number };
   const tree = $derived.by((): Node => {
     const root: Node = { name: '', path: '', dirs: [], files: [], count: 0 };
-    const q = filter.trim().toLowerCase();
+    const q = fold(filter.trim());
     const dirAt = (parts: string[], n: number, counted: boolean) => {
       let node = root;
       for (let i = 0; i < n; i++) {
@@ -776,7 +777,7 @@
       return node;
     };
     for (const f of files) {
-      if (q && !`${f.path} ${titleOf(f)}`.toLowerCase().includes(q)) continue;
+      if (q && !fold(`${f.path} ${titleOf(f)}`).includes(q)) continue;
       const parts = String(f.path).split('/');
       if (isSystem(f.path)) { root.count++; continue; }
       dirAt(parts, parts.length - 1, true).files.push(f);
@@ -858,6 +859,7 @@
     {/if}
   </aside>
 
+  <FindBar root={() => article} editor={() => (editing ? treeEl?.parentElement?.querySelector<HTMLTextAreaElement>('textarea.editor') : null)} where={'doc:' + (path ?? '')} />
   <section class="view scroll">
     <div class="narrowbar no-print">
       <button class="btn" bind:this={treeBtn} onclick={showTree} aria-expanded={treeOpen}><Icon name="folder" size={14} /> {t('docs3.files')}</button>
@@ -867,18 +869,8 @@
     {:else if treeError}
       <div class="state" role="alert"><Icon name="warning" size={26} /><h1>{t('docs.loadFailed')}</h1><p class="muted" dir="auto">{treeError}</p>
         <button class="btn primary" onclick={() => { loading = true; loadTree().then(() => { if (!treeError && !current) openFile(firstFile()); }); }}><Icon name="retry" size={14} /> {t('docs3.retry')}</button></div>
-    {:else if results}
-      <h1>{t('search')}: <span dir="auto">{path?.slice(1)}</span></h1>
-      {#if searchError}
-        <div class="state" role="alert"><Icon name="warning" size={24} /><p>{t('docs3.searchFailed')}</p><p class="muted sm" dir="auto">{searchError}</p>
-          <button class="btn primary" onclick={runSearch}><Icon name="retry" size={14} /> {t('docs3.retry')}</button></div>
-      {:else if !results.length}<div class="state"><Icon name="search" size={24} /><p class="muted">{t('docs.noMatches')}</p></div>{/if}
-      {#each results as r}
-        <button class="hit" onclick={() => openFile(r.path)}>
-          <b><bdi>{r.path}</bdi></b>
-          {#each r.matches as m}<div class="muted sm" dir="auto"><bdi>{m.line}</bdi>: {m.text}</div>{/each}
-        </button>
-      {/each}
+    {:else if results && path?.startsWith('?')}
+      {#key path}<SearchResults query={path.slice(1)} />{/key}
     {:else if !files.length}
       <div class="state">
         <Icon name="docs" size={30} />
@@ -1079,8 +1071,6 @@
     .view { padding-inline: 20px; }
   }
 
-  .hit { font: inherit; color: inherit; text-align: start; width: 100%; box-sizing: border-box; display: block; cursor: pointer; background: var(--panel); border: var(--border-w) solid var(--border); border-radius: var(--radius); padding: 10px; margin-bottom: 8px; }
-  .hit:hover { border-color: var(--accent); }
 
   .state { display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; gap: 6px; min-height: 60%; padding: 40px 0; color: var(--muted); }
   .state h1 { margin: 6px 0 0; color: var(--fg); font-size: 18px; letter-spacing: -.02em; }

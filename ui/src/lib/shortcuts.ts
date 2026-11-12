@@ -4,7 +4,8 @@
 // Command ids (also the `detail.id` of the window CustomEvent `thoughts:command`):
 //   nav.<view>            home | chats | ideas | todos | docs | projects | me
 //   chat.new              start a new chat            chat.open   { chatId }
-//   doc.open { path }     open a library file         search.focus
+//   doc.open { path }     open a library file         search.focus (the sidebar search box)
+//   find                  find in the open note or chat (falls back to search.focus)
 //   wrap.start            sync            rollback    settings    help    tour    print
 //   palette               sidebar.toggle  theme.<id>  mode.<light|dark|system>
 //   back / forward        through the views visited this session   history (notes history)
@@ -33,7 +34,8 @@ export type Shortcut = {
 export const shortcuts: Shortcut[] = [
   { id: 'palette', label: 'shell.sc.palette', code: 'KeyK', key: 'K', mod: true },
   { id: 'chat.new', label: 'shell.sc.newChat', code: 'KeyN', key: 'N', mod: true },
-  { id: 'search.focus', label: 'shell.sc.search', code: 'KeyF', key: 'F', mod: true },
+  { id: 'find', label: 'srch.sc.find', code: 'KeyF', key: 'F', mod: true },
+  { id: 'search.focus', label: 'srch.sc.search', code: 'KeyF', key: 'F', mod: true, shift: true },
   { id: 'search.focus', label: 'shell.sc.searchSlash', code: 'Slash', key: '/', plain: true },
   ...[1, 2, 3, 4, 5, 6].map((n) => ({ id: 'nav.' + n, label: 'shell.sc.nav', code: 'Digit' + n, key: String(n), mod: true, hidden: n > 1 })),
   { id: 'wrap.start', label: 'shell.sc.wrap', code: 'KeyW', key: 'W', mod: true, shift: true },

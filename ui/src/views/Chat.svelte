@@ -13,6 +13,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
   import { onMount, tick } from 'svelte';
+  import FindBar from '../lib/FindBar.svelte';
   import { api, del, on, patch, post, ApiError } from '../lib/api';
   import { md, mdClick } from '../lib/md';
   import { app, costVisible, go, refreshChats } from '../lib/store.svelte';
@@ -446,6 +447,7 @@
     {/if}
 
     <div class="msgs-wrap">
+      <FindBar root={() => scroller} where={'chat:' + id} anchors=":scope > .msg.user, :scope > .msg.ai" />
       <div class="msgs scroll" bind:this={scroller} {onscroll} role="group" aria-label={t('chat.conversation')}>
         {#each chat.messages as m (m.id)}
           {#if m.role === 'user'}

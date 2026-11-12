@@ -38,6 +38,9 @@
   import { crashText, reportError } from './lib/crash';
   import CommandPalette, { type PaletteItem } from './lib/CommandPalette.svelte';
   import { workflowNotice } from './lib/automatic';
+  import Marked from './lib/Marked.svelte';
+  import { findOnOpen, findWords, markTerms, openFind, searchAll } from './lib/search';
+  import { prettyName } from './lib/content/util';
 
   let projects = $state<any[]>([]);
   let showTour = $state(false);
@@ -86,10 +89,6 @@
     startReminders();
     // A change staged earlier (or by an import / app update) is still waiting for a decision.
     checkPending(true);
-    try {
-      const ext = await api('/extensions');
-      if (ext.search.suggest) toast(t('shell.searchExtHint'), { action: { label: t('settings'), run: () => go({ kind: 'settings' }) } });
-    } catch { /* optional */ }
   }
 
   async function loadProjects() {
@@ -387,6 +386,7 @@
     'palette': () => openPalette(!app.showPalette),
     'sidebar.toggle': () => toggleSidebar(),
     'search.focus': () => focusSearch(),
+    'find': () => { if (!openFind()) focusSearch(); },
     'zoom.in': () => zoom(1),
     'zoom.out': () => zoom(-1),
     'zoom.reset': () => zoom(0),
@@ -451,18 +451,26 @@
   let searching = $state(false);
   let searchFailed = $state(false);
   let fileHits = $state<any[]>([]);
+  /** Chats whose text matched (from the service); until it answers, chat titles are matched here. */
+  let chatResults = $state<any[] | null>(null);
+  let searchTerms = $state<string[]>([]);
   let sel = $state(-1);
   let searchSeq = 0;
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
 
   const chatHits = $derived.by(() => {
+    if (chatResults) return chatResults.slice(0, 4);
     const q = fold(searchQ.trim());
-    return q ? app.chats.filter((c) => fold(String(c.title || '')).includes(q)).slice(0, 6) : [];
+    return q ? app.chats.filter((c) => c.kind === 'chat' && fold(String(c.title || '')).includes(q)).slice(0, 4) : [];
   });
-  type Hit = { key: string; icon: string; title: string; sub?: string; path?: boolean; open: () => void };
+  type Hit = { key: string; icon: string; title: string; marks?: [number, number][]; sub?: string; subMarks?: [number, number][]; path?: string; open: () => void };
+  /** Open a result with its words highlighted there. */
+  const reveal = (where: string, v: { kind: string; id?: string; path?: string }, msg?: number) => { findOnOpen(where, findWords(searchQ), msg); go(v); };
   const hits = $derived<Hit[]>([
-    ...chatHits.map((c) => ({ key: 'c:' + c.id, icon: 'chat', title: c.title, open: () => go({ kind: 'chat', id: c.id }) })),
-    ...fileHits.map((f) => ({ key: 'f:' + f.path, icon: 'docs', title: f.path, path: true, sub: f.matches?.[0]?.text, open: () => go({ kind: 'docs', path: f.path }) })),
+    ...chatHits.map((c) => ({ key: 'c:' + c.id, icon: 'chat', title: c.title, marks: markTerms(c.title, searchTerms),
+      sub: c.matches?.[0]?.text, subMarks: c.matches?.[0]?.marks, open: () => reveal('chat:' + c.id, { kind: 'chat', id: c.id }, c.matches?.[0]?.msg) })),
+    ...fileHits.map((f) => ({ key: 'f:' + f.path, icon: 'docs', title: f.title || prettyName(f.path), marks: markTerms(f.title || prettyName(f.path), searchTerms), path: f.path,
+      sub: f.matches?.[0]?.text, subMarks: f.matches?.[0]?.marks, open: () => reveal('doc:' + f.path, { kind: 'docs', path: f.path }) })),
   ]);
 
   async function focusSearch() {
@@ -477,23 +485,24 @@
     sel = -1;
     searchFailed = false;
     const mine = ++searchSeq;
-    if (!q) { fileHits = []; searching = false; searchOpen = false; return; }
+    chatResults = null;
+    if (!q) { fileHits = []; searchTerms = []; searching = false; searchOpen = false; return; }
     searchOpen = true;
     searching = true;
     searchTimer = setTimeout(async () => {
       track('search');
       try {
-        const r = await api('/library/search?q=' + encodeURIComponent(q));
-        if (mine === searchSeq) fileHits = (Array.isArray(r) ? r : []).slice(0, 8);
+        const r = await searchAll(q, 12);
+        if (mine === searchSeq) { fileHits = r.notes.slice(0, 6); chatResults = r.chats; searchTerms = r.terms; }
       } catch {
         if (mine === searchSeq) { fileHits = []; searchFailed = true; }
       } finally { if (mine === searchSeq) searching = false; }
-    }, 250);
+    }, 200);
   }
 
   function closeSearch() { searchOpen = false; sel = -1; }
 
-  function pick(h: Hit) { closeSearch(); searchQ = ''; fileHits = []; h.open(); }
+  function pick(h: Hit) { closeSearch(); h.open(); searchQ = ''; fileHits = []; chatResults = null; }
 
   function submitSearch(e: Event) {
     e.preventDefault();
@@ -510,7 +519,7 @@
     else if (e.key === 'ArrowUp' && hits.length) { e.preventDefault(); sel = sel <= 0 ? hits.length - 1 : sel - 1; }
     else if (e.key === 'Escape') {
       e.stopPropagation();
-      if (searchOpen) closeSearch(); else if (searchQ) { searchQ = ''; fileHits = []; } else searchEl?.blur();
+      if (searchOpen) closeSearch(); else if (searchQ) { searchQ = ''; fileHits = []; chatResults = null; } else searchEl?.blur();
     }
   }
 
@@ -665,9 +674,9 @@
               <div class="hit" id={'side-hit-' + i} role="option" tabindex="-1" aria-selected={i === sel}
                 onmousedown={(e) => e.preventDefault()} onclick={() => pick(h)} onmousemove={() => (sel = i)}>
                 <Icon name={h.icon} size={14} />
-                <span class="grow">
-                  {#if h.path}<bdi class="ell blk">{h.title}</bdi>{:else}<span class="ell blk" dir="auto">{h.title}</span>{/if}
-                  {#if h.sub}<span class="ell blk muted sm" dir="auto">{h.sub}</span>{/if}
+                <span class="grow" title={h.path}>
+                  <span class="ell blk" dir="auto"><Marked text={h.title} marks={h.marks} /></span>
+                  {#if h.sub}<span class="ell blk muted sm" dir="auto"><Marked text={h.sub} marks={h.subMarks} /></span>{/if}
                 </span>
               </div>
             {/each}
@@ -678,8 +687,8 @@
             {:else if !hits.length}
               <p class="muted note">{t('shell.searchNone')}</p>
             {/if}
-            {#if !searching && fileHits.length}
-              <button type="submit" class="all" onmousedown={(e) => e.preventDefault()} onclick={() => (sel = -1)}>{t('shell.searchAll')} <Icon name="arrow" size={13} class="flip-rtl" /></button>
+            {#if !searching && searchQ.trim()}
+              <button type="submit" class="all" onmousedown={(e) => e.preventDefault()} onclick={() => (sel = -1)}>{t(hits.length ? 'srch.sideAll' : 'srch.sideMore')} <Icon name="arrow" size={13} class="flip-rtl" /></button>
             {/if}
           </div>
         {/if}
