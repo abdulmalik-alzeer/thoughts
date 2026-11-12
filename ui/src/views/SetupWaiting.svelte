@@ -17,7 +17,8 @@
   const connected = $derived(!!claude.installed && !!claude.loggedIn);
   // Installed but signed out: the app's own sign-in banner already says what to do.
   const signedOutShown = $derived(claude.installed === true && claude.loggedIn === false);
-  const here = $derived(app.view.kind === 'chat' && app.view.id === waiting?.id);
+  // Not over the setup chat itself, nor over Settings, where the assistant is being connected.
+  const here = $derived((app.view.kind === 'chat' && app.view.id === waiting?.id) || app.view.kind === 'settings');
   // A hidden "connect" banner comes back once the assistant is connected: that is news.
   const show = $derived(!!waiting && !here && (connected ? hidden !== 'ready' : !signedOutShown && hidden !== 'wait'));
 

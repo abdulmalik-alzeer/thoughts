@@ -949,7 +949,7 @@
       </div>
       <div class="row">
         <button class="btn grow tb" onclick={createNew}><Icon name="plus" size={14} /> {t('docs3.new')}</button>
-        <button class="btn grow tb" onclick={bringIn} disabled={importing} title={t('docs.importTip')}><Icon name="upload" size={14} /> {t(importing ? 'docs.importing' : 'docs.import')}</button>
+        <button class="btn grow tb" onclick={bringIn} disabled={importing} title={t('sb.imp.buttonTip')}><Icon name="upload" size={14} /> {t(importing ? 'docs.importing' : 'sb.imp.button')}</button>
       </div>
       <input type="file" multiple hidden bind:this={picker} onchange={pick} />
     </div>
@@ -990,7 +990,7 @@
         <p class="muted">{t('docs.emptyBody')}</p>
         <div class="row wrapr">
           <button class="btn primary" onclick={() => newDoc('')}><Icon name="plus" size={14} /> {t('docs3.newDoc')}</button>
-          <button class="btn" onclick={bringIn} disabled={importing}><Icon name="upload" size={14} /> {t('docs.import')}</button>
+          <button class="btn" onclick={bringIn} disabled={importing} title={t('sb.imp.buttonTip')}><Icon name="upload" size={14} /> {t('sb.imp.button')}</button>
           <button class="btn" onclick={() => go({ kind: 'home' })}>{t('docs.emptyAsk')}</button>
         </div>
       </div>

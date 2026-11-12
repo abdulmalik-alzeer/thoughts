@@ -72,13 +72,19 @@
     } finally { busy = false; }
   }
 
+  // Shown over the whole window, whichever view opened it (a view's own layout must not clip it).
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return { destroy() { node.remove(); } };
+  }
+
   async function undo(hash: string, where: string) {
     try { await post('/library/undo', { hash }); toast(t('sb.imp.undone'), { kind: 'success' }); done?.(where); }
     catch (e) { failed(t('sb.imp.undoFailed'), e); }
   }
 </script>
 
-<div class="modal-bg no-print" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && close()}>
+<div class="modal-bg no-print" role="presentation" use:portal onclick={(e) => e.target === e.currentTarget && !busy && close()}>
   <div class="modal imp" role="dialog" aria-modal="true" aria-labelledby="imp-title" aria-describedby="imp-body" tabindex="-1"
     use:trapFocus={{ onEscape: () => { if (!busy) close(); } }}>
     <h1 id="imp-title"><Icon name="upload" size={20} /> {t('sb.imp.title')}</h1>
@@ -98,7 +104,7 @@
       {:else if preview}
         <p><b>{t('sb.imp.counts', { notes: fmtNum(preview.notes ?? 0), other: fmtNum(preview.other ?? 0), size: fmtSize(Number(preview.bytes) || 0) })}</b></p>
         {#if preview.sample?.length}
-          <p class="muted sm">{t('sb.imp.sample')} {#each preview.sample.slice(0, 4) as f, i}{#if i}, {/if}<bdi>{f}</bdi>{/each}</p>
+          <p class="muted sm">{t('sb.imp.sample')} {#each preview.sample.slice(0, 4) as f, i}{#if i}{', '}{/if}<bdi>{f}</bdi>{/each}</p>
         {/if}
         {#if leftLines.length}
           <div class="left">
@@ -123,11 +129,12 @@
 </div>
 
 <style>
-  .imp { max-width: 560px; width: 100%; padding: 22px 24px; }
+  .imp { width: min(560px, 92vw); padding: 22px 24px; }
   .imp h1 { display: flex; gap: 10px; align-items: center; font-size: 20px; margin: 0 0 6px; }
   .imp p { margin: 6px 0; }
   .imp input { width: 100%; }
-  .row .grow { min-width: 0; }
+  .row { flex-wrap: wrap; }
+  .row .grow { min-width: 200px; flex: 1; }
   .warn { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; }
   .warn :global(.icon) { flex: none; margin-top: 3px; color: var(--danger); }
   .left ul { margin: 2px 0 0; padding-inline-start: 20px; }

@@ -105,6 +105,8 @@ export default {
     'sb.bring.sum': 'Notes brought in',
 
     // ----- the import dialog (and its preview, also used during setup) -----
+    'sb.imp.button': 'Import…',
+    'sb.imp.buttonTip': 'Bring in files from your computer, or a whole folder of notes with its folders kept',
     'sb.imp.choose': 'What would you like to bring in?',
     'sb.imp.chooseBody': 'Bring in single files, or a whole folder of notes with its folders kept.',
     'sb.imp.files': 'Files…',
@@ -233,6 +235,8 @@ export default {
     'sb.bring.bad': 'اختر مجلد ملاحظات آخر، أو لا تنقل شيئاً.',
     'sb.bring.sum': 'الملاحظات المنقولة',
 
+    'sb.imp.button': 'استيراد…',
+    'sb.imp.buttonTip': 'انقل ملفات من جهازك، أو مجلد ملاحظات كاملاً مع الحفاظ على مجلداته',
     'sb.imp.choose': 'ماذا تريد أن تنقل؟',
     'sb.imp.chooseBody': 'انقل ملفات منفردة، أو مجلد ملاحظات كاملاً مع الحفاظ على مجلداته.',
     'sb.imp.files': 'ملفات…',

@@ -565,9 +565,9 @@
         </ul>
       </div>
       <dl class="sum">
-        <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}{#if adopting} · {t('sb.adopt.sum')}{/if}</dd>
+        <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}{#if adopting}{' · '}{t('sb.adopt.sum')}{/if}</dd>
         {#if bringing}<dt>{t('sb.bring.sum')}</dt><dd><code><bdi>{importFrom.trim()}</bdi></code></dd>{/if}
-        <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}{#if waitsForAssistant} · {t('sb.later.sum')}{/if}</dd>
+        <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}{#if waitsForAssistant}{' · '}{t('sb.later.sum')}{/if}</dd>
         <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if s.sync.mode === 'folder' && !inCloud} · {t('sa.sum.notCloud')}{/if}</dd>
         <dt>{t('hista.historyTitle')}</dt><dd>{t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</dd>
       </dl>
