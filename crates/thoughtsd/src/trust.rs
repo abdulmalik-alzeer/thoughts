@@ -86,7 +86,10 @@ fn store() -> PathBuf { crate::paths::trusted_file() }
 fn canon(p: &Path) -> String { dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().to_string() }
 
 /// Git, for inspecting a folder: no system config, no fsmonitor, and never longer than two minutes.
+/// `None` without running anything when there is no real git (`git::usable`): Apple's placeholder
+/// would only make macOS offer to install the developer tools, or hang.
 fn git_out(dir: Option<&Path>, args: &[&std::ffi::OsStr]) -> Option<std::process::Output> {
+    if !crate::git::usable() { return None; }
     let mut c = crate::proc::std_command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
     if let Some(d) = dir { c.current_dir(d); }
     c.env("PATH", crate::claude::shell_path()).env("GIT_CONFIG_NOSYSTEM", "1").args(["-c", "core.fsmonitor=false"]).args(args);
@@ -514,6 +517,10 @@ impl Scan {
     fn git(&mut self, path: &Path) {
         use Part::Git as G;
         if !path.join(".git").exists() { return; }
+        // Without a real git nothing in `.git` can run (hooks, filters and ssh commands are git's
+        // own), and the app runs no git either: nothing to look at, and no reason to ask. Once git
+        // is there, the next check looks, and asks about whatever needs it.
+        if !crate::git::usable() { return; }
         // Resolve both the worktree gitdir and the common dir with the same git the app uses; fail closed.
         let rev = |arg: &str| git_out(Some(path), &["rev-parse".as_ref(), arg.as_ref()])
             .filter(|o| o.status.success()).map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()));
@@ -1528,6 +1535,24 @@ mod tests {
         assert_eq!((mail["name"].as_str(), mail["detail"].as_str(), mail["new"].as_bool()), (Some("mail"), Some("other-server"), Some(true)));
         assert!(mail["open"].as_str().unwrap().ends_with(".mcp.json"));
         assert_eq!(p["files"][0], json!({"file": ".mcp.json", "what": "changed"}));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// Without a real git (a Mac without Apple's developer tools) the check runs no git at all, so
+    /// macOS never offers to install anything: nothing in `.git` can run, so nothing there is asked
+    /// about. Once git is there, what needs the user's yes is asked about before git runs.
+    #[test]
+    fn without_a_real_git_the_git_folder_is_not_looked_at() {
+        let d = tmp("nogit");
+        git(&d, &["init", "-q"]);
+        git(&d, &["config", "core.sshCommand", "ssh -i key"]);
+        crate::git::TEST_NO_GIT.with(|c| c.set(true));
+        assert!(git_out(Some(&d), &["--version".as_ref()]).is_none(), "no git is started");
+        assert!(kinds(&d).is_empty(), "{:?}", kinds(&d));
+        assert!(require(&d).is_ok() && require_git(&d).is_ok());
+        crate::git::TEST_NO_GIT.with(|c| c.set(false));
+        assert_eq!(kinds(&d), [".git/config git_setting"]);
+        assert!(question(require_git(&d)).items.iter().any(|(f, _)| f.kind == "git_setting"));
         std::fs::remove_dir_all(d).unwrap();
     }
 
