@@ -1,0 +1,70 @@
+name: Advisories
+
+# Tells somebody when a dependency that ships inside the app has a known vulnerability.
+# The lock files pin every version, so a security fix released upstream changes nothing here
+# until a person updates — this workflow is how that person finds out. It fails (GitHub then
+# e-mails the repository owner) when:
+#
+#   - an npm package the app ships has an advisory rated high or critical
+#     (`npm audit --omit=dev`: build-only tools such as the dev server are not counted; Svelte,
+#     whose runtime ships, is, because the shipped @lucide/svelte depends on it), or
+#   - a Rust crate in Cargo.lock has a vulnerability in the RustSec advisory database
+#     (`cargo audit`; crates that are merely unmaintained are listed as warnings in the log).
+#
+# Runs every Monday, whenever a lock file changes on main, and on demand:
+#   gh workflow run advisories.yml
+#
+# To accept an advisory that does not apply to the app, see "Dependencies" in docs/RELEASING.md.
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  push:
+    branches: [main]
+    paths:
+      - Cargo.lock
+      - package-lock.json
+      - .github/workflows/advisories.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: advisories-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Known vulnerabilities in dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: npm packages that ship in the app
+        run: npm audit --omit=dev --audit-level=high
+
+      # cargo-audit is a prebuilt program from the RustSec project's own releases, pinned by
+      # version and by the SHA-256 of the archive (a changed file fails the check instead of
+      # running). To update: take the new URL and digest from
+      #   gh api repos/rustsec/rustsec/releases --jq '.[] | select(.tag_name|startswith("cargo-audit/")) | .assets[] | select(.name|test("x86_64-unknown-linux-musl")) | .browser_download_url, .digest'
+      - name: Rust crates
+        if: ${{ !cancelled() }}
+        env:
+          CARGO_AUDIT_URL: https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+          CARGO_AUDIT_SHA256: 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/cargo-audit.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --retry 3 --max-time 120 --output "$archive" "$CARGO_AUDIT_URL"
+          echo "$CARGO_AUDIT_SHA256  $archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/cargo-audit"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/cargo-audit"
+          bin=$(find "$RUNNER_TEMP/cargo-audit" -type f -name cargo-audit | head -n 1)
+          if [ -z "$bin" ]; then echo "::error::cargo-audit was not found in the downloaded archive"; exit 1; fi
+          chmod +x "$bin"
+          "$bin" audit

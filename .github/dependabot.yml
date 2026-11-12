@@ -1,6 +1,15 @@
-# Keeps the commit-SHA pins of the GitHub Actions used in .github/workflows current.
+# Proposes dependency updates as pull requests, for the three places versions are pinned:
+# the Actions used by the workflows, the Rust crates (Cargo.lock) and the npm packages
+# (package-lock.json, where every version is an exact pin — a fix never arrives unasked).
+#
+# Known vulnerabilities are reported by .github/workflows/advisories.yml, every week.
+# Each pull request runs the whole CI workflow, and this repository pays for CI minutes: so the
+# two big ecosystems are checked monthly, grouped into one pull request each, and an open pull
+# request is not rebuilt every time main moves (comment `@dependabot rebase` on it when you want
+# it refreshed).
 version: 2
 updates:
+  # The commit-SHA pins of the GitHub Actions used in .github/workflows.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -8,3 +17,40 @@ updates:
     groups:
       actions:
         patterns: ['*']
+
+  # Rust crates.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    rebase-strategy: disabled
+    groups:
+      rust:
+        patterns: ['*']
+        update-types: [minor, patch]
+    ignore:
+      # Tauri's crates and its npm packages must stay on the same major.minor, or `tauri build`
+      # refuses to run — and CI does not run `tauri build`, so a one-sided bump would only be
+      # noticed when a release fails. Update Tauri by hand, both sides in one commit
+      # (docs/RELEASING.md). Patch releases still arrive here; a vulnerability in any Tauri
+      # version is still reported by the Advisories workflow.
+      - dependency-name: 'tauri'
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
+      - dependency-name: 'tauri-*'
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
+
+  # npm packages.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    rebase-strategy: disabled
+    groups:
+      npm:
+        patterns: ['*']
+        update-types: [minor, patch]
+    ignore:
+      - dependency-name: '@tauri-apps/*'
+        update-types: ['version-update:semver-major', 'version-update:semver-minor']
