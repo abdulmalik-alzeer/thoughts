@@ -1,5 +1,5 @@
 // Strings for the add-on host (freeze guard, limits on what an add-on may do unasked, the marks that
-// say what comes from an add-on, pack names, the review's Home buttons). Keys start with `lua.`
+// say what comes from an add-on, pack names). Keys start with `lua.`
 // (layerui-a).
 export default {
   en: {
@@ -16,6 +16,8 @@ export default {
     'lua.frozeKeepAnyway': 'Keep it anyway',
     'lua.safeCrashNamed': 'Thoughts stopped responding last time while the add-on “{name}” was running, so your customisations are switched off for now. Your library is untouched. Restore an earlier version of the app, or try again.',
     'lua.safeCrash': 'Thoughts stopped responding last time while your add-ons were running, so your customisations are switched off for now. Your library is untouched. Restore an earlier version of the app, or try again.',
+    'lua.reviewKeep': 'Review and keep',
+    'lua.previewOn': 'Previewing the change. Look around, then choose Review and keep, or Discard, at the top.',
     'lua.packNameTitle': 'Name this pack',
     'lua.packNameBody': 'Whoever adds the pack sees this name. Give each pack a name of its own, so that one never takes the place of another.',
     'lua.packNameHint': 'For example: Client board',
@@ -39,6 +41,8 @@ export default {
     'lua.frozeKeepAnyway': 'اعتمده مع ذلك',
     'lua.safeCrashNamed': 'توقّف التطبيق عن الاستجابة في المرة الماضية أثناء عمل الإضافة «{name}»، لذلك أوقفنا تخصيصاتك مؤقتاً. مكتبتك لم تُمَسّ. يمكنك استعادة نسخة سابقة من التطبيق أو المحاولة مجدداً.',
     'lua.safeCrash': 'توقّف التطبيق عن الاستجابة في المرة الماضية أثناء عمل إضافاتك، لذلك أوقفنا تخصيصاتك مؤقتاً. مكتبتك لم تُمَسّ. يمكنك استعادة نسخة سابقة من التطبيق أو المحاولة مجدداً.',
+    'lua.reviewKeep': 'راجِع واعتمد',
+    'lua.previewOn': 'تعاين التغيير الآن. تجوّل في التطبيق، ثم اختر «راجِع واعتمد» أو «تجاهل» في الأعلى.',
     'lua.packNameTitle': 'سمِّ هذه الحزمة',
     'lua.packNameBody': 'هذا الاسم يراه كل من يضيف الحزمة. اجعل لكل حزمة اسماً خاصاً بها حتى لا تحلّ واحدة محلّ أخرى.',
     'lua.packNameHint': 'مثال: لوحة العملاء',

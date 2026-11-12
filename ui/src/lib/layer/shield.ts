@@ -3,16 +3,28 @@
 // Used by the Review panel and the preview banner: the two places where the user decides whether a
 // customisation is kept must always look the way the app drew them.
 //
-// * Nothing from the document's CSS applies inside (no .btn, no .modal): everything is in CSS below.
-// * CSS custom properties DO inherit into a shadow tree, so the colours are pinned to fixed values
-//   (AA contrast, light and dark) on the inner wrapper instead of reading the theme's variables.
-// * The host's own box is set with inline `!important` declarations, which page CSS cannot override.
+// * No selector of the document's CSS reaches inside (no .btn, no .modal): everything is in CSS below.
+// * A shadow root stops selectors, not inheritance. Page CSS can still match the HOST element, and
+//   what it sets there would flow in (a transparent text fill, a text indent, `visibility`) or hide
+//   the host itself (`content-visibility`, `translate`, `zoom`, a mask). So:
+//     - the host gets `all: initial !important` inline, followed by its box. Inline `!important`
+//       beats every rule a stylesheet can hold, and with `all` reset the page can attach neither an
+//       animation nor a transition to it;
+//     - the inner wrapper `.sh` starts from `all: initial` too, so nothing is inherited from the host.
+//   `all` leaves out `direction` and custom properties: the direction is pinned on the host from the
+//   document's `dir`, and the colours are fixed values (AA contrast, light and dark) set on `.sh`
+//   instead of the theme's variables.
+// * A dialog (`trap`) is also put in the browser's top layer (`popover`), where no element of the
+//   page can be painted over it whatever its z-index. It steps down while one of the app's own
+//   confirm dialogs or toasts is up, so that shows above it. Where the top layer is not available the
+//   dialog is an ordinary fixed box as before.
 // * Focus: `document.activeElement` is the host for anything focused inside, so the focus trap here
 //   uses the shadow root's own `activeElement`.
 
 const CSS = `
 :host { all: initial; }
 .sh {
+  all: initial; display: block; unicode-bidi: isolate;
   --bg: #ffffff; --fg: #1a1a1a; --muted: #555555; --line: #c4c4c4; --fill: #f0f0f2; --fill2: #e2e2e6;
   --accent: #0b5cad; --on-accent: #ffffff; --warn: #8a5a00; --danger: #b3261e; --ok: #1b6e3c;
   color: var(--fg); font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "SF Arabic", "Noto Sans Arabic", system-ui, sans-serif;
@@ -95,16 +107,40 @@ export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
   while (node.firstChild) inner.appendChild(node.firstChild);
   root.appendChild(inner);
 
-  for (const d of ('display:block;visibility:visible;opacity:1;transform:none;filter:none;clip-path:none;pointer-events:auto;' + (opts.box ?? '')).split(';')) {
+  // `all` first: every property the page could have set on the host is back to its initial value,
+  // and stays there. Then the box.
+  for (const d of ('all:initial;display:block;' + (opts.box ?? '')).split(';')) {
     const i = d.indexOf(':');
     if (i > 0) node.style.setProperty(d.slice(0, i).trim(), d.slice(i + 1).trim(), 'important');
   }
 
   const html = document.documentElement;
-  const look = () => inner.classList.toggle('dark', html.dataset.mode === 'dark');
+  const look = () => {
+    inner.classList.toggle('dark', html.dataset.mode === 'dark');
+    node.style.setProperty('direction', html.dir === 'rtl' ? 'rtl' : 'ltr', 'important');
+  };
   look();
   const mo = new MutationObserver(look);
-  mo.observe(html, { attributes: true, attributeFilter: ['data-mode'] });
+  mo.observe(html, { attributes: true, attributeFilter: ['data-mode', 'dir'] });
+
+  // The top layer, for dialogs (see the notes at the top).
+  const canTop = !!opts.trap && typeof (node as any).showPopover === 'function';
+  let onTop = false;
+  // The app's own confirm dialog, or a toast (a failed Keep is reported in one), must show above it.
+  const dialogOpen = () => !!document.querySelector('.modal-bg.top, .toast-wrap > *');
+  function layer() {
+    if (!canTop || !node.isConnected) return;
+    const want = !dialogOpen();
+    if (want === onTop) return;
+    try {
+      if (want) { node.setAttribute('popover', 'manual'); (node as any).showPopover(); }
+      else (node as any).hidePopover();
+      onTop = want;
+    } catch { /* stays an ordinary fixed box */ }
+  }
+  const dialogs = canTop ? new MutationObserver(layer) : null;
+  dialogs?.observe(document.body, { childList: true, subtree: true });
+  if (canTop) queueMicrotask(layer);
 
   const items = () => Array.from(inner.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.getClientRects().length > 0);
   function onKey(e: KeyboardEvent) {
@@ -139,6 +175,8 @@ export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
     update(o: ShieldOpts) { opts = { ...opts, ...o }; },
     destroy() {
       mo.disconnect();
+      dialogs?.disconnect();
+      if (onTop) { try { (node as any).hidePopover(); } catch { /* already gone */ } }
       document.removeEventListener('focusin', onDocFocus);
       if (opts.trap) prev?.focus?.();
     },

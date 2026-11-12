@@ -98,7 +98,7 @@
     try { await fn(); } catch (e) { failed(t(failKey), e); }
     finally { busy = ''; }
   }
-  const tryIt = () => act('try', async () => { if (await tryPending()) toast(t('layer.previewOn'), { key: 'layer' }); }, 'layer.tryFailed');
+  const tryIt = () => act('try', async () => { if (await tryPending()) toast(t('lua.previewOn'), { key: 'layer' }); }, 'layer.tryFailed');
   const keep = () => {
     if (blocked) return;
     act('keep', async () => {

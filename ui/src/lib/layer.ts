@@ -877,11 +877,18 @@ export async function checkPending(open = true): Promise<PendingChange | null> {
     return null;
   }
   app.pending = p;
-  if (open && !p.running && sig(p) !== dismissed) app.showReview = true;
+  if (open && !p.running && sig(p) !== dismissed) await showReview();
   return p;
 }
 
-export function openReview() { dismissed = ''; if (app.pending) app.showReview = true; else checkPending(true); }
+/** Put the review on screen. The staged change is never loaded into the app while it is decided on:
+ *  a preview is stopped first, so staged CSS cannot draw over the review or relabel its buttons. */
+async function showReview() {
+  if (app.preview) await loadLayer().catch(() => {});
+  app.showReview = true;
+}
+
+export function openReview() { dismissed = ''; if (app.pending) showReview(); else checkPending(true); }
 export function closeReview() { dismissed = sig(app.pending); app.showReview = false; }
 
 /** The staged change froze the app when it was last tested or tried: ask before running it again. */
@@ -905,8 +912,10 @@ export async function startCustomise(prompt: string): Promise<string | null> {
 /** "Try it": load the staged layer into the running app. False when the person decided not to. */
 export async function tryPending(): Promise<boolean> {
   if (!(await sureDespiteFreeze('try'))) return false;
-  await loadLayer({ preview: true });
+  // Close the review before anything staged is loaded (see `showReview`).
   closeReview();
+  try { await loadLayer({ preview: true }); }
+  catch (e) { dismissed = ''; app.showReview = !!app.pending; throw e; }
   return true;
 }
 
