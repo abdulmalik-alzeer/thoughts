@@ -19,7 +19,7 @@ Check every item folder (`*/*/`), `INDEX.md`, the todo lists, `routines/` and `m
 - **Todos:** lines that are not one task per line; malformed `@due(...)` dates; overdue items; finished work still unticked.
 - **Meetings:** file names without a date; action items that never became todos.
 - **Logs:** over about 400 lines without archiving; entries not newest-first.
-- **Files and links:** stray files that fit none of README / log / todo / notes / meetings / outputs; broken links; working notes sitting in `outputs/` or deliverables sitting in `notes/`.
+- **Files and links:** stray files that fit none of README / log / todo / notes / meetings / outputs (an `images/` folder next to a note holds that note's pictures and is not stray; a picture in it that no note links to may be mentioned, never deleted); broken links; working notes sitting in `outputs/` or deliverables sitting in `notes/`.
 - **Language:** files that mix languages against the working language recorded in CLAUDE.md.
 - **Privacy:** anything that looks like a password, an ID, bank or card number; one client's details inside another item or inside `me/`.
 
