@@ -56,16 +56,47 @@
     return out.sort((a, b) => a.z - b.z);
   });
 
+  // Turns only while it can be seen and motion is welcome: never with Reduce motion (the system's or
+  // the app's own, Settings › Accessibility), and paused while the window is hidden or in the
+  // background, or the emblem is off screen or hidden by the layout. At most 20 frames a second.
+  let el: HTMLDivElement;
   onMount(() => {
-    if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    let raf = 0, last = performance.now();
-    const tick = (now: number) => { angle += (now - last) * 0.00006; last = now; raf = requestAnimationFrame(tick); };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    const osReduce = matchMedia('(prefers-reduced-motion: reduce)');
+    const root = document.documentElement;
+    let onScreen = false, focused = document.hasFocus(), raf = 0, last = 0;
+    const allowed = () => !osReduce.matches && root.dataset.motion !== 'reduce' && onScreen && focused && document.visibilityState === 'visible';
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick);
+      if (now - last < 50) return;
+      angle += Math.min(now - last, 100) * 0.00006;
+      last = now;
+    };
+    const update = () => {
+      if (allowed()) { if (!raf) { last = performance.now(); raf = requestAnimationFrame(tick); } }
+      else if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    };
+    const io = new IntersectionObserver((es) => { onScreen = es.some((x) => x.isIntersecting); update(); });
+    io.observe(el);
+    const mo = new MutationObserver(update);
+    mo.observe(root, { attributes: true, attributeFilter: ['data-motion'] });
+    const onFocus = () => { focused = true; update(); };
+    const onBlur = () => { focused = false; update(); };
+    osReduce.addEventListener('change', update);
+    document.addEventListener('visibilitychange', update);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      io.disconnect(); mo.disconnect();
+      osReduce.removeEventListener('change', update);
+      document.removeEventListener('visibilitychange', update);
+      window.removeEventListener('focus', onFocus);
+      window.removeEventListener('blur', onBlur);
+    };
   });
 </script>
 
-<div class="emblem" style="width:{size}px;height:{size}px">
+<div class="emblem" bind:this={el} style="width:{size}px;height:{size}px">
   <div class="halo"></div>
   <svg viewBox="0 0 100 100" aria-hidden="true">
     {#each faces as f}
