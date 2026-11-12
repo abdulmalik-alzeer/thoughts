@@ -829,7 +829,11 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     // The same library in a new place (the user said so): its chats follow it.
     if q.get("library").map(String::as_str) == Some("moved") {
         if let (Some(was), Some(now)) = (&old.library_path, &new.library_path) {
-            if was != now { wraps::library_moved(&st, was, now).await; }
+            if was != now {
+                wraps::library_moved(&st, was, now).await;
+                // …and so does the history the app keeps for it (before anything starts a new one there).
+                crate::log::ok_or_warn("history: could not move the library's history with it", git::follow_move(&st, std::path::Path::new(was), std::path::Path::new(now)).await);
+            }
         }
     }
     st.emit(json!({"type": "settings.changed"}));
@@ -5277,6 +5281,39 @@ mod tests {
         assert!(validate_with(&s, None, |_| true).is_ok());
         s.sync.target = "online".into();
         assert!(validate_with(&s, None, |_| true).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_library_whose_folder_moved_keeps_the_history_the_app_keeps_for_it() {
+        let root = dunce::canonicalize(std::env::temp_dir()).unwrap().join(format!("thoughts-moved-{}", uuid::Uuid::new_v4()));
+        let lib = root.join("Notes");
+        t::write(&lib, "note.md", "first\n");
+        let st = Arc::new(AppState::for_test());
+        {
+            let mut s = st.settings.write().await;
+            s.library_path = Some(lib.to_string_lossy().to_string());
+            (s.onboarded, s.sync.mode) = (true, "none".into());
+            *s = std::mem::take(&mut *s).with_defaults();
+        }
+        git::start_history(&st, &lib).await.unwrap();
+        t::write(&lib, "note.md", "second\n");
+        { let _g = st.git_lock.lock().await; assert!(git::commit_all(&st, &lib, "an edit").await.unwrap()); }
+        let store = git::history_store(&lib);
+        // The folder is moved (in Finder, say) and chosen again as the same library.
+        let moved = root.join("Notes (moved)");
+        std::fs::rename(&lib, &moved).unwrap();
+        let mut wanted = st.settings.read().await.clone();
+        wanted.library_path = Some(moved.to_string_lossy().to_string());
+        put_settings(State(st.clone()), q(&[("library", "moved")]), Json(wanted)).await.unwrap();
+        assert_eq!(git::repo_of(&moved), git::Repo::Kept(git::history_store(&moved)));
+        assert!(!store.exists(), "one history, not two");
+        let h = git::history(&st, &moved, None, 50).await.unwrap();
+        assert_eq!(h.len(), 2, "every earlier version is still there: {h:?}");
+        assert_eq!(git::file_at(&st, &moved, "note.md", h[1]["hash"].as_str().unwrap()).await.unwrap(), b"first\n");
+        // A folder that has a history of its own already keeps that one.
+        assert!(!git::follow_move(&st, &lib, &moved).await.unwrap());
+        std::fs::remove_dir_all(git::history_store(&moved)).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 }

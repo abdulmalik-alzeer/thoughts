@@ -74,6 +74,22 @@ pub fn history_store(dir: &Path) -> PathBuf {
     crate::paths::history_dir().join(format!("{}-{hex}", if name.is_empty() { "library" } else { name.as_str() }))
 }
 
+/// The library that was in folder `from` is now in folder `to` (moved or renamed, and chosen again):
+/// the history the app keeps for it, which is filed under the folder's place, goes with it, and so
+/// does what is known about its backups. (A library's own `.git` moved with the folder by itself.)
+/// Nothing changes when `to` already has a history, or when `from` had none kept by the app.
+/// Returns whether a history was moved.
+pub async fn follow_move(state: &AppState, from: &Path, to: &Path) -> anyhow::Result<bool> {
+    let _g = state.git_lock.lock().await;
+    let (old, new) = (history_store(from), history_store(to));
+    if old == new || !old.join("HEAD").is_file() || repo_of(to) != Repo::Missing || std::fs::symlink_metadata(&new).is_ok() { return Ok(false); }
+    std::fs::rename(&old, &new)?;
+    let noted = backup_state().get(&backup_key(from)).and_then(Value::as_object).cloned().filter(|e| !e.is_empty());
+    if let Some(e) = noted { change_backup_state(to, |n| if n.is_empty() { *n = e; }); }
+    crate::log::info("history: the library's folder moved; its history went with it");
+    Ok(true)
+}
+
 /// Which repository belongs to `dir`: its own when it has one, else the one the app keeps for it.
 pub fn repo_of(dir: &Path) -> Repo {
     if std::fs::symlink_metadata(dir.join(".git")).is_ok() { return Repo::Own; }
