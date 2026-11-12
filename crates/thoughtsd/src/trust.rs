@@ -799,11 +799,44 @@ pub fn accept(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Record a folder as trusted the way it is right now, without a question. Only for the daemon's own
-/// writes into a folder that was trusted just before (a routine the user reviewed in the app, see
-/// `routines::renew_trust`) — never for a path or a request that comes from a client: the user's
-/// yes goes through `accept`.
+/// Record a folder as trusted the way it is right now, without a question. Never for a path or a
+/// request that comes from a client: the user's yes goes through `accept`. (The daemon's own write
+/// of a reviewed routine goes through `renew_after_app_write`.)
 pub fn trust(p: &Path) -> anyhow::Result<()> { Ok(record(&canon(p), Scan::of(p).entry())?) }
+
+/// One app write with trust renewal at a time.
+static APP_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The app itself writes (or removes) one file under a library's `.claude` — a routine the user
+/// reviewed. `write` runs in between two looks at the folder. The library's record is renewed only
+/// when the folder was trusted just before, everything else trust looks at (findings, assistant
+/// files and their contents, git's part) is exactly what it was, and `file` then holds exactly
+/// `expected` (`None`: it is gone). Otherwise the record is left alone, so the usual question
+/// appears. Returns whether the record was renewed.
+pub fn renew_after_app_write(path: &Path, file: &Path, expected: Option<&[u8]>, write: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<bool> {
+    let _g = APP_WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let rel = file.strip_prefix(path).map(|r| r.to_string_lossy().replace('\\', "/")).unwrap_or_default();
+    if rel.is_empty() { anyhow::bail!("not a file inside the folder"); }
+    let shown_rel = shown(&rel);
+    // Everything trust depends on, except the one file the app writes.
+    let rest = |s: &Scan| {
+        let findings: Vec<Finding> = s.findings.iter().filter(|f| f.file != shown_rel).cloned().collect();
+        let files: Vec<(String, String)> = s.files.iter().filter(|(f, _)| **f != rel).map(|(f, m)| (f.clone(), m.clone())).collect();
+        (findings, files, s.git_marks.clone(), s.trustable)
+    };
+    let on_disk = || std::fs::symlink_metadata(file).ok().filter(|m| m.is_file()).and_then(|_| std::fs::read(file).ok());
+    let trusted = check(path, Scope::Whole).is_ok();
+    let before = rest(&Scan::of(path));
+    write()?;
+    if !trusted { return Ok(false); }
+    let after = Scan::of(path);
+    if rest(&after) != before || on_disk().as_deref() != expected || !after.trustable { return Ok(false); }
+    // Nothing moved while it was being looked at.
+    let again = Scan::of(path);
+    if again.state() != after.state() || again.files != after.files || on_disk().as_deref() != expected { return Ok(false); }
+    record(&canon(path), after.entry())?;
+    Ok(true)
+}
 
 /// Compare the assistant-related files of a second checkout (`copy`, e.g. the reorganize working
 /// copy, which holds the *recorded* state) with the library folder the user trusted (`trusted`,
