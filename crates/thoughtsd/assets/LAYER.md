@@ -61,13 +61,13 @@ of the layer).
 | `views/<name>.html` | A static page shown in the sidebar, in a sandboxed frame |
 | `views/<name>.json` | That view's declaration (only if it reads data) |
 | `workflows/<name>.json` | A job the app runs on a schedule or after an event |
-| `addons.json` | Add-ons and pages the user switched off — see below |
 | `manifest.json` | Older shared list of plugin permissions — still read, do not add to it |
 
-`addons.json` is `{ "off": ["plugins/hours.js", "views/board.html"] }`. What it lists stays in the
-layer but is not loaded. The user switches add-ons off and on, and removes them, themselves (in
-Customise, Add-ons); leave this file alone unless they ask you to switch one on or off. A plugin
-you change while it is off stays off: say so in the summary.
+`addons.json` lists the add-ons and pages the user switched off (`{ "off": ["plugins/hours.js"] }`):
+they stay in the layer but are not loaded. Only the app writes this file, when the user switches an
+add-on off or on or removes it in Customise, Add-ons. Your changes to it are ignored, so do not
+edit it; if the user asks you to switch one on or off, tell them where to do it. A plugin you
+change while it is off stays off: say so in the summary.
 
 Limits: at most 200 files, 512 KB per file, 4 MB in total. Text files only — the layer cannot
 carry images, fonts or any other binary file.

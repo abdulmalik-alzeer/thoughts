@@ -184,15 +184,40 @@ pub fn unsupported_message(arabic: bool) -> &'static str {
 /// The declaration of one plugin or view: its own `<stem>.json` beside it, else its entry in
 /// `manifest.json` (`plugins` / `views`), else nothing (no permissions).
 /// → `{permissions, write, apiVersion, description, unsupported, message?}`.
-pub fn resolve_decl(dir: &Path, sub: &str, file: &str, shared: &Value, arabic: bool) -> Value {
+/// Which declaration is in effect for `sub/file`, the one rule every reader and writer of
+/// declarations follows: the item's own `<stem>.json` when it is a regular file (never a link) of at
+/// most 64 KB holding a JSON object, else its entry in `manifest.json` (`shared`) when that is an
+/// object, else none.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeclIn {
+    /// The own file, layer-relative (`plugins/hours.json`), with what it says.
+    Own(String, Value),
+    /// The entry `shared[sub][file]`.
+    Manifest(Value),
+    None,
+}
+
+pub fn decl_in_effect(dir: &Path, sub: &str, file: &str, shared: &Value) -> DeclIn {
     let stem = Path::new(file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-    let own_path = dir.join(sub).join(format!("{stem}.json"));
+    let rel = format!("{sub}/{stem}.json");
+    let own_path = dir.join(&rel);
     let own = std::fs::symlink_metadata(&own_path).ok().filter(|m| m.is_file() && m.len() <= 64 * 1024)
         .and_then(|_| std::fs::read_to_string(&own_path).ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(Value::is_object);
-    let (decl, version) = match &own {
-        Some(o) => (o.clone(), o["apiVersion"].as_u64().unwrap_or(API_VERSION)),
-        None => (shared[sub][file].clone(), shared["apiVersion"].as_u64().unwrap_or(API_VERSION)),
+    match own {
+        Some(o) => DeclIn::Own(rel, o),
+        None if shared[sub][file].is_object() => DeclIn::Manifest(shared[sub][file].clone()),
+        None => DeclIn::None,
+    }
+}
+
+pub fn resolve_decl(dir: &Path, sub: &str, file: &str, shared: &Value, arabic: bool) -> Value {
+    let found = decl_in_effect(dir, sub, file, shared);
+    let (decl, version) = match &found {
+        DeclIn::Own(_, o) => (o.clone(), o["apiVersion"].as_u64().unwrap_or(API_VERSION)),
+        DeclIn::Manifest(m) => (m.clone(), shared["apiVersion"].as_u64().unwrap_or(API_VERSION)),
+        DeclIn::None => (Value::Null, shared["apiVersion"].as_u64().unwrap_or(API_VERSION)),
     };
+    let own = matches!(found, DeclIn::Own(..)).then_some(());
     let allowed = if sub == "views" { VIEW_PERMISSIONS } else { PERMISSIONS };
     let mut permissions: Vec<&str> = decl["permissions"].as_array().into_iter().flatten().filter_map(Value::as_str)
         .filter_map(|p| allowed.iter().find(|a| **a == p).copied()).collect();
@@ -217,13 +242,18 @@ pub async fn manifest() -> Value { manifest_of(&Dirs::real().layer) }
 pub fn manifest_of(dir: &Path) -> Value { manifest_lang(dir, false) }
 
 /// Same, with user-facing messages in the UI language.
-pub fn manifest_lang(dir: &Path, arabic: bool) -> Value {
+pub fn manifest_lang(dir: &Path, arabic: bool) -> Value { manifest_with(dir, arabic, &switched_off(dir)) }
+
+/// The staged layer for "Try it": what the user switched off stays off. The switched-off list is
+/// the live layer's, since only the app writes it and a staged copy of it is never kept.
+pub fn manifest_preview(staging: &Path, layer: &Path, arabic: bool) -> Value { manifest_with(staging, arabic, &switched_off(layer)) }
+
+fn manifest_with(dir: &Path, arabic: bool, off: &BTreeSet<String>) -> Value {
     let read = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap_or_default();
     let parsed = |p: &str| std::fs::read_to_string(dir.join(p)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
     let object = |p: &str| Some(parsed(p)).filter(Value::is_object).unwrap_or(Value::Null);
     let shared = parsed("manifest.json");
     // What the user switched off is not handed to the UI at all: it is listed under `off` only.
-    let off = switched_off(dir);
     let list = |sub: &str, ext: &str| -> Vec<Value> {
         let mut v: Vec<Value> = std::fs::read_dir(dir.join(sub)).into_iter().flatten().flatten()
             .filter(|e| e.path().extension().map_or(false, |x| x == ext) && !e.file_name().to_string_lossy().starts_with('.'))
@@ -376,30 +406,35 @@ pub async fn remove_in(g: Git<'_>, dir: &Path, path: &str) -> anyhow::Result<Str
 /// wherever its declaration lives. The add-on may stop working in the parts that needed it.
 pub async fn withdraw_in(g: Git<'_>, dir: &Path, path: &str, permission: &str) -> anyhow::Result<String> {
     let (sub, file) = known_item(dir, path)?;
-    let stem = file.rsplit_once('.').map_or(file, |(s, _)| s).to_string();
-    let shared = std::fs::read_to_string(dir.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
-    if !resolve_decl(dir, sub, file, &shared, false)["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == permission)) {
-        return Err(crate::tr::err("addon.no_permission", &[]));
-    }
+    let shared_of = |dir: &Path| std::fs::read_to_string(dir.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+    let granted = |dir: &Path| resolve_decl(dir, sub, file, &shared_of(dir), false)["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == permission));
+    if !granted(dir) { return Err(crate::tr::err("addon.no_permission", &[])); }
     let act = Act { kind: "permission".into(), item: path.to_string(), detail: permission.to_string() };
-    let own = format!("{sub}/{stem}.json");
     app_change(g, dir, &format!("Take away {permission} from {path}"), act, |dir| {
         let take = |decl: &mut serde_json::Map<String, Value>| {
             if let Some(Value::Array(list)) = decl.get_mut("permissions") { list.retain(|p| p != permission); }
             if permission == "library:write" { decl.remove("write"); }
         };
-        // The same place `resolve_decl` reads: the add-on's own file, else its manifest entry.
-        if let Some(mut decl) = read_object(&dir.join(&own)).filter(|_| std::fs::symlink_metadata(dir.join(&own)).map_or(false, |m| m.is_file())) {
-            take(&mut decl);
-            write_json(&dir.join(&own), &Value::Object(decl))?;
-            return Ok(vec![own.clone()]);
-        }
-        let mut m = read_object(&dir.join("manifest.json")).ok_or_else(|| crate::tr::err("addon.no_permission", &[]))?;
-        let decl = m.get_mut(sub).and_then(Value::as_object_mut).and_then(|s| s.get_mut(file)).and_then(Value::as_object_mut)
-            .ok_or_else(|| crate::tr::err("addon.no_permission", &[]))?;
-        take(decl);
-        write_json(&dir.join("manifest.json"), &Value::Object(m))?;
-        Ok(vec!["manifest.json".into()])
+        // Exactly the declaration that is in effect (`decl_in_effect`, the rule `resolve_decl` reads by).
+        let touched = match decl_in_effect(dir, sub, file, &shared_of(dir)) {
+            DeclIn::Own(rel, Value::Object(mut decl)) => {
+                take(&mut decl);
+                write_json(&dir.join(&rel), &Value::Object(decl))?;
+                rel
+            }
+            DeclIn::Manifest(_) => {
+                let mut m = read_object(&dir.join("manifest.json")).ok_or_else(|| crate::tr::err("addon.no_permission", &[]))?;
+                let decl = m.get_mut(sub).and_then(Value::as_object_mut).and_then(|s| s.get_mut(file)).and_then(Value::as_object_mut)
+                    .ok_or_else(|| crate::tr::err("addon.no_permission", &[]))?;
+                take(decl);
+                write_json(&dir.join("manifest.json"), &Value::Object(m))?;
+                "manifest.json".to_string()
+            }
+            _ => return Err(crate::tr::err("addon.no_permission", &[])),
+        };
+        // Never report success while the permission is still granted (the change is then undone).
+        if granted(dir) { anyhow::bail!("the permission {permission} is still granted to {path} after it was taken away"); }
+        Ok(vec![touched])
     }).await
 }
 
@@ -691,7 +726,10 @@ pub async fn history_page_in(g: Git<'_>, dir: &Path, offset: usize, limit: usize
         let summary = title_of(&marks, &p[0], &p[3], &p[4], ar, 0);
         let mut v = json!({"hash": p[0], "short": p[1], "summary": summary, "subject": summary, "date": p[2], "files": files.remove(&p[0]).unwrap_or_default(),
             "kind": kind, "entry": entry_of(&marks, &p[0], &p[3], &clean_subject(&p[4])), "undoable": kind == "change" || kind == "undo", "undone": !marks.in_effect(&p[0])});
-        if let Some(pk) = marks.packs.get(&p[0]) { v["pack"] = json!(pk); }
+        if let Some(pk) = marks.packs.get(&p[0]) {
+            v["pack"] = json!(pk);
+            v["pack"]["code"] = json!(crate::packs::fingerprint_code(&pk.fingerprint));
+        }
         v
     }).collect()
 }
@@ -1069,6 +1107,83 @@ mod tests {
         for bad in ["plugins/../manifest.json", "custom.css", "plugins/gone.js", "plugins/a b.js", "views/x.js", "plugins/hours.json"] {
             assert!(switch_in(st, &d.layer, bad, false).await.is_err() && remove_in(st, &d.layer, bad).await.is_err(), "{bad}");
         }
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    /// Only the app's own switch puts an add-on back on: a pack cannot carry the switched-off list,
+    /// a change prepared in the staging copy cannot keep an edit of it (nor show it in "Try it"),
+    /// and an edit made outside the app is set aside.
+    #[tokio::test]
+    async fn only_the_app_switches_an_add_on_back_on() {
+        let (st, d) = testutil::layer("addon-onlyapp").await;
+        std::fs::write(d.layer.join("plugins/a.js"), "export default () => {}\n").unwrap();
+        st.commit_all(&d.layer, "Add a").await.unwrap();
+        switch_in(st, &d.layer, "plugins/a.js", false).await.unwrap();
+        let off = || switched_off(&d.layer).contains("plugins/a.js");
+        let pack = json!({"format": "thoughts-pack", "version": 1, "kind": "feature", "name": "x", "files": {ADDONS_FILE: "{\"off\": []}\n", "plugins/b.js": "export default () => {}\n"}});
+        assert!(crate::packs::check_pack(&pack).is_err());
+        assert!(crate::packs::check_path(ADDONS_FILE).is_err());
+        // Prepared in staging (as an assistant run could): not part of the change, never kept, not tried.
+        crate::staging::recreate(st, &d, "customize", None).await.unwrap();
+        std::fs::write(d.staging.join(ADDONS_FILE), "{\"off\": []}\n").unwrap();
+        std::fs::write(d.staging.join("plugins/b.js"), "export default () => {}\n").unwrap();
+        let p = crate::staging::pending(st, &d, false).await;
+        assert_eq!(p["files"], json!([{"path": "plugins/b.js", "status": "added"}]));
+        assert_eq!(p["ignored"], json!([ADDONS_FILE]));
+        let tried = manifest_preview(&d.staging, &d.layer, false);
+        assert_eq!(tried["plugins"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect::<Vec<_>>(), ["b.js"]);
+        crate::staging::apply(st, &d, false, p["signature"].as_str()).await.unwrap();
+        assert!(off(), "still off after the change was kept");
+        // Edited by hand in the live layer: taken out before anything loads.
+        std::fs::write(d.layer.join(ADDONS_FILE), "{\"off\": []}\n").unwrap();
+        crate::staging::guard(st, &d, false).await;
+        assert!(off());
+        assert!(!manifest_of(&d.layer)["plugins"].as_array().unwrap().iter().any(|x| x["name"] == "a.js"));
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    /// Taking a permission away edits exactly the declaration in effect (the one `resolve_decl`
+    /// reads), and never reports success while the permission is still granted.
+    #[tokio::test]
+    async fn a_permission_is_taken_from_the_declaration_in_effect() {
+        let (st, d) = testutil::layer("addon-decl").await;
+        let w = |p: &str, t: &str| std::fs::write(d.layer.join(p), t).unwrap();
+        let granted = |name: &str| manifest_of(&d.layer)["plugins"].as_array().unwrap().iter().find(|x| x["name"] == name).unwrap()["permissions"].clone();
+        w("manifest.json", r#"{"apiVersion":1,"plugins":{"big.js":{"permissions":["todos:read"]},"odd.js":{"permissions":["todos:read"]},"linked.js":{"permissions":["todos:read"]},"shared.js":{"permissions":["todos:read","storage"]}}}"#);
+        for n in ["big", "odd", "linked", "shared"] { w(&format!("plugins/{n}.js"), "export default () => {}\n"); }
+        // Own files that are not in effect: too large, not an object, a link.
+        let big = format!(r#"{{"apiVersion":1,"permissions":["storage"],"description":"{}"}}"#, "x".repeat(70 * 1024));
+        w("plugins/big.json", &big);
+        w("plugins/odd.json", r#"["todos:read"]"#);
+        let outside = d.home.join("outside.json");
+        std::fs::write(&outside, r#"{"apiVersion":1,"permissions":["storage"]}"#).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, d.layer.join("plugins/linked.json")).unwrap();
+        st.commit_all(&d.layer, "Add four").await.unwrap();
+        for n in ["big.js", "odd.js", "linked.js"] {
+            if n == "linked.js" && !cfg!(unix) { continue; }
+            assert!(matches!(decl_in_effect(&d.layer, "plugins", n, &serde_json::from_str(&std::fs::read_to_string(d.layer.join("manifest.json")).unwrap()).unwrap()), DeclIn::Manifest(_)), "{n}");
+            assert_eq!(granted(n), json!(["todos:read"]), "{n}: the manifest entry is in effect");
+            withdraw_in(st, &d.layer, &format!("plugins/{n}"), "todos:read").await.unwrap();
+            assert_eq!(granted(n), json!([]), "{n}: taken away where it was granted");
+        }
+        assert_eq!(std::fs::read_to_string(d.layer.join("plugins/big.json")).unwrap(), big, "the file not in effect is left alone");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), r#"{"apiVersion":1,"permissions":["storage"]}"#, "nothing is written through a link");
+        // A manifest entry shared with others: only this add-on's entry changes.
+        withdraw_in(st, &d.layer, "plugins/shared.js", "storage").await.unwrap();
+        assert_eq!(granted("shared.js"), json!(["todos:read"]));
+        // A permission granted twice is gone entirely.
+        w("plugins/twice.js", "export default () => {}\n");
+        w("plugins/twice.json", r#"{"apiVersion":1,"permissions":["storage","todos:read","storage"]}"#);
+        st.commit_all(&d.layer, "Add twice").await.unwrap();
+        withdraw_in(st, &d.layer, "plugins/twice.js", "storage").await.unwrap();
+        assert_eq!(granted("twice.js"), json!(["todos:read"]));
+        // Nothing declared: refused, nothing recorded.
+        w("plugins/bare.js", "export default () => {}\n");
+        st.commit_all(&d.layer, "Add bare").await.unwrap();
+        let before = history_in(st, &d.layer).await.len();
+        assert!(withdraw_in(st, &d.layer, "plugins/bare.js", "storage").await.is_err());
+        assert_eq!(history_in(st, &d.layer).await.len(), before);
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 

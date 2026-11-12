@@ -125,7 +125,7 @@ async fn layer(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     if preview {
         if !d.staging.join(".git").exists() { return Err(crate::tr::err("layer.no_pending", &[]).into()); }
         staging::sync(Git(Some(&st)), &d).await;
-        return Ok(Json(applayer::manifest_lang(&d.staging, ar)));
+        return Ok(Json(applayer::manifest_preview(&d.staging, &d.layer, ar)));
     }
     Ok(Json(applayer::manifest_lang(&d.layer, ar)))
 }

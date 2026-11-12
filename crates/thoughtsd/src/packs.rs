@@ -10,7 +10,9 @@ pub const MAX_FILES: usize = 200;
 pub const MAX_FILE_BYTES: usize = 512 * 1024;
 pub const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
-const TOP_FILES: &[&str] = &["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json", crate::applayer::ADDONS_FILE];
+// (`addons.json`, the switched-off list, is not one: only the app's own switch and remove write it,
+// so no pack, review or outside edit can switch an add-on back on.)
+const TOP_FILES: &[&str] = &["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json"];
 const TOP_DIRS: &[&str] = &["plugins", "views", "workflows"];
 
 /// Is `path` a place a customisation may live? Relative, forward slashes, no `..`, no dotfiles,
@@ -33,7 +35,7 @@ pub fn check_path(path: &str) -> anyhow::Result<()> {
         1 => TOP_FILES.contains(&parts[0]),
         n => TOP_DIRS.contains(&parts[0]) && n <= 6,
     };
-    if !ok { return Err(bad("not a customisation file (allowed: custom.css, themes.json, home.json, nav.json, todos.json, addons.json, manifest.json, plugins/, views/, workflows/)")); }
+    if !ok { return Err(bad("not a customisation file (allowed: custom.css, themes.json, home.json, nav.json, todos.json, manifest.json, plugins/, views/, workflows/)")); }
     Ok(())
 }
 
@@ -66,9 +68,9 @@ pub fn check_pack(pack: &Value) -> anyhow::Result<BTreeMap<String, String>> {
     Ok(out)
 }
 
-/// A pack's fingerprint: a short code calculated from exactly what it would bring (its kind and
-/// every file with its content), so two people can tell they hold the same pack by reading it out.
-/// What the pack calls itself plays no part, and a fingerprint written in the file is never trusted.
+/// A pack's fingerprint: the full SHA-256 (64 hex digits) of exactly what it would bring (its kind
+/// and every file with its content). Every decision compares this full value. What the pack calls
+/// itself plays no part, and a fingerprint written in the file is only compared, never trusted.
 pub fn fingerprint(kind: &str, files: &BTreeMap<String, String>) -> String {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -80,9 +82,18 @@ pub fn fingerprint(kind: &str, files: &BTreeMap<String, String>) -> String {
         h.update((text.len() as u64).to_le_bytes());
         h.update(text.as_bytes());
     }
-    let hex = format!("{:X}", h.finalize());
-    format!("{}-{}-{}", &hex[0..4], &hex[4..8], &hex[8..12])
+    format!("{:x}", h.finalize())
 }
+
+/// The fingerprint as people compare it by eye or read it out: its first 128 bits, as eight groups
+/// of four (`3F9A-12C4-…`). Only for showing; decisions use the full fingerprint.
+pub fn fingerprint_code(full: &str) -> String {
+    let hex: Vec<char> = full.chars().filter(char::is_ascii_hexdigit).take(32).map(|c| c.to_ascii_uppercase()).collect();
+    hex.chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join("-")
+}
+
+/// Is `s` a full fingerprint (64 hex digits)?
+pub fn full_fingerprint(s: &str) -> bool { s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) }
 
 /// What a pack says it is, each claim one short clean line: `(name, author, version, description)`.
 pub fn claims(pack: &Value) -> (String, String, String, String) {
@@ -91,22 +102,27 @@ pub fn claims(pack: &Value) -> (String, String, String, String) {
 }
 
 /// A pack checked before anything is staged, for the import dialog: what it says it is (its
-/// maker's words), its fingerprint as calculated here, whether the fingerprint written in it
-/// matches (`null` when it has none), how many of its files differ from the layer at `layer`, and
-/// the newest earlier pack of the same name that was kept here. Refusals are in the UI language.
+/// maker's words), its fingerprint as calculated here (`fingerprint` in full, `code` to show),
+/// whether the fingerprint written in it matches in full (`null` when it has none), how many of its
+/// files differ from the layer at `layer`, and the newest earlier pack of the same name kept here
+/// (`same`: exactly this pack, by full fingerprint). Refusals are in the UI language.
 pub fn inspect(pack: &Value, layer: &Path, kept: &[(String, crate::applayer::PackMark)]) -> anyhow::Result<Value> {
     let files = check_pack(pack)?;
     let kind = if pack["kind"] == "feature" { "feature" } else { "full" };
     let print = fingerprint(kind, &files);
-    let claimed = pack["fingerprint"].as_str().map(|f| clean_line(f, 20));
+    let claimed = pack["fingerprint"].as_str().map(|f| clean_line(f, 80));
     let (name, author, version, description) = claims(pack);
     let mine = collect(layer);
     let changes = files.iter().filter(|(p, t)| mine.get(p.as_str()) != Some(*t)).count();
-    let earlier = kept.iter().rev().find(|(_, p)| !name.is_empty() && p.name == name).map(|(h, p)| json!({"entry": h, "version": p.version, "author": p.author, "fingerprint": p.fingerprint}));
+    let earlier = kept.iter().rev().find(|(_, p)| !name.is_empty() && p.name == name).map(|(h, p)| json!({
+        "entry": h, "version": p.version, "author": p.author, "code": fingerprint_code(&p.fingerprint),
+        "same": full_fingerprint(&p.fingerprint) && p.fingerprint.eq_ignore_ascii_case(&print),
+    }));
     Ok(json!({
         "name": name, "author": author, "version": version, "description": description, "kind": kind,
-        "files": files.keys().collect::<Vec<_>>(), "fingerprint": print,
-        "claimed": claimed, "matches": claimed.as_ref().map(|c| c.eq_ignore_ascii_case(&print)),
+        "files": files.keys().collect::<Vec<_>>(), "fingerprint": print, "code": fingerprint_code(&print),
+        "claimed": claimed.as_deref().map(fingerprint_code),
+        "matches": claimed.as_ref().map(|c| full_fingerprint(c) && c.eq_ignore_ascii_case(&print)),
         "changes": changes, "earlier": earlier, "appVersion": clean_line(pack["appVersion"].as_str().unwrap_or(""), 30),
     }))
 }
@@ -452,7 +468,9 @@ mod tests {
         let pack = export_as(&d.layer, &who, Some(&["plugins/board.js".to_string()])).unwrap();
         assert_eq!((&pack["author"], &pack["packVersion"]), (&json!("Sara[U+202E]"), &json!("1.2")));
         let print = pack["fingerprint"].as_str().unwrap().to_string();
-        assert!(regex::Regex::new(r"^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$").unwrap().is_match(&print), "{print}");
+        assert!(full_fingerprint(&print), "the full SHA-256: {print}");
+        let code = fingerprint_code(&print);
+        assert!(regex::Regex::new(r"^([0-9A-F]{4}-){7}[0-9A-F]{4}$").unwrap().is_match(&code), "128 bits to compare by eye: {code}");
         // The same content under another name has the same fingerprint; other content another one.
         let renamed = export_as(&d.layer, &Identity { name: "Something else", ..who }, Some(&["plugins/board.js".to_string()])).unwrap();
         assert_eq!(renamed["fingerprint"], pack["fingerprint"]);
@@ -462,12 +480,17 @@ mod tests {
         let (st2, d2) = crate::applayer::testutil::layer("identity-in").await;
         let i = inspect(&pack, &d2.layer, &[]).unwrap();
         assert_eq!((&i["name"], &i["author"], &i["version"], &i["fingerprint"], &i["matches"]), (&json!("Kanban"), &json!("Sara[U+202E]"), &json!("1.2"), &json!(print), &json!(true)));
+        assert_eq!(i["code"], json!(code));
         assert_eq!(i["changes"], 1);
         // A file changed after it was made: the fingerprint written in it no longer matches.
         let mut tampered = pack.clone();
         tampered["files"]["plugins/board.js"] = json!("export default () => { steal() }\n");
         let t = inspect(&tampered, &d2.layer, &[]).unwrap();
-        assert_eq!((t["matches"].clone(), t["claimed"].clone()), (json!(false), json!(print)));
+        assert_eq!((t["matches"].clone(), t["claimed"].clone()), (json!(false), json!(code)));
+        // Only the full fingerprint counts: a file claiming just the short code it shows does not match.
+        let mut short = pack.clone();
+        short["fingerprint"] = json!(code);
+        assert_eq!(inspect(&short, &d2.layer, &[]).unwrap()["matches"], false);
         assert_ne!(t["fingerprint"], json!(print));
         let mut bare = pack.clone();
         bare.as_object_mut().unwrap().remove("fingerprint");
@@ -486,7 +509,10 @@ mod tests {
         assert_eq!(crate::applayer::history_page_in(st2, &d2.layer, 0, 1, true).await[0]["summary"], "إضافة الحزمة «Kanban»");
         let kept_packs = crate::applayer::kept_packs(st2, &d2.layer).await;
         let again = inspect(&pack, &d2.layer, &kept_packs).unwrap();
-        assert_eq!((again["earlier"]["version"].as_str(), again["changes"].as_u64()), (Some("1.2"), Some(0)));
+        assert_eq!((again["earlier"]["version"].as_str(), again["earlier"]["same"].as_bool(), again["changes"].as_u64()), (Some("1.2"), Some(true), Some(0)));
+        // Another pack under the same name is not "the same", whatever its first digits.
+        let other = inspect(&tampered, &d2.layer, &kept_packs).unwrap();
+        assert_eq!(other["earlier"]["same"], false);
         assert!(already_in(&pack, &d2.layer));
         let _ = st;
         std::fs::remove_dir_all(&d.home).unwrap();

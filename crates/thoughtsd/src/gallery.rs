@@ -129,7 +129,8 @@ pub fn list(ar: bool, layer: &Path) -> Vec<Value> {
         }
         Some(json!({
             "id": id, "name": name, "about": about, "author": "Thoughts", "version": env!("CARGO_PKG_VERSION"),
-            "fingerprint": pack["fingerprint"], "files": files.keys().collect::<Vec<_>>(),
+            "fingerprint": pack["fingerprint"], "code": crate::packs::fingerprint_code(pack["fingerprint"].as_str().unwrap_or_default()),
+            "files": files.keys().collect::<Vec<_>>(),
             "permissions": permissions, "write": write,
             "workflow": files.keys().any(|p| p.starts_with("workflows/")), "theme": files.contains_key("themes.json"),
             "added": crate::packs::already_in(&pack, layer),
