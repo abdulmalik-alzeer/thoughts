@@ -335,11 +335,31 @@ fn yaml_date(v: &Value) -> String {
     match v { Value::String(s) => s.clone(), Value::Null => String::new(), o => o.to_string() }
 }
 
+/// Folders left out of a listing (the user's private folders), recognised by where they really are
+/// as well as by name: the same folder under another spelling — letter case, an accent or hamza
+/// stored in its other Unicode form, a link that leads to it — is left out just the same.
+pub(crate) struct Hidden { real: Vec<String> }
+
+impl Hidden {
+    fn norm(p: &Path) -> String { crate::paths::canonical_lenient(p).to_string_lossy().replace('\\', "/").trim_end_matches('/').to_lowercase() }
+
+    pub(crate) fn new(root: &Path, dirs: &[String]) -> Self { Hidden { real: dirs.iter().map(|d| Self::norm(&root.join(d))).collect() } }
+
+    /// Is this folder of a walk one of the hidden ones (or inside one)? Asked once per folder, so
+    /// the walk never goes into it; files are not looked up one by one.
+    pub(crate) fn folder(&self, e: &walkdir::DirEntry) -> bool {
+        if self.real.is_empty() || !e.file_type().is_dir() { return false; }
+        let p = Self::norm(e.path());
+        self.real.iter().any(|d| p == *d || p.starts_with(&format!("{d}/")))
+    }
+}
+
 /// All markdown and output files, grouped client-side. Anything under `exclude`
 /// (library-relative folders) is left out.
 pub fn tree(root: &Path, exclude: &[String]) -> Vec<Value> {
     let mut out = vec![];
-    for e in WalkDir::new(root).into_iter().filter_entry(|e| !skip(e)).flatten() {
+    let hidden = Hidden::new(root, exclude);
+    for e in WalkDir::new(root).into_iter().filter_entry(|e| !skip(e) && !hidden.folder(e)).flatten() {
         if !e.file_type().is_file() { continue; }
         let Some(rel) = rel_of(root, e.path()) else { continue };
         if crate::paths::is_under(&rel, exclude) { continue; }
@@ -800,6 +820,36 @@ mod tests {
         assert_eq!(paths(tree(&d, &private)), ["ideas/a.md"]);
         assert_eq!(paths(search(&d, "salary", 10, &private)), ["ideas/a.md"]);
         assert_eq!(tree(&d, &[]).len(), 2);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// SEC-32: a private folder is left out of listings and search whatever its spelling.
+    #[cfg(unix)]
+    #[test]
+    fn private_folders_are_left_out_under_any_spelling() {
+        let d = tmp();
+        let paths = |v: Vec<Value>| { let mut p: Vec<String> = v.iter().map(|x| x["path"].as_str().unwrap().to_string()).collect(); p.sort(); p };
+        write(&d, "me/finances/tax.md", "secret salary").unwrap();
+        write(&d, "me/finances/2026/jan.md", "salary slip").unwrap();
+        write(&d, "ideas/a.md", "salary idea").unwrap();
+        // The private entry is a link's name; the folder it leads to is the private one.
+        std::os::unix::fs::symlink("../me/finances", d.join("ideas/money")).unwrap();
+        let alias = vec!["ideas/money".to_string()];
+        assert!(!crate::paths::is_under("me/finances/tax.md", &alias), "the name alone does not match");
+        assert_eq!(paths(tree(&d, &alias)), ["ideas/a.md"]);
+        assert_eq!(paths(search(&d, "salary", 10, &alias)), ["ideas/a.md"]);
+        // A name with an accent, configured in one Unicode form and stored in the other. Where the
+        // disk treats the two as one folder (macOS), it is the private folder.
+        let (composed, decomposed) = ("clients/caf\u{e9}", "clients/cafe\u{301}");
+        std::fs::create_dir_all(d.join(decomposed)).unwrap();
+        std::fs::write(d.join(decomposed).join("deal.md"), "salary terms").unwrap();
+        if d.join(composed).join("deal.md").exists() {
+            let private = vec![composed.to_string()];
+            assert!(!tree(&d, &private).iter().any(|f| f["path"].as_str().unwrap().ends_with("deal.md")), "listed under its other spelling");
+            assert!(!search(&d, "salary terms", 10, &private).iter().any(|f| f["path"].as_str().unwrap().ends_with("deal.md")));
+        }
+        // Nothing private: everything is listed, as before.
+        assert_eq!(tree(&d, &[]).len(), 4);
         std::fs::remove_dir_all(d).unwrap();
     }
 

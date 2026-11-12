@@ -199,7 +199,9 @@ pub fn notes(root: &Path, terms: &[String], limit: usize, exclude: &[String]) ->
     let mut found: Vec<(i64, Option<SystemTime>, String, FileEntry)> = vec![];
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut cache = file_cache().lock().unwrap_or_else(|e| e.into_inner());
-    for e in WalkDir::new(root).into_iter().filter_entry(|e| !crate::library::skip(e)).flatten() {
+    // Private folders are left out by where they really are, not only by name (see `library::Hidden`).
+    let hidden = crate::library::Hidden::new(root, exclude);
+    for e in WalkDir::new(root).into_iter().filter_entry(|e| !crate::library::skip(e) && !hidden.folder(e)).flatten() {
         if !e.file_type().is_file() { continue; }
         let Some(rel) = e.path().strip_prefix(root).ok().map(|p| p.to_string_lossy().replace('\\', "/")) else { continue };
         if crate::paths::is_under(&rel, exclude) { continue; }
