@@ -34,6 +34,8 @@ export default {
     'hista.online.address': 'Address of the online location (optional: you can add it later)',
     'hista.online.addressShort': 'Address of the online location',
     'hista.online.locations': 'Online locations',
+    'hista.online.mainHint': 'Sync receives changes from the main location and sends your library to every location.',
+    'hista.online.makeMain': 'Make main',
     'hista.online.needGit': 'An online location needs Git. Install it, or choose another backup.',
     'hista.online.cloudClash': 'This folder is already synced by a cloud drive, and an online location would fight with it over the same files. Choose “Cloud folder”, or pick a folder outside the cloud drive.',
 
@@ -87,6 +89,8 @@ export default {
     'hista.online.address': 'عنوان الموقع على الإنترنت (اختياري، ويمكنك إضافته لاحقاً)',
     'hista.online.addressShort': 'عنوان الموقع على الإنترنت',
     'hista.online.locations': 'المواقع على الإنترنت',
+    'hista.online.mainHint': 'تستلم المزامنة التغييرات من الموقع الرئيسي، وترسل مكتبتك إلى جميع المواقع.',
+    'hista.online.makeMain': 'اجعله الرئيسي',
     'hista.online.needGit': 'الموقع على الإنترنت يحتاج إلى Git. ثبّتها أو اختر نسخاً احتياطياً آخر.',
     'hista.online.cloudClash': 'هذا المجلد تُزامنه خدمة سحابية أصلاً، والموقع على الإنترنت سيتنازع معها على الملفات نفسها. اختر «مجلد سحابي»، أو اختر مجلداً خارج الخدمة السحابية.',
 

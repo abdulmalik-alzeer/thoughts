@@ -278,14 +278,33 @@ pub async fn unmerged(state: &AppState, dir: &Path) -> Vec<String> {
         .split('\0').filter(|f| !f.is_empty()).map(String::from).collect()
 }
 
+/// The main location among `names` (in the order they were added): the one the user chose
+/// (`sync.mainLocation`), while it still exists; otherwise the first one added. Never a matter of
+/// how the names happen to sort.
+pub fn pick_main<'a>(names: &[&'a str], chosen: Option<&str>) -> Option<&'a str> {
+    chosen.and_then(|c| names.iter().copied().find(|n| *n == c)).or_else(|| names.first().copied())
+}
+
+/// The online locations, `[{name, url, main}]`, in the order they were added. `main` marks the
+/// one a sync receives from (see `pick_main`); every location is sent to.
 pub async fn remotes(state: &AppState, dir: &Path) -> Vec<Value> {
-    let out = git(state, dir, &["remote", "-v"]).await.unwrap_or_default();
-    let mut seen = std::collections::BTreeMap::new();
+    // The configuration lists them in the order they were added; `git remote` would sort by name.
+    let out = git(state, dir, &["config", "--local", "--get-regexp", r"^remote\..*\.url$"]).await.unwrap_or_default();
+    let mut list: Vec<(String, String)> = vec![];
     for l in out.lines() {
-        let p: Vec<_> = l.split_whitespace().collect();
-        if p.len() >= 2 { seen.entry(p[0].to_string()).or_insert(p[1].to_string()); }
+        let Some((key, url)) = l.split_once(' ') else { continue };
+        let Some(name) = key.strip_prefix("remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
+        if !list.iter().any(|(n, _)| n == name) { list.push((name.to_string(), url.trim().to_string())); }
     }
-    seen.into_iter().map(|(n, u)| json!({"name": n, "url": u})).collect()
+    let chosen = state.settings.read().await.sync.main_location.clone();
+    let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
+    let main = pick_main(&names, chosen.as_deref()).map(String::from);
+    list.iter().map(|(n, u)| json!({"name": n, "url": u, "main": Some(n) == main.as_ref()})).collect()
+}
+
+/// The name of the main location in a list from `remotes`.
+fn main_of(rs: &[Value]) -> Option<String> {
+    rs.iter().find(|r| r["main"] == true).or(rs.first()).and_then(|r| r["name"].as_str()).map(String::from)
 }
 
 pub async fn status(state: &AppState, dir: &Path) -> Value {
@@ -317,9 +336,15 @@ async fn syncable_branch(state: &AppState, dir: &Path) -> anyhow::Result<String>
 /// (a key of `tr`'s table, see `why_not_sent`).
 async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log: &mut Vec<String>) -> Vec<(String, Option<&'static str>)> {
     let mut sent = vec![];
-    for r in rs {
+    // The main location first, and only it becomes what the branch follows: "to send" and "to
+    // receive" are counted against it, whatever was added or sent to afterwards.
+    let main = main_of(rs);
+    let mut order: Vec<&Value> = rs.iter().collect();
+    order.sort_by_key(|r| r["name"].as_str().map(String::from) != main);
+    for r in order {
         let name = r["name"].as_str().unwrap_or_default();
-        match git(state, dir, &["push", "-u", "--", name, branch]).await {
+        let args: &[&str] = if Some(name) == main.as_deref() { &["push", "-u", "--", name, branch] } else { &["push", "--", name, branch] };
+        match git(state, dir, args).await {
             Ok(_) => { log.push(format!("pushed {name}")); sent.push((name.to_string(), None)); }
             Err(e) => {
                 crate::log::warn(format!("sync: push to {name} failed: {e}"));
@@ -389,7 +414,7 @@ fn sync_outcome(dir: &Path, sent: &[(String, Option<&'static str>)]) -> anyhow::
     Err(crate::tr::UserErr { code: "sync_failed", status: 409, message: parts.join(" ") }.into())
 }
 
-/// Commit local changes, pull --rebase from the first remote, push to all.
+/// Commit local changes, pull --rebase from the main location, push to all.
 /// A pull that conflicts is undone and reported as `CONFLICT::<file;file;…>` (see `resolve`).
 /// Fails (`no_location`) when there is nowhere to send the library, and (`sync_failed`, naming the
 /// location and the reason) when any location did not take it: `Ok` means it is backed up.
@@ -403,7 +428,7 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
     if rs.is_empty() { return Err(crate::tr::err("sync.no_location", &[])); }
     let before = head(state, dir).await;
     let mut log = vec![];
-    if let Some(primary) = rs.first().and_then(|r| r["name"].as_str()) {
+    if let Some(primary) = main_of(&rs).as_deref() {
         match git_ident(state, dir, &["pull", "--rebase", "--autostash", "--", primary, &branch]).await {
             Ok(_) => log.push(format!("pulled {primary}")),
             Err(e) if e.to_string().contains("couldn't find remote ref") => log.push(format!("{primary}: new branch")),
@@ -477,7 +502,7 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
     let branch = syncable_branch(state, dir).await?;
     let committed = commit_all(state, dir, &subject::sync()).await?;
     let rs = remotes(state, dir).await;
-    let primary = rs.first().and_then(|r| r["name"].as_str()).ok_or_else(|| crate::tr::err("git.no_remote", &[]))?.to_string();
+    let primary = main_of(&rs).ok_or_else(|| crate::tr::err("git.no_remote", &[]))?;
     if head(state, dir).await.is_none() { anyhow::bail!("there is nothing in this library's history yet"); }
 
     let mut log = vec![];
@@ -843,6 +868,59 @@ mod tests {
         assert_eq!(sh(&mine, &["status", "--porcelain"]), "", "the change is still recorded in the history");
         assert!(resolve(&st, &mine, "mine").await.is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn adding_a_second_location_does_not_change_where_sync_receives_from() {
+        // `origin` holds work from another device (see `diverged`) that this computer has not received yet.
+        let (root, mine, remote) = diverged();
+        let st = AppState::for_test();
+        sh(&mine, &["checkout", "-q", "--", "notes.md"]);
+        // A second location is added. Its name ("backup", what the app calls it) sorts before "origin".
+        let extra = root.join("backup.git");
+        std::fs::create_dir_all(&extra).unwrap();
+        sh(&extra, &["init", "-q", "--bare", "-b", "main"]);
+        sh(&mine, &["remote", "add", "backup", extra.to_str().unwrap()]);
+        let listed = |rs: &[Value]| rs.iter().map(|r| (r["name"].as_str().unwrap().to_string(), r["main"] == true)).collect::<Vec<_>>();
+        assert_eq!(listed(&remotes(&st, &mine).await), [("origin".to_string(), true), ("backup".to_string(), false)], "in the order added; the first is the main one");
+        // Sync still receives from origin, and sends to both.
+        let v = sync(&st, &mine).await.unwrap();
+        assert_eq!(v["received"], true);
+        assert_eq!(read(&mine, "b.md"), "from the other device\n");
+        let here = sh(&mine, &["rev-parse", "HEAD"]);
+        assert_eq!((sh(&remote, &["rev-parse", "main"]), sh(&extra, &["rev-parse", "main"])), (here.clone(), here));
+        // What the branch follows is the main location, so "to send / to receive" are counted against it.
+        assert_eq!(sh(&mine, &["config", "branch.main.remote"]), "origin");
+        let s = status(&st, &mine).await;
+        assert_eq!((s["ahead"].as_u64(), s["behind"].as_u64()), (Some(0), Some(0)));
+
+        // "Make main" is an explicit choice. From then on changes are received from that location.
+        st.settings.write().await.sync.main_location = Some("backup".into());
+        assert_eq!(listed(&remotes(&st, &mine).await), [("origin".to_string(), false), ("backup".to_string(), true)]);
+        sh(&root, &["clone", "-q", extra.to_str().unwrap(), "third"]);
+        let third = root.join("third");
+        write(&third, "c.md", "sent to the backup location\n");
+        sh(&third, &["add", "-A"]);
+        sh(&third, &["commit", "-q", "-m", "third"]);
+        sh(&third, &["push", "-q", "origin", "HEAD:main"]);
+        sync(&st, &mine).await.unwrap();
+        assert_eq!(read(&mine, "c.md"), "sent to the backup location\n");
+        assert_eq!(sh(&mine, &["config", "branch.main.remote"]), "backup");
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]), "origin is still sent to");
+        // The chosen location is removed: the first one added is the main one again.
+        sh(&mine, &["remote", "remove", "backup"]);
+        assert_eq!(listed(&remotes(&st, &mine).await), [("origin".to_string(), true)]);
+        assert!(sync(&st, &mine).await.is_ok());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_main_location_is_chosen_or_the_first_added_never_by_name() {
+        assert_eq!(pick_main(&["origin", "backup"], None), Some("origin"));
+        assert_eq!(pick_main(&["github", "backup"], None), Some("github"));
+        assert_eq!(pick_main(&["origin", "backup"], Some("backup")), Some("backup"));
+        assert_eq!(pick_main(&["origin", "backup"], Some("gone")), Some("origin"));
+        assert_eq!(pick_main(&[], Some("origin")), None);
     }
 
     #[cfg(unix)]

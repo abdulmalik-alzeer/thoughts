@@ -248,6 +248,9 @@ pub struct SyncSettings {
     pub mode: String,
     /// "keychain" | "file"
     pub credential_store: String,
+    /// The online location a sync receives changes from, by its short name, when the user picked
+    /// one ("Make main"). Unset, or naming a location that is gone: the first one that was added.
+    pub main_location: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -315,7 +318,7 @@ impl Default for AiSettings {
 
 impl Default for SyncSettings {
     fn default() -> Self {
-        Self { mode: "git-manual".into(), credential_store: "keychain".into() }
+        Self { mode: "git-manual".into(), credential_store: "keychain".into(), main_location: None }
     }
 }
 
@@ -514,6 +517,10 @@ impl Settings {
         if !repo.is_empty() && (!repo.starts_with("https://") || repo.len() < 12 || repo.chars().any(|ch| ch.is_whitespace() || ch.is_control())) {
             anyhow::bail!("the search extension address must start with https://");
         }
+
+        // A location's short name, or nothing (the same shape the API accepts when one is added).
+        self.sync.main_location = self.sync.main_location.take().map(|n| n.trim().to_string())
+            .filter(|n| (1..=40).contains(&n.len()) && !n.starts_with('-') && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b)));
 
         let mut private = vec![];
         for p in &self.private_paths {
@@ -861,6 +868,11 @@ mod tests {
         // An online location is sent the history itself, so there the history is always kept.
         let online = parse(r#"{"keepHistory":false,"sync":{"mode":"git-auto"}}"#).unwrap();
         assert!(online.history_enabled() && online.sync_enabled());
+        // The main location is a short name or nothing; nothing git could read as an option.
+        let main = |name: &str| { let mut s = Settings::default(); s.sync.main_location = Some(name.into()); s.sanitize_update(&Settings::default()).unwrap(); s.sync.main_location };
+        assert_eq!(main(" backup-2 ").as_deref(), Some("backup-2"));
+        for bad in ["", "-f", "--upload-pack=x", "a b", "a/b", "نسخة"] { assert_eq!(main(bad), None, "{bad}"); }
+        assert_eq!(parse(r#"{"sync":{"mode":"git-manual"}}"#).unwrap().sync.main_location, None);
     }
 
     #[test]

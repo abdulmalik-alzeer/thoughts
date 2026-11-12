@@ -423,10 +423,24 @@
     const ok = await confirmDialog({ title: t('set.uploadTitle'), body: t('set.uploadBody'), list: [remote.url.trim()], confirmLabel: t('set.addRemote') });
     if (!ok) return;
     await run('remote', async () => {
-      await post('/git/remotes', { ...remote, name: remote.name.trim() || ((gitStatus.remotes || []).length ? 'backup' : 'origin'), url: remote.url.trim() });
+      await post('/git/remotes', { ...remote, name: remote.name.trim() || freeName(), url: remote.url.trim() });
       remote = { name: '', url: '', username: '', token: '' };
       gitStatus = await api('/git');
     });
+  }
+
+  /** A short name for a location the user did not name: "origin" for the first, then "backup", "backup-2"… */
+  function freeName(): string {
+    const taken = new Set<string>((gitStatus.remotes || []).map((r: any) => String(r.name)));
+    if (!taken.size) return 'origin';
+    for (let n = 1; ; n++) { const name = n === 1 ? 'backup' : `backup-${n}`; if (!taken.has(name)) return name; }
+  }
+
+  /** Receive changes from this location from now on (every location is still sent to). */
+  async function makeMain(r: any) {
+    s.sync.mainLocation = r.name;
+    await autoSave();
+    await loadGit();
   }
 
   async function removeRemote(r: any) {
@@ -710,11 +724,11 @@
           {#if loadErr.git}<p class="err" role="alert">{loadErr.git} <button type="button" class="btn ghost" onclick={loadGit}>{t('set.retry')}</button></p>{/if}
           {#if gitStatus.repo}<p class="muted sm">{t('set.gitState', { branch: gitStatus.branch, changed: fmtNum(gitStatus.dirty ?? 0), ahead: fmtNum(gitStatus.ahead ?? 0), behind: fmtNum(gitStatus.behind ?? 0) })}</p>{/if}
           {#each gitStatus.remotes || [] as r, i (r.name)}
-            <div class="row remote"><b dir="auto">{r.name}</b>{#if i === 0}<span class="pill">{t('set.remoteMain')}</span>{/if}<code class="grow sm path"><bdi>{r.url}</bdi></code><button type="button" class="btn ghost danger" disabled={busy.remote} onclick={() => removeRemote(r)}>{t('set.remove')}</button></div>
+            <div class="row remote"><b dir="auto">{r.name}</b>{#if r.main ?? i === 0}<span class="pill">{t('set.remoteMain')}</span>{/if}<code class="grow sm path"><bdi>{r.url}</bdi></code>{#if !(r.main ?? i === 0)}<button type="button" class="btn ghost" disabled={busy.remote || busy.save} onclick={() => makeMain(r)}>{t('hista.online.makeMain')}</button>{/if}<button type="button" class="btn ghost danger" disabled={busy.remote} onclick={() => removeRemote(r)}>{t('set.remove')}</button></div>
           {:else}
             {#if !loading.git && !loadErr.git}<p class="muted sm">{t('set.noRemotes')}</p>{/if}
           {/each}
-          <p class="muted sm">{t('set.remotesHint')}</p>
+          <p class="muted sm">{t('hista.online.mainHint')}</p>
           {#if !loading.git && !loadErr.git && (gitStatus.remotes || []).length}<p class="muted sm">{lastBackupText(gitStatus.lastBackup ?? null) || t('hista.sync.never')}</p>{/if}
           <div class="grid2">
             <div><label for="st-rurl">{t('hista.online.addressShort')}</label><input id="st-rurl" dir="ltr" bind:value={remote.url} placeholder="https://github.com/me/thoughts.git" autocomplete="off" /></div>
