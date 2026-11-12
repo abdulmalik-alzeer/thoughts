@@ -394,7 +394,8 @@ fn mcp_servers(text: &str) -> Vec<(String, String)> {
     let v: Value = serde_json::from_str(text).unwrap_or(Value::Null);
     v.get("mcpServers").and_then(Value::as_object).into_iter().flatten().map(|(name, s)| {
         let mut what: Vec<String> = s.get("command").map(plain).into_iter().collect();
-        what.extend(s.get("args").map(plain));
+        // The arguments as they would be typed after the command.
+        what.extend(s.get("args").and_then(Value::as_array).into_iter().flatten().map(plain));
         what.extend(s.get("url").map(plain));
         (name.clone(), what.join(" "))
     }).collect()
@@ -1219,7 +1220,7 @@ mod tests {
         assert_eq!(get("hook", "Stop"), "say done");
         assert_eq!(get("permissions", "permissions"), "allow: Bash(*)");
         assert_eq!(get("env", "env"), "A, B");
-        assert_eq!(get("mcp", "mail"), "npx -y, mail-server");
+        assert_eq!(get("mcp", "mail"), "npx -y mail-server");
         assert_eq!(get("mcp", "web"), "https://example.com/mcp");
         // SEC-37: how long past chats are kept is not a harmless choice for a shared folder to make.
         put(&d, ".claude/settings.local.json", r#"{"cleanupPeriodDays": 0, "language": "arabic", "spinnerTipsEnabled": false}"#);

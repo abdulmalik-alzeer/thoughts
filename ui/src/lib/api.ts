@@ -222,7 +222,7 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
         if (!asked) { asked = askTrust(data.trust, answerTrust).finally(() => trustAsked.delete(id)); trustAsked.set(id, asked); }
         if (!(await asked)) {
           const { t } = await import('./i18n');
-          throw new ApiError(t('seca.trust.declined'), r.status, 'untrusted');
+          throw new ApiError(t('seca.trust.declined'), r.status, 'TRUST_DECLINED');
         }
         return api<T>(path, opts);
       }
