@@ -6,6 +6,17 @@ use crate::library::resolve;
 use serde_json::{json, Value};
 use std::path::Path;
 
+/// The general list: `tasks/TODO.md` (the starter's place for it) or root `TODO.md`, whichever
+/// exists — `tasks/TODO.md` when both do. When neither exists yet, the library's own rules decide:
+/// a `CLAUDE.md` that names `tasks/TODO.md`, or an existing `tasks/` folder, means `tasks/TODO.md`.
+pub fn general(root: &Path) -> String {
+    const TASKS: &str = "tasks/TODO.md";
+    if root.join(TASKS).is_file() { return TASKS.into(); }
+    if root.join("TODO.md").is_file() { return "TODO.md".into(); }
+    let rules = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap_or_default();
+    if rules.contains(TASKS) || root.join("tasks").is_dir() { TASKS.into() } else { "TODO.md".into() }
+}
+
 pub fn files(root: &Path) -> Vec<String> {
     let mut out = vec![];
     for cand in ["TODO.md", "tasks/TODO.md"] {
@@ -117,8 +128,24 @@ pub fn edit(root: &Path, file: &str, line: usize, old: &str, new: &str) -> anyho
     })
 }
 
+/// An indented, non-empty line directly under a task belongs to it (a note or sub-step).
+fn is_continuation(l: &str) -> bool { l.starts_with([' ', '\t']) && !l.trim().is_empty() }
+
+/// The index just past task `i` and the indented lines that belong to it.
+fn end_of_task(lines: &[String], i: usize) -> usize {
+    let mut j = i + 1;
+    while j < lines.len() && is_continuation(&lines[j]) { j += 1; }
+    j
+}
+
+/// Deleting a task also removes its indented sub-lines, so they never end up under the task above.
 pub fn delete(root: &Path, file: &str, line: usize, text: &str) -> anyhow::Result<()> {
-    rewrite(root, file, |lines| { check_line(lines, line, text)?; lines.remove(line); Ok(()) })
+    rewrite(root, file, |lines| {
+        check_line(lines, line, text)?;
+        let end = end_of_task(lines, line);
+        lines.drain(line..end);
+        Ok(())
+    })
 }
 
 /// New items go at the end of the top group (or the end of the file).
@@ -132,11 +159,11 @@ pub fn add(root: &Path, file: &str, text: &str) -> anyhow::Result<()> {
         let insert_at = match first_h2 {
             Some(h) => {
                 let next_h2 = lines.iter().enumerate().skip(h + 1).find(|(_, l)| l.starts_with("## ")).map(|(i, _)| i).unwrap_or(lines.len());
-                let last_item = (h + 1..next_h2).rev().find(|&i| lines[i].starts_with("- [")).map(|i| i + 1);
+                let last_item = (h + 1..next_h2).rev().find(|&i| lines[i].starts_with("- [")).map(|i| end_of_task(lines, i));
                 last_item.unwrap_or(h + 1)
             }
             None => {
-                let last = lines.iter().rposition(|l| l.starts_with("- [")).map(|i| i + 1);
+                let last = lines.iter().rposition(|l| l.starts_with("- [")).map(|i| end_of_task(lines, i));
                 last.unwrap_or(lines.len())
             }
         };
@@ -280,6 +307,38 @@ mod tests {
         toggle(&d, "TODO.md", 4, "b").unwrap();
         assert!(std::fs::read_to_string(d.join("TODO.md")).unwrap().contains("- [x] b"));
         assert_eq!(parse(&std::fs::read_to_string(d.join("TODO.md")).unwrap()).len(), 3);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn the_general_list_is_the_one_that_exists() {
+        let d = std::env::temp_dir().join(format!("todo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        // Nothing yet: a plain library gets a root list, a starter library (its rules name tasks/TODO.md) the tasks one.
+        assert_eq!(general(&d), "TODO.md");
+        std::fs::write(d.join("CLAUDE.md"), "General list: `tasks/TODO.md` (or root `TODO.md` if that is what exists).").unwrap();
+        assert_eq!(general(&d), "tasks/TODO.md");
+        std::fs::write(d.join("TODO.md"), "- [ ] a\n").unwrap();
+        assert_eq!(general(&d), "TODO.md");
+        std::fs::create_dir_all(d.join("tasks")).unwrap();
+        std::fs::write(d.join("tasks/TODO.md"), "- [ ] b\n").unwrap();
+        assert_eq!(general(&d), "tasks/TODO.md");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn indented_sub_lines_stay_with_their_task() {
+        let d = std::env::temp_dir().join(format!("todo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("TODO.md"), "# Todo\n\n## Now\n- [ ] Prepare report\n  - draft\n\t- send\n\n## Later\n- [ ] z\n").unwrap();
+        add(&d, "TODO.md", "new").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# Todo\n\n## Now\n- [ ] Prepare report\n  - draft\n\t- send\n- [ ] new\n\n## Later\n- [ ] z\n");
+        delete(&d, "TODO.md", 3, "Prepare report").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# Todo\n\n## Now\n- [ ] new\n\n## Later\n- [ ] z\n");
+        // Without groups too.
+        std::fs::write(d.join("TODO.md"), "- [ ] a\n    note\n").unwrap();
+        add(&d, "TODO.md", "b").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "- [ ] a\n    note\n- [ ] b\n");
         std::fs::remove_dir_all(d).unwrap();
     }
 

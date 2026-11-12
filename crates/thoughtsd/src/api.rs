@@ -1083,7 +1083,7 @@ struct TodoOp { file: String, line: usize, text: String, new_text: String }
 async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<String, String>>, Json(t): Json<TodoOp>) -> R {
     let root = lib(&st).await?;
     library_free(&st)?;
-    let file = if t.file.is_empty() { todos::files(&root).into_iter().next().unwrap_or_else(|| "TODO.md".into()) } else { t.file.clone() };
+    let file = if t.file.is_empty() { todos::general(&root) } else { t.file.clone() };
     check_todo_file(&file)?;
     if scope_of(&q).plugin {
         // An add-on names a list plainly (no `.` or `..` steps) and never one in a private folder,

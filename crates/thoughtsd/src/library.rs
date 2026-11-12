@@ -205,7 +205,60 @@ pub fn frontmatter(text: &str) -> (Value, &str) {
     (Value::Null, text)
 }
 
-/// Every `<area>/<slug>/README.md` with frontmatter.
+/// Note details for showing an item: strict YAML first; when the block is not valid YAML (an
+/// unquoted "title: Client: Acme", a value starting with `*` or `@`…) a line-by-line `key: value`
+/// reading, which is all the item list needs. A leading byte-order mark is ignored. `None` when
+/// the file has no note details at all; the flag says the lenient reading was needed.
+pub fn note_details(text: &str) -> Option<(Value, bool)> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let (fm, _) = frontmatter(text);
+    if !fm.is_null() { return Some((fm, false)); }
+    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"))?;
+    let yaml = &rest[..rest.find("\n---")?];
+    Some((lenient_details(yaml), true))
+}
+
+/// Flat `key: value` lines, `key: [a, b]` and `key:` followed by `- item` lines. Values are text.
+fn lenient_details(yaml: &str) -> Value {
+    let unquote = |v: &str| -> String {
+        let v = v.trim();
+        for q in ['"', '\''] {
+            if v.len() >= 2 && v.starts_with(q) && v.ends_with(q) { return v[1..v.len() - 1].to_string(); }
+        }
+        v.to_string()
+    };
+    let mut out = serde_json::Map::new();
+    let mut list_key: Option<String> = None;
+    for raw in yaml.lines() {
+        let l = raw.trim_end_matches('\r');
+        if l.trim().is_empty() || l.trim_start().starts_with('#') { continue; }
+        if let (Some(k), Some(item)) = (&list_key, l.trim_start().strip_prefix("- ").or_else(|| (l.trim() == "-").then_some(""))) {
+            if let Some(Value::Array(a)) = out.get_mut(k) { a.push(Value::String(unquote(item))); }
+            continue;
+        }
+        list_key = None;
+        if l.starts_with([' ', '\t']) { continue; }
+        let Some((k, v)) = l.split_once(':') else { continue };
+        let k = k.trim();
+        if k.is_empty() || !k.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') { continue; }
+        let v = v.trim();
+        let value = if v.is_empty() {
+            list_key = Some(k.to_string());
+            Value::Array(vec![])
+        } else if v.starts_with('[') && v.ends_with(']') {
+            Value::Array(v[1..v.len() - 1].split(',').map(unquote).filter(|x| !x.is_empty()).map(Value::String).collect())
+        } else {
+            Value::String(unquote(v))
+        };
+        out.entry(k.to_string()).or_insert(value);
+    }
+    // A key left with an empty list and no items was just empty.
+    for v in out.values_mut() { if matches!(v, Value::Array(a) if a.is_empty()) { *v = Value::Null; } }
+    if let Some(t) = out.get_mut("tags") { if t.is_null() { *t = json!([]); } }
+    Value::Object(out)
+}
+
+/// Every `<area>/<slug>/README.md` with note details.
 pub fn ideas(root: &Path) -> Vec<Value> {
     let mut out = vec![];
     for e in WalkDir::new(root).min_depth(3).max_depth(3).into_iter().filter_entry(|e| !skip(e)).flatten() {
@@ -214,9 +267,10 @@ pub fn ideas(root: &Path) -> Vec<Value> {
         let parts: Vec<_> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
         if parts.len() != 3 || parts[0].starts_with('.') || parts[0] == "me" || parts[0] == "inbox" { continue; }
         let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
-        let (fm, _) = frontmatter(&text);
-        if fm.is_null() { continue; }
+        let Some((fm, lenient)) = note_details(&text) else { continue };
         let s = |k: &str| fm[k].as_str().map(String::from).unwrap_or_default();
+        // The details were not valid and nothing usable could be read from them: still listed, flagged.
+        let unreadable = lenient && s("title").is_empty() && s("status").is_empty() && s("summary").is_empty();
         let todo_open = std::fs::read_to_string(e.path().with_file_name("todo.md"))
             .map(|t| t.lines().filter(|l| l.starts_with("- [ ] ")).count()).unwrap_or(0);
         out.push(json!({
@@ -227,6 +281,8 @@ pub fn ideas(root: &Path) -> Vec<Value> {
             "tags": fm["tags"], "level": fm["level"],
             "updated": fm["updated"].as_str().map(String::from).or_else(|| fm["updated"].as_str().map(String::from)).unwrap_or_else(|| yaml_date(&fm["updated"])),
             "openTodos": todo_open,
+            "kind": s("kind"),
+            "detailsUnreadable": unreadable,
         }));
     }
     out.sort_by(|a, b| b["updated"].as_str().cmp(&a["updated"].as_str()));
@@ -364,15 +420,25 @@ pub fn search(root: &Path, q: &str, limit: usize, exclude: &[String]) -> Vec<Val
     hits
 }
 
+/// The library's own machinery rather than the user's notes: the rules (`CLAUDE.md` anywhere), the
+/// index and the starter's welcome pages at the top, and a leftover `presets/` folder.
+fn system_file(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    name == "CLAUDE.md" || rel == "INDEX.md" || (!rel.contains('/') && name.starts_with("START-HERE")) || rel.starts_with("presets/")
+}
+
+/// `markdownFiles` counts every markdown file (what search sizing needs); `notes` leaves out the
+/// library's system files, for showing the user how many notes they have.
 pub fn stats(root: &Path) -> Value {
-    let (mut files, mut bytes) = (0usize, 0u64);
+    let (mut files, mut notes, mut bytes) = (0usize, 0usize, 0u64);
     for e in WalkDir::new(root).into_iter().filter_entry(|e| !skip(e)).flatten() {
         if e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "md") {
             files += 1;
             bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
+            if rel_of(root, e.path()).map_or(false, |r| !system_file(&r)) { notes += 1; }
         }
     }
-    json!({"markdownFiles": files, "bytes": bytes})
+    json!({"markdownFiles": files, "notes": notes, "bytes": bytes})
 }
 
 /// The starter library kit, embedded in the program.
@@ -396,6 +462,58 @@ mod tests {
         let d = std::env::temp_dir().join(format!("thoughts-lib-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn items_with_loose_note_details_are_still_listed() {
+        let d = tmp();
+        for (slug, head) in [
+            ("acme", "title: Client: Acme Co\nstatus: active\nsummary: Things to do: call bank\ntags: [vat, monthly]\nupdated: 2026-11-02"),
+            ("star", "title: *Star* project\nstatus: seed\ntags:\n  - a\n  - \"b\"\nupdated: '2026-11-01'"),
+            ("ar", "title: عميل: شركة الأفق\nstatus: active\nkind: client"),
+            ("junk", "{{{ not details at all"),
+        ] {
+            std::fs::create_dir_all(d.join("clients").join(slug)).unwrap();
+            std::fs::write(d.join("clients").join(slug).join("README.md"), format!("---\n{head}\n---\n# x\n")).unwrap();
+        }
+        // A byte-order mark in front of valid details.
+        std::fs::create_dir_all(d.join("ideas/bom")).unwrap();
+        std::fs::write(d.join("ideas/bom/README.md"), "\u{feff}---\ntitle: With mark\nstatus: seed\n---\n").unwrap();
+        // No details at all: not an item.
+        std::fs::create_dir_all(d.join("ideas/plain")).unwrap();
+        std::fs::write(d.join("ideas/plain/README.md"), "# Just a page\n").unwrap();
+        let all = ideas(&d);
+        let by = |slug: &str| all.iter().find(|i| i["slug"] == slug).cloned().unwrap_or(Value::Null);
+        assert_eq!(all.len(), 5, "{all:?}");
+        assert_eq!(by("acme")["title"], "Client: Acme Co");
+        assert_eq!(by("acme")["summary"], "Things to do: call bank");
+        assert_eq!(by("acme")["tags"], json!(["vat", "monthly"]));
+        assert_eq!(by("acme")["updated"], "2026-11-02");
+        assert_eq!(by("acme")["detailsUnreadable"], false);
+        assert_eq!(by("star")["title"], "*Star* project");
+        assert_eq!(by("star")["tags"], json!(["a", "b"]));
+        assert_eq!(by("star")["updated"], "2026-11-01");
+        assert_eq!(by("ar")["title"], "عميل: شركة الأفق");
+        assert_eq!(by("ar")["kind"], "client");
+        assert_eq!(by("junk")["title"], "junk");
+        assert_eq!(by("junk")["detailsUnreadable"], true);
+        assert_eq!(by("bom")["title"], "With mark");
+        // The strict reader used elsewhere (the trust check) is unchanged.
+        assert!(frontmatter("---\ntitle: Client: Acme\n---\n").0.is_null());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn the_note_count_leaves_out_system_files() {
+        let d = tmp();
+        for f in ["CLAUDE.md", "INDEX.md", "START-HERE.md", "START-HERE.ar.md", "presets/legal.md", "TODO.md", "ideas/x/README.md", "ideas/x/CLAUDE.md", "ideas/x/notes/START-HERE.md"] {
+            if let Some(p) = d.join(f).parent() { std::fs::create_dir_all(p).unwrap(); }
+            std::fs::write(d.join(f), "x").unwrap();
+        }
+        let s = stats(&d);
+        assert_eq!(s["markdownFiles"], 9);
+        assert_eq!(s["notes"], 3);
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
