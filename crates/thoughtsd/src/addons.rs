@@ -125,6 +125,13 @@ fn asking() -> &'static Mutex<HashSet<String>> {
     SET.get_or_init(Default::default)
 }
 
+/// An add-on's place in `asking`, given up however the question ends (also when the request is
+/// dropped half-way because the window went away).
+struct Asking(String);
+impl Drop for Asking {
+    fn drop(&mut self) { asking().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0); }
+}
+
 /// `POST /api/layer/addon/ask {plugin, question}` → `{text}`: the assistant's answer to an add-on's
 /// question. Only a kept add-on that declares `assistant:ask`; one question at a time, at most
 /// `ASKS_PER_HOUR` an hour and `ASKS_PER_DAY` a day per add-on, never once the month's spending
@@ -155,9 +162,10 @@ pub async fn ask_in(st: &AppState, d: &Dirs, plugin: &str, preview: bool, questi
         note(&key, now);
         busy.insert(plugin.to_string());
     }
+    let waiting = Asking(plugin.to_string());
     let model = crate::claude::background_model(&st.settings.read().await.ai.claude);
     let answer = crate::claude::complete(st, &ask_prompt(plugin, question), model).await;
-    asking().lock().unwrap_or_else(|e| e.into_inner()).remove(plugin);
+    drop(waiting);
     crate::spend::after_cost(st).await;
     crate::log::info(format!("add-on {name} asked the assistant ({})", if answer.is_ok() { "answered" } else { "no answer" }));
     answer
@@ -384,6 +392,23 @@ mod tests {
         for _ in 1..ASKS_PER_HOUR { ask_in(&st, &d, "brief.js", false, "again").await.unwrap(); }
         assert!(ask_in(&st, &d, "brief.js", false, "one more").await.unwrap_err().to_string().contains("in the last hour"));
         assert_eq!(seen.lock().unwrap().len(), ASKS_PER_HOUR);
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_add_on_asks_one_question_at_a_time_and_a_question_that_goes_away_gives_its_place_up() {
+        let d = layer("busy");
+        put(&d.layer, "plugins/slow.js", "export default () => {}\n");
+        put(&d.layer, "plugins/slow.json", r#"{"apiVersion":1,"permissions":["assistant:ask"]}"#);
+        let st = AppState::for_test();
+        *st.complete_hook.lock().unwrap() = Some(Arc::new(|prompt: String, _model| {
+            if prompt.contains("think long") { Box::pin(futures::future::pending()) } else { Box::pin(async { Ok("ok".to_string()) }) }
+        }));
+        let mut first = Box::pin(ask_in(&st, &d, "slow.js", false, "think long"));
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert!(ask_in(&st, &d, "slow.js", false, "quick").await.unwrap_err().to_string().contains("still waiting"));
+        drop(first);
+        assert_eq!(ask_in(&st, &d, "slow.js", false, "quick").await.unwrap(), "ok");
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
