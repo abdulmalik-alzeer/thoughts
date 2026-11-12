@@ -247,6 +247,12 @@ with an `Origin`.
   lists them, `DELETE /api/chats/:id/always/:id` takes one back, deleting the chat forgets them.
   Under strict private folders a command is offered once only and the "always" list is not
   consulted for commands.
+- **Characters that do not show** (the add-on check's list, `staging::validate::is_hidden_char`,
+  plus control characters, here with no exceptions: bidi controls, zero-width characters, tag
+  characters, variation selectors…) are written out as `[U+202E]` in the card's `target`, `tool`
+  and `detail`, and the card carries `hidden: true` (`approvals::hidden_in`, `approvals::reveal`).
+  Such a request is never offered "Always"; the card warns, puts Deny first and focuses it. The UI
+  checks the same list again. The target is never cut; a long one scrolls and the card says so.
 - Refusals the user gave on a card are left out of the `denied` list under the answer.
 - `approval.asked {chatId, id, title}` and `approval.changed {chatId}` go out on the event stream
   (not to add-ons); the window shows a toast when the user is elsewhere, and a notification when

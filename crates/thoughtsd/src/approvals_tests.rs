@@ -105,6 +105,34 @@ fn a_request_is_said_in_plain_words_with_why_the_mode_did_not_let_it_through() {
 }
 
 #[test]
+fn characters_that_do_not_show_are_written_out_and_flagged_and_nothing_is_cut() {
+    let c = ctx("c", "acceptEdits");
+    // Shown as `ls # cleanup.txt`, runs `rm -rf ~ ; …`: a right-to-left override, zero-width spaces, a tag character.
+    let sneaky = "ls \u{202E}txt.punaelc # \u{202C}\u{200B}\u{200B}; rm -rf ~\u{E0041}";
+    let k = card(&req("Bash", json!({"command": sneaky}), "t"), &c);
+    assert!(k.hidden);
+    assert_eq!(k.target, "ls [U+202E]txt.punaelc # [U+202C][U+200B][U+200B]; rm -rf ~[U+E0041]");
+    assert!(!k.target.chars().any(hidden_char) && !k.detail.to_string().chars().any(hidden_char), "nothing invisible reaches the card");
+    assert_eq!(k.detail["command"], k.target);
+    assert_eq!(k.always, None, "only what can be seen in full can be allowed for good");
+    // Every direction mark counts here, also one alone (a command is not Arabic prose), and so do control characters.
+    for x in ["a\u{200F}b", "a\u{200E}b", "a\u{061C}b", "a\u{2066}b\u{2069}", "a\u{FEFF}", "a\u{1B}[2Kb", "a\u{FE0F}"] {
+        assert!(card(&req("Bash", json!({"command": x}), "t"), &c).hidden, "{x:?}");
+    }
+    // In a file's name, and in the tool's own name, too.
+    assert!(card(&req("Write", json!({"file_path": "/home/u/Elsewhere/re\u{202E}fdp.exe"}), "t"), &c).hidden);
+    assert!(card(&req("mcp__mail\u{200B}__send", json!({}), "t"), &c).hidden);
+    // Ordinary text, Arabic included, line breaks and tabs: nothing to say.
+    let plain = card(&req("Bash", json!({"command": "mv \"ملاحظات قديمة.md\" archive/\n\tls"}), "t"), &c);
+    assert!(!plain.hidden && plain.target.contains("ملاحظات") && plain.always.is_some());
+    // A run of them is shortened to a count; nothing else is.
+    assert_eq!(reveal(&format!("a{}b", "\u{200B}".repeat(20))), format!("a{}[+12]b", "[U+200B]".repeat(8)));
+    // The whole command is on the card however long it is.
+    let long = format!("echo {}", "word ".repeat(2000));
+    assert_eq!(card(&req("Bash", json!({"command": long.clone()}), "t"), &c).target, long);
+}
+
+#[test]
 fn some_requests_are_answered_without_asking() {
     let c = ctx("c", "acceptEdits");
     let deny = |r: &Request| matches!(decide_now(r, &c, false, &[]), Some(Verdict::Deny(_)));
@@ -185,6 +213,13 @@ async fn the_user_answers_once_always_or_no_and_the_run_gets_that() {
     assert_eq!(st.approvals.always(&id).iter().map(|a| a.key.as_str()).collect::<Vec<_>>(), ["npm test"]);
     assert_eq!(asked(json!({"command": "npm test"}), "t4").await.unwrap(), Verdict::Allow);
     assert_eq!(cards(&st, &id).await.len(), 3, "no card for what is always allowed");
+    // A request with characters that do not show is never allowed for good, whatever is pressed.
+    let waiting = asked(json!({"command": "npm test\u{202E}"}), "t3b");
+    let c3b = nth_card(&st, &id, 4).await;
+    assert_eq!(c3b.tool.as_ref().unwrap()["card"]["hidden"], true);
+    assert_eq!(answer(&st, &id, &c3b.id, Answer::Always).await.unwrap(), "once");
+    assert_eq!(waiting.await.unwrap(), Verdict::Allow);
+    assert_eq!(st.approvals.always(&id).len(), 1);
     // A tool use is asked about once: the same id again is refused, without a card.
     assert!(matches!(asked(json!({"command": "npm install"}), "t1").await.unwrap(), Verdict::Deny(_)));
     // It is remembered across restarts of the service, and can be taken back.
@@ -199,7 +234,7 @@ async fn the_user_answers_once_always_or_no_and_the_run_gets_that() {
 
     // The run ends while a request waits: refused, and the card says so.
     let waiting = asked(json!({"command": "make"}), "t5");
-    let c5 = nth_card(&st, &id, 4).await;
+    let c5 = nth_card(&st, &id, 5).await;
     drop(ticket);
     assert!(matches!(waiting.await.unwrap(), Verdict::Deny(_)));
     settled(&st, &id, &c5.id, "ended").await;

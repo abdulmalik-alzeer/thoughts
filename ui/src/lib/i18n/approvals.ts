@@ -26,6 +26,8 @@ export default {
     'appr.why.strict': 'Strict private folders is on, so every command needs your OK.',
     'appr.strictWarn': 'A command is not checked against your private folders: it could open, copy or change what is in them. Allow it only if you are sure it stays out of: {folders}',
 
+    'appr.hidden': 'This request contains characters that do not show on screen, or that change the order text is drawn in. They are written out here as [U+…]. What you would see without them may not be what would run. Deny it unless you know why they are there.',
+    'appr.long': 'This is long. Scroll through all of it before you answer.',
     'appr.allowOnce': 'Allow once',
     'appr.allowAlways': 'Always for this chat',
     'appr.deny': 'Deny',
@@ -92,6 +94,8 @@ export default {
     'appr.why.strict': 'خيار «المجلدات الخاصة بصرامة» مفعّل، فكل أمر يحتاج إلى موافقتك.',
     'appr.strictWarn': 'لا يُفحص الأمر مقابل مجلداتك الخاصة، فقد يفتح ما فيها أو ينسخه أو يغيّره. لا توافق إلا إن كنت متأكداً أنه لا يقترب من: {folders}',
 
+    'appr.hidden': 'يحوي هذا الطلب محارف لا تظهر على الشاشة، أو محارف تغيّر ترتيب عرض النص، وقد كُتبت هنا بصيغة [U+…]. فما كنت ستراه دونها قد لا يكون ما سيُنفَّذ فعلاً. ارفضه ما لم تكن تعرف سبب وجودها.',
+    'appr.long': 'هذا الطلب طويل. مرّر حتى تقرأه كله قبل أن تجيب.',
     'appr.allowOnce': 'اسمح مرة واحدة',
     'appr.allowAlways': 'اسمح دائماً في هذه المحادثة',
     'appr.deny': 'ارفض',

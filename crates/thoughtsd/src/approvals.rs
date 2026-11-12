@@ -344,9 +344,50 @@ pub struct Card {
     pub private: Vec<String>,
     /// What "Always for this chat" would cover (`command`, `file`, `read`, `tool`); `None`: only once.
     pub always: Option<String>,
-    /// The request as the program sent it, long values cut.
+    /// The request as the program sent it, long values cut, characters that do not show written out.
     pub detail: Value,
     pub tool_use_id: Option<String>,
+    /// The request holds characters that do not show or that turn text around (`hidden_in`): what is
+    /// shown could differ from what would run. `target` and `detail` have them written out as
+    /// `[U+202E]`; the card warns, and "Always" is not offered.
+    pub hidden: bool,
+}
+
+/// Is `c` a character a reader would not see, or one that changes the order text is drawn in? The
+/// list the add-on checks use (`staging::validate::is_hidden_char`), plus control characters other
+/// than a line break or a tab — and here with no exceptions: in a command or a path even a single
+/// direction mark can make what is shown differ from what runs.
+fn hidden_char(c: char) -> bool {
+    crate::staging::validate::is_hidden_char(c) || (c.is_control() && c != '\n' && c != '\t')
+}
+
+/// Does any text in `v` (keys too) hold such a character?
+pub fn hidden_in(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.chars().any(hidden_char),
+        Value::Array(a) => a.iter().any(hidden_in),
+        Value::Object(o) => o.iter().any(|(k, x)| k.chars().any(hidden_char) || hidden_in(x)),
+        _ => false,
+    }
+}
+
+/// `s` with every such character written out (`[U+202E]`), so that what is read is what is there.
+/// Nothing else is changed or left out; a long run of them is shortened to the first few and a count.
+pub fn reveal(s: &str) -> String {
+    const SHOWN: usize = 8;
+    let (mut out, mut run) = (String::with_capacity(s.len()), 0usize);
+    for c in s.chars() {
+        if hidden_char(c) {
+            run += 1;
+            if run <= SHOWN { out.push_str(&format!("[U+{:04X}]", c as u32)); }
+            continue;
+        }
+        if run > SHOWN { out.push_str(&format!("[+{}]", run - SHOWN)); }
+        run = 0;
+        out.push(c);
+    }
+    if run > SHOWN { out.push_str(&format!("[+{}]", run - SHOWN)); }
+    out
 }
 
 const SHELL: [&str; 2] = ["Bash", "PowerShell"];
@@ -396,12 +437,14 @@ fn shown_path(raw: &str, ctx: &RunCtx) -> String {
     raw.to_string()
 }
 
-/// Long strings in a request cut down for the card (a whole file being written, say).
+/// A request as the card shows it in its details: long strings cut down (a whole file being
+/// written, say), characters that do not show written out.
 fn trimmed(v: &Value) -> Value {
     match v {
-        Value::String(s) if s.chars().count() > DETAIL_CHARS => Value::String(format!("{}…", s.chars().take(DETAIL_CHARS).collect::<String>())),
+        Value::String(s) if s.chars().count() > DETAIL_CHARS => Value::String(format!("{}…", reveal(&s.chars().take(DETAIL_CHARS).collect::<String>()))),
+        Value::String(s) => Value::String(reveal(s)),
         Value::Array(a) => Value::Array(a.iter().take(50).map(trimmed).collect()),
-        Value::Object(o) => Value::Object(o.iter().take(50).map(|(k, x)| (k.clone(), trimmed(x))).collect()),
+        Value::Object(o) => Value::Object(o.iter().take(50).map(|(k, x)| (reveal(k), trimmed(x))).collect()),
         x => x.clone(),
     }
 }
@@ -444,11 +487,13 @@ pub fn card(req: &Request, ctx: &RunCtx) -> Card {
         ("tool", t.to_string(), "other")
     };
     let strict = ctx.strict && what == "command";
+    let hidden = hidden_in(&req.input) || t.chars().any(hidden_char);
     Card {
-        tool: t.to_string(), what: what.into(), target, why: why.into(), mode: ctx.mode.clone(), strict,
+        tool: reveal(t), what: what.into(), target: reveal(&target), why: why.into(), mode: ctx.mode.clone(), strict,
         private: if strict { ctx.private.iter().filter_map(|p| crate::paths::clean_rel(p).ok()).filter(|p| !p.is_empty()).collect() } else { vec![] },
-        always: always_key(req, ctx).map(|(k, _)| k.to_string()),
-        detail: trimmed(&req.input), tool_use_id: req.tool_use_id.clone(),
+        // Only what can be seen in full can be allowed for good.
+        always: if hidden { None } else { always_key(req, ctx).map(|(k, _)| k.to_string()) },
+        detail: trimmed(&req.input), tool_use_id: req.tool_use_id.clone(), hidden,
     }
 }
 
@@ -520,7 +565,8 @@ pub async fn ask(state: &Arc<AppState>, token: &str, req: Request, wait: Duratio
     let open = {
         let mut g = state.approvals.lock();
         let open = g.runs.contains_key(token);
-        if open { g.waiting.insert(id.clone(), Waiting { chat_id: ctx.chat_id.clone(), token: token.to_string(), card: c.clone(), key: always_key(&req, &ctx), tx }); }
+        let key = if c.hidden { None } else { always_key(&req, &ctx) };
+        if open { g.waiting.insert(id.clone(), Waiting { chat_id: ctx.chat_id.clone(), token: token.to_string(), card: c.clone(), key, tx }); }
         open
     };
     if !open {
@@ -533,7 +579,7 @@ pub async fn ask(state: &Arc<AppState>, token: &str, req: Request, wait: Duratio
     let _gone = Gone { state: state.clone(), chat: ctx.chat_id.clone(), id: id.clone() };
     let title = state.chats.with(&ctx.chat_id, |ch| ch.title.clone()).await.unwrap_or_default();
     state.emit(json!({"type": "approval.asked", "chatId": ctx.chat_id, "id": id, "title": title}));
-    crate::log::info(format!("chat {}: asking the user about {} ({})", ctx.chat_id, c.tool, c.why));
+    crate::log::info(format!("chat {}: asking the user about {} ({}){}", ctx.chat_id, c.tool, c.why, if c.hidden { ", with characters that do not show" } else { "" }));
     let verdict = |a: Result<Answer, tokio::sync::oneshot::error::TryRecvError>| match a {
         Ok(Answer::Deny) => Verdict::Deny(REFUSED.into()),
         Ok(_) => Verdict::Allow,
