@@ -18,6 +18,7 @@ pub mod hello;
 pub mod inbox;
 pub mod history;
 pub mod import;
+pub mod kit_history;
 pub mod health;
 pub mod layer_api;
 pub mod library;

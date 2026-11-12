@@ -156,7 +156,12 @@ stops it and starts its own. Any chat that was mid-answer at that moment is cut 
 
 1. Make sure `main` is green in CI.
 2. Set the version: `node scripts/set-version.mjs X.Y.Z`, then `cargo check -p thoughts`.
-3. Commit (`Cargo.toml`, `Cargo.lock`, `package.json`, `package-lock.json`) and push to `main`.
+   Then bring the starter kit's history up to date: `git fetch --tags`, then
+   `node scripts/kit-history.mjs`. It lists every starter file each earlier release shipped, so a
+   library made by an older version is not asked for trust again because this release reworded
+   one of the kit's routines (`--check` only says whether the file is current).
+3. Commit (`Cargo.toml`, `Cargo.lock`, `package.json`, `package-lock.json`,
+   `crates/thoughtsd/src/kit_history.rs`) and push to `main`.
 4. Recommended: [rehearse](#rehearsal) with `gh workflow run release.yml --ref main` and wait for
    it. If it fails, fix `main` and rehearse again; no tag has been spent.
 5. Tag and push the tag:

@@ -191,13 +191,45 @@ fn nested_files(path: &Path) -> (Vec<AFile>, bool, bool) {
     (out, complete, whole)
 }
 
-/// Is this `.claude` file exactly what the starter kit ships at that path?
+/// Is this `.claude` file exactly what the starter kit ships at that path — today, or in any
+/// earlier release? A library made by an older version keeps that version's copies of the kit's
+/// routines. They are still the app's own files, so a release that rewords one does not make the
+/// library ask for trust (`kit_history`, made from the release tags by `scripts/kit-history.mjs`).
+/// A file that matches none of them is the library's own, and is checked like any other.
 fn from_starter(rel: &str, real: &Path, symlink: bool) -> bool {
     if symlink { return false; }
-    let Some(want) = starter_version(rel) else { return false };
-    // Size first: no need to read a large file to know it differs.
-    std::fs::metadata(real).map_or(false, |m| m.len() == want.len() as u64) && std::fs::read(real).map_or(false, |b| b == want)
+    if let Some(want) = starter_version(rel) {
+        // Size first: no need to read a large file to know it differs.
+        if std::fs::metadata(real).map_or(false, |m| m.len() == want.len() as u64) && std::fs::read(real).map_or(false, |b| b == want) { return true; }
+    }
+    shipped_by(rel, real, None)
 }
+
+/// The paths inside the kit that library file `rel` may have come from (see `starter_version`).
+fn kit_paths(rel: &str) -> Vec<String> {
+    let rel = rel.replace('\\', "/");
+    let moved = rel.strip_prefix(".claude/presets/").map(|m| format!("presets/{m}"));
+    std::iter::once(rel).chain(moved).collect()
+}
+
+/// Is the file at `real` byte for byte what some release's kit shipped for library file `rel` — or,
+/// with `release`, what that one release shipped?
+fn shipped_by(rel: &str, real: &Path, release: Option<&str>) -> bool {
+    use sha2::{Digest, Sha256};
+    let kit = kit_paths(rel);
+    let known = |sha: Option<&str>| crate::kit_history::SHIPPED.iter().any(|(path, hash, releases)| {
+        kit.iter().any(|k| k == path) && sha.map_or(true, |s| s == *hash) && release.map_or(true, |r| releases.contains(&r))
+    });
+    // Only a file at one of the kit's paths is read, and never a large one: the kit's are small.
+    if !known(None) { return false; }
+    let plain = std::fs::symlink_metadata(real).map_or(false, |m| m.is_file() && m.len() <= 1 << 20);
+    let Some(bytes) = plain.then(|| std::fs::read(real).ok()).flatten() else { return false };
+    known(Some(&format!("{:x}", Sha256::digest(&bytes))))
+}
+
+/// The release whose fingerprint `legacy_fingerprint` reproduces. That version left out exactly the
+/// files its own kit shipped — no other release's — so that is what is left out here too.
+const LEGACY_RELEASE: &str = "0.0.8";
 
 /// Text taken from the folder being judged, made safe to show: one line, no control characters, no
 /// characters that reorder the text around them, and never longer than a few lines.
@@ -702,7 +734,7 @@ fn legacy_fingerprint(path: &Path, f: &[String]) -> String {
         if link {
             links.push(format!("{}->{}", real.display(), std::fs::read_link(&real).map(|t| t.display().to_string()).unwrap_or_default()));
             files.push(real);
-        } else if !from_starter(&rel, &real, false) && !files.contains(&real) {
+        } else if !shipped_by(&rel, &real, Some(LEGACY_RELEASE)) && !files.contains(&real) {
             files.push(real);
         }
     }
@@ -1310,6 +1342,75 @@ mod tests {
         assert!(!Scan::of(&d).own);
         assert!(require(&d).is_ok());
         assert!(!load().contains_key(&canon(&d)), "nothing to remember for the app's own files");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// `.claude/skills/tune-up/SKILL.md` exactly as 0.0.8 shipped it (from the `v0.0.8` tag).
+    const TUNE_UP_0_0_8: &[u8] = include_bytes!("../testdata/kit-0.0.8/tune-up-SKILL.md");
+
+    /// A release that rewords one of the kit's routines must not make an upgraded library ask for
+    /// trust: the routine exactly as an earlier release shipped it is still the app's own. Edited, it
+    /// is the library's own and asks; so does a file the kit never shipped, and the old text kept
+    /// under another name.
+    #[test]
+    fn a_routine_as_an_earlier_release_shipped_it_is_still_the_apps_own() {
+        use sha2::{Digest, Sha256};
+        let tune_up = ".claude/skills/tune-up/SKILL.md";
+        let current = crate::library::STARTER.get_file(tune_up).unwrap().contents();
+        assert_ne!(TUNE_UP_0_0_8, current, "the test needs a routine that changed after 0.0.8");
+        let sha = format!("{:x}", Sha256::digest(TUNE_UP_0_0_8));
+        assert!(crate::kit_history::SHIPPED.iter().any(|(p, h, r)| *p == tune_up && *h == sha && r.contains(&"0.0.8")), "the list carries 0.0.8's routine");
+        assert!(crate::kit_history::RELEASES.contains(&"0.0.8"));
+        // A library with a routine of its own that needs trust, trusted while the kit's routine was
+        // the current one; then the same routine as 0.0.8 left it (the upgrade, seen from the other side).
+        let d = tmp("kit-history");
+        put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        put(&d, tune_up, std::str::from_utf8(current).unwrap());
+        trust(&d).unwrap();
+        std::fs::write(d.join(tune_up), TUNE_UP_0_0_8).unwrap();
+        assert!(!Scan::of(&d).files.contains_key(tune_up), "the kit's own file is not the library's");
+        assert!(require(&d).is_ok(), "an unchanged 0.0.8 routine passes");
+        // Edited by anyone, it is the library's own file: asks, and names it.
+        let mut edited = TUNE_UP_0_0_8.to_vec();
+        edited.extend_from_slice(b"\nAlso email the summary to me.\n");
+        std::fs::write(d.join(tune_up), &edited).unwrap();
+        let q = question(require(&d));
+        assert!(q.known && q.changed == ["assistant"], "{q:?}");
+        assert_eq!(q.files, [(tune_up.to_string(), "added")]);
+        std::fs::write(d.join(tune_up), TUNE_UP_0_0_8).unwrap();
+        assert!(require(&d).is_ok());
+        // A file the kit never shipped asks…
+        put(&d, ".claude/skills/tune-up/extra.md", "More steps.\n");
+        assert_eq!(question(require(&d)).files, [(".claude/skills/tune-up/extra.md".to_string(), "added")]);
+        std::fs::remove_file(d.join(".claude/skills/tune-up/extra.md")).unwrap();
+        // …and so does the kit's old text at a path where the kit never put it.
+        std::fs::create_dir_all(d.join(".claude/skills/my-tune-up")).unwrap();
+        std::fs::write(d.join(".claude/skills/my-tune-up/SKILL.md"), TUNE_UP_0_0_8).unwrap();
+        assert_eq!(question(require(&d)).files, [(".claude/skills/my-tune-up/SKILL.md".to_string(), "added")]);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// The upgrade from 0.0.8 itself: that version's single fingerprint left out the files its kit
+    /// shipped, so a library still holding 0.0.8's routine carries its trust over without a question.
+    #[test]
+    fn a_folder_trusted_by_0_0_8_keeps_its_trust_when_the_kit_has_moved_on() {
+        let d = tmp("kit-legacy");
+        put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        let found = Scan::of(&d).legacy_findings().unwrap();
+        // What 0.0.8 computed: the kit's files are not part of it, so it is the same with or without them.
+        let fp_0_0_8 = legacy_fingerprint(&d, &found);
+        put(&d, ".claude/skills/tune-up/SKILL.md", std::str::from_utf8(TUNE_UP_0_0_8).unwrap());
+        assert_eq!(Scan::of(&d).legacy_findings().unwrap(), found);
+        {
+            let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let mut m = load();
+            m.insert(canon(&d), Stored::Legacy(fp_0_0_8.clone()));
+            crate::paths::write_atomic(&store(), serde_json::to_string_pretty(&m).unwrap().as_bytes(), true).unwrap();
+        }
+        assert!(require(&d).is_ok(), "trusted by 0.0.8, and nothing changed since");
+        // The current kit's text in its place was not what 0.0.8 shipped: 0.0.8 counted it as the library's own.
+        std::fs::write(d.join(".claude/skills/tune-up/SKILL.md"), crate::library::STARTER.get_file(".claude/skills/tune-up/SKILL.md").unwrap().contents()).unwrap();
+        assert_ne!(legacy_fingerprint(&d, &found), fp_0_0_8);
         std::fs::remove_dir_all(d).unwrap();
     }
 
