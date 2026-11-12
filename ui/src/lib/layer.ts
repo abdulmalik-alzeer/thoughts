@@ -493,11 +493,14 @@ function previewOnly(): Error {
   toast(t('layer3.previewReadOnly'), { key: 'preview-readonly' });
   return Object.assign(new Error('Preview: nothing was saved'), { code: 'preview' });
 }
-/** What a test load answers: empty data, and nothing is ever registered, written or shown. */
+/** What a test load answers: empty data in the shape the real call gives (so a correct add-on does
+ *  not trip over it), and nothing is ever registered, written or shown. */
 function dryAnswer(method: string): any {
   if (method === 'library.read') return '';
   if (/\.(list|search)$/.test(method)) return [];
-  if (method === 'storage.get') return null;
+  if (method === 'storage.get') return {};
+  if (method === 'chat.start') return { chatId: '' };
+  if (/^(library\.(write|remove)|todos\.(add|setDone|edit|remove)|ideas\.setStatus|storage\.set)$/.test(method)) return { ok: true };
   return null;
 }
 
@@ -562,8 +565,9 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
       return { ok: true };
     }
     case 'storage.get': {
-      try { const r = await api('/layer/storage/' + storageName(p)); return plain(r && typeof r === 'object' && 'data' in r ? r.data : r); }
-      catch (e) { if (e instanceof ApiError && e.status === 404) return null; throw e; }
+      // The daemon answers with the add-on's own object, exactly as it was saved (`{}` before the first save).
+      try { const r = plain(await api('/layer/storage/' + storageName(p))); return r && typeof r === 'object' && !Array.isArray(r) ? r : {}; }
+      catch (e) { if (e instanceof ApiError && e.status === 404) return {}; throw e; }
     }
     case 'storage.set': {
       const doc = plain(a[0]);
