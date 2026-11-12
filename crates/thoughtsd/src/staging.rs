@@ -1608,7 +1608,9 @@ mod tests {
         let rules = deny_rules(&d, Some(Path::new("/home/u/Library")));
         for want in ["Edit(//home/u/Library/**)", "Edit(//home/u/.thoughts/app-layer/**)", "Edit(./.claude/**)", "Read(//home/u/.thoughts/daemon.json)",
                      "Read(//home/u/.thoughts/secrets.json)", "Read(//home/u/.thoughts/git-credentials)", "Read(//home/u/.thoughts/trusted.json)",
-                     "Read(//home/u/.thoughts/settings.json*)", "Read(//home/u/.thoughts/chats/**)", "Bash(*/home/u/.thoughts/secrets.json*)"] {
+                     "Read(//home/u/.thoughts/settings.json*)", "Read(//home/u/.thoughts/chats/**)", "Bash(*/home/u/.thoughts/secrets.json*)",
+                     // (Also before the first change is ever set aside: a run must not plant one.)
+                     "Edit(//home/u/.thoughts/layer-drafts.json)"] {
             assert!(rules.iter().any(|r| r == want), "missing {want}");
         }
         assert!(!rules.iter().any(|r| r.contains("app-layer-staging")));

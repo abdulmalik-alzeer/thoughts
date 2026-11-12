@@ -58,7 +58,7 @@ pub fn write_protected_in(home: &Path) -> Vec<PathBuf> { vec![home.join("app-lay
 /// else found in the folder is added, so a new state file is protected by default.
 pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     const FILES: &[&str] = &["daemon.json", "daemon.lock", "settings.json", "settings.json.bak", "git-credentials", "trusted.json", "secrets.json",
-        "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "workflows-approved.json",
+        "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "layer-drafts.json", "workflows-approved.json",
         "workflows-state.json", "suggestions.json", "base-manifest.json", "layer-requests.json", "backup-state.json", "update-status.json"];
     const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "wrap-copies", "run-tmp", "plugin-data", "history", "app-layer-held"];
     const OPEN: &[&str] = &["app-layer-staging", "app-layer"];
