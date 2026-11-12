@@ -81,6 +81,11 @@ pub async fn run() -> anyhow::Result<()> {
     // Assistant processes that outlived a crashed daemon are ended before anything new starts.
     let reaped = runs::reap_stale(&paths::runs_file());
     if reaped > 0 { log::warn(format!("ended {reaped} assistant process(es) left over from a previous run")); }
+    // …and so are the private files that daemon had handed to its runs.
+    claude::clear_run_tmp(&paths::run_tmp_dir());
+    // Asking the user's shell for its PATH can take a few seconds: do it now, off to the side,
+    // rather than inside the first request that needs it.
+    tokio::task::spawn_blocking(|| { claude::shell_path(); });
     let state = Arc::new(AppState::load()?);
     log::add_secret(&state.token);
     if state.settings_recovered.load(std::sync::atomic::Ordering::Relaxed) { log::warn("settings were reset to defaults; the damaged file was kept next to settings.json"); }
@@ -113,17 +118,65 @@ pub async fn run() -> anyhow::Result<()> {
     });
     let app = api::router(state.clone());
     let shutdown = state.shutdown.clone();
-    let served = axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown.notified().await })
-        .await;
-    state.chats.flush(true).await;
-    paths::clear_daemon_info();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move { shutdown.notified().await });
+    // The daemon stops when it is asked to over the API (POST /api/shutdown) or by the system
+    // (logout, restart, the app's own last resort: SIGTERM / SIGINT / SIGHUP). Either way it ends
+    // the same way, in `shut_down`.
+    // (`notify_waiters` only reaches a `notified()` that already exists, so this one is made first.)
+    let asked = state.shutdown.notified();
+    tokio::pin!(asked);
+    let served = tokio::select! {
+        r = server => r,
+        // Asked over the API: requests in flight get a moment to finish. The window's live event
+        // stream never closes by itself, so the wait is bounded.
+        _ = async { asked.await; tokio::time::sleep(SHUTDOWN_GRACE).await } => Ok(()),
+        // Asked by the system: there may be very little time, so nothing is waited for.
+        sig = stop_signal() => { log::info(format!("{sig} received: stopping")); Ok(()) }
+    };
+    shut_down(&state).await;
     match &served {
         Ok(()) => log::info("daemon stopped"),
         Err(e) => log::error(format!("daemon stopped with an error: {e}")),
     }
     served?;
     Ok(())
+}
+
+/// How long requests in flight get after a shutdown was asked for over the API.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// The system asking this process to stop. Resolves with the name of the signal.
+#[cfg(unix)]
+async fn stop_signal() -> &'static str {
+    use tokio::signal::unix::{signal, SignalKind};
+    // A signal that cannot be listened for is simply never seen.
+    async fn got(kind: SignalKind) {
+        match signal(kind) { Ok(mut s) => { s.recv().await; } Err(_) => std::future::pending().await }
+    }
+    tokio::select! {
+        _ = got(SignalKind::terminate()) => "SIGTERM",
+        _ = got(SignalKind::interrupt()) => "SIGINT",
+        _ = got(SignalKind::hangup()) => "SIGHUP",
+    }
+}
+
+/// The system asking this process to stop (UNTESTED on Windows: a process without a console may never see it).
+#[cfg(not(unix))]
+async fn stop_signal() -> &'static str {
+    if tokio::signal::ctrl_c().await.is_err() { std::future::pending::<()>().await; }
+    "Ctrl+C"
+}
+
+/// What stopping means, however it was asked for: every assistant run still going is ended
+/// together with everything it started, the chats are written out, and the files that say "a
+/// daemon is running" are removed. Runs ended here stay marked as running in their chats, so the
+/// next start reports them as cut off (and recovers a wrap that was in progress).
+async fn shut_down(state: &Arc<AppState>) {
+    state.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    let ended = runs::end_all(&paths::runs_file());
+    if ended > 0 { log::warn(format!("ended {ended} assistant run(s) that were still going")); }
+    state.chats.flush(true).await;
+    paths::clear_daemon_info();
 }
 
 /// Whether the daemon that owns `token` is answering on `port`. The token is not sent: the
