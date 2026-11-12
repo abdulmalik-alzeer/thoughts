@@ -13,7 +13,7 @@ This folder is your library: everything you think through with the assistant, ke
 - **Capture an idea.** Say "new idea: ..." in a chat, or use the capture button. One line is enough; you can develop it later.
 - **Start a client, matter, class or project.** Say "new client: ..." (or whichever word fits your work). It gets its own page with notes, todos and meeting notes.
 - **Save a meeting.** Paste or dictate your rough notes and say "meeting notes". You get a clean, dated note, and the action items become todos.
-- **Add a todo with a due date.** Add the task in the Todos view and pick a date. Or just tell the assistant: "remind me to send the report by Thursday" — it adds the todo with that date. You can also type `todo: ...` (or «مهمة: ...») in quick capture.
+- **Add a todo with a due date.** Add it in Todos and give it a date with its calendar button. Or just tell the assistant: "remind me to send the report by Thursday" — it adds the todo with that date. You can also type `todo: ...` (or «مهمة: ...») in quick capture.
 - **See what is due.** The Calendar view shows your todos on their due dates. While Thoughts is running, it shows a notification when a todo falls due. It cannot notify you when it is not running, so for dates that matter, export your due dates to your own calendar app from the Todos view.
 - **Find things.** Use Search for any word or name. Or ask: "what did we decide about ...?"
 - **Undo.** If you chose to keep a history when setting up (you can turn it on later in Settings), every save is kept. Open History to see what changed and undo a whole change, such as a Wrap. To go back on a single document, open its versions and restore an earlier one. Without history turned on, saved changes cannot be undone from the app.
@@ -24,7 +24,7 @@ The library adapts to how you work. After a wrap, the assistant may suggest one 
 
 ## Keeping things private
 
-Your files stay in this folder. What you say in a chat, and the notes the assistant opens to answer you, are sent to the AI provider you signed in with. In Settings, under Privacy, you can mark folders the assistant is blocked from reading; they are still included in your backup. Avoid putting passwords, bank details or ID numbers in notes.
+Your files stay in this folder. What you say in a chat, and the notes the assistant opens to answer you, are sent to the AI provider you signed in with. In Settings, under Privacy & cost, you can mark folders the assistant is blocked from reading; they are still included in your backup. Avoid putting passwords, bank details or ID numbers in notes.
 
 ---
 

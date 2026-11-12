@@ -62,23 +62,23 @@ A README's note details carry `kind:` (`idea`, `client`, `matter`, `engagement`,
 
 ## Routines the user can trigger
 
-Skills hold the step-by-step routines; plain language triggers them just the same, in any language.
+Skills hold the step-by-step routines; plain language triggers them just the same, in any language. A tune-up and a review of the library are different routines: when the user's words could mean either («مراجعة المكتبة», "review how my library works"), ask which one they mean before starting the longer review.
 
 | The user says something like | Routine |
 |---|---|
 | "new idea: …", «فكرة جديدة: …», "new client / matter / class / project: …" | Create the item, list it, start talking — `.claude/skills/new-idea/SKILL.md` |
-| "continue …", "where were we on …?" | Short recap, then resume — `.claude/skills/continue-idea/SKILL.md` |
+| "continue …", «تابع …», "where were we on …?" | Short recap, then resume — `.claude/skills/continue-idea/SKILL.md` |
 | "wrap", "save this", "done for now" | Turn the session into notes and todos — `.claude/skills/wrap/SKILL.md` |
 | pasted or dictated meeting notes, "meeting notes", "minutes" | Dated meeting note + todos — `.claude/skills/meeting-notes/SKILL.md` |
 | "process the inbox", «عالج صندوق الوارد» | File every capture waiting in `inbox/`, then delete it — `.claude/skills/process-inbox/SKILL.md` |
 | "todo: …", «مهمة: …», "remind me to …", "what's on my list?" | Edit or read the todo lists (see Todos below) |
 | "start <routine> for …" (for example month-end close) | Copy that checklist from `routines/` into the item's todos with due dates |
 | "which items …?", "what did we decide about …?" | Search, following rule 4 |
-| "tune-up", "how is my library working?" | Review how the library is used, propose adjustments — `.claude/skills/tune-up/SKILL.md` |
-| "review the library" | Full health check with prioritised feedback — `.claude/skills/review-library/SKILL.md` |
+| "tune-up", «ضبط المكتبة», "how is my library working?" | Review how the library is used, propose adjustments — `.claude/skills/tune-up/SKILL.md` |
+| "review the library", «فحص المكتبة» | Full health check with prioritised feedback — `.claude/skills/review-library/SKILL.md` |
 | "reindex" | Rebuild INDEX.md — `.claude/skills/reindex/SKILL.md` |
-| "interview me" | Deepen the personal profile — `.claude/skills/interview-me/SKILL.md` |
-| "check-in", "daily review", "weekly review" | Short debrief into `me/log.md` — `.claude/skills/check-in/SKILL.md` |
+| "interview me", «حاورني» | Deepen the personal profile — `.claude/skills/interview-me/SKILL.md` |
+| "check-in", "daily review", "weekly review", «وقفة يومية» or «وقفة أسبوعية» | Short debrief into `me/log.md` — `.claude/skills/check-in/SKILL.md` |
 
 **Quick-capture prefixes.** A message that begins with `todo:` or «مهمة:» is a todo to add — nothing else: add it to the right list (with `@due(...)` if a date is given or implied), confirm in one line, and do not start a discussion. A message that begins with `new idea:` or «فكرة جديدة:» is an idea to capture with the new-idea routine. Treat the English and Arabic prefixes as identical, whatever the working language, with or without a space before the colon; the text after the prefix is kept in the language it was written in.
 
