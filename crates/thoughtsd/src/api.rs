@@ -2375,6 +2375,10 @@ async fn pump(st: Arc<AppState>, mut socket: WebSocket) {
 mod tests {
     use super::*;
 
+    /// Tests that read the process-wide error log back take this, so one test filling the log
+    /// cannot push out the entry another test is about to read.
+    static ERROR_LOG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn remote_names() {
         for ok in ["origin", "backup-2", "my.remote_1"] { assert!(check_remote_name(ok).is_ok(), "{ok}"); }
@@ -2589,8 +2593,11 @@ mod tests {
         let r = ApiErr(crate::tr::err("library.missing", &[("path", "/Users/sara/Notes")])).into_response();
         let note = r.extensions().get::<ErrNote>().unwrap().clone();
         assert_eq!(note.code, "library_missing");
+        // Other tests write to the same process-wide error log in parallel: hold the test lock and
+        // look the entry up instead of taking the newest one.
+        let _log = ERROR_LOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         note_error("PUT", "/api/library/file", 404, note.code, "could not open /x?token=abcdef123456");
-        let last = recent_errors().lock().unwrap().back().cloned().unwrap();
+        let last = recent_errors().lock().unwrap().iter().rev().find(|e| e["path"] == "/api/library/file" && e["code"] == "library_missing").cloned().unwrap();
         assert_eq!((last["path"].as_str(), last["status"].as_u64(), last["code"].as_str()), (Some("/api/library/file"), Some(404), Some("library_missing")));
         assert!(!last["error"].as_str().unwrap().contains("abcdef123456"));
         for _ in 0..KEEP_ERRORS + 10 { note_error("GET", "/x", 400, "error", "m"); }
@@ -3387,6 +3394,7 @@ mod tests {
         // SEC-34: an error that names the library, the home folder and a private repository's
         // address reaches the report without any of them.
         let home = dirs::home_dir().unwrap();
+        let _log = ERROR_LOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         note_error("POST", "/api/git/sync", 400, "error", &format!("git push: fatal: unable to access 'https://glpat-AbCdEf0123456789xyzz@gitlab.com/sara/clients.git/': failed in {}/notes ({}/x)", lib.display(), home.display()));
         let d = diagnostics(State(st.clone())).await.unwrap().0;
         // (Tests running at the same time note errors too: look for this one rather than the last.)
