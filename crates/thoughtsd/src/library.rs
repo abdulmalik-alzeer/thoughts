@@ -447,9 +447,13 @@ impl Hidden {
 
     /// Is this folder of a walk one of the hidden ones (or inside one)? Asked once per folder, so
     /// the walk never goes into it; files are not looked up one by one.
-    pub(crate) fn folder(&self, e: &walkdir::DirEntry) -> bool {
-        if self.real.is_empty() || !e.file_type().is_dir() { return false; }
-        let p = Self::norm(e.path());
+    pub(crate) fn folder(&self, e: &walkdir::DirEntry) -> bool { e.file_type().is_dir() && self.dir(e.path()) }
+
+    /// Is the folder at `p` one of the hidden ones (or inside one)? For a list of files that was
+    /// walked already: ask per folder, not per file.
+    pub(crate) fn dir(&self, p: &Path) -> bool {
+        if self.real.is_empty() { return false; }
+        let p = Self::norm(p);
         self.real.iter().any(|d| p == *d || p.starts_with(&format!("{d}/")))
     }
 }

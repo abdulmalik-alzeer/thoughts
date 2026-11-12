@@ -427,8 +427,12 @@ pub fn backlinks(root: &Path, target: &str, exclude: &[String]) -> Vec<Value> {
     let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
     if c.len() > 50_000 { c.clear(); }
     let mut out = vec![];
+    // Private folders by where they really are as well as by name, as in the file list and search.
+    let hidden = crate::library::Hidden::new(root, exclude);
+    let mut hidden_dirs: HashMap<PathBuf, bool> = HashMap::new();
     for (rel, abs) in files {
         if crate::paths::is_under(&rel, exclude) || rel == target { continue; }
+        if !exclude.is_empty() && abs.parent().map_or(false, |p| *hidden_dirs.entry(p.to_path_buf()).or_insert_with(|| hidden.dir(p))) { continue; }
         let Ok(meta) = std::fs::metadata(&abs) else { continue };
         let (modified, len) = (meta.modified().ok(), meta.len());
         let fresh = c.get(&abs).map_or(false, |e| e.modified == modified && e.len == len && modified.is_some());
@@ -573,6 +577,20 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         put(&r, "apps/two/README.md", "nothing here any more, longer text");
         assert!(!paths(backlinks(&r, "apps/one/README.md", &[])).contains(&"apps/two/README.md".to_string()));
+    }
+
+    /// SEC-32: a private folder named through a link to it is left out just the same.
+    #[cfg(unix)]
+    #[test]
+    fn backlinks_leave_out_a_private_folder_under_another_name() {
+        let r = tmp();
+        put(&r, "apps/one/README.md", "# One");
+        put(&r, "me/finances/x.md", "[one](../../apps/one/README.md) salary");
+        put(&r, "ideas/a.md", "[one](../apps/one/README.md)");
+        std::os::unix::fs::symlink("../me/finances", r.join("ideas/money")).unwrap();
+        let paths = |v: Vec<Value>| v.iter().map(|x| x["path"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(paths(backlinks(&r, "apps/one/README.md", &["ideas/money".into()])), ["ideas/a.md"]);
+        std::fs::remove_dir_all(r).unwrap();
     }
 
     #[test]
