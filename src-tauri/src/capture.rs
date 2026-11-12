@@ -267,21 +267,15 @@ pub(crate) fn capture_hide(window: tauri::Window, give_back: Option<bool>) {
     }
 }
 
-/// "Open in Thoughts" after a save: the todo list, or the note just written to the inbox.
+/// "Open in Thoughts" after a save: the todo list, or the inbox the note was just written to.
 #[tauri::command]
-pub(crate) fn capture_open_main(window: tauri::Window, view: String, path: Option<String>) -> Result<(), String> {
+pub(crate) fn capture_open_main(window: tauri::Window, view: String) -> Result<(), String> {
     if !from_capture(&window) {
         return Err("not allowed".into());
     }
     let app = window.app_handle();
-    match (view.as_str(), path) {
-        ("todos", _) => crate::links::route(app, json!({"kind": "view", "view": "todos"})),
-        ("note", Some(p)) if p.starts_with("inbox/") && !p.contains("..") => {
-            let settings = thoughtsd::settings::Settings::load();
-            let root = settings.library().ok_or("no library")?;
-            let (path, _) = crate::links::locate(&root, &p, &[]).map_err(|_| "not found".to_string())?;
-            crate::links::route(app, json!({"kind": "note", "path": path}));
-        }
+    match view.as_str() {
+        "todos" | "inbox" => crate::links::route(app, json!({"kind": "view", "view": view})),
         _ => crate::show_main(app),
     }
     hide(app, false);

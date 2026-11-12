@@ -6,7 +6,7 @@ import { app, command, go, refreshChats, toast } from './store.svelte';
 import { t } from './i18n';
 
 type Route = { kind: 'note'; path: string } | { kind: 'chat'; id: string } | { kind: 'view'; view: string };
-const VIEWS = ['home', 'chats', 'ideas', 'todos', 'docs'];
+const VIEWS = ['home', 'chats', 'ideas', 'todos', 'docs', 'inbox'];
 
 let polling = false;
 

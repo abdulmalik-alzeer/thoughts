@@ -164,7 +164,7 @@
   function openInApp() {
     const s = saved;
     cancelHide();
-    invoke('capture_open_main', s ? { view: s.kind === 'todo' ? 'todos' : 'note', path: s.path } : { view: 'home' }).catch(() => {});
+    invoke('capture_open_main', { view: s ? (s.kind === 'todo' ? 'todos' : 'inbox') : 'home' }).catch(() => {});
   }
 
   // After a save the box goes away by itself, unless the pointer or the keyboard is on it.
