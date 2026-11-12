@@ -1,8 +1,8 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
-  import { onDestroy, onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { api, apiBlob, inTauri, on, post, put } from '../lib/api';
-  import { md, mdClick, resolveLink } from '../lib/md';
+  import { hasHiddenText, md, mdClick, resolveLink, revealInvisible } from '../lib/md';
   import { app, go, refreshChats, track } from '../lib/store.svelte';
   import { t, tn, lang, fmtDate, fmtNum } from '../lib/i18n';
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
@@ -10,6 +10,8 @@
   import { saveFile } from '../lib/download';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, prettyName, rawBlobUrl, readAsDataURL } from '../lib/content/util';
   import Versions from './docs/Versions.svelte';
+  import FolderPicker from './docs/FolderPicker.svelte';
+  import Conflict from './docs/Conflict.svelte';
 
   let { path }: { path?: string } = $props();
 
@@ -45,6 +47,14 @@
   let canOpenExternal = $state(true);
   let article = $state<HTMLElement>();
   let picker = $state<HTMLInputElement>();
+  /** The note's source instead of its formatted view (hidden text made visible). */
+  let showSource = $state(false);
+  /** The file as it is now on disk, when it changed elsewhere while being edited ({gone} when it disappeared). */
+  let theirs = $state<any>(null);
+  /** The "two versions" comparison, while it is open. */
+  let conflict = $state<{ theirs: string; gone: boolean; resolve: (c: 'copy' | 'theirs' | 'mine' | null) => void } | null>(null);
+  /** The Move folder picker, while it is open. */
+  let moving = $state<{ path: string; folder: boolean } | null>(null);
 
   const TEXT_EXT = /\.(txt|csv|tsv|json|ya?ml|toml|log|xml|html?|css|js|ts|py|sh|ini|conf)$/i;
   /** Text files that can be edited here like notes (the rest of TEXT_EXT is shown read-only). */
@@ -65,16 +75,54 @@
   function readPref() { try { return localStorage.getItem('thoughts.docs.preview') !== '0'; } catch { return true; } }
   function togglePreview() { preview = !preview; try { localStorage.setItem('thoughts.docs.preview', preview ? '1' : '0'); } catch { /* private mode */ } }
 
-  // Safety net only: unsaved text is mirrored to sessionStorage so a crash or forced reload never loses it.
+  // Safety net only: unsaved text is mirrored to localStorage, with the version it started from, so a
+  // crash, a forced reload or quitting the app never loses it (the next open brings it back).
   // Leaving normally goes through `leaveOk` (Save / Discard / Keep editing), wired to `app.leaveGuard`.
-  const stashKey = (p: string) => `thoughts.draft:${p}`;
-  const stashGet = (p: string) => { try { return sessionStorage.getItem(stashKey(p)); } catch { return null; } };
-  const stashDrop = (p: string) => { try { sessionStorage.removeItem(stashKey(p)); } catch { /* ignore */ } };
+  type Stash = { text: string; base?: string; at: number };
+  const STASH = 'thoughts.docdraft:';
+  const DAY = 86_400_000;
+  const libKey = () => String(app.status?.library ?? '');
+  const stashKey = (p: string) => `${STASH}${libKey()}\n${p}`;
+  const oldKey = (p: string) => `thoughts.draft:${p}`; // 0.0.8 kept drafts in sessionStorage
+  function stashGet(p: string): Stash | null {
+    try {
+      const s = JSON.parse(localStorage.getItem(stashKey(p)) || 'null');
+      if (s && typeof s.text === 'string') return s;
+    } catch { /* unreadable: none */ }
+    try { const old = sessionStorage.getItem(oldKey(p)); if (old !== null) return { text: old, at: Date.now() }; } catch { /* ignore */ }
+    return null;
+  }
+  function stashDrop(p: string) {
+    try { localStorage.removeItem(stashKey(p)); } catch { /* ignore */ }
+    try { sessionStorage.removeItem(oldKey(p)); } catch { /* ignore */ }
+  }
   $effect(() => {
     if (!current || !editing) return;
-    const d = draft, isDirty = dirty;
-    try { if (isDirty) sessionStorage.setItem(stashKey(current), d); else sessionStorage.removeItem(stashKey(current)); } catch { /* ignore */ }
+    const d = draft, isDirty = dirty, base = doc?.hash;
+    try {
+      if (isDirty) localStorage.setItem(stashKey(current), JSON.stringify({ text: d, base, at: Date.now() } satisfies Stash));
+      else stashDrop(current);
+    } catch { /* storage full or unavailable */ }
   });
+  /** Drafts of this library waiting in other files (older than 60 days are dropped). */
+  function waitingDrafts(except: string): string[] {
+    const out: string[] = [], prefix = `${STASH}${libKey()}\n`;
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (!k?.startsWith(STASH)) continue;
+        let s: Stash | null = null;
+        try { s = JSON.parse(localStorage.getItem(k) || 'null'); } catch { /* broken */ }
+        if (!s || typeof s.text !== 'string' || Date.now() - (s.at || 0) > 60 * DAY) { localStorage.removeItem(k); continue; }
+        if (!k.startsWith(prefix)) continue;
+        const p = k.slice(prefix.length);
+        if (p !== except && files.some((f) => f.path === p)) out.push(p);
+      }
+    } catch { /* storage unavailable */ }
+    return out.sort();
+  }
+  /** A non-Markdown text file is shown as plain text, however it was loaded. */
+  const asDoc = (p: string, d: any) => (isMd(p) ? { ...d, plain: false } : { ...d, plain: true });
 
   let emptyDirs = $state<string[]>([]);
   async function loadTree() {
@@ -89,11 +137,26 @@
   }
 
   async function runSearch() {
-    searchError = '';
+    searchError = ''; searched = path ?? '';
     try { results = await api(`/library/search?q=${encodeURIComponent(path!.slice(1))}`); track('search'); }
     catch (e) { results = []; searchError = errDetail(e) || t('docs3.searchFailed'); }
   }
-  const firstFile = () => (files.some((f) => f.path === 'INDEX.md') ? 'INDEX.md' : files.find((f) => isMd(f.path))?.path ?? files[0]?.path);
+  // Files at the top of the library that are there for the assistant (and the user's orientation),
+  // grouped under "About this library" instead of sitting among the user's own folders.
+  const SYSTEM = /^(CLAUDE|AGENTS|INDEX|START-HERE(\.[a-z]{2})?)\.md$/i;
+  const isSystem = (p: string) => !p.includes('/') && SYSTEM.test(p);
+  const lastKey = () => `thoughts.docs.last:${libKey()}`;
+  const has = (p: string | null | undefined) => !!p && files.some((f) => f.path === p);
+  /** Where Docs opens: the note opened last, else the library's welcome page, else the first own note. */
+  function defaultFile(): string | undefined {
+    let last: string | null = null;
+    try { last = localStorage.getItem(lastKey()); } catch { /* private mode */ }
+    if (has(last)) return last!;
+    const welcome = lang() === 'ar' && has('START-HERE.ar.md') ? 'START-HERE.ar.md' : 'START-HERE.md';
+    if (has(welcome)) return welcome;
+    return files.find((f) => isMd(f.path) && !isSystem(f.path))?.path ?? files.find((f) => isMd(f.path))?.path ?? files[0]?.path;
+  }
+  const firstFile = () => defaultFile();
 
   function beforeUnload(e: BeforeUnloadEvent) { if (dirty) { e.preventDefault(); e.returnValue = ''; } }
   function onKey(e: KeyboardEvent) {
@@ -104,18 +167,65 @@
   function onDocClick(e: MouseEvent) { if (menu && !(e.target as HTMLElement)?.closest?.('.menuwrap')) menu = false; }
 
   let off: (() => void) | undefined;
+  let ready = $state(false);
+  let searched = '';
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   onMount(async () => {
     window.addEventListener('beforeunload', beforeUnload);
     window.addEventListener('keydown', onKey);
     window.addEventListener('thoughts:command', onCommand);
     window.addEventListener('click', onDocClick);
     app.leaveGuard = leaveOk;
-    off = on((e) => { if (e.type === 'library.changed' || e.type === 'resync') loadTree(); });
+    off = on((e) => {
+      if (e.type !== 'library.changed' && e.type !== 'resync') return;
+      // Bursts (a wrap writes many files) settle into one refresh.
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(async () => { await loadTree(); refreshOpen(); }, 250);
+    });
     await loadTree();
-    if (treeError) return;
-    if (path?.startsWith('?')) await runSearch();
-    else openFile(path || firstFile());
+    try {
+      if (treeError) return;
+      if (path?.startsWith('?')) await runSearch();
+      else await openFile(path || defaultFile(), false, !path);
+    } finally { ready = true; }
+    const waiting = waitingDrafts(current);
+    if (waiting.length) notify(tn('docsa.draftsWaiting', waiting.length, { name: prettyName(waiting[0]) }), { kind: 'info', key: 'docs-drafts-waiting', duration: 12000, action: { label: t('docsa.open'), run: () => go({ kind: 'docs', path: waiting[0] }) } });
   });
+
+  // The app's route follows the open file (Back, the sidebar highlight and the palette agree), and a
+  // route change made elsewhere (palette, search, Back) opens its file here without a remount.
+  $effect(() => {
+    const p = path;
+    if (!ready) return;
+    untrack(() => {
+      if (treeError) return;
+      if (p?.startsWith('?')) { if (results === null || searched !== p) runSearch(); }
+      else if (p && p !== current) openFile(p, true);
+      else if (!p) { if (current) go({ kind: 'docs', path: current }, { replace: true }); else openFile(defaultFile(), true, true); }
+    });
+  });
+  // The shell drops the leave guard each time it navigates; this view stays mounted, so arm it again.
+  $effect(() => { void app.view; untrack(() => { if (app.leaveGuard !== leaveOk) app.leaveGuard = leaveOk; }); });
+
+  /** The open file changed on disk (the assistant, a sync, another app): show the new version, or,
+   *  with unsaved edits, say so and offer the comparison. */
+  async function refreshOpen() {
+    const p = current;
+    if (!p || !doc || doc.binary) return;
+    if (saving) { setTimeout(refreshOpen, 400); return; }
+    if (!files.some((f) => f.path === p)) {
+      if (editing && dirty) theirs = { gone: true, content: '' };
+      else if (!editing) { doc = null; docError = t('docsa.goneBody'); }
+      return;
+    }
+    let d: any;
+    try { d = await api(`/library/file?path=${encodeURIComponent(p)}`); } catch { return; }
+    if (current !== p || !doc || (d.hash && d.hash === doc.hash)) return;
+    if (!editing) { doc = asDoc(p, d); return; }
+    if (!dirty) { doc = asDoc(p, d); draft = d.content; theirs = null; return; }
+    if (d.content === draft) { doc = asDoc(p, d); theirs = null; return; }
+    theirs = asDoc(p, d);
+  }
   onDestroy(() => {
     window.removeEventListener('beforeunload', beforeUnload);
     window.removeEventListener('keydown', onKey);
@@ -123,6 +233,7 @@
     window.removeEventListener('click', onDocClick);
     document.documentElement.classList.remove('print-doc');
     off?.();
+    clearTimeout(refreshTimer);
     if (imgUrl) URL.revokeObjectURL(imgUrl);
     if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     dropInline();
@@ -136,8 +247,8 @@
       title: t('docs.unsavedTitle'), body: t('docs.unsavedBody'), list: [current], cancelLabel: t('docs.keepEditing'),
       choices: [{ id: 'discard', label: t('docs.discard'), danger: true }, { id: 'save', label: t('save'), primary: true }],
     });
-    if (choice === 'save') return save();
-    if (choice === 'discard') { stashDrop(current); editing = false; return true; }
+    if (choice === 'save') { const ok = await save(false, true); if (ok) { editing = false; refreshOpen(); } return ok; }
+    if (choice === 'discard') { stashDrop(current); editing = false; theirs = null; return true; }
     return false;
   }
 
@@ -150,11 +261,16 @@
     } catch (e) { if (current === p) pdfError = errDetail(e) || t('docs3.pdfFailed'); }
   }
 
-  async function openFile(p?: string, force = false) {
+  /** `replace`: the route is corrected in place (a default file), not added to Back. */
+  async function openFile(p?: string, force = false, replace = false) {
     if (!p) return;
     if (!force && !(await leaveOk())) return;
+    // A link to a folder opens the folder's front page when there is one.
+    if (!files.some((f) => f.path === p) && files.some((f) => f.path === `${p}/README.md`)) p = `${p}/README.md`;
     if (p !== current) track('doc.open');
-    results = null; editing = false; current = p; docError = ''; menu = false; treeOpen = false;
+    results = null; editing = false; current = p; docError = ''; menu = false; treeOpen = false; showSource = false; theirs = null;
+    if (path !== p) go({ kind: 'docs', path: p }, { replace });
+    try { localStorage.setItem(lastKey(), p); } catch { /* private mode */ }
     if (imgUrl) { URL.revokeObjectURL(imgUrl); imgUrl = null; }
     if (pdfUrl) { URL.revokeObjectURL(pdfUrl); pdfUrl = null; }
     pdfError = '';
@@ -172,58 +288,108 @@
     try {
       const d = await api(`/library/file?path=${encodeURIComponent(p)}`);
       if (current !== p) return;
-      doc = isMd(p) ? d : { ...d, plain: true };
+      doc = asDoc(p, d);
       const kept = EDIT_EXT.test(p) ? stashGet(p) : null;
-      if (kept !== null && kept !== d.content) { draft = kept; editing = true; notify(t('docs.draftRestored'), { kind: 'info' }); }
+      if (kept && kept.text !== d.content) {
+        draft = kept.text; editing = true;
+        // The file moved on since the draft began: keep the draft's starting point, so Save compares.
+        const moved = !!kept.base && !!d.hash && kept.base !== d.hash;
+        if (moved) { doc = { ...doc, hash: kept.base }; theirs = asDoc(p, d); }
+        notify(t(moved ? 'docsa.draftRestoredChanged' : 'docs.draftRestored'), { kind: 'info', key: 'docs-draft-restored' });
+      } else if (kept) stashDrop(p);
     } catch (e: any) {
       if (current === p) { doc = null; docError = errDetail(e) || String(e); }
     } finally { if (current === p) docLoading = false; }
   }
 
-  function startEdit() { draft = doc.content; editing = true; }
+  function startEdit() { draft = doc.content; editing = true; theirs = null; }
 
+  /** Done: leave the editor (asking first about unsaved text), showing what is on disk now. */
   async function cancelEdit() {
     if (dirty && !(await leaveOk())) return;
     stashDrop(current);
-    editing = false;
+    editing = false; theirs = null;
+    refreshOpen();
   }
 
-  async function reloadTheirs() {
-    const p = current;
-    const d = await api(`/library/file?path=${encodeURIComponent(p)}`);
-    if (current !== p) return;
+  /** Show the version on disk. The draft it replaces can be brought back for a while. */
+  async function reloadTheirs(): Promise<boolean> {
+    const p = current, mine = draft;
+    let d: any;
+    try { d = await api(`/library/file?path=${encodeURIComponent(p)}`); }
+    catch (err) { failed(t('docsa.loadTheirsFailed'), err); return false; }
+    if (current !== p) return true;
     stashDrop(p);
-    doc = d;
-    editing = false;
-    notify(t('layer.docs.reloaded'));
+    doc = asDoc(p, d);
+    editing = false; theirs = null;
+    notify(t('docsa.usedTheirs'), { kind: 'info', duration: 20000, action: { label: t('docsa.bringBack'), run: () => {
+      if (current !== p || editing) return;
+      // Picks up from the version now shown, so saving replaces it on purpose.
+      draft = mine; editing = true;
+    } } });
+    return true;
+  }
+
+  /** Free name next to `p` for "save mine as a copy": "plan (my version).md", "plan (my version 2).md"… */
+  function copyName(p: string): string {
+    const dot = baseName(p).lastIndexOf('.');
+    const stem = dot > 0 ? p.slice(0, p.length - baseName(p).length + dot) : p;
+    const extn = dot > 0 ? baseName(p).slice(dot) : '';
+    for (let i = 1; ; i++) {
+      const c = `${stem} (${t('docsa.copySuffix')}${i > 1 ? ' ' + i : ''})${extn}`;
+      if (!taken(c)) return c;
+    }
+  }
+
+  /** Both versions side by side; resolves true when the edit is settled (saved, copied or set aside). */
+  async function resolveConflict(disk: any): Promise<boolean> {
+    const p = current, mine = draft;
+    const choice = await new Promise<'copy' | 'theirs' | 'mine' | null>((resolve) => {
+      conflict = { theirs: disk?.gone ? '' : String(disk?.content ?? ''), gone: !!disk?.gone, resolve };
+    });
+    conflict = null;
+    if (!choice || current !== p) return false;
+    if (choice === 'mine') return save(true);
+    if (choice === 'theirs') return reloadTheirs();
+    // Keep both: my text goes into a new file beside this one; this one shows what is on disk.
+    const copy = copyName(p);
+    try { await post('/library/new', { path: copy, content: mine }); }
+    catch (err) { failed(t('docsa.copyFailed'), err); return false; }
+    await loadTree();
+    notify(t('docsa.copySaved', { name: baseName(copy) }), { kind: 'success', duration: 12000, action: { label: t('docsa.open'), run: () => go({ kind: 'docs', path: copy }) } });
+    stashDrop(p);
+    editing = false; theirs = null;
+    if (disk?.gone) { await openFile(copy, true); return true; }
+    try { const d = await api(`/library/file?path=${encodeURIComponent(p)}`); if (current === p) doc = asDoc(p, d); } catch { /* the tree shows what is there */ }
+    return true;
   }
 
   /** `force` saves over whatever is on disk (the user chose "Overwrite with mine"). */
-  async function save(force: boolean | Event = false): Promise<boolean> {
+  /** `closing`: the editor is being left right after (Save in the unsaved-changes question). */
+  async function save(force: boolean | Event = false, closing = false): Promise<boolean> {
     force = force === true;
     if (saving) return false;
     saving = true;
+    // Saving keeps the editor open (Done leaves it); text typed while the request runs stays unsaved.
+    const p = current, sent = draft;
     try {
-      const r = await put('/library/file', { path: current, content: draft, ...(force || !doc?.hash ? {} : { baseHash: doc.hash }) });
-      doc = { ...doc, content: draft, hash: r?.hash ?? doc.hash };
-      stashDrop(current);
-      editing = false;
-      notify(t('docs.saved'));
-      // Re-read so frontmatter pills and the rendered body reflect what is on disk.
-      api(`/library/file?path=${encodeURIComponent(current)}`).then((d) => { if (d.path === current && !editing) doc = d; }).catch(() => {});
+      const r = await put('/library/file', { path: p, content: sent, ...(force || !doc?.hash ? {} : { baseHash: doc.hash }) });
+      if (current !== p) return true;
+      doc = { ...doc, content: sent, hash: r?.hash ?? doc.hash };
+      theirs = null;
+      if (draft === sent) stashDrop(p);
+      notify(t(editing && !closing ? 'docsa.savedStill' : 'docs.saved'));
       return true;
     } catch (e: any) {
       const msg: string = e?.message ?? String(e);
       if (!msg.startsWith('STALE::')) { failed(t('docs3.saveFailed'), e); return false; }
       // The file changed on disk after it was opened here (a sync, the assistant, another app).
       saving = false;
-      const choice = await choiceDialog({
-        title: t('layer.docs.staleTitle'), body: t('layer.docs.staleBody'), list: [current], cancelLabel: t('docs.keepEditing'),
-        choices: [{ id: 'mine', label: t('layer.docs.overwrite'), danger: true }, { id: 'theirs', label: t('layer.docs.reload'), primary: true }],
-      });
-      if (choice === 'mine') return save(true);
-      if (choice === 'theirs') { try { await reloadTheirs(); } catch (err) { failed(t('docs3.reloadFailed'), err); } }
-      return false;
+      let disk: any = { gone: true, content: '' };
+      try { disk = await api(`/library/file?path=${encodeURIComponent(p)}`); }
+      catch (err) { if ((err as any)?.status !== 404) { failed(t('docs3.saveFailed'), err); return false; } }
+      if (current !== p) return false;
+      return resolveConflict(disk);
     } finally { saving = false; }
   }
 
@@ -239,10 +405,8 @@
       for (const img of Array.from(el.querySelectorAll('img'))) {
         const src = img.getAttribute('src') || '';
         if (!src || /^([a-z][a-z0-9+.-]*:|\/\/|#)/i.test(src)) continue;
-        let rel = src;
-        try { rel = decodeURIComponent(src); } catch { /* keep as written */ }
         img.removeAttribute('src');
-        rawBlobUrl(resolveLink(p, rel)).then((u) => {
+        rawBlobUrl(resolveLink(p, src)).then((u) => {
           if (!u) return; // missing file, or a background service without /library/raw
           if (current !== p || !img.isConnected) { URL.revokeObjectURL(u); return; }
           inlineUrls.push(u);
@@ -262,15 +426,18 @@
     openFile(resolveLink(current, href));
   }
 
+  /** A new chat with this file mentioned and the cursor in the message box; nothing is sent until the user does. */
   async function discuss() {
+    const p = current;
+    const priv = ((app.settings?.privatePaths ?? []) as string[]).some((x) => { const b = String(x).replace(/\/+$/, '').toLowerCase(); return !!b && (p.toLowerCase() === b || p.toLowerCase().startsWith(b + '/')); });
+    if (priv) { notify(t('docsa.privateDiscuss'), { kind: 'error' }); return; }
     try {
       const c = await post('/chats', {});
-      const slug = current.split('/').slice(0, 2).join('/');
-      const text = isMd(current) ? `continue ${slug.split('/')[1] || current}` : t('docs.discussPrompt', { path: current });
-      await post(`/chats/${c.id}/send`, { text, mentions: [current] });
+      // The chat view picks this up as the draft of the new chat (same shape as its own drafts).
+      try { localStorage.setItem(`thoughts.chatdraft:${c.id}`, JSON.stringify({ text: `@${p} `, mentions: [p], files: [] })); } catch { /* storage unavailable */ }
       await refreshChats().catch(() => {});
       go({ kind: 'chat', id: c.id });
-    } catch (e) { failed(t('docs3.discussFailed'), e); }
+    } catch (e) { failed(t('docsa.discussFailed'), e); }
   }
 
   async function openExternal() {
@@ -286,8 +453,17 @@
     try { const { revealItemInDir } = await import('@tauri-apps/plugin-opener'); await revealItemInDir(absPath); }
     catch { notify(t('docs.revealFailed'), { kind: 'error' }); }
   }
+  /** What a reader sees, as text: the clean copy laid out off screen (a detached element has no line breaks). */
+  function plainText(): string {
+    const el = exportClone();
+    if (!el) return '';
+    el.style.cssText = 'position:fixed;inset-inline-start:-100000px;top:0;width:760px;';
+    el.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(el);
+    try { return el.innerText.trim(); } finally { el.remove(); }
+  }
   async function copyDoc() {
-    const text = article?.innerText?.trim() || doc?.body || doc?.content || '';
+    const text = plainText() || doc?.body || doc?.content || '';
     const ok = await copyText(text);
     notify(t(ok ? 'docs.copied' : 'docs.copyFailed'), { kind: ok ? 'info' : 'error' });
   }
@@ -304,7 +480,7 @@
   async function copyRich() {
     const el = exportClone();
     if (!el || !article) return;
-    const text = article.innerText.trim();
+    const text = plainText();
     try {
       await navigator.clipboard.write([new ClipboardItem({
         'text/html': new Blob([el.innerHTML], { type: 'text/html' }),
@@ -447,11 +623,16 @@
     if (await relocate(p, to, 'docs3.renameFailed')) notify(t('docs3.renamed', { name }), { kind: 'success' });
   }
 
-  async function movePath(p: string) {
-    const raw = await promptDialog({ title: t('docs3.moveTitle', { name: baseName(p) }), body: t('docs3.moveHint'), value: dirName(p), placeholder: t('docs3.folderPlaceholder') });
-    if (raw === null) return;
-    const dir = cleanPath(raw);
-    if (dir === null || inside(dir, p)) { notify(t('docs3.badName'), { kind: 'error' }); return; }
+  /** Every folder in the library (from the file list already loaded). */
+  const allFolders = $derived.by(() => {
+    const s = new Set<string>(emptyDirs);
+    for (const f of files) { const parts = String(f.path).split('/'); for (let i = 1; i < parts.length; i++) s.add(parts.slice(0, i).join('/')); }
+    return [...s];
+  });
+  function movePath(p: string, folder = false) { moving = { path: p, folder }; }
+  async function moveTo(p: string, dir: string) {
+    moving = null;
+    if (inside(dir, p)) { notify(t('docs3.badName'), { kind: 'error' }); return; }
     const to = dir ? `${dir}/${baseName(p)}` : baseName(p);
     if (await relocate(p, to, 'docs3.moveFailed')) {
       if (dir) setOpen(dir, true);
@@ -484,10 +665,10 @@
       });
       if (!ok) return;
     }
-    if (affected && dirty) { stashDrop(current); editing = false; }
-    try { await post('/library/delete', { path: p }); }
+    // The draft of an open file inside is dropped only once the delete has really happened.
+    try { await post('/library/delete', folder ? { path: p, recursive: true } : { path: p }); }
     catch (e) { failed(t('docs3.deleteFailed'), e); return; }
-    if (affected) { editing = false; stashDrop(current); current = ''; doc = null; }
+    if (affected) { editing = false; theirs = null; stashDrop(current); current = ''; doc = null; }
     await loadTree();
     if (affected) openFile(firstFile(), true);
     let hash = '';
@@ -509,7 +690,7 @@
         { id: 'rename', label: t('docs3.rename') }, { id: 'new', label: t('docs3.newDoc'), primary: true },
       ],
     });
-    if (c === 'new') newDoc(dir); else if (c === 'rename') renamePath(dir, true); else if (c === 'move') movePath(dir); else if (c === 'delete') removePath(dir, true);
+    if (c === 'new') newDoc(dir); else if (c === 'rename') renamePath(dir, true); else if (c === 'move') movePath(dir, true); else if (c === 'delete') removePath(dir, true);
   }
 
   // ---------- "More" menu for the open document ----------
@@ -522,6 +703,7 @@
         { id: 'html', label: t('docs3.exportHtml'), icon: 'download', run: exportHtml },
         { id: 'rich', label: t('docs3.copyRich'), icon: 'copy', run: copyRich },
         { id: 'copy', label: t('docs.copyText'), icon: 'copy', run: copyDoc },
+        ...(isMd(current) ? [{ id: 'source', label: t(showSource ? 'docsa.showFormatted' : 'docsa.showSource'), icon: 'eye', run: () => (showSource = !showSource) }] : []),
       ] : []),
       ...(desktop && absPath ? [{ id: 'reveal', label: t(isMac ? 'docs.revealMac' : 'docs.reveal'), icon: 'folder', run: reveal }] : []),
       { id: 'rename', label: t('docs3.rename'), icon: 'edit', run: () => renamePath(current) },
@@ -596,6 +778,7 @@
     for (const f of files) {
       if (q && !`${f.path} ${titleOf(f)}`.toLowerCase().includes(q)) continue;
       const parts = String(f.path).split('/');
+      if (isSystem(f.path)) { root.count++; continue; }
       dirAt(parts, parts.length - 1, true).files.push(f);
       root.count++;
     }
@@ -605,6 +788,13 @@
     return root;
   });
   const isOpen = (k: string) => !!(open[k] || filter.trim());
+  const systemFiles = $derived.by(() => {
+    const q = filter.trim().toLowerCase();
+    return files.filter((f) => isSystem(f.path) && (!q || `${f.path} ${titleOf(f)}`.toLowerCase().includes(q))).sort((a, b) => a.path.localeCompare(b.path));
+  });
+  const SYS = '\u0000system';
+  const sysOpen = $derived(!!(open[SYS] || filter.trim() || isSystem(current)));
+  const hidden = $derived(!!doc && !doc.binary && !doc.plain && isMd(current) && hasHiddenText(String(doc.content ?? '')));
 
   const FM = ['status', 'area', 'updated', 'level'];
   function fmValue(k: string, v: any): string {
@@ -659,6 +849,13 @@
       <button class="btn ghost sm" onclick={() => (filter = '')}>{t('docs.clearFilter')}</button>
     {/if}
     {@render level(tree, 0)}
+    {#if systemFiles.length}
+      <div class="dirrow sys">
+        <button class="dir grow" onclick={() => setOpen(SYS, !open[SYS])} aria-expanded={sysOpen} title={t('docsa.systemTip')}>
+          <Icon name={sysOpen ? 'down' : 'right'} size={13} class={sysOpen ? '' : 'flip-rtl'} /> <Icon name="info" size={13} /> <span class="dname">{t('docsa.systemGroup')}</span> <span class="count muted">{fmtNum(systemFiles.length)}</span></button>
+      </div>
+      {#if sysOpen}{#each systemFiles as f (f.path)}{@render fileRow(f, 1)}{/each}{/if}
+    {/if}
   </aside>
 
   <section class="view scroll">
@@ -702,7 +899,7 @@
         {#if editing}
           <span class="dirty" class:on={dirty} role="status"><span class="dot" aria-hidden="true"></span>{t(dirty ? 'docs.unsaved' : 'docs.noChanges')}</span>
           {#if !doc.plain}<button class="btn" onclick={togglePreview} aria-pressed={preview}><Icon name="eye" size={15} /> {t('docs.preview')}</button>{/if}
-          <button class="btn" onclick={cancelEdit}>{t('cancel')}</button>
+          <button class="btn" onclick={cancelEdit} title={t('docsa.doneTip')}>{t('docsa.done')}</button>
           <button class="btn primary" onclick={save} disabled={!dirty || saving} title={t('docs.saveTip')}>{t(saving ? 'docs.saving' : 'save')}</button>
         {:else}
           {#if !doc.binary}
@@ -752,6 +949,12 @@
           {/if}
         {/if}
       {:else if editing}
+        {#if theirs}
+          <div class="banner no-print" role="status">
+            <Icon name="warning" size={16} /><span class="grow">{t(theirs.gone ? 'docsa.goneBanner' : 'docsa.changedBanner')}</span>
+            <button class="btn sm-btn" onclick={() => resolveConflict(theirs)}>{t('docsa.compare')}</button>
+          </div>
+        {/if}
         <div class="split" class:two={preview && !doc.plain}>
           <textarea class="editor" bind:value={draft} dir="auto" spellcheck={!doc.plain} aria-label={t('docs.editorLabel', { name: current })}></textarea>
           {#if preview && !doc.plain}
@@ -762,7 +965,19 @@
       {:else if doc.plain}
         <h1 class="ptitle" dir="auto">{baseName(current)}</h1>
         <article bind:this={article} aria-label={t('docs3.textLabel', { name: baseName(current) })}><pre class="plain" dir="auto">{doc.content}</pre></article>
+      {:else if showSource}
+        <div class="banner info no-print">
+          <span class="grow">{t('docsa.sourceNote')} <code class="inv">U+202E</code></span>
+          <button class="btn sm-btn" onclick={() => (showSource = false)}>{t('docsa.showFormatted')}</button>
+        </div>
+        <article bind:this={article} aria-label={t('docsa.sourceLabel', { name: baseName(current) })}><pre class="plain src">{#each revealInvisible(String(doc.content ?? '')) as seg}{#if seg.code}<code class="inv">{seg.text}</code>{:else}{seg.text}{/if}{/each}</pre></article>
       {:else}
+        {#if hidden}
+          <div class="banner no-print" role="note">
+            <Icon name="eye" size={16} /><span class="grow">{t('docsa.hiddenBody')}</span>
+            <button class="btn sm-btn" onclick={() => (showSource = true)}>{t('docsa.showSource')}</button>
+          </div>
+        {/if}
         {#if doc.frontmatter && typeof doc.frontmatter === 'object'}
           <div class="row fm">
             {#each Object.entries(doc.frontmatter).filter(([k, v]) => FM.includes(k) && v != null && v !== '') as [k, v]}<span class="pill">{t(`docs.fm.${k}`)}: <bdi>{fmValue(k, v)}</bdi></span>{/each}
@@ -779,6 +994,14 @@
   {#if dragging}<div class="dropzone" aria-hidden="true"><Icon name="upload" size={28} /><span>{t('docs.dropHere')}</span></div>{/if}
 </div>
 </div>
+
+{#if moving}
+  <FolderPicker item={moving.path} folder={moving.folder} folders={allFolders} clean={(raw) => cleanPath(raw) || null}
+    pick={(dir) => { const m = moving; if (m) moveTo(m.path, dir); }} close={() => (moving = null)} />
+{/if}
+{#if conflict}
+  <Conflict name={baseName(current)} theirs={conflict.theirs} mine={draft} gone={conflict.gone} done={(c) => conflict?.resolve(c)} />
+{/if}
 
 {#if showVersions && current}
   <Versions path={current} close={() => (showVersions = false)}
@@ -831,7 +1054,17 @@
 
   .split { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; height: calc(100vh - 110px); }
   .split.two { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .editor { height: 100%; font-family: var(--mono); font-size: 13px; line-height: 1.55; resize: none; }
+  /* Each paragraph finds its own direction, so an Arabic note behind English front matter is still
+     written right-to-left, line by line. */
+  .editor { height: 100%; font-family: var(--mono); font-size: 13px; line-height: 1.55; resize: none; unicode-bidi: plaintext; text-align: start; }
+  .banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; padding: 8px 12px; border-radius: var(--radius);
+    border: var(--border-w) solid color-mix(in srgb, var(--accent-2) 45%, var(--border)); background: color-mix(in srgb, var(--accent-2) 10%, var(--bg)); font-size: var(--fs-sm); }
+  .banner.info { border-color: var(--border); background: var(--panel); }
+  .banner :global(.icon) { flex: none; color: var(--accent-2); }
+  .sm-btn { font-size: var(--fs-sm); padding: 4px 10px; }
+  .src { unicode-bidi: plaintext; text-align: start; }
+  .inv { font-family: var(--mono); font-size: .85em; padding: 0 3px; border-radius: 4px; border: 1px dashed var(--danger); color: var(--danger); }
+  .sys { margin-top: 10px; }
   .pv { height: 100%; padding: 8px 14px; border-radius: var(--radius); border: var(--border-w) solid var(--border); overflow-wrap: anywhere; }
   @container docs (max-width: 900px) { .split.two { grid-template-columns: minmax(0, 1fr); grid-template-rows: 1fr 1fr; } }
 
@@ -861,7 +1094,7 @@
   .fname { display: block; overflow-wrap: anywhere; font-size: 14px; font-weight: 700; letter-spacing: 0; line-height: 1.4; margin: 0; }
   .wrapr { flex-wrap: wrap; }
   .inline-img { display: block; max-width: 100%; margin-top: 16px; border-radius: var(--radius); box-shadow: var(--shadow); }
-  .plain { margin-top: 16px; font-size: var(--fs-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .plain { margin-top: 16px; font-size: var(--fs-sm); white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; text-align: start; }
 
   .pad { padding-top: 16px; display: grid; gap: 12px; }
   .skel { height: 13px; margin: 5px 6px; border-radius: 8px; background: linear-gradient(90deg, var(--fill), var(--fill-2), var(--fill)); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }

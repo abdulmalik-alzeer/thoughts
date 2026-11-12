@@ -849,7 +849,7 @@
           </div>
         </div>
       {:else if app.view.kind === 'ideas'}<Ideas />
-      {:else if app.view.kind === 'docs'}{#key app.view.path}<Docs path={app.view.path} />{/key}
+      {:else if app.view.kind === 'docs'}<Docs path={app.view.path} />
       {:else if app.view.kind === 'todos'}<Todos mode={app.view.id === 'calendar' ? 'calendar' : 'list'} />
       {:else if app.view.kind === 'history'}<History />
       {:else if app.view.kind === 'projects'}<Projects {projects} reload={loadProjects} {newChat} />

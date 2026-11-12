@@ -285,11 +285,13 @@ async function leave(): Promise<boolean> {
   return true;
 }
 
-/** Navigate. A view with unsaved work (`app.leaveGuard`) is asked first; resolves false when the user stays. */
-export async function go(v: View): Promise<boolean> {
+/** Navigate. A view with unsaved work (`app.leaveGuard`) is asked first; resolves false when the user stays.
+ *  `replace`: correct the current entry of Back/Forward instead of adding one (a view filling in its default). */
+export async function go(v: View, opts: { replace?: boolean } = {}): Promise<boolean> {
   if (!(await leave())) return false;
   if (v.kind !== app.view.kind) track('view.' + v.kind);
-  if (!sameView(v, trail[at])) {
+  if (opts.replace) trail[at] = { ...v };
+  else if (!sameView(v, trail[at])) {
     trail.splice(at + 1);
     trail.push({ ...v });
     if (trail.length > 60) trail.shift();
