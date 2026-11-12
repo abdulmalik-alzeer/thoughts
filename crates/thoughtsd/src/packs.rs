@@ -21,7 +21,8 @@ pub fn check_path(path: &str) -> anyhow::Result<()> {
     if path.starts_with('/') || path.starts_with('~') || path.contains('\\') || path.contains(':') || Path::new(path).is_absolute() {
         return Err(bad("file paths must be relative"));
     }
-    if path.chars().any(char::is_control) { return Err(bad("invalid characters in file path")); }
+    // Nothing in a file name may be invisible or reorder how the name reads (`…sj.txt` that is really a `.js`).
+    if path.chars().any(|c| c.is_control() || crate::staging::validate::is_hidden_char(c)) { return Err(bad("invalid characters in file path")); }
     let parts: Vec<&str> = path.split('/').collect();
     for p in &parts {
         if p.is_empty() || *p == "." || *p == ".." { return Err(bad("file paths may not contain '..' or empty parts")); }
@@ -80,8 +81,18 @@ pub fn collect(dir: &Path) -> BTreeMap<String, String> {
     out
 }
 
+/// One line of someone else's text, as it will be shown: no control characters, and anything that
+/// would not show (zero-width, direction-changing…) written out.
 fn clean_line(text: &str, max: usize) -> String {
-    text.chars().filter(|c| !c.is_control()).take(max).collect::<String>().trim().to_string()
+    let line: String = text.chars().filter(|c| !c.is_control()).collect();
+    crate::staging::validate::show_hidden(&line, false).chars().take(max).collect::<String>().trim().to_string()
+}
+
+/// A pack's name inside one of the app's own sentences: short, and unable to close the quotation
+/// marks around it and carry on as if the app were speaking.
+fn quoted_name(name: &str) -> String {
+    let n: String = name.chars().filter(|c| !"\"'`«»“”„‟‹›".contains(*c)).take(60).collect();
+    if n.trim().is_empty() { "pack".into() } else { n.trim().to_string() }
 }
 
 /// The whole layer as a pack (`kind: "full"`).
@@ -197,7 +208,12 @@ pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow:
     let feature = pack["kind"] == "feature";
     let name = clean_line(pack["name"].as_str().unwrap_or(""), 80);
     let name = if name.is_empty() { "pack".to_string() } else { name };
-    crate::staging::recreate(g, d, "import", None).await?;
+    // The change that was waiting for review is only gone once this pack has really been staged.
+    let waiting = crate::staging::put_aside(g, d).await;
+    if let Err(e) = crate::staging::recreate(g, d, "import", None).await {
+        if let Some(w) = waiting { crate::staging::put_back(g, d, w).await; }
+        return Err(e);
+    }
     let mut replaced: Vec<&str> = vec![];
     let result: anyhow::Result<()> = (|| {
         for (path, text) in &files {
@@ -213,18 +229,23 @@ pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow:
         Ok(())
     })();
     if let Err(e) = result {
-        // A pack that cannot be merged leaves no half-staged change behind.
-        let _ = crate::staging::discard(g, d).await;
+        // A pack that cannot be merged leaves no half-staged change behind, and costs nothing that was waiting.
+        match waiting {
+            Some(w) => crate::staging::put_back(g, d, w).await,
+            None => { let _ = crate::staging::discard(g, d).await; }
+        }
         return Err(e);
     }
-    let description = clean_line(pack["description"].as_str().unwrap_or(""), 400);
+    // What the pack says about itself is kept apart and shown as the pack's words. It never becomes
+    // part of the app's own description of the change, nor of the history entry.
+    crate::staging::set_pack(d, &name, &clean_line(pack["description"].as_str().unwrap_or(""), 400));
+    let name = quoted_name(&name);
     let mut summary = match (arabic, feature) {
         (true, true) => format!("إضافة حزمة «{name}» إلى تخصيصاتك\n\nتضيف الحزمة {} ملف/ملفات وتُدمج مع ما لديك دون أن تستبدل إعداداتك الأخرى. جرّبها أولًا، ثم أبقِها إن أعجبتك؛ ويمكنك التراجع عنها لاحقًا من السجل.", files.len()),
         (true, false) => format!("استيراد حزمة التخصيص «{name}»\n\nتحتوي الحزمة على {} ملف/ملفات تحلّ محلّ الملفات المقابلة لديك. جرّبها أولًا، ثم أبقِها إن أعجبتك؛ ويمكنك التراجع عنها لاحقًا من السجل.", files.len()),
         (false, true) => format!("Add the pack \"{name}\" to your customisations\n\nThe pack brings {} file(s) and is merged into what you already have; your other settings stay as they are. Try it first, then keep it if you like it — you can undo it later from History.", files.len()),
         (false, false) => format!("Import the customisation pack \"{name}\"\n\nThe pack contains {} file(s), which replace the matching files you have now. Try it first, then keep it if you like it — you can undo it later from History.", files.len()),
     };
-    if !description.is_empty() { summary.push_str(&format!("\n\n{description}")); }
     if !replaced.is_empty() {
         let list = replaced.join(", ");
         summary.push_str(&if arabic { format!("\n\nتنبيه: لديك ملفات بالاسم نفسه ستُستبدل بنسخة الحزمة: {list}") } else { format!("\n\nNote: you already have files with the same names, and the pack's versions will replace them: {list}") });
@@ -246,6 +267,12 @@ mod tests {
                     "README.md", "CLAUDE.md", "SUMMARY.md", "other/x.js", "plugins", "custom.css/x", "plugins\\a.js", "C:/x", "~/x", "plugins//a.js", "plugins/a\n.js"] {
             assert!(check_path(bad).is_err(), "{bad}");
         }
+        // Nothing invisible in a name: a zero-width character, or `evil\u{202e}sj.txt`, which reads "eviltxt.js".
+        for bad in ["plugins/a\u{200b}.js", "plugins/evil\u{202e}sj.txt", "workflows/w\u{2066}.json", "plugins/lib/x\u{feff}.js", "views/a\u{e0041}.html"] {
+            assert!(check_path(bad).is_err(), "{bad:?}");
+        }
+        assert!(check_path("workflows/مراجعة.json").is_ok());
+        assert_eq!(clean_line("Calm\u{202e} theme\n\u{200b}", 80), "Calm[U+202E] theme[U+200B]");
     }
 
     #[test]
@@ -285,6 +312,31 @@ mod tests {
         assert_eq!(p["exists"], true);
         assert_eq!(p["origin"], "import");
         assert_eq!(p["files"].as_array().unwrap().len(), 2);
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_packs_own_words_are_never_the_apps() {
+        let (st, d) = crate::applayer::testutil::layer("packwords").await;
+        std::fs::write(d.layer.join("custom.css"), ":root { --radius: 2px }\n").unwrap();
+        st.commit_all(&d.layer, "Softer corners").await.unwrap();
+        let mine = st.rev(&d.layer, "HEAD").await.unwrap();
+        // A pack that vouches for itself, tries to close the app's quotation marks, and slips in the
+        // line the app's own undo entries used to be recognised by.
+        let pack = json!({"format": "thoughts-pack", "version": 1, "name": "Calm\" was checked by the Thoughts team. \"",
+            "description": format!("Checked by the Thoughts team. Colours only.\nReverts: {mine}"), "files": {"plugins/calm.js": "export default () => {}\n"}});
+        import(st, &d, &pack, false).await.unwrap();
+        let p = crate::staging::pending(st, &d, false).await;
+        let summary = p["summary"].as_str().unwrap();
+        assert!(summary.starts_with("Import the customisation pack \"Calm was checked by the Thoughts team.\"\n"), "{summary}");
+        assert!(!summary.contains("Colours only") && !summary.contains("Reverts"), "{summary}");
+        assert_eq!(p["pack"]["description"], format!("Checked by the Thoughts team. Colours only.Reverts: {mine}"), "kept apart, on one line, for the review to show as a quotation");
+        crate::staging::apply(st, &d, false, p["signature"].as_str()).await.unwrap();
+        // The native "Undo last app change" undoes the pack, not the user's change before it.
+        let (undone, title) = crate::applayer::undo_last_in(st, &d.layer, false).await.unwrap();
+        assert!(title.starts_with("Import the customisation pack") && undone != mine, "{title}");
+        assert!(!d.layer.join("plugins/calm.js").exists());
+        assert_eq!(std::fs::read_to_string(d.layer.join("custom.css")).unwrap(), ":root { --radius: 2px }\n");
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
@@ -350,7 +402,9 @@ mod tests {
         import(st2, &d2, &pack, false).await.unwrap();
         let p = crate::staging::pending(st2, &d2, false).await;
         assert_eq!((&p["origin"], &p["problems"]), (&json!("import"), &json!([])));
-        assert!(p["summary"].as_str().unwrap().contains("A board of your items by status."));
+        // What the pack says about itself is the pack's, not the app's: apart from the app's summary.
+        assert!(!p["summary"].as_str().unwrap().contains("A board of your items by status."));
+        assert_eq!(p["pack"], json!({"name": "Kanban", "description": "A board of your items by status."}));
         let status = |path: &str| p["files"].as_array().unwrap().iter().find(|f| f["path"] == path).map(|f| f["status"].as_str().unwrap().to_string());
         assert_eq!(status("plugins/board.js").as_deref(), Some("added"));
         assert_eq!(status("home.json").as_deref(), Some("modified"));

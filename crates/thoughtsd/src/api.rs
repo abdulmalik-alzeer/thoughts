@@ -1652,7 +1652,7 @@ type RunDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture
 fn after_chat_run(kind: &str) -> Option<RunDone> {
     if kind != "customize" { return None; }
     // Nothing is applied or committed here: the result waits as a pending change.
-    Some(Box::new(|st: Arc<AppState>, _ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move { crate::staging::after_run(&st).await; }) }))
+    Some(Box::new(|st: Arc<AppState>, ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move { crate::staging::after_run(&st, ok).await; }) }))
 }
 
 /// A run that was to resume the chat's session just failed. If that was because the CLI no longer
@@ -1807,7 +1807,10 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         }
         None => after_chat_run(&kind),
     };
-    claude::start_run(st.clone(), spec(prompt, chat.session_id.clone()), on_done).await?;
+    let started = claude::start_run(st.clone(), spec(prompt, chat.session_id.clone()), on_done).await;
+    // A customise run that never started must not cost the user the change it was about to replace.
+    if kind == "customize" { crate::staging::run_start_result(applayer::Git(Some(&st)), &applayer::Dirs::real(), &id, started.is_ok()).await; }
+    started?;
     ok()
 }
 
@@ -1980,8 +1983,19 @@ pub(crate) async fn start_customize(st: Arc<AppState>, text: String, origin: &st
     let id = chat.id.clone();
     st.chats.insert(chat).await;
     if !text.trim().is_empty() {
-        crate::staging::recreate(applayer::Git(Some(&st)), &applayer::Dirs::real(), origin, Some(&id)).await?;
-        let _ = chat_send(State(st.clone()), Path(id.clone()), Json(SendBody { text, ..Default::default() })).await.map_err(|e| e.0)?;
+        let (g, d) = (applayer::Git(Some(&st)), applayer::Dirs::real());
+        // The change that is waiting for review is replaced only if this request really starts:
+        // when it cannot (signed out, the assistant program missing…), that change is put back
+        // and the empty chat made for the request is removed.
+        let sent = match crate::staging::replace_for(g, &d, origin, &id).await {
+            Ok(()) => chat_send(State(st.clone()), Path(id.clone()), Json(SendBody { text, ..Default::default() })).await.map(|_| ()).map_err(|e| e.0),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = sent {
+            crate::staging::run_start_result(g, &d, &id, false).await;
+            st.chats.remove(&id).await;
+            return Err(e);
+        }
     }
     Ok(id)
 }

@@ -546,6 +546,12 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
             _ => closed(dir, &mut deny),
         }
     }
+    // The live customisation layer changes only through a change the user reviewed and kept: every
+    // run may read it, none may write it (a customise run works in the staging copy beside it).
+    for dir in crate::paths::write_protected_in(home) {
+        let (p, shell) = (rule_path(&dir), dir.to_string_lossy().replace('\\', "/"));
+        for rule in [format!("Edit({p})"), format!("Edit({p}/**)"), format!("Bash(*{shell}/*)"), format!("Bash(*{shell} *)"), format!("Bash(*{shell})")] { deny.push(rule); }
+    }
     let mut seen = std::collections::HashSet::new();
     deny.retain(|r| seen.insert(r.clone()));
     deny

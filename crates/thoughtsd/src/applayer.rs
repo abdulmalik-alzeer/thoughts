@@ -4,8 +4,11 @@
 //! applied change is one history entry that can be undone on its own, and Rollback restores any
 //! earlier state as a whole.
 
+use crate::staging::validate::show_hidden;
 use crate::state::AppState;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 /// The contract that teaches the AI how to customise the app. Rewritten into the layer as
@@ -23,7 +26,7 @@ pub const SHIPPED: &[(&str, &str)] = &[
 ];
 
 /// Never part of the layer, wherever a working copy lives.
-const EXCLUDE: &str = "SUMMARY.md\n.claude/\n.mcp.json\n";
+const EXCLUDE: &str = "SUMMARY.md\n.claude/\n.mcp.json\n.DS_Store\nThumbs.db\ndesktop.ini\n";
 
 /// The folders the layer machinery works in. Tests point these at a temp dir.
 #[derive(Clone, Debug)]
@@ -34,13 +37,17 @@ pub struct Dirs {
     pub layer: PathBuf,
     /// The staging worktree (branch `staging`).
     pub staging: PathBuf,
+    /// Files found changed in the live layer without a review, waiting to be reviewed (see `staging::set_aside`).
+    pub held: PathBuf,
 }
 
 impl Dirs {
     pub fn real() -> Self { Self::at(&crate::paths::home()) }
     pub fn at(home: &Path) -> Self {
-        Self { home: home.to_path_buf(), layer: home.join("app-layer"), staging: home.join("app-layer-staging") }
+        Self { home: home.to_path_buf(), layer: home.join("app-layer"), staging: home.join("app-layer-staging"), held: home.join("app-layer-held") }
     }
+    /// The folders that belong to the live layer at `layer` (`<home>/app-layer`).
+    pub fn of_layer(layer: &Path) -> Self { Self::at(layer.parent().unwrap_or(layer)) }
 }
 
 pub fn valid_hash(hash: &str) -> bool {
@@ -83,6 +90,24 @@ impl<'a> Git<'a> {
 
     pub async fn chat_running(&self, chat_id: &str) -> bool {
         match self.0 { Some(state) => state.chats.get(chat_id).await.map_or(false, |c| c.running), None => false }
+    }
+
+    /// Was this chat's last run cut off by the app stopping?
+    pub async fn chat_interrupted(&self, chat_id: &str) -> bool {
+        match self.0 { Some(state) => state.chats.get(chat_id).await.map_or(false, |c| c.interrupted), None => false }
+    }
+
+    /// Run a git command that records something, as the app itself (the staging copy's own
+    /// bookkeeping never carries the user's name, and works on a machine with no git identity).
+    pub async fn run_as_app(&self, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+        let mut all = vec!["-c", "user.name=Thoughts", "-c", "user.email=thoughts@localhost"];
+        all.extend(args);
+        self.run(dir, &all).await
+    }
+
+    /// The commit `rev` names in `dir`, in full.
+    pub async fn rev(&self, dir: &Path, rev: &str) -> anyhow::Result<String> {
+        Ok(self.run(dir, &["rev-parse", "--verify", "-q", "--end-of-options", &format!("{rev}^{{commit}}")]).await?.trim().to_string())
     }
 }
 
@@ -129,7 +154,8 @@ pub async fn ensure_in(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
         g.run(dir, &["add", "--", "README.md"]).await?;
         if g.run(dir, &["diff", "--cached", "--quiet", "--", "README.md"]).await.is_err() {
             // Only the guide goes into this commit, whatever else is lying around.
-            g.commit_staged(dir, "Update customisation guide", &["README.md"]).await?;
+            g.commit_staged(dir, GUIDE_SUBJECT, &["README.md"]).await?;
+            mark_system_head(g, dir).await;
         }
     }
     Ok(())
@@ -177,7 +203,7 @@ pub fn resolve_decl(dir: &Path, sub: &str, file: &str, shared: &Value, arabic: b
     let unsupported = version > API_VERSION;
     let mut v = json!({
         "permissions": permissions, "write": write, "apiVersion": version,
-        "description": decl["description"].as_str().map(|d| d.chars().take(300).collect::<String>()).unwrap_or_default(),
+        "description": decl["description"].as_str().map(|d| show_hidden(&d.chars().take(300).collect::<String>(), false)).unwrap_or_default(),
         "unsupported": unsupported, "source": if own.is_some() { "file" } else if decl.is_object() { "manifest" } else { "none" },
     });
     if unsupported { v["message"] = json!(unsupported_message(arabic)); }
@@ -226,24 +252,159 @@ pub fn manifest_lang(dir: &Path, arabic: bool) -> Value {
     })
 }
 
-/// `[{hash, short, date, summary, files:[path]}]`, newest first (`subject` = `summary`, kept for older UIs).
+// ---------- history ----------
+
+const GUIDE_SUBJECT: &str = "Update customisation guide";
+const DEFAULTS_SUBJECT: &str = "Update built-in defaults";
+
+/// What the app itself knows about its history entries: which ones are undos (and of what), and
+/// which are its own housekeeping. Kept beside the history, inside the layer's `.git` folder where
+/// no customisation can write, and never read out of the entries' text, which a pack or a summary
+/// decides.
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[serde(default)]
+struct Marks {
+    /// Undo entry → the entry it undid (full hashes).
+    undo: BTreeMap<String, String>,
+    /// The app's own entries: refreshed guide, refreshed built-in defaults.
+    system: BTreeSet<String>,
+}
+
+impl Marks {
+    /// Is the change `hash` made still part of the layer? Not when an undo of it is itself still in effect.
+    fn in_effect(&self, hash: &str) -> bool {
+        !self.undo.iter().any(|(undo, of)| of == hash && self.in_effect(undo))
+    }
+}
+
+fn marks_file(dir: &Path) -> PathBuf { dir.join(".git").join("thoughts-history.json") }
+
+fn save_marks(dir: &Path, m: &Marks) {
+    if let Ok(t) = serde_json::to_string(m) { let _ = crate::paths::write_atomic(&marks_file(dir), t.as_bytes(), true); }
+}
+
+async fn load_marks(g: Git<'_>, dir: &Path) -> Marks {
+    if let Some(m) = std::fs::read_to_string(marks_file(dir)).ok().and_then(|t| serde_json::from_str::<Marks>(&t).ok()) { return m; }
+    let m = seed_marks(g, dir).await;
+    save_marks(dir, &m);
+    m
+}
+
+fn full_hash(s: &str) -> bool { (s.len() == 40 || s.len() == 64) && s.bytes().all(|b| b.is_ascii_hexdigit()) }
+
+/// `git log` as records of exactly `fields.len()` fields. Records end with a NUL, which no entry
+/// can contain, and only the last field may be free text: nothing an entry says can add, hide or
+/// reshape a record.
+async fn log_records(g: Git<'_>, dir: &Path, range: &[&str], fields: &[&str]) -> Vec<Vec<String>> {
+    let format = format!("--format={}", fields.join("%x1f"));
+    let mut args = vec!["log", "-z", format.as_str()];
+    args.extend(range);
+    let out = g.run(dir, &args).await.unwrap_or_default();
+    out.split('\0').filter(|r| !r.is_empty())
+        .map(|r| r.splitn(fields.len(), '\x1f').map(String::from).collect::<Vec<_>>())
+        .filter(|p| p.len() == fields.len() && full_hash(&p[0])).collect()
+}
+
+/// The files each of the entries `known` touched.
+async fn files_of(g: Git<'_>, dir: &Path, range: &[&str], known: &BTreeSet<&str>) -> HashMap<String, Vec<String>> {
+    let mut args = vec!["log", "-z", "--name-only", "--no-renames", "--format=%x1e%H"];
+    args.extend(range);
+    let out = g.run(dir, &args).await.unwrap_or_default();
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current: Option<String> = None;
+    for token in out.split('\0') {
+        let token = token.strip_prefix('\n').unwrap_or(token);
+        if let Some(h) = token.strip_prefix('\x1e').filter(|h| known.contains(h)) {
+            map.entry(h.to_string()).or_default();
+            current = Some(h.to_string());
+        } else if !token.is_empty() {
+            if let Some(list) = current.as_ref().and_then(|c| map.get_mut(c)) { list.push(token.to_string()); }
+        }
+    }
+    map
+}
+
+/// The marks for a history that has none yet (made by an app version from before they were kept, or
+/// whose record was lost). Only entries of the exact shape the app itself writes are taken: an undo
+/// is `Undo: <the subject of X>` with `Reverts: <X>` as its whole body, where X is an older entry
+/// (a kept change always repeats its title in its body, so its text cannot take that shape); a
+/// housekeeping entry has the app's subject and touches only the app's files.
+async fn seed_marks(g: Git<'_>, dir: &Path) -> Marks {
+    let mut m = Marks::default();
+    let recs = log_records(g, dir, &[], &["%H", "%s"]).await;
+    let bodies: HashMap<String, String> = log_records(g, dir, &[], &["%H", "%b"]).await.into_iter().map(|mut p| (p.remove(0), p.remove(0))).collect();
+    let known: BTreeSet<&str> = recs.iter().map(|p| p[0].as_str()).collect();
+    let files = files_of(g, dir, &[], &known).await;
+    for (i, p) in recs.iter().enumerate() {
+        let (hash, subject) = (&p[0], p[1].trim());
+        let touched = files.get(hash).map(Vec::as_slice).unwrap_or_default();
+        if subject == GUIDE_SUBJECT && touched == ["README.md"] { m.system.insert(hash.clone()); continue; }
+        if subject.starts_with(&format!("{DEFAULTS_SUBJECT} to version ")) && !touched.is_empty() && touched.iter().all(|f| SHIPPED.iter().any(|(s, _)| s == f)) {
+            m.system.insert(hash.clone());
+            continue;
+        }
+        let Some(of) = bodies.get(hash).and_then(|b| b.trim_end_matches(['\n', '\r']).strip_prefix("Reverts: ")).filter(|h| full_hash(h)) else { continue };
+        let older = recs[i + 1..].iter().find(|o| o[0] == of);
+        if older.map_or(false, |o| subject == format!("Undo: {}", o[1].trim()) || subject == format!("Undo: {}", clean_subject(&o[1]))) {
+            m.undo.insert(hash.clone(), of.to_string());
+        }
+    }
+    m
+}
+
+/// Record that the newest entry is the app's own housekeeping (never something the user undoes).
+pub async fn mark_system_head(g: Git<'_>, dir: &Path) {
+    let Ok(head) = g.rev(dir, "HEAD").await else { return };
+    let mut m = load_marks(g, dir).await;
+    if m.system.insert(head) { save_marks(dir, &m); }
+}
+
+/// A history entry's title as it is shown: one line, nothing invisible in it.
+pub fn clean_subject(raw: &str) -> String {
+    let line: String = raw.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    show_hidden(line.trim(), false)
+}
+
+fn kind_of(marks: &Marks, hash: &str, parents: &str) -> &'static str {
+    if parents.trim().is_empty() { "start" }
+    else if marks.system.contains(hash) { "system" }
+    else if marks.undo.contains_key(hash) { "undo" }
+    else { "change" }
+}
+
+/// `[{hash, short, date, summary, files:[path], kind, undoable, undone}]`, newest first (`subject` =
+/// `summary`, kept for older UIs). `kind` is `start` (the first entry), `system` (the app's own
+/// housekeeping), `undo` or `change`; only the last two can be undone on their own.
 pub async fn history(state: &AppState) -> Vec<Value> { history_in(Git(Some(state)), &Dirs::real().layer).await }
 
-pub async fn history_in(g: Git<'_>, dir: &Path) -> Vec<Value> {
-    let out = g.run(dir, &["log", "-100", "--name-only", "--no-renames", "--format=%x1e%H%x1f%h%x1f%s%x1f%cI"]).await.unwrap_or_default();
-    out.split('\x1e').filter_map(|rec| {
-        let mut lines = rec.lines();
-        let p: Vec<_> = lines.next()?.split('\x1f').collect();
-        if p.len() != 4 { return None; }
-        let files: Vec<&str> = lines.map(str::trim).filter(|l| !l.is_empty()).collect();
-        Some(json!({"hash": p[0], "short": p[1], "summary": p[2], "subject": p[2], "date": p[3], "files": files}))
+pub async fn history_in(g: Git<'_>, dir: &Path) -> Vec<Value> { history_page(g, dir, 0, 100).await }
+
+/// `limit` entries of the history after skipping the `offset` newest.
+pub async fn history_page(g: Git<'_>, dir: &Path, offset: usize, limit: usize) -> Vec<Value> {
+    let (skip, max) = (format!("--skip={offset}"), format!("--max-count={}", limit.clamp(1, 500)));
+    let range = [skip.as_str(), max.as_str()];
+    let recs = log_records(g, dir, &range, &["%H", "%h", "%cI", "%P", "%s"]).await;
+    if recs.is_empty() { return vec![]; }
+    let known: BTreeSet<&str> = recs.iter().map(|p| p[0].as_str()).collect();
+    let mut files = files_of(g, dir, &range, &known).await;
+    let marks = load_marks(g, dir).await;
+    recs.iter().map(|p| {
+        let kind = kind_of(&marks, &p[0], &p[3]);
+        let summary = clean_subject(&p[4]);
+        json!({"hash": p[0], "short": p[1], "summary": summary, "subject": summary, "date": p[2], "files": files.remove(&p[0]).unwrap_or_default(),
+            "kind": kind, "undoable": kind == "change" || kind == "undo", "undone": !marks.in_effect(&p[0])})
     }).collect()
 }
 
-/// A stray edit made straight in the live layer is kept as its own history entry before anything else moves.
-async fn snapshot(g: Git<'_>, dir: &Path) -> anyhow::Result<()> {
-    g.commit_all(dir, "Snapshot of manual changes").await?;
-    Ok(())
+fn bad_entry() -> anyhow::Error { anyhow::anyhow!("bad history entry") }
+
+/// `hash` as an entry of this layer's own history (never a commit of the staging copy, which lives
+/// in the same repository and has not been reviewed).
+async fn own_entry(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<String> {
+    if !valid_hash(hash) { return Err(bad_entry()); }
+    let full = g.rev(dir, hash).await.map_err(|_| bad_entry())?;
+    if !full_hash(&full) || g.run(dir, &["merge-base", "--is-ancestor", &full, "HEAD"]).await.is_err() { return Err(bad_entry()); }
+    Ok(full)
 }
 
 /// Restore the whole layer to `hash` as a *new* history entry, so rollback itself is undoable.
@@ -254,11 +415,12 @@ pub async fn rollback(state: &AppState, hash: &str) -> anyhow::Result<()> {
 }
 
 pub async fn rollback_in(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<()> {
-    if !valid_hash(hash) { anyhow::bail!("bad history entry"); }
-    snapshot(g, dir).await?;
-    let commit = format!("{hash}^{{commit}}");
-    let short = g.run(dir, &["rev-parse", "--verify", "--short", "--end-of-options", &commit]).await?.trim().to_string();
-    g.run(dir, &["read-tree", "-u", "--reset", "--end-of-options", hash]).await?;
+    if !valid_hash(hash) { return Err(bad_entry()); }
+    // Recovery must work on a damaged layer too: what cannot be set aside is simply overwritten.
+    let _ = crate::staging::set_aside(g, &Dirs::of_layer(dir)).await;
+    let full = own_entry(g, dir, hash).await?;
+    let short = g.run(dir, &["rev-parse", "--short", "--end-of-options", &full]).await?.trim().to_string();
+    g.run(dir, &["read-tree", "-u", "--reset", "--end-of-options", &full]).await?;
     g.commit_all(dir, &format!("Went back to an earlier version ({short})")).await?;
     Ok(())
 }
@@ -271,11 +433,21 @@ pub async fn revert(state: &AppState, hash: &str) -> anyhow::Result<()> {
 }
 
 pub async fn revert_in(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<()> {
-    if !valid_hash(hash) { anyhow::bail!("bad history entry"); }
-    snapshot(g, dir).await?;
-    let commit = format!("{hash}^{{commit}}");
-    let subject = g.run(dir, &["log", "-1", "--format=%s", "--end-of-options", &commit]).await?.trim().to_string();
-    if let Err(e) = g.run(dir, &["revert", "--no-commit", "--end-of-options", hash]).await {
+    if !valid_hash(hash) { return Err(bad_entry()); }
+    crate::staging::set_aside(g, &Dirs::of_layer(dir)).await?;
+    let full = own_entry(g, dir, hash).await?;
+    let rec = log_records(g, dir, &["-1", &full], &["%H", "%P", "%s"]).await.into_iter().next().ok_or_else(bad_entry)?;
+    let mut marks = load_marks(g, dir).await;
+    let ar = crate::tr::arabic();
+    match kind_of(&marks, &full, &rec[1]) {
+        "start" => anyhow::bail!("{}", if ar { "لا يمكن التراجع عن نقطة البداية. للعودة إليها استخدم «العودة إلى هذه النقطة»." }
+            else { "The starting point cannot be undone. To return to it, use \u{201c}Go back to this point\u{201d}." }),
+        "system" => anyhow::bail!("{}", if ar { "هذا الإدخال تحديث أجراه التطبيق لملفاته، ولا يمكن التراجع عنه." }
+            else { "This entry is the app keeping its own files up to date. It cannot be undone." }),
+        _ => {}
+    }
+    let subject = clean_subject(&rec[2]);
+    if let Err(e) = g.run(dir, &["revert", "--no-commit", "--end-of-options", &full]).await {
         let _ = g.run(dir, &["revert", "--abort"]).await;
         let _ = g.run(dir, &["reset", "-q", "--hard", "HEAD"]).await;
         crate::log::warn(format!("layer: revert of {hash} failed: {e}"));
@@ -285,35 +457,33 @@ pub async fn revert_in(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<()>
         let _ = g.run(dir, &["revert", "--quit"]).await;
         anyhow::bail!("This change is already undone.");
     }
-    let full = g.run(dir, &["rev-parse", "--verify", "--end-of-options", &commit]).await?.trim().to_string();
     g.commit_staged(dir, &format!("Undo: {subject}\n\nReverts: {full}"), &[]).await?;
     let _ = g.run(dir, &["revert", "--quit"]).await;
+    if let Ok(head) = g.rev(dir, "HEAD").await {
+        marks.undo.insert(head, full);
+        save_marks(dir, &marks);
+    }
     Ok(())
 }
 
 /// The subject of history entry `hash` (empty when unknown).
 pub async fn subject_in(g: Git<'_>, dir: &Path, hash: &str) -> String {
-    if !valid_hash(hash) { return String::new(); }
-    let commit = format!("{hash}^{{commit}}");
-    g.run(dir, &["log", "-1", "--format=%s", "--end-of-options", &commit]).await.unwrap_or_default().trim().to_string()
+    let Ok(full) = own_entry(g, dir, hash).await else { return String::new() };
+    log_records(g, dir, &["-1", &full], &["%H", "%s"]).await.into_iter().next().map(|p| clean_subject(&p[1])).unwrap_or_default()
 }
 
 /// The newest change the user can still undo: not the starting point, not the app's own
 /// housekeeping (guide and built-in default updates), not an undo, and not already undone.
 pub async fn last_undoable_in(g: Git<'_>, dir: &Path) -> Option<(String, String)> {
-    let out = g.run(dir, &["log", "-200", "--format=%H%x1f%P%x1f%s%x1f%b%x1e"]).await.ok()?;
-    let recs: Vec<Vec<&str>> = out.split('\x1e').map(|r| r.trim_matches(|c| c == '\n' || c == '\r').split('\x1f').collect::<Vec<_>>()).filter(|p| p.len() == 4).collect();
-    let undone: Vec<&str> = recs.iter().flat_map(|p| p[3].lines()).filter_map(|l| l.trim().strip_prefix("Reverts: ")).collect();
-    recs.iter().find(|p| {
-        let (hash, parents, subject) = (p[0], p[1], p[2]);
-        !parents.trim().is_empty() && !undone.contains(&hash) && !p[3].lines().any(|l| l.trim().starts_with("Reverts: "))
-            && subject != "Update customisation guide" && !subject.starts_with("Update built-in defaults")
-    }).map(|p| (p[0].to_string(), p[2].to_string()))
+    let marks = load_marks(g, dir).await;
+    log_records(g, dir, &["-200"], &["%H", "%P", "%s"]).await.into_iter()
+        .find(|p| kind_of(&marks, &p[0], &p[1]) == "change" && marks.in_effect(&p[0]))
+        .map(|p| (p[0].clone(), clean_subject(&p[2])))
 }
 
 /// Undo the most recent change that is still in effect. Returns `(hash, subject)` of what was undone.
 pub async fn undo_last_in(g: Git<'_>, dir: &Path, arabic: bool) -> anyhow::Result<(String, String)> {
-    snapshot(g, dir).await?;
+    crate::staging::set_aside(g, &Dirs::of_layer(dir)).await?;
     let Some((hash, subject)) = last_undoable_in(g, dir).await else {
         anyhow::bail!("{}", if arabic { "لا يوجد تغيير للتراجع عنه." } else { "There is no change to undo." });
     };
@@ -406,6 +576,97 @@ mod tests {
         assert_eq!(subject, "Add plugin B");
         assert!(!d.layer.join("plugins/b.js").exists());
         assert!(undo_last_in(st, &d.layer, false).await.is_err(), "only the starting point is left");
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_is_read_whatever_the_entries_say() {
+        let (st, d) = testutil::layer("histtext").await;
+        let commit = |file: &'static str, msg: String| { let (st, d) = (st, d.clone()); async move {
+            std::fs::write(d.layer.join(file), format!("/* {} */\n", uuid::Uuid::new_v4())).unwrap();
+            st.commit_all(&d.layer, &msg).await.unwrap();
+            st.rev(&d.layer, "HEAD").await.unwrap()
+        } };
+        let first = commit("custom.css", "Make text red".into()).await;
+        // A title carrying the very characters the history used to be split on: still listed, cleaned.
+        let odd = commit("themes.json", "Hid\u{1f}den \u{1e}title\u{202e}".into()).await;
+        // A body shaped like the app's own undo note (what a pack's description or a summary could say).
+        let pack = commit("home.json", format!("Import the pack\n\nImport the pack\n\nChecked by the Thoughts team.\nReverts: {first}\nReverts: 0")).await;
+        let h = history_in(st, &d.layer).await;
+        assert_eq!(h.len(), 4);
+        assert_eq!((h[0]["hash"].as_str(), h[0]["kind"].as_str(), h[0]["undoable"].as_bool()), (Some(pack.as_str()), Some("change"), Some(true)));
+        assert_eq!((h[1]["hash"].as_str(), h[1]["summary"].as_str()), (Some(odd.as_str()), Some("Hid den  title[U+202E]")));
+        assert_eq!(h[1]["files"], json!(["themes.json"]));
+        assert_eq!((h[2]["hash"].as_str(), h[2]["undone"].as_bool()), (Some(first.as_str()), Some(false)), "free text cannot mark another change as undone");
+        assert_eq!((h[3]["kind"].as_str(), h[3]["undoable"].as_bool()), (Some("start"), Some(false)));
+        // Undo-last takes the newest change, whatever its text claims to be.
+        let (undone, _) = undo_last_in(st, &d.layer, false).await.unwrap();
+        assert_eq!(undone, pack);
+        let h = history_in(st, &d.layer).await;
+        assert_eq!((h[0]["kind"].as_str(), h[1]["undone"].as_bool(), h[0]["undone"].as_bool()), (Some("undo"), Some(true), Some(false)));
+        // The next one is the odd-titled change, not the one the pack's text pointed at.
+        assert_eq!(undo_last_in(st, &d.layer, false).await.unwrap().0, odd);
+        // Undoing an undo brings the change back, and it can then be undone again.
+        let redo = h[0]["hash"].as_str().unwrap().to_string();
+        revert_in(st, &d.layer, &redo).await.unwrap();
+        assert_eq!(last_undoable_in(st, &d.layer).await.unwrap().0, pack);
+        // A history from before the app kept its own record (or whose record was lost) is read once,
+        // and only entries of the exact shape the app writes count as undos.
+        std::fs::remove_file(marks_file(&d.layer)).unwrap();
+        let h = history_in(st, &d.layer).await;
+        let kinds: Vec<&str> = h.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["undo", "undo", "undo", "change", "change", "change", "start"]);
+        assert_eq!(last_undoable_in(st, &d.layer).await.unwrap().0, pack);
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_starting_point_and_the_apps_own_entries_cannot_be_undone() {
+        let (st, d) = testutil::layer("noundo").await;
+        std::fs::write(d.layer.join("README.md"), "old").unwrap();
+        st.commit_all(&d.layer, "old guide").await.unwrap();
+        ensure_in(st, &d).await.unwrap();
+        std::fs::write(d.layer.join("plugins/a.js"), "export default () => {}\n").unwrap();
+        st.commit_all(&d.layer, "Add a plugin").await.unwrap();
+        let h = history_in(st, &d.layer).await;
+        let (guide, root) = (&h[1], h.last().unwrap());
+        assert_eq!((guide["summary"].as_str(), guide["kind"].as_str(), guide["undoable"].as_bool()), (Some("Update customisation guide"), Some("system"), Some(false)));
+        assert_eq!((root["kind"].as_str(), root["undoable"].as_bool()), (Some("start"), Some(false)));
+        // Undoing the first entry used to succeed and delete the starting files.
+        let e = revert_in(st, &d.layer, root["hash"].as_str().unwrap()).await.unwrap_err().to_string();
+        assert!(e.contains("starting point"), "{e}");
+        assert!(revert_in(st, &d.layer, guide["hash"].as_str().unwrap()).await.unwrap_err().to_string().contains("own files"));
+        for kept in ["custom.css", "home.json", "themes.json", "manifest.json", "CLAUDE.md"] { assert!(d.layer.join(kept).exists(), "{kept}"); }
+        assert_eq!(history_in(st, &d.layer).await.len(), h.len(), "nothing was recorded");
+        // A user's change with the app's subject is still the user's: it stays undoable.
+        std::fs::write(d.layer.join("custom.css"), "body{}\n").unwrap();
+        st.commit_all(&d.layer, "Update customisation guide").await.unwrap();
+        assert_eq!(history_in(st, &d.layer).await[0]["kind"], "change");
+        assert_eq!(last_undoable_in(st, &d.layer).await.unwrap().1, "Update customisation guide");
+        // Only entries of this history are accepted: not a commit of the staging copy beside it.
+        crate::staging::recreate(st, &d, "customize", None).await.unwrap();
+        std::fs::write(d.staging.join("plugins/unreviewed.js"), "export default () => {}\n").unwrap();
+        st.run(&d.staging, &["add", "-A"]).await.unwrap();
+        st.run_as_app(&d.staging, &["commit", "-q", "-m", "pending change"]).await.unwrap();
+        let staged = st.rev(&d.staging, "HEAD").await.unwrap();
+        assert!(rollback_in(st, &d.layer, &staged).await.is_err() && revert_in(st, &d.layer, &staged).await.is_err());
+        assert!(!d.layer.join("plugins/unreviewed.js").exists());
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn history_goes_back_as_far_as_it_exists() {
+        let (st, d) = testutil::layer("paging").await;
+        for i in 1..=7 {
+            std::fs::write(d.layer.join("custom.css"), format!("/* {i} */\n")).unwrap();
+            st.commit_all(&d.layer, &format!("Change {i}")).await.unwrap();
+        }
+        let titles = |v: Vec<Value>| v.iter().map(|e| e["summary"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(titles(history_page(st, &d.layer, 0, 3).await), ["Change 7", "Change 6", "Change 5"]);
+        assert_eq!(titles(history_page(st, &d.layer, 3, 3).await), ["Change 4", "Change 3", "Change 2"]);
+        assert_eq!(titles(history_page(st, &d.layer, 6, 3).await), ["Change 1", "Starting point"]);
+        assert!(history_page(st, &d.layer, 8, 3).await.is_empty());
+        assert_eq!(history_page(st, &d.layer, 6, 3).await[1]["files"].as_array().unwrap().len(), 9, "the first entry lists the starting files");
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 

@@ -72,6 +72,17 @@ pub fn status(home: &Path) -> Value {
     v
 }
 
+/// `status`, with `merging: true` on the conflict for `merging`: the user chose "let the assistant
+/// merge" for that file, and the merged version is being prepared or is waiting for review. The
+/// conflict itself stays on record until that version is kept.
+pub fn status_merging(home: &Path, merging: Option<&str>) -> Value {
+    let mut v = status(home);
+    if let (Some(path), Some(list)) = (merging, v["conflicts"].as_array_mut()) {
+        for c in list.iter_mut().filter(|c| c["path"] == path) { c["merging"] = json!(true); }
+    }
+    v
+}
+
 /// Compare two version strings by their numeric parts (`0.10.0` is newer than `0.9.3`).
 pub fn older(a: &str, b: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> {
@@ -155,6 +166,8 @@ pub async fn check_with(g: Git<'_>, d: &Dirs, version: &str, shipped: &[(&str, &
         g.run(&d.layer, &add).await?;
         if g.run(&d.layer, &["diff", "--cached", "--quiet"]).await.is_err() {
             g.commit_staged(&d.layer, &format!("Update built-in defaults to version {version}"), &[]).await?;
+            // The app's own entry: History never offers to undo it.
+            crate::applayer::mark_system_head(g, &d.layer).await;
         }
     }
     store_base(&d.home, version, shipped)?;
@@ -184,17 +197,22 @@ pub async fn resolve(g: Git<'_>, d: &Dirs, shipped: &[(&str, &str)], path: &str,
         "keep" => {}
         "new" => {
             let text = shipped_text(path, shipped).ok_or_else(|| anyhow::anyhow!("{path} is not a built-in file"))?;
-            g.commit_all(&d.layer, "Snapshot of manual changes").await?;
+            // Anything in the live layer that was never reviewed is taken out first, not recorded along.
+            crate::staging::set_aside(g, d).await?;
             std::fs::write(d.layer.join(path), text)?;
-            g.commit_all(&d.layer, &format!("Use the new built-in version of {path}")).await?;
+            g.run(&d.layer, &["add", "--", path]).await?;
+            if g.run(&d.layer, &["diff", "--cached", "--quiet"]).await.is_err() {
+                g.commit_staged(&d.layer, &format!("Use the new built-in version of {path}"), &[]).await?;
+            }
         }
         _ => anyhow::bail!("choice must be keep, new or merge"),
     }
     write_status(&d.home, &st)
 }
 
-/// Forget the conflict on `path`: once an AI merge has started it lives on as a pending change
-/// (origin `update`) that the user applies or discards.
+/// Forget the conflict on `path`: the merged version the assistant prepared has been kept. (Until
+/// then the conflict stays listed, so a merge that fails, is stopped, is discarded or is replaced by
+/// another request leaves the question open and "use the new version" still possible.)
 pub fn clear_conflict(home: &Path, path: &str) -> anyhow::Result<()> {
     write_status(home, &take_conflict(home, path)?)
 }
@@ -271,7 +289,14 @@ mod tests {
         // Merge prompt carries both built-in versions; resolving clears the conflict.
         let prompt = merge_prompt(&d, v2, "custom.css").unwrap();
         assert!(prompt.contains("/* v1 */") && prompt.contains("/* v2 */"));
-        assert_eq!(status(&d.home)["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]), "still listed until the merge run has started");
+        assert_eq!(status(&d.home)["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]), "still listed while the merge is prepared and reviewed");
+        assert_eq!(status_merging(&d.home, Some("custom.css"))["conflicts"], json!([{"path": "custom.css", "from": "1.0.0", "merging": true}]));
+        assert_eq!(status_merging(&d.home, Some("home.json"))["conflicts"], json!([{"path": "custom.css", "from": "1.0.0"}]));
+        // The built-in refresh is the app's own entry: it is not offered for undoing.
+        let top = &crate::applayer::history_in(st, &d.layer).await[0];
+        assert_eq!((&top["kind"], &top["undoable"]), (&json!("system"), &json!(false)));
+        assert!(crate::applayer::revert_in(st, &d.layer, top["hash"].as_str().unwrap()).await.unwrap_err().to_string().contains("cannot be undone"));
+        // Once the merged version is kept the conflict is settled.
         clear_conflict(&d.home, "custom.css").unwrap();
         assert_eq!(status(&d.home)["conflicts"], json!([]));
         assert!(resolve(st, &d, v2, "custom.css", "new").await.is_err(), "already resolved");

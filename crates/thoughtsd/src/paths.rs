@@ -46,6 +46,11 @@ pub fn history_dir() -> PathBuf { home().join("history") }
 /// When each library was last backed up to an online location, and where (see `git::note_backup`).
 pub fn backup_state_file() -> PathBuf { home().join("backup-state.json") }
 
+/// Folders under the app's home that an assistant run may read but never write, whatever mode it
+/// runs in: the live customisation layer, which changes only when the user keeps a reviewed change.
+/// (Anything that does get written there is set aside before it is loaded, see `staging::set_aside`.)
+pub fn write_protected_in(home: &Path) -> Vec<PathBuf> { vec![home.join("app-layer")] }
+
 /// Everything under the app's home (`home`) that a customise run must never read or change: every
 /// file and folder the daemon keeps there (credentials, token, settings, chats, workflow approvals,
 /// usage, pending state…) except the staging worktree it works in and the live layer (which the
@@ -54,8 +59,8 @@ pub fn backup_state_file() -> PathBuf { home().join("backup-state.json") }
 pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     const FILES: &[&str] = &["daemon.json", "daemon.lock", "settings.json", "settings.json.bak", "git-credentials", "trusted.json", "secrets.json",
         "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "workflows-approved.json",
-        "workflows-state.json", "suggestions.json", "base-manifest.json", "layer-requests.json", "backup-state.json"];
-    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "run-tmp", "plugin-data", "history"];
+        "workflows-state.json", "suggestions.json", "base-manifest.json", "layer-requests.json", "backup-state.json", "update-status.json"];
+    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "run-tmp", "plugin-data", "history", "app-layer-held"];
     const OPEN: &[&str] = &["app-layer-staging", "app-layer"];
     let mut files: Vec<PathBuf> = FILES.iter().map(|f| home.join(f)).collect();
     let mut dirs: Vec<PathBuf> = DIRS.iter().map(|d| home.join(d)).collect();

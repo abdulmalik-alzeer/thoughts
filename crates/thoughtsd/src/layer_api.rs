@@ -32,6 +32,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/customize", post(customize))
         .route("/api/layer/pending", get(pending))
         .route("/api/layer/pending/apply", post(pending_apply))
+        .route("/api/layer/pending/accept", post(pending_accept))
         .route("/api/layer/pending/discard", post(pending_discard))
         .route("/api/layer/export", get(export))
         .route("/api/layer/import", post(import).layer(DefaultBodyLimit::max(8 * 1024 * 1024)))
@@ -79,7 +80,10 @@ async fn record_outcome(st: &AppState, outcome: &str, request: &str) {
 /// with the same words. Local, small, capped.
 fn requests_file(home: &std::path::Path) -> std::path::PathBuf { home.join("layer-requests.json") }
 
-fn remember_request(home: &std::path::Path, hash: &str, request: &str) {
+/// `usage` = the local usage log is switched on. Off, nothing is remembered and what was is removed:
+/// these words only ever fed that log.
+fn remember_request(home: &std::path::Path, hash: &str, request: &str, usage: bool) {
+    if !usage { let _ = std::fs::remove_file(requests_file(home)); return; }
     if hash.is_empty() || request.is_empty() { return; }
     let mut list: Vec<Value> = std::fs::read_to_string(requests_file(home)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
     list.push(json!({"hash": hash, "request": request}));
@@ -95,17 +99,28 @@ fn recall_request(home: &std::path::Path, hash: &str) -> Option<String> {
 
 /// `GET /api/layer` — the live layer; `?preview=1` — the staged one, in the same shape.
 async fn layer(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let _g = LAYER_LOCK.lock().await;
     let d = Dirs::real();
     let ar = arabic(&st).await;
     let preview = q.get("preview").map_or(false, |v| v == "1" || v == "true");
+    // Only what the user kept is ever loaded: anything else found in the live layer is taken out
+    // first and offered for review like any other change.
+    if staging::guard(Git(Some(&st)), &d, ar).await { st.emit(json!({"type": "layer.pending"})); }
     if preview {
         if !d.staging.join(".git").exists() { return Err(anyhow::anyhow!("there is no pending change to preview").into()); }
+        staging::sync(Git(Some(&st)), &d).await;
         return Ok(Json(applayer::manifest_lang(&d.staging, ar)));
     }
     Ok(Json(applayer::manifest_lang(&d.layer, ar)))
 }
 
-async fn history(State(st): S) -> R { Ok(Json(json!(applayer::history(&st).await))) }
+/// `GET /api/layer/history?limit=&offset=` — `limit` entries (100 unless given, 500 at most) after
+/// skipping the `offset` newest.
+async fn history(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let number = |k: &str, default: usize| q.get(k).and_then(|v| v.parse::<usize>().ok()).unwrap_or(default);
+    Ok(Json(json!(applayer::history_page(Git(Some(&st)), &Dirs::real().layer, number("offset", 0), number("limit", 100)).await)))
+}
 
 #[derive(Deserialize)]
 struct Commit { hash: String }
@@ -152,13 +167,25 @@ async fn customize(State(st): S, Json(c): Json<Customize>) -> R {
     let _g = LAYER_LOCK.lock().await;
     let request = c.request();
     let id = crate::api::start_customize(st.clone(), request.clone(), "customize", None).await?;
-    staging::set_request(&Dirs::real(), &request);
+    // The request's words are kept only for the local usage log; with that log off they are not kept at all.
+    if st.settings.read().await.usage_signals { staging::set_request(&Dirs::real(), &request); }
     Ok(Json(json!({"chatId": id})))
 }
 
 async fn pending(State(st): S) -> R {
     let _g = LAYER_LOCK.lock().await;
-    Ok(Json(staging::pending(Git(Some(&st)), &Dirs::real(), arabic(&st).await).await))
+    let (d, ar) = (Dirs::real(), arabic(&st).await);
+    staging::guard(Git(Some(&st)), &d, ar).await;
+    Ok(Json(staging::pending(Git(Some(&st)), &d, ar).await))
+}
+
+/// Body: `{signature}` — the user read that the assistant was interrupted and wants to keep the
+/// change with that signature anyway.
+async fn pending_accept(State(st): S, body: axum::body::Bytes) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+    staging::accept_incomplete(Git(Some(&st)), &Dirs::real(), arabic(&st).await, body["signature"].as_str().unwrap_or_default()).await?;
+    ok()
 }
 
 /// Which workflow files a kept change may approve: only a change the user made through the
@@ -188,9 +215,15 @@ async fn pending_apply(State(st): S, body: axum::body::Bytes) -> R {
     r["approvedWorkflows"] = json!(approved);
     if r["origin"] == "customize" {
         let request = r["request"].as_str().unwrap_or_default().to_string();
-        remember_request(&d.home, r["hash"].as_str().unwrap_or_default(), &request);
+        remember_request(&d.home, r["hash"].as_str().unwrap_or_default(), &request, st.settings.read().await.usage_signals);
         record_outcome(&st, "keep", &request).await;
     }
+    // A merge of an app update settles its question only now that the merged file is really kept.
+    if r["origin"] == "update" {
+        if let Some(path) = r["resolves"].as_str().filter(|p| !p.is_empty()) { let _ = updates::clear_conflict(&d.home, path); }
+    }
+    // Anything set aside while this change was waiting takes its turn now.
+    staging::adopt_held(Git(Some(&st)), &d, ar).await;
     st.emit(json!({"type": "layer.changed"}));
     st.emit(json!({"type": "layer.pending"}));
     Ok(Json(r))
@@ -203,6 +236,7 @@ async fn pending_discard(State(st): S) -> R {
     let had_change = staging::pending(Git(Some(&st)), &d, false).await["exists"] == true;
     staging::discard(Git(Some(&st)), &d).await?;
     if let Some(m) = meta.filter(|m| had_change && (m.origin.is_empty() || m.origin == "customize")) { record_outcome(&st, "discard", &m.request).await; }
+    staging::adopt_held(Git(Some(&st)), &d, arabic(&st).await).await;
     st.emit(json!({"type": "layer.pending"}));
     ok()
 }
@@ -374,7 +408,17 @@ async fn suggestion_dismiss(Path(id): Path<String>) -> R {
     ok()
 }
 
-async fn update_status() -> R { Ok(Json(updates::status(&crate::paths::home()))) }
+/// The update status, with `merging: true` on a conflict whose assistant merge is being prepared or
+/// is waiting for review. It stays a conflict until that merge is kept; if the merge fails, is
+/// discarded or is replaced, the question is simply open again.
+async fn update_status(State(st): S) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let d = Dirs::real();
+    let p = staging::pending(Git(Some(&st)), &d, arabic(&st).await).await;
+    // (While the assistant is still writing there may be nothing staged yet.)
+    let merging = staging::load_meta(&d).filter(|m| m.origin == "update" && (p["exists"] == true || p["running"] == true)).map(|m| m.resolves);
+    Ok(Json(updates::status_merging(&d.home, merging.as_deref().filter(|m| !m.is_empty()))))
+}
 
 #[derive(Deserialize)]
 struct Resolve { path: String, choice: String }
@@ -386,8 +430,9 @@ async fn update_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
         let prompt = updates::merge_prompt(&d, applayer::SHIPPED, &r.path)?;
         let title = if arabic(&st).await { format!("دمج تحديث {}", r.path) } else { format!("Merge update of {}", r.path) };
         let id = crate::api::start_customize(st.clone(), prompt, "update", Some(title)).await?;
-        updates::clear_conflict(&d.home, &r.path)?;
-        return Ok(Json(json!({"ok": true, "chatId": id, "status": updates::status(&d.home)})));
+        // The conflict stays on record until the merged file is kept (see `pending_apply`).
+        staging::set_resolves(&d, &r.path);
+        return Ok(Json(json!({"ok": true, "chatId": id, "status": updates::status_merging(&d.home, Some(&r.path))})));
     }
     updates::resolve(Git(Some(&st)), &d, applayer::SHIPPED, &r.path, &r.choice).await?;
     if r.choice == "new" { st.emit(json!({"type": "layer.changed"})); }
@@ -456,12 +501,16 @@ mod tests {
         let home = std::env::temp_dir().join(format!("thoughts-requests-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         assert_eq!(recall_request(&home, "abc123"), None);
-        remember_request(&home, "abc123def456", "Show overdue todos on Home");
-        remember_request(&home, "ffff0000aaaa", "Group todos by date");
-        remember_request(&home, "", "ignored");
+        remember_request(&home, "abc123def456", "Show overdue todos on Home", true);
+        remember_request(&home, "ffff0000aaaa", "Group todos by date", true);
+        remember_request(&home, "", "ignored", true);
         assert_eq!(recall_request(&home, "abc123").as_deref(), Some("Show overdue todos on Home"), "a short hash finds it too");
         assert_eq!(recall_request(&home, "ffff0000aaaa").as_deref(), Some("Group todos by date"));
         assert_eq!(recall_request(&home, ""), None);
+        // With the usage log switched off nothing is kept, and what was kept is removed.
+        remember_request(&home, "1234abcd5678", "Private wording", false);
+        assert!(!requests_file(&home).exists());
+        assert_eq!(recall_request(&home, "abc123"), None);
         std::fs::remove_dir_all(home).unwrap();
     }
 }
