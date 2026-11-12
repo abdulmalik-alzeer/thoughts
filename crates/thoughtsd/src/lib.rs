@@ -78,6 +78,8 @@ pub async fn run() -> anyhow::Result<()> {
     if state.chats.unreadable > 0 { log::warn(format!("{} chat file(s) could not be read and were skipped", state.chats.unreadable)); }
     log::ok_or_warn("could not prepare the customisation layer", applayer::ensure(&state).await);
     wraps::recover(&state).await;
+    // The start-at-login entry records where the app was when it was switched on: check it still matches.
+    { let s = state.settings.read().await.clone(); tokio::task::spawn_blocking(move || api::reconcile_login_item(&s)); }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     paths::write_daemon_info(&paths::DaemonInfo {

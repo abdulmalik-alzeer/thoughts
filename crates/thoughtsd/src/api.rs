@@ -106,6 +106,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ping", get(|| async { Json(json!({"ok": true, "version": env!("CARGO_PKG_VERSION")})) }))
         .route("/api/status", get(status))
         .route("/api/status/ack-recovered", post(ack_recovered))
+        .route("/api/ui-error", post(ui_error))
         .route("/api/diagnostics", get(diagnostics))
         .route("/api/shutdown", post(shutdown))
         .route("/api/settings", get(get_settings).put(put_settings))
@@ -329,6 +330,20 @@ async fn status(State(st): S) -> R {
 }
 
 /// The damaged-settings notice has been shown.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct UiError { r#where: String, message: String }
+
+/// An error the window could not handle (a view that failed to render, an unhandled promise): kept
+/// in the service log and in the diagnostics report, scrubbed and cut short like any other error.
+async fn ui_error(Json(e): Json<UiError>) -> R {
+    let place: String = e.r#where.chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '-' | '_' | '.')).take(60).collect();
+    let text = scrub(&e.message.replace(['\r', '\n'], " ⏎ "));
+    crate::log::warn(format!("window error ({place}): {text}"));
+    note_error("UI", &place, 0, "UI_ERROR", &e.message);
+    ok()
+}
+
 async fn ack_recovered(State(st): S) -> R {
     st.settings_recovered.store(false, std::sync::atomic::Ordering::Relaxed);
     st.settings_restored.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -492,18 +507,35 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
         && q.get("confirm").map(String::as_str) != Some(crate::settings::BYPASS_CONFIRM) {
         return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
     }
-    if url_changed && old.ai.claude.has_api_token {
-        // A token saved for one provider address must never reach another. The run code also
-        // refuses to send it while `hasApiToken` is false, so a keychain hiccup here is not a leak.
-        crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token());
+    // The login item goes first: when it is refused (an app run from a download) nothing changes.
+    let login_changed = new.daemon.run_at_login != old.daemon.run_at_login;
+    if login_changed { login_item(new.daemon.run_at_login)?; }
+    if let Err(e) = new.save() {
+        // The saved settings did not change: put the login item back the way they describe it.
+        if login_changed { crate::log::ok_or_warn("could not undo the start-at-login change", login_item(old.daemon.run_at_login)); }
+        return Err(e.into());
     }
-    if new.daemon.run_at_login != old.daemon.run_at_login { login_item(new.daemon.run_at_login)?; }
-    new.save()?;
     crate::tr::set_language(&new.language);
     *cur = new.clone();
     drop(cur);
+    if url_changed && old.ai.claude.has_api_token {
+        // A token saved for one provider address must never reach another. Removed only once the
+        // settings saying "no key" are on disk; the run code also refuses to send it while
+        // `hasApiToken` is false, so a keychain hiccup here is not a leak.
+        crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token());
+    }
     st.emit(json!({"type": "settings.changed"}));
     Ok(Json(serde_json::to_value(new)?))
+}
+
+/// Change the settings as one step: the change is made on a copy, saved, and only then swapped in,
+/// so a refused save (settings from a newer version, a full disk) leaves memory and disk agreeing.
+fn change_settings<T>(cur: &mut Settings, save: impl FnOnce(&Settings) -> std::io::Result<()>, f: impl FnOnce(&mut Settings) -> T) -> std::io::Result<T> {
+    let mut next = cur.clone();
+    let out = f(&mut next);
+    save(&next)?;
+    *cur = next;
+    Ok(out)
 }
 
 /// A Linux autostart entry (XDG `.desktop` file) that starts the daemon at login.
@@ -537,6 +569,9 @@ fn launchd_job_pid(print: &str) -> Option<u32> {
 /// autostart entry on Linux. Anywhere else this is an error rather than a setting that does nothing.
 /// (Windows and Linux are UNTESTED here.)
 fn login_item(enable: bool) -> anyhow::Result<()> {
+    // There is one start-at-login entry per user, shared by every copy of the service: a copy with
+    // its own THOUGHTS_HOME (a sandbox, a developer build) must never change the real app's.
+    if !login_items_allowed() { return Err(crate::tr::err("login_item.other_home", &[])); }
     #[cfg(target_os = "macos")]
     {
         let agents = paths::user_home()?.join("Library/LaunchAgents");
@@ -619,6 +654,109 @@ fn login_item(enable: bool) -> anyhow::Result<()> {
     {
         let _ = enable;
         bail!("starting at login is not supported on this system")
+    }
+}
+
+/// May this copy of the service touch the start-at-login entry? Only the app's own (default) home.
+fn login_items_allowed() -> bool { cfg!(not(test)) && std::env::var_os("THOUGHTS_HOME").is_none() }
+
+/// What start-at-login needs at daemon start so the system's entry matches the setting.
+#[derive(Debug, PartialEq)]
+enum LoginFix { Keep, Write, Remove }
+
+/// `registered` is the program the current entry starts (`None`: there is no entry) and
+/// `target_exists` whether that program is still there; `exe` is this copy of the app.
+fn login_fix(want: bool, registered: Option<&str>, target_exists: bool, exe: &str) -> LoginFix {
+    match (want, registered) {
+        (false, None) => LoginFix::Keep,
+        // Switched off (or the settings were reset) but the entry survived.
+        (false, Some(_)) => LoginFix::Remove,
+        (true, None) => LoginFix::Write,
+        (true, Some(p)) if p == exe => LoginFix::Keep,
+        // It starts a program that is gone (the app was moved, an old download deleted).
+        (true, Some(_)) if !target_exists => LoginFix::Write,
+        // It starts another copy of Thoughts that is still there (a second install): left alone.
+        (true, Some(_)) => LoginFix::Keep,
+    }
+}
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+}
+
+/// The program a LaunchAgent starts: the first string of its ProgramArguments.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn plist_program(plist: &str) -> Option<String> {
+    let rest = &plist[plist.find("<key>ProgramArguments</key>")?..];
+    let start = rest.find("<string>")? + "<string>".len();
+    let len = rest[start..].find("</string>")?;
+    Some(xml_unescape(&rest[start..start + len]))
+}
+
+/// The program an autostart entry written by `autostart_desktop_entry` starts.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn desktop_program(entry: &str) -> Option<String> {
+    let v = entry.lines().find_map(|l| l.strip_prefix("Exec="))?.trim();
+    let mut chars = v.strip_prefix('"')?.chars().peekable();
+    let mut out = String::new();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.push(chars.next()?),
+            '"' => return Some(out),
+            '%' => { if chars.peek() == Some(&'%') { chars.next(); } out.push('%'); }
+            c => out.push(c),
+        }
+    }
+    None
+}
+
+/// The program in `reg query … /v Thoughts` output (a value written by `windows_run_value`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_run_program(out: &str) -> Option<String> {
+    let line = out.lines().find(|l| l.contains("REG_SZ"))?;
+    let v = line[line.find("REG_SZ")? + "REG_SZ".len()..].trim();
+    match v.strip_prefix('"') { Some(q) => q.split('"').next().map(str::to_string), None => v.split_whitespace().next().map(str::to_string) }
+}
+
+/// The program the system's start-at-login entry starts: `None` when there is no entry,
+/// `Some("")` when there is one this app cannot read.
+fn registered_login_program() -> anyhow::Result<Option<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        let plist = paths::user_home()?.join("Library/LaunchAgents/app.thoughts.daemon.plist");
+        Ok(std::fs::read_to_string(&plist).ok().map(|t| plist_program(&t).unwrap_or_default()))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let cfg = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).filter(|p| p.is_absolute())
+            .map_or_else(|| paths::user_home().map(|h| h.join(".config")), Ok)?;
+        Ok(std::fs::read_to_string(cfg.join("autostart/thoughts-daemon.desktop")).ok().map(|t| desktop_program(&t).unwrap_or_default()))
+    }
+    #[cfg(windows)]
+    {
+        let o = crate::proc::std_command("reg").args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Thoughts"]).output()?;
+        Ok(o.status.success().then(|| windows_run_program(&String::from_utf8_lossy(&o.stdout)).unwrap_or_default()))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    { Ok(None) }
+}
+
+/// At daemon start: make the start-at-login entry match the setting. The entry records the
+/// program's path at the moment it was switched on, so a moved app or a reset left it stale.
+pub fn reconcile_login_item(settings: &Settings) {
+    if !login_items_allowed() || !settings.onboarded { return; }
+    let want = settings.daemon.run_at_login;
+    let registered = match registered_login_program() {
+        Ok(r) => r,
+        Err(e) => { crate::log::warn(format!("could not read the start-at-login entry: {e}")); return; }
+    };
+    let Ok(exe) = paths::app_exe() else { return };
+    let exe = exe.to_string_lossy().to_string();
+    let exists = registered.as_deref().is_some_and(|p| !p.is_empty() && std::path::Path::new(p).is_file());
+    match login_fix(want, registered.as_deref(), exists, &exe) {
+        LoginFix::Keep => {}
+        LoginFix::Write => { crate::log::info("start at login: pointing the entry at this copy of the app"); crate::log::ok_or_warn("could not update the start-at-login entry", login_item(true)); }
+        LoginFix::Remove => { crate::log::info("start at login is off: removing the entry left behind"); crate::log::ok_or_warn("could not remove the start-at-login entry", login_item(false)); }
     }
 }
 
@@ -755,7 +893,7 @@ async fn enable_module(State(st): S, Path(id): Path<String>) -> R {
         crate::trust::require(&p)?;
         Some(p)
     };
-    { let mut s = st.settings.write().await; s.modules.insert(id.clone(), true); s.save()?; }
+    { let mut s = st.settings.write().await; change_settings(&mut s, Settings::save, |s| { s.modules.insert(id.clone(), true); })?; }
     st.emit(json!({"type": "settings.changed"}));
     let Some(path) = path else { return Ok(Json(json!({"ok": true, "chatId": null}))) };
     // The feature's routines come from the app itself; the assistant only fits them into the library.
@@ -778,8 +916,8 @@ async fn enable_module(State(st): S, Path(id): Path<String>) -> R {
 /// notes, lists, routines — is touched, and switching it back on finds everything as it was.
 async fn disable_module(State(st): S, Path(id): Path<String>) -> R {
     let m = modules::get(&id).ok_or_else(|| crate::tr::err("not_found.module", &[]))?;
-    if m.id == "ideas" { return Err(crate::tr::err("module.always_on", &[]).into()); }
-    { let mut s = st.settings.write().await; s.modules.insert(id.clone(), false); s.save()?; }
+    if !modules::can_disable(m.id) { return Err(crate::tr::err("module.always_on", &[]).into()); }
+    { let mut s = st.settings.write().await; change_settings(&mut s, Settings::save, |s| { s.modules.insert(id.clone(), false); })?; }
     st.emit(json!({"type": "settings.changed"}));
     ok()
 }
@@ -790,9 +928,20 @@ async fn claude_options(State(st): S) -> R { Ok(Json(claude::options(&st).await)
 struct Token { token: String }
 async fn save_ai_token(State(st): S, Json(t): Json<Token>) -> R {
     let mut s = st.settings.write().await;
-    if t.token.is_empty() { crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token()); s.ai.claude.has_api_token = false; }
-    else { crate::secrets::set("thoughts-ai", "claude", &t.token)?; s.ai.claude.has_api_token = true; }
-    s.save()?;
+    if t.token.is_empty() {
+        // "No key" is saved first: if that is refused, the key is still there and still described.
+        change_settings(&mut s, Settings::save, |s| s.ai.claude.has_api_token = false)?;
+        crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token());
+    } else {
+        let had = s.ai.claude.has_api_token;
+        crate::secrets::set("thoughts-ai", "claude", &t.token)?;
+        if let Err(e) = change_settings(&mut s, Settings::save, |s| s.ai.claude.has_api_token = true) {
+            // The settings still say there is no key: do not leave one behind that nothing knows of.
+            if !had { crate::log::ok_or_warn("could not remove the provider token after a failed save", forget_api_token()); }
+            return Err(e.into());
+        }
+    }
+    drop(s);
     st.forget_auth();
     ok()
 }
@@ -1440,14 +1589,12 @@ async fn project_add(State(st): S, Json(p): Json<NewProject>) -> R {
         path.file_name().map(|n| n.to_string_lossy().to_string()).ok_or_else(|| anyhow::anyhow!("give the project a name"))?
     };
     let proj = Project { id: uuid::Uuid::new_v4().to_string(), name, path: path.to_string_lossy().into() };
-    s.projects.push(proj.clone());
-    s.save()?;
+    change_settings(&mut s, Settings::save, |s| s.projects.push(proj.clone()))?;
     Ok(Json(serde_json::to_value(proj)?))
 }
 async fn project_remove(State(st): S, Path(id): Path<String>) -> R {
     let mut s = st.settings.write().await;
-    s.projects.retain(|p| p.id != id);
-    s.save()?;
+    change_settings(&mut s, Settings::save, |s| s.projects.retain(|p| p.id != id))?;
     ok()
 }
 
@@ -1970,6 +2117,49 @@ mod tests {
         let r = todo_calendar(State(st.clone())).await.ok().unwrap();
         assert_eq!(r.headers()[header::CONTENT_TYPE], "text/calendar; charset=utf-8");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_login_entry_is_brought_in_line_with_the_setting() {
+        let me = "/Applications/Thoughts.app/Contents/MacOS/thoughts";
+        assert_eq!(login_fix(false, None, false, me), LoginFix::Keep);
+        // A reset (or a switch-off whose removal failed) left the entry behind.
+        assert_eq!(login_fix(false, Some(me), true, me), LoginFix::Remove);
+        assert_eq!(login_fix(true, None, false, me), LoginFix::Write);
+        assert_eq!(login_fix(true, Some(me), true, me), LoginFix::Keep);
+        // The app was moved: the entry starts nothing any more.
+        assert_eq!(login_fix(true, Some("/Users/me/Downloads/Thoughts.app/Contents/MacOS/thoughts"), false, me), LoginFix::Write);
+        assert_eq!(login_fix(true, Some(""), false, me), LoginFix::Write);
+        // Another copy that still exists is not taken over.
+        assert_eq!(login_fix(true, Some("/Applications/Other/Thoughts.app/Contents/MacOS/thoughts"), true, me), LoginFix::Keep);
+        // Tests (and any copy with its own THOUGHTS_HOME) never touch the real entry.
+        assert!(!login_items_allowed());
+        assert!(login_item(false).is_err());
+    }
+
+    #[test]
+    fn login_entries_are_read_back_as_written() {
+        for exe in ["/Applications/Thoughts.app/Contents/MacOS/thoughts", "/opt/My Apps/thoughts$1", "/home/a\"b/100%/Thoughts.AppImage", "/x/R&D <new>/thoughts"] {
+            let plist = format!("<plist><dict><key>Label</key><string>app.thoughts.daemon</string><key>ProgramArguments</key><array><string>{}</string><string>--daemon</string></array></dict></plist>", xml_escape(exe));
+            assert_eq!(plist_program(&plist).as_deref(), Some(exe));
+            assert_eq!(desktop_program(&autostart_desktop_entry(exe)).as_deref(), Some(exe), "{exe}");
+        }
+        let reg = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\r\n    Thoughts    REG_SZ    \"C:\\Program Files\\Thoughts\\thoughts.exe\" --daemon\r\n";
+        assert_eq!(windows_run_program(reg).as_deref(), Some("C:\\Program Files\\Thoughts\\thoughts.exe"));
+        assert_eq!(plist_program("<plist></plist>"), None);
+        assert_eq!(desktop_program("[Desktop Entry]\nExec=thoughts --daemon\n"), None);
+    }
+
+    #[test]
+    fn a_refused_settings_save_changes_nothing_in_memory() {
+        let mut cur = Settings::default();
+        cur.modules.insert("docs".into(), true);
+        let r = change_settings(&mut cur, |_| Err(std::io::Error::other("disk full")), |s| { s.modules.insert("docs".into(), false); s.ai.claude.has_api_token = true; });
+        assert!(r.is_err());
+        assert_eq!((cur.modules.get("docs"), cur.ai.claude.has_api_token), (Some(&true), false));
+        let mut saved = None;
+        change_settings(&mut cur, |s| { saved = Some(s.modules.get("docs").copied()); Ok(()) }, |s| { s.modules.insert("docs".into(), false); }).unwrap();
+        assert_eq!((saved, cur.modules.get("docs")), (Some(Some(false)), Some(&false)));
     }
 
     #[test]

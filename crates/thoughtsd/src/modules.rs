@@ -50,7 +50,13 @@ pub fn list() -> Vec<Value> {
         "id": m.id, "name": m.name, "nameAr": m.name_ar,
         "description": m.description, "descriptionAr": m.description_ar, "defaultOn": m.default_on,
         "addLater": !m.add_prompt.is_empty(),
+        // Ideas and projects is the library itself: it cannot be switched off (see `disable_module`).
+        "canDisable": can_disable(m.id),
     })).collect()
+}
+
+/// Can this feature be switched off? Everything but the ideas the library is built around.
+pub fn can_disable(id: &str) -> bool { id != "ideas"
 }
 
 pub fn get(id: &str) -> Option<&'static Module> {
@@ -112,6 +118,13 @@ mod tests {
         }
         let docs = list().into_iter().find(|m| m["id"] == "docs").unwrap();
         assert_eq!(docs["nameAr"], "المستندات");
+    }
+
+    #[test]
+    fn only_ideas_is_offered_without_a_turn_off_button() {
+        for m in list() {
+            assert_eq!(m["canDisable"], m["id"] != "ideas", "{}", m["id"]);
+        }
     }
 
     #[test]
