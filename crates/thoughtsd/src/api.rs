@@ -87,9 +87,13 @@ fn for_report(text: &str, home: Option<&std::path::Path>, library: Option<&std::
             if form.len() > 3 { places.push((form.replace('\\', "/"), word)); places.push((form, word)); }
         }
     }
-    // An error noted earlier already has `~` for the home folder (`scrub`): the library inside it then reads `~/Its Name`.
-    if let Some(rest) = library.zip(home).and_then(|(l, h)| l.strip_prefix(h).ok()).map(|r| r.to_string_lossy().replace('\\', "/")).filter(|r| !r.is_empty()) {
-        places.push((format!("~/{rest}"), "(library)"));
+    // An error noted earlier already has `~` for the home folder (`scrub`): the library inside it
+    // then reads `~/Its Name` — on Windows `~\Its Name`, with the separators the folder was named with.
+    if let Some((l, h)) = library.zip(home).map(|(l, h)| (l.to_string_lossy(), h.to_string_lossy())) {
+        if let Some(rest) = l.strip_prefix(h.trim_end_matches(['/', '\\'])).filter(|r| r.len() > 1 && r.starts_with(['/', '\\'])) {
+            places.push((format!("~{}", rest.replace('\\', "/")), "(library)"));
+            places.push((format!("~{rest}"), "(library)"));
+        }
     }
     places.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
     for (p, word) in places { t = t.replace(&p, word); }
@@ -3017,6 +3021,15 @@ mod tests {
         assert_eq!(r("could not reach https://github.com"), "could not reach https://github.com");
         // No library set, no home known: still no secrets and no repository paths.
         assert_eq!(for_report("token=abc at https://x.example/a/b", None, None), "token=[redacted] at https://x.example/…");
+        // Windows names folders with backslashes, and a message may add forward slashes after them.
+        let (home, lib) = (std::path::Path::new(r"C:\Users\sara"), std::path::Path::new(r"C:\Users\sara\Client Notes"));
+        let r = |t: &str| for_report(t, Some(home), Some(lib));
+        assert_eq!(r(r"history: could not record C:\Users\sara\Client Notes\acme\README.md"), r"history: could not record (library)\acme\README.md");
+        assert_eq!(r(r"failed in ~\Client Notes/notes (~/x)"), "failed in (library)/notes (~/x)");
+        assert_eq!(r(r"failed in ~/Client Notes\notes"), r"failed in (library)\notes");
+        assert_eq!(r(r"reading C:\Users\sara\AppData\Roaming"), r"reading ~\AppData\Roaming");
+        // A folder whose name only begins like the home folder's is not inside it.
+        assert_eq!(for_report(r"~\Client Notes", Some(std::path::Path::new(r"C:\Users\sar")), Some(lib)), r"~\Client Notes");
     }
 
     #[test]
