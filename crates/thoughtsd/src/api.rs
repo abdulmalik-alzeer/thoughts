@@ -156,6 +156,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/claude/recheck", post(claude_recheck))
         .route("/api/git/install", post(git_install))
         .route("/api/library/trust", post(trust_library))
+        .route("/api/library/access", get(library_access).post(library_keep_to_owner))
+        .route("/api/library/private-index", get(private_index).post(private_index_remove))
         // library
         .route("/api/library/ideas", get(ideas))
         .route("/api/library/ideas/status", post(idea_status))
@@ -505,6 +507,51 @@ struct TrustReq { id: String }
 async fn trust_library(Json(t): Json<TrustReq>) -> R {
     crate::trust::accept(&t.id)?;
     ok()
+}
+
+/// `GET /api/library/access` → `{openToOthers}`: can other accounts on this computer get into the
+/// library folder? `null` where that cannot be told (Windows keeps to its own rules).
+async fn library_access(State(st): S) -> R {
+    Ok(Json(json!({"openToOthers": library::open_to_others(&lib(&st).await?)})))
+}
+
+/// `POST /api/library/access`: close the library folder to every account but the user's own.
+async fn library_keep_to_owner(State(st): S) -> R {
+    let root = lib(&st).await?;
+    library::keep_to_owner(&root)?;
+    crate::log::info("library: the folder was closed to other accounts on this computer");
+    Ok(Json(json!({"openToOthers": library::open_to_others(&root)})))
+}
+
+/// The folder named in a private-index request: it must be one the user has marked private.
+async fn private_folder(st: &AppState, raw: &str) -> anyhow::Result<String> {
+    let bad = || crate::tr::err("invalid.path", &[]);
+    let rel = paths::clean_rel(raw).map_err(|_| bad())?;
+    let listed = st.settings.read().await.private_paths.iter().any(|p| paths::clean_rel(p).map_or(false, |p| p == rel));
+    if listed { Ok(rel) } else { Err(bad()) }
+}
+
+/// `GET /api/library/private-index?path=<private folder>` → `{count, titles}`: the item lines of the
+/// index that still point into that folder. Marking a folder private closes the folder; what the
+/// index already says about its items (title, one-line summary) stays readable until removed.
+async fn private_index(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = lib(&st).await?;
+    let dir = private_folder(&st, q.get("path").map(String::as_str).unwrap_or("")).await?;
+    let titles = library::index_lines_in(&root, &dir);
+    Ok(Json(json!({"count": titles.len(), "titles": titles.iter().take(8).collect::<Vec<_>>()})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PrivateIndex { path: String }
+/// `POST /api/library/private-index {path}` → `{removed}`: take those lines out of the index, in place.
+async fn private_index_remove(State(st): S, Json(b): Json<PrivateIndex>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st)?;
+    let dir = private_folder(&st, &b.path).await?;
+    let removed = library::remove_index_lines(&root, &dir)?;
+    if removed > 0 { st.emit(json!({"type": "library.changed"})); }
+    Ok(Json(json!({"removed": removed})))
 }
 
 /// How to get git on this system. macOS starts Apple's command-line tools installer; Windows
@@ -2889,6 +2936,35 @@ mod tests {
         begin_history(&st, &s, &lib, false).await.unwrap();
         assert_eq!(git::repo_of(&lib), git::Repo::Missing);
         forget(&lib);
+    }
+
+    /// SEC-27 and SEC-14 through the API: index lines of a private folder, and who can open the library.
+    #[tokio::test]
+    async fn a_private_folders_index_lines_can_be_removed_and_the_library_closed() {
+        let (st, lib) = t::library().await;
+        t::write(&lib, "INDEX.md", "# Index\n\n## matters\n- [Beta v. Gamma](matters/beta/README.md) · active · hearing 3 Dec · 2026-11-02\n- [Acme](clients/acme/README.md) · active · audit · 2026-11-01\n");
+        t::write(&lib, "matters/beta/README.md", "---\ntitle: Beta v. Gamma\n---\n");
+        // Only a folder the user has marked private can be asked about; an add-on never can.
+        assert_eq!(shown(private_index(State(st.clone()), q(&[("path", "matters")])).await).status, 422);
+        st.settings.write().await.private_paths = vec!["matters".into()];
+        for bad in ["", "../x", "clients"] { assert_eq!(shown(private_index(State(st.clone()), q(&[("path", bad)])).await).status, 422, "{bad}"); }
+        assert!(!plugin_scope_allowed("/api/library/private-index", "scope=plugin&path=matters") && !plugin_scope_allowed("/api/library/access", "scope=plugin"));
+        let found = private_index(State(st.clone()), q(&[("path", "matters/")])).await.unwrap().0;
+        assert_eq!((found["count"].as_u64(), found["titles"][0].as_str()), (Some(1), Some("Beta v. Gamma")));
+        let done = private_index_remove(State(st.clone()), Json(PrivateIndex { path: "matters".into() })).await.unwrap().0;
+        assert_eq!(done["removed"], 1);
+        assert_eq!(std::fs::read_to_string(lib.join("INDEX.md")).unwrap(), "# Index\n\n## matters\n- [Acme](clients/acme/README.md) · active · audit · 2026-11-01\n");
+        assert_eq!(private_index(State(st.clone()), q(&[("path", "matters")])).await.unwrap().0["count"], 0);
+        // The library folder: closed to other accounts on request (where the system has such a thing).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&lib, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(library_access(State(st.clone())).await.unwrap().0["openToOthers"].is_boolean());
+            assert_eq!(library_keep_to_owner(State(st.clone())).await.unwrap().0["openToOthers"], false);
+            assert_eq!(std::fs::metadata(&lib).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]

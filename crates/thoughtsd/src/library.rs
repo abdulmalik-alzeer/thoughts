@@ -522,9 +522,99 @@ pub fn create_from_starter(dest: &Path) -> anyhow::Result<()> {
     if dest.exists() && std::fs::read_dir(dest)?.next().is_some() {
         anyhow::bail!("{} is not empty — choose an empty folder or 'use existing library'", dest.display());
     }
-    std::fs::create_dir_all(dest)?;
+    // Notes are personal: the library folder opens for its owner alone, like the app's own data.
+    // (A new folder in the home folder is otherwise readable by every account on a Mac.)
+    crate::paths::create_private_dir(dest)?;
     STARTER.extract(dest)?;
     Ok(())
+}
+
+/// Can other accounts on this computer get into the library folder? `None` where the question
+/// does not apply (Windows keeps a user's folders to that user by its own rules) or cannot be told.
+/// A folder is reachable when it lets group or others in *and* every folder above it lets them pass.
+pub fn open_to_others(root: &Path) -> Option<bool> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let real = crate::paths::canonical(root).ok()?;
+        if std::fs::metadata(&real).ok()?.permissions().mode() & 0o077 == 0 { return Some(false); }
+        let passable = |d: &Path| std::fs::metadata(d).map_or(true, |m| m.permissions().mode() & 0o011 != 0);
+        Some(real.ancestors().skip(1).all(passable))
+    }
+    #[cfg(not(unix))]
+    { let _ = root; None }
+}
+
+/// Close the library folder to every account but its owner. Only the folder's own door changes:
+/// with it shut nothing inside can be reached, and no file inside is touched.
+pub fn keep_to_owner(root: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(crate::paths::canonical(root)?, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = root;
+    Ok(())
+}
+
+/// Where a markdown link on `line` points, for every link on it: `[Title](target)` → (Title, target).
+fn links_on(line: &str) -> Vec<(String, String)> {
+    let mut out = vec![];
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let Some(close) = after.find("](") else { break };
+        let Some(end) = after[close + 2..].find(')') else { break };
+        out.push((after[..close].to_string(), after[close + 2..close + 2 + end].to_string()));
+        rest = &after[close + 2 + end..];
+    }
+    out
+}
+
+/// A link target as a library-relative path: no `<…>` wrapper, title or anchor, `%20`-style escapes
+/// read back. `None` for anything that is not a file in the library (a web address, an anchor).
+fn link_path(target: &str) -> Option<String> {
+    let t = target.trim().trim_start_matches('<');
+    let t = t.split(['>', '#']).next().unwrap_or("").split(" \"").next().unwrap_or("").trim();
+    if t.is_empty() || t.contains("://") || t.starts_with("mailto:") || t.starts_with('/') { return None; }
+    let (mut bytes, mut i, raw) = (vec![], 0, t.as_bytes());
+    while i < raw.len() {
+        let hex = if raw[i] == b'%' { raw.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok()) } else { None };
+        match hex { Some(b) => { bytes.push(b); i += 3; } None => { bytes.push(raw[i]); i += 1; } }
+    }
+    Some(String::from_utf8_lossy(&bytes).trim_start_matches("./").to_string())
+}
+
+/// Is this line of the index an item line that points into `dir`? Gives the item's title when it is.
+fn index_line_in(root: &Path, line: &str, dir: &[String]) -> Option<String> {
+    let t = line.trim_start();
+    if !(t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ")) { return None; }
+    links_on(t).into_iter().find(|(_, target)| link_path(target).map_or(false, |p| crate::paths::is_private(root, &p, dir))).map(|(title, _)| title)
+}
+
+/// The item lines of the library's index (`INDEX.md`) that point into `dir`, a library-relative
+/// folder: the titles they show. An item indexed before its folder was made private still has its
+/// title and one-line summary there, where the assistant reads them in most chats.
+pub fn index_lines_in(root: &Path, dir: &str) -> Vec<String> {
+    let Ok(text) = resolve(root, "INDEX.md").and_then(|p| Ok(std::fs::read_to_string(p)?)) else { return vec![] };
+    let dir = [dir.to_string()];
+    text.lines().filter_map(|l| index_line_in(root, l, &dir)).collect()
+}
+
+/// Take those lines out of the index, in place: every other line, and the file's line endings,
+/// stay exactly as they are. Returns how many lines went.
+pub fn remove_index_lines(root: &Path, dir: &str) -> anyhow::Result<usize> {
+    let p = resolve(root, "INDEX.md")?;
+    let text = match std::fs::read_to_string(&p) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.into()),
+    };
+    let dir = [dir.to_string()];
+    let (keep, gone): (Vec<&str>, Vec<&str>) = text.split_inclusive('\n').partition(|l| index_line_in(root, l, &dir).is_none());
+    if !gone.is_empty() { crate::paths::write_atomic(&p, keep.concat().as_bytes(), false)?; }
+    Ok(gone.len())
 }
 
 #[cfg(test)]
@@ -882,6 +972,71 @@ mod tests {
         }
         // Nothing private: everything is listed, as before.
         assert_eq!(tree(&d, &[]).len(), 4);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// SEC-14: a new library is its owner's alone, and an older one can be told apart and closed.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_library_is_closed_to_other_accounts() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let base = tmp();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let lib = base.join("Thoughts");
+        create_from_starter(&lib).unwrap();
+        assert_eq!(mode(&lib), 0o700);
+        assert!(lib.join("CLAUDE.md").is_file() && lib.join(".claude/skills/wrap/SKILL.md").is_file());
+        assert_eq!(open_to_others(&lib), Some(false));
+        // An empty folder the user picked is closed as it becomes the library.
+        let picked = base.join("Picked");
+        std::fs::create_dir(&picked).unwrap();
+        std::fs::set_permissions(&picked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        create_from_starter(&picked).unwrap();
+        assert_eq!(mode(&picked), 0o700);
+        // A library from before: open like any folder made the usual way — unless a folder above it is shut.
+        let old = base.join("Old");
+        std::fs::create_dir(&old).unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(old.join("note.md"), "x").unwrap();
+        let above_all_open = crate::paths::canonical(&base).unwrap().ancestors().skip(1).all(|d| mode(d) & 0o011 != 0);
+        assert_eq!(open_to_others(&old), Some(above_all_open));
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(open_to_others(&old), Some(false), "nobody else gets past the folder above");
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Closing it changes the folder's own door and nothing inside.
+        keep_to_owner(&old).unwrap();
+        assert_eq!((mode(&old), mode(&old.join("note.md")) & 0o700, open_to_others(&old)), (0o700, 0o600, Some(false)));
+        assert_eq!(open_to_others(&base.join("missing")), None);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    /// SEC-27: the index lines of items in a folder that became private can be found and removed, in place.
+    #[test]
+    fn index_lines_of_a_private_folder_are_found_and_removed_in_place() {
+        let d = tmp();
+        let index = "# Index\r\n\r\nLine format: `- [Title](area/folder/README.md) · status`\r\n\r\n## clients\r\n\
+            - [Acme audit](clients/acme/README.md) · active · year-end audit · 2026-11-01\r\n\
+            - [Beta & Sons](matters/beta/README.md) · active · Beta v. Gamma, hearing 3 Dec · 2026-11-02\r\n\
+            * [Delta appeal](./Matters/delta%20appeal/README.md) · parked · appeal against Delta · 2026-10-01\r\n\
+            - [Notes on matters](knowledge/matters.md) · done · how we open a matter · 2026-01-01\r\n\
+            - See [the site](https://example.com/matters/x) and [Epsilon](<matters/epsilon/README.md> \"Epsilon\")\r\n\
+            A paragraph that mentions [Beta](matters/beta/README.md) is not an item line.\r\n";
+        std::fs::write(d.join("INDEX.md"), index).unwrap();
+        std::fs::create_dir_all(d.join("matters/beta")).unwrap();
+        assert_eq!(index_lines_in(&d, "matters"), ["Beta & Sons", "Delta appeal", "Epsilon"]);
+        assert_eq!(index_lines_in(&d, "clients/acme"), ["Acme audit"]);
+        assert!(index_lines_in(&d, "nothing/here").is_empty() && index_lines_in(&d, "knowledge/matters").is_empty());
+        assert_eq!(remove_index_lines(&d, "matters").unwrap(), 3);
+        assert_eq!(std::fs::read_to_string(d.join("INDEX.md")).unwrap(), "# Index\r\n\r\nLine format: `- [Title](area/folder/README.md) · status`\r\n\r\n## clients\r\n\
+            - [Acme audit](clients/acme/README.md) · active · year-end audit · 2026-11-01\r\n\
+            - [Notes on matters](knowledge/matters.md) · done · how we open a matter · 2026-01-01\r\n\
+            A paragraph that mentions [Beta](matters/beta/README.md) is not an item line.\r\n");
+        // Nothing left to remove: the file is not rewritten; no index at all is not an error.
+        assert_eq!(remove_index_lines(&d, "matters").unwrap(), 0);
+        std::fs::remove_file(d.join("INDEX.md")).unwrap();
+        assert_eq!(remove_index_lines(&d, "matters").unwrap(), 0);
+        assert!(index_lines_in(&d, "matters").is_empty());
         std::fs::remove_dir_all(d).unwrap();
     }
 

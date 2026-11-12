@@ -86,9 +86,25 @@ Thoughts.app
 - A library the app did not create can carry things that execute: Claude Code hooks and other
   non-allowlisted keys in `.claude/settings*.json`, `.mcp.json`, git hooks and risky repo-local git
   config. `trust.rs` lists these as *findings*; the daemon refuses to run the assistant or git in
-  the folder (`UNTRUSTED::<path>::<findings>`) until the user accepts them.
-- Trust is stored daemon-side in `~/.thoughts/trusted.json`, per folder and per fingerprint (the
-  findings plus the bytes of every file they can come from), so any later change asks again.
+  the folder until the user accepts them.
+- The refusal is a typed error (`trust::Untrusted`), never a marker in an error's text. The API
+  answers 403 with `code: "untrusted"` and a `trust` object: the id of the question the daemon
+  holds open, the folder, each finding (`kind`, `file`, `name`, `detail`, `new`), which part
+  changed and which files differ. The UI opens the trust dialog for that object only and words
+  each `kind` itself (`ui/src/lib/i18n/sec-a.ts`); `file`, `name` and `detail` come from the folder
+  and are shown as data. `POST /api/library/trust {id}` answers that one question, and only while
+  the folder is still what it listed; there is no call that trusts a path.
+- Trust is stored daemon-side in `~/.thoughts/trusted.json`, per folder, in two parts so that a
+  change in one is never reported as a change in the other: the *assistant* part (its findings
+  plus the bytes of every file under a `.claude` folder that the starter kit did not put there,
+  and `.mcp.json`) and the *git* part (risky settings with their values, hook files). Plain git
+  settings (where the library syncs to, which branch follows which) belong to neither, so adding a
+  backup location never asks. A record written by 0.0.8 (one fingerprint string) is carried over
+  when the folder is still exactly what that version trusted.
+- `.claude` folders below the top level count too: Claude Code loads their routines as soon as
+  the assistant reads or edits a file beside them. Their markdown is checked and their files are
+  remembered like the top folder's; a `settings.json` there is not read by Claude Code unless that
+  sub-folder is opened as a project, which is checked as a folder of its own.
 - The starter's own SessionStart hook is recognised by exact JSON equality with
   `starter/.claude/settings.json`. Changing that file changes what is treated as known-safe.
 - Markdown under `.claude/` (skills, commands, agents, and the presets once the init skill has
@@ -148,6 +164,10 @@ settings files and treated as `plan`, because there is no approve/deny UI.
   assistant is permitted to run is not filtered by them. PRIVACY.md says this in plain words;
   keep the two in step.
 - Private folders are still part of the library on disk and are still synced.
+- The file list and search leave a private folder out by where it really is (`library::Hidden`),
+  not only by its name. What `INDEX.md` already says about its items is not covered by the deny
+  rules: Settings offers to remove those lines when a folder is marked private
+  (`/api/library/private-index`).
 
 ### App layer and updates
 
@@ -227,6 +247,12 @@ npm run tauri dev          # app + hot-reloading UI
 cargo test -p thoughtsd    # daemon tests
 npx vite build             # UI build check
 ```
+
+A development build of the daemon also answers pages served from `http://localhost:<port>` (the
+Vite dev server, a browser preview). A release build answers the app's own window only; set
+`THOUGHTS_DEV_ORIGINS=1` when starting one by hand to preview the UI in a browser against it.
+The events WebSocket takes the token from its offered sub-protocols
+(`thoughts.events, thoughts.token.<token>`), never from the address.
 
 ```
 src-tauri/         Tauri shell — one binary: GUI · --daemon · git credential helper

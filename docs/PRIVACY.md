@@ -26,6 +26,8 @@ When you delete a chat in Thoughts, the assistant's transcript of that conversat
 
 The part of Thoughts that runs in the background only accepts connections from your own computer.
 
+A library that Thoughts creates can be opened only by your own user account on the computer. A folder you already had keeps whatever access it had: on a computer with several accounts, **Settings → Privacy** tells you when other accounts can open your library folder, and offers to close it to them.
+
 ### Saved passwords
 
 By default, passwords you enter for sync or for an AI provider are kept in your computer's password store: the Keychain on a Mac, and the equivalent system store on other computers.
@@ -87,6 +89,7 @@ What it does not do:
 
 - **It is a safeguard, not a guarantee against every route.** The block applies to the assistant's file tools. If the assistant is allowed to run a command on your computer, a command could still reach a file in a private folder. If that risk is not acceptable for some material, do not keep it in the library at all.
 - **Private folders are still backed up and synced.** They are ordinary folders in your library, so sync uploads them with everything else. To keep a folder out of sync, keep it **outside the library folder** (anywhere else on your computer) and link to it from your notes if you need to remember where it is.
+- **It does not go back over what is already written elsewhere.** An item's title and one-line summary in your library's index, and anything from the folder that was copied into other notes, stay where they are, and the assistant reads the index in most chats. When you mark a folder private, the app tells you if the index still mentions its items and offers to remove those lines. Text in other notes is yours to tidy.
 - A private folder cannot be used with the assistant. You cannot ask it to summarise or search something it is blocked from reading.
 
 Good candidates: anything a client or employer has asked you not to put through AI tools, and records about named individuals.

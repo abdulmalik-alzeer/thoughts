@@ -10,6 +10,7 @@
   import { fmtMoney, fmtNum, t, tn } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { restartService } from '../lib/shell';
+  import { keepLibraryToMe, libraryOpenToOthers, offerIndexCleanup } from '../lib/privacy';
   import ThemePicker from './ThemePicker.svelte';
   import CalendarPrefs from '../lib/CalendarPrefs.svelte';
   import Customise from './Customise.svelte';
@@ -28,7 +29,7 @@
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations', 'reorganize'],
-    privacy: ['set.privTitle', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
+    privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'layer.appUpdates'],
@@ -76,6 +77,8 @@
   let apiToken = $state('');
   let remote = $state({ name: '', url: '', username: '', token: '' });
   let privErr = $state('');
+  /** Can other accounts on this computer open the library folder? null: not known, nothing is shown. */
+  let openToOthers = $state<boolean | null>(null);
   let advOpen = $state<Record<string, boolean>>({});
 
   const isDirty = () => norm(s) !== norm(base);
@@ -145,6 +148,7 @@
   onMount(() => {
     api('/ai/claude/options').then((o) => (opts = o)).catch(() => {});
     loadGit(); loadModules();
+    libraryOpenToOthers().then((v) => (openToOthers = v));
     app.leaveGuard = leaveGuard;
   });
 
@@ -481,8 +485,11 @@
     }
     if (s.privatePaths.includes(rel)) { privErr = t('set.privDup'); return; }
     s.privatePaths = [...s.privatePaths, rel];
-    autoSave();
+    await autoSave();
+    // What the index already says about this folder's items stays readable: offer to remove it.
+    await offerIndexCleanup(rel);
   }
+  const closeLibrary = () => run('access', async () => { openToOthers = await keepLibraryToMe(); });
 
   async function removePrivate(p: string) {
     if (!(await confirmDialog({ title: t('set.privRemoveTitle'), body: t('set.privRemoveBody'), list: [p], confirmLabel: t('set.remove'), danger: true }))) return;
@@ -724,7 +731,7 @@
       {/if}
     </div>
   {:else if c === 'privacy'}
-    {#if vis(c, 'set.privTitle')}
+    {#if vis(c, 'set.privTitle', 'seca.access.title')}
       <div class="card">
         <h3>{t('set.privSentTitle')}</h3>
         <p class="muted sm">{t('set.privSent')}</p>
@@ -737,6 +744,15 @@
         {/each}
         {#if privErr}<p class="err" role="alert">{privErr}</p>{/if}
         <div class="row gap-top"><button type="button" class="btn" onclick={addPrivate}><Icon name="plus" size={14} /> {t('set.privAdd')}</button></div>
+        {#if openToOthers !== null}
+          <h3>{t('seca.access.title')}</h3>
+          {#if openToOthers}
+            <p class="muted sm">{t('seca.access.open')}</p>
+            <div class="row gap-top"><button type="button" class="btn" disabled={busy.access} onclick={closeLibrary}>{t('seca.access.fix')}</button></div>
+          {:else}
+            <p class="muted sm">{t('seca.access.closed')}</p>
+          {/if}
+        {/if}
       </div>
     {/if}
     {#if vis(c, 'wrapa.set.auto')}

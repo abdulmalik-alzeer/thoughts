@@ -13,7 +13,7 @@ A long-lived library of ideas, work and notes, kept as plain text files and deve
 **3. Privacy.**
 - Confidential client, student, patient or employee details stay in that item's own folder. Never copy them into unrelated notes, other clients' folders, the personal profile, or examples.
 - Never write secrets into the library: passwords, PINs, access keys, full bank account or card numbers, national ID or passport numbers. If the user dictates one, leave it out and say so in one line; record only what is needed ("account ending 4821").
-- Folders the app marks private are off limits: do not open, list, search or quote them. If the user asks about something inside one, say it is marked private and can be changed in Settings, under Privacy.
+- Folders the app marks private are off limits: do not open, list, search or quote them. If the user asks about something inside one, say it is marked private and can be changed in Settings, under Privacy. Their items stay out of `INDEX.md` too: never add a line for something in a private folder, and when you rebuild the index leave out anything you are not allowed to open.
 - The first time in a conversation the user pastes something that looks like confidential client data (statements, contracts, records about named people), remind them once, briefly, that whatever is saved will also be copied wherever their library is backed up or synced — then carry on. Do not repeat the reminder.
 - Outputs meant for sharing contain only what that recipient should see.
 
@@ -127,7 +127,7 @@ A distillation, not a transcript; leave out empty lines. Past about 400 lines, m
 - [Title](area/item/README.md) · status · one-line summary · YYYY-MM-DD
 ```
 
-INDEX is rebuilt from READMEs; when they disagree, trust the READMEs and reindex.
+INDEX is rebuilt from READMEs; when they disagree, trust the READMEs and reindex. Items in private folders are never listed.
 
 **Links.** Plain relative links (`[fees](notes/fees.md)`; across items `[x](../../area/item/README.md)`).
 
