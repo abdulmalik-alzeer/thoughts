@@ -101,6 +101,8 @@
 
   // Is there a library, and is its folder still there?
   async function checkLibrary() {
+    // During first-run setup there is no library yet, and nothing is missing.
+    if (!app.settings?.onboarded) { libraryGone = false; return; }
     if (!app.status?.library || app.status?.libraryMissing) { libraryGone = true; return; }
     if (app.status.libraryMissing === false) { libraryGone = false; return; }
     // Older background service without `libraryMissing`: work it out from the error text.
@@ -237,6 +239,8 @@
         if (e.type === 'chat.persistError') toast(t('layer.chat.persistError'), { kind: 'error', key: 'persist:' + e.chatId, detail: e.error ? String(e.error) : undefined });
         if (e.type === 'wrap.failed') { toast(t(e.rolledBack === false ? 'layer.wrap.failedKept' : 'layer.wrap.failedRolledBack'), { kind: 'error', key: 'wrap', action: e.chatId ? { label: t('layer.details'), run: () => go({ kind: 'chat', id: e.chatId }) } : undefined }); refreshWrap().catch(() => {}); }
         if (e.type === 'wrap.done') refreshWrap().catch(() => {});
+        // First-run setup ended while the user was looking at something else.
+        if (e.type === 'setup.finished' && e.chatId && !(app.view.kind === 'chat' && app.view.id === e.chatId)) toast(t(e.ok ? 'sa.toast.ready' : 'sa.toast.failed'), { kind: e.ok ? 'success' : 'error', key: 'setup', action: { label: t(e.ok ? 'sa.toast.open' : 'sa.toast.see'), run: () => go({ kind: 'chat', id: e.chatId }) } });
         if (e.type === 'reorganize.ready' && e.chatId && app.view.id !== e.chatId) toast(t(e.ok === false ? 'layer.reorg.failed' : 'layer.reorg.ready'), { kind: e.ok === false ? 'error' : 'info', action: { label: t('layer.details'), run: () => go(e.ok === false ? { kind: 'chat', id: e.chatId } : { kind: 'reorganize', id: e.chatId }) } });
         if (e.type === 'settings.changed') { app.settings = await api('/settings'); applyTheme(); loadProjects(); refreshStatus(); refreshChats().catch(() => {}); refreshWrap().catch(() => {}); }
         if (e.type === 'auth.changed') authChanged();
@@ -379,11 +383,17 @@
     catch (e: any) { toast(t('shell.themeNotSaved'), { kind: 'error', detail: e.message }); }
   }
 
-  function onboarded(setupChatId: string | null) {
-    afterOnboard();
-    refreshStatus();
+  async function onboarded(setupChatId: string | null) {
     if (setupChatId) go({ kind: 'chat', id: setupChatId });
+    // The status in hand is from before setup, when there was no library: fetch the new one before
+    // anything asks whether the library is there, or "can't find your library" flashes and is read out.
+    await refreshStatus();
+    if (!app.status?.library && app.settings?.libraryPath) app.status = { ...(app.status ?? {}), library: app.settings.libraryPath, libraryMissing: false };
+    afterOnboard();
+    // The short tour, once. A new library takes the assistant a couple of minutes to set up anyway.
+    showTour = true;
   }
+  const setupAtWork = $derived(app.chats.some((c) => c.kind === 'setup' && c.running));
 
   // ---------- commands & keyboard ----------
   const actions: Record<string, (d: any) => void> = {
@@ -588,6 +598,8 @@
   $effect(() => {
     viewKey;
     linkTip = '';
+    // The "can't find your library" card replaces the view: when it comes or goes, say what is shown now.
+    libraryGone;
     if (!app.ready || !app.settings?.onboarded) return;
     if (firstView) { firstView = false; return; }
     const kind = app.view.kind;
@@ -900,7 +912,7 @@
 {#if app.showRollback}<Rollback />{/if}
 {#if app.showReview && app.pending}<Review />{/if}
 {#if app.showWrapNag}<WrapNag {startWrap} />{/if}
-{#if showTour}<Tour close={() => (showTour = false)} />{/if}
+{#if showTour}<Tour close={() => (showTour = false)} note={setupAtWork ? t('sa.tour.meanwhile') : ''} />{/if}
 {#if showRecent}<RecentMessages close={() => (showRecent = false)} />{/if}
 {#if app.showPalette}<CommandPalette items={paletteItems} close={() => (app.showPalette = false)} />{/if}
 

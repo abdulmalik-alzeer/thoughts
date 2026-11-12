@@ -26,6 +26,7 @@
   import WrapPanel from './WrapPanel.svelte';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, readAsDataURL } from '../lib/content/util';
   import { imeKey } from '../lib/ime';
+  import SetupCard from './SetupCard.svelte';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
 
@@ -592,8 +593,8 @@
         <button class="btn primary" onclick={() => go({ kind: 'reorganize', id })}>{t('chat.reviewChanges')}</button></div>
     {/if}
 
-    <!-- Wrap, Reorganize and Setup have no message box, so their Stop lives here. -->
-    {#if !canCompose && chat.running}
+    <!-- Wrap, Reorganize and Setup have no message box, so their Stop lives here (setup's is on its own card below). -->
+    {#if !canCompose && chat.running && chat.kind !== 'setup'}
       <div class="runbar card row" role="status">
         <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
         <span class="grow">{t(chat.kind === 'wrap' ? (phase === 'applying' ? 'chata.run.wrapApply' : 'chata.run.wrapPreview') : chat.kind === 'reorganize' ? 'chata.run.reorganize' : 'chata.run.setup')}</span>
@@ -601,6 +602,10 @@
       </div>
     {/if}
 
+    {#if chat.kind === 'setup' || chat.meta?.setup}
+      <!-- First run: setup at work, setup that did not finish, or "you're set up" with a reply ready to send. -->
+      <SetupCard {chat} {stop} reload={() => load()} reply={(s) => { if (!text.trim()) text = s; tick().then(() => input?.focus()); }} />
+    {/if}
     {#if canCompose}
       <div class="composer card">
         {#if mentionHits.length}
