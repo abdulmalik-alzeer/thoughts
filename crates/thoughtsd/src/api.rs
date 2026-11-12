@@ -137,6 +137,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/raw", get(raw_file))
         .route("/api/library/import", post(import_files).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)))
         .route("/api/library/search", get(search))
+        .route("/api/search", get(search_all))
         .route("/api/library/stats", get(stats))
         .route("/api/todos", get(todo_list))
         .route("/api/todos/calendar.ics", get(todo_calendar))
@@ -364,8 +365,7 @@ fn redacted_settings(s: &Settings) -> Value {
     v["projects"] = json!(s.projects.len());
     v["privatePaths"] = json!(s.private_paths.len());
     for key in ["binary", "baseUrl"] { v["ai"]["claude"][key] = set(&v["ai"]["claude"][key]); }
-    let default_repo = s.search.extension_repo == crate::settings::DEFAULT_EXTENSION_REPO;
-    v["search"]["extensionRepo"] = json!(if default_repo { "(default)" } else { "(custom)" });
+    v["search"]["extensionRepo"] = json!(if s.search.extension_repo.trim().is_empty() { "(none)" } else { "(custom)" });
     v
 }
 
@@ -1210,7 +1210,25 @@ async fn library_undo(State(st): S, Json(u): Json<Undo>) -> R {
 }
 
 async fn search(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
-    Ok(Json(json!(library::search(&lib(&st).await?, q.get("q").map(String::as_str).unwrap_or(""), 60, &private_filter(&st, &q).await))))
+    let (root, exclude) = (lib(&st).await?, private_filter(&st, &q).await);
+    let text = q.get("q").cloned().unwrap_or_default();
+    Ok(Json(json!(tokio::task::spawn_blocking(move || library::search(&root, &text, 60, &exclude)).await.unwrap_or_default())))
+}
+
+/// `GET /api/search?q=…[&limit=][&exclude=private]`: library files and ordinary chats containing every
+/// word of `q`, in any order, best first, with marked snippets (`crate::search`). Chat text is the
+/// user's own: add-ons cannot use this (they have `/api/library/search`).
+async fn search_all(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    if scope_of(&q).plugin { return Err(crate::tr::err("plugin.not_allowed", &[("path", "/api/search")]).into()); }
+    let terms = crate::search::terms(q.get("q").map(String::as_str).unwrap_or(""));
+    let limit = q.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(40).clamp(1, 200);
+    let exclude = private_filter(&st, &q).await;
+    let notes = match lib(&st).await {
+        Ok(root) => { let t = terms.clone(); tokio::task::spawn_blocking(move || crate::search::notes(&root, &t, limit, &exclude)).await.unwrap_or_default() }
+        Err(_) => vec![],
+    };
+    let chats = { let all = st.chats.chats.read().await; crate::search::chats(all.values(), &terms, limit) };
+    Ok(Json(json!({"terms": terms, "notes": notes, "chats": chats})))
 }
 
 #[derive(Deserialize)]
@@ -1808,15 +1826,15 @@ pub(crate) async fn start_customize(st: Arc<AppState>, text: String, origin: &st
     Ok(id)
 }
 
+/// The optional smart-search add-on. No address is set unless the user typed one in, and the app
+/// never offers it on its own: built-in search covers note and chat text (`/api/search`).
 async fn extensions(State(st): S) -> R {
     let s = st.settings.read().await.clone();
-    let stats = s.library().map(|l| library::stats(&l)).unwrap_or(json!({}));
-    let files = stats["markdownFiles"].as_u64().unwrap_or(0) as usize;
     Ok(Json(json!({
         "search": {
             "installed": paths::extensions_dir().join("search/.git").exists(),
             "repo": s.search.extension_repo, "threshold": s.search.file_threshold,
-            "files": files, "suggest": files >= s.search.file_threshold && !s.search.prompt_dismissed,
+            "suggest": false,
         }
     })))
 }
@@ -1824,9 +1842,12 @@ async fn extensions(State(st): S) -> R {
 async fn search_ext(State(st): S, Path(op): Path<String>) -> R {
     match op.as_str() {
         "install" => {
-            let repo = st.settings.read().await.search.extension_repo.clone();
+            let repo = st.settings.read().await.search.extension_repo.trim().to_string();
+            if repo.is_empty() { return Err(crate::tr::err("search.no_addon", &[]).into()); }
             if !repo.starts_with("https://") || repo.chars().any(|c| c.is_whitespace() || c.is_control()) { bail!("the search extension address must start with https://"); }
             let dest = paths::extensions_dir().join("search");
+            // A clone that was cut off leaves a folder without `.git`: start that one again.
+            if dest.exists() && !dest.join(".git").exists() { std::fs::remove_dir_all(&dest)?; }
             if !dest.exists() {
                 git::git(&st, &paths::extensions_dir(), &["clone", "--depth", "1", "--", &repo, "search"]).await?;
             }
@@ -2212,6 +2233,16 @@ mod tests {
         assert!(!listed(tree(State(st.clone()), plugin(&[])).await.unwrap().0).iter().any(|p| p.to_lowercase().starts_with("me/finances")));
         assert!(listed(tree(State(st.clone()), none()).await.unwrap().0).iter().any(|p| p == "Me/Finances/tax.md"));
         assert!(listed(search(State(st.clone()), plugin(&[("q", "salary")])).await.unwrap().0).is_empty());
+        // Searching chats and notes together is for the user only; private folders follow `exclude=private`.
+        assert_eq!(shown(search_all(State(st.clone()), plugin(&[("q", "salary")])).await).code, "forbidden");
+        let mut chat = Chat::default();
+        chat.messages.push(crate::chats::Msg::new("assistant", "Your salary note is filed."));
+        st.chats.insert(chat).await;
+        let v = search_all(State(st.clone()), q(&[("q", "SALARY")])).await.unwrap().0;
+        assert_eq!((listed(v["notes"].clone()), v["chats"].as_array().unwrap().len()), (vec!["Me/Finances/tax.md".to_string()], 1));
+        let v = search_all(State(st.clone()), q(&[("q", "salary"), ("exclude", "private")])).await.unwrap().0;
+        assert!(listed(v["notes"].clone()).is_empty());
+        assert_eq!(v["chats"][0]["matches"][0]["text"], "Your salary note is filed.");
         assert!(!listed(ideas(State(st.clone()), plugin(&[])).await.unwrap().0).iter().any(|p| p.starts_with("Me/")));
         assert_eq!(shown(library_version(State(st.clone()), plugin(&[("path", "Me/Finances/tax.md"), ("hash", "0123456")])).await).code, "private");
         // Writing: only text files, only inside the folders it declared.

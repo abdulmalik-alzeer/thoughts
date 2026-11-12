@@ -20,6 +20,7 @@ pub mod paths;
 pub mod proc;
 pub mod routines;
 pub mod runs;
+pub mod search;
 pub mod secrets;
 pub mod settings;
 pub mod staging;

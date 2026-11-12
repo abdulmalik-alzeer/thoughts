@@ -60,7 +60,10 @@ impl Default for Accessibility {
 }
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const DEFAULT_EXTENSION_REPO: &str = "https://github.com/thoughts-app/thoughts-search.git";
+/// The smart-search add-on address that earlier versions filled in by themselves. Nobody connected
+/// to the app controls that account, so a saved copy of it is cleared: the address is only ever one
+/// the user typed in.
+const RETIRED_EXTENSION_REPO: &str = "https://github.com/thoughts-app/thoughts-search.git";
 /// The only permission modes the app ever passes to the CLI, under the names Claude Code gives them.
 /// `bypassPermissions` is special: it is only ever switched on after the user confirmed it in a
 /// dialog (see `bypass_needs_confirm`), and only for ordinary chats.
@@ -386,8 +389,8 @@ impl Settings {
         if self.search.file_threshold == 0 {
             self.search.file_threshold = 1500;
         }
-        if self.search.extension_repo.is_empty() {
-            self.search.extension_repo = DEFAULT_EXTENSION_REPO.into();
+        if self.search.extension_repo.trim() == RETIRED_EXTENSION_REPO {
+            self.search.extension_repo.clear();
         }
         if self.schema_version == 0 {
             self.schema_version = SCHEMA_VERSION;
@@ -454,9 +457,10 @@ impl Settings {
             if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) { anyhow::bail!("the assistant program was not found at {b}"); }
         }
 
-        if self.search.extension_repo.trim().is_empty() { self.search.extension_repo = DEFAULT_EXTENSION_REPO.into(); }
+        self.search.extension_repo = self.search.extension_repo.trim().to_string();
+        if self.search.extension_repo == RETIRED_EXTENSION_REPO { self.search.extension_repo.clear(); }
         let repo = &self.search.extension_repo;
-        if !repo.starts_with("https://") || repo.len() < 12 || repo.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+        if !repo.is_empty() && (!repo.starts_with("https://") || repo.len() < 12 || repo.chars().any(|ch| ch.is_whitespace() || ch.is_control())) {
             anyhow::bail!("the search extension address must start with https://");
         }
 
@@ -606,6 +610,27 @@ mod tests {
         assert!(bad(&|n| n.ai.claude.binary = Some("claude".into())));
         assert!(bad(&|n| n.ai.claude.binary = Some("/bin/sh".into())));
         assert!(bad(&|n| n.ai.claude.binary = Some("/nonexistent/dir/claude".into())));
+    }
+
+    #[test]
+    fn the_smart_search_address_is_only_one_the_user_typed() {
+        // Nothing by default, and the address earlier versions filled in is cleared.
+        assert_eq!(Settings::default().with_defaults().search.extension_repo, "");
+        let saved: Settings = serde_json::from_str(&format!(r#"{{"search":{{"extensionRepo":"{RETIRED_EXTENSION_REPO}"}}}}"#)).unwrap();
+        assert_eq!(saved.with_defaults().search.extension_repo, "");
+        let old = Settings::default().with_defaults();
+        let mut new = old.clone();
+        new.search.extension_repo = format!(" {RETIRED_EXTENSION_REPO} ");
+        new.sanitize_update(&old).unwrap();
+        assert_eq!(new.search.extension_repo, "");
+        // Empty stays empty; one the user typed is kept.
+        let mut new = old.clone();
+        new.sanitize_update(&old).unwrap();
+        assert_eq!(new.search.extension_repo, "");
+        let mut new = old.clone();
+        new.search.extension_repo = "https://example.com/me/search.git".into();
+        new.sanitize_update(&old).unwrap();
+        assert_eq!(new.search.extension_repo, "https://example.com/me/search.git");
     }
 
     #[test]

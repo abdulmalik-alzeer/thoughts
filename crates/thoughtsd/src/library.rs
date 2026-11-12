@@ -7,7 +7,7 @@ use walkdir::WalkDir;
 
 const SKIP: &[&str] = &[".git", "node_modules", ".thoughts-search", "target"];
 
-fn skip(e: &walkdir::DirEntry) -> bool {
+pub(crate) fn skip(e: &walkdir::DirEntry) -> bool {
     e.file_name().to_str().map_or(false, |n| SKIP.contains(&n) || (e.depth() > 0 && denied_component(n)))
 }
 
@@ -412,30 +412,9 @@ pub fn remove_leftover_presets(root: &Path) -> bool {
     }
 }
 
+/// Library files containing every word of `q` (see `crate::search`), best first.
 pub fn search(root: &Path, q: &str, limit: usize, exclude: &[String]) -> Vec<Value> {
-    let needle = q.to_lowercase();
-    if needle.trim().is_empty() { return vec![]; }
-    let mut hits = vec![];
-    for e in WalkDir::new(root).into_iter().filter_entry(|e| !skip(e)).flatten() {
-        if hits.len() >= limit { break; }
-        if !e.file_type().is_file() || e.path().extension().map_or(true, |x| x != "md") { continue; }
-        let Some(rel) = rel_of(root, e.path()) else { continue };
-        if crate::paths::is_under(&rel, exclude) { continue; }
-        let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
-        let mut lines = vec![];
-        let name_hit = rel.to_lowercase().contains(&needle);
-        for (i, l) in text.lines().enumerate() {
-            if l.to_lowercase().contains(&needle) {
-                lines.push(json!({"line": i + 1, "text": l.chars().take(200).collect::<String>()}));
-                if lines.len() >= 3 { break; }
-            }
-        }
-        if name_hit || !lines.is_empty() {
-            hits.push(json!({"path": rel, "matches": lines, "nameHit": name_hit}));
-        }
-    }
-    hits.sort_by_key(|h| !h["nameHit"].as_bool().unwrap_or(false));
-    hits
+    crate::search::notes(root, &crate::search::terms(q), limit, exclude)
 }
 
 /// The library's own machinery rather than the user's notes: the rules (`CLAUDE.md` anywhere), the
