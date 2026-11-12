@@ -351,13 +351,14 @@ pub fn move_to(root: &Path, file: &str, line: usize, text: &str, to_file: &str, 
 }
 
 /// Swap a task (with its notes) with the one above or below it in the same group → its new line.
-/// At the top or bottom of its group nothing moves.
-pub fn reorder(root: &Path, file: &str, line: usize, text: &str, up: bool) -> anyhow::Result<usize> {
+/// At the top or bottom of its group nothing moves. With `skip_done`, ticked tasks (hidden on the
+/// Todos page) are stepped over, so the task passes the next one the user can see.
+pub fn reorder(root: &Path, file: &str, line: usize, text: &str, up: bool, skip_done: bool) -> anyhow::Result<usize> {
     rewrite(root, file, |lines| {
         check_line(lines, line, text)?;
         let end = end_of_task(lines, line);
         let neighbour = |range: Box<dyn Iterator<Item = usize>>, lines: &[String]| {
-            for i in range { if lines[i].starts_with("## ") { return None; } if is_task(&lines[i]) { return Some(i); } }
+            for i in range { if lines[i].starts_with("## ") { return None; } if is_task(&lines[i]) && !(skip_done && is_done(&lines[i])) { return Some(i); } }
             None
         };
         if up {
@@ -892,13 +893,20 @@ mod tests {
     fn reorder_stays_inside_the_group() {
         let d = tmp(&[("TODO.md", "## Now\r\n- [ ] a\r\n  - a1\r\n- [ ] ب\r\n\r\n## Later\r\n- [ ] z\r\n")]);
         // Down: a (with its note) goes below ب; again: already last in its group, nothing moves.
-        assert_eq!(reorder(&d, "TODO.md", 1, "a", false).unwrap(), 2);
+        assert_eq!(reorder(&d, "TODO.md", 1, "a", false, false).unwrap(), 2);
         assert_eq!(read(&d, "TODO.md"), "## Now\r\n- [ ] ب\r\n- [ ] a\r\n  - a1\r\n\r\n## Later\r\n- [ ] z\r\n");
-        assert_eq!(reorder(&d, "TODO.md", 2, "a", false).unwrap(), 2);
-        assert_eq!(reorder(&d, "TODO.md", 6, "z", true).unwrap(), 6);
-        assert_eq!(reorder(&d, "TODO.md", 2, "a", true).unwrap(), 1);
+        assert_eq!(reorder(&d, "TODO.md", 2, "a", false, false).unwrap(), 2);
+        assert_eq!(reorder(&d, "TODO.md", 6, "z", true, false).unwrap(), 6);
+        assert_eq!(reorder(&d, "TODO.md", 2, "a", true, false).unwrap(), 1);
         assert_eq!(read(&d, "TODO.md"), "## Now\r\n- [ ] a\r\n  - a1\r\n- [ ] ب\r\n\r\n## Later\r\n- [ ] z\r\n");
-        assert!(reorder(&d, "TODO.md", 1, "b", true).is_err());
+        assert!(reorder(&d, "TODO.md", 1, "b", true, false).is_err());
+        // Hidden ticked tasks are stepped over when asked.
+        std::fs::write(d.join("TODO.md"), "- [ ] a\n- [ ] b\n- [x] done\n- [ ] c\n").unwrap();
+        assert_eq!(reorder(&d, "TODO.md", 3, "c", true, true).unwrap(), 1);
+        assert_eq!(read(&d, "TODO.md"), "- [ ] a\n- [ ] c\n- [ ] b\n- [x] done\n");
+        assert_eq!(reorder(&d, "TODO.md", 2, "b", false, true).unwrap(), 2);
+        assert_eq!(reorder(&d, "TODO.md", 0, "a", false, true).unwrap(), 1);
+        assert_eq!(read(&d, "TODO.md"), "- [ ] c\n- [ ] a\n- [ ] b\n- [x] done\n");
         std::fs::remove_dir_all(d).unwrap();
     }
 

@@ -53,8 +53,8 @@
     if (!hijri) return '';
     const first = parse(cursor.slice(0, 8) + '01');
     const last = new Date(first.getFullYear(), first.getMonth() + 1, 0, 12);
-    const a = fmtHijri(first, { month: 'long' }), b = fmtHijri(last, { month: 'long', year: 'numeric' });
-    return a && b ? (b.startsWith(a) ? b : `${a} – ${b}`) : '';
+    const a = fmtHijri(first, { month: 'long' }), b = fmtHijri(last, { month: 'long' }), whole = fmtHijri(last, { month: 'long', year: 'numeric' });
+    return a && whole ? (a === b ? whole : `${a} – ${whole}`) : '';
   });
 
   type Row = { l: any; it: any };
@@ -196,9 +196,9 @@
   .daybtn:focus-visible::after { outline: 2px solid var(--accent); outline-offset: -2px; }
   .num { font-size: 13px; font-weight: 600; }
   .hjd { font-size: var(--fs-xxs); color: var(--muted); }
-  .hjt { font-size: 13px; font-weight: 400; color: var(--muted); }
+  .hjt { font-size: 13px; font-weight: 400; color: var(--muted); margin-inline: 8px 2px; }
   /* Weekend days are shaded (never colour alone: the column header names the day). */
-  .cell.off:not(.out) { background: color-mix(in srgb, var(--fill) 60%, transparent); }
+  .cell.off:not(.out) { background: var(--fill); }
   .wd.off { opacity: .8; }
   /* The + appears on the selected day and on hover; it is a mouse shortcut (Enter does the same from the keyboard). */
   .cadd { position: absolute; inset-block-start: 3px; inset-inline-end: 3px; z-index: 1; font: inherit; color: var(--muted); background: var(--bg); border: var(--border-w) solid var(--hairline); border-radius: 6px; width: 22px; height: 22px; padding: 0; display: grid; place-items: center; cursor: pointer; opacity: 0; }

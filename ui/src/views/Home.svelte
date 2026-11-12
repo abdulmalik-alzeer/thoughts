@@ -5,6 +5,7 @@
   import { startCustomise } from '../lib/layer';
   import { t, tn, ago, fmtDate, fmtHijri, fmtNum, lang } from '../lib/i18n';
   import { showHijri } from '../lib/weekPrefs.svelte';
+  import { inSentence } from '../lib/todoline';
   import { dueLabel as dueLabelOn, dueState as dueStateOn, normTodo } from '../lib/content/util';
   import { clock } from '../lib/clock.svelte';
   import { failed } from '../lib/errors';
@@ -146,7 +147,7 @@
       ask = '';
       if (kind === 'todo') {
         track('todo.add');
-        const msg = r?.due ? t('todob.home.todoDue', { date: dueLabelOn(r.due) }) : t('todob.home.todoSaved');
+        const msg = r?.due ? t('todob.home.todoDue', { date: inSentence(dueLabelOn(r.due)) }) : t('todob.home.todoSaved');
         const undo = { file: r.file, line: r.line, text: r.text };
         toast(msg, { kind: 'success', action: { label: t('undo'), run: () => { post('/todos/delete', undo).then(load).catch((e) => failed(t('ui.todo.undoFailed'), e)); } } });
       } else {

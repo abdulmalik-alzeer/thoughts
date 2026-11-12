@@ -18,3 +18,6 @@ const DONE = /^(done|completed|finished|archived?|منجز[ةه]?|المنجز[�
 export const isDoneGroup = (g: string) => DONE.test(String(g ?? '').trim());
 /** The list's own group for finished tasks, if it has one. */
 export const doneGroupOf = (l: { groups?: string[] }) => (l.groups ?? []).find(isDoneGroup) ?? null;
+
+/** A due label ("Today", "Tomorrow", "Dec 31") as it reads inside a sentence: "… due tomorrow." */
+export const inSentence = (label: string) => (/^(Today|Tomorrow)$/.test(label) ? label.toLowerCase() : label);

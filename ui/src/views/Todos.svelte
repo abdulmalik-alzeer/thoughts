@@ -11,7 +11,7 @@
   import { copyText, dueLabel as dueLabelOn, dueState as dueStateOn, isoDay, normTodo, notify, prettyName, withDue } from '../lib/content/util';
   import { clock } from '../lib/clock.svelte';
   import { loadLibraryWeek, nextWeekDay, showHijri } from '../lib/weekPrefs.svelte';
-  import { compose, doneGroupOf, REPEATS } from '../lib/todoline';
+  import { compose, doneGroupOf, inSentence, REPEATS } from '../lib/todoline';
 
   type Filter = 'all' | 'soon' | 'overdue';
   type GroupBy = 'list' | 'due' | 'tag' | 'none';
@@ -115,7 +115,7 @@
     if (wasDone) return;
     track('todo.done');
     if (res.next) {
-      notify(t('todob.repeatNext', { date: dueLabel(res.next) }), { key: 'todo-done', action: { label: t('undo'), run: () => { op('edit', { file: l.file, line: res.line, text: res.text, new_text: res.previous }); } } });
+      notify(t('todob.repeatNext', { date: inSentence(dueLabel(res.next)) }), { key: 'todo-done', action: { label: t('undo'), run: () => { op('edit', { file: l.file, line: res.line, text: res.text, new_text: res.previous }); } } });
       return;
     }
     const line = typeof res.line === 'number' ? res.line : it.line;
@@ -129,7 +129,7 @@
     if (!res) return false;
     track('todo.add');
     const read = !due && typeof res.text === 'string' ? /@due\((\d{4}-\d{2}-\d{2})\)\s*$/.exec(res.text)?.[1] : null;
-    if (read && !/@due\(/.test(text)) notify(t('todob.dateRead', { date: dueLabel(read) }), { kind: 'success' });
+    if (read && !/@due\(/.test(text)) notify(t('todob.dateRead', { date: inSentence(dueLabel(read)) }), { kind: 'success' });
     return true;
   }
 
@@ -232,10 +232,10 @@
     const back = { file: res.file ?? to[0], line: res.line, text: it.text, to_file: l.file, group: it.group || '' };
     notify(t('todob.moved', { place: placeLabel(to[0], to[1]) }), { action: { label: t('undo'), run: () => { op('move', back); } } });
   }
-  /** Neighbours in the same group, in file order (moving only ever swaps within a group). */
-  const siblings = (l: any, it: any) => l.items.filter((x: any) => (x.group ?? '') === (it.group ?? ''));
+  /** Neighbours the user can see in the same group, in file order (moving only ever swaps within a group). */
+  const siblings = (l: any, it: any) => l.items.filter((x: any) => (x.group ?? '') === (it.group ?? '') && (showDone || !x.done || x.line === it.line));
   async function shiftTask(l: any, it: any, dir: 'up' | 'down') {
-    const res = await op('reorder', { ...ref(l, it), dir });
+    const res = await op('reorder', { ...ref(l, it), dir, skip_done: !showDone });
     if (!res || typeof res.line !== 'number') return;
     moveFor = l.file + ':' + res.line;
     await tick();

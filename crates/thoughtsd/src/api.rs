@@ -1407,6 +1407,8 @@ struct TodoOp {
     lines: Vec<String>,
     /// add: read a date said at the end ("tomorrow", «غداً») as the due date.
     dates: bool,
+    /// reorder: step over ticked tasks (they are hidden on the page).
+    skip_done: bool,
 }
 async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<String, String>>, Json(t): Json<TodoOp>) -> R {
     let root = lib(&st).await?;
@@ -1441,7 +1443,7 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<S
         "delete" => json!({"removed": {"line": t.line, "lines": todos::delete(&root, &file, t.line, &t.text)?}}),
         "restore" => json!({"line": todos::restore(&root, &file, t.line, &t.lines)?}),
         "move" => json!({"file": to_file, "line": todos::move_to(&root, &file, t.line, &t.text, &to_file, group.unwrap_or(""))?}),
-        "reorder" => json!({"line": todos::reorder(&root, &file, t.line, &t.text, t.dir == "up")?}),
+        "reorder" => json!({"line": todos::reorder(&root, &file, t.line, &t.text, t.dir == "up", t.skip_done)?}),
         "archive" => json!({"moved": todos::archive(&root, &file, group.unwrap_or(""))?}),
         _ => bail!("unknown op"),
     };
