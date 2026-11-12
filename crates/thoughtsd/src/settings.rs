@@ -242,7 +242,11 @@ impl Default for Accessibility {
     fn default() -> Self { Self { zoom: 100, reduce_motion: false, underline_links: false, strong_focus: false, text_spacing: false } }
 }
 
-pub const SCHEMA_VERSION: u32 = 1;
+/// 2 since 0.0.9: its files carry what 0.0.8 would drop on its next save (the library list with
+/// each other library's own settings and private folders, the history switch, the spending
+/// limit, strict private folders…). 0.0.8 reads a file of a higher version without ever writing
+/// it, so going back to it for a while loses nothing.
+pub const SCHEMA_VERSION: u32 = 2;
 /// The smart-search add-on address that earlier versions filled in by themselves. Nobody connected
 /// to the app controls that account, so a saved copy of it is cleared: the address is only ever one
 /// the user typed in.
@@ -497,6 +501,8 @@ impl Default for SyncSettings {
 /// Steps work on the raw JSON so they can rename or reshape fields the current struct no longer has.
 const MIGRATIONS: &[fn(&mut serde_json::Value)] = &[
     // v0 -> v1: files written before `schemaVersion` existed. Nothing to reshape.
+    |_v| {},
+    // v1 -> v2 (0.0.9): only new fields, each with its default; marks the file as one 0.0.8 must not rewrite.
     |_v| {},
 ];
 
@@ -1278,6 +1284,30 @@ mod tests {
         assert_eq!(migrate(serde_json::json!({"schemaVersion": 99}))["schemaVersion"], 99);
         assert_eq!(parse(r#"{"userName":"Sara"}"#).unwrap().user_name, "Sara");
         assert!(parse("nonsense").is_err());
+    }
+
+    #[test]
+    fn a_file_saved_now_is_one_0_0_8_leaves_alone() {
+        // 0.0.8 knew version 1 and treats anything above it as newer: read, never rewritten.
+        const VERSION_0_0_8: u64 = 1;
+        let d = std::env::temp_dir().join(format!("thoughts-settings-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join("settings.json");
+        // A 0.0.8 file comes in as it was, and is not "newer" here.
+        std::fs::write(&f, r#"{"schemaVersion":1,"onboarded":true,"libraryPath":"/Users/sara/Notes","privatePaths":["me/finances"]}"#).unwrap();
+        let l = Settings::load_full(&f);
+        assert!(!l.newer && !l.reset && l.settings.onboarded && l.settings.private_paths == ["me/finances"]);
+        // Saved by this version, with what 0.0.8 would drop (another library and its private folders, history off).
+        let mut s = l.settings;
+        s.keep_history = false;
+        s.libraries.push(Library { id: "lib-work".into(), name: "Work".into(), path: "/Users/sara/Work".into(),
+            parked: Some(LibrarySettings { private_paths: vec!["clients".into()], ..LibrarySettings::default() }) });
+        s.save_to(&f).unwrap();
+        let on_disk: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&f).unwrap()).unwrap();
+        assert!(version_of(&on_disk.to_string()).unwrap() > VERSION_0_0_8, "0.0.8 would rewrite it and drop the other library");
+        assert_eq!(on_disk["libraries"][1]["parked"]["privatePaths"], serde_json::json!(["clients"]));
+        assert!(!Settings::load_full(&f).newer);
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
