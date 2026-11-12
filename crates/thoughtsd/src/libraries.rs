@@ -4,11 +4,523 @@
 //! fields of `Settings` (everything reads them there), each other library's wait in its entry
 //! (`settings::LibrarySettings`). Chats carry the library they were started in (`Chat::library`,
 //! see `wraps::Scope`), trust and history are kept per folder already.
+//!
+//! Switching is allowed while a chat or a Wrap is still at work: that work goes on in the library
+//! it belongs to — everything it writes is addressed by that library's folder, never by "the open
+//! one" (see `claude::start_run`, `wraps`, `history::record_saved`, `workflows`). A window that
+//! still shows the library that was open before sends its id along (`x-thoughts-library`), and a
+//! change it asks for is refused (`gate`) rather than written into the library opened since.
+
+use crate::api::ApiErr;
+use crate::settings::{Library, Settings};
+use crate::state::AppState;
+use crate::wraps::Scope;
+use axum::extract::{Path, Request, State};
+use axum::http::Method;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, patch, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+type S = State<Arc<AppState>>;
+type R = Result<Json<Value>, ApiErr>;
+
+/// The header a window sends with every request: the id of the library it is showing.
+pub const HEADER: &str = "x-thoughts-library";
+
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/libraries", get(list))
+        .route("/api/libraries/switch", post(switch))
+        .route("/api/libraries/:id", patch(rename).delete(remove))
+}
+
+/// What a library has going on: assistant runs at work in it, and chats waiting for its next Wrap.
+async fn activity(st: &AppState, path: &str) -> (usize, usize) {
+    let scope = Scope::of(Some(PathBuf::from(path)));
+    let mine: Vec<_> = st.chats.list().await.into_iter().filter(|c| c.library.is_some() && scope.holds(c.library.as_deref())).collect();
+    (mine.iter().filter(|c| c.running).count(), mine.iter().filter(|c| c.is_unwrapped()).count())
+}
+
+async fn entry_json(st: &AppState, s: &Settings, l: &Library) -> Value {
+    let (running, waiting) = activity(st, &l.path).await;
+    json!({"id": l.id, "name": l.name, "displayName": l.display_name(), "path": l.path, "open": s.is_open_library(std::path::Path::new(&l.path)),
+           "missing": !std::path::Path::new(&l.path).is_dir(), "running": running, "waiting": waiting})
+}
+
+/// `GET /api/libraries` → `{libraries: [{id, name, displayName, path, open, missing, running, waiting}], openId}`.
+async fn list(State(st): S) -> R {
+    let s = st.settings.read().await.clone();
+    let mut out = vec![];
+    for l in &s.libraries { out.push(entry_json(&st, &s, l).await); }
+    Ok(Json(json!({"libraries": out, "openId": s.library_id()})))
+}
+
+#[derive(Deserialize)]
+struct SwitchReq { id: String }
+
+/// `POST /api/libraries/switch {id}` → `{id, left: {name, running}}`: open another listed library.
+/// What is still at work in the one left behind goes on there (`left.running` says how much).
+async fn switch(State(st): S, Json(b): Json<SwitchReq>) -> R {
+    if crate::settings::read_only() || st.settings_newer.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(crate::tr::err("newer_settings", &[]).into());
+    }
+    let target = st.settings.read().await.libraries.iter().find(|l| l.id == b.id).cloned().ok_or_else(|| crate::tr::err("libs.not_found", &[]))?;
+    let folder = PathBuf::from(&target.path);
+    if !folder.is_dir() { return Err(crate::tr::err("libs.missing", &[("name", &target.display_name()), ("path", &target.path)]).into()); }
+    // The folder is looked at like any other the app is pointed at: it may have changed since.
+    crate::trust::require(&folder)?;
+    let (before, after) = {
+        let mut cur = st.settings.write().await;
+        let before = cur.clone();
+        let mut next = cur.clone();
+        next.switch_to(&target.id)?;
+        next.save()?;
+        *cur = next.clone();
+        (before, next)
+    };
+    let left = before.open_library().cloned();
+    let running = match &left { Some(l) => activity(&st, &l.path).await.0, None => 0 };
+    if before.library_id() != after.library_id() {
+        crate::log::info(format!("libraries: opened another library ({} listed); {running} run(s) go on in the one left", after.libraries.len()));
+        st.emit(json!({"type": "settings.changed"}));
+        st.emit(json!({"type": "library.switched", "id": after.library_id()}));
+    }
+    Ok(Json(json!({"id": after.library_id(), "left": {"name": left.map(|l| l.display_name()), "running": running}})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RenameReq { name: String }
+
+/// `PATCH /api/libraries/:id {name}`: the name the switcher shows (empty: the folder's own).
+async fn rename(State(st): S, Path(id): Path<String>, Json(b): Json<RenameReq>) -> R {
+    let entry = {
+        let mut cur = st.settings.write().await;
+        let mut next = cur.clone();
+        next.rename_library(&id, &b.name)?;
+        next.save()?;
+        *cur = next.clone();
+        next.libraries.iter().find(|l| l.id == id).cloned()
+    };
+    st.emit(json!({"type": "libraries.changed"}));
+    let s = st.settings.read().await.clone();
+    Ok(Json(match entry { Some(l) => entry_json(&st, &s, &l).await, None => json!(null) }))
+}
+
+/// `DELETE /api/libraries/:id`: take a library off the list. Nothing in its folder is touched, and
+/// its chats are kept: they are listed again if the same folder is added back.
+async fn remove(State(st): S, Path(id): Path<String>) -> R {
+    let gone = {
+        let mut cur = st.settings.write().await;
+        let mut next = cur.clone();
+        let gone = next.remove_library(&id)?;
+        next.save()?;
+        *cur = next;
+        gone
+    };
+    crate::log::info("libraries: a library was taken off the list (its folder and chats are kept)");
+    st.emit(json!({"type": "libraries.changed"}));
+    Ok(Json(json!({"ok": true, "removed": gone.id})))
+}
+
+/// The settings after "Add a library": the app's own settings as they are (`old`), the library
+/// open until now parked in its entry, and the new one opened at `path` with the choices made on
+/// the setup screens (`form`: backup, history, private folders, line of work, features).
+pub fn added(old: &Settings, form: Settings, path: &str, name: &str) -> anyhow::Result<Settings> {
+    let mut own = form.own();
+    // Linked folders and the last wrap are the other library's (a form carries them along).
+    own.projects.clear();
+    own.last_wrap = None;
+    let mut s = old.clone();
+    let id = s.open_folder(path, Some(own));
+    if !name.trim().is_empty() { s.rename_library(&id, name)?; }
+    Ok(s)
+}
+
+/// The name of the library at `lib` when it is not the one open now — for a message about work
+/// that finished there while another library was open.
+pub async fn elsewhere(st: &AppState, lib: &std::path::Path) -> Option<String> {
+    let s = st.settings.read().await;
+    if s.is_open_library(lib) { return None; }
+    s.library_at(lib).map(Library::display_name)
+}
+
+/// The library a chat's work belongs to: the folder it was started in, else the open one.
+pub fn of_chat(s: &Settings, chat_library: Option<&str>) -> Option<PathBuf> {
+    chat_library.filter(|l| !l.trim().is_empty()).map(PathBuf::from).or_else(|| s.library())
+}
+
+/// Is a change asked for by a window that shows another library than the open one? Reading is
+/// always fine (the window reloads on `library.switched`); the switcher's own requests, a window's
+/// error report and stopping the app are not about any library.
+fn stale(method: &Method, path: &str, sent: Option<&str>, open: Option<&str>) -> bool {
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) { return false; }
+    if path.starts_with("/api/libraries") || path == "/api/ui-error" || path == "/api/shutdown" { return false; }
+    match (sent.map(str::trim).filter(|s| !s.is_empty()), open) { (Some(s), Some(o)) => s != o, _ => false }
+}
+
+/// Middleware: refuse a change from a window that still shows the library open before (see `stale`).
+pub async fn gate(State(st): S, req: Request, next: Next) -> Response {
+    let sent = req.headers().get(HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+    if sent.is_some() {
+        let open = st.settings.read().await.library_id();
+        if stale(req.method(), req.uri().path(), sent.as_deref(), open.as_deref()) {
+            return ApiErr::from(crate::tr::err("libs.switched", &[])).into_response();
+        }
+    }
+    next.run(req).await
+}
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::chats::{Chat, Msg};
     use crate::wraps::{self, testutil as t};
+    use std::path::Path;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve(st: &Arc<AppState>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = crate::api::router(st.clone());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        port
+    }
+
+    /// One request with the test token (and the window's library, when `lib` is given) → (status, body).
+    async fn http(port: u16, method: &str, path: &str, body: &str, lib: Option<&str>) -> (u16, Value) {
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let extra = lib.map(|l| format!("{HEADER}: {l}\r\n")).unwrap_or_default();
+        let head = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer test-token\r\n{extra}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        s.write_all(head.as_bytes()).await.unwrap();
+        s.write_all(body.as_bytes()).await.unwrap();
+        let mut out = Vec::new();
+        let _ = s.read_to_end(&mut out).await;
+        let out = String::from_utf8_lossy(&out).to_string();
+        let status = out.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+        let body = out.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+        (status, serde_json::from_str(&body).unwrap_or(Value::String(body)))
+    }
+
+    /// A second library beside `a`: a folder with a note of its own, recorded in a history of its own.
+    fn second(a: &Path, name: &str) -> PathBuf {
+        let b = a.parent().unwrap().join(name);
+        t::write(&b, "README.md", "the other library\n");
+        t::sh(&b, &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Tester"), ("user.email", "tester@example.com")] { t::sh(&b, &["config", k, v]); }
+        t::sh(&b, &["add", "-A"]);
+        t::sh(&b, &["commit", "-q", "-m", "first"]);
+        dunce::canonicalize(b).unwrap()
+    }
+
+    /// Two libraries in the list, `a` open: (id of a, id of b).
+    async fn two(st: &AppState, a: &Path, b: &Path) -> (String, String) {
+        let mut s = st.settings.write().await;
+        s.onboarded = true;
+        s.private_paths = vec!["clients".into()];
+        let a_id = s.open_folder(&a.to_string_lossy(), None);
+        let b_id = s.open_folder(&b.to_string_lossy(), None);
+        s.private_paths = vec![];
+        s.switch_to(&a_id).unwrap();
+        (a_id, b_id)
+    }
+
+    #[tokio::test]
+    async fn the_switcher_opens_each_library_with_its_own_chats_and_settings() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "personal");
+        let (a_id, b_id) = two(&st, &a, &b).await;
+        let in_a = t::chat(&st, "CLIENTFEE nine thousand for client A").await;
+        st.chats.update(&in_a, |c| c.library = Some(a.to_string_lossy().to_string())).await;
+        let in_b = t::chat(&st, "a personal note").await;
+        st.chats.update(&in_b, |c| c.library = Some(b.to_string_lossy().to_string())).await;
+        let port = serve(&st).await;
+        let mut rx = st.events.subscribe();
+
+        let (code, list) = http(port, "GET", "/api/libraries", "", None).await;
+        assert_eq!(code, 200, "{list}");
+        assert_eq!(list["openId"], a_id.as_str());
+        assert_eq!(list["libraries"].as_array().unwrap().iter().map(|l| (l["displayName"].as_str().unwrap().to_string(), l["open"].as_bool().unwrap(), l["waiting"].as_u64().unwrap())).collect::<Vec<_>>(),
+            [("library".to_string(), true, 1), ("personal".to_string(), false, 1)]);
+        let (_, status) = http(port, "GET", "/api/status", "", None).await;
+        assert_eq!((status["libraryId"].as_str(), status["libraryName"].as_str()), (Some(a_id.as_str()), Some("library")));
+
+        // Open the second library: its own settings, its own chats, its own search.
+        let (code, r) = http(port, "POST", "/api/libraries/switch", &json!({"id": b_id}).to_string(), Some(&a_id)).await;
+        assert_eq!(code, 200, "{r}");
+        assert_eq!(r["left"]["name"], "library");
+        let ev = loop { let e = rx.recv().await.unwrap(); if e["type"] == "library.switched" { break e; } };
+        assert_eq!(ev["id"], b_id.as_str());
+        let s = st.settings.read().await.clone();
+        assert_eq!((s.library(), s.private_paths.len()), (Some(b.clone()), 0));
+        assert_eq!(s.settings_of(&a).unwrap().private_paths, ["clients"]);
+        let (_, chats) = http(port, "GET", "/api/chats", "", None).await;
+        assert_eq!(chats.as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect::<Vec<_>>(), [in_b.as_str()]);
+        let (_, found) = http(port, "GET", "/api/search?q=CLIENTFEE", "", None).await;
+        assert!(found["chats"].as_array().unwrap().is_empty(), "another library's chats are never found: {found}");
+
+        // A window that still shows the first library cannot change anything in the second.
+        let before = st.settings.read().await.clone();
+        let mut sent = serde_json::to_value(&before).unwrap();
+        sent["privatePaths"] = json!(["clients"]);
+        let (code, r) = http(port, "PUT", "/api/settings", &sent.to_string(), Some(&a_id)).await;
+        assert_eq!(code, 409, "{r}");
+        assert!(r["error"].as_str().unwrap().starts_with("LIBRARY_SWITCHED::"), "{r}");
+        assert!(st.settings.read().await.private_paths.is_empty());
+        let (code, _) = http(port, "POST", "/api/capture", &json!({"kind": "note", "text": "for A"}).to_string(), Some(&a_id)).await;
+        assert_eq!(code, 409);
+        assert!(!a.join("inbox").exists() && !b.join("inbox").exists());
+        // Reading is fine, and a window that shows the open library goes through.
+        assert_eq!(http(port, "GET", "/api/libraries", "", Some(&a_id)).await.0, 200);
+        let (code, _) = http(port, "POST", "/api/capture", &json!({"kind": "note", "text": "a quick note"}).to_string(), Some(&b_id)).await;
+        assert_eq!(code, 200);
+
+        // Named, and taken off the list: never the open one, and never its folder or its chats.
+        let (code, r) = http(port, "PATCH", &format!("/api/libraries/{a_id}"), &json!({"name": " Client A "}).to_string(), Some(&b_id)).await;
+        assert_eq!((code, r["displayName"].as_str()), (200, Some("Client A")));
+        assert_eq!(http(port, "DELETE", &format!("/api/libraries/{b_id}"), "", Some(&b_id)).await.0, 409);
+        assert_eq!(http(port, "DELETE", &format!("/api/libraries/{a_id}"), "", Some(&b_id)).await.0, 200);
+        assert!(a.join("README.md").is_file() && st.chats.meta(&in_a).await.is_some());
+        assert_eq!(st.settings.read().await.libraries.len(), 1);
+        assert_eq!(http(port, "POST", "/api/libraries/switch", &json!({"id": a_id}).to_string(), None).await.0, 404);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn quick_capture_writes_into_the_library_open_now() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "personal");
+        let (_, b_id) = two(&st, &a, &b).await;
+        let port = serve(&st).await;
+        assert_eq!(http(port, "POST", "/api/capture", &json!({"kind": "note", "text": "in the first"}).to_string(), None).await.0, 200);
+        assert_eq!(http(port, "POST", "/api/libraries/switch", &json!({"id": b_id}).to_string(), None).await.0, 200);
+        let (code, r) = http(port, "POST", "/api/capture", &json!({"kind": "todo", "text": "call the bank"}).to_string(), None).await;
+        assert_eq!(code, 200, "{r}");
+        let files = |d: &Path| std::fs::read_dir(d.join("inbox")).map_or(0, |r| r.count());
+        assert_eq!((files(&a), files(&b)), (1, 0));
+        assert!(std::fs::read_to_string(b.join(r["file"].as_str().unwrap())).unwrap().contains("call the bank"));
+        assert_eq!(t::read(&a, "TODO.md"), "# Todo\n\n- [ ] call the bank\n", "the first library's list is as it was");
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn each_library_is_trusted_on_its_own() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "shared-with-me");
+        // The second library came with assistant settings that run a command.
+        t::write(&b, ".claude/settings.json", r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say done"}]}]}}"#);
+        let (a_id, b_id) = two(&st, &a, &b).await;
+        let port = serve(&st).await;
+        let (code, r) = http(port, "POST", "/api/libraries/switch", &json!({"id": b_id}).to_string(), None).await;
+        assert_eq!((code, r["code"].as_str()), (403, Some("untrusted")), "{r}");
+        assert_eq!(st.settings.read().await.library(), Some(a.clone()), "nothing switched before the yes");
+        crate::trust::accept(r["trust"]["id"].as_str().unwrap()).unwrap();
+        assert_eq!(http(port, "POST", "/api/libraries/switch", &json!({"id": b_id}).to_string(), None).await.0, 200);
+        // Trusting the second library says nothing about the first: it is looked at on its own, and is fine.
+        assert_eq!(http(port, "POST", "/api/libraries/switch", &json!({"id": a_id}).to_string(), None).await.0, 200);
+        // A change in the second library asks again when it is opened next.
+        t::write(&b, ".claude/settings.json", r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"say something else"}]}]}}"#);
+        assert_eq!(http(port, "POST", "/api/libraries/switch", &json!({"id": b_id}).to_string(), None).await.0, 403);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_wrap_started_in_one_library_finishes_there_after_another_is_opened() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "personal");
+        let (_, b_id) = two(&st, &a, &b).await;
+        let key_a = a.to_string_lossy().to_string();
+        let chat = t::chat(&st, "let us plan the shop").await;
+        let wrap = t::wrap_ready(&st, &[chat.clone()]).await;
+        let k = key_a.clone();
+        st.chats.update(&chat, |c| c.library = Some(k.clone())).await;
+        st.chats.update(&wrap, |c| { c.library = Some(k); c.meta["direct"] = json!(true); }).await;
+        let go = Arc::new(tokio::sync::Notify::new());
+        let (g, a2) = (go.clone(), a.clone());
+        t::assistant(&st, move |info| { let (g, a) = (g.clone(), a2.clone()); async move {
+            assert_eq!(info.cwd, a, "the wrap works in its own library");
+            // The other library is opened while the wrap writes.
+            g.notified().await;
+            t::write(&info.cwd, "ideas/shop/log.md", "## today\n- Decided: open in May\n");
+            true
+        } });
+        let mut rx = st.events.subscribe();
+        wraps::apply(st.clone(), &wrap, "").await.unwrap();
+        assert!(st.library_busy());
+        st.settings.write().await.switch_to(&b_id).unwrap();
+        go.notify_one();
+        t::event(&mut rx, &st, "wrap.done").await;
+        let told = loop { let e = rx.recv().await.unwrap(); if e["type"] == "notify" { break e; } };
+        assert_eq!(told["body"], "1 chat saved into the library \"library\"");
+        // Everything went into the first library, and its history; the second is exactly as it was.
+        assert!(a.join("ideas/shop/log.md").is_file());
+        assert_eq!(t::sh(&a, &["log", "-1", "--format=%s"]), crate::git::subject::wrap(1));
+        assert!(!b.join("ideas").exists());
+        assert_eq!(t::sh(&b, &["log", "--format=%s"]), "first");
+        assert_eq!(t::sh(&b, &["status", "--porcelain"]), "");
+        // The first library was wrapped, the open one was not.
+        let s = st.settings.read().await.clone();
+        assert_eq!(s.library(), Some(b.clone()));
+        assert!(s.last_wrap.is_none());
+        assert!(s.settings_of(&a).unwrap().last_wrap.is_some());
+        assert!(!st.chats.meta(&chat).await.unwrap().is_unwrapped());
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_automatic_task_runs_in_the_library_it_belongs_to() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "personal");
+        let (_, b_id) = two(&st, &a, &b).await;
+        let home = crate::paths::home();
+        let (file, other, gone) = (format!("libs-{}.json", uuid::Uuid::new_v4()), format!("libs-{}.json", uuid::Uuid::new_v4()), format!("libs-{}.json", uuid::Uuid::new_v4()));
+        // Allowed while the first library was open; another one was never tied to any.
+        crate::workflows::bind_to_open(&st, &[file.clone()]).await;
+        st.settings.write().await.switch_to(&b_id).unwrap();
+        // Allowing it again from the second library does not move it.
+        crate::workflows::bind_to_open(&st, &[file.clone()]).await;
+        assert_eq!(crate::workflows::load_bound(&home).get(&file).map(String::as_str), Some(a.to_string_lossy().as_ref()));
+        // Settings lists it as the first library's, the untied one as this one's.
+        let mut list = vec![json!({"file": file}), json!({"file": other})];
+        crate::workflows::add_libraries(&st, &mut list).await;
+        assert_eq!((list[0]["here"].as_bool(), list[0]["libraryName"].as_str()), (Some(false), Some("library")));
+        assert_eq!((list[1]["here"].as_bool(), list[1]["orphaned"].as_bool()), (Some(true), Some(false)));
+        // Its run works in the first library although the second is open.
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
+        let s2 = seen.clone();
+        t::assistant(&st, move |info| { let s = s2.clone(); async move { s.lock().unwrap().push((info.cwd.clone(), info.deny.clone())); true } });
+        let w = crate::workflows::Workflow { name: "Morning".into(), trigger: crate::workflows::Trigger::Event { on: "app.start".into() }, prompt: "tidy the todo list".into() };
+        let id = crate::workflows::start(&st, &file, &w, 1.0).await.unwrap();
+        for _ in 0..400 { if !seen.lock().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        let (cwd, deny) = seen.lock().unwrap()[0].clone();
+        assert_eq!(cwd, a);
+        assert!(deny.iter().any(|d| d.contains("clients")), "the first library's private folders apply: {deny:?}");
+        assert_eq!(st.chats.meta(&id).await.unwrap().library.as_deref(), Some(a.to_string_lossy().as_ref()));
+        // The one never tied runs in the open library.
+        crate::workflows::start(&st, &other, &w, 1.0).await.unwrap();
+        for _ in 0..400 { if seen.lock().unwrap().len() > 1 { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        assert_eq!(seen.lock().unwrap()[1].0, b);
+        // A task whose library left the list runs nowhere, and says why.
+        crate::workflows::bind(&home, &[gone.clone()], "/no/longer/listed", |_| true).unwrap();
+        let e = crate::workflows::start(&st, &gone, &w, 1.0).await.unwrap_err();
+        assert_eq!(crate::tr::classify_in(false, &e).message, crate::tr::text_in(false, "workflow.no_library", &[]));
+        let mut list = vec![json!({"file": gone})];
+        crate::workflows::add_libraries(&st, &mut list).await;
+        assert_eq!(list[0]["orphaned"], true);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn another_folder_chosen_in_settings_is_opened_with_its_own_settings_and_a_moved_one_keeps_them() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "personal");
+        let (a_id, _) = two(&st, &a, &b).await;
+        let port = serve(&st).await;
+        let put = |s: &crate::settings::Settings, lib: &Path, q: &str| {
+            let mut v = serde_json::to_value(s).unwrap();
+            v["libraryPath"] = json!(lib.to_string_lossy());
+            let q = q.to_string();
+            async move { http(port, "PUT", &format!("/api/settings{q}"), &v.to_string(), None).await }
+        };
+        // Pointing the library folder at a listed library opens it, with its own settings.
+        let cur = st.settings.read().await.clone();
+        let (code, r) = put(&cur, &b, "").await;
+        assert_eq!(code, 200, "{r}");
+        let s = st.settings.read().await.clone();
+        assert_eq!((s.library(), s.private_paths.len(), s.libraries.len()), (Some(b.clone()), 0, 2));
+        assert_eq!(s.settings_of(&a).unwrap().private_paths, ["clients"]);
+        // A folder that is no library yet becomes one more in the list, starting afresh.
+        let c = second(&a, "third");
+        let (code, _) = put(&s, &c, "").await;
+        assert_eq!(code, 200);
+        assert_eq!(st.settings.read().await.libraries.len(), 3);
+        // The open library moved: same entry, same settings, and its chats go with it.
+        let a2 = { let mut s = st.settings.write().await; s.switch_to(&a_id).unwrap(); a.parent().unwrap().join("library-moved") };
+        let chat = t::chat(&st, "about the first").await;
+        st.chats.update(&chat, |c| c.library = Some(a.to_string_lossy().to_string())).await;
+        std::fs::rename(&a, &a2).unwrap();
+        let cur = st.settings.read().await.clone();
+        let (code, r) = put(&cur, &a2, "?library=moved").await;
+        assert_eq!(code, 200, "{r}");
+        let s = st.settings.read().await.clone();
+        assert_eq!((s.library_id().as_deref(), s.libraries.len(), s.private_paths.clone()), (Some(a_id.as_str()), 3, vec!["clients".to_string()]));
+        assert_eq!(st.chats.meta(&chat).await.unwrap().library.as_deref(), Some(a2.to_string_lossy().as_ref()));
+        std::fs::remove_dir_all(a2.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn adding_a_library_reuses_setup_and_leaves_the_apps_own_settings_alone() {
+        let (st, a) = t::library().await;
+        let root = a.parent().unwrap().to_path_buf();
+        {
+            let mut s = st.settings.write().await;
+            s.onboarded = true;
+            s.language = "ar".into();
+            s.user_name = "Sara".into();
+            s.ai.claude.model = Some("opus".into());
+            s.private_paths = vec!["clients".into()];
+            s.profession = Some("legal".into());
+            *s = std::mem::take(&mut *s).with_defaults();
+        }
+        let a_id = st.settings.read().await.library_id().unwrap();
+        let port = serve(&st).await;
+        // What the setup screens send in "add a library" mode: a whole settings object, of which
+        // only the library's part counts.
+        let mut form = serde_json::to_value(&*st.settings.read().await).unwrap();
+        let c = root.join("Family");
+        form["libraryPath"] = json!(c.to_string_lossy());
+        form["privatePaths"] = json!([]);
+        form["profession"] = json!("personal");
+        form["sync"]["mode"] = json!("none");
+        form["language"] = json!("en");
+        form["userName"] = json!("Someone else");
+        form["ai"]["claude"]["model"] = json!("haiku");
+        let body = json!({"settings": form, "libraryMode": "new", "assistantLater": true, "addLibrary": true, "libraryName": "Family"});
+        let (code, r) = http(port, "POST", "/api/onboarding", &body.to_string(), Some(&a_id)).await;
+        assert_eq!(code, 200, "{r}");
+        assert!(c.join("CLAUDE.md").is_file(), "a new library made from the starter kit");
+        let s = st.settings.read().await.clone();
+        assert_eq!(s.library(), Some(c.clone()));
+        assert_eq!(s.open_library().unwrap().display_name(), "Family");
+        assert_eq!((s.profession.as_deref(), s.private_paths.len(), s.sync.mode.as_str()), (Some("personal"), 0, "none"));
+        // The app's own settings did not move.
+        assert_eq!((s.language.as_str(), s.user_name.as_str(), s.ai.claude.model.as_deref()), ("ar", "Sara", Some("opus")));
+        // The first library is parked, whole.
+        let first = s.settings_of(&a).unwrap();
+        assert_eq!((first.private_paths, first.profession.as_deref()), (vec!["clients".to_string()], Some("legal")));
+        assert_eq!(s.libraries.len(), 2);
+        // Its setup waits for the assistant, tied to the new library.
+        let setup = st.chats.list().await.into_iter().find(|c| c.kind == "setup").unwrap();
+        assert_eq!(setup.library.as_deref(), Some(c.to_string_lossy().as_ref()));
+        // Back in the first library, that setup cannot be run there.
+        st.settings.write().await.switch_to(&a_id).unwrap();
+        let (code, r) = http(port, "POST", &format!("/api/onboarding/setup/{}", setup.id), "", None).await;
+        assert_eq!(code, 409);
+        assert!(r["error"].as_str().unwrap().contains("belongs to another library"), "{r}");
+        // Before Thoughts is set up at all, there is nothing to add to.
+        st.settings.write().await.onboarded = false;
+        assert_eq!(http(port, "POST", "/api/onboarding", &body.to_string(), None).await.0, 409);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn only_changes_from_a_window_showing_another_library_are_refused() {
+        let (a, b) = (Some("lib-a"), Some("lib-b"));
+        assert!(stale(&Method::PUT, "/api/library/file", a, b));
+        assert!(stale(&Method::POST, "/api/chats", a, b));
+        assert!(!stale(&Method::GET, "/api/library/file", a, b), "reading is fine");
+        assert!(!stale(&Method::POST, "/api/libraries/switch", a, b), "the switcher itself");
+        assert!(!stale(&Method::POST, "/api/ui-error", a, b));
+        assert!(!stale(&Method::PUT, "/api/library/file", b, b));
+        assert!(!stale(&Method::PUT, "/api/library/file", None, b), "a window that does not say (the capture box, an older window)");
+        assert!(!stale(&Method::PUT, "/api/library/file", Some(" "), b));
+        assert!(!stale(&Method::PUT, "/api/library/file", a, None), "before there is a library");
+    }
 
     #[tokio::test]
     async fn chats_from_before_libraries_belong_to_the_one_open_at_the_upgrade_and_stay_there() {

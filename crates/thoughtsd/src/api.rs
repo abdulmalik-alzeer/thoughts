@@ -247,17 +247,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::care_api::routes())
         // bringing in notes the user already has
         .merge(crate::import::routes())
+        // several libraries: the switcher
+        .merge(crate::libraries::routes())
         .route("/api/extensions", get(extensions))
         .route("/api/extensions/search/:op", post(search_ext))
         .route("/api/events", get(events))
         .layer(middleware::from_fn(plugin_gate))
+        .layer(middleware::from_fn_with_state(state.clone(), crate::libraries::gate))
         .layer(middleware::from_fn(note_errors))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         // Outermost: answer CORS preflights before auth, for the app's own origins only.
         .layer(tower_http::cors::CorsLayer::new()
             .allow_origin(tower_http::cors::AllowOrigin::predicate(|o: &HeaderValue, _| o.to_str().map_or(false, origin_allowed)))
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::HeaderName::from_static(crate::libraries::HEADER)])
             // Without this a webview asks again (an extra request before every call) after five
             // seconds. Each webview caps it at its own limit (ten minutes to a day); the answer only
             // says which origins, methods and headers are allowed — every real request is still
@@ -470,7 +473,7 @@ async fn status(State(st): S) -> R {
         "library": s.library_path, "claude": claude::status(&st).await,
         "libraryId": s.library_id(), "libraryName": s.open_library().map(|l| l.display_name()), "libraries": s.libraries.len(),
         "git": git_tool_status().await,
-        "interrupted": st.interrupted.lock().await.iter().map(|(id, title)| json!({"chatId": id, "title": title})).collect::<Vec<_>>(),
+        "interrupted": interrupted_here(&st).await,
         "usage": crate::spend::usage_json(&st).await,
         "planLimit": crate::spend::plan_limit_json(&st),
         "settingsRecovered": st.settings_recovered.load(std::sync::atomic::Ordering::Relaxed),
@@ -485,6 +488,17 @@ async fn status(State(st): S) -> R {
         "home": dirs::home_dir(),
         "newerVersion": crate::release::newer_value(&crate::release::load(&paths::home()), env!("CARGO_PKG_VERSION")),
     })))
+}
+
+/// Chats cut off by a restart, of the open library only: another library's are told when it is opened.
+async fn interrupted_here(st: &AppState) -> Vec<Value> {
+    let all = st.interrupted.lock().await.clone();
+    let scope = wraps::Scope::now(st).await;
+    let mut out = vec![];
+    for (id, title) in all {
+        if st.chats.meta(&id).await.map_or(true, |c| scope.holds(c.library.as_deref())) { out.push(json!({"chatId": id, "title": title})); }
+    }
+    out
 }
 
 /// The damaged-settings notice has been shown.
@@ -1046,6 +1060,11 @@ struct Onboarding {
     /// The assistant is set up later: the library is made now, and its setup run waits until one
     /// is connected (the chat is kept with `phase: waiting`).
     assistant_later: bool,
+    /// Another library is added to an app that is already set up (the switcher's "Add a library"):
+    /// only what belongs to a library is taken from `settings`; the app's own settings, the
+    /// assistant and its sign-in stay exactly as they are. `library_name`: what to call it.
+    add_library: bool,
+    library_name: String,
     /// "I already have one" on a folder of notes that is not a library yet: the user saw what the
     /// app adds to it (`POST /api/onboarding/adopt`) and said yes.
     adopt: bool,
@@ -1089,6 +1108,12 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     let wanted_url = s.ai.claude.base_url.take();
     let old = st.settings.read().await.clone();
     s.sanitize_update(&old)?;
+    // Adding a library: everything but the library's own settings stays as it is (the provider too).
+    let wanted_url = if o.add_library {
+        if !old.onboarded { return Err(crate::tr::err("libs.not_set_up", &[]).into()); }
+        s = crate::libraries::added(&old, s, &path.to_string_lossy(), &o.library_name)?;
+        None
+    } else { wanted_url };
     if let Some(u) = wanted_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         crate::settings::check_base_url(u)?;
         // Another service is only set up together with its key.
@@ -1103,7 +1128,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     let fresh = o.library_mode != "existing";
     // Everything that can say no is asked first, before anything is created or saved: a refusal
     // then leaves nothing half-made behind, and the same answers can simply be sent again.
-    if s.daemon.run_at_login { login_item_check()?; }
+    if s.daemon.run_at_login && !o.add_library { login_item_check()?; }
     // An online location cannot work without git. (The history of changes can wait for it.)
     if s.sync_enabled() && git_tool_status().await["installed"] != true { return Err(crate::tr::err("git.missing", &[]).into()); }
     if fresh {
@@ -1187,18 +1212,23 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     // Anthropic key), or neither (the Claude account). Saved before setup is marked as done, so a
     // key that cannot be stored stops here.
     let key = Some(o.api_token.trim()).filter(|k| !k.is_empty());
-    if key.is_some() || wanted_url.is_some() || s.ai.claude.has_api_token || s.ai.claude.base_url.is_some() {
+    if !o.add_library && (key.is_some() || wanted_url.is_some() || s.ai.claude.has_api_token || s.ai.claude.base_url.is_some()) {
         if key.is_none() && claude::destination(wanted_url.as_deref()).is_none() { claude::clear_provider(&st, &claude::Keychain).await?; }
         else { claude::set_provider(&st, &claude::Keychain, wanted_url.as_deref(), key).await?; }
         let now = st.settings.read().await.ai.claude.clone();
         s.ai.claude.base_url = now.base_url;
         s.ai.claude.has_api_token = now.has_api_token;
     }
-    if s.daemon.run_at_login { login_item(true)?; }
+    if s.daemon.run_at_login && !o.add_library { login_item(true)?; }
     s.onboarded = true;
     s.save()?;
     crate::tr::set_language(&s.language);
     *st.settings.write().await = s.clone();
+    if o.add_library {
+        crate::log::info(format!("libraries: a library was added and opened ({} listed)", s.libraries.len()));
+        st.emit(json!({"type": "settings.changed"}));
+        st.emit(json!({"type": "library.switched", "id": s.library_id()}));
+    }
     // From here on the app is set up, and nothing below may turn that into "setup could not be
     // finished". The customisation layer needs git; without it the app still works, and the layer
     // is prepared at a later start once git is there.
@@ -1208,7 +1238,8 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
         return Ok(Json(json!({"ok": true, "setupChatId": null})));
     }
     let ar = s.language == "ar";
-    let mut chat = Chat { title: if ar { "تجهيز مكتبتك" } else { "Setting up your library" }.into(), kind: "setup".into(), ..Default::default() };
+    // It belongs to the library it sets up, even when it waits and another library is opened meanwhile.
+    let mut chat = Chat { title: if ar { "تجهيز مكتبتك" } else { "Setting up your library" }.into(), kind: "setup".into(), library: s.library_path.clone(), ..Default::default() };
     // The user's answers stay with the chat, so setup can be run again without asking them twice.
     // Without an assistant yet, the chat waits: it is offered again once one is connected.
     let waiting = o.assistant_later;
@@ -1279,6 +1310,10 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
     let chat = st.chats.get(id).await.filter(|c| c.kind == "setup" || c.meta["setup"] == true).ok_or_else(no_chat)?;
     if chat.running { return Err(crate::tr::err("chat.running", &[])); }
     let path = lib(&st).await?;
+    // It sets up the library it was made for, and only while that library is the open one.
+    if !wraps::Scope::now(&st).await.holds(chat.library.as_deref()) {
+        return Err(crate::tr::err("chat.other_library", &[("path", chat.library.as_deref().unwrap_or_default())]));
+    }
     // A setup that waited for the assistant runs for the first time now (it is not run "again").
     let waited = chat.meta["phase"] == "waiting";
     let adopted = chat.meta["adopted"] == true;
@@ -1888,7 +1923,9 @@ async fn search_all(State(st): S, Query(q): Query<HashMap<String, String>>) -> R
         Ok(root) => { let t = terms.clone(); tokio::task::spawn_blocking(move || crate::search::notes(&root, &t, limit, &exclude)).await.unwrap_or_default() }
         Err(_) => vec![],
     };
-    let chats = { let all = st.chats.chats.read().await; crate::search::chats(all.values(), &terms, limit) };
+    // Only the open library's chats: another library's are as closed as its files.
+    let scope = wraps::Scope::now(&st).await;
+    let chats = { let all = st.chats.chats.read().await; crate::search::chats(all.values().filter(|c| scope.holds(c.library.as_deref())), &terms, limit) };
     Ok(Json(json!({"terms": terms, "notes": notes, "chats": chats})))
 }
 

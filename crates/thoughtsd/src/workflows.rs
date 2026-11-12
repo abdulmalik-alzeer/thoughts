@@ -208,6 +208,80 @@ fn prune_approved(layer: &Path, home: &Path) {
     if kept.len() != a.len() { crate::log::ok_or_warn("could not save workflow approvals", save_approved(home, &kept)); }
 }
 
+// ----- each automatic task belongs to one library (FEAT-32) -----
+
+/// Which library each automatic task works in: file name -> library folder. A task is tied to the
+/// library that was open when the user allowed it to run, and runs there whichever library is
+/// open later. Kept outside the layer, beside the approvals.
+pub type Bound = BTreeMap<String, String>;
+
+fn bound_file(home: &Path) -> PathBuf { home.join("workflows-library.json") }
+
+pub fn load_bound(home: &Path) -> Bound {
+    std::fs::read_to_string(bound_file(home)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+fn save_bound(home: &Path, b: &Bound) -> anyhow::Result<()> {
+    crate::paths::write_atomic(&bound_file(home), serde_json::to_string_pretty(b)?.as_bytes(), true)?;
+    Ok(())
+}
+
+/// Tie the tasks in `files` to the library at `lib` — unless one already belongs to another
+/// library that is still in the list (`listed`). A task whose library left the list is the
+/// user's to allow again, and is then tied to the library open at that moment.
+pub fn bind(home: &Path, files: &[String], lib: &str, listed: impl Fn(&str) -> bool) -> anyhow::Result<()> {
+    let mut b = load_bound(home);
+    let mut changed = false;
+    for f in files {
+        if b.get(f).map_or(false, |l| l != lib && listed(l)) { continue; }
+        if b.get(f).map(String::as_str) != Some(lib) { b.insert(f.clone(), lib.to_string()); changed = true; }
+    }
+    if changed { save_bound(home, &b)?; }
+    Ok(())
+}
+
+/// `bind`, to the library open now (the user allowed the tasks from there).
+pub async fn bind_to_open(state: &AppState, files: &[String]) {
+    let s = state.settings.read().await.clone();
+    let Some(lib) = s.library_path.clone().filter(|p| !p.trim().is_empty()) else { return };
+    let listed = |l: &str| s.library_at(Path::new(l)).is_some();
+    crate::log::ok_or_warn("could not note which library an automatic task belongs to", bind(&crate::paths::home(), files, &lib, listed));
+}
+
+/// Where a task's run works: the library it belongs to (`None`: it belongs to none yet, the open
+/// one). An error when that library is no longer in the list or its folder is gone: it is not
+/// run anywhere else.
+fn home_library(state_settings: &crate::settings::Settings, home: &Path, file: &str) -> anyhow::Result<PathBuf> {
+    let open = || state_settings.library().ok_or_else(|| anyhow::anyhow!("no library configured"));
+    match load_bound(home).get(file) {
+        None => open(),
+        Some(l) if state_settings.is_open_library(Path::new(l)) => open(),
+        Some(l) => match state_settings.library_at(Path::new(l)) {
+            Some(e) if Path::new(&e.path).is_dir() => Ok(PathBuf::from(&e.path)),
+            Some(e) => Err(crate::tr::err("libs.missing", &[("name", &e.display_name()), ("path", &e.path)])),
+            None => Err(crate::tr::err("workflow.no_library", &[])),
+        },
+    }
+}
+
+/// The library each listed task belongs to, for the list in Settings: `here` (the open library's,
+/// or not tied to one yet), `libraryName` (another library's), `orphaned` (its library left the list).
+pub async fn add_libraries(state: &AppState, list: &mut [Value]) {
+    let s = state.settings.read().await.clone();
+    let bound = load_bound(&crate::paths::home());
+    for w in list.iter_mut() {
+        let file = w["file"].as_str().unwrap_or_default().to_string();
+        let (here, name, orphaned) = match bound.get(&file) {
+            None => (true, None, false),
+            Some(l) if s.is_open_library(Path::new(l)) => (true, None, false),
+            Some(l) => match s.library_at(Path::new(l)) { Some(e) => (false, Some(e.display_name()), false), None => (true, None, true) },
+        };
+        w["here"] = json!(here);
+        w["libraryName"] = json!(name);
+        w["orphaned"] = json!(orphaned);
+    }
+}
+
 /// The first time a schedule fires strictly after `after` (local wall-clock time). `None` for event triggers.
 pub fn next_run(trigger: &Trigger, after: NaiveDateTime) -> Option<NaiveDateTime> {
     let Trigger::Schedule { at, .. } = trigger else { return None };
@@ -486,9 +560,10 @@ async fn busy(state: &AppState) -> bool {
         || crate::wraps::interrupted_wrap(state).await.is_some()
 }
 
-async fn start(state: &Arc<AppState>, w: &Workflow, budget: f64) -> anyhow::Result<String> {
-    let lib = state.settings.read().await.library().ok_or_else(|| anyhow::anyhow!("no library configured"))?;
-    let mut chat = Chat { kind: "workflow".into(), title: w.name.clone(), ..Default::default() };
+pub(crate) async fn start(state: &Arc<AppState>, file: &str, w: &Workflow, budget: f64) -> anyhow::Result<String> {
+    // Its own library, whichever is open (an error when that library left the list).
+    let lib = { let s = state.settings.read().await; home_library(&s, &crate::paths::home(), file)? };
+    let mut chat = Chat { kind: "workflow".into(), title: w.name.clone(), library: Some(lib.to_string_lossy().to_string()), ..Default::default() };
     chat.options = RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() };
     chat.messages.push(Msg::new("user", &w.prompt));
     let id = chat.id.clone();
@@ -533,7 +608,7 @@ pub async fn run_now(state: &Arc<AppState>, file: &str, hash: &str) -> anyhow::R
     migrate(&mut st, &load_files(&layer));
     if busy(state).await || st.get(&l.file).map_or(false, |s| s.chat_id.is_some()) { return Err(crate::tr::err("workflow.busy", &[])); }
     let budget = st.get(&l.file).map_or(DEFAULT_BUDGET_USD, Seen::budget);
-    let id = start(state, &l.workflow, budget).await?;
+    let id = start(state, &l.file, &l.workflow, budget).await?;
     note_manual_start(st.entry(l.file.clone()).or_default(), &id, Local::now().naive_local());
     save_state(&home, &st);
     crate::log::info(format!("workflow \"{}\" ({}) started by hand", l.workflow.name, l.file));
@@ -598,6 +673,9 @@ pub async fn run_loop(state: Arc<AppState>) {
         let loaded = load_files(&layer);
         let approved_list = load_approved(&home);
         let workflows: Vec<Loaded> = loaded.iter().filter(|l| is_approved(&approved_list, l)).cloned().collect();
+        // Tasks allowed before there were several libraries belong to the library open now.
+        let unbound: Vec<String> = { let b = load_bound(&home); workflows.iter().filter(|l| !b.contains_key(&l.file)).map(|l| l.file.clone()).collect() };
+        if !unbound.is_empty() { bind_to_open(&state, &unbound).await; }
         let now = Local::now().naive_local();
         let mut st = load_state(&home);
         let mut changed = migrate(&mut st, &loaded);
@@ -677,7 +755,7 @@ pub async fn run_loop(state: Arc<AppState>) {
                     settle(seen, "monthLimit", 0.0, now);
                     announce(&state, l, "monthLimit", None, false, Some(now));
                 } else {
-                match start(&state, &l.workflow, seen.budget()).await {
+                match start(&state, &l.file, &l.workflow, seen.budget()).await {
                     Ok(id) => seen.chat_id = Some(id),
                     Err(e) => {
                         crate::log::warn(format!("workflow \"{}\" could not start: {e}", l.workflow.name));

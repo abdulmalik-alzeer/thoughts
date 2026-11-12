@@ -47,9 +47,11 @@ pub fn record_after(state: &Arc<AppState>, root: &Path, quiet: Duration) {
 /// Record the user's saved changes now, when nothing stands in the way. `false`: not now (the
 /// assistant is working in the library, or a wrap or a save holds it), try again later.
 async fn record_saved(state: &Arc<AppState>, root: &Path) -> bool {
-    // Another library was chosen meanwhile, or the history was switched off: nothing to do.
-    let (current, on) = { let s = state.settings.read().await; (s.library().map(|l| crate::paths::canonical_lenient(&l)), s.git_enabled()) };
-    if !on || current.as_deref() != Some(crate::paths::canonical_lenient(root).as_path()) { return true; }
+    // The save is recorded in the library it was made in, even when another one was opened since,
+    // as that library's own history setting says. A library taken off the list meanwhile (or a
+    // folder that is no library any more), or a history switched off: nothing to do.
+    let (listed, on) = { let s = state.settings.read().await; (s.is_open_library(root) || s.library_at(root).is_some(), s.history_enabled_in(root)) };
+    if !on || !listed { return true; }
     // The assistant's half-written files are not the user's version; its own entry follows its work.
     if state.run_active_in(root) { return false; }
     let Ok(_guard) = state.library_lock.clone().try_lock_owned() else { return false };

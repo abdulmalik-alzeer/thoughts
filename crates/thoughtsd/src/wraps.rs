@@ -378,6 +378,13 @@ pub async fn interrupted_wrap(state: &AppState) -> Option<String> {
     cut.into_iter().find(|c| scope.holds(c.library.as_deref())).map(|c| c.id)
 }
 
+/// `interrupted_wrap` for the library at `lib`, whichever library is open: work that goes on in a
+/// library after another one was opened is held back by that library's own cut-off wrap.
+pub async fn interrupted_wrap_in(state: &AppState, lib: &Path) -> Option<String> {
+    let scope = Scope::of(Some(lib.to_path_buf()));
+    state.chats.list().await.into_iter().find(|c| c.kind == "wrap" && c.meta["phase"] == "interrupted" && scope.holds(c.library.as_deref())).map(|c| c.id)
+}
+
 /// Fail with `WRAP_INTERRUPTED::<chatId>` while a cut-off wrap is waiting for the user's decision.
 pub async fn require_no_interrupted(state: &AppState) -> anyhow::Result<()> {
     match interrupted_wrap(state).await {
@@ -1291,9 +1298,11 @@ async fn stamp_saved(st: &AppState, wid: &str, ids: &[String], marks: &HashMap<S
         }).await;
         stamps.insert(id.clone(), json!({"before": before, "mark": mark}));
     }
+    // The library this wrap saved into, whichever one is open now.
+    let home = st.chats.meta(wid).await.and_then(|w| w.library).map(PathBuf::from);
     {
         let mut s = st.settings.write().await;
-        s.last_wrap = Some(Utc::now());
+        s.set_last_wrap(home.as_deref(), Utc::now());
         crate::log::ok_or_warn("wrap: could not save settings", s.save());
     }
     st.chats.update(wid, |c| { c.meta["phase"] = json!("done"); c.meta["stamps"] = Value::Object(stamps); c.meta["partial"] = Value::Null; }).await;
@@ -1318,7 +1327,8 @@ async fn report_saved(st: &Arc<AppState>, wid: &str, lib: &Path, git_on: bool, c
             Err(e) => crate::log::warn(format!("wrap {wid}: could not list what it changed: {e}")),
         }
     }
-    let git_mode = st.settings.read().await.sync.mode.clone();
+    // The backup of the library this wrap saved into, which need not be the one open now.
+    let git_mode = st.settings.read().await.sync_of(lib).mode.clone();
     let mut backup = Backup::NotAsked;
     if git_on && saved.is_ok() {
         backup = match git_mode.as_str() {
@@ -1361,8 +1371,13 @@ async fn report_saved(st: &Arc<AppState>, wid: &str, lib: &Path, git_on: bool, c
     crate::log::info(format!("wrap {wid}: done ({chats} chat(s), {total} document(s) changed)"));
     st.emit(json!({"type": "wrap.done", "chatId": wid}));
     st.emit(json!({"type": "library.changed"}));
-    if ar { st.notify("اكتمل التلخيص والحفظ", &format!("حُفظت خلاصة {} في مكتبتك", ar_chats(chats))); }
-    else { st.notify("Wrap complete", &format!("{} saved into your library", en_n(chats, "chat"))); }
+    // Finished in a library that is not open now (another one was opened meanwhile): say which.
+    match (crate::libraries::elsewhere(st, lib).await, ar) {
+        (Some(name), true) => st.notify("اكتمل التلخيص والحفظ", &format!("حُفظت خلاصة {} في مكتبة «{name}»", ar_chats(chats))),
+        (Some(name), false) => st.notify("Wrap complete", &format!("{} saved into the library \"{name}\"", en_n(chats, "chat"))),
+        (None, true) => st.notify("اكتمل التلخيص والحفظ", &format!("حُفظت خلاصة {} في مكتبتك", ar_chats(chats))),
+        (None, false) => st.notify("Wrap complete", &format!("{} saved into your library", en_n(chats, "chat"))),
+    }
 }
 
 // ---------- writing into a working copy, and the review ----------
@@ -1872,6 +1887,7 @@ fn reorganize_shown(ar: bool, instructions: &str) -> String {
 pub async fn reorganize_diff(state: &AppState, id: &str) -> anyhow::Result<Value> {
     let lib = library(state.settings.read().await.library())?;
     let c = state.chats.meta(id).await.filter(|c| c.kind == "reorganize").ok_or_else(|| crate::tr::err("not_found.chat", &[]))?;
+    if !Scope::now(state).await.holds(c.library.as_deref()) { return Err(crate::tr::err("wrap.other_library", &[])); }
     let (base, branch) = (c.meta["base"].as_str().unwrap_or("main"), c.meta["branch"].as_str().unwrap_or_default());
     if !branch.starts_with("reorganize/") || base.starts_with('-') { anyhow::bail!("no such chat"); }
     // Compared with where the proposal started, not with whatever the library holds now.
@@ -1888,6 +1904,8 @@ pub async fn reorganize_finish(state: &AppState, id: &str, keep: bool) -> anyhow
     let lib = library(state.settings.read().await.library())?;
     let c = state.chats.meta(id).await.ok_or_else(|| crate::tr::err("not_found.chat", &[]))?;
     if c.kind != "reorganize" { anyhow::bail!("no such chat"); }
+    // Its branch is in the library it was started in: never merged into another one.
+    if !Scope::now(state).await.holds(c.library.as_deref()) { return Err(crate::tr::err("wrap.other_library", &[])); }
     if c.running { anyhow::bail!("the reorganize is still running — stop it or wait for it to finish"); }
     match c.meta["phase"].as_str() {
         Some("merged") | Some("discarded") => anyhow::bail!("this reorganize has already been closed"),

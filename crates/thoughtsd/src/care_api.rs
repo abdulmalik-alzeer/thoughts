@@ -300,7 +300,8 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
 // ---------- removing Thoughts from this computer ----------
 
 async fn user_folders(s: &Settings) -> (Option<PathBuf>, Vec<PathBuf>) {
-    (s.library().filter(|_| s.library_path.as_deref().map_or(false, |p| !p.trim().is_empty())), s.projects.iter().map(|p| PathBuf::from(&p.path)).collect())
+    // Every other library in the switcher, and their linked folders, are left alone just the same.
+    (s.library().filter(|_| s.library_path.as_deref().map_or(false, |p| !p.trim().is_empty())), s.projects.iter().map(|p| PathBuf::from(&p.path)).chain(s.other_folders()).collect())
 }
 
 /// What "Remove Thoughts from this computer" would do, for the confirmation screen.
@@ -311,7 +312,8 @@ async fn remove_plan(State(st): S) -> R {
     let p = removal::plan(&home, library.as_deref(), &linked);
     Ok(Json(json!({
         "dataFolder": home, "blocked": p.blocked, "unknown": p.left.len(),
-        "library": library, "folders": s.projects.iter().map(|p| json!({"name": p.name, "path": p.path})).collect::<Vec<_>>(),
+        "library": library, "folders": s.projects.iter().map(|p| json!({"name": p.name, "path": p.path}))
+            .chain(s.libraries.iter().filter(|l| !s.is_open_library(Path::new(&l.path))).map(|l| json!({"name": l.display_name(), "path": l.path}))).collect::<Vec<_>>(),
         "shared": removal::shares_with_real_app(), "busy": working(&st).await,
         "hasKey": s.ai.claude.has_api_token, "loginItem": s.daemon.run_at_login,
         "keptHistory": std::fs::read_dir(home.join("history")).map_or(false, |mut d| d.next().is_some()),

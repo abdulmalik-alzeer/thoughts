@@ -1419,8 +1419,9 @@ type OnDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<
 /// (an interrupted wrap must keep its undo point; git settings must still be the trusted ones).
 /// `wait` = wait for other git work to finish; otherwise skip when git is busy.
 pub(crate) async fn record_library(state: &AppState, lib: &Path, subject: &str, wait: bool) {
-    if !state.settings.read().await.git_enabled() || state.library_busy() { return; }
-    if crate::wraps::interrupted_wrap(state).await.is_some() { return; }
+    // That library's own history setting, whichever library is open now.
+    if !state.settings.read().await.history_enabled_in(lib) || state.library_busy() { return; }
+    if crate::wraps::interrupted_wrap_in(state, lib).await.is_some() { return; }
     // Every library has a history: its own repository, or the one the app keeps for it.
     if !crate::git::ready(state, lib).await { return; }
     let _g = if wait { state.git_lock.lock().await } else { match state.git_lock.try_lock() { Ok(g) => g, Err(_) => return } };
@@ -1430,8 +1431,8 @@ pub(crate) async fn record_library(state: &AppState, lib: &Path, subject: &str, 
 
 /// Like `record_library`, for a caller that already holds the library lock.
 pub(crate) async fn record_library_locked(state: &AppState, lib: &Path, subject: &str) {
-    if !state.settings.read().await.git_enabled() { return; }
-    if crate::wraps::interrupted_wrap(state).await.is_some() { return; }
+    if !state.settings.read().await.history_enabled_in(lib) { return; }
+    if crate::wraps::interrupted_wrap_in(state, lib).await.is_some() { return; }
     if !crate::git::ready(state, lib).await { return; }
     let _g = state.git_lock.lock().await;
     if let Err(e) = crate::trust::require_git(lib) { crate::log::warn(format!("history: not recording ({e})")); return; }
@@ -1472,9 +1473,10 @@ async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathB
 /// the library is busy (or a cut-off wrap waits for the user, whose undo must find the library as
 /// it left it) the swap waits for a later run; the daemon's start does it too, before anything runs.
 pub(crate) async fn refresh_starter_hook(state: &AppState, dir: &Path) {
-    let in_library = state.settings.read().await.library().map_or(false, |lib| dir.starts_with(&lib));
-    if !in_library { crate::trust::refresh_starter_hook(dir); return; }
-    if crate::wraps::interrupted_wrap(state).await.is_some() { return; }
+    // Any library in the list, open or not (an automatic task may run in one that is not open).
+    let in_library = { let s = state.settings.read().await; s.library().into_iter().chain(s.libraries.iter().map(|l| PathBuf::from(&l.path))).find(|lib| dir.starts_with(lib)) };
+    let Some(lib) = in_library else { crate::trust::refresh_starter_hook(dir); return; };
+    if crate::wraps::interrupted_wrap_in(state, &lib).await.is_some() { return; }
     let Ok(_held) = state.library_lock.clone().try_lock_owned() else { return };
     crate::trust::refresh_starter_hook(dir);
 }
@@ -1492,7 +1494,11 @@ pub async fn start_run(
     crate::settings::check_cli_value("effort", spec.options.effort.as_deref())?;
     crate::settings::check_cli_value("session", spec.resume.as_deref())?;
     let settings = state.settings.read().await.clone();
-    let library = settings.library();
+    // The library this run belongs to: the one its chat was started in, else the open one. That
+    // library's own private folders apply, whichever library is open by the time it starts.
+    let chat_library = state.chats.with(&spec.chat_id, |c| c.library.clone()).await.flatten();
+    let library = crate::libraries::of_chat(&settings, chat_library.as_deref());
+    let private_paths = settings.private_paths_of(library.as_deref());
     // Nothing runs in a folder the user has not trusted. The app layer is the app's own folder.
     // Its staging copy likewise: the app creates it, strips any settings from it, and runs there
     // only under the deny rules in `extra_deny`.
@@ -1522,7 +1528,7 @@ pub async fn start_run(
         // A library that holds half a wrap waits for the user's decision: anything written into it
         // now would be thrown away with the wrap if it is undone. (Finishing that wrap is the exception.)
         if spec.cwd == *lib || (kind != "customize" && spec.add_dirs.contains(lib)) {
-            if let Some(cut) = crate::wraps::interrupted_wrap(&state).await.filter(|id| *id != spec.chat_id) {
+            if let Some(cut) = crate::wraps::interrupted_wrap_in(&state, lib).await.filter(|id| *id != spec.chat_id) {
                 return Err(crate::tr::err("wrap.interrupted", &[("id", &cut)]));
             }
         }
@@ -1541,10 +1547,10 @@ pub async fn start_run(
     if mode == crate::settings::BYPASS && kind != "chat" {
         return Err(crate::tr::err("bypass.chat_only", &[]));
     }
-    let mut deny = private_deny_settings(library.as_deref(), &spec.cwd, &settings.private_paths)?;
+    let mut deny = private_deny_settings(library.as_deref(), &spec.cwd, &private_paths)?;
     // Reorganize and Wrap work in a second checkout of the library: private folders are off-limits there too.
     if spec.cwd == reorg || crate::wraps::is_copy(&spec.cwd) {
-        deny = merge_deny(deny, private_deny_settings(Some(&spec.cwd), &spec.cwd, &settings.private_paths)?);
+        deny = merge_deny(deny, private_deny_settings(Some(&spec.cwd), &spec.cwd, &private_paths)?);
     }
     // Only the run that sets up a brand-new library may write its `.claude` folder (it installs the presets).
     let protective = protective_deny(&spec.cwd, &spec.add_dirs, &crate::paths::home(), &spec.chat_id, kind == "setup");
@@ -1561,7 +1567,7 @@ pub async fn start_run(
     let asks = crate::approvals::wanted(&kind, &mode, &prof)
         && (hook.is_some() || (crate::approvals::supported(&help) && crate::approvals::port() != 0));
     // Strict private folders: commands are put to the user one by one, or closed where nobody can be asked.
-    let strict = crate::approvals::strict_applies(settings.strict_private(), &settings.private_paths, &kind, &mode);
+    let strict = crate::approvals::strict_applies(settings.strict_private(), &private_paths, &kind, &mode);
     if strict { prof = prof.strict(asks); }
     let dirs: Vec<&Path> = std::iter::once(spec.cwd.as_path()).chain(spec.add_dirs.iter().map(PathBuf::as_path)).collect();
     let (prof_deny, prof_allow) = profile_rules(&prof, &dirs);
@@ -1585,7 +1591,7 @@ pub async fn start_run(
     // not its to change (all runs but first-time setup), whether CLAUDE.md is, which folders are
     // private (named only when the instructions travel in a private file), and the user's language.
     let system_text = |named: bool| {
-        let private = private_note(library.as_deref(), &settings.private_paths, named);
+        let private = private_note(library.as_deref(), &private_paths, named);
         let (asking, strictly) = (asks.then_some(crate::approvals::NOTE), strict.then(|| crate::approvals::strict_note(prof.shell)));
         [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(language_note(&settings.language))]
             .into_iter().flatten().collect::<Vec<_>>().join("\n\n")
@@ -1596,7 +1602,7 @@ pub async fn start_run(
     // What the run's questions are asked with, for as long as it runs.
     let ticket = asks.then(|| crate::approvals::open(&state, crate::approvals::RunCtx {
         chat_id: spec.chat_id.clone(), mode: mode.clone(), strict, cwd: spec.cwd.clone(), add_dirs: spec.add_dirs.clone(),
-        library: library.clone(), private: settings.private_paths.clone() }));
+        library: library.clone(), private: private_paths.clone() }));
     if let Some(hook) = hook {
         let rules = |key: &str| -> Vec<String> { deny.as_deref().and_then(|d| serde_json::from_str::<Value>(d).ok())
             .and_then(|v| v["permissions"][key].as_array().cloned()).unwrap_or_default()
@@ -1952,12 +1958,15 @@ async fn denied_msg(state: &AppState, id: &str, list: &Value) -> Option<Msg> {
     let (kind, options) = state.chats.with(id, |c| (c.kind.clone(), c.options.clone())).await?;
     let mode = crate::settings::effective_permission_mode(options.permission_mode.as_deref()).to_string();
     let cwd = state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned().unwrap_or_default();
+    // The library the run belongs to, with its own private folders.
+    let chat_library = state.chats.with(id, |c| c.library.clone()).await.flatten();
     let settings = state.settings.read().await;
-    let library = settings.library();
+    let library = crate::libraries::of_chat(&settings, chat_library.as_deref());
+    let private = settings.private_paths_of(library.as_deref());
     let home = crate::paths::home();
     let mut prof = profile(&kind, &mode, options.web);
-    if crate::approvals::strict_applies(settings.strict_private(), &settings.private_paths, &kind, &mode) { prof = prof.strict(state.approvals.asking(id)); }
-    let cx = DenialContext { profile: prof, mode: &mode, cwd: &cwd, library: library.as_deref(), private: &settings.private_paths, home: &home };
+    if crate::approvals::strict_applies(settings.strict_private(), &private, &kind, &mode) { prof = prof.strict(state.approvals.asking(id)); }
+    let cx = DenialContext { profile: prof, mode: &mode, cwd: &cwd, library: library.as_deref(), private: &private, home: &home };
     // What the user refused on a card (or let run out) is on that card already.
     let carded = state.approvals.carded(id);
     let list = Value::Array(list.as_array().into_iter().flatten().filter(|d| d["tool_use_id"].as_str().map_or(true, |t| !carded.contains(t))).cloned().collect());

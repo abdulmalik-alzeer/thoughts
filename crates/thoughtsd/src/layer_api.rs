@@ -248,6 +248,7 @@ async fn pending_apply(State(st): S, body: axum::body::Bytes) -> R {
     if r["origin"] == "import" { mark_kept_pack(Git(Some(&st)), &d, r["hash"].as_str().unwrap_or_default(), &before).await; }
     let approved = workflows::approve_paths(&d.layer, &d.home, &workflows_to_approve(&before, approve))?;
     if !approved.is_empty() { crate::log::info(format!("workflows approved with a kept change: {}", approved.join(", "))); }
+    workflows::bind_to_open(&st, &approved).await;
     r["approvedWorkflows"] = json!(approved);
     if r["origin"] == "customize" {
         let request = r["request"].as_str().unwrap_or_default().to_string();
@@ -668,6 +669,7 @@ async fn storage_put(State(st): S, Path(plugin): Path<String>, body: axum::body:
 async fn workflow_list(State(st): S) -> R {
     let mut list = workflows::status(&crate::paths::app_layer_dir(), &crate::paths::home(), chrono::Local::now().naive_local());
     let budget = crate::claude::has_flag(&st, "--max-budget-usd").await;
+    workflows::add_libraries(&st, &mut list).await;
     for w in &mut list {
         w["budgetSupported"] = json!(budget);
         // A past run links to its chat only while that chat still exists.
@@ -690,6 +692,7 @@ struct WorkflowRef { file: String, hash: String }
 /// Allow the task the user was shown to run on its own, in exactly that form.
 async fn workflow_approve(State(st): S, Json(w): Json<WorkflowRef>) -> R {
     let l = workflows::approve(&crate::paths::app_layer_dir(), &crate::paths::home(), &w.file, &w.hash)?;
+    workflows::bind_to_open(&st, &[l.file.clone()]).await;
     crate::log::info(format!("workflow \"{}\" ({}) approved", l.workflow.name, l.file));
     st.emit(json!({"type": "workflows.changed"}));
     ok()

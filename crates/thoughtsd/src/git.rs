@@ -416,7 +416,8 @@ pub async fn remotes(state: &AppState, dir: &Path) -> Vec<Value> {
         let Some(name) = key.strip_prefix("remote.").and_then(|k| k.strip_suffix(".url")) else { continue };
         if !list.iter().any(|(n, _)| n == name) { list.push((name.to_string(), url.trim().to_string())); }
     }
-    let chosen = state.settings.read().await.sync.main_location.clone();
+    // That library's own choice (a Wrap may sync a library after another one was opened).
+    let chosen = state.settings.read().await.sync_of(dir).main_location.clone();
     let names: Vec<&str> = list.iter().map(|(n, _)| n.as_str()).collect();
     let main = pick_main(&names, chosen.as_deref()).map(String::from);
     list.iter().map(|(n, u)| json!({"name": n, "url": u, "main": Some(n) == main.as_ref(), "kind": location_kind(u)})).collect()
