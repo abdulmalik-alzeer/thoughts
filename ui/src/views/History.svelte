@@ -3,13 +3,16 @@
   import { onMount } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import Rollback from './Rollback.svelte';
+  import HistoryRepair from './HistoryRepair.svelte';
+  import ChangeView, { type ChangeFile } from '../lib/ChangeView.svelte';
   import { api, on, post } from '../lib/api';
-  import { go, toast } from '../lib/store.svelte';
+  import { app, go, toast } from '../lib/store.svelte';
   import { confirmDialog } from '../lib/dialog.svelte';
   import { errCode, errDetail, failed } from '../lib/errors';
   import { t, tn, fmtDate } from '../lib/i18n';
 
-  type Entry = { hash: string; short?: string; date: string; subject: string; kind: string; files: string[]; first?: boolean };
+  // `merge`: it combined two devices' changes (it cannot be undone on its own).
+  type Entry = { hash: string; short?: string; date: string; subject: string; kind: string; files: string[]; first?: boolean; merge?: boolean };
 
   let tab = $state<'notes' | 'app'>('notes');
   let entries = $state<Entry[]>([]);
@@ -23,6 +26,13 @@
   const PAGE = 100;
   let more = $state(false);
   let loadingMore = $state(false);
+  // The history's health check and repair: opened from an error ("Repair history"), by the check
+  // made when History opens, or by hand.
+  let showRepair = $state(false);
+  let historyState = $state(false);
+  $effect(() => { if (app.view.kind === 'history' && app.view.id === 'repair') { tab = 'notes'; showRepair = true; } });
+  // What each entry changed, read when it is first unfolded.
+  let changes = $state<Record<string, { loading: boolean; error: string; files: ChangeFile[] | null }>>({});
 
   /** `count` entries from `skip` on, plus whether there are older ones (one more is asked for to know). */
   async function page(skip: number, count: number): Promise<{ list: Entry[]; more: boolean }> {
@@ -43,16 +53,35 @@
     try {
       const r = await page(0, Math.max(PAGE, entries.length));
       entries = r.list; more = r.more;
-      noHistory = false; noGit = false;
+      noHistory = false; noGit = false; historyState = false;
     } catch (e) {
       if (errCode(e) === 'NO_HISTORY') { noHistory = true; noGit = false; entries = []; }
+      // The history is in a state it cannot be read in: its repair is the way forward.
+      else if (errCode(e) === 'history_state') { historyState = true; showRepair = true; loadError = errDetail(e); }
       // History is on, but the tool that records it is not installed on this computer yet.
       else if (errCode(e) === 'git_missing') { noGit = true; noHistory = false; entries = []; }
       else loadError = errDetail(e) || t('ui.hist.loadFailed');
     } finally { loading = false; }
   }
   // `history.changed`: a save was recorded as a version a few seconds after it was made.
-  onMount(() => { load(); return on((e) => { if (e.type === 'library.changed' || e.type === 'history.changed' || e.type === 'resync') load(); }); });
+  onMount(() => {
+    load().then(quickCheck);
+    return on((e) => { if (e.type === 'library.changed' || e.type === 'history.changed' || e.type === 'resync') load(); });
+  });
+  /** A quick look (files only, nothing read in full) for a state that keeps the history from working. */
+  async function quickCheck() {
+    if (noHistory || noGit) return;
+    try { const r = await api('/library/history/check'); if (r && r.ok === false) showRepair = true; } catch { /* the list says what is wrong */ }
+  }
+
+  async function toggleChanges(e: Entry) {
+    if (changes[e.hash] && !changes[e.hash].error) { delete changes[e.hash]; return; }
+    changes[e.hash] = { loading: true, error: '', files: null };
+    try {
+      const r = await api(`/library/changes?hash=${encodeURIComponent(e.hash)}`);
+      changes[e.hash] = { loading: false, error: '', files: Array.isArray(r?.files) ? r.files : [] };
+    } catch (err) { changes[e.hash] = { loading: false, error: errDetail(err) || t('histc.hist.changesFailed'), files: null }; }
+  }
 
   async function older() {
     if (loadingMore) return;
@@ -68,10 +97,10 @@
   }
 
   const KINDS = ['wrap', 'sync', 'edit', 'assistant'];
-  const kindLabel = (k: string) => (k === 'start' ? t('hista.hist.kindStart') : t('ui.hist.kind.' + (KINDS.includes(k) ? k : 'other')));
+  const kindLabel = (k: string, merge = false) => (merge ? t('histc.hist.kindMerge') : k === 'start' ? t('hista.hist.kindStart') : t('ui.hist.kind.' + (KINDS.includes(k) ? k : 'other')));
   const kindIcon = (k: string) => ({ wrap: 'wrap', sync: 'sync', edit: 'edit', assistant: 'ai' } as Record<string, string>)[k] ?? 'clock';
   /** What an entry says it did. The entry a history starts with is described in the reader's language. */
-  const subjectOf = (e: Entry) => (e.kind === 'start' ? t('hista.hist.startSubject') : e.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
+  const subjectOf = (e: Entry) => (e.merge ? t('histc.hist.mergeSubject') : e.kind === 'start' ? t('hista.hist.startSubject') : e.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
 
   // Grouped by calendar day, newest first (the list already arrives newest first).
   const days = $derived.by(() => {
@@ -114,6 +143,9 @@
   </div>
 
   <div id="hist-panel" role="tabpanel" aria-labelledby={'hist-tab-' + tab}>
+  {#if tab === 'notes' && showRepair && !noHistory && !noGit}
+    <HistoryRepair onclose={historyState ? undefined : () => (showRepair = false)} onrepaired={() => { loading = !entries.length; load(); }} />
+  {/if}
   {#if tab === 'app'}
     <p class="muted intro">{t('ui.hist.appIntro')}</p>
     <div class="card"><Rollback embedded /></div>
@@ -135,6 +167,8 @@
         <p class="muted">{t('hista.hist.noGitBody')}</p>
         <button class="btn primary" onclick={() => go({ kind: 'settings', id: 'git' })}><Icon name="settings" size={14} /> {t('hista.openSettings')}</button>
       </div>
+    {:else if loadError && historyState}
+      <p class="muted sm">{t('histc.hist.afterRepair')}</p>
     {:else if loadError}
       <div class="state" role="alert">
         <Icon name="warning" size={24} /><p>{t('ui.hist.loadFailed')}</p><p class="muted sm" dir="auto">{loadError}</p>
@@ -152,7 +186,7 @@
                 <span class="ki" aria-hidden="true"><Icon name={kindIcon(e.kind)} size={15} /></span>
                 <div class="grow body">
                   <div class="row top">
-                    <span class="pill">{kindLabel(e.kind)}</span>
+                    <span class="pill">{kindLabel(e.kind, e.merge)}</span>
                     <span class="muted sm">{time(e)}</span>
                   </div>
                   <div class="subj" dir="auto">{subjectOf(e)}</div>
@@ -166,12 +200,30 @@
                       {/if}
                     </div>
                   {/if}
+                  <button class="btn ghost sm what" aria-expanded={!!changes[e.hash] && !changes[e.hash].error} onclick={() => toggleChanges(e)}>
+                    <Icon name={changes[e.hash] && !changes[e.hash].error ? 'down' : 'eye'} size={13} /> {t(changes[e.hash] && !changes[e.hash].error ? 'histc.hist.hideChanges' : 'histc.hist.showChanges')}
+                  </button>
                 </div>
-                {#if e.first}
+                {#if e.merge}
+                  <!-- A combination of two devices' changes is undone document by document, from Versions. -->
+                  <span class="muted sm firstmark" title={t('histc.hist.mergeNoUndoTip')}>{t('histc.hist.mergeNoUndo')}</span>
+                {:else if e.first}
                   <!-- Nothing exists before the first entry, so there is nothing to go back to. -->
                   <span class="muted sm firstmark">{t('hista.hist.first')}</span>
                 {:else}
                   <button class="btn" disabled={!!busy} aria-busy={busy === e.hash} onclick={() => undo(e)}><Icon name="undo" size={14} /> {t('ui.hist.undo')}</button>
+                {/if}
+                {#if changes[e.hash]}
+                  {@const c = changes[e.hash]}
+                  <!-- Under the whole entry, at full width: the lines need the room. -->
+                  <div class="changes" aria-live="polite">
+                    {#if c.loading}<div class="skel w70" aria-busy="true"></div>
+                    {:else if c.error}<p class="muted sm" role="alert" dir="auto"><Icon name="warning" size={13} /> {c.error}</p>
+                    {:else if c.files}
+                      {#if e.merge}<p class="muted sm">{t('histc.hist.mergeChanges')}</p>{/if}
+                      <ChangeView files={c.files} openCount={3} onopen={(p) => go({ kind: 'docs', path: p })} />
+                    {/if}
+                  </div>
                 {/if}
               </div>
             {/each}
@@ -182,6 +234,7 @@
         <div class="row morerow"><button class="btn" disabled={loadingMore} aria-busy={loadingMore} onclick={older}>{t(loadingMore ? 'shell.loading' : 'ui.hist.older')}</button></div>
       {/if}
       <p class="muted sm tip">{t('ui.hist.versionsTip')}</p>
+      {#if !showRepair}<p class="sm"><button class="btn ghost sm" onclick={() => (showRepair = true)}><Icon name="tool" size={13} /> {t('histc.hist.checkHistory')}</button></p>{/if}
     {/if}
   {/if}
   </div>
@@ -205,6 +258,10 @@
   .firstmark { align-self: center; }
   .morerow { justify-content: center; margin-top: 14px; }
   .tip { margin-top: 18px; }
+  .what { margin-top: 6px; padding: 2px 8px; }
+  .entry:has(.changes) { flex-wrap: wrap; }
+  .changes { flex: 0 0 calc(100% - 40px); min-width: 0; margin-inline-start: 40px; display: grid; gap: 6px; max-height: 70vh; overflow: auto; }
+  @container main (max-width: 620px) { .changes { flex-basis: 100%; margin-inline-start: 0; } }
   .state { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 40px 0; color: var(--muted); }
   .state h2 { margin: 4px 0 0; color: var(--fg); }
   .state p { margin: 0; max-width: 460px; }

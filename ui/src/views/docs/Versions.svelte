@@ -2,6 +2,7 @@
   // Earlier versions of one library file: list → preview → restore.
   import { onMount } from 'svelte';
   import Icon from '../../lib/Icon.svelte';
+  import ChangeView, { type ChangeFile } from '../../lib/ChangeView.svelte';
   import { api, post } from '../../lib/api';
   import { errCode, errDetail, failed } from '../../lib/errors';
   import { trapFocus } from '../../lib/focus';
@@ -23,6 +24,10 @@
   let verLoading = $state(false);
   let restoring = $state(false);
   let seq = 0;
+  // How the chosen version is shown: what differs from the text now, or its whole text.
+  let view = $state<'diff' | 'text'>('diff');
+  let diff = $state<ChangeFile[] | null>(null);
+  let diffError = $state('');
   // Versions are read a page at a time, however many there are: `more` says older ones exist.
   const PAGE = 50;
   let more = $state(false);
@@ -71,14 +76,19 @@
 
   async function show(v: Ver) {
     const mine = ++seq;
-    sel = v; content = null; verError = ''; verLoading = true;
+    sel = v; content = null; verError = ''; verLoading = true; diff = null; diffError = '';
+    const q = `path=${encodeURIComponent(path)}&hash=${encodeURIComponent(v.hash)}${atOf(v)}`;
     try {
-      const r = await api(`/library/version?path=${encodeURIComponent(path)}&hash=${encodeURIComponent(v.hash)}${atOf(v)}`);
-      if (mine === seq) content = String(r?.content ?? '');
+      const [r, d] = await Promise.all([
+        api(`/library/version?${q}`),
+        api(`/library/compare?${q}`).catch((e) => { if (mine === seq) diffError = errDetail(e) || t('histc.ver.diffFailed'); return null; }),
+      ]);
+      if (mine === seq) { content = String(r?.content ?? ''); diff = Array.isArray(d?.files) ? d.files : null; }
     } catch (e) {
       if (mine === seq) verError = errDetail(e) || t('docs3.versionFailed');
     } finally { if (mine === seq) verLoading = false; }
   }
+  const same = $derived(!!diff && diff.every((f) => !f.hunks?.length && f.detail !== false && !f.binary));
 
   async function restore() {
     if (!sel || restoring) return;
@@ -149,7 +159,20 @@
             <div role="alert"><p><Icon name="warning" size={14} /> {t('docs3.versionFailed')}</p><p class="muted sm" dir="auto">{verError}</p>
               <button class="btn" onclick={() => sel && show(sel)}><Icon name="retry" size={14} /> {t('docs3.retry')}</button></div>
           {:else if content !== null}
-            {#if /\.md$/i.test(path)}
+            <div class="seg vtabs" role="tablist" aria-label={t('histc.ver.showAs')}>
+              <button class="segb" role="tab" aria-selected={view === 'diff'} onclick={() => (view = 'diff')}>{t('histc.ver.diff')}</button>
+              <button class="segb" role="tab" aria-selected={view === 'text'} onclick={() => (view = 'text')}>{t('histc.ver.text')}</button>
+            </div>
+            {#if view === 'diff'}
+              {#if diffError}
+                <p class="muted sm" role="alert" dir="auto"><Icon name="warning" size={14} /> {diffError}</p>
+              {:else if diff && same}
+                <p class="muted"><Icon name="check" size={14} /> {t('histc.ver.same')}</p>
+              {:else if diff}
+                <p class="muted sm">{t('histc.ver.diffIntro')}</p>
+                <ChangeView files={diff} single labels={{ added: t('histc.ver.onlyNow'), removed: t('histc.ver.onlyThen') }} />
+              {/if}
+            {:else if /\.md$/i.test(path)}
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
               <article class="md" dir="auto" onclick={(e) => { if ((e.target as HTMLElement).closest('a')) e.preventDefault(); }}>{@html md(content)}</article>
             {:else}
@@ -183,6 +206,8 @@
   .subj { font-size: var(--fs-xs); color: var(--muted); font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pv { border: var(--border-w) solid var(--border); border-radius: var(--radius); padding: 10px 14px; overflow-wrap: anywhere; background: var(--bg); }
   .plain { white-space: pre-wrap; font-size: var(--fs-sm); margin: 0; }
+  .vtabs { margin-bottom: 10px; }
+  .vtabs .segb[aria-selected='true'] { background: var(--accent); color: var(--accent-fg); }
   .state { display: grid; justify-items: center; text-align: center; gap: 8px; padding: 30px 10px; color: var(--muted); }
   .state h3 { margin: 0; color: var(--fg); font-size: 16px; }
   .state p { margin: 0; max-width: 460px; }

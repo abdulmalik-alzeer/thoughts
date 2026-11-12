@@ -42,5 +42,10 @@ export function failed(headline: string, e: unknown, opts: ToastOpts = {}): void
   // Saying no to trusting a folder is the user's own choice: a plain note, not something that went wrong.
   if (code === 'TRUST_DECLINED') { toast(detail || t('seca.trust.declined'), { key: 'trust-declined' }); return; }
   if (code === 'NEWER_SETTINGS') { toast(t('err.newerSettings'), { kind: 'error', key: 'newer-settings' }); return; }
+  // The history is in a state the app cannot work in: the way out is one tap away.
+  if (code === 'history_state') {
+    toast(headline, { kind: 'error', key: 'history-state', duration: 0, ...opts, detail: detail && detail !== headline ? detail : undefined, action: { label: t('histc.repair.action'), run: () => go({ kind: 'history', id: 'repair' }) } });
+    return;
+  }
   toast(headline, { kind: 'error', detail: detail && detail !== headline ? detail : undefined, ...opts });
 }

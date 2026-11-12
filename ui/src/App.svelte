@@ -14,7 +14,7 @@
   import { startupChecks } from './lib/maintenance';
   import { t, tn, ago, fmtDate, fmtNum } from './lib/i18n';
   import { matchShortcut, keys, tip, isMac, isTyping } from './lib/shortcuts';
-  import { choiceDialog, confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
+  import { confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
   import Chat from './views/Chat.svelte';
   import ChatList from './views/ChatList.svelte';
@@ -44,6 +44,8 @@
   import Icon from './lib/Icon.svelte';
   import Logo from './lib/Logo.svelte';
   import Dialogs from './lib/Dialogs.svelte';
+  import SyncConflict from './lib/SyncConflict.svelte';
+  import { settleClash } from './lib/conflict.svelte';
   import Toasts from './lib/Toasts.svelte';
   import RecentMessages from './lib/RecentMessages.svelte';
   import { crashText, reportError } from './lib/crash';
@@ -374,23 +376,8 @@
     } finally { syncing = false; }
   }
 
-  // The same file changed here and in the synced copy: let the user pick, in plain words.
-  async function resolveConflict(files: string[]) {
-    const strategy = await choiceDialog({
-      title: t('shell.conflict.title'),
-      body: tn('shell.conflict.body', files.length),
-      list: files,
-      note: t('shell.conflict.backup'),
-      choices: [
-        { id: 'theirs', label: t('shell.conflict.theirs') },
-        { id: 'mine', label: t('shell.conflict.mine'), primary: true },
-      ],
-    });
-    if (!strategy) { toast(t('shell.conflict.cancelled')); return; }
-    try {
-      syncDone(await post('/git/resolve', { strategy }), strategy === 'mine' ? t('shell.conflict.keptMine') : t('shell.conflict.usedTheirs'));
-    } catch (e: any) { syncFailed(e, t('shell.conflict.failed')); }
-  }
+  // The same documents changed here and on another device: the user picks for each one, in plain words.
+  async function resolveConflict(files: string[]) { await settleClash(files); }
 
   async function setLook(patch: { theme?: string; mode?: string }) {
     try { await saveSettings(patch); }
@@ -690,6 +677,7 @@
 <svelte:window onclick={guardLinks} onauxclick={guardLinks} onkeydown={onKey} onfocus={onFocus} onresize={measure}
   onmouseover={tipFor} onfocusin={tipFor} onfocusout={() => (linkTip = '')} />
 <Dialogs />
+<SyncConflict />
 
 {#if app.error}
   <div class="center">

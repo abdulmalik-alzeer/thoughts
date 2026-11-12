@@ -4,8 +4,8 @@
   import Icon from '../lib/Icon.svelte';
   import { onMount, tick } from 'svelte';
   import { api, halt, inTauri, post } from '../lib/api';
-  import { toast } from '../lib/store.svelte';
-  import { confirmDialog, promptDialog } from '../lib/dialog.svelte';
+  import { go, toast } from '../lib/store.svelte';
+  import { promptDialog } from '../lib/dialog.svelte';
   import { fmtDate, fmtNum, t, tn } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { restartService } from '../lib/shell';
@@ -37,7 +37,8 @@
     if (!i.fix || fixing[i.id]) return;
     if (i.fix === 'choose-library') { open('git'); return; }
     if (i.fix === 'enter-key') { open('ai'); return; }
-    if (i.fix === 'finish-history' && !(await confirmDialog({ title: t('care.fix.finishTitle'), body: t('care.fix.finishBody'), confirmLabel: t('care.fix.finish-history') }))) return;
+    // The history's own check and repair: it says what is wrong, keeps a copy first and shows what differs after.
+    if (i.fix === 'finish-history' || i.fix === 'unlock-history' || i.fix === 'repair-history') { go({ kind: 'history', id: 'repair' }); return; }
     fixing[i.id] = true;
     try {
       if (i.fix === 'install-git') {
