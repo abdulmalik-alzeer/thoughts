@@ -11,15 +11,18 @@ pub const LOCAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12
 /// Longest a git command that talks to a remote may run.
 pub const NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// The git subcommand in `args` (skipping leading `-c key=value` pairs).
-fn subcommand<'a>(args: &[&'a str]) -> &'a str {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if *a == "-c" { it.next(); continue; }
-        return a;
+/// Where the git subcommand sits in `args` (after any leading `-c key=value` pairs).
+fn subcommand_at(args: &[&str]) -> Option<usize> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "-c" { i += 2; continue; }
+        return Some(i);
     }
-    ""
+    None
 }
+
+/// The git subcommand in `args` (skipping leading `-c key=value` pairs).
+fn subcommand<'a>(args: &[&'a str]) -> &'a str { subcommand_at(args).map_or("", |i| args[i]) }
 
 /// How long `args` may take: commands that reach a remote get longer than local ones.
 pub fn timeout_for(args: &[&str]) -> std::time::Duration {
@@ -51,9 +54,12 @@ pub async fn git_raw(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Res
     #[cfg(not(windows))] let no_hooks = "/dev/null";
     c.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_ATTR_NOSYSTEM", "1");
     for kv in ["core.fsmonitor=false", &format!("core.hooksPath={no_hooks}"), "core.sshCommand=ssh",
-               "core.askPass=", "core.pager=cat", "core.editor=true", "diff.external=",
+               "core.askPass=", "core.pager=cat", "core.editor=true",
                "commit.gpgSign=false", "tag.gpgSign=false", "gpg.program=gpg", "protocol.ext.allow=never", "core.gitProxy=",
                "credential.helper=",
+               // File names are shown as they are. Without this git prints every name that is not
+               // plain ASCII (Arabic, accented letters…) as a quoted string of octal escapes.
+               "core.quotePath=false",
                // A transfer that crawls below 1 kB/s for 30 seconds is given up on rather than left hanging.
                "http.lowSpeedLimit=1000", "http.lowSpeedTime=30"] {
         c.args(["-c", kv]);
@@ -72,7 +78,14 @@ pub async fn git_raw(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Res
     if store != "file" {
         if let Ok(exe) = crate::paths::app_exe() { c.env("GIT_ASKPASS", exe).env("THOUGHTS_ASKPASS", "1"); }
     }
-    c.args(args).stdin(std::process::Stdio::null());
+    // A comparison is always made by git itself, never handed to a program named in some
+    // configuration. (Blanking `diff.external` instead does not work: git then tries to start a
+    // program with no name, and every `git diff` fails.)
+    match subcommand_at(args).filter(|i| args[*i] == "diff") {
+        Some(i) => { c.args(&args[..=i]).arg("--no-ext-diff").args(&args[i + 1..]); }
+        None => { c.args(args); }
+    }
+    c.stdin(std::process::Stdio::null());
     let limit = timeout_for(args);
     let out = match crate::proc::output_timeout(&mut c, limit).await {
         Ok(o) => o,
@@ -831,6 +844,31 @@ mod tests {
         let shown = crate::tr::classify_in(false, &err);
         assert_eq!(shown.status, 404);
         assert!(shown.message.contains(&gone.display().to_string()) && !shown.message.contains("os error"));
+    }
+
+    #[tokio::test]
+    async fn names_that_are_not_ascii_are_listed_as_they_are() {
+        let d = dunce::canonicalize(tmp("names")).unwrap();
+        sh(&d, &["init", "-q", "-b", "main"]);
+        let st = AppState::load().unwrap();
+        write(&d, "أفكار/متجر/خطة العمل.md", "one\n");
+        write(&d, "café/naïve.md", "x\n");
+        commit_all(&st, &d, &subject::edit("your changes")).await.unwrap();
+        let h = history(&st, &d, None, 10).await.unwrap();
+        assert_eq!(h[0]["files"], json!(["café/naïve.md", "أفكار/متجر/خطة العمل.md"]));
+        // The name a history entry gives is the name the file can be read back by.
+        let hash = h[0]["hash"].as_str().unwrap();
+        assert_eq!(file_at(&st, &d, "أفكار/متجر/خطة العمل.md", hash).await.unwrap(), b"one\n");
+        assert_eq!(history(&st, &d, Some("أفكار/متجر/خطة العمل.md"), 10).await.unwrap().len(), 1);
+        // The reorganize review reads names from these two commands.
+        write(&d, "أفكار/متجر/خطة العمل.md", "two\n");
+        commit_all(&st, &d, &subject::edit("your changes")).await.unwrap();
+        for args in [&["diff", "--stat", "HEAD~1", "HEAD", "--"][..], &["diff", "HEAD~1", "HEAD", "--"], &["status", "--porcelain"]] {
+            let out = git(&st, &d, args).await.unwrap();
+            assert!(!out.contains("\\330") && !out.contains("\\303"), "{args:?}: {out}");
+        }
+        assert!(git(&st, &d, &["diff", "HEAD~1", "HEAD", "--"]).await.unwrap().contains("أفكار/متجر/خطة العمل.md"));
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
