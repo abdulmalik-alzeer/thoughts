@@ -27,6 +27,8 @@ fn finished(c: &ChatMeta) -> bool {
     match c.kind.as_str() {
         "wrap" | "reorganize" => matches!(c.meta["phase"].as_str(),
             Some("done" | "failed" | "undone" | "superseded" | "discarded" | "closed" | "merged" | "preview_failed")),
+        // A library's setup that waits for the assistant to be connected is still to come.
+        "setup" => c.meta["phase"] != "waiting",
         _ => true,
     }
 }

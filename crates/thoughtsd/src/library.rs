@@ -47,7 +47,7 @@ pub fn resolve(root: &Path, rel: &str) -> anyhow::Result<std::path::PathBuf> {
 }
 
 /// A path the user (or an add-on) wants to create: every part a sensible file or folder name.
-fn check_new_path(rel: &str) -> anyhow::Result<()> {
+pub(crate) fn check_new_path(rel: &str) -> anyhow::Result<()> {
     let bad = || crate::tr::err("invalid.path", &[]);
     let rel = rel.trim();
     if rel.is_empty() || rel.len() > 400 || rel.starts_with(['/', '\\', '~']) || Path::new(rel).is_absolute() { return Err(bad()); }
@@ -162,7 +162,7 @@ pub const PLUGIN_WRITE_EXT: &[&str] = &["md", "json", "csv", "txt"];
 /// Files Claude Code reads as standing instructions as soon as the assistant works in their folder,
 /// at any depth: `CLAUDE.md`, `CLAUDE.local.md`, and `AGENTS.md` where there is no `CLAUDE.md`.
 /// Whatever the letter case, and without the trailing dots and spaces some filesystems ignore.
-fn instruction_file(name: &str) -> bool {
+pub(crate) fn instruction_file(name: &str) -> bool {
     matches!(name.trim_end_matches(['.', ' ']).to_lowercase().as_str(), "claude.md" | "claude.local.md" | "agents.md")
 }
 
@@ -972,7 +972,7 @@ impl FolderState {
 }
 
 /// Files an operating system drops into folders by itself.
-fn os_dropping(name: &str) -> bool { matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini") || name.starts_with("._") }
+pub(crate) fn os_dropping(name: &str) -> bool { matches!(name, ".DS_Store" | "Thumbs.db" | "desktop.ini") || name.starts_with("._") }
 
 pub fn folder_state(dest: &Path) -> FolderState {
     let Ok(meta) = std::fs::metadata(dest) else {

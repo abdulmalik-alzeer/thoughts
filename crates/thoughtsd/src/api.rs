@@ -159,6 +159,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/claude/presets", get(provider_presets))
         .route("/api/ai/claude/login", post(claude_login))
         .route("/api/ai/claude/recheck", post(claude_recheck))
+        .route("/api/ai/claude/status", get(claude_status))
         .route("/api/git/install", post(git_install))
         .route("/api/library/trust", post(trust_library))
         .route("/api/library/access", get(library_access).post(library_keep_to_owner))
@@ -232,6 +233,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::inbox::routes())
         // maintenance: self-check, newer version, moving, removing
         .merge(crate::care_api::routes())
+        // bringing in notes the user already has
+        .merge(crate::import::routes())
         .route("/api/extensions", get(extensions))
         .route("/api/extensions/search/:op", post(search_ext))
         .route("/api/events", get(events))
@@ -357,7 +360,7 @@ fn xml_escape(s: &str) -> String {
 
 /// The library folder — as a plain error when none is set up, or when the folder is gone (moved,
 /// renamed, on a drive that is not connected) rather than the operating system's own wording.
-async fn lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
+pub(crate) async fn lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
     let l = st.settings.read().await.library().ok_or_else(|| crate::tr::err("library.none", &[]))?;
     if !l.is_dir() { return Err(crate::tr::err("library.missing", &[("path", &l.display().to_string())])); }
     Ok(l)
@@ -367,7 +370,7 @@ async fn lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
 /// fails puts the library back exactly as it was, which would erase anything written meanwhile.
 /// The same holds while a wrap that was cut off waits for the user's decision
 /// (`WRAP_INTERRUPTED::<chatId>`): undoing it must not take later work with it.
-async fn library_free(st: &AppState) -> anyhow::Result<()> {
+pub(crate) async fn library_free(st: &AppState) -> anyhow::Result<()> {
     if st.library_busy() { return Err(crate::tr::err("busy", &[])); }
     wraps::require_no_interrupted(st).await
 }
@@ -993,6 +996,14 @@ struct Onboarding {
     /// language, or their own description. It goes to the assistant only — `settings.profession`
     /// keeps the choice itself (the id the rest of the app reads its words from).
     profession: String,
+    /// The assistant is set up later: the library is made now, and its setup run waits until one
+    /// is connected (the chat is kept with `phase: waiting`).
+    assistant_later: bool,
+    /// "I already have one" on a folder of notes that is not a library yet: the user saw what the
+    /// app adds to it (`POST /api/onboarding/adopt`) and said yes.
+    adopt: bool,
+    /// "Start fresh", bringing in a copy of the notes in this folder (folders kept).
+    import_from: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1055,14 +1066,33 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     } else if !path.is_dir() {
         return Err(crate::tr::err("library.no_folder", &[("path", &path.display().to_string())]).into());
     } else if !path.join("CLAUDE.md").exists() && !path.join("INDEX.md").exists() {
-        return Err(crate::tr::err("library.not_thoughts", &[("path", &path.display().to_string())]).into());
+        // A folder of the user's own notes becomes the library only with their yes to what is added.
+        if !o.adopt { return Err(crate::tr::err("library.not_thoughts", &[("path", &path.display().to_string())]).into()); }
+        let p = path.clone();
+        tokio::task::spawn_blocking(move || crate::import::check_adopt(&p)).await??;
+        crate::trust::require(&path)?;
     } else {
         crate::trust::require(&path)?;
     }
+    let adopt = !fresh && o.adopt && !path.join("CLAUDE.md").exists() && !path.join("INDEX.md").exists();
+    // A copy of notes the user already has, for a new library: looked at now, so a folder that cannot
+    // be brought in says so before anything is made.
+    let brought = match o.import_from.trim() {
+        "" => None,
+        _ if !fresh => None,
+        from => {
+            let src = crate::import::source(from, Some(&path))?;
+            let s2 = src.clone();
+            let scan = tokio::task::spawn_blocking(move || crate::import::Scan::of(&s2, library::IMPORT_MAX_BYTES as u64)).await?;
+            if scan.too_big { return Err(crate::tr::err("import.too_big", &[]).into()); }
+            if scan.files.is_empty() { return Err(crate::tr::err("import.nothing", &[]).into()); }
+            Some(scan)
+        }
+    };
     // An existing folder that is still an untouched copy of the starter kit has never been set up.
     // Its own instructions tell every chat to offer set-up first — which no chat can finish, since
     // only the set-up run may write `.claude/`. So the app runs set-up for it, as for a new library.
-    let needs_setup = fresh || awaits_setup(&path);
+    let needs_setup = fresh || adopt || awaits_setup(&path);
     if fresh {
         library::create_from_starter(&path)?;
         // Trim rituals for modules that were not chosen (the AI re-adds them on demand).
@@ -1074,6 +1104,29 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     }
     // Without git the app still works, minus the history — but an online location cannot.
     let began = begin_history(&st, &s, &path, fresh).await;
+    // Notes brought in, and the app's own files added to a folder of notes, are each one history
+    // entry of their own (so either can be undone), after the library as it was before.
+    let mut setup_note = String::new();
+    if let Some(scan) = &brought {
+        let history = s.history_enabled() && began.is_ok() && git::start_history(&st, &path).await.is_ok();
+        if history && git::head(&st, &path).await.is_none() {
+            let _g = st.git_lock.lock().await;
+            crate::log::ok_or_warn("onboarding: could not record the new library", git::commit_all(&st, &path, &git::subject::start()).await);
+        }
+        let into = crate::import::default_into(&path, &scan.root);
+        let (copied, _) = crate::import::copy_in(scan, &path, &into)?;
+        if history && copied > 0 { crate::import::record(&st, &path, &crate::import::subject(&into, copied), &[into.clone()]).await; }
+        setup_note = crate::import::setup_note_imported(&into, copied);
+    }
+    if adopt {
+        let files = { let p = path.clone(); tokio::task::spawn_blocking(move || crate::import::Scan::of(&p, u64::MAX)).await?.files.len() };
+        let plan = crate::import::adopt_plan(&path);
+        let added = crate::import::adopt(&path, &plan)?;
+        if s.history_enabled() && began.is_ok() && git::start_history(&st, &path).await.is_ok() {
+            crate::import::record(&st, &path, &git::subject::edit("Thoughts added its rules, index and routines"), &added).await;
+        }
+        setup_note = crate::import::setup_note_adopted(files);
+    }
     if !s.sync_enabled() { crate::log::ok_or_warn("onboarding: the history of changes could not be started", began); } else {
         began?;
         if !remote_url.is_empty() {
@@ -1110,10 +1163,16 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     let ar = s.language == "ar";
     let mut chat = Chat { title: if ar { "تجهيز مكتبتك" } else { "Setting up your library" }.into(), kind: "setup".into(), ..Default::default() };
     // The user's answers stay with the chat, so setup can be run again without asking them twice.
-    chat.meta = json!({"phase": "running", "prompt": setup_prompt(&s, &o.seeds, &o.profession)});
+    // Without an assistant yet, the chat waits: it is offered again once one is connected.
+    let waiting = o.assistant_later;
+    chat.meta = json!({"phase": if waiting { "waiting" } else { "running" }, "prompt": setup_prompt(&s, &o.seeds, &o.profession) + &setup_note, "adopted": adopt});
     chat.messages.push(Msg::new("user", if ar { "جهّز مكتبتي." } else { "Set up my library." }));
     let id = chat.id.clone();
     st.chats.insert(chat).await;
+    if waiting {
+        crate::log::info("onboarding: the library is ready; its setup waits until an assistant is connected");
+        return Ok(Json(json!({"ok": true, "setupChatId": id, "waiting": true})));
+    }
     // The assistant's part could not even start (not signed in any more, its program is gone…):
     // the chat says why and offers to run it again.
     if let Err(e) = start_setup(st.clone(), &id, false).await {
@@ -1173,6 +1232,9 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
     let chat = st.chats.get(id).await.filter(|c| c.kind == "setup" || c.meta["setup"] == true).ok_or_else(no_chat)?;
     if chat.running { return Err(crate::tr::err("chat.running", &[])); }
     let path = lib(&st).await?;
+    // A setup that waited for the assistant runs for the first time now (it is not run "again").
+    let waited = chat.meta["phase"] == "waiting";
+    let adopted = chat.meta["adopted"] == true;
     // Setup removes its own routine when it succeeds: without it there is nothing left to run. (Nor
     // is a routine someone has changed run again with the right to write `.claude/`.)
     if again && !awaits_setup(&path) { return Err(crate::tr::err("setup.done", &[])); }
@@ -1180,7 +1242,7 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
     if again {
         library_free(&st).await?;
         claude::require_signed_in(&st).await?;
-        prompt.push_str(SETUP_AGAIN);
+        if !waited { prompt.push_str(SETUP_AGAIN); }
     }
     let s = st.settings.read().await.clone();
     let spec = RunSpec { chat_id: id.to_string(), prompt, cwd: path.clone(), add_dirs: vec![],
@@ -1195,7 +1257,7 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
     let on_done = Box::new(move |st: Arc<AppState>, ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move {
         if ok {
             // The assistant was told to leave these to the app (it cannot write under `.claude/`).
-            library::finish_setup(&path);
+            if adopted { crate::import::finish_adopted_setup(&path); } else { library::finish_setup(&path); }
             if git_on && git::ready(&st, &path).await {
                 let first = { let _g = st.git_lock.lock().await;
                     git::commit_all(&st, &path, &git::subject::assistant(&format!("library set up for {}", if name.is_empty() { "me" } else { &name }))).await };
@@ -1234,11 +1296,12 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
         st.chats.update(id, |c| c.meta["phase"] = json!("failed")).await;
         return Err(e);
     }
-    if again { claude::push(&st, id, Msg::new("user", if s.language == "ar" { "أعد تجهيز مكتبتي." } else { "Run setup again." })).await; }
+    if again && !waited { claude::push(&st, id, Msg::new("user", if s.language == "ar" { "أعد تجهيز مكتبتي." } else { "Run setup again." })).await; }
     Ok(())
 }
 
-/// Run a new library's setup again, in its setup chat, after a run that failed or was stopped.
+/// Run a new library's setup again, in its setup chat, after a run that failed or was stopped —
+/// or for the first time, once an assistant is connected, when it waited for one.
 async fn setup_again(State(st): S, Path(id): Path<String>) -> R {
     start_setup(st.clone(), &id, true).await?;
     ok()
@@ -1286,6 +1349,8 @@ async fn enable_module(State(st): S, Path(id): Path<String>) -> R {
         let p = lib(&st).await?;
         library_free(&st).await?;
         crate::trust::require(&p)?;
+        // The assistant fits the feature in: without one connected it is said now, before the switch.
+        claude::require_signed_in(&st).await?;
         Some(p)
     };
     { let mut s = st.settings.write().await; change_settings(&mut s, Settings::save, |s| { s.modules.insert(id.clone(), true); })?; }
@@ -1369,6 +1434,10 @@ async fn claude_login(State(st): S) -> R {
     claude::watch_login(st.clone(), c.spawn()?, claude::LOGIN_TIMEOUT);
     ok()
 }
+
+/// The assistant as it stands, asked over and over while the guided install and sign-in wait for
+/// it to work. Unlike "Check again" it forgets nothing: a sign-in that ended is still reported so.
+async fn claude_status(State(st): S) -> R { Ok(Json(claude::status(&st).await)) }
 
 /// "Check again": forget what the last failed run said about the sign-in and ask the CLI afresh.
 async fn claude_recheck(State(st): S) -> R {
@@ -1717,10 +1786,14 @@ async fn import_files(State(st): S, Json(req): Json<ImportReq>) -> R {
         if bytes.len() > library::IMPORT_MAX_BYTES { return Err(crate::tr::err("too_large", &[("name", &name)]).into()); }
         decoded.push((&f.name, bytes));
     }
+    // With history on, the files brought in are one entry of their own (pending edits first), so they can be undone.
+    let recoverable = history_lib(&st).await.is_ok() && wraps::interrupted_wrap(&st).await.is_none();
+    if recoverable { claude::record_library(&st, &root, &git::subject::edit("changes before bringing in files"), true).await; }
     let mut out = vec![];
     for (name, bytes) in decoded { out.push(library::import_file(&root, name, &bytes)?); }
+    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("brought in {} file{}", out.len(), if out.len() == 1 { "" } else { "s" })), true).await; }
     st.emit(json!({"type": "library.changed"}));
-    Ok(Json(json!({"paths": out})))
+    Ok(Json(json!({"paths": out, "recoverable": recoverable})))
 }
 
 #[derive(Deserialize, Default)]
@@ -3125,6 +3198,129 @@ mod tests {
         assert!(made.0["setupChatId"].is_null() && st2.settings.read().await.onboarded);
         git::TEST_NO_GIT.with(|c| c.set(false));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// FEAT-08: without an assistant the library is made now and its setup waits; it runs (for the
+    /// first time, not "again") once one is connected.
+    #[tokio::test]
+    async fn setup_waits_for_an_assistant_and_runs_once_one_is_connected() {
+        let root = tmp_root("later");
+        let lib = root.join("Thoughts");
+        let st = Arc::new(AppState::for_test());
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = prompts.clone();
+        t::assistant(&st, move |info| { let seen = seen.clone(); async move { seen.lock().unwrap().push(info.prompt.clone()); true } });
+        let mut later = setup_answers(&lib, "new");
+        later.assistant_later = true;
+        let made = onboarding(State(st.clone()), Json(later)).await.unwrap().0;
+        assert_eq!(made["waiting"], true);
+        let chat = made["setupChatId"].as_str().unwrap().to_string();
+        // The app is set up and the library usable; nothing has been asked of an assistant yet.
+        assert!(st.settings.read().await.onboarded && lib.join("CLAUDE.md").is_file() && lib.join("INDEX.md").is_file());
+        assert!(library::awaits_setup(&lib) && prompts.lock().unwrap().is_empty());
+        assert_eq!(t::phase(&st, &chat).await, "waiting");
+        let meta = st.chats.meta(&chat).await.unwrap();
+        assert_eq!(meta.summary()["phase"], "waiting");
+        assert!(!crate::tidy::removable(&meta), "a setup still to come is never cleaned away");
+        // Connected now: the same answers, run once, as a first run.
+        let mut rx = st.events.subscribe();
+        setup_again(State(st.clone()), Path(chat.clone())).await.unwrap();
+        assert_eq!(t::event(&mut rx, &st, "setup.finished").await["ok"], true);
+        assert_eq!(t::phase(&st, &chat).await, "done");
+        assert!(!library::awaits_setup(&lib) && !lib.join("START-HERE.md").exists());
+        let p = prompts.lock().unwrap().clone();
+        assert_eq!(p.len(), 1);
+        assert!(p[0].contains("- Name: Sara") && !p[0].contains("an earlier run of this setup"), "{}", p[0]);
+        let texts: Vec<String> = st.chats.get(&chat).await.unwrap().messages.iter().filter(|m| m.role == "user").map(|m| m.text.clone()).collect();
+        assert_eq!(texts, ["Set up my library."]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// FEAT-09: "I already have one" on a folder of notes: refused without the user's yes; with it,
+    /// the app adds only its own files (one history entry after the folder as it was), and setup
+    /// is told the notes are the user's.
+    #[tokio::test]
+    async fn a_folder_of_notes_becomes_the_library_only_with_the_users_yes() {
+        let root = tmp_root("adopt");
+        let notes = root.join("My notes");
+        t::write(&notes, "Clients/Acme.md", "# Acme\nCall on Monday.\n");
+        t::write(&notes, "ideas.txt", "a shop\n");
+        t::write(&notes, "presets/legal.md", "mine\n");
+        let st = Arc::new(AppState::for_test());
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (seen, n2) = (prompts.clone(), notes.clone());
+        t::assistant(&st, move |info| { let (seen, n2) = (seen.clone(), n2.clone()); async move {
+            seen.lock().unwrap().push(info.prompt.clone());
+            t::write(&n2, "INDEX.md", "# Index\n\n## Notes you brought\n- Clients — client notes\n");
+            true
+        } });
+        let e = shown(onboarding(State(st.clone()), Json(setup_answers(&notes, "existing"))).await);
+        assert_eq!(e.status, 422);
+        assert!(!notes.join("CLAUDE.md").exists() && !st.settings.read().await.onboarded);
+        // What would be added, before anything is.
+        let v = crate::import::adopt_summary(&crate::import::adopt_plan(&notes));
+        assert_eq!(v["adds"][0]["what"], "rules");
+        let mut yes = setup_answers(&notes, "existing");
+        yes.adopt = true;
+        let mut rx = st.events.subscribe();
+        let made = onboarding(State(st.clone()), Json(yes)).await.unwrap().0;
+        assert!(made["setupChatId"].is_string());
+        assert_eq!(t::event(&mut rx, &st, "setup.finished").await["ok"], true);
+        // The notes are exactly as they were, the user's own presets folder too; the kit's are tucked away.
+        assert_eq!(t::read(&notes, "Clients/Acme.md"), "# Acme\nCall on Monday.\n");
+        assert_eq!(t::read(&notes, "presets/legal.md"), "mine\n");
+        assert!(notes.join("CLAUDE.md").is_file() && notes.join(".claude/presets/legal.md").is_file() && !notes.join("START-HERE.md").exists());
+        assert!(!library::awaits_setup(&notes), "setup's routine is gone once it ran");
+        let p = prompts.lock().unwrap().clone();
+        assert!(p[0].contains("not a fresh copy of the kit") && p[0].contains("(3 files)"), "{}", p[0]);
+        // History: the folder as it was, then the app's own files as one entry, then setup.
+        let h = git::history(&st, &notes, None, 10).await.unwrap();
+        let subjects: Vec<&str> = h.iter().map(|e| e["subject"].as_str().unwrap()).collect();
+        assert_eq!(subjects[1..], ["edit: Thoughts added its rules, index and routines", "start: the library as it was when its history began"], "{subjects:?}");
+        let kit_entry: Vec<&str> = h[1]["files"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+        assert!(kit_entry.contains(&"CLAUDE.md") && !kit_entry.iter().any(|f| f.starts_with("Clients/")), "{kit_entry:?}");
+        assert!(h[2]["files"].as_array().unwrap().iter().any(|f| f == "Clients/Acme.md"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// FEAT-09: a new library can bring in a copy of a folder of notes, folders kept, as an entry of its own.
+    #[tokio::test]
+    async fn a_new_library_brings_in_a_copy_of_the_notes_with_their_folders() {
+        let root = tmp_root("bring");
+        let (vault, lib) = (root.join("Vault"), root.join("Thoughts"));
+        t::write(&vault, "Work/Plan.md", "# Plan\n");
+        t::write(&vault, ".obsidian/app.json", "{}");
+        let st = Arc::new(AppState::for_test());
+        let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = prompts.clone();
+        t::assistant(&st, move |info| { let seen = seen.clone(); async move { seen.lock().unwrap().push(info.prompt.clone()); true } });
+        // A folder that cannot be brought in stops setup before anything is made.
+        let mut bad = setup_answers(&lib, "new");
+        bad.import_from = root.join("nowhere").to_string_lossy().to_string();
+        assert_eq!(shown(onboarding(State(st.clone()), Json(bad)).await).status, 422);
+        assert!(!lib.exists());
+        let mut bring = setup_answers(&lib, "new");
+        bring.import_from = vault.to_string_lossy().to_string();
+        let mut rx = st.events.subscribe();
+        onboarding(State(st.clone()), Json(bring)).await.unwrap();
+        assert_eq!(t::event(&mut rx, &st, "setup.finished").await["ok"], true);
+        assert_eq!(t::read(&lib, "Vault/Work/Plan.md"), "# Plan\n");
+        assert!(!lib.join("Vault/.obsidian").exists() && vault.join(".obsidian/app.json").is_file());
+        assert!(prompts.lock().unwrap()[0].contains("`Vault/` (1 files)"));
+        let subjects: Vec<String> = git::history(&st, &lib, None, 10).await.unwrap().iter().map(|e| e["subject"].as_str().unwrap().to_string()).collect();
+        assert_eq!(subjects[1..], ["edit: brought in notes as Vault (1 file)", "start: the library as it was when its history began"], "{subjects:?}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Switching on a feature the assistant fits in says so when no assistant can, before anything changes.
+    #[tokio::test]
+    async fn a_feature_that_needs_the_assistant_is_not_switched_on_without_one() {
+        let (st, lib) = t::library().await;
+        *st.settings.write().await = { let mut s = st.settings.read().await.clone(); s.ai.claude.binary = Some("/nowhere/claude".into()); s };
+        let e = shown(enable_module(State(st.clone()), Path("docs".into())).await);
+        assert_eq!(e.code, "assistant_missing");
+        assert_ne!(st.settings.read().await.modules.get("docs"), Some(&true));
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
     use crate::wraps::testutil as t;
