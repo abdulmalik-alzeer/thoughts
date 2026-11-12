@@ -3334,7 +3334,8 @@ mod tests {
         let home = dirs::home_dir().unwrap();
         note_error("POST", "/api/git/sync", 400, "error", &format!("git push: fatal: unable to access 'https://glpat-AbCdEf0123456789xyzz@gitlab.com/sara/clients.git/': failed in {}/notes ({}/x)", lib.display(), home.display()));
         let d = diagnostics(State(st.clone())).await.unwrap().0;
-        let last = d["errors"].as_array().unwrap().last().unwrap()["error"].as_str().unwrap().to_string();
+        // (Tests running at the same time note errors too: look for this one rather than the last.)
+        let last = d["errors"].as_array().unwrap().iter().rev().filter_map(|e| e["error"].as_str()).find(|e| e.starts_with("git push: fatal: unable to access")).unwrap().to_string();
         assert_eq!(last, "git push: fatal: unable to access 'https://[redacted]@gitlab.com/…': failed in (library)/notes (~/x)");
         let text = d.to_string();
         assert!(!text.contains(&lib.display().to_string()) && !text.contains("sara/clients") && !text.contains("glpat-"), "{text}");
