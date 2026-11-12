@@ -191,6 +191,13 @@ impl Finding {
     fn key(&self) -> String { format!("{}|{}|{}|{}", self.kind, self.file, self.name, short_hash(&self.detail)) }
 }
 
+/// For the log: where and what, in one line.
+impl std::fmt::Display for Finding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} {} {}", self.file, self.kind, self.name)
+    }
+}
+
 /// What a skill, command or agent file (`.claude/**/*.md`) could do beyond being read.
 struct MdRisk { kind: &'static str, detail: String, legacy: Option<&'static str> }
 
@@ -792,8 +799,10 @@ pub fn accept(id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Trust a folder as it is right now, without a question. Tests only: the app goes through `accept`.
-#[cfg(test)]
+/// Record a folder as trusted the way it is right now, without a question. Only for the daemon's own
+/// writes into a folder that was trusted just before (a routine the user reviewed in the app, see
+/// `routines::renew_trust`) — never for a path or a request that comes from a client: the user's
+/// yes goes through `accept`.
 pub fn trust(p: &Path) -> anyhow::Result<()> { Ok(record(&canon(p), Scan::of(p).entry())?) }
 
 /// Compare the assistant-related files of a second checkout (`copy`, e.g. the reorganize working
