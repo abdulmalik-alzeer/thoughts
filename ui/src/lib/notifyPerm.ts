@@ -33,6 +33,21 @@ export async function askNotify(): Promise<NotifState> {
   return 'unknown';
 }
 
+/** The system's own notification settings, where Thoughts can be allowed: on macOS and Windows,
+ *  in the desktop app. The desktop app lets the window open exactly these two addresses. */
+export function notifySettingsUrl(): string | null {
+  if (!inTauri()) return null;
+  const os = (window as any).__THOUGHTS_PLATFORM__;
+  return os === 'macos' ? 'x-apple.systempreferences:com.apple.preference.notifications' : os === 'windows' ? 'ms-settings:notifications' : null;
+}
+
+/** Open the system's notification settings. Resolves false when that could not be done. */
+export async function openNotifySettings(): Promise<boolean> {
+  const url = notifySettingsUrl();
+  if (!url) return false;
+  try { await (await import('@tauri-apps/plugin-opener')).openUrl(url); return true; } catch { return false; }
+}
+
 /** Send one notification now (asking first if needed). Resolves the permission it found. */
 export async function testNotify(title: string, body: string): Promise<NotifState> {
   const st = await askNotify();

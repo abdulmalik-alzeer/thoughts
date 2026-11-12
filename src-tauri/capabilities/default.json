@@ -18,6 +18,13 @@
     "notification:allow-request-permission",
     "notification:allow-notify",
     "dialog:allow-open",
-    "opener:default"
+    "opener:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "x-apple.systempreferences:com.apple.preference.notifications" },
+        { "url": "ms-settings:notifications" }
+      ]
+    }
   ]
 }

@@ -1,7 +1,7 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
-  import { askNotify, notifState, testNotify, type NotifState } from '../lib/notifyPerm';
+  import { askNotify, notifState, notifySettingsUrl, openNotifySettings, testNotify, type NotifState } from '../lib/notifyPerm';
   import { api, del, inTauri, post, put, reloadApp } from '../lib/api';
   import { reportUnsaved } from '../lib/unsaved';
   import { a11y, app, applyTheme, go, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
@@ -559,6 +559,7 @@
         <div class="row wrap notif" id="st-notif-state">
           {#if s.notifications && notif === 'blocked'}
             <p class="note grow" role="status"><Icon name="warning" size={15} /> <span>{t('shellui.notif.blocked')}</span></p>
+            {#if notifySettingsUrl()}<button type="button" class="btn" onclick={async () => { if (!(await openNotifySettings())) toast(t('nativea.notif.openFailed'), { kind: 'error' }); }}>{t('nativea.notif.open')}</button>{/if}
           {:else if notif === 'granted'}
             <span class="muted sm grow">{t('shellui.notif.allowed')}</span>
           {:else}<span class="grow"></span>{/if}
