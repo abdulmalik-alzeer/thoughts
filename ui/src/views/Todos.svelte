@@ -325,7 +325,7 @@
         {/if}
         <span class="acts">
           {#if !it.due}<button class="ib" onclick={() => { moveFor = null; dueFor = dueFor === k ? null : k; }} aria-expanded={dueFor === k} aria-label={t('todo.setDue')} title={t('todo.setDue')}><Icon name="calendar" size={14} /></button>{/if}
-          <button class="ib" onclick={() => { dueFor = null; moveFor = moveFor === k ? null : k; }} aria-expanded={moveFor === k} aria-label={t('todob.moveItem', { title: it.title })} title={t('todob.move')}><Icon name="arrow" size={14} /></button>
+          <button class="ib" onclick={() => { dueFor = null; moveFor = moveFor === k ? null : k; }} aria-expanded={moveFor === k} aria-label={t('todob.moveItem', { title: it.title })} title={t('todob.move')}><Icon name="arrow" size={14} class="flip-rtl" /></button>
           <ItemActions target="todo" name={it.title} item={{ file: l.file, idea: l.idea ?? null, line: it.line, text: it.text, title: it.title, due: it.due, done: it.done, group: it.group ?? null }} />
           <button class="ib" onclick={() => startEdit(l, it)} aria-label={t('todo.editItem', { title: it.title })} title={t('edit')}><Icon name="edit" size={14} /></button>
           <button class="ib" onclick={() => remove(l, it)} aria-label={t('todo.deleteItem', { title: it.title })} title={t('delete')}><Icon name="trash" size={14} /></button>

@@ -50,7 +50,7 @@
   }
 </script>
 
-<p><button class="btn" onclick={back}><Icon name="left" size={15} /> {t('help.back')}</button></p>
+<p><button class="btn" onclick={back}><Icon name="left" size={15} class="flip-rtl" /> {t('help.back')}</button></p>
 <h1 class="row"><Icon name="warning" size={24} /> {t('help.rep.title')}</h1>
 <p class="muted lead">{t('help.rep.lead')}</p>
 

@@ -30,5 +30,5 @@
   }
 </script>
 
-<p><button class="btn" onclick={back}><Icon name="left" size={15} /> {t('help.back')}</button></p>
+<p><button class="btn" onclick={back}><Icon name="left" size={15} class="flip-rtl" /> {t('help.back')}</button></p>
 <article class="md guide" dir="auto" bind:this={box} onclick={click}>{@html html}</article>
