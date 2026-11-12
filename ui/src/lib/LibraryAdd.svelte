@@ -21,5 +21,7 @@
 {/if}
 
 <style>
-  .adding { position: fixed; inset: 0; z-index: 900; background: var(--bg); overflow-y: auto; }
+  /* Over the app and its own overlays (50–70), under confirmations (90) and messages (100): an error
+     while adding a library is shown as a message, and must be seen. */
+  .adding { position: fixed; inset: 0; z-index: 85; background: var(--bg); overflow-y: auto; }
 </style>
