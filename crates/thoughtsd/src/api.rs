@@ -182,6 +182,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/version", get(library_version))
         .route("/api/library/restore", post(library_restore))
         .route("/api/library/undo", post(library_undo))
+        .route("/api/library/changes", get(library_changes))
+        .route("/api/library/compare", get(library_compare))
+        .route("/api/library/history/check", get(history_check))
+        .route("/api/library/history/repair", post(history_repair))
         .route("/api/library/tree", get(tree))
         .route("/api/library/mentions", get(mention_list))
         .route("/api/library/file", get(read_file).put(write_file))
@@ -225,6 +229,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/git", get(git_status))
         .route("/api/git/sync", post(git_sync))
         .route("/api/git/resolve", post(git_resolve))
+        .route("/api/git/conflict", get(git_conflict))
         .route("/api/git/remotes", post(remote_add))
         .route("/api/git/remotes/:name", delete(remote_remove))
         .route("/api/git/credentials", post(save_cred).get(sign_ins).delete(forget_cred))
@@ -1798,6 +1803,57 @@ async fn library_undo(State(st): S, Json(u): Json<Undo>) -> R {
     Ok(Json(v))
 }
 
+/// `GET /api/library/changes?hash=` → what that history entry changed, document by document, in a
+/// form a person can read (`diffs::of_entry`).
+async fn library_changes(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = history_lib(&st).await?;
+    Ok(Json(crate::diffs::of_entry(&st, &root, q.get("hash").map(String::as_str).unwrap_or("")).await?))
+}
+
+/// `GET /api/library/compare?path=&hash=&at=` → one document as it was at that point (under the name
+/// `at` it had then) against its text now (`diffs::with_now`).
+async fn library_compare(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = history_lib(&st).await?;
+    let rel = q.get("path").map(String::as_str).unwrap_or("");
+    library::resolve(&root, rel)?;
+    scope_of(&q).check_read(&st, &root, rel).await?;
+    let was = earlier_name(q.get("at"));
+    if let Some(w) = &was { library::resolve(&root, w)?; scope_of(&q).check_read(&st, &root, w).await?; }
+    Ok(Json(crate::diffs::with_now(&st, &root, rel, q.get("hash").map(String::as_str).unwrap_or(""), was.as_deref()).await?))
+}
+
+/// The library whose history is checked or repaired. History must be on, but the history itself
+/// may be in any state, so it is neither started nor read here.
+async fn repair_lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
+    let l = lib(st).await?;
+    if !st.settings.read().await.history_enabled() { return Err(crate::tr::err("no_history", &[])); }
+    Ok(l)
+}
+
+/// `GET /api/library/history/check?thorough=1` → `{ok, problems: [{id, stale?, branch?}]}`: what, if
+/// anything, keeps the history from working (`repair::check`; `thorough` also reads every record).
+async fn history_check(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let l = repair_lib(&st).await?;
+    let thorough = q.get("thorough").map_or(false, |v| v == "1" || v == "true");
+    Ok(Json(crate::repair::check(&st, &l, thorough).await?))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RepairReq { rebuild: bool }
+/// `POST /api/library/history/repair {rebuild?}` → put the history right, keeping a copy of the
+/// library as it was first (`repair::repair`); with `rebuild`, start a damaged history again
+/// (`repair::rebuild`). Refused while the assistant or a save is at work in the library.
+async fn history_repair(State(st): S, Json(r): Json<RepairReq>) -> R {
+    let l = repair_lib(&st).await?;
+    if st.run_active_in(&l) { return Err(crate::tr::err("busy.run", &[]).into()); }
+    let _guard = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    let v = if r.rebuild { crate::repair::rebuild(&st, &l).await? } else { crate::repair::repair(&st, &l).await? };
+    st.emit(json!({"type": "library.changed"}));
+    st.emit(json!({"type": "history.changed"}));
+    Ok(Json(v))
+}
+
 async fn search(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let (root, exclude) = (lib(&st).await?, private_filter(&st, &q).await);
     let text = q.get("q").cloned().unwrap_or_default();
@@ -2639,16 +2695,28 @@ async fn git_sync(State(st): S) -> R {
     Ok(Json(v?))
 }
 
-#[derive(Deserialize)]
-struct Resolve { strategy: String }
-/// Finish a sync that reported `CONFLICT::…`, keeping "mine" or "theirs" where the two disagree.
-/// When the two really clash the local version is kept first as a `backup/<timestamp>` branch
-/// (`backup` in the answer; `null` when there was nothing to settle and no backup was needed).
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Resolve { strategy: Option<String>, choices: HashMap<String, String> }
+/// `POST /api/git/resolve {choices: {path: mine|theirs|both}, strategy?}`: finish a sync that reported
+/// `CONFLICT::…`, settling each clashing document as chosen (`strategy` for any not named; see
+/// `git::resolve_each`). When the two really clash the local version is kept first as a
+/// `backup/<timestamp>` branch (`backup` in the answer; `null` when there was nothing to settle).
+/// A clashing document without a choice is reported again with all the others (`CONFLICT::…`).
 async fn git_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
     let (l, _busy) = sync_guard(&st).await?;
-    let v = git::resolve(&st, &l, &r.strategy).await;
+    let v = git::resolve_each(&st, &l, r.strategy.as_deref(), &r.choices).await;
     st.emit(json!({"type": "library.changed"}));
     Ok(Json(v?))
+}
+
+/// `GET /api/git/conflict?path=` → a document that clashed in a sync: this computer's version against
+/// the other device's, in a form a person can read (`diffs::clash`).
+async fn git_conflict(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let l = lib(&st).await?;
+    let rel = q.get("path").map(String::as_str).unwrap_or("");
+    library::resolve(&l, rel)?;
+    Ok(Json(crate::diffs::clash(&st, &l, rel).await?))
 }
 
 #[derive(Deserialize, Default)]
@@ -3552,7 +3620,7 @@ mod tests {
         busy(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: t::sh(&lib, &["rev-parse", "HEAD"]), ..Default::default() })).await);
         busy(library_undo(State(st.clone()), Json(Undo { hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
         busy(git_sync(State(st.clone())).await);
-        busy(git_resolve(State(st.clone()), Json(Resolve { strategy: "mine".into() })).await);
+        busy(git_resolve(State(st.clone()), Json(Resolve { strategy: Some("mine".into()), ..Default::default() })).await);
         busy(chat_send(State(st.clone()), Path(other.clone()), Json(SendBody { text: "write a note".into(), ..Default::default() })).await);
         busy(enable_module(State(st.clone()), Path("docs".into())).await);
         busy(wrap_start(State(st.clone()), None).await);
@@ -3751,7 +3819,7 @@ mod tests {
 
         let interrupted = |r: R| { let e = shown(r); assert_eq!((e.message.as_str(), e.status, e.code), (format!("WRAP_INTERRUPTED::{wrap}").as_str(), 409, "wrap_interrupted")); };
         interrupted(git_sync(State(st.clone())).await);
-        interrupted(git_resolve(State(st.clone()), Json(Resolve { strategy: "mine".into() })).await);
+        interrupted(git_resolve(State(st.clone()), Json(Resolve { strategy: Some("mine".into()), ..Default::default() })).await);
         interrupted(wrap_start(State(st.clone()), None).await);
         interrupted(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: snap.clone(), ..Default::default() })).await);
         interrupted(library_undo(State(st.clone()), Json(Undo { hash: snap.clone() })).await);

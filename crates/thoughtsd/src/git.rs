@@ -156,6 +156,34 @@ fn line_endings(repo: &Repo, windows: bool) -> Option<&'static str> {
 
 /// `git_raw` on a repository named by the caller (creating one is the only time it is not `repo_of`).
 async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow::Result<Vec<u8>> {
+    let out = run_with(state, dir, repo, args, None).await?;
+    if !out.status.success() {
+        anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(out.stdout)
+}
+
+/// `git` reading and writing its own index file `index` instead of the repository's: a snapshot of
+/// the folder can be taken this way while the repository's index is damaged or in the middle of a
+/// merge, without changing it.
+pub async fn git_with_index(state: &AppState, dir: &Path, index: &Path, args: &[&str]) -> anyhow::Result<String> {
+    if !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &dir.display().to_string())])); }
+    let out = run_with(state, dir, repo_of(dir), args, Some(index)).await?;
+    if !out.status.success() {
+        anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// `git` for a command whose answer is in its output whether or not it succeeds (`merge-tree`
+/// lists the clashing files and exits with 1): `(succeeded, output)`.
+pub async fn git_output(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<(bool, String)> {
+    if !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &dir.display().to_string())])); }
+    let out = run_with(state, dir, repo_of(dir), args, None).await?;
+    Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).to_string()))
+}
+
+async fn run_with(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index: Option<&Path>) -> anyhow::Result<std::process::Output> {
     if !usable() { return Err(crate::tr::err("git.missing", &[])); }
     let store = state.settings.read().await.sync.credential_store.clone();
     let mut c = crate::proc::command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
@@ -169,6 +197,7 @@ async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow:
         Repo::Kept(kept) => { c.env("GIT_DIR", kept).env("GIT_WORK_TREE", dir); }
         Repo::Own | Repo::Missing => if let Some(parent) = crate::paths::canonical_lenient(dir).parent() { c.env("GIT_CEILING_DIRECTORIES", parent); },
     }
+    if let Some(index) = index { c.env("GIT_INDEX_FILE", index); }
     // Never run code a library's own git config could smuggle in (hooks, fsmonitor, ssh command).
     #[cfg(windows)] let no_hooks = "NUL";
     #[cfg(not(windows))] let no_hooks = "/dev/null";
@@ -218,10 +247,7 @@ async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow:
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(crate::tr::err("git.missing", &[])),
         Err(e) => return Err(e.into()),
     };
-    if !out.status.success() {
-        anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(out.stdout)
+    Ok(out)
 }
 
 pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
@@ -307,6 +333,9 @@ pub async fn ready(state: &AppState, dir: &Path) -> bool {
 }
 
 pub async fn commit_all(state: &AppState, dir: &Path, msg: &str) -> anyhow::Result<bool> {
+    // Never into a combine of changes that stopped halfway: the half-done state (clash marks and
+    // all) would become an entry of the history. Repair history settles it first.
+    if crate::repair::unfinished(dir).is_some() { return Err(crate::tr::err("history.unfinished", &[])); }
     git(state, dir, &["add", "-A"]).await?;
     if git(state, dir, &["diff", "--cached", "--quiet"]).await.is_ok() {
         return Ok(false);
@@ -663,7 +692,8 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
         let _g = state.git_lock.lock().await;
         crate::trust::require_git(dir)?;
         let branch = syncable_branch(state, dir).await?;
-        let committed = commit_all(state, dir, &subject::sync()).await?;
+        // Edits not recorded yet are the user's own: they are recorded as such, not as something that arrived.
+        let committed = commit_all(state, dir, &subject::edit("your changes")).await?;
         (branch, committed, remotes(state, dir).await)
     };
     // Nothing leaves this computer without a location: that is not a sync that worked.
@@ -690,7 +720,7 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
                     let _files = state.sync_files.write().await;
                     let _g = state.git_lock.lock().await;
                     // What was saved while the fetch ran is recorded first, like everything before it.
-                    committed |= commit_all(state, dir, &subject::sync()).await?;
+                    committed |= commit_all(state, dir, &subject::edit("your changes")).await?;
                     if let Err(e) = git_ident(state, dir, &["rebase", "--autostash", &theirs]).await {
                         // Read the conflict list before undoing the half-finished rebase.
                         let files = unmerged(state, dir).await;
@@ -699,6 +729,10 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
                             if conflict { crate::log::error(format!("sync: could not undo the conflicting pull: {e2}")); }
                         }
                         if conflict {
+                            // A rebase stops at the first change that clashes, so its list can be short: the
+                            // documents that clash when the two sides are combined (as `resolve` will) are
+                            // the ones to ask about.
+                            let files = match merge_clashes(state, dir, "HEAD", &theirs).await { Some(all) if !all.is_empty() => all, _ => files };
                             crate::log::warn(format!("sync: pull from {primary} conflicts in {} file(s)", files.len()));
                             anyhow::bail!("CONFLICT::{}", files.join(";"));
                         }
@@ -737,7 +771,10 @@ pub async fn prune_backups(state: &AppState, dir: &Path) -> usize {
 }
 
 /// Keep the current local state as a new branch `backup/<YYYYMMDD-HHMMSS>` and return its name.
-async fn make_backup(state: &AppState, dir: &Path) -> anyhow::Result<String> {
+async fn make_backup(state: &AppState, dir: &Path) -> anyhow::Result<String> { make_backup_at(state, dir, "HEAD").await }
+
+/// Keep commit `at` as a new branch `backup/<YYYYMMDD-HHMMSS>` and return its name.
+pub async fn make_backup_at(state: &AppState, dir: &Path, at: &str) -> anyhow::Result<String> {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let mut backup = format!("backup/{stamp}");
     let mut n = 1;
@@ -745,29 +782,57 @@ async fn make_backup(state: &AppState, dir: &Path) -> anyhow::Result<String> {
         n += 1;
         backup = format!("backup/{stamp}-{n}");
     }
-    git(state, dir, &["branch", "--", &backup]).await?;
+    git(state, dir, &["branch", "--", &backup, at]).await?;
     prune_backups(state, dir).await;
     Ok(backup)
 }
 
+/// The documents that clash when `a` and `b` are combined, or None when this git cannot tell
+/// without combining them (older than 2.38).
+pub async fn merge_clashes(state: &AppState, dir: &Path, a: &str, b: &str) -> Option<Vec<String>> {
+    let (clean, out) = git_output(state, dir, &["merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", a, b]).await.ok()?;
+    // The new tree's id comes first; then, when they clash, each clashing name.
+    let mut it = out.split('\0');
+    let tree = it.next()?.trim();
+    if tree.len() < 40 || !tree.bytes().all(|c| c.is_ascii_hexdigit()) { return None; }
+    if clean { return Some(vec![]); }
+    let mut names: Vec<String> = vec![];
+    for n in it.map(str::trim_end).filter(|n| !n.is_empty()) {
+        if !names.iter().any(|x| x == n) { names.push(n.to_string()); }
+    }
+    Some(names)
+}
+
+/// How one clashing document can be settled: keep `mine`, take `theirs`, or keep `both` (mine
+/// where it is, theirs beside it as a second copy named for the other device).
+pub const CHOICES: &[&str] = &["mine", "theirs", "both"];
+
+/// Finish a sync whose pull conflicted, with one choice for every clashing document (see
+/// `resolve_each`).
+pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Result<Value> {
+    resolve_each(state, dir, Some(strategy), &std::collections::HashMap::new()).await
+}
+
 /// Finish a sync whose pull conflicted: the remote is merged (a merge, not a rebase, so "mine"
-/// really is the local side) keeping `strategy`'s side wherever the two disagree, and the result is
-/// pushed. Whenever the two sides really clash, the local state is first kept as a branch
+/// really is the local side) and each clashing document is settled as `choices` says (`{path:
+/// mine|theirs|both}`), or as `default` for one not named there; then the result is pushed. Where
+/// the two sides changed different parts of a document both changes are kept: mine or theirs only
+/// decides where they disagree. A clashing document with no choice at all changes nothing and is
+/// reported again with every other one (`CONFLICT::<file;file;…>`), so the person is asked about
+/// all of them. Whenever the two sides really clash, the local state is first kept as a branch
 /// `backup/<YYYYMMDD-HHMMSS>`; when there is nothing to settle (the call was not needed) no backup
 /// is made and this is an ordinary sync.
-pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Result<Value> {
-    let side = match strategy {
-        "mine" => "ours",
-        "theirs" => "theirs",
-        _ => return Err(crate::tr::err("git.strategy", &[])),
-    };
+pub async fn resolve_each(state: &AppState, dir: &Path, default: Option<&str>, choices: &std::collections::HashMap<String, String>) -> anyhow::Result<Value> {
+    if default.map_or(false, |d| !CHOICES.contains(&d)) || choices.values().any(|c| !CHOICES.contains(&c.as_str())) {
+        return Err(crate::tr::err("git.strategy", &[]));
+    }
     // As in `sync`: the files are held while git changes them, and free while it waits on the network.
     let (branch, mut committed, rs, primary) = {
         let _files = state.sync_files.write().await;
         let _g = state.git_lock.lock().await;
         crate::trust::require_git(dir)?;
         let branch = syncable_branch(state, dir).await?;
-        let committed = commit_all(state, dir, &subject::sync()).await?;
+        let committed = commit_all(state, dir, &subject::edit("your changes")).await?;
         let rs = remotes(state, dir).await;
         let primary = main_of(&rs).ok_or_else(|| crate::tr::err("git.no_remote", &[]))?;
         if head(state, dir).await.is_none() { anyhow::bail!("there is nothing in this library's history yet"); }
@@ -780,12 +845,14 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
 
     let mut log = vec![];
     let mut backup: Option<String> = None;
+    let mut settled: Vec<Value> = vec![];
+    let how = default.unwrap_or("each");
     let fetched = { let _g = state.git_lock.lock().await; fetch_tip(state, dir, &primary, &branch).await };
     match fetched {
         Ok(Some(theirs)) => {
             let _files = state.sync_files.write().await;
             let _g = state.git_lock.lock().await;
-            committed |= commit_all(state, dir, &subject::sync()).await?;
+            committed |= commit_all(state, dir, &subject::edit("your changes")).await?;
             if is_ancestor(state, dir, &theirs, "HEAD").await {
                 log.push(format!("{primary}: nothing new"));
             } else {
@@ -794,13 +861,13 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
                     || git(state, dir, &["merge-tree", "--write-tree", "HEAD", &theirs]).await.is_ok();
                 if !clean {
                     let b = make_backup(state, dir).await?;
-                    crate::log::info(format!("sync: resolving conflict keeping {strategy}; local state kept as {b}"));
+                    crate::log::info(format!("sync: resolving conflict ({how}); local state kept as {b}"));
                     log.push(format!("backup {b}"));
                     backup = Some(b);
                 }
-                if let Err(e) = git_ident(state, dir, &["merge", "--no-edit", "-X", side, &theirs]).await {
-                    // What -X cannot settle (one side deleted or renamed the file): take the chosen side whole.
-                    let files = unmerged(state, dir).await;
+                let msg = subject::combined();
+                if let Err(e) = git_ident(state, dir, &["merge", "--no-edit", "-m", &msg, &theirs]).await {
+                    let mut files = unmerged(state, dir).await;
                     if files.is_empty() {
                         let _ = git(state, dir, &["merge", "--abort"]).await;
                         anyhow::bail!("could not combine the two versions: {e}");
@@ -811,23 +878,31 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
                         let b = make_backup(state, dir).await?;
                         log.push(format!("backup {b}"));
                         backup = Some(b);
-                        let _ = git_ident(state, dir, &["merge", "--no-edit", "-X", side, &theirs]).await;
+                        let _ = git_ident(state, dir, &["merge", "--no-edit", "-m", &msg, &theirs]).await;
+                        files = unmerged(state, dir).await;
                     }
-                    for f in &files {
-                        if git(state, dir, &["checkout", &format!("--{side}"), "--", f]).await.is_err() {
-                            let _ = git(state, dir, &["rm", "-q", "-f", "--", f]).await;
-                        }
+                    let choice_of = |f: &str| choices.get(f).map(String::as_str).or(default);
+                    // Nothing is decided for the person: every clashing document needs its choice.
+                    if files.iter().any(|f| choice_of(f).is_none()) {
+                        let _ = git(state, dir, &["merge", "--abort"]).await;
+                        crate::log::info(format!("sync: {} clashing file(s), not all of them chosen for; asking again", files.len()));
+                        return Err(crate::tr::err("conflict", &[("files", &files.join(";"))]));
                     }
                     let done = async {
+                        for f in &files {
+                            let choice = choice_of(f).unwrap_or("mine");
+                            let copy = settle(state, dir, f, choice).await?;
+                            settled.push(json!({"path": f, "choice": choice, "copy": copy}));
+                        }
                         git(state, dir, &["add", "-A"]).await?;
-                        git_ident(state, dir, &["commit", "-q", "--no-edit"]).await
+                        git_ident(state, dir, &["commit", "-q", "-m", &msg]).await
                     }.await;
                     if let Err(e) = done {
                         let _ = git(state, dir, &["merge", "--abort"]).await;
                         anyhow::bail!("could not combine the two versions: {e}");
                     }
                 }
-                log.push(format!("merged {primary} keeping {strategy}"));
+                log.push(format!("merged {primary} ({how})"));
             }
         }
         Ok(None) => log.push(format!("{primary}: new branch")),
@@ -836,7 +911,90 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
     let sent = { let _g = state.git_lock.lock().await; push_all(state, dir, &rs, &branch, &mut log).await };
     crate::log::info(format!("sync: {}", log.join(", ")));
     let locations = sync_outcome(dir, &sent)?;
-    Ok(json!({"committed": committed, "backup": backup, "strategy": strategy, "log": log, "locations": locations, "lastBackup": last_backup(dir)}))
+    Ok(json!({"committed": committed, "backup": backup, "strategy": default, "settled": settled, "log": log, "locations": locations, "lastBackup": last_backup(dir)}))
+}
+
+/// The blob of each side of clashing document `f` in a stopped merge: `[base, mine, theirs]`, None
+/// where that side does not have it (it was added on both sides, or deleted on one).
+async fn sides_of(state: &AppState, dir: &Path, f: &str) -> anyhow::Result<[Option<String>; 3]> {
+    let spec = format!(":(top,literal){f}");
+    let out = git(state, dir, &["ls-files", "-u", "-z", "--", &spec]).await?;
+    let mut sides: [Option<String>; 3] = [None, None, None];
+    for entry in out.split('\0').filter(|e| !e.is_empty()) {
+        // `<mode> <blob> <stage>\t<path>`
+        let Some((meta, _)) = entry.split_once('\t') else { continue };
+        let p: Vec<&str> = meta.split(' ').collect();
+        if let (Some(blob), Some(Ok(stage))) = (p.get(1), p.get(2).map(|s| s.parse::<usize>())) {
+            if (1..=3).contains(&stage) { sides[stage - 1] = Some(blob.to_string()); }
+        }
+    }
+    Ok(sides)
+}
+
+/// Settle clashing document `f` of a stopped merge as `choice` (see `CHOICES`). Returns the name of
+/// the second copy, when both were kept.
+async fn settle(state: &AppState, dir: &Path, f: &str, choice: &str) -> anyhow::Result<Option<String>> {
+    let [base, mine, theirs] = sides_of(state, dir, f).await?;
+    let blob = |id: String| async move { git_raw(state, dir, &["cat-file", "blob", &id]).await };
+    let spec = format!(":(top,literal){f}");
+    let put = |rel: String, bytes: Vec<u8>| async move {
+        let target = crate::library::resolve(dir, &rel)?;
+        if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
+        crate::paths::write_atomic(&target, &bytes, false)?;
+        git(state, dir, &["add", "--", &format!(":(top,literal){rel}")]).await.map(|_| ())
+    };
+    let keep = match choice { "theirs" => theirs.clone(), _ => mine.clone() };
+    match (choice, mine, theirs) {
+        // Both kept, and both sides have it: mine stays, theirs is put beside it.
+        ("both", Some(m), Some(t)) => {
+            let copy = other_copy_name(f, &crate::tr::text("sync.other_copy", &[]), |c| std::fs::symlink_metadata(dir.join(c)).is_ok());
+            put(f.to_string(), blob(m).await?).await?;
+            put(copy.clone(), blob(t).await?).await?;
+            return Ok(Some(copy));
+        }
+        // Only one side still has it: keeping both is keeping that one.
+        ("both", Some(x), None) | ("both", None, Some(x)) => put(f.to_string(), blob(x).await?).await?,
+        (_, Some(m), Some(t)) => {
+            let (m, t) = (blob(m).await?, blob(t).await?);
+            let whole = if choice == "theirs" { t.clone() } else { m.clone() };
+            let combined = match base { Some(b) => combine(state, dir, &blob(b).await?, &m, &t, choice == "theirs").await.unwrap_or(whole), None => whole };
+            put(f.to_string(), combined).await?;
+        }
+        // The chosen side removed it.
+        _ if keep.is_none() => { git(state, dir, &["rm", "-q", "-f", "--ignore-unmatch", "--", &spec]).await?; }
+        _ => put(f.to_string(), blob(keep.unwrap_or_default()).await?).await?,
+    }
+    Ok(None)
+}
+
+/// The two sides of a document combined line by line from their common `base`: every change only one
+/// side made is kept, and where both changed the same lines `theirs` (or mine) wins. None for a
+/// document that is not text, or when git cannot combine it.
+async fn combine(state: &AppState, dir: &Path, base: &[u8], mine: &[u8], theirs: &[u8], prefer_theirs: bool) -> Option<Vec<u8>> {
+    let binary = |b: &[u8]| b.iter().take(8000).any(|c| *c == 0);
+    if binary(base) || binary(mine) || binary(theirs) { return None; }
+    let tmp = std::env::temp_dir().join(format!("thoughts-combine-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).ok()?;
+    let files = [tmp.join("mine"), tmp.join("base"), tmp.join("theirs")];
+    let wrote = std::fs::write(&files[0], mine).and(std::fs::write(&files[1], base)).and(std::fs::write(&files[2], theirs));
+    let side = if prefer_theirs { "--theirs" } else { "--ours" };
+    let (a, b, c) = (files[0].to_string_lossy().to_string(), files[1].to_string_lossy().to_string(), files[2].to_string_lossy().to_string());
+    let out = if wrote.is_ok() { git_raw(state, dir, &["merge-file", "-p", side, &a, &b, &c]).await.ok() } else { None };
+    let _ = std::fs::remove_dir_all(&tmp);
+    out
+}
+
+/// The name for the other device's copy of `f`, kept beside it: `plan (other device).md`, then
+/// `plan (other device 2).md`… — the first one `taken` says is free.
+pub fn other_copy_name(f: &str, label: &str, taken: impl Fn(&str) -> bool) -> String {
+    let (folder, name) = match f.rsplit_once('/') { Some((d, n)) => (format!("{d}/"), n), None => (String::new(), f) };
+    let (stem, ext) = match name.rfind('.') { Some(i) if i > 0 => name.split_at(i), _ => (name, "") };
+    let mut n = 1;
+    loop {
+        let candidate = if n == 1 { format!("{folder}{stem} ({label}){ext}") } else { format!("{folder}{stem} ({label} {n}){ext}") };
+        if !taken(&candidate) || n > 1000 { return candidate; }
+        n += 1;
+    }
 }
 
 // ---------- library history ----------
@@ -847,6 +1005,8 @@ pub mod subject {
     pub fn edit(why: &str) -> String { format!("edit: {why}") }
     pub fn wrap(chats: usize) -> String { format!("wrap: {} — {chats} chat(s)", chrono::Local::now().format("%Y-%m-%d")) }
     pub fn sync() -> String { format!("sync: {}", chrono::Local::now().format("%Y-%m-%d %H:%M")) }
+    /// Changes from another device combined with the ones made here (the merge a clash is settled with).
+    pub fn combined() -> String { "sync: changes from another device combined with yours".into() }
     /// Something the assistant did (a chat, a workflow, a feature being added, a reorganize).
     pub fn assistant(what: &str) -> String {
         let what: String = what.chars().filter(|c| !c.is_control()).take(80).collect();
@@ -929,7 +1089,9 @@ fn log_records(out: &str) -> Vec<(Value, Vec<&str>)> {
         if p.len() != 5 { return None; }
         let names: Vec<&str> = fields.map(|f| f.trim_start_matches('\n')).filter(|f| !f.is_empty()).collect();
         // `first`: where the history begins (nothing earlier exists, so it cannot be undone).
-        Some((json!({"hash": p[0], "short": p[1], "subject": p[2], "date": p[3], "kind": commit_kind(p[2]), "first": p[4].trim().is_empty()}), names))
+        // `merge`: it combined the changes of two devices (it cannot be undone on its own either).
+        let parents = p[4].split_whitespace().count();
+        Some((json!({"hash": p[0], "short": p[1], "subject": p[2], "date": p[3], "kind": commit_kind(p[2]), "first": parents == 0, "merge": parents > 1}), names))
     }).collect()
 }
 
@@ -996,7 +1158,16 @@ pub async fn restore_file(state: &AppState, dir: &Path, rel: &str, hash: &str) -
 pub async fn restore_file_from(state: &AppState, dir: &Path, rel: &str, hash: &str, was: Option<&str>) -> anyhow::Result<Value> {
     let _g = state.git_lock.lock().await;
     crate::trust::require_git(dir)?;
-    let bytes = file_at(state, dir, was.unwrap_or(rel), hash).await?;
+    let mut bytes = file_at(state, dir, was.unwrap_or(rel), hash).await?;
+    // A version from before a move has its links written from where the note was then: they are
+    // pointed again at what they meant, from where it is now.
+    if let Some(was) = was.filter(|w| *w != rel && crate::links::is_markdown(rel)) {
+        if let Ok(text) = String::from_utf8(bytes.clone()) {
+            let exists = |p: &str| crate::library::resolve(dir, p).map_or(false, |a| std::fs::symlink_metadata(a).is_ok());
+            let (relinked, n) = crate::links::relink_moved(&text, was, rel, &exists);
+            if n > 0 { crate::log::info(format!("history: {n} link(s) of the restored version pointed again from its new place")); bytes = relinked.into_bytes(); }
+        }
+    }
     commit_all(state, dir, &subject::edit(&format!("changes before restoring {rel}"))).await?;
     let target = crate::library::resolve(dir, rel)?;
     if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
@@ -1317,6 +1488,8 @@ mod tests {
         write(&mine, "keep.md", "changed here\n");
         let v = sync(&st, &mine).await.unwrap();
         assert_eq!(v["committed"], true);
+        // Edits not recorded yet are the person's own, not something that arrived.
+        assert_eq!(sh(&mine, &["log", "-1", "--format=%s"]), "edit: your changes");
         assert_eq!(read(&mine, "notes.md"), "their line\n");
         assert_eq!(read(&mine, "b.md"), "from the other device\n");
         assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]));
@@ -1546,8 +1719,118 @@ mod tests {
         resolve(&st, &mine, "theirs").await.unwrap();
         assert_eq!(read(&mine, "notes.md"), "their line\n");
         assert_eq!(sh(&mine, &["status", "--porcelain"]), "");
-        assert!(resolve(&st, &mine, "both").await.is_err());
+        assert!(resolve(&st, &mine, "neither").await.is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// FEAT-40: each clashing document settled its own way, with nothing chosen for the person.
+    #[tokio::test]
+    async fn each_clashing_document_is_settled_as_chosen() {
+        let (root, mine, remote) = diverged();
+        let st = AppState::for_test();
+        // A second clash, in a document the rebase never reaches (it stops at the first one), and a
+        // third with changes to different parts on each side.
+        let other = root.join("other");
+        write(&other, "plan.md", "intro\ntheir middle\nend\n");
+        write(&other, "INDEX.md", "- a\n- their line\n- c\n- d\n- e\n- f\n- g\n- h\n");
+        sh(&other, &["add", "-A"]);
+        sh(&other, &["commit", "-q", "-m", "theirs again"]);
+        sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+        sh(&mine, &["commit", "-q", "-am", "my notes"]);
+        write(&mine, "plan.md", "intro\nmy middle\nend\n");
+        write(&mine, "INDEX.md", "- a\n- my line\n- c\n- d\n- e\n- f\n- g\n- my last\n");
+        sh(&mine, &["add", "-A"]);
+        sh(&mine, &["commit", "-q", "-m", "my plan"]);
+        let err = sync(&st, &mine).await.unwrap_err().to_string();
+        let mut asked: Vec<&str> = err.strip_prefix("CONFLICT::").unwrap().split(';').collect();
+        asked.sort();
+        assert_eq!(asked, ["INDEX.md", "notes.md", "plan.md"], "every document that clashes is asked about at once");
+        // A choice is missing: nothing is changed, and all of them are asked about again.
+        let some: std::collections::HashMap<String, String> = [("notes.md".to_string(), "theirs".to_string())].into();
+        let before = sh(&mine, &["rev-parse", "HEAD"]);
+        let again = resolve_each(&st, &mine, None, &some).await.unwrap_err().to_string();
+        assert!(again.starts_with("CONFLICT::") && again.contains("plan.md") && again.contains("INDEX.md"), "{again}");
+        assert_eq!(sh(&mine, &["rev-parse", "HEAD"]), before);
+        assert_eq!(sh(&mine, &["status", "--porcelain"]), "");
+        assert!(!mine.join(".git/MERGE_HEAD").exists());
+        // Every one chosen: theirs, both, mine.
+        let all: std::collections::HashMap<String, String> = [("notes.md", "theirs"), ("plan.md", "both"), ("INDEX.md", "mine")]
+            .iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
+        let bad: std::collections::HashMap<String, String> = [("notes.md".to_string(), "everything".to_string())].into();
+        assert!(resolve_each(&st, &mine, None, &bad).await.is_err());
+        let v = resolve_each(&st, &mine, None, &all).await.unwrap();
+        assert_eq!(read(&mine, "notes.md"), "their line\n");
+        assert_eq!(read(&mine, "plan.md"), "intro\nmy middle\nend\n");
+        assert_eq!(read(&mine, "plan (other device).md"), "intro\ntheir middle\nend\n");
+        // Added on both sides: mine, whole.
+        assert_eq!(read(&mine, "INDEX.md"), "- a\n- my line\n- c\n- d\n- e\n- f\n- g\n- my last\n");
+        let copy = v["settled"].as_array().unwrap().iter().find(|s| s["path"] == "plan.md").unwrap();
+        assert_eq!((copy["choice"].as_str(), copy["copy"].as_str()), (Some("both"), Some("plan (other device).md")));
+        assert_eq!(read(&mine, "b.md"), "from the other device\n");
+        assert!(v["backup"].as_str().unwrap().starts_with("backup/"));
+        assert_eq!(sh(&mine, &["rev-parse", v["backup"].as_str().unwrap()]), before);
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]));
+        assert_eq!(sh(&mine, &["status", "--porcelain"]), "");
+        // The combining entry says what it is, and is marked as one in the history.
+        let newest = &history(&st, &mine, None, 1).await.unwrap()[0];
+        assert_eq!((newest["subject"].as_str(), newest["merge"].as_bool(), newest["kind"].as_str()), (Some(subject::combined().as_str()), Some(true), Some("sync")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mine_keeps_the_other_sides_changes_elsewhere_in_the_same_document() {
+        let (root, mine, _remote) = diverged();
+        let st = AppState::for_test();
+        let other = root.join("other");
+        write(&other, "long.md", "1\n2\n3\n4\n5\n6\n7\n8\n");
+        sh(&other, &["add", "-A"]);
+        sh(&other, &["commit", "-q", "-m", "long"]);
+        sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+        sh(&mine, &["checkout", "-q", "--", "notes.md"]);
+        assert!(sync(&st, &mine).await.is_ok());
+        write(&other, "long.md", "1\nTHEIRS\n3\n4\n5\n6\n7\nTHEIR END\n");
+        sh(&other, &["commit", "-q", "-am", "theirs"]);
+        sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+        write(&mine, "long.md", "1\nMINE\n3\n4\n5\n6\n7\n8\n");
+        assert!(sync(&st, &mine).await.unwrap_err().to_string().starts_with("CONFLICT::long.md"));
+        let v = resolve(&st, &mine, "mine").await.unwrap();
+        assert_eq!(read(&mine, "long.md"), "1\nMINE\n3\n4\n5\n6\n7\nTHEIR END\n");
+        assert_eq!(v["strategy"], "mine");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_version_from_before_a_move_comes_back_with_its_links_pointing_from_the_new_place() {
+        let d = dunce::canonicalize(tmp("relink")).unwrap();
+        sh(&d, &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Tester"), ("user.email", "tester@example.com")] { sh(&d, &["config", k, v]); }
+        let st = AppState::for_test();
+        write(&d, "INDEX.md", "# Index\n");
+        write(&d, "ideas/todo.md", "- [ ] a\n");
+        write(&d, "ideas/plan.md", "# Plan\n[index](../INDEX.md) [todo](todo.md) [web](https://example.com)\n");
+        commit_all(&st, &d, &subject::edit("your changes")).await.unwrap();
+        let old = head(&st, &d).await.unwrap();
+        // Moved one folder deeper in the app (its links rewritten by the move), then edited.
+        std::fs::create_dir_all(d.join("ideas/later")).unwrap();
+        std::fs::remove_file(d.join("ideas/plan.md")).unwrap();
+        write(&d, "ideas/later/plan.md", "# Plan\n[index](../../INDEX.md) [todo](../todo.md) [web](https://example.com)\nnewer\n");
+        commit_all(&st, &d, &subject::moved("ideas/plan.md", "ideas/later/plan.md")).await.unwrap();
+        restore_file_from(&st, &d, "ideas/later/plan.md", &old, Some("ideas/plan.md")).await.unwrap();
+        assert_eq!(read(&d, "ideas/later/plan.md"), "# Plan\n[index](../../INDEX.md) [todo](../todo.md) [web](https://example.com)\n");
+        // A version from where it is now is put back as it was, byte for byte.
+        let moved = sh(&d, &["rev-parse", "HEAD~1"]);
+        restore_file_from(&st, &d, "ideas/later/plan.md", &moved, Some("ideas/later/plan.md")).await.unwrap();
+        assert!(read(&d, "ideas/later/plan.md").ends_with("newer\n"));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn the_second_copy_is_named_for_the_other_device() {
+        let taken = |c: &str| ["notes/plan (other device).md", "README (other device)"].contains(&c);
+        assert_eq!(other_copy_name("notes/plan.md", "other device", taken), "notes/plan (other device 2).md");
+        assert_eq!(other_copy_name("TODO.md", "الجهاز الآخر", taken), "TODO (الجهاز الآخر).md");
+        assert_eq!(other_copy_name("README", "other device", taken), "README (other device 2)");
+        assert_eq!(other_copy_name("a.b/.hidden", "other device", taken), "a.b/.hidden (other device)");
     }
 
     #[tokio::test]

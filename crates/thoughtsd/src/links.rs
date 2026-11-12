@@ -355,6 +355,43 @@ pub fn apply(root: &Path, plan: &MovePlan) -> anyhow::Result<usize> {
     Ok(plan.writes.len())
 }
 
+/// The text of a version of a note written while it was at `was`, about to be put back at `now`:
+/// every relative link that pointed at something is pointed at it again from `now`. The target is
+/// looked for where it was (`exists`), and else where the same move took it (a folder that moved
+/// with the note). A link that leads nowhere either way, or that needs no change, stays as written.
+/// Returns the new text and how many links changed.
+pub fn relink_moved(text: &str, was: &str, now: &str, exists: &dyn Fn(&str) -> bool) -> (String, usize) {
+    let (was, now) = (was.trim_matches('/'), now.trim_matches('/'));
+    if was == now || was.is_empty() || now.is_empty() { return (text.to_string(), 0); }
+    // What moved: the folders the two names do not share at their end (`ideas/shop/README.md` →
+    // `areas/shop/README.md`: `ideas` became `areas`).
+    let (a, b): (Vec<&str>, Vec<&str>) = (was.split('/').collect(), now.split('/').collect());
+    let same_end = a.iter().rev().zip(b.iter().rev()).take_while(|(x, y)| x == y).count();
+    let (old_root, new_root) = (a[..a.len() - same_end].join("/"), b[..b.len() - same_end].join("/"));
+    let mut edits: Vec<(usize, usize, String)> = vec![];
+    for l in find_links(text) {
+        let dest = &text[l.start..l.end];
+        let Some(t) = target(dest) else { continue };
+        let Some(old_t) = resolve(was, &t.path) else { continue };
+        if old_t.is_empty() { continue; }
+        let new_t = if old_t == was { Some(now.to_string()) }
+            else if exists(&old_t) { Some(old_t.clone()) }
+            else if same_end > 0 && !old_root.is_empty() { moved(&old_t, &old_root, &new_root).filter(|m| exists(m)) }
+            else { None };
+        let Some(new_t) = new_t else { continue };
+        // Written so that it already reaches it from the new place: left as the person wrote it.
+        if resolve(now, &t.path).as_deref() == Some(new_t.as_str()) { continue; }
+        let new_dest = rewrite(&t, l.angle, now, &new_t);
+        if new_dest != dest { edits.push((l.start, l.end, new_dest)); }
+    }
+    if edits.is_empty() { return (text.to_string(), 0); }
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut at = 0;
+    for (s, e, d) in &edits { out.push_str(&text[at..*s]); out.push_str(d); at = *e; }
+    out.push_str(&text[at..]);
+    (out, edits.len())
+}
+
 // ---------- the index line of an idea ----------
 
 /// After an idea's status changed: the INDEX.md line that links to `readme` gets the new status
@@ -547,6 +584,32 @@ mod tests {
         assert!(plan.writes.is_empty() && plan.links == 0);
         let plan = plan_move(&r, "a.md", "c/a.md", &|p| p != "b.md");
         assert!(plan.writes.is_empty(), "files the mover may not write are left alone");
+    }
+
+    #[test]
+    fn a_version_from_before_a_move_points_its_links_from_where_the_note_is_now() {
+        let now: std::collections::HashSet<&str> = ["INDEX.md", "areas/shop/notes/pricing.md", "areas/shop/README.md", "me/README.md", "ideas/old/keep.md"].into();
+        let exists = |p: &str| now.contains(p);
+        // Written at ideas/shop/README.md; the shop folder has since moved to areas/shop. Links that
+        // still work as written stay exactly as written; one to a note that did not move is re-pointed.
+        let text = "# Shop\n[index](../../INDEX.md) [pricing](notes/pricing.md) [me](<../../me/README.md>)\n[gone](notes/nowhere.md) [web](https://x.y/z) [top](#shop) [kept](../old/keep.md) [self](README.md#plan)\n";
+        let (out, n) = relink_moved(text, "ideas/shop/README.md", "areas/shop/README.md", &exists);
+        assert_eq!(out, text.replace("](../old/keep.md)", "](../../ideas/old/keep.md)"));
+        assert_eq!(n, 1);
+        // A single note moved one folder deeper, away from its siblings (Windows line ending kept).
+        let text = "[index](../INDEX.md) and [plan](plan.md) and [same](./plan.md#x) and [kept](old/keep.md)\r\n";
+        let have: std::collections::HashSet<&str> = ["INDEX.md", "ideas/plan.md", "ideas/old/keep.md"].into();
+        let (out, n) = relink_moved(text, "ideas/note.md", "ideas/later/note.md", &|p: &str| have.contains(p));
+        assert_eq!(out, "[index](../../INDEX.md) and [plan](../plan.md) and [same](../plan.md#x) and [kept](../old/keep.md)\r\n");
+        assert_eq!(n, 4);
+        // A sibling that moved with the folder is found where the move took it.
+        let have: std::collections::HashSet<&str> = ["areas/shop/notes/pricing.md", "ideas/shop/x/ملاحظات/فكرة جديدة.md"].into();
+        let (out, n) = relink_moved("[p](notes/pricing.md)", "ideas/shop/plan.md", "areas/shop/x/plan.md", &|p: &str| have.contains(p));
+        assert_eq!((out.as_str(), n), ("[p](notes/pricing.md)", 0), "two moves in one: the second is not guessed at");
+        let (out, n) = relink_moved("[p](../notes/pricing.md) [ا](<ملاحظات/فكرة جديدة.md>)", "ideas/shop/x/plan.md", "areas/shop/x/plan.md", &|p: &str| have.contains(p));
+        assert_eq!((out.as_str(), n), ("[p](../notes/pricing.md) [ا](<../../../ideas/shop/x/ملاحظات/فكرة جديدة.md>)", 1));
+        // Nothing moved: nothing changes.
+        assert_eq!(relink_moved("[a](b.md)", "x/a.md", "x/a.md", &|_| true), ("[a](b.md)".to_string(), 0));
     }
 
     #[test]

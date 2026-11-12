@@ -49,6 +49,12 @@ pub fn unfinished_step(git_dir: &Path) -> Option<&'static str> {
     None
 }
 
+/// Is the history off its branch (its HEAD names a commit instead of a branch)? A HEAD that cannot be
+/// read is left to the history's own check.
+pub fn detached(git_dir: &Path) -> bool {
+    std::fs::read_to_string(git_dir.join("HEAD")).map_or(false, |h| { let h = h.trim(); !h.is_empty() && !h.starts_with("ref:") })
+}
+
 /// The history tool's lock file, when it was left behind by a program that is long gone.
 pub fn stale_lock(git_dir: &Path, now: SystemTime) -> Option<PathBuf> {
     let lock = git_dir.join("index.lock");
@@ -114,8 +120,9 @@ pub fn check(f: &Facts) -> Vec<Issue> {
             if s.sync_enabled() && s.sync.target != "drive" && in_cloud_folder(&l.to_string_lossy()) { out.push(issue("library-cloud-git", "use-folder-sync")); }
             if s.history_enabled() {
                 if let Some(g) = git_dir(l) {
-                    if unfinished_step(&g).is_some() { out.push(issue("history-unfinished", "finish-history")); }
+                    if unfinished_step(&g).is_some() || crate::repair::operation(&g).is_some() { out.push(issue("history-unfinished", "finish-history")); }
                     else if stale_lock(&g, f.now).is_some() { out.push(issue("history-locked", "unlock-history")); }
+                    else if detached(&g) { out.push(issue("history-detached", "repair-history")); }
                 }
             }
         }
@@ -187,6 +194,14 @@ mod tests {
         std::fs::write(lib.join(".git/MERGE_HEAD"), "abc").unwrap();
         assert!(ids(&check(&facts(&s, &d))).contains(&"history-unfinished"));
         std::fs::remove_file(lib.join(".git/MERGE_HEAD")).unwrap();
+        // An undo that stopped halfway, and a history off its branch.
+        std::fs::write(lib.join(".git/REVERT_HEAD"), "abc").unwrap();
+        assert!(ids(&check(&facts(&s, &d))).contains(&"history-unfinished"));
+        std::fs::remove_file(lib.join(".git/REVERT_HEAD")).unwrap();
+        std::fs::write(lib.join(".git/HEAD"), "3b18e512dba79e4c8300dd08aeb37f8e728b8dad\n").unwrap();
+        assert_eq!(check(&facts(&s, &d)).into_iter().find(|i| i.id == "history-detached"), Some(issue("history-detached", "repair-history")));
+        std::fs::write(lib.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert!(!ids(&check(&facts(&s, &d))).contains(&"history-detached"));
 
         // A lock file: only stale after a while.
         std::fs::write(lib.join(".git/index.lock"), "").unwrap();

@@ -253,8 +253,31 @@ const TABLE: &[Entry] = &[
         "This took too long and was stopped. Check your internet connection and try again.",
         "استغرق هذا وقتاً طويلاً فأُوقف. تحقّق من اتصالك بالإنترنت وحاول مرة أخرى."),
     e("git.not_branch", "history_state", 409, "",
-        "Your library's history is in an unusual state (it is not on a branch), so this cannot be done right now.",
-        "سجلّ مكتبتك في حالة غير معتادة (ليس على فرع)، فلا يمكن تنفيذ هذا الآن."),
+        "Your library's history is in an unusual state (it is not on a branch), so this cannot be done right now. Use \"Repair history\" to put it right; nothing is lost.",
+        "سجلّ مكتبتك في حالة غير معتادة (ليس على فرع)، فلا يمكن تنفيذ هذا الآن. استخدم «إصلاح السجلّ» لإعادته إلى وضعه الصحيح، ولن يضيع شيء."),
+    // A history the app cannot work in (see `repair`).
+    e("history.unfinished", "history_state", 409, "",
+        "Your library's history stopped halfway through combining changes, so nothing new can be recorded until that is settled. Use \"Repair history\" to put it right; nothing is lost.",
+        "توقف سجلّ مكتبتك في منتصف دمج تغييرات، فلا يمكن تسجيل شيء جديد حتى تُحسم هذه الخطوة. استخدم «إصلاح السجلّ» لإعادته إلى وضعه الصحيح، ولن يضيع شيء."),
+    e("history.locked", "history_state", 409, "",
+        "Your library's history is locked by another program, so changes cannot be recorded right now. If this does not clear up within a few minutes, use \"Repair history\".",
+        "سجلّ مكتبتك مقفل من برنامج آخر، فلا يمكن تسجيل التغييرات الآن. إن لم يزُل ذلك خلال دقائق فاستخدم «إصلاح السجلّ»."),
+    e("history.in_use", "history_state", 409, "",
+        "Another program is using your library's history right now. Wait a few minutes, then try again. Nothing was changed.",
+        "يستخدم برنامج آخر سجلّ مكتبتك الآن. انتظر بضع دقائق ثم حاول مرة أخرى. لم يتغيّر شيء."),
+    e("history.damaged", "history_state", 409, "",
+        "Part of your library's history cannot be read: it is damaged. Your notes themselves are fine. Use \"Repair history\" to put it right.",
+        "تعذّرت قراءة جزء من سجلّ مكتبتك لأنه تالف. ملاحظاتك نفسها سليمة. استخدم «إصلاح السجلّ» لإعادته إلى وضعه الصحيح."),
+    e("repair.offline", "offline", 503, "",
+        "To start the history again from your online location, the location must be reachable. Check your internet connection and try again. Nothing was changed.",
+        "لبدء السجلّ من جديد انطلاقاً من موقعك على الإنترنت، يجب أن يكون الوصول إليه ممكناً. تحقّق من اتصالك بالإنترنت وحاول مرة أخرى. لم يتغيّر شيء."),
+    e("repair.cannot", "history_state", 409, "",
+        "This library's history is kept in a way the app cannot repair. Nothing was changed.",
+        "سجلّ هذه المكتبة محفوظ بطريقة لا يستطيع التطبيق إصلاحها. لم يتغيّر شيء."),
+    // The name part of the second copy kept when both versions of a clashing document are kept.
+    e("sync.other_copy", "validation", 422, "",
+        "other device",
+        "الجهاز الآخر"),
     e("git.internal_branch", "history_state", 409, "",
         "Your library is on \"{branch}\", which the app keeps for its own use and never syncs.",
         "مكتبتك على الفرع «{branch}» الذي يحتفظ به التطبيق لاستخدامه الخاص ولا يزامنه."),
@@ -355,8 +378,8 @@ const TABLE: &[Entry] = &[
         "The server showed a different key this time, so nothing was trusted. Check the server again.",
         "أظهر الخادم مفتاحاً مختلفاً هذه المرة، فلم يُوثَق بشيء. تحقّق من الخادم مرة أخرى."),
     e("git.strategy", "validation", 422, "",
-        "Choose which version to keep: yours or the other one.",
-        "اختر النسخة التي تريد الإبقاء عليها: نسختك أم الأخرى."),
+        "Choose which version to keep: yours, the other one, or both.",
+        "اختر النسخة التي تريد الإبقاء عليها: نسختك أم الأخرى أم كلتيهما."),
     e("sign_in", "sign_in", 401, "",
         "Sign-in is needed. Update the sign-in of your online location under Settings › Library & backup.",
         "يلزم تسجيل الدخول. حدّث بيانات الدخول لموقعك على الإنترنت من الإعدادات › المكتبة والنسخ الاحتياطي."),
@@ -762,6 +785,17 @@ fn known_raw(msg: &str) -> Option<&'static str> {
     let m = msg.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| m.contains(n));
     if has(&["the library is not on a branch"]) { return Some("git.not_branch"); }
+    // A history the app cannot work in: each has its way out (Repair history). Only git's own
+    // words (a file elsewhere can be "corrupt" too).
+    let from_git = m.starts_with("git ") || m.contains(": git ") || m.contains("fatal: ");
+    if from_git {
+        if has(&["index.lock': file exists", "another git process seems to be running"]) { return Some("history.locked"); }
+        if has(&["you have not concluded your merge", "there is already a rebase-merge directory", "there is already a rebase-apply directory",
+                 "it looks like you are in the middle of", "you are currently rebasing", "because you have unmerged files", "you need to resolve your current index first",
+                 "a cherry-pick or revert is already in progress", "cherry-pick is already in progress", "revert is already in progress"]) { return Some("history.unfinished"); }
+        if has(&["index file corrupt", "index file smaller than expected", "bad index file", "bad signature 0x", "is corrupt", "loose object", "bad object",
+                 "unable to read tree", "appears to be broken", "inflate:", "failed to traverse parents", "missing blob", "missing tree", "missing commit", "bad tree object"]) { return Some("history.damaged"); }
+    }
     if has(&["no library configured", "no library"]) && m.len() < 40 { return Some("library.none"); }
     if has(&["no such chat"]) { return Some("not_found.chat"); }
     if has(&["claude code cli not found"]) { return Some("assistant.missing"); }
@@ -870,6 +904,17 @@ mod tests {
         assert_eq!(c(anyhow::anyhow!("git push: fatal: Authentication failed for 'https://github.com/a/b.git/'"), false).code, "sign_in");
         assert_eq!(c(anyhow::anyhow!("pull failed: git pull: fatal: unable to access 'https://x/': Could not resolve host: x"), false).code, "offline");
         assert_eq!(c(anyhow::anyhow!("the library is not on a branch"), true).code, "history_state");
+        // Each state of the history the app cannot work in says so, and points at its repair.
+        for raw in ["git add -A: fatal: Unable to create '/Users/x/Notes/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository",
+                    "git commit -q -m x: error: Committing is not possible because you have unmerged files.",
+                    "git pull: fatal: It seems that there is already a rebase-merge directory, and\nI wonder if you are in the middle of another rebase.",
+                    "git log: fatal: loose object 3b18e512dba79e4c8300dd08aeb37f8e728b8dad (stored in .git/objects/3b/18e5) is corrupt",
+                    "git status: error: bad signature 0x00000000\nfatal: index file corrupt",
+                    "git log: fatal: bad object HEAD"] {
+            let u = c(anyhow::anyhow!("{raw}"), false);
+            assert_eq!(u.code, "history_state", "{raw}");
+            assert!(u.message.contains("Repair history") && !u.message.contains(".git"), "{}", u.message);
+        }
         assert_eq!(c(anyhow::anyhow!("no such chat"), false).status, 404);
         // An untranslated message stays readable: as is in English, behind a generic sentence in Arabic.
         assert_eq!(c(anyhow::anyhow!("give the project a name"), false).message, "give the project a name");

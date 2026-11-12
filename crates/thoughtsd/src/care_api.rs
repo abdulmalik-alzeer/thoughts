@@ -77,23 +77,12 @@ async fn run_fix(st: &AppState, id: &str) -> anyhow::Result<()> {
             crate::log::info("self-check: the backup was switched from an online location to the cloud folder the library is in");
             st.emit(json!({"type": "settings.changed"}));
         }
-        "finish-history" | "unlock-history" => {
+        "finish-history" | "unlock-history" | "repair-history" => {
             if st.library_busy() { return Err(crate::tr::err("busy", &[])); }
             let lib = st.settings.read().await.library().ok_or_else(|| crate::tr::err("library.none", &[]))?;
-            let _g = st.git_lock.lock().await;
-            let g = health::git_dir(&lib).ok_or_else(|| crate::tr::err("no_history", &[]))?;
-            if id == "finish-history" {
-                // Undo the step that stopped halfway: the library goes back to how it was before it.
-                match health::unfinished_step(&g) {
-                    Some("rebase") => { git::git(st, &lib, &["rebase", "--abort"]).await?; }
-                    Some(_) => { git::git(st, &lib, &["merge", "--abort"]).await?; }
-                    None => {}
-                }
-                crate::log::info("self-check: an unfinished history step was undone");
-            } else if let Some(lock) = health::stale_lock(&g, std::time::SystemTime::now()) {
-                std::fs::remove_file(&lock)?;
-                crate::log::info("self-check: removed a history lock left behind by a program that is gone");
-            }
+            // The same repair as History's: a copy of the library as it is now is kept first.
+            let r = crate::repair::repair(st, &lib).await?;
+            crate::log::info(format!("self-check: history repaired ({})", r["repaired"]));
         }
         "set-aside-chats" => {
             let n = health::set_aside(&health::unreadable_chats(&paths::chats_dir()), &paths::home().join("chats-set-aside"))?;
