@@ -139,6 +139,21 @@ pub async fn git_raw(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Res
     run(state, dir, repo_of(dir), args).await
 }
 
+/// How git treats line endings in `repo` (`core.autocrlf`; `None` leaves it to git's settings).
+/// A history the app keeps is only ever written and read by the app: every file is recorded and
+/// given back exactly as it was, Windows line endings included, whatever this computer's git
+/// settings say. A repository of the folder's own may have been checked out by Git for Windows,
+/// which turns line-ending conversion on in its system settings (ignored here, see `run`): there
+/// "input" keeps such a library from looking entirely changed. It compares and saves with plain
+/// line endings and never rewrites a file on disk — but a file saved with Windows line endings
+/// then comes back from that history with plain ones.
+fn line_endings(repo: &Repo, windows: bool) -> Option<&'static str> {
+    match repo {
+        Repo::Kept(_) => Some("false"),
+        Repo::Own | Repo::Missing => windows.then_some("input"),
+    }
+}
+
 /// `git_raw` on a repository named by the caller (creating one is the only time it is not `repo_of`).
 async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     if !usable() { return Err(crate::tr::err("git.missing", &[])); }
@@ -149,6 +164,7 @@ async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow:
     // app itself was started with, and never by searching upwards: a library inside another
     // repository (a vault, a dotfiles folder) is not that repository, so the search stops at `dir`.
     for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES"] { c.env_remove(var); }
+    let autocrlf = line_endings(&repo, cfg!(windows));
     match repo {
         Repo::Kept(kept) => { c.env("GIT_DIR", kept).env("GIT_WORK_TREE", dir); }
         Repo::Own | Repo::Missing => if let Some(parent) = crate::paths::canonical_lenient(dir).parent() { c.env("GIT_CEILING_DIRECTORIES", parent); },
@@ -173,12 +189,9 @@ async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow:
         c.env("GIT_CONFIG_GLOBAL", no_hooks).args(["-c", "user.useConfigOnly=true"]);
         for var in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"] { c.env_remove(var); }
     }
-    // Git for Windows turns line-ending conversion on in its system settings, which this command
-    // ignores (see above). Without the line below a library that was cloned with that conversion
-    // would look entirely changed here. "input" compares and saves with plain line endings and
-    // never rewrites the files on disk.
-    #[cfg(windows)]
-    c.args(["-c", "core.autocrlf=input"]);
+    if let Some(v) = autocrlf {
+        c.args(["-c", &format!("core.autocrlf={v}")]);
+    }
     // On Linux a machine without a keyring keeps passwords in the private file instead (see `save_credential`).
     let file_fallback = cfg!(target_os = "linux") && crate::paths::git_credentials_file().exists();
     if store == "file" || file_fallback {
@@ -1876,6 +1889,38 @@ mod tests {
         assert_eq!(names(&lib), ["b.md", "keep.md", "notes.md"]);
         std::fs::remove_dir_all(store).unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_history_kept_by_the_app_gives_back_every_file_exactly_line_endings_and_all() {
+        // Kept exactly on every computer; only a repository of the library's own on Windows
+        // saves plain line endings (it may have been checked out by Git for Windows).
+        for windows in [false, true] { assert_eq!(line_endings(&Repo::Kept(PathBuf::from("h")), windows), Some("false")); }
+        assert_eq!((line_endings(&Repo::Own, true), line_endings(&Repo::Own, false)), (Some("input"), None));
+        TEST_NO_IDENTITY.with(|c| c.set(true));
+        let lib = dunce::canonicalize(tmp("eol")).unwrap();
+        let notepad = "made in Notepad\r\nsecond line\r\n";
+        write(&lib, "notes/windows.md", notepad);
+        write(&lib, "plain.md", "plain\n");
+        let st = AppState::load().unwrap();
+        start_history(&st, &lib).await.unwrap();
+        let Repo::Kept(store) = repo_of(&lib) else { panic!("expected a history kept by the app") };
+        let first = head(&st, &lib).await.unwrap();
+        assert_eq!(file_at(&st, &lib, "notes/windows.md", &first).await.unwrap(), notepad.as_bytes());
+        // Changed, and that change undone: the file is back byte for byte, and nothing looks changed.
+        write(&lib, "notes/windows.md", "rewritten\n");
+        write(&lib, "plain.md", "rewritten\r\n");
+        commit_all(&st, &lib, &subject::edit("your changes")).await.unwrap();
+        let newest = history(&st, &lib, None, 1).await.unwrap()[0]["hash"].as_str().unwrap().to_string();
+        undo_commit(&st, &lib, &newest).await.unwrap();
+        assert_eq!((read(&lib, "notes/windows.md").as_str(), read(&lib, "plain.md").as_str()), (notepad, "plain\n"));
+        assert_eq!(git(&st, &lib, &["status", "--porcelain"]).await.unwrap(), "");
+        // One file put back from an earlier version: the same.
+        write(&lib, "notes/windows.md", "again\n");
+        restore_file(&st, &lib, "notes/windows.md", &first).await.unwrap();
+        assert_eq!(read(&lib, "notes/windows.md"), notepad);
+        std::fs::remove_dir_all(store).unwrap();
+        std::fs::remove_dir_all(lib).unwrap();
     }
 
     #[test]

@@ -3859,9 +3859,11 @@ mod tests {
         let mut files: Vec<&str> = h[0]["files"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
         files.sort();
         assert_eq!(files, ["INDEX.md", "apps/one/README.md", "apps/two/README.md", "business/one/README.md"]);
-        // Undoing that one entry puts the folder and every link back.
+        // Undoing that one entry puts the folder and every link back. (This library has a
+        // repository of its own, which on Windows saves plain line endings — see `git::line_endings`;
+        // a history kept by the app gives back every byte there too.)
         library_undo(State(st.clone()), Json(Undo { hash: h[0]["hash"].as_str().unwrap().into() })).await.unwrap();
-        assert_eq!(t::read(&lib, "apps/two/README.md"), "See [one](../one/README.md).\r\n");
+        assert_eq!(t::read(&lib, "apps/two/README.md"), if cfg!(windows) { "See [one](../one/README.md).\n" } else { "See [one](../one/README.md).\r\n" });
         assert!(lib.join("apps/one/README.md").exists());
         // A status change made in the app shows in the index line too.
         idea_status(State(st.clone()), none(), Json(IdeaStatus { path: "apps/one".into(), status: "active".into() })).await.unwrap();
