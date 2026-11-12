@@ -1020,7 +1020,10 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        // Without its own click script: that script opens a Shift/Ctrl-clicked or `_blank` link
+        // before the window's link guard (App.svelte `guardLinks`) sees it, which skipped the
+        // "this link goes somewhere else" warning. The guard opens every safe link itself.
+        .plugin(tauri_plugin_opener::Builder::new().open_js_links_on_click(false).build())
         .plugin(voice::plugin())
         // The app window only ever shows the app itself; any attempt to navigate elsewhere is refused.
         .plugin(
