@@ -536,3 +536,21 @@ async fn the_first_message_names_a_chat_at_a_word_and_talking_brings_an_archived
     assert!(st.chats.get(&id).await.unwrap().title.ends_with("accounting…"));
     std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
 }
+
+#[tokio::test]
+async fn moving_a_chat_back_to_the_library_clears_its_folder() {
+    // What the chat's "Move to" menu sends: a folder, then null for "Library".
+    let body = |v: Value| Json(serde_json::from_value::<ChatPatch>(v).unwrap());
+    assert_eq!(serde_json::from_value::<ChatPatch>(json!({"title": "x"})).unwrap().project_id, None, "left out: unchanged");
+    let st = Arc::new(AppState::for_test());
+    let chat = Chat::default();
+    let id = chat.id.clone();
+    st.chats.insert(chat).await;
+    let v = chat_patch(State(st.clone()), Path(id.clone()), body(json!({"projectId": "p1"}))).await.unwrap().0;
+    assert_eq!(v["projectId"], "p1");
+    let v = chat_patch(State(st.clone()), Path(id.clone()), body(json!({"title": "Renamed"}))).await.unwrap().0;
+    assert_eq!(v["projectId"], "p1", "a patch without projectId leaves the folder alone");
+    let v = chat_patch(State(st.clone()), Path(id.clone()), body(json!({"projectId": null}))).await.unwrap().0;
+    assert_eq!(v["projectId"], Value::Null);
+    assert_eq!(st.chats.meta(&id).await.unwrap().summary()["projectId"], Value::Null);
+}

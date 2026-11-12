@@ -2477,9 +2477,16 @@ async fn chat_retention_put(State(st): S, Json(b): Json<RetentionBody>) -> R {
     Ok(Json(v))
 }
 
+/// A field that can be left out (None), sent as null (Some(None): clear it) or given. A plain
+/// `Option<Option<T>>` reads null as left out, so "Move back to Library" never cleared the folder.
+fn null_clears<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
+}
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct ChatPatch { title: Option<String>, pinned: Option<bool>, archived: Option<bool>, project_id: Option<Option<String>>, options: Option<RunOptions>, confirm_bypass: bool,
+struct ChatPatch { title: Option<String>, pinned: Option<bool>, archived: Option<bool>,
+    #[serde(deserialize_with = "null_clears")] project_id: Option<Option<String>>,
+    options: Option<RunOptions>, confirm_bypass: bool,
     /// Move the chat to the other assistant program ("claude" | "codex"), see `handoff.rs`.
     provider: Option<String> }
 async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatch>) -> R {
