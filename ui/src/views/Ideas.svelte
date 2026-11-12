@@ -6,7 +6,7 @@
   import { go, refreshChats } from '../lib/store.svelte';
   import { t, tn, fmtDate, fmtNum } from '../lib/i18n';
   import { failed } from '../lib/errors';
-  import { term } from '../lib/terms';
+  import { areaKey, areaLabel, areaWord, newItemTrigger, term } from '../lib/terms';
   import { fold } from '../lib/CommandPalette.svelte';
 
   let ideas = $state<any[]>([]);
@@ -14,6 +14,8 @@
   let loadError = $state('');
   let status = $state('');
   let q = $state('');
+  // One tab per area of the library ('' = all of them).
+  let area = $state('');
   let newIdea = $state('');
   let busy = $state(false);
 
@@ -26,9 +28,17 @@
 
   const ORDER = ['active', 'seed', 'parked', 'done', 'dropped'];
   const statuses = $derived([...new Set(ideas.map((i) => i.status).filter(Boolean))].sort((a, b) => (ORDER.indexOf(a) + 99) % 99 - (ORDER.indexOf(b) + 99) % 99));
-  const shown = $derived(ideas.filter((i) => (!status || i.status === status) &&
+  // Areas in a fixed order: the user's work area first, then the rest alphabetically, ideas last.
+  const work = $derived(areaWord());
+  const rank = (a: string) => (areaKey(a) === work && work !== 'ideas' ? 0 : areaKey(a) === 'ideas' ? 2 : 1);
+  const byArea = (a: string, b: string) => rank(a) - rank(b) || areaLabel(a).localeCompare(areaLabel(b));
+  const allAreas = $derived([...new Set(ideas.map((i) => i.area))].sort(byArea));
+  $effect(() => { if (area && !allAreas.includes(area)) area = ''; });
+  const shown = $derived(ideas.filter((i) => (!status || i.status === status) && (!area || i.area === area) &&
     (!q.trim() || fold(`${i.title} ${i.summary} ${(i.tags || []).join(' ')}`).includes(fold(q.trim())))));
-  const areas = $derived([...new Set(shown.map((i) => i.area))].sort());
+  const areas = $derived([...new Set(shown.map((i) => i.area))].sort(byArea));
+  // With a work word the page holds more than ideas, so search and the counter speak of items.
+  const isWork = $derived(work !== 'ideas');
 
   /** Known statuses are translated; anything custom is shown as written. */
   const statusLabel = (s: string) => { const k = `idea.status.${s}`; const x = t(k); return x === k ? s : x; };
@@ -40,7 +50,8 @@
     busy = true;
     try {
       const c = await post('/chats', {});
-      await post(`/chats/${c.id}/send`, { text: `new idea: ${text}` });
+      // The user's own word ("new client: …"), so the assistant files a client, not an idea.
+      await post(`/chats/${c.id}/send`, { text: newItemTrigger('en') + text });
       newIdea = '';
       await refreshChats().catch(() => {});
       go({ kind: 'chat', id: c.id });
@@ -50,7 +61,7 @@
 </script>
 
 <div class="page">
-  <h1>{term('title')}</h1>
+  <h1>{term('nav')}</h1>
   <form class="row" onsubmit={(e) => { e.preventDefault(); capture(); }}>
     <input class="grow" placeholder={term('newPlaceholder')} aria-label={term('newPlaceholder')} bind:value={newIdea} dir="auto" />
     <button class="btn primary" disabled={!newIdea.trim() || busy}><Icon name="ideas" size={14} /> {term('capture')}</button>
@@ -64,30 +75,37 @@
   {:else if !ideas.length}
     <div class="state"><Icon name="ideas" size={28} /><h2>{term('emptyTitle')}</h2><p class="muted">{term('emptyBody')}</p><p class="muted sm">{t('ui.idea.emptyTip')}</p></div>
   {:else}
+    {#if allAreas.length > 1}
+      <div class="row tabs" role="group" aria-label={t('todoa.work.areas')}>
+        <button class="tab" aria-pressed={!area} onclick={() => (area = '')}>{t('idea.all')}</button>
+        {#each allAreas as a (a)}<button class="tab" aria-pressed={area === a} onclick={() => (area = a)} dir="auto">{areaLabel(a)}</button>{/each}
+      </div>
+    {/if}
     <div class="row filters">
-      <input type="search" placeholder={t('idea.searchPlaceholder')} aria-label={t('idea.searchPlaceholder')} bind:value={q} class="q" dir="auto" />
+      <input type="search" placeholder={t(isWork ? 'todoa.work.search' : 'idea.searchPlaceholder')} aria-label={t(isWork ? 'todoa.work.search' : 'idea.searchPlaceholder')} bind:value={q} class="q" dir="auto" />
       <div class="row pills" role="group" aria-label={t('idea.statusFilter')}>
         <button class="pill" class:accent={!status} aria-pressed={!status} onclick={() => (status = '')}>{t('idea.all')}</button>
         {#each statuses as s}<button class="pill" class:accent={status === s} aria-pressed={status === s} onclick={() => (status = s)}>{statusLabel(s)}</button>{/each}
       </div>
       <span class="grow"></span>
-      <span class="muted sm" role="status">{tn('idea.count', shown.length)}</span>
+      <span class="muted sm" role="status">{tn(isWork ? 'todoa.work.count' : 'idea.count', shown.length)}</span>
     </div>
     {#if !shown.length}
       <div class="state">
         <Icon name="search" size={24} />
         <p>{t('idea.noMatches')}</p>
-        <button class="btn" onclick={() => { q = ''; status = ''; }}>{t('idea.clearFilters')}</button>
+        <button class="btn" onclick={() => { q = ''; status = ''; area = ''; }}>{t('idea.clearFilters')}</button>
       </div>
     {/if}
-    {#each areas as area}
-      <h2 dir="auto">{area}</h2>
+    {#each areas as a (a)}
+      {#if !area}<h2 dir="auto">{areaLabel(a)}</h2>{/if}
       <div class="grid">
-        {#each shown.filter((i) => i.area === area) as i (i.path)}
+        {#each shown.filter((i) => i.area === a) as i (i.path)}
           <div class="cell">
           <button class="idea surface lit" onclick={() => go({ kind: 'docs', path: i.path })}>
             <div class="row"><b class="grow" dir="auto">{i.title}</b>{#if i.status}<span class="pill st-{i.status}">{statusLabel(i.status)}</span>{/if}</div>
             <p class="muted" dir="auto">{i.summary}</p>
+            {#if i.detailsUnreadable}<p class="warn sm" role="note"><Icon name="warning" size={12} /> {t('todoa.work.unreadable')}</p>{/if}
             <div class="row sm muted"><span class="grow">{when(i.updated)}</span>{#if i.level}<span class="pill"><bdi>{i.level}</bdi></span>{/if}
               {#if i.openTodos}<span class="row" style="gap:4px" title={tn('idea.openTodos', i.openTodos)}><Icon name="todos" size={13} /> <span aria-hidden="true">{fmtNum(i.openTodos)}</span><span class="sr">{tn('idea.openTodos', i.openTodos)}</span></span>{/if}</div>
           </button>
@@ -101,6 +119,11 @@
 
 <style>
   .filters { margin: 12px 0; flex-wrap: wrap; }
+  .tabs { margin-top: 14px; gap: 4px; flex-wrap: wrap; border-bottom: var(--border-w) solid var(--hairline); }
+  .tab { font: inherit; font-size: 13.5px; font-weight: 500; color: var(--muted); background: none; border: 0; border-bottom: 2px solid transparent; margin-bottom: -1px; padding: 6px 10px; cursor: pointer; }
+  .tab:hover { color: var(--fg); }
+  .tab[aria-pressed='true'] { color: var(--fg); border-bottom-color: var(--accent); }
+  .warn { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
   .q { max-width: 260px; }
   .pills { flex-wrap: wrap; gap: 6px; }
   .filters .pill { font: inherit; font-size: var(--fs-xs); font-weight: 500; border: 0; cursor: pointer; padding: 3px 11px; }

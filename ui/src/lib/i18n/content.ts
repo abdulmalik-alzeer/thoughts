@@ -106,7 +106,7 @@ export default {
     'idea.loadFailed': 'Could not load your ideas', 'idea.tryAgain': 'Try again',
     'idea.emptyTitle': 'No ideas yet', 'idea.emptyBody': 'Capture one above, or say “new idea: …” in any chat.',
     'idea.noMatches': 'No ideas match your search.', 'idea.clearFilters': 'Clear filters',
-    'idea.status.seed': 'Seed', 'idea.status.active': 'Active', 'idea.status.parked': 'Parked', 'idea.status.done': 'Done', 'idea.status.dropped': 'Dropped',
+    'idea.status.seed': 'New', 'idea.status.active': 'Active', 'idea.status.parked': 'On hold', 'idea.status.done': 'Done', 'idea.status.dropped': 'Dropped',
 
     // ---- home ----
     'home.captureIdea': 'Capture idea',
@@ -217,7 +217,7 @@ export default {
     'idea.loadFailed': 'تعذّر تحميل أفكارك', 'idea.tryAgain': 'أعد المحاولة',
     'idea.emptyTitle': 'لا أفكار بعد', 'idea.emptyBody': 'دوّن فكرة بالأعلى، أو اكتب «فكرة جديدة: …» في أي محادثة.',
     'idea.noMatches': 'لا توجد أفكار مطابقة لبحثك.', 'idea.clearFilters': 'مسح التصفية',
-    'idea.status.seed': 'بذرة', 'idea.status.active': 'نشطة', 'idea.status.parked': 'مؤجّلة', 'idea.status.done': 'مكتملة', 'idea.status.dropped': 'متروكة',
+    'idea.status.seed': 'جديد', 'idea.status.active': 'قيد العمل', 'idea.status.parked': 'معلّق', 'idea.status.done': 'منتهٍ', 'idea.status.dropped': 'متروك',
 
     'home.captureIdea': 'دوّن فكرة',
     'home.upcoming': 'المواعيد القادمة', 'home.upcomingEyebrow': 'مهام لها موعد',

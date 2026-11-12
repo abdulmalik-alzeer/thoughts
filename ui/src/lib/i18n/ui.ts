@@ -3,41 +3,44 @@
 
 // ---- profession words ----
 // [title, singular, active-label plural forms…, capture verb phrase]
-type Forms = { title: string; one: string; activeOne: string; activeOther: string; capture: string; newPh: string };
+// `trigger` is what the assistant's routines recognise; `nav` names the page (Work, when there is a work word).
+type Forms = { title: string; one: string; activeOne: string; activeOther: string; capture: string; newPh: string; trigger: string; nav: string };
 const enWords: Record<string, Forms> = {
-  ideas: { title: 'Ideas', one: 'idea', activeOne: 'Active idea', activeOther: 'Active ideas', capture: 'Capture idea', newPh: 'Describe a new idea…' },
-  clients: { title: 'Clients', one: 'client', activeOne: 'Active client', activeOther: 'Active clients', capture: 'Add client', newPh: 'Name a new client and what you do for them…' },
-  matters: { title: 'Matters', one: 'matter', activeOne: 'Active matter', activeOther: 'Active matters', capture: 'Add matter', newPh: 'Describe a new matter…' },
-  classes: { title: 'Classes', one: 'class', activeOne: 'Active class', activeOther: 'Active classes', capture: 'Add class', newPh: 'Describe a new class…' },
-  topics: { title: 'Topics', one: 'topic', activeOne: 'Active topic', activeOther: 'Active topics', capture: 'Add topic', newPh: 'Describe a new topic…' },
+  ideas: { title: 'Ideas', one: 'idea', activeOne: 'Active idea', activeOther: 'Active ideas', capture: 'Capture idea', newPh: 'Describe a new idea…', trigger: 'new idea: …', nav: 'Ideas' },
+  clients: { title: 'Clients', one: 'client', activeOne: 'Active client', activeOther: 'Active clients', capture: 'Add client', newPh: 'Name a new client and what you do for them…', trigger: 'new client: …', nav: 'Work' },
+  matters: { title: 'Matters', one: 'matter', activeOne: 'Active matter', activeOther: 'Active matters', capture: 'Add matter', newPh: 'Describe a new matter…', trigger: 'new matter: …', nav: 'Work' },
+  engagements: { title: 'Engagements', one: 'engagement', activeOne: 'Active engagement', activeOther: 'Active engagements', capture: 'Add engagement', newPh: 'Name the client and the piece of work…', trigger: 'new engagement: …', nav: 'Work' },
+  classes: { title: 'Classes', one: 'class', activeOne: 'Active class', activeOther: 'Active classes', capture: 'Add class', newPh: 'Describe a new class…', trigger: 'new class: …', nav: 'Work' },
+  projects: { title: 'Projects', one: 'project', activeOne: 'Active project', activeOther: 'Active projects', capture: 'Add project', newPh: 'Describe a new project…', trigger: 'new project: …', nav: 'Work' },
 };
 const en: Record<string, string> = {};
 for (const [w, f] of Object.entries(enWords)) {
   const lower = f.title.toLowerCase();
   Object.assign(en, {
-    [`term.${w}.title`]: f.title,
+    [`term.${w}.title`]: f.title, [`term.${w}.nav`]: f.nav,
     [`term.${w}.active_one`]: f.activeOne, [`term.${w}.active_other`]: f.activeOther,
     [`term.${w}.capture`]: f.capture,
     [`term.${w}.newPlaceholder`]: f.newPh,
     [`term.${w}.continueSub`]: `The ${lower} you touched most recently.`,
     [`term.${w}.homeEmpty`]: `No ${lower} yet — add one from the box above.`,
     [`term.${w}.emptyTitle`]: `No ${lower} yet`,
-    [`term.${w}.emptyBody`]: `Add one above, or write “new idea: …” in any chat and the assistant files it for you.`,
+    [`term.${w}.emptyBody`]: `Add one above, or write “${f.trigger}” in any chat and the assistant files it for you.`,
   });
 }
 
-type ArForms = { title: string; none: string; one: string; two: string; few: string; many: string; capture: string; newPh: string; recent: string; emptyHome: string };
+type ArForms = { title: string; none: string; one: string; two: string; few: string; many: string; capture: string; newPh: string; recent: string; emptyHome: string; trigger: string; nav: string };
 const arWords: Record<string, ArForms> = {
-  ideas: { title: 'الأفكار', none: 'لا أفكار بعد', one: 'فكرة نشطة', two: 'فكرتان نشطتان', few: 'أفكار نشطة', many: 'فكرة نشطة', capture: 'دوّن فكرة', newPh: 'صف فكرة جديدة…', recent: 'آخر الأفكار التي عملت عليها.', emptyHome: 'لا أفكار بعد — دوّن واحدة من المربع في الأعلى.' },
-  clients: { title: 'العملاء', none: 'لا عملاء بعد', one: 'عميل نشط', two: 'عميلان نشطان', few: 'عملاء نشطون', many: 'عميلاً نشطاً', capture: 'أضف عميلاً', newPh: 'اكتب اسم عميل جديد وما تقدّمه له…', recent: 'آخر العملاء الذين عملت على ملفاتهم.', emptyHome: 'لا عملاء بعد — أضف واحداً من المربع في الأعلى.' },
-  matters: { title: 'القضايا', none: 'لا قضايا بعد', one: 'قضية نشطة', two: 'قضيتان نشطتان', few: 'قضايا نشطة', many: 'قضية نشطة', capture: 'أضف قضية', newPh: 'صف قضية جديدة…', recent: 'آخر القضايا التي عملت عليها.', emptyHome: 'لا قضايا بعد — أضف واحدة من المربع في الأعلى.' },
-  classes: { title: 'الصفوف', none: 'لا صفوف بعد', one: 'صف نشط', two: 'صفّان نشطان', few: 'صفوف نشطة', many: 'صفاً نشطاً', capture: 'أضف صفاً', newPh: 'صف صفاً جديداً…', recent: 'آخر الصفوف التي عملت عليها.', emptyHome: 'لا صفوف بعد — أضف واحداً من المربع في الأعلى.' },
-  topics: { title: 'المواضيع', none: 'لا مواضيع بعد', one: 'موضوع نشط', two: 'موضوعان نشطان', few: 'مواضيع نشطة', many: 'موضوعاً نشطاً', capture: 'أضف موضوعاً', newPh: 'صف موضوعاً جديداً…', recent: 'آخر المواضيع التي عملت عليها.', emptyHome: 'لا مواضيع بعد — أضف واحداً من المربع في الأعلى.' },
+  ideas: { title: 'الأفكار', none: 'لا أفكار بعد', one: 'فكرة نشطة', two: 'فكرتان نشطتان', few: 'أفكار نشطة', many: 'فكرة نشطة', capture: 'دوّن فكرة', newPh: 'صف فكرة جديدة…', recent: 'آخر الأفكار التي عملت عليها.', emptyHome: 'لا أفكار بعد — دوّن واحدة من المربع في الأعلى.', trigger: 'فكرة جديدة: …', nav: 'الأفكار' },
+  clients: { title: 'العملاء', none: 'لا عملاء بعد', one: 'عميل نشط', two: 'عميلان نشطان', few: 'عملاء نشطون', many: 'عميلاً نشطاً', capture: 'أضف عميلاً', newPh: 'اكتب اسم عميل جديد وما تقدّمه له…', recent: 'آخر العملاء الذين عملت على ملفاتهم.', emptyHome: 'لا عملاء بعد — أضف واحداً من المربع في الأعلى.', trigger: 'عميل جديد: …', nav: 'العمل' },
+  matters: { title: 'القضايا', none: 'لا قضايا بعد', one: 'قضية نشطة', two: 'قضيتان نشطتان', few: 'قضايا نشطة', many: 'قضية نشطة', capture: 'أضف قضية', newPh: 'صف قضية جديدة…', recent: 'آخر القضايا التي عملت عليها.', emptyHome: 'لا قضايا بعد — أضف واحدة من المربع في الأعلى.', trigger: 'قضية جديدة: …', nav: 'العمل' },
+  engagements: { title: 'المشاريع الاستشارية', none: 'لا مشاريع استشارية بعد', one: 'مشروع استشاري نشط', two: 'مشروعان استشاريان نشطان', few: 'مشاريع استشارية نشطة', many: 'مشروعاً استشارياً نشطاً', capture: 'أضف مشروعاً استشارياً', newPh: 'اذكر العميل والعمل المطلوب…', recent: 'آخر المشاريع الاستشارية التي عملت عليها.', emptyHome: 'لا مشاريع استشارية بعد — أضف واحداً من المربع في الأعلى.', trigger: 'مشروع استشاري جديد: …', nav: 'العمل' },
+  classes: { title: 'الفصول', none: 'لا فصول بعد', one: 'فصل نشط', two: 'فصلان نشطان', few: 'فصول نشطة', many: 'فصلاً نشطاً', capture: 'أضف فصلاً', newPh: 'صف فصلاً جديداً…', recent: 'آخر الفصول التي عملت عليها.', emptyHome: 'لا فصول بعد — أضف واحداً من المربع في الأعلى.', trigger: 'فصل جديد: …', nav: 'العمل' },
+  projects: { title: 'المشاريع', none: 'لا مشاريع بعد', one: 'مشروع نشط', two: 'مشروعان نشطان', few: 'مشاريع نشطة', many: 'مشروعاً نشطاً', capture: 'أضف مشروعاً', newPh: 'صف مشروعاً جديداً…', recent: 'آخر المشاريع التي عملت عليها.', emptyHome: 'لا مشاريع بعد — أضف واحداً من المربع في الأعلى.', trigger: 'مشروع جديد: …', nav: 'العمل' },
 };
 const ar: Record<string, string> = {};
 for (const [w, f] of Object.entries(arWords)) {
   Object.assign(ar, {
-    [`term.${w}.title`]: f.title,
+    [`term.${w}.title`]: f.title, [`term.${w}.nav`]: f.nav,
     [`term.${w}.active_zero`]: f.few, [`term.${w}.active_one`]: f.one, [`term.${w}.active_two`]: f.two,
     [`term.${w}.active_few`]: f.few, [`term.${w}.active_many`]: f.many, [`term.${w}.active_other`]: f.one,
     [`term.${w}.capture`]: f.capture,
@@ -45,7 +48,7 @@ for (const [w, f] of Object.entries(arWords)) {
     [`term.${w}.continueSub`]: f.recent,
     [`term.${w}.homeEmpty`]: f.emptyHome,
     [`term.${w}.emptyTitle`]: f.none,
-    [`term.${w}.emptyBody`]: 'أضف من الأعلى، أو اكتب «فكرة جديدة: …» في أي محادثة وسيحفظها المساعد في مكانها.',
+    [`term.${w}.emptyBody`]: `أضف من الأعلى، أو اكتب «${f.trigger}» في أي محادثة وسيحفظها المساعد في مكانها.`,
   });
 }
 
