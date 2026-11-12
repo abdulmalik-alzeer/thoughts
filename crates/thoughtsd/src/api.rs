@@ -116,7 +116,7 @@ fn plugin_scoped(query: &str) -> bool { query.split('&').any(|kv| kv == "scope=p
 /// May a request for `path` with this query string go through? (See `PLUGIN_SCOPED`.)
 fn plugin_scope_allowed(path: &str, query: &str) -> bool {
     if !plugin_scoped(query) { return true; }
-    let guarded = path.starts_with("/api/library/") || path == "/api/todos/calendar.ics" || path == "/api/capture";
+    let guarded = path.starts_with("/api/library/") || path == "/api/todos/calendar.ics" || path == "/api/capture" || path.starts_with("/api/inbox");
     !guarded || PLUGIN_SCOPED.contains(&path)
 }
 
@@ -221,6 +221,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // app layer & updates & extensions
         .merge(crate::layer_api::routes())
         .merge(crate::routines::routes())
+        .merge(crate::inbox::routes())
         // maintenance: self-check, newer version, moving, removing
         .merge(crate::care_api::routes())
         .route("/api/extensions", get(extensions))
@@ -3762,7 +3763,7 @@ mod tests {
 
         // Everything else under the library API is closed to a request made for an add-on.
         for path in ["/api/library/restore", "/api/library/undo", "/api/library/history", "/api/library/import", "/api/library/stats",
-                     "/api/library/trust", "/api/library/ideas/status", "/api/todos/calendar.ics", "/api/capture", "/api/library/picture"] {
+                     "/api/library/trust", "/api/library/ideas/status", "/api/todos/calendar.ics", "/api/capture", "/api/library/picture", "/api/inbox", "/api/inbox/prepare"] {
             assert!(!plugin_scope_allowed(path, "scope=plugin"), "{path}");
             assert!(!plugin_scope_allowed(path, "allow=x&scope=plugin&path=a"), "{path}");
             assert!(plugin_scope_allowed(path, ""), "{path}");

@@ -70,6 +70,7 @@ Skills hold the step-by-step routines; plain language triggers them just the sam
 | "continue …", "where were we on …?" | Short recap, then resume — `.claude/skills/continue-idea/SKILL.md` |
 | "wrap", "save this", "done for now" | Turn the session into notes and todos — `.claude/skills/wrap/SKILL.md` |
 | pasted or dictated meeting notes, "meeting notes", "minutes" | Dated meeting note + todos — `.claude/skills/meeting-notes/SKILL.md` |
+| "process the inbox", «عالج صندوق الوارد» | File every capture waiting in `inbox/`, then delete it — `.claude/skills/process-inbox/SKILL.md` |
 | "todo: …", «مهمة: …», "remind me to …", "what's on my list?" | Edit or read the todo lists (see Todos below) |
 | "start <routine> for …" (for example month-end close) | Copy that checklist from `routines/` into the item's todos with due dates |
 | "which items …?", "what did we decide about …?" | Search, following rule 4 |
@@ -118,7 +119,7 @@ A distillation, not a transcript; leave out empty lines. Past about 400 lines, m
 
 `@due(YYYY-MM-DD)` is an optional ending; add it whenever the user gives or implies a date ("by Thursday", "end of month" — work out the actual date from today's date, and say which date you used). A task that repeats also carries `@every(…)` just before `@due(…)`, with one of `day`, `week`, `2weeks`, `month`, `month-end`, `quarter`, `year`: `- [ ] Pay the rent @every(month) @due(2026-04-01)`. Write it that way when the user asks for something regular, and keep it when you change the line. A repeating task is never ticked off: when it is done, move its `@due` to the next date and leave it open (the app does the same). Other people's tasks start with their name ("Sara: send the invoices"). `##` headings may group tasks; new tasks go in the first group. The app edits these same files, so keep the format exact and change lines in place — never rewrite the whole file. A todo is an action; a log "Next:" line is context. When a "Next" is a concrete action the user wants tracked, it also becomes a todo.
 
-**inbox/.** Quick notes the user saved in the app without a chat, one file each (`inbox/YYYY-MM-DD-HHMM-….md`). At a wrap, or when the user asks, file each one where it belongs — into an item's notes, log or todos, or as a new idea — then delete it from `inbox/`. When it is unclear where a note belongs, ask rather than guess.
+**inbox/.** Quick notes the user saved in the app without a chat, one file each (`inbox/YYYY-MM-DD-HHMM-….md`). At a wrap, or when the user asks, file each one where it belongs — into an item's notes, log or todos, or as a new idea — then delete it from `inbox/` (the process-inbox routine does exactly this). Captures sent from the user's phone land here too, as `.md` or `.txt` files. When it is unclear where a note belongs, ask rather than guess.
 
 **The week.** The `Week:` line under `## About this library` gives the working week and the weekly-review day (Sunday–Thursday with the review on Thursday for Arabic and Saudi users; otherwise Monday–Friday with the review on Friday, unless the user chose differently). Use it whenever you work out "this week", "end of the week" or "next working day", and when you offer a weekly review. Do not assume a Monday start.
 

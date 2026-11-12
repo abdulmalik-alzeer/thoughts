@@ -13,6 +13,7 @@ pub mod claude;
 pub mod cloud;
 pub mod git;
 pub mod hello;
+pub mod inbox;
 pub mod history;
 pub mod health;
 pub mod layer_api;

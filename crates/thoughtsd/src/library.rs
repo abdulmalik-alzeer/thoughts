@@ -801,7 +801,7 @@ pub fn read_raw(root: &Path, rel: &str) -> anyhow::Result<(Vec<u8>, &'static str
 /// Does the way from `root` down to `path` (not counting `path` itself) pass through a link? The
 /// app never moves, writes or removes one of the kit's files by way of a link: where a link leads
 /// is not the library.
-fn via_link(root: &Path, path: &Path) -> bool {
+pub(crate) fn via_link(root: &Path, path: &Path) -> bool {
     let Ok(rel) = path.strip_prefix(root) else { return true };
     let mut parts: Vec<_> = rel.components().collect();
     parts.pop();
@@ -925,7 +925,7 @@ pub fn search(root: &Path, q: &str, limit: usize, exclude: &[String]) -> Vec<Val
 /// index and the starter's welcome pages at the top, and a leftover `presets/` folder.
 fn system_file(rel: &str) -> bool {
     let name = rel.rsplit('/').next().unwrap_or(rel);
-    name == "CLAUDE.md" || rel == "INDEX.md" || (!rel.contains('/') && name.starts_with("START-HERE")) || rel.starts_with("presets/")
+    name == "CLAUDE.md" || rel == "INDEX.md" || (!rel.contains('/') && name.starts_with("START-HERE")) || rel.starts_with("presets/") || rel.starts_with("inbox/")
 }
 
 /// `markdownFiles` counts every markdown file (what search sizing needs); `notes` leaves out the
