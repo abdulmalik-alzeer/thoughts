@@ -78,11 +78,16 @@ async fn run_fix(st: &AppState, id: &str) -> anyhow::Result<()> {
             st.emit(json!({"type": "settings.changed"}));
         }
         "finish-history" | "unlock-history" | "repair-history" => {
-            if st.library_busy() { return Err(crate::tr::err("busy", &[])); }
             let lib = st.settings.read().await.library().ok_or_else(|| crate::tr::err("library.none", &[]))?;
+            // As History's repair: never under an assistant at work in the library, and with the
+            // library held for the whole repair, so no wrap, sync or edit changes it halfway.
+            if st.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
+            let _held = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
             // The same repair as History's: a copy of the library as it is now is kept first.
             let r = crate::repair::repair(st, &lib).await?;
             crate::log::info(format!("self-check: history repaired ({})", r["repaired"]));
+            st.emit(json!({"type": "library.changed"}));
+            st.emit(json!({"type": "history.changed"}));
         }
         "set-aside-chats" => {
             let n = health::set_aside(&health::unreadable_chats(&paths::chats_dir()), &paths::home().join("chats-set-aside"))?;
@@ -479,6 +484,31 @@ mod tests {
 
     fn bundle_with(chats: Value, settings: Value, attachments: Value) -> Value {
         json!({"format": transfer::FORMAT, "version": 1, "settings": settings, "chats": chats, "attachments": attachments})
+    }
+
+    #[tokio::test]
+    async fn the_self_check_repairs_history_only_when_nothing_else_is_at_work_in_the_library() {
+        use crate::wraps::testutil as t;
+        let (st, lib) = t::library().await;
+        // A history left off its branch: what the repair would put right.
+        t::sh(&lib, &["checkout", "-q", "--detach"]);
+        let detached = || t::sh(&lib, &["rev-parse", "--abbrev-ref", "HEAD"]) == "HEAD";
+        for fix in ["finish-history", "unlock-history", "repair-history"] {
+            // The assistant is writing in the library: refused, nothing touched.
+            st.run_dirs.lock().unwrap().insert("c-run".into(), lib.clone());
+            assert!(crate::tr::classify_in(false, &run_fix(&st, fix).await.unwrap_err()).message.ends_with(&crate::tr::text_in(false, "busy.run", &[])), "{fix}");
+            st.run_dirs.lock().unwrap().clear();
+            // A wrap, a sync or another repair holds the library: refused, nothing touched.
+            let held = st.library_lock.clone().try_lock_owned().unwrap();
+            assert!(crate::tr::classify_in(false, &run_fix(&st, fix).await.unwrap_err()).message.ends_with(&crate::tr::text_in(false, "busy", &[])), "{fix}");
+            assert!(detached());
+            drop(held);
+        }
+        // Free: repaired, and the library is held while it is (nothing else gets in meanwhile).
+        run_fix(&st, "repair-history").await.unwrap();
+        assert!(!detached());
+        assert!(!st.library_busy());
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]
