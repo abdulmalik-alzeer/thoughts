@@ -198,6 +198,8 @@
       if (treeError) return;
       if (path?.startsWith('?')) await runSearch();
       else await openFile(path || defaultFile(), false, !path);
+      // Opened to be edited (an item's page: Edit, a new meeting note): straight into the editor.
+      if (app.view.id === 'edit' && doc && !doc.binary && !editing && EDIT_EXT.test(current)) startEdit();
     } finally { ready = true; }
     const waiting = waitingDrafts(current);
     if (waiting.length) notify(tn('docsa.draftsWaiting', waiting.length, { name: prettyName(waiting[0]) }), { kind: 'info', key: 'docs-drafts-waiting', duration: 12000, action: { label: t('docsa.open'), run: () => go({ kind: 'docs', path: waiting[0] }) } });

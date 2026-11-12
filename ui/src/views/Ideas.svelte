@@ -8,6 +8,7 @@
   import { failed } from '../lib/errors';
   import { areaKey, areaLabel, areaWord, newItemTrigger, term } from '../lib/terms';
   import { fold } from '../lib/CommandPalette.svelte';
+  import { openItem } from '../lib/item';
 
   let ideas = $state<any[]>([]);
   let loading = $state(true);
@@ -133,7 +134,7 @@
       <div class="grid">
         {#each shown.filter((i) => i.area === a) as i (i.path)}
           <div class="cell">
-          <button class="idea surface lit" onclick={() => go({ kind: 'docs', path: i.path })}>
+          <button class="idea surface lit" onclick={() => openItem(i.path)}>
             <div class="row"><b class="grow" dir="auto">{i.title}</b><span class="stspace" aria-hidden="true"></span></div>
             <p class="muted" dir="auto">{i.summary}</p>
             {#if i.detailsUnreadable}<p class="warn sm" role="note"><Icon name="warning" size={12} /> {t('todoa.work.unreadable')}</p>{/if}

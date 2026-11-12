@@ -10,6 +10,7 @@
   import { clock } from '../lib/clock.svelte';
   import { failed } from '../lib/errors';
   import { isWorkItem, newItemTrigger, term, termN } from '../lib/terms';
+  import { openItem } from '../lib/item';
   import { capturePrefix, captureKind, normalizeCapture } from '../lib/capture';
   import Icon from '../lib/Icon.svelte';
   import Emblem from '../lib/Emblem.svelte';
@@ -279,7 +280,7 @@
     </div>
     <div class="ideas">
       {#each recentIdeas as i (i.path)}
-        <button class="idea surface lit" onclick={() => go({ kind: 'docs', path: i.path })}>
+        <button class="idea surface lit" onclick={() => openItem(i.path)}>
           <span class="badge"><Icon name="ideas" size={12} />{statusLabel(i.status)}</span>
           <span class="glyph" aria-hidden="true">{(i.title || '?').trim()[0]}</span>
           <b class="ell" dir="auto">{i.title}</b>

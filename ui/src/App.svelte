@@ -19,6 +19,8 @@
   import Chat from './views/Chat.svelte';
   import ChatList from './views/ChatList.svelte';
   import Ideas from './views/Ideas.svelte';
+  import Item from './views/Item.svelte';
+  import { itemOf, openItem } from './lib/item';
   import Docs from './views/Docs.svelte';
   import Todos from './views/Todos.svelte';
   import Projects from './views/Projects.svelte';
@@ -505,7 +507,9 @@
     ...chatHits.map((c) => ({ key: 'c:' + c.id, icon: 'chat', title: c.title, marks: markTerms(c.title, searchTerms),
       sub: c.matches?.[0]?.text, subMarks: c.matches?.[0]?.marks, open: () => reveal('chat:' + c.id, { kind: 'chat', id: c.id }, c.matches?.[0]?.msg) })),
     ...fileHits.map((f) => ({ key: 'f:' + f.path, icon: 'docs', title: f.title || prettyName(f.path), marks: markTerms(f.title || prettyName(f.path), searchTerms), path: f.path,
-      sub: f.matches?.[0]?.text, subMarks: f.matches?.[0]?.marks, open: () => reveal('doc:' + f.path, { kind: 'docs', path: f.path }) })),
+      sub: f.matches?.[0]?.text, subMarks: f.matches?.[0]?.marks,
+      // An item's front page opens as the item's page (its overview shows the words found).
+      open: () => reveal('doc:' + f.path, itemOf(f.path) ? { kind: 'item', path: itemOf(f.path)!, id: 'overview' } : { kind: 'docs', path: f.path }) })),
   ]);
 
   async function focusSearch() {
@@ -574,7 +578,7 @@
   });
 
   const meOpen = $derived(app.view.kind === 'docs' && (app.view.path ?? '').startsWith('me/'));
-  const isActive = (k: string) => app.view.kind === k && !(k === 'docs' && meOpen);
+  const isActive = (k: string) => (app.view.kind === k || (k === 'ideas' && app.view.kind === 'item')) && !(k === 'docs' && meOpen);
 
   // Sidebar items: built-ins, "Me" and plugin views — then `nav.json` (hidden / order / labels) from the
   // customisation layer. Home can never be hidden; Settings and Help live in the footer, outside this list.
@@ -657,7 +661,7 @@
       add('mode.' + m, t('shell.pal.mode', { name: t(m) }), g.look, icon, { keywords: 'appearance mode day night مظهر' });
     for (const c of app.commands) items.push({ id: 'plugin:' + c.id, title: c.title, group: g.plug, icon: c.icon || 'plugin', run: () => { command('plugin:' + c.id); c.run(); } });
     for (const c of app.chats.slice(0, 40)) items.push({ id: 'chat:' + c.id, title: c.title, group: g.chat, icon: 'chat', run: () => command('chat.open', { chatId: c.id }) });
-    for (const i of ideas) items.push({ id: 'idea:' + i.path, title: i.title, group: g.idea, icon: 'ideas', keywords: i.summary, run: () => command('doc.open', { path: i.path }) });
+    for (const i of ideas) items.push({ id: 'idea:' + i.path, title: i.title, group: g.idea, icon: 'ideas', keywords: i.summary, run: () => { openItem(i.path); } });
     return items;
   });
 </script>
@@ -884,6 +888,7 @@
         {#key app.view.id}<Chat id={app.view.id} {projects} />{/key}
       {:else if app.view.kind === 'chats'}<ChatList {projects} {newChat} />
       {:else if app.view.kind === 'ideas'}<Ideas />
+      {:else if app.view.kind === 'item'}<Item path={app.view.path} tab={app.view.id} />
       {:else if app.view.kind === 'docs'}<Docs path={app.view.path} />
       {:else if app.view.kind === 'todos'}<Todos mode={app.view.id === 'calendar' ? 'calendar' : 'list'} />
       {:else if app.view.kind === 'history'}<History />

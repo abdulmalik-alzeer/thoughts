@@ -8,6 +8,7 @@
   import { go, track } from './store.svelte';
   import { errDetail } from './errors';
   import { prettyName } from './content/util';
+  import { itemOf } from './item';
   import { cached, findOnOpen, findWords, markTerms, registerFind, searchAll, type ChatHit, type NoteHit, type Results } from './search';
 
   let { query }: { query: string } = $props();
@@ -49,7 +50,8 @@
     findOnOpen(where, findWords(v0 || query), msg);
     go(v);
   }
-  const openNote = (n: NoteHit) => open({ kind: 'docs', path: n.path }, 'doc:' + n.path);
+  // An item's front page opens as the item's page, its overview showing the words found.
+  const openNote = (n: NoteHit) => open(itemOf(n.path) ? { kind: 'item', path: itemOf(n.path)!, id: 'overview' } : { kind: 'docs', path: n.path }, 'doc:' + n.path);
   const openChat = (c: ChatHit, msg?: number) => open({ kind: 'chat', id: c.id }, 'chat:' + c.id, msg);
 
   const notes = $derived(res?.notes ?? []);

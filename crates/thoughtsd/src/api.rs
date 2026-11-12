@@ -164,6 +164,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // library
         .route("/api/library/ideas", get(ideas))
         .route("/api/library/ideas/status", post(idea_status))
+        .route("/api/library/item", get(item_page))
+        .route("/api/library/item/meeting", post(item_meeting))
         .route("/api/library/new", post(new_file))
         .route("/api/library/move", post(move_file))
         .route("/api/library/delete", post(delete_file))
@@ -1518,6 +1520,40 @@ async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
     st.emit(json!({"type": "library.changed"}));
     crate::history::record_soon(&st, &root);
     ok()
+}
+
+/// `GET /api/library/item?path=<area>/<item>[&exclude=private]`: everything one item's page shows,
+/// in one call (see `library::item`), plus `private` when the item is in a private folder. The
+/// user's own page sees it all, as the file tree does; with `exclude=private` (anything offered to
+/// the assistant) a private item is refused and private folders inside it are left out. Add-ons
+/// never reach this (the plugin gate), and are refused here too.
+async fn item_page(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = lib(&st).await?;
+    let dir = library::item_dir(q.get("path").map(String::as_str).unwrap_or(""))?;
+    let private = paths::is_private(&root, &format!("{dir}/README.md"), &st.settings.read().await.private_paths);
+    let exclude = private_filter(&st, &q).await;
+    if private && (scope_of(&q).plugin || !exclude.is_empty()) { return Err(crate::tr::err("private", &[("path", &dir)]).into()); }
+    let mut v = tokio::task::spawn_blocking(move || library::item(&root, &dir, &exclude)).await.map_err(|e| anyhow::anyhow!("{e}"))??;
+    v["private"] = json!(private);
+    Ok(Json(v))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct NewMeeting { path: String, title: String, date: String }
+/// `POST /api/library/item/meeting {path: "<area>/<item>", title, date?: "YYYY-MM-DD"}` → `{ok, path}`:
+/// a new, dated meeting note in the item's `meetings/` folder (see `library::new_meeting`).
+async fn item_meeting(State(st): S, Json(m): Json<NewMeeting>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st).await?;
+    let today = chrono::Local::now().date_naive();
+    let date = match m.date.trim() {
+        "" => today,
+        d => chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| crate::tr::err("meeting.date", &[]))?,
+    };
+    let path = library::new_meeting(&root, &m.path, &m.title, date, today, crate::tr::arabic())?;
+    st.emit(json!({"type": "library.changed"}));
+    Ok(Json(json!({"ok": true, "path": path})))
 }
 
 // ---------- library history ----------
@@ -3044,6 +3080,48 @@ mod tests {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         assert_eq!(t::read(&lib, "me/plans/README.md"), format!("---\ntitle: Plans\nstatus: parked\nupdated: {today}\n---\nBody\n"));
         assert!(t::read(&lib, "ideas/shop/README.md").contains("status: done\n"));
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    /// FEAT-17: an item's page in one call; a private item is the user's to see, never the
+    /// assistant's or an add-on's; meeting notes are started in the item's own folder.
+    #[tokio::test]
+    async fn an_items_page_comes_in_one_call_and_private_items_stay_closed() {
+        let (st, lib) = t::library().await;
+        t::write(&lib, "ideas/shop/todo.md", "- [ ] rent a stall\n");
+        t::write(&lib, "clients/acme/README.md", "---\ntitle: Acme\nstatus: active\n---\nBody\n");
+        t::write(&lib, "clients/acme/notes/fees.md", "---\ntitle: Fees\n---\n");
+        st.settings.write().await.private_paths = vec!["clients/acme".into()];
+        let v = item_page(State(st.clone()), q(&[("path", "ideas/shop")])).await.unwrap().0;
+        assert_eq!((v["title"].as_str(), v["private"].as_bool()), (Some("Shop"), Some(false)));
+        assert_eq!(v["todo"]["items"][0]["title"], "rent a stall");
+        // The user's own page shows a private item, and says so.
+        let v = item_page(State(st.clone()), q(&[("path", "clients/acme/README.md")])).await.unwrap().0;
+        assert_eq!((v["private"].as_bool(), v["notes"][0]["title"].as_str()), (Some(true), Some("Fees")));
+        // What is offered to the assistant, and any add-on, is refused it.
+        assert_eq!(shown(item_page(State(st.clone()), q(&[("path", "clients/acme"), ("exclude", "private")])).await).status, 403);
+        assert_eq!(shown(item_page(State(st.clone()), q(&[("path", "clients/acme"), ("scope", "plugin")])).await).status, 403);
+        assert_eq!(item_page(State(st.clone()), q(&[("path", "ideas/shop"), ("exclude", "private")])).await.unwrap().0["title"], "Shop");
+        for path in ["/api/library/item", "/api/library/item/meeting"] {
+            assert!(!plugin_scope_allowed(path, "scope=plugin"), "{path}");
+            assert!(plugin_scope_allowed(path, ""), "{path}");
+        }
+        // Not an item.
+        for bad in ["clients/nobody", "README.md", "clients", "me/plans"] {
+            assert_eq!(shown(item_page(State(st.clone()), q(&[("path", bad)])).await).status, 404, "{bad}");
+        }
+        // A new meeting note, dated, in the item's meetings folder; a bad date is refused.
+        let nm = |path: &str, title: &str, date: &str| Json(NewMeeting { path: path.into(), title: title.into(), date: date.into() });
+        let v = item_meeting(State(st.clone()), nm("ideas/shop", "Stall visit", "2026-11-10")).await.unwrap().0;
+        assert_eq!(v["path"], "ideas/shop/meetings/2026-11-10-stall-visit.md");
+        assert!(t::read(&lib, "ideas/shop/meetings/2026-11-10-stall-visit.md").contains("\ndate: 2026-11-10\n"));
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        assert_eq!(item_meeting(State(st.clone()), nm("ideas/shop", "Call", "")).await.unwrap().0["path"], format!("ideas/shop/meetings/{today}-call.md"));
+        assert_eq!(shown(item_meeting(State(st.clone()), nm("ideas/shop", "x", "10/11/2026")).await).status, 422);
+        assert_eq!(shown(item_meeting(State(st.clone()), nm("ideas/nobody", "x", "")).await).status, 404);
+        let v = item_page(State(st.clone()), q(&[("path", "ideas/shop")])).await.unwrap().0;
+        assert_eq!(v["meetings"].as_array().unwrap().len(), 2);
+        assert!(v["meetings"].as_array().unwrap().iter().any(|m| m["title"] == "Stall visit"));
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 

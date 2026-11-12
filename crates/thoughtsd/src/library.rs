@@ -435,6 +435,248 @@ fn yaml_date(v: &Value) -> String {
     match v { Value::String(s) => s.clone(), Value::Null => String::new(), o => o.to_string() }
 }
 
+// ---------- one item's page (FEAT-17) ----------
+
+/// The folder of an item, `<area>/<item>`, from `<area>/<item>`, `<area>/<item>/` or
+/// `<area>/<item>/README.md` — only where `ideas` would list one (never `me/`, `inbox/` or a dot folder).
+pub fn item_dir(rel: &str) -> anyhow::Result<String> {
+    let rel = rel.trim().replace('\\', "/");
+    let rel = rel.trim_matches('/');
+    let rel = rel.strip_suffix("/README.md").unwrap_or(rel);
+    let parts: Vec<&str> = rel.split('/').collect();
+    let ok = parts.len() == 2 && parts.iter().all(|p| !p.trim().is_empty() && *p != "." && *p != "..")
+        && !parts[0].starts_with('.') && parts[0] != "me" && parts[0] != "inbox";
+    if !ok { return Err(crate::tr::err("not_found.item", &[])); }
+    Ok(rel.to_string())
+}
+
+/// A file of an item as its page lists it. Markdown files carry what their note details say.
+fn item_file(root: &Path, p: &Path, rel: String) -> Value {
+    let meta = std::fs::metadata(p).ok();
+    let modified = meta.as_ref().and_then(|m| m.modified().ok()).map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+    let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
+    let mut v = json!({"path": rel, "name": name, "size": meta.as_ref().map(|m| m.len()).unwrap_or(0), "modified": modified});
+    if name.to_lowercase().ends_with(".md") {
+        // The note details are at the top: the first part of the file is enough.
+        use std::io::Read;
+        let mut head = Vec::with_capacity(8192);
+        if let Ok(f) = std::fs::File::open(root.join(&rel)) { let _ = f.take(16 * 1024).read_to_end(&mut head); }
+        let text = String::from_utf8_lossy(&head);
+        if let Some((fm, _)) = note_details(&text) {
+            let s = |k: &str| match &fm[k] { Value::Null => Value::Null, Value::String(s) if s.trim().is_empty() => Value::Null, Value::String(s) => json!(s.trim()), o => json!(yaml_date(o)) };
+            for k in ["title", "summary", "updated", "date"] { v[k] = s(k); }
+            v["attendees"] = match &fm["attendees"] {
+                Value::Array(a) => json!(a.iter().map(|x| x.as_str().map(String::from).unwrap_or_else(|| yaml_date(x))).filter(|x| !x.trim().is_empty()).collect::<Vec<_>>()),
+                Value::String(s) if !s.trim().is_empty() => json!(s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect::<Vec<_>>()),
+                _ => json!([]),
+            };
+        }
+    }
+    // A meeting's day: its note details, else the date its name starts with.
+    if v["date"].is_null() {
+        let d: String = name.chars().take(10).collect();
+        if chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").is_ok() { v["date"] = json!(d); }
+    }
+    v
+}
+
+/// Dated lines under a "key dates" heading of an item's front page (either language), soonest
+/// first: `{date, text}`. Only full dates (YYYY-MM-DD) count; the rest of the line (or of the table
+/// row) is the text.
+pub fn key_dates(body: &str) -> Vec<Value> {
+    let heading = regex::Regex::new(r"(?i)\b(key|important)\s+dates?\b|\bdates\b|\bdeadlines?\b|التواريخ|تواريخ|المواعيد|مواعيد").unwrap();
+    let date = regex::Regex::new(r"\b(\d{4}-\d{2}-\d{2})\b").unwrap();
+    let bullet = regex::Regex::new(r"^(?:[-*+]|\d+[.)])\s+").unwrap();
+    let mut out: Vec<Value> = vec![];
+    let mut level: Option<usize> = None;
+    for l in body.lines() {
+        let t = l.trim();
+        let hashes = t.chars().take_while(|c| *c == '#').count();
+        if hashes > 0 && t.chars().nth(hashes) == Some(' ') {
+            if level.map_or(false, |lv| hashes <= lv) { level = None; }
+            if level.is_none() && heading.is_match(&t[hashes..]) { level = Some(hashes); }
+            continue;
+        }
+        if level.is_none() { continue; }
+        let Some(m) = date.captures(t).and_then(|c| c.get(1)) else { continue };
+        if chrono::NaiveDate::parse_from_str(m.as_str(), "%Y-%m-%d").is_err() { continue; }
+        let tidy = |s: &str| s.replace("**", "").replace('`', "").trim().trim_matches(['-', '—', '–', ':', '·', '|', ' ', '*']).trim().to_string();
+        let text = if t.starts_with('|') {
+            t.split('|').map(|c| tidy(&c.replace(m.as_str(), ""))).filter(|c| !c.is_empty()).collect::<Vec<_>>().join(" · ")
+        } else {
+            tidy(&bullet.replace(t, "").replacen(m.as_str(), "", 1))
+        };
+        out.push(json!({"date": m.as_str(), "text": text.chars().take(200).collect::<String>()}));
+        if out.len() >= 50 { break; }
+    }
+    out.sort_by(|a, b| a["date"].as_str().cmp(&b["date"].as_str()));
+    out
+}
+
+/// The entries of an item's log (`## YYYY-MM-DD — topic`, then lines), newest first. Anything
+/// above the first entry (a title) is left out; an entry without a date keeps its place after the dated ones.
+pub fn log_entries(text: &str) -> Vec<Value> {
+    // (heading, body lines) per entry, in file order.
+    let mut raw: Vec<(String, Vec<&str>)> = vec![];
+    for l in text.lines() {
+        if let Some(h) = l.strip_prefix("## ") { raw.push((h.trim().to_string(), vec![])); }
+        else if let Some((_, body)) = raw.last_mut() { body.push(l.trim_end_matches('\r')); }
+    }
+    let mut out: Vec<(String, Value)> = raw.into_iter().map(|(heading, body)| {
+        let d: String = heading.chars().take(10).collect();
+        let date = if chrono::NaiveDate::parse_from_str(&d, "%Y-%m-%d").is_ok() { d } else { String::new() };
+        let topic = if date.is_empty() { heading.clone() } else { heading[date.len()..].trim().trim_start_matches(['—', '–', '-', ':', '·']).trim().to_string() };
+        let v = json!({"date": if date.is_empty() { Value::Null } else { json!(date) }, "topic": topic, "heading": heading,
+            "body": body.join("\n").trim_matches('\n').to_string()});
+        (date, v)
+    }).collect();
+    // Newest first, whatever order the file is in; undated entries after the dated ones.
+    out.sort_by(|a, b| match (a.0.is_empty(), b.0.is_empty()) { (false, false) => b.0.cmp(&a.0), (x, y) => x.cmp(&y) });
+    out.into_iter().map(|(_, v)| v).collect()
+}
+
+/// Everything an item's page shows, in one read: its note details, front page, key dates, todo
+/// list, meeting notes, notes, deliverables (`outputs/`), log, and any other file in its folder.
+/// Anything under `exclude` (library-relative folders) is left out, as `tree` does.
+pub fn item(root: &Path, rel: &str, exclude: &[String]) -> anyhow::Result<Value> {
+    let dir = item_dir(rel)?;
+    let readme_rel = format!("{dir}/README.md");
+    if crate::paths::is_under(&readme_rel, exclude) { return Err(crate::tr::err("private", &[("path", &dir)])); }
+    let base = resolve(root, &dir)?;
+    let readme = resolve(root, &readme_rel)?;
+    let raw = match std::fs::read_to_string(&readme) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(crate::tr::err("not_found.item", &[])),
+        Err(e) => return Err(e.into()),
+    };
+    let text = raw.strip_prefix('\u{feff}').unwrap_or(&raw).to_string();
+    let details = note_details(&text);
+    let fm = details.as_ref().map(|d| d.0.clone()).unwrap_or(Value::Null);
+    let s = |k: &str| match &fm[k] { Value::String(s) => s.trim().to_string(), Value::Null => String::new(), o => yaml_date(o) };
+    let (area, slug) = dir.split_once('/').map(|(a, b)| (a.to_string(), b.to_string())).unwrap_or_default();
+    // (The body is split off even when the details are not strict YAML.)
+    let body = frontmatter(&text).1.to_string();
+
+    let hidden = Hidden::new(root, exclude);
+    let (mut notes, mut meetings, mut outputs, mut other) = (vec![], vec![], vec![], vec![]);
+    const MAX: usize = 1000;
+    for e in WalkDir::new(&base).min_depth(1).into_iter().filter_entry(|e| !skip(e) && !hidden.folder(e)).flatten() {
+        if !e.file_type().is_file() || e.file_name().to_string_lossy().starts_with('.') { continue; }
+        let Some(r) = rel_of(root, e.path()) else { continue };
+        if crate::paths::is_under(&r, exclude) { continue; }
+        let Some(inner) = r.strip_prefix(&format!("{dir}/")) else { continue };
+        let (first, nested) = match inner.split_once('/') { Some((f, _)) => (f.to_lowercase(), true), None => (inner.to_lowercase(), false) };
+        let list = match (first.as_str(), nested) {
+            ("notes", true) => &mut notes,
+            ("meetings", true) => &mut meetings,
+            ("outputs", true) => &mut outputs,
+            ("readme.md" | "log.md" | "todo.md" | "log-archive.md", false) => continue,
+            _ => &mut other,
+        };
+        if list.len() < MAX { list.push(item_file(root, e.path(), r)); }
+    }
+    let day = |v: &Value| v["date"].as_str().or(v["updated"].as_str()).map(|d| d.chars().take(10).collect::<String>())
+        .or_else(|| v["modified"].as_str().map(|m| m.chars().take(10).collect())).unwrap_or_default();
+    let newest = |a: &Value, b: &Value| day(b).cmp(&day(a)).then_with(|| b["path"].as_str().cmp(&a["path"].as_str()));
+    meetings.sort_by(newest);
+    notes.sort_by(|a, b| { let u = |v: &Value| v["updated"].as_str().map(String::from).unwrap_or_else(|| day(v)); u(b).cmp(&u(a)).then_with(|| a["path"].as_str().cmp(&b["path"].as_str())) });
+    outputs.sort_by(|a, b| b["modified"].as_str().cmp(&a["modified"].as_str()).then_with(|| a["path"].as_str().cmp(&b["path"].as_str())));
+    other.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+
+    let todo_rel = format!("{dir}/todo.md");
+    let todo_text = if crate::paths::is_under(&todo_rel, exclude) { None } else { std::fs::read_to_string(resolve(root, &todo_rel)?).ok() };
+    let log_rel = format!("{dir}/log.md");
+    let log_text = if crate::paths::is_under(&log_rel, exclude) { None } else { std::fs::read_to_string(resolve(root, &log_rel)?).ok() };
+    let archive = format!("{dir}/log-archive.md");
+    let archive = (!crate::paths::is_under(&archive, exclude) && resolve(root, &archive)?.is_file()).then_some(archive);
+
+    Ok(json!({
+        "path": readme_rel, "dir": dir, "area": area, "slug": slug,
+        "title": if s("title").is_empty() { slug.clone() } else { s("title") },
+        "status": s("status"), "kind": s("kind"), "summary": s("summary"),
+        "created": s("created"), "updated": s("updated"),
+        "tags": match &fm["tags"] { Value::Array(a) => json!(a), Value::String(t) if !t.trim().is_empty() => json!(t.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect::<Vec<_>>()), _ => json!([]) },
+        "details": details.is_some(),
+        "detailsUnreadable": details.as_ref().map_or(false, |d| d.1 && s("title").is_empty() && s("status").is_empty() && s("summary").is_empty()),
+        "readme": {"content": text, "body": body, "hash": content_hash(raw.as_bytes())},
+        "keyDates": key_dates(&body),
+        "todo": {"file": todo_rel, "exists": todo_text.is_some(),
+                 "groups": todo_text.as_deref().map(crate::todos::groups).unwrap_or_default(),
+                 "items": todo_text.as_deref().map(crate::todos::parse).unwrap_or_default()},
+        "meetings": meetings, "notes": notes, "outputs": outputs, "other": other,
+        "log": {"path": log_rel, "exists": log_text.is_some(), "archive": archive, "entries": log_text.as_deref().map(log_entries).unwrap_or_default()},
+    }))
+}
+
+/// Characters a file name made from a title leaves out instead of turning them into a gap:
+/// Arabic diacritics and tatweel, and combining accents.
+fn name_mark(c: char) -> bool {
+    matches!(c, '\u{0300}'..='\u{036f}' | '\u{0610}'..='\u{061a}' | '\u{064b}'..='\u{065f}' | '\u{0670}' | '\u{0640}' | '\u{06d6}'..='\u{06ed}')
+}
+fn arabic_letter(c: char) -> bool {
+    matches!(c, '\u{0600}'..='\u{06ff}' | '\u{0750}'..='\u{077f}' | '\u{08a0}'..='\u{08ff}' | '\u{fb50}'..='\u{fdff}' | '\u{fe70}'..='\u{feff}')
+}
+
+/// Does this library name its files in Arabic? The `Names:` line under `## About this library`
+/// (written at setup) says so; without one, an item whose own folder name is Arabic does.
+pub fn arabic_names(root: &Path, folder: &str) -> bool {
+    let rules = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap_or_default();
+    for l in rules.lines() {
+        let l = l.trim().trim_start_matches(['-', '*']).trim().to_lowercase();
+        let Some(v) = l.strip_prefix("names:").or_else(|| l.strip_prefix("الأسماء:")) else { continue };
+        if v.contains("arab") || v.contains("عرب") { return true; }
+        if v.contains("latin") || v.contains("لاتين") { return false; }
+    }
+    folder.chars().any(arabic_letter)
+}
+
+/// A short file-name part from a title, as the library's rules name things: lowercase words joined
+/// by hyphens, in Arabic or Latin letters (`arabic`), without diacritics or punctuation, at most six words.
+pub fn name_from_title(title: &str, arabic: bool) -> String {
+    let mut out = String::new();
+    for c in title.chars() {
+        if name_mark(c) { continue; }
+        let keep = c.is_alphanumeric() && (arabic || !arabic_letter(c));
+        if keep { out.extend(c.to_lowercase()); } else if !out.ends_with('-') { out.push('-'); }
+    }
+    let mut name = String::new();
+    for w in out.split('-').filter(|w| !w.is_empty()).take(6) {
+        if name.chars().count() + w.chars().count() > 60 { break; }
+        if !name.is_empty() { name.push('-'); }
+        name.push_str(w);
+    }
+    name
+}
+
+/// Start a meeting note for an item, the way the meeting-notes routine files one:
+/// `<item>/meetings/YYYY-MM-DD-short-topic.md` with the note details `title, date, attendees,
+/// updated, summary` and the three sections, headings in the app's language. Never replaces a file:
+/// a second note of the same name and day gets `-2`, `-3`… Returns the new file.
+pub fn new_meeting(root: &Path, rel: &str, title: &str, date: chrono::NaiveDate, today: chrono::NaiveDate, arabic: bool) -> anyhow::Result<String> {
+    let dir = item_dir(rel)?;
+    if !resolve(root, &format!("{dir}/README.md"))?.is_file() { return Err(crate::tr::err("not_found.item", &[])); }
+    let folder = dir.rsplit('/').next().unwrap_or(&dir);
+    let names_ar = arabic_names(root, folder);
+    let title: String = title.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect();
+    let title = if title.is_empty() { (if arabic { "اجتماع" } else { "Meeting" }).to_string() } else { title };
+    let topic = name_from_title(&title, names_ar);
+    let topic = if topic.is_empty() { (if names_ar { "اجتماع" } else { "meeting" }).to_string() } else { topic };
+    let quoted = title.replace('\\', "\\\\").replace('"', "\\\"");
+    let (discussed, decisions, actions) = if arabic { ("ما نوقش", "القرارات", "بنود العمل") } else { ("Discussed", "Decisions", "Action items") };
+    let content = format!("---\ntitle: \"{quoted}\"\ndate: {d}\nattendees: []\nupdated: {u}\nsummary: \n---\n\n# {title}\n\n## {discussed}\n\n\n## {decisions}\n\n\n## {actions}\n\n",
+        d = date.format("%Y-%m-%d"), u = today.format("%Y-%m-%d"));
+    let stem = format!("{dir}/meetings/{}-{topic}", date.format("%Y-%m-%d"));
+    for n in 1..100 {
+        let path = if n == 1 { format!("{stem}.md") } else { format!("{stem}-{n}.md") };
+        match create(root, &path, &content) {
+            Ok(_) => return Ok(path),
+            Err(e) if crate::tr::classify(&e).code == "exists" => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(crate::tr::err("exists", &[("path", &stem)]))
+}
+
 /// Folders left out of a listing (the user's private folders), recognised by where they really are
 /// as well as by name: the same folder under another spelling — letter case, an accent or hamza
 /// stored in its other Unicode form, a link that leads to it — is left out just the same.
@@ -926,6 +1168,156 @@ mod tests {
         assert_eq!(by("bom")["title"], "With mark");
         // The strict reader used elsewhere (the trust check) is unchanged.
         assert!(frontmatter("---\ntitle: Client: Acme\n---\n").0.is_null());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// FEAT-17: one item's page in one read — a full client folder.
+    #[test]
+    fn an_items_page_has_all_its_parts() {
+        let d = tmp();
+        write(&d, "clients/acme/README.md", "---\ntitle: Acme Trading\nkind: client\nstatus: active\narea: clients\ntags: [vat, monthly]\ncreated: 2026-01-05\nupdated: 2026-11-02\nsummary: Monthly books and VAT\n---\n\n# Acme Trading\n\n\
+            ## Key dates\n\n| Date | What | Source |\n|---|---|---|\n| 2026-12-31 | **Year end** | Engagement letter |\n\n- 2026-11-30 — VAT return due\n- not dated yet\n\n\
+            ## Current state\nBooks closed to the end of October (2026-10-31).\n").unwrap();
+        write(&d, "clients/acme/todo.md", "## Now\n- [ ] Send the draft @due(2026-11-20)\n  - with the notes\n## Done\n- [x] Book the review\n").unwrap();
+        write(&d, "clients/acme/log.md", "# Log\n\n## 2026-10-01 — Kick-off\n- Decided: monthly close\n\n## 2026-11-02 — October close\n- Learned: invoices arrive late\n- Next: chase the supplier\n").unwrap();
+        write(&d, "clients/acme/meetings/2026-10-01-kick-off.md", "---\ntitle: Kick-off\ndate: 2026-10-01\nattendees: [Sara (CFO), Omar]\nupdated: 2026-10-01\nsummary: Monthly close agreed\n---\n## Discussed\n").unwrap();
+        write(&d, "clients/acme/meetings/2026-11-02-october-review.md", "Rough notes, no details yet.\n").unwrap();
+        write(&d, "clients/acme/notes/fees.md", "---\ntitle: Fees\nupdated: 2026-09-01\nsummary: What we charge\n---\nText\n").unwrap();
+        std::fs::write(d.join("clients/acme/notes/scan.png"), [0x89, b'P']).unwrap();
+        std::fs::create_dir_all(d.join("clients/acme/outputs/letters")).unwrap();
+        std::fs::write(d.join("clients/acme/outputs/2026-10-report.pdf"), b"%PDF").unwrap();
+        std::fs::write(d.join("clients/acme/outputs/letters/2026-11-01-reminder.docx"), b"PK").unwrap();
+        std::fs::write(d.join("clients/acme/contract.pdf"), b"%PDF").unwrap();
+        std::fs::write(d.join("clients/acme/.DS_Store"), b"x").unwrap();
+        let paths = |v: &Value| v.as_array().unwrap().iter().map(|x| x["path"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+
+        let v = item(&d, "clients/acme/README.md", &[]).unwrap();
+        assert_eq!((v["dir"].as_str(), v["area"].as_str(), v["slug"].as_str()), (Some("clients/acme"), Some("clients"), Some("acme")));
+        assert_eq!((v["title"].as_str(), v["status"].as_str(), v["kind"].as_str()), (Some("Acme Trading"), Some("active"), Some("client")));
+        assert_eq!((v["created"].as_str(), v["updated"].as_str(), v["summary"].as_str()), (Some("2026-01-05"), Some("2026-11-02"), Some("Monthly books and VAT")));
+        assert_eq!(v["tags"], json!(["vat", "monthly"]));
+        assert!(v["readme"]["body"].as_str().unwrap().starts_with("# Acme Trading"));
+        // Key dates come from their own section only, soonest first.
+        assert_eq!(v["keyDates"], json!([{"date": "2026-11-30", "text": "VAT return due"}, {"date": "2026-12-31", "text": "Year end · Engagement letter"}]));
+        assert_eq!(v["todo"]["file"], "clients/acme/todo.md");
+        assert_eq!(v["todo"]["exists"], true);
+        assert_eq!(v["todo"]["groups"], json!(["Now", "Done"]));
+        assert_eq!((v["todo"]["items"][0]["line"].as_u64(), v["todo"]["items"][0]["due"].as_str()), (Some(1), Some("2026-11-20")));
+        assert_eq!(v["todo"]["items"][1]["done"], true);
+        // Meetings newest first; the date comes from the note details or the file name.
+        assert_eq!(paths(&v["meetings"]), ["clients/acme/meetings/2026-11-02-october-review.md", "clients/acme/meetings/2026-10-01-kick-off.md"]);
+        assert_eq!((v["meetings"][0]["date"].as_str(), v["meetings"][0]["title"].as_str()), (Some("2026-11-02"), None));
+        assert_eq!(v["meetings"][1]["title"], "Kick-off");
+        assert_eq!(v["meetings"][1]["attendees"], json!(["Sara (CFO)", "Omar"]));
+        assert_eq!(paths(&v["notes"]).len(), 2);
+        assert!(v["notes"].as_array().unwrap().iter().any(|n| n["title"] == "Fees" && n["summary"] == "What we charge"));
+        assert_eq!(paths(&v["outputs"]).len(), 2);
+        assert!(paths(&v["outputs"]).contains(&"clients/acme/outputs/letters/2026-11-01-reminder.docx".to_string()));
+        assert_eq!(paths(&v["other"]), ["clients/acme/contract.pdf"]);
+        // The log newest first, whatever order it is written in.
+        assert_eq!(v["log"]["exists"], true);
+        assert_eq!(v["log"]["entries"][0]["date"], "2026-11-02");
+        assert_eq!(v["log"]["entries"][0]["topic"], "October close");
+        assert_eq!(v["log"]["entries"][0]["body"], "- Learned: invoices arrive late\n- Next: chase the supplier");
+        assert_eq!(v["log"]["entries"][1]["topic"], "Kick-off");
+        assert!(v["log"]["archive"].is_null());
+        // The same item by its folder; anything that is not an item is refused.
+        assert_eq!(item(&d, "clients/acme", &[]).unwrap()["path"], "clients/acme/README.md");
+        assert_eq!(item(&d, "/clients/acme/", &[]).unwrap()["title"], "Acme Trading");
+        for bad in ["", "clients", "clients/acme/notes", "clients/acme/notes/fees.md", "me/x", "inbox/x", ".claude/x", "../x/y", "clients/../x", "clients/missing"] {
+            assert!(item(&d, bad, &[]).is_err(), "{bad:?}");
+        }
+        // Private folders are left out the way the file tree leaves them out.
+        write(&d, "clients/acme/notes/salaries/2026.md", "secret").unwrap();
+        assert_eq!(paths(&item(&d, "clients/acme", &[]).unwrap()["notes"]).len(), 3);
+        assert_eq!(paths(&item(&d, "clients/acme", &["clients/acme/notes/salaries".into()]).unwrap()["notes"]).len(), 2);
+        for private in ["clients/acme", "Clients", "clients/acme/README.md"] {
+            let err = item(&d, "clients/acme", &[private.to_string()]).unwrap_err();
+            assert_eq!(crate::tr::classify(&err).code, "private", "{private}");
+        }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// FEAT-17: a new idea with only its front page, and a front page without note details.
+    #[test]
+    fn a_seed_item_with_only_a_readme_has_empty_parts() {
+        let d = tmp();
+        write(&d, "ideas/shop/README.md", "---\ntitle: Shop\nstatus: seed\n---\nJust an idea.\n").unwrap();
+        let v = item(&d, "ideas/shop", &[]).unwrap();
+        assert_eq!((v["title"].as_str(), v["status"].as_str(), v["details"].as_bool()), (Some("Shop"), Some("seed"), Some(true)));
+        assert_eq!(v["readme"]["body"], "Just an idea.\n");
+        assert_eq!(v["todo"], json!({"file": "ideas/shop/todo.md", "exists": false, "groups": [], "items": []}));
+        for part in ["meetings", "notes", "outputs", "other", "keyDates"] { assert_eq!(v[part], json!([]), "{part}"); }
+        assert_eq!(v["log"], json!({"path": "ideas/shop/log.md", "exists": false, "archive": null, "entries": []}));
+        assert_eq!(v["tags"], json!([]));
+        // No note details at all: still a page, named after its folder.
+        write(&d, "ideas/plain/README.md", "# Plain page\n").unwrap();
+        let v = item(&d, "ideas/plain/README.md", &[]).unwrap();
+        assert_eq!((v["title"].as_str(), v["details"].as_bool(), v["status"].as_str()), (Some("plain"), Some(false), Some("")));
+        // Details a strict reader rejects: still read, and the body starts after them.
+        write(&d, "ideas/loose/README.md", "---\ntitle: Client: Acme\nstatus: active\n---\nBody here\n").unwrap();
+        let v = item(&d, "ideas/loose", &[]).unwrap();
+        assert_eq!((v["title"].as_str(), v["readme"]["body"].as_str()), (Some("Client: Acme"), Some("Body here\n")));
+        // An older log moved to the archive is pointed to.
+        write(&d, "ideas/shop/log-archive.md", "## 2025-01-01 — Old\n").unwrap();
+        assert_eq!(item(&d, "ideas/shop", &[]).unwrap()["log"]["archive"], "ideas/shop/log-archive.md");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// FEAT-17: Arabic folder and file names, Arabic headings, and meeting notes named in either script.
+    #[test]
+    fn items_with_arabic_names_and_new_meeting_notes() {
+        let d = tmp();
+        write(&d, "العملاء/شركة-الأفق/README.md", "---\ntitle: شركة الأفق\nkind: client\nstatus: active\n---\n\n## التواريخ المهمة\n- 2026-12-15 — موعد تقديم الإقرار\n\n## الوضع الحالي\nتم إقفال أكتوبر.\n").unwrap();
+        write(&d, "العملاء/شركة-الأفق/meetings/2026-11-01-اجتماع-الانطلاق.md", "---\ntitle: اجتماع الانطلاق\ndate: 2026-11-01\nattendees: [سارة]\n---\n").unwrap();
+        write(&d, "العملاء/شركة-الأفق/todo.md", "- [ ] إرسال التقرير @due(2026-11-20)\n").unwrap();
+        write(&d, "العملاء/شركة-الأفق/notes/خطة.md", "---\ntitle: الخطة\n---\n").unwrap();
+        write(&d, "العملاء/شركة-الأفق/log.md", "## 2026-11-01 — بداية العمل\n- تقرر: إقفال شهري\n").unwrap();
+        std::fs::create_dir_all(d.join("العملاء/شركة-الأفق/outputs")).unwrap();
+        std::fs::write(d.join("العملاء/شركة-الأفق/outputs/تقرير-أكتوبر.pdf"), b"%PDF").unwrap();
+        let v = item(&d, "العملاء/شركة-الأفق", &[]).unwrap();
+        assert_eq!((v["area"].as_str(), v["slug"].as_str(), v["title"].as_str()), (Some("العملاء"), Some("شركة-الأفق"), Some("شركة الأفق")));
+        assert_eq!(v["keyDates"], json!([{"date": "2026-12-15", "text": "موعد تقديم الإقرار"}]));
+        assert_eq!(v["meetings"][0]["title"], "اجتماع الانطلاق");
+        assert_eq!(v["meetings"][0]["attendees"], json!(["سارة"]));
+        assert_eq!(v["todo"]["items"][0]["title"], "إرسال التقرير");
+        assert_eq!(v["notes"][0]["path"], "العملاء/شركة-الأفق/notes/خطة.md");
+        assert_eq!(v["outputs"][0]["name"], "تقرير-أكتوبر.pdf");
+        assert_eq!(v["log"]["entries"][0]["topic"], "بداية العمل");
+
+        // A new meeting note: Arabic words without diacritics, as the folder names are Arabic.
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 12).unwrap();
+        let p = new_meeting(&d, "العملاء/شركة-الأفق/README.md", "  مراجعةُ  الحسابات: الشهريّة!  ", day, day, true).unwrap();
+        assert_eq!(p, "العملاء/شركة-الأفق/meetings/2026-11-12-مراجعة-الحسابات-الشهرية.md");
+        let text = std::fs::read_to_string(d.join(&p)).unwrap();
+        assert!(text.starts_with("---\ntitle: \"مراجعةُ الحسابات: الشهريّة!\"\ndate: 2026-11-12\nattendees: []\nupdated: 2026-11-12\nsummary: \n---\n\n# مراجعةُ الحسابات: الشهريّة!\n\n## ما نوقش\n"), "{text}");
+        assert!(text.contains("\n## القرارات\n") && text.contains("\n## بنود العمل\n"));
+        let (fm, lenient) = note_details(&text).unwrap();
+        assert!(!lenient && fm["title"] == "مراجعةُ الحسابات: الشهريّة!" && fm["date"] == "2026-11-12");
+        // Never replaces one: the same name on the same day gets a number.
+        assert_eq!(new_meeting(&d, "العملاء/شركة-الأفق", "مراجعة الحسابات الشهرية", day, day, true).unwrap(), "العملاء/شركة-الأفق/meetings/2026-11-12-مراجعة-الحسابات-الشهرية-2.md");
+        assert_eq!(item(&d, "العملاء/شركة-الأفق", &[]).unwrap()["meetings"].as_array().unwrap().len(), 3);
+
+        // Latin names (from the folder, or from the library's rules); English headings; an empty title.
+        write(&d, "clients/acme/README.md", "---\ntitle: Acme\n---\n").unwrap();
+        let earlier = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).unwrap();
+        let p = new_meeting(&d, "clients/acme", "Kick-off: Sara & Omar (VAT)", earlier, day, false).unwrap();
+        assert_eq!(p, "clients/acme/meetings/2026-11-03-kick-off-sara-omar-vat.md");
+        let text = std::fs::read_to_string(d.join(&p)).unwrap();
+        assert!(text.contains("date: 2026-11-03\n") && text.contains("updated: 2026-11-12\n") && text.contains("\n## Discussed\n") && text.contains("\n## Action items\n"));
+        assert_eq!(new_meeting(&d, "clients/acme", "  ", day, day, false).unwrap(), "clients/acme/meetings/2026-11-12-meeting.md");
+        assert!(std::fs::read_to_string(d.join("clients/acme/meetings/2026-11-12-meeting.md")).unwrap().contains("title: \"Meeting\"\n"));
+        // An Arabic title in a library with Latin names: the name falls back to "meeting".
+        write(&d, "CLAUDE.md", "# Rules\n\n## About this library\n- Names: Latin letters — folder and file names follow this everywhere\n").unwrap();
+        assert_eq!(new_meeting(&d, "clients/acme", "اجتماع مع سارة", day, day, true).unwrap(), "clients/acme/meetings/2026-11-12-meeting-2.md");
+        // The rules saying Arabic win over a Latin folder name.
+        write(&d, "CLAUDE.md", "## About this library\n- Names: Arabic — folder and file names follow this everywhere\n").unwrap();
+        assert_eq!(new_meeting(&d, "clients/acme", "اجتماع مع سارة", day, day, true).unwrap(), "clients/acme/meetings/2026-11-12-اجتماع-مع-سارة.md");
+        // Not an item: refused, nothing written.
+        for bad in ["clients/missing", "clients", ".claude/x", "me/x", "../x/y"] { assert!(new_meeting(&d, bad, "x", day, day, false).is_err(), "{bad}"); }
+        assert!(!d.join("clients/missing").exists());
+        assert_eq!(name_from_title("Q3 — review, part 2/3", false), "q3-review-part-2-3");
+        assert_eq!(name_from_title("one two three four five six seven", false), "one-two-three-four-five-six");
         std::fs::remove_dir_all(d).unwrap();
     }
 
