@@ -22,6 +22,7 @@ pub mod import;
 pub mod kit_history;
 pub mod health;
 pub mod layer_api;
+pub mod libraries;
 pub mod library;
 pub mod links;
 pub mod log;

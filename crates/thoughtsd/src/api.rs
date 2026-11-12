@@ -466,6 +466,7 @@ async fn status(State(st): S) -> R {
     Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"), "onboarded": s.onboarded,
         "library": s.library_path, "claude": claude::status(&st).await,
+        "libraryId": s.library_id(), "libraryName": s.open_library().map(|l| l.display_name()), "libraries": s.libraries.len(),
         "git": git_tool_status().await,
         "interrupted": st.interrupted.lock().await.iter().map(|(id, title)| json!({"chatId": id, "title": title})).collect::<Vec<_>>(),
         "usage": crate::spend::usage_json(&st).await,
@@ -513,6 +514,8 @@ fn redacted_settings(s: &Settings) -> Value {
     for key in ["userName", "libraryPath", "profession"] { v[key] = set(&v[key]); }
     v["projects"] = json!(s.projects.len());
     v["privatePaths"] = json!(s.private_paths.len());
+    // Other libraries' folders, names and private folders are as personal as the open one's.
+    v["libraries"] = json!(s.libraries.len());
     for key in ["binary", "baseUrl"] { v["ai"]["claude"][key] = set(&v["ai"]["claude"][key]); }
     v["search"]["extensionRepo"] = json!(if s.search.extension_repo.trim().is_empty() { "(none)" } else { "(custom)" });
     v
@@ -715,22 +718,32 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     // Hold the write lock across validate + save so two saves cannot interleave.
     let mut cur = st.settings.write().await;
     let old = cur.clone();
-    validate(&new, Some(&old))?;
+    let moved = q.get("library").map(String::as_str) == Some("moved");
     if new.library_path != old.library_path {
         if let Some(p) = new.library_path.clone().filter(|p| !p.trim().is_empty()) {
             // A library can only be pointed at a folder that is really there.
             let folder = paths::expand_tilde(p.trim())?;
             if !folder.is_absolute() || !folder.is_dir() { return Err(crate::tr::err("library.no_folder", &[("path", p.trim())]).into()); }
             new.library_path = Some(folder.to_string_lossy().to_string());
-            if st.library_busy() { return Err(crate::tr::err("busy", &[]).into()); }
+            // Another library may be opened while work goes on in this one (it finishes there); a
+            // library whose folder moved may not change place under a wrap that is writing in it.
+            if moved && st.library_busy() { return Err(crate::tr::err("busy", &[]).into()); }
             crate::trust::require(&folder)?;
         } else {
             new.library_path = None;
         }
     }
+    // Another library folder: the settings sent are the open library's own, and the one chosen is
+    // opened with its own (`Settings::open_folder`) — or this library moved there, settings and all.
+    let chosen = new.library_path.clone().filter(|p| new.library_path != old.library_path && !p.trim().is_empty());
+    if chosen.is_some() { new.library_path = old.library_path.clone(); }
     // Everything the client sent is validated; server-owned fields are put back (the provider
     // address and its key among them: those change through PUT /api/ai/claude/provider only).
     new.sanitize_update(&old)?;
+    if let Some(p) = &chosen {
+        if moved || old.library_path.as_deref().map_or(true, |o| o.trim().is_empty()) { new.move_open_library(p); } else { new.open_folder(p, None); }
+    }
+    validate(&new, Some(&old))?;
     // Making "bypass permissions" the default for new chats needs the user's yes (the dialog in Settings).
     if crate::settings::bypass_needs_confirm(old.ai.claude.permission_mode.as_deref(), new.ai.claude.permission_mode.as_deref())
         && q.get("confirm").map(String::as_str) != Some(crate::settings::BYPASS_CONFIRM) {
@@ -754,6 +767,7 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
         }
     }
     st.emit(json!({"type": "settings.changed"}));
+    if new.library_id() != old.library_id() { st.emit(json!({"type": "library.switched", "id": new.library_id()})); }
     Ok(Json(serde_json::to_value(new)?))
 }
 

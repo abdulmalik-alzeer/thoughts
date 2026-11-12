@@ -52,7 +52,84 @@ pub struct Settings {
     pub spending: SpendingSettings,
     /// Quick capture from anywhere (the desktop app's keyboard shortcut).
     pub capture: CaptureSettings,
+    /// Every library the user has added, the open one (`library_path`) among them. The open one's
+    /// own settings are the top-level fields above; each other one's wait in its entry until it is
+    /// opened again (see `LibrarySettings`). Server-owned: it changes only through the library
+    /// switcher (`libraries.rs`), setup, and choosing another library folder in Settings.
+    pub libraries: Vec<Library>,
 }
+
+/// What belongs to one library rather than to the app: its backup and history, its private
+/// folders, its line of work, its features, its linked folders and when it was last wrapped. The
+/// open library's are the top-level fields of `Settings`, where everything reads them.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LibrarySettings {
+    /// Everything but the password store, which belongs to the app (`Settings::sync` keeps it).
+    pub sync: SyncSettings,
+    pub keep_history: bool,
+    pub private_paths: Vec<String>,
+    pub profession: Option<String>,
+    pub modules: BTreeMap<String, bool>,
+    pub projects: Vec<Project>,
+    pub last_wrap: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl Default for LibrarySettings {
+    fn default() -> Self {
+        Self { sync: SyncSettings::default(), keep_history: true, private_paths: vec![], profession: None, modules: BTreeMap::new(), projects: vec![], last_wrap: None }
+    }
+}
+
+impl LibrarySettings {
+    /// What a library starts with when it is added: the kind of backup, the history choice and the
+    /// line of work of the library open now (`from`); nothing that only made sense for that folder
+    /// (its private folders, its main backup location, its linked folders, its last wrap).
+    pub fn for_new(from: &Settings) -> Self {
+        let mut sync = SyncSettings { mode: from.sync.mode.clone(), target: from.sync.target.clone(), ..SyncSettings::default() };
+        sync.credential_store = from.sync.credential_store.clone();
+        Self { sync, keep_history: from.keep_history, profession: from.profession.clone(), ..Self::default() }
+    }
+}
+
+/// One library in the switcher.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Library {
+    /// Stable for as long as the library is listed (see `library_id_for`).
+    pub id: String,
+    /// The name the user gave it in the switcher. Empty: the folder's own name.
+    pub name: String,
+    pub path: String,
+    /// Its own settings while another library is open. `None` for the open one (the top-level
+    /// fields are its settings), and for one never opened yet (it starts from `for_new`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parked: Option<LibrarySettings>,
+}
+
+impl Library {
+    /// The name to show: the one the user gave it, else the folder's own.
+    pub fn display_name(&self) -> String {
+        if !self.name.trim().is_empty() { return self.name.trim().to_string(); }
+        std::path::Path::new(&self.path).file_name().map(|n| n.to_string_lossy().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| self.path.clone())
+    }
+}
+
+/// The id a library gets when it is first listed: derived from its folder, so an install that was
+/// never saved again since the upgrade sees the same id on every start.
+pub fn library_id_for(path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let h = format!("{:x}", Sha256::digest(path.as_bytes()));
+    format!("lib-{}", &h[..12])
+}
+
+/// Are `a` and `b` the same folder (another spelling, a trailing slash, a link, other capitals)?
+pub fn same_folder(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b || crate::paths::canonical_lenient(a) == crate::paths::canonical_lenient(b)
+}
+
+/// The longest name the user can give a library.
+pub const LIBRARY_NAME_MAX: usize = 60;
 
 /// A monthly spending limit the user sets, in US dollars. `None` = no limit. At `warn_percent` of it
 /// the app says so; at the limit it stops starting things nobody is watching.
@@ -373,6 +450,7 @@ impl Default for Settings {
             release_check: false,
             spending: SpendingSettings::default(),
             capture: CaptureSettings::default(),
+            libraries: vec![],
         }
     }
 }
@@ -525,7 +603,30 @@ impl Settings {
         normalize_permission_mode(&mut self.ai.claude.permission_mode);
         let z = &mut self.accessibility.zoom;
         *z = if *z == 0 { 100 } else { (*z).clamp(ZOOM_MIN, ZOOM_MAX) };
+        self.list_open_library();
         self
+    }
+
+    /// The open library is always in the list, holding no parked settings of its own (its settings
+    /// are the top-level ones). This is the whole upgrade for an install with one library: it is
+    /// listed, nothing else changes. Entries without a folder or with an id seen before are dropped.
+    fn list_open_library(&mut self) {
+        let mut seen = std::collections::BTreeSet::new();
+        self.libraries.retain(|l| !l.path.trim().is_empty() && !l.id.is_empty() && seen.insert(l.id.clone()));
+        let Some(open) = self.library_path.clone().filter(|p| !p.trim().is_empty()) else { return };
+        let mut found = false;
+        for l in &mut self.libraries {
+            if !found && same_folder(std::path::Path::new(&l.path), std::path::Path::new(&open)) {
+                found = true;
+                l.parked = None;
+                l.path = open.clone();
+            }
+        }
+        if !found {
+            let mut id = library_id_for(&open);
+            while self.libraries.iter().any(|l| l.id == id) { id = format!("lib-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]); }
+            self.libraries.insert(0, Library { id, name: String::new(), path: open, parked: None });
+        }
     }
 
     fn write_to(&self, file: &std::path::Path) -> std::io::Result<()> {
@@ -556,6 +657,7 @@ impl Settings {
         self.schema_version = SCHEMA_VERSION;
         self.last_wrap = old.last_wrap;
         self.projects = old.projects.clone(); // projects change only through the project endpoints
+        self.libraries = old.libraries.clone(); // the switcher's list changes only through its own endpoints
         self.chat_retention_days = old.chat_retention_days; // deleting chats automatically is switched only on its own endpoint
         // The provider address and its key belong together and change only through
         // `claude::set_provider`. A general save can therefore never drop a saved key, and never
@@ -614,6 +716,163 @@ impl Settings {
 
     pub fn library(&self) -> Option<std::path::PathBuf> {
         self.library_path.as_ref().map(std::path::PathBuf::from)
+    }
+
+    // ----- several libraries -----
+
+    /// The open library's own settings, as they would be parked when another one is opened.
+    pub fn own(&self) -> LibrarySettings {
+        LibrarySettings {
+            sync: self.sync.clone(), keep_history: self.keep_history, private_paths: self.private_paths.clone(),
+            profession: self.profession.clone(), modules: self.modules.clone(), projects: self.projects.clone(), last_wrap: self.last_wrap,
+        }
+    }
+
+    /// Make `l` the open library's settings. Where passwords are kept stays the app's choice.
+    pub fn set_own(&mut self, l: LibrarySettings) {
+        let store = std::mem::take(&mut self.sync.credential_store);
+        self.sync = l.sync;
+        self.sync.credential_store = if store.is_empty() { "keychain".into() } else { store };
+        self.keep_history = l.keep_history;
+        self.private_paths = l.private_paths;
+        self.profession = l.profession;
+        self.modules = l.modules;
+        self.projects = l.projects;
+        self.last_wrap = l.last_wrap;
+    }
+
+    fn open_index(&self) -> Option<usize> {
+        let open = self.library_path.as_deref().filter(|p| !p.trim().is_empty())?;
+        self.libraries.iter().position(|l| same_folder(std::path::Path::new(&l.path), std::path::Path::new(open)))
+    }
+
+    /// The open library's entry in the switcher.
+    pub fn open_library(&self) -> Option<&Library> { self.open_index().map(|i| &self.libraries[i]) }
+
+    /// The open library's id (`None` before there is a library).
+    pub fn library_id(&self) -> Option<String> { self.open_library().map(|l| l.id.clone()) }
+
+    /// The listed library whose folder is `lib`.
+    pub fn library_at(&self, lib: &std::path::Path) -> Option<&Library> {
+        self.libraries.iter().find(|l| same_folder(std::path::Path::new(&l.path), lib))
+    }
+
+    /// Is `lib` the open library's folder?
+    pub fn is_open_library(&self, lib: &std::path::Path) -> bool {
+        self.library_path.as_deref().map_or(false, |p| !p.trim().is_empty() && same_folder(std::path::Path::new(p), lib))
+    }
+
+    /// The settings of the library at `lib`: the open one's, another listed one's (what was parked,
+    /// or what a new one starts with), or `None` for a folder that is not a library in the list.
+    pub fn settings_of(&self, lib: &std::path::Path) -> Option<LibrarySettings> {
+        if self.is_open_library(lib) { return Some(self.own()); }
+        self.library_at(lib).map(|l| l.parked.clone().unwrap_or_else(|| LibrarySettings::for_new(self)))
+    }
+
+    /// The private folders of the library at `lib`; the open library's when `lib` is none of the
+    /// listed ones (a linked folder, the app's own folders).
+    pub fn private_paths_of(&self, lib: Option<&std::path::Path>) -> Vec<String> {
+        lib.and_then(|l| self.settings_of(l)).map_or_else(|| self.private_paths.clone(), |l| l.private_paths)
+    }
+
+    /// Is a history kept for the library at `lib`? (`history_enabled`, for any listed library.)
+    pub fn history_enabled_in(&self, lib: &std::path::Path) -> bool {
+        match self.settings_of(lib) {
+            Some(l) => l.keep_history || l.sync.mode.starts_with("git"),
+            None => self.history_enabled(),
+        }
+    }
+
+    /// The backup settings of the library at `lib` (the open one's when it is not listed).
+    pub fn sync_of(&self, lib: &std::path::Path) -> SyncSettings {
+        self.settings_of(lib).map_or_else(|| self.sync.clone(), |l| l.sync)
+    }
+
+    /// Note that the library at `lib` was just wrapped, wherever its settings are kept now.
+    pub fn set_last_wrap(&mut self, lib: Option<&std::path::Path>, at: chrono::DateTime<chrono::Utc>) {
+        match lib {
+            Some(l) if !self.is_open_library(l) => {
+                let fresh = LibrarySettings::for_new(self);
+                if let Some(e) = self.libraries.iter_mut().find(|e| same_folder(std::path::Path::new(&e.path), l)) {
+                    e.parked.get_or_insert(fresh).last_wrap = Some(at);
+                }
+            }
+            _ => self.last_wrap = Some(at),
+        }
+    }
+
+    /// Open the listed library `id`: the open one's settings are parked in its entry, and `id`'s
+    /// own come out of theirs. Nothing on disk changes here (the caller saves).
+    pub fn switch_to(&mut self, id: &str) -> anyhow::Result<()> {
+        self.list_open_library();
+        let to = self.libraries.iter().position(|l| l.id == id).ok_or_else(|| crate::tr::err("libs.not_found", &[]))?;
+        let from = self.open_index();
+        if from == Some(to) { return Ok(()); }
+        let parked = self.libraries[to].parked.take();
+        let theirs = parked.unwrap_or_else(|| LibrarySettings::for_new(self));
+        if let Some(i) = from { self.libraries[i].parked = Some(self.own()); }
+        self.set_own(theirs);
+        self.library_path = Some(self.libraries[to].path.clone());
+        Ok(())
+    }
+
+    /// Open the library in folder `path` — the listed one there, or a new entry — parking the open
+    /// one's settings. `own`: the new library's settings when the user just chose them (setup);
+    /// otherwise a listed one gets its own back and a new one starts from `for_new`. Returns its id.
+    pub fn open_folder(&mut self, path: &str, own: Option<LibrarySettings>) -> String {
+        self.list_open_library();
+        let id = match self.library_at(std::path::Path::new(path)) {
+            Some(l) => l.id.clone(),
+            None => {
+                let mut id = library_id_for(path);
+                while self.libraries.iter().any(|l| l.id == id) { id = format!("lib-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]); }
+                self.libraries.push(Library { id: id.clone(), name: String::new(), path: path.to_string(), parked: None });
+                id
+            }
+        };
+        // Cannot fail: the id was just found or made.
+        let _ = self.switch_to(&id);
+        if let Some(o) = own { self.set_own(o); }
+        id
+    }
+
+    /// The open library is now at `path` (its folder was moved or renamed): same entry, same settings.
+    pub fn move_open_library(&mut self, path: &str) {
+        self.list_open_library();
+        if let Some(i) = self.open_index() { self.libraries[i].path = path.to_string(); }
+        self.library_path = Some(path.to_string());
+        self.list_open_library();
+    }
+
+    /// Give library `id` a name of the user's choosing (empty: its folder's name).
+    pub fn rename_library(&mut self, id: &str, name: &str) -> anyhow::Result<()> {
+        let clean: String = name.chars().filter(|c| !c.is_control()).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+        if clean.chars().count() > LIBRARY_NAME_MAX { return Err(crate::tr::err("libs.name_long", &[("max", &LIBRARY_NAME_MAX.to_string())])); }
+        let l = self.libraries.iter_mut().find(|l| l.id == id).ok_or_else(|| crate::tr::err("libs.not_found", &[]))?;
+        l.name = clean;
+        Ok(())
+    }
+
+    /// Take library `id` off the list. Its folder, its chats and its history stay where they are;
+    /// only the settings it kept here go. The open library cannot be removed (open another first).
+    pub fn remove_library(&mut self, id: &str) -> anyhow::Result<Library> {
+        self.list_open_library();
+        let i = self.libraries.iter().position(|l| l.id == id).ok_or_else(|| crate::tr::err("libs.not_found", &[]))?;
+        if Some(i) == self.open_index() { return Err(crate::tr::err("libs.remove_open", &[])); }
+        Ok(self.libraries.remove(i))
+    }
+
+    /// Every library folder in the list besides the open one, and every linked folder of any
+    /// library: what must never be touched when the app removes its own data.
+    pub fn other_folders(&self) -> Vec<std::path::PathBuf> {
+        let open = self.open_index();
+        let mut out = vec![];
+        for (i, l) in self.libraries.iter().enumerate() {
+            if Some(i) == open { continue; }
+            out.push(std::path::PathBuf::from(&l.path));
+            if let Some(p) = &l.parked { out.extend(p.projects.iter().map(|p| std::path::PathBuf::from(&p.path))); }
+        }
+        out
     }
 
     /// Is a history of changes kept for the library? It is, for every kind of backup, unless the
@@ -945,6 +1204,128 @@ mod tests {
         assert_eq!(main(" backup-2 ").as_deref(), Some("backup-2"));
         for bad in ["", "-f", "--upload-pack=x", "a b", "a/b", "نسخة"] { assert_eq!(main(bad), None, "{bad}"); }
         assert_eq!(parse(r#"{"sync":{"mode":"git-manual"}}"#).unwrap().sync.main_location, None);
+    }
+
+    #[test]
+    fn an_install_with_one_library_upgrades_to_a_list_of_one_and_nothing_else_changes() {
+        let old = r#"{"schemaVersion":1,"onboarded":true,"language":"ar","libraryPath":"/Users/sara/Notes","privatePaths":["me/finances"],
+            "sync":{"mode":"git-auto","mainLocation":"backup"},"profession":"legal","modules":{"docs":true},
+            "projects":[{"id":"p1","name":"Site","path":"/Users/sara/site"}],"lastWrap":"2026-01-02T03:04:05Z"}"#;
+        let s = parse(old).unwrap();
+        assert_eq!(s.libraries.len(), 1);
+        let l = &s.libraries[0];
+        assert_eq!((l.path.as_str(), l.name.as_str()), ("/Users/sara/Notes", ""));
+        assert!(l.parked.is_none(), "the open library's settings stay where everything reads them");
+        assert_eq!(l.display_name(), "Notes");
+        // The same id on every start, even before anything is saved again.
+        assert_eq!(parse(old).unwrap().libraries[0].id, l.id);
+        assert_eq!(s.library_id().as_deref(), Some(l.id.as_str()));
+        // Every setting is where it was.
+        assert_eq!(s.private_paths, ["me/finances"]);
+        assert_eq!((s.sync.mode.as_str(), s.sync.main_location.as_deref()), ("git-auto", Some("backup")));
+        assert_eq!((s.profession.as_deref(), s.modules.get("docs"), s.projects.len()), (Some("legal"), Some(&true), 1));
+        assert!(s.last_wrap.is_some() && s.onboarded && s.language == "ar");
+        assert_eq!(s.settings_of(Path::new("/Users/sara/Notes")).unwrap().private_paths, ["me/finances"]);
+        // Saved and read again: the same list, the same id.
+        let again = parse(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(again.libraries.len(), 1);
+        assert_eq!(again.libraries[0].id, l.id);
+        // Not set up yet: no library, no list.
+        assert!(parse(r#"{"onboarded":false}"#).unwrap().libraries.is_empty());
+    }
+
+    use std::path::Path;
+
+    fn with_library(path: &str) -> Settings {
+        let mut s = Settings::default();
+        s.library_path = Some(path.into());
+        s.language = "ar".into();
+        s.private_paths = vec!["clients/acme".into()];
+        s.sync.mode = "git-auto".into();
+        s.sync.main_location = Some("backup".into());
+        s.sync.credential_store = "file".into();
+        s.profession = Some("legal".into());
+        s.modules.insert("docs".into(), true);
+        s.projects.push(Project { id: "p1".into(), name: "Acme site".into(), path: "/work/acme-site".into() });
+        s.last_wrap = Some(chrono::Utc::now());
+        s.with_defaults()
+    }
+
+    #[test]
+    fn each_library_keeps_its_own_settings_across_switches() {
+        let mut s = with_library("/work/Acme");
+        let a = s.library_id().unwrap();
+        let a_own = s.own();
+        // A new library starts with the same kind of backup and line of work, and nothing of A's folder.
+        let b = s.open_folder("/work/Personal", None);
+        assert_ne!(a, b);
+        assert_eq!(s.library_path.as_deref(), Some("/work/Personal"));
+        assert_eq!(s.library_id().as_deref(), Some(b.as_str()));
+        assert!(s.private_paths.is_empty() && s.projects.is_empty() && s.last_wrap.is_none() && s.sync.main_location.is_none());
+        assert_eq!((s.sync.mode.as_str(), s.profession.as_deref(), s.sync.credential_store.as_str()), ("git-auto", Some("legal"), "file"));
+        // B gets settings of its own.
+        s.private_paths = vec!["diary".into()];
+        s.sync.mode = "none".into();
+        s.profession = None;
+        // A's are where they were left, and come back whole.
+        assert_eq!(s.settings_of(Path::new("/work/Acme")).unwrap().private_paths, ["clients/acme"]);
+        assert_eq!(s.private_paths_of(Some(Path::new("/work/Acme"))), ["clients/acme"]);
+        assert_eq!(s.private_paths_of(Some(Path::new("/work/Personal"))), ["diary"]);
+        assert_eq!(s.private_paths_of(Some(Path::new("/elsewhere"))), ["diary"], "a folder that is no library: the open one's");
+        assert!(s.history_enabled_in(Path::new("/work/Acme")));
+        assert_eq!(s.sync_of(Path::new("/work/Acme")).main_location.as_deref(), Some("backup"));
+        s.switch_to(&a).unwrap();
+        assert_eq!(s.library_path.as_deref(), Some("/work/Acme"));
+        let back = s.own();
+        assert_eq!(back.private_paths, a_own.private_paths);
+        assert_eq!((back.sync.mode, back.sync.main_location), (a_own.sync.mode, a_own.sync.main_location));
+        assert_eq!((back.profession, back.modules, back.projects.len(), back.last_wrap), (a_own.profession, a_own.modules, 1, a_own.last_wrap));
+        // …and B's are parked for next time; the app's own choices never moved.
+        assert_eq!(s.settings_of(Path::new("/work/Personal")).unwrap().private_paths, ["diary"]);
+        assert_eq!((s.language.as_str(), s.sync.credential_store.as_str()), ("ar", "file"));
+        // Opening the folder that is already listed opens that library, not a second entry.
+        assert_eq!(s.open_folder("/work/Personal/", None), b);
+        assert_eq!(s.libraries.len(), 2);
+        assert_eq!(s.private_paths, ["diary"]);
+        // Unknown ids are refused and change nothing.
+        assert!(s.switch_to("lib-nope").is_err());
+        assert_eq!(s.library_id().as_deref(), Some(b.as_str()));
+    }
+
+    #[test]
+    fn libraries_are_named_moved_and_taken_off_the_list_but_never_by_a_general_save() {
+        let mut s = with_library("/work/Acme");
+        let a = s.library_id().unwrap();
+        let b = s.open_folder("/work/Personal", None);
+        s.rename_library(&a, "  Acme\u{7}  &   Co ").unwrap();
+        assert_eq!(s.libraries.iter().find(|l| l.id == a).unwrap().display_name(), "Acme & Co");
+        assert!(s.rename_library(&a, &"x".repeat(LIBRARY_NAME_MAX + 1)).is_err());
+        s.rename_library(&b, "").unwrap();
+        assert_eq!(s.open_library().unwrap().display_name(), "Personal");
+        // A save from a window never changes the list, whatever it sends.
+        let mut sent = s.clone();
+        sent.libraries.clear();
+        sent.sanitize_update(&s).unwrap();
+        assert_eq!(sent.libraries.len(), 2);
+        // The open library cannot be taken off; another one can, and only its entry goes.
+        assert!(s.remove_library(&b).is_err());
+        // What the app's own removal must leave alone: the other library and its linked folder.
+        assert_eq!(s.other_folders(), [std::path::PathBuf::from("/work/Acme"), std::path::PathBuf::from("/work/acme-site")]);
+        let gone = s.remove_library(&a).unwrap();
+        assert_eq!(gone.path, "/work/Acme");
+        assert_eq!(s.libraries.len(), 1);
+        // A library whose folder moved keeps its entry and its settings.
+        s.private_paths = vec!["diary".into()];
+        s.move_open_library("/Volumes/Disk/Personal");
+        assert_eq!((s.library_id().as_deref(), s.libraries.len()), (Some(b.as_str()), 1));
+        assert_eq!(s.private_paths, ["diary"]);
+        // A wrap of a library that is not open is noted in its own settings.
+        let c = s.open_folder("/work/Third", None);
+        let when = chrono::Utc::now();
+        s.set_last_wrap(Some(Path::new("/Volumes/Disk/Personal")), when);
+        assert!(s.last_wrap.is_none(), "the open library was not wrapped");
+        assert_eq!(s.settings_of(Path::new("/Volumes/Disk/Personal")).unwrap().last_wrap, Some(when));
+        assert_eq!(s.library_id().as_deref(), Some(c.as_str()));
     }
 
     #[test]
