@@ -25,7 +25,7 @@ const LINE_CHARS: usize = 2000;
 /// Unchanged lines shown before and after each change.
 const CONTEXT: usize = 3;
 /// A document larger than this is listed without its lines.
-const MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 2 * 1024 * 1024;
 /// Past this many differing lines the two texts are not matched line by line any more: the old
 /// text is shown as removed and the new one as added (the page cuts both short anyway).
 const MAX_EDITS: usize = 1000;
@@ -166,6 +166,13 @@ fn named(path: &str, from: Option<&str>, change: &str) -> Value {
     json!({"path": path, "from": from, "change": change, "binary": false, "detail": false, "added": null, "removed": null, "more": 0, "hunks": []})
 }
 
+/// A document listed by name only because it is too large to show line by line (`tooLarge`).
+pub(crate) fn too_large(path: &str, from: Option<&str>, change: &str) -> Value {
+    let mut v = named(path, from, change);
+    v["tooLarge"] = json!(true);
+    v
+}
+
 /// `{files, total, counts: {added, edited, moved, deleted}}` around a list of documents.
 fn listing(files: Vec<Value>) -> Value {
     let mut counts = json!({"added": 0, "edited": 0, "moved": 0, "deleted": 0});
@@ -203,12 +210,26 @@ fn parse_raw(out: &str) -> Vec<Raw> {
 /// The id git gives a side that does not exist.
 fn null(id: &str) -> bool { id.is_empty() || id.bytes().all(|b| b == b'0') }
 
-/// The bytes of blob `id`, unless there is none or it is too large to show.
-async fn blob(state: &AppState, dir: &Path, id: &str) -> Option<Vec<u8>> {
-    if null(id) { return None; }
-    let size: u64 = crate::git::git(state, dir, &["cat-file", "-s", id]).await.ok()?.trim().parse().ok()?;
-    if size > MAX_BYTES { return None; }
-    crate::git::git_raw(state, dir, &["cat-file", "blob", id]).await.ok()
+/// One side of a document: not there (or unreadable), too large to show, or its bytes.
+enum Blob { None, TooLarge, Bytes(Vec<u8>) }
+
+impl Blob {
+    fn bytes(&self) -> Option<&[u8]> { if let Blob::Bytes(b) = self { Some(b) } else { None } }
+}
+
+/// How large `spec` (a blob id, or `<rev>:<path>`) is, without reading it. None: there is no such thing.
+pub(crate) async fn size_of(state: &AppState, dir: &Path, spec: &str) -> Option<u64> {
+    crate::git::git(state, dir, &["cat-file", "-s", spec]).await.ok()?.trim().parse().ok()
+}
+
+/// The bytes of `spec` (see `size_of`) — its size is looked at first, so one too large to show is never read.
+async fn blob(state: &AppState, dir: &Path, spec: &str) -> Blob {
+    if null(spec) { return Blob::None; }
+    match size_of(state, dir, spec).await {
+        None => Blob::None,
+        Some(n) if n > MAX_BYTES => Blob::TooLarge,
+        Some(_) => crate::git::git_raw(state, dir, &["cat-file", "blob", spec]).await.map_or(Blob::None, Blob::Bytes),
+    }
 }
 
 /// What history entry `hash` changed, compared with the entry before it (the first one before it,
@@ -228,14 +249,19 @@ pub async fn of_entry(state: &AppState, dir: &Path, hash: &str) -> anyhow::Resul
     let mut files = vec![];
     for (n, r) in raw.iter().enumerate() {
         if n >= DETAILED || r.special { files.push(named(&r.path, r.from.as_deref(), r.change)); continue; }
-        let old = if r.change == "added" { None } else { blob(state, dir, &r.old).await };
-        let new = if r.change == "deleted" { None } else { blob(state, dir, &r.new).await };
-        // Too large to read: named only.
-        if (r.change != "added" && old.is_none() && !null(&r.old)) || (r.change != "deleted" && new.is_none() && !null(&r.new)) {
+        let old = if r.change == "added" { Blob::None } else { blob(state, dir, &r.old).await };
+        let new = if r.change == "deleted" { Blob::None } else { blob(state, dir, &r.new).await };
+        // Too large to read: named only, and said so.
+        if matches!(old, Blob::TooLarge) || matches!(new, Blob::TooLarge) {
+            files.push(too_large(&r.path, r.from.as_deref(), r.change));
+            continue;
+        }
+        // Could not be read: named only.
+        if (r.change != "added" && old.bytes().is_none() && !null(&r.old)) || (r.change != "deleted" && new.bytes().is_none() && !null(&r.new)) {
             files.push(named(&r.path, r.from.as_deref(), r.change));
             continue;
         }
-        files.push(document(&r.path, r.from.as_deref(), r.change, old.as_deref(), new.as_deref()));
+        files.push(document(&r.path, r.from.as_deref(), r.change, old.bytes(), new.bytes()));
     }
     let mut v = listing(files);
     v["hash"] = json!(me);
@@ -246,14 +272,21 @@ pub async fn of_entry(state: &AppState, dir: &Path, hash: &str) -> anyhow::Resul
 /// Document `rel` as it was at `hash` (under the name `was` it had then, if it was moved since)
 /// against the text in the library now. A document that is gone now is shown as removed.
 pub async fn with_now(state: &AppState, dir: &Path, rel: &str, hash: &str, was: Option<&str>) -> anyhow::Result<Value> {
-    let then = crate::git::file_at(state, dir, was.unwrap_or(rel), hash).await?;
+    let big = || Ok(listing(vec![too_large(rel, was.filter(|w| *w != rel), "edited")]));
+    // Both sizes are looked at before either side is read.
+    if crate::git::valid_hash(hash) {
+        let then_at = format!("{hash}:{}", was.unwrap_or(rel).trim_start_matches("./").trim_start_matches('/').replace('\\', "/"));
+        if size_of(state, dir, &then_at).await.map_or(false, |n| n > MAX_BYTES) { return big(); }
+    }
     let target = crate::library::resolve(dir, rel)?;
+    if std::fs::metadata(&target).map_or(false, |m| m.is_file() && m.len() > MAX_BYTES) { return big(); }
+    let then = crate::git::file_at(state, dir, was.unwrap_or(rel), hash).await?;
     let now = match std::fs::metadata(&target) {
-        Ok(m) if m.is_file() && m.len() > MAX_BYTES => return Ok(listing(vec![named(rel, was.filter(|w| *w != rel), "edited")])),
+        Ok(m) if m.is_file() && m.len() > MAX_BYTES => return big(),
         Ok(m) if m.is_file() => Some(std::fs::read(&target)?),
         _ => None,
     };
-    if then.len() as u64 > MAX_BYTES { return Ok(listing(vec![named(rel, was.filter(|w| *w != rel), "edited")])); }
+    if then.len() as u64 > MAX_BYTES { return big(); }
     let change = if now.is_none() { "deleted" } else { "edited" };
     Ok(listing(vec![document(rel, was.filter(|w| *w != rel), change, Some(&then), now.as_deref())]))
 }
@@ -261,22 +294,21 @@ pub async fn with_now(state: &AppState, dir: &Path, rel: &str, hash: &str, was: 
 /// A document that clashed in a sync: this computer's version (`mine`, as last recorded) against the
 /// other device's (`theirs`, as last received). Either may be missing (removed on that side).
 pub async fn clash(state: &AppState, dir: &Path, rel: &str) -> anyhow::Result<Value> {
-    let side = |rev: &'static str| async move {
-        let spec = format!("{rev}:{rel}");
-        // Does that side have it at all? (A missing side is a removal, not an error.)
-        match crate::git::git(state, dir, &["cat-file", "-e", &spec]).await {
-            Ok(_) => crate::git::git_raw(state, dir, &["cat-file", "blob", &spec]).await.map(Some),
-            Err(_) => Ok(None),
-        }
+    // The size of each side, before anything is read (none: that side does not have it — a removal, not an error).
+    let size = |rev: &'static str| async move { size_of(state, dir, &format!("{rev}:{rel}")).await };
+    let side = |rev: &'static str, there: bool| async move {
+        if !there { return Ok(None); }
+        crate::git::git_raw(state, dir, &["cat-file", "blob", &format!("{rev}:{rel}")]).await.map(Some)
     };
     if crate::git::git(state, dir, &["rev-parse", "--verify", "-q", "FETCH_HEAD^{commit}"]).await.is_err() {
         return Err(crate::tr::err("not_found.version", &[]));
     }
-    let (mine, theirs) = (side("HEAD").await?, side("FETCH_HEAD").await?);
-    if mine.is_none() && theirs.is_none() { return Err(crate::tr::err("not_found.version", &[])); }
-    if mine.as_ref().map_or(0, |b| b.len()) as u64 > MAX_BYTES || theirs.as_ref().map_or(0, |b| b.len()) as u64 > MAX_BYTES {
-        return Ok(listing(vec![named(rel, None, "edited")]));
+    let (mine_size, theirs_size) = (size("HEAD").await, size("FETCH_HEAD").await);
+    if mine_size.is_none() && theirs_size.is_none() { return Err(crate::tr::err("not_found.version", &[])); }
+    if mine_size.map_or(false, |n| n > MAX_BYTES) || theirs_size.map_or(false, |n| n > MAX_BYTES) {
+        return Ok(listing(vec![too_large(rel, None, "edited")]));
     }
+    let (mine, theirs) = (side("HEAD", mine_size.is_some()).await?, side("FETCH_HEAD", theirs_size.is_some()).await?);
     let change = match (&mine, &theirs) { (None, _) => "added", (_, None) => "deleted", _ => "edited" };
     Ok(listing(vec![document(rel, None, change, mine.as_deref(), theirs.as_deref())]))
 }
@@ -376,6 +408,38 @@ mod tests {
         let p = dir.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, text).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_document_too_large_to_show_is_said_so_in_history_versions_and_clashes() {
+        let d = std::env::temp_dir().join(format!("thoughts-diffs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        sh(&d, &["init", "-q", "-b", "main"]);
+        let st = AppState::for_test();
+        let big = "a row of a large export, again and again\n".repeat(60_000);
+        assert!(big.len() as u64 > MAX_BYTES);
+        write(&d, "export.csv", big.as_bytes());
+        write(&d, "note.md", b"small\n");
+        sh(&d, &["add", "-A"]);
+        sh(&d, &["commit", "-q", "-m", "first"]);
+        let first = sh(&d, &["rev-parse", "HEAD"]);
+        write(&d, "export.csv", big.replace("again", "once more").as_bytes());
+        write(&d, "note.md", b"small, edited\n");
+        sh(&d, &["commit", "-q", "-am", "second"]);
+        let second = sh(&d, &["rev-parse", "HEAD"]);
+        let v = of_entry(&st, &d, &second).await.unwrap();
+        let by = |p: &str| v["files"].as_array().unwrap().iter().find(|f| f["path"] == p).cloned().unwrap();
+        assert_eq!((by("export.csv")["tooLarge"].as_bool(), by("export.csv")["detail"].as_bool()), (Some(true), Some(false)));
+        assert_eq!((by("note.md")["tooLarge"].as_bool(), by("note.md")["detail"].as_bool()), (None, Some(true)));
+        // An earlier version against the text now.
+        let v = with_now(&st, &d, "export.csv", &first, None).await.unwrap();
+        assert_eq!(v["files"][0]["tooLarge"], true);
+        assert_eq!(with_now(&st, &d, "note.md", &first, None).await.unwrap()["files"][0]["detail"], true);
+        // A clash with what arrived.
+        std::fs::write(d.join(".git/FETCH_HEAD"), format!("{first}\t\tbranch 'main' of elsewhere\n")).unwrap();
+        assert_eq!(clash(&st, &d, "export.csv").await.unwrap()["files"][0]["tooLarge"], true);
+        assert_eq!(clash(&st, &d, "note.md").await.unwrap()["files"][0]["detail"], true);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[tokio::test]

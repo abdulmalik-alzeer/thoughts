@@ -7,7 +7,7 @@
   import { fmtNum, t, tn } from './i18n';
 
   type Hunk = { line: number; lines: [string, string][] };
-  export type Doc = { path: string; from?: string | null; change: string; detail: boolean; binary: boolean; added?: number | null; removed?: number | null; more: number; hunks: Hunk[] };
+  export type Doc = { path: string; from?: string | null; change: string; detail: boolean; binary: boolean; tooLarge?: boolean; added?: number | null; removed?: number | null; more: number; hunks: Hunk[] };
 
   let { files, canOpen = false, labels, single = false }: {
     files: Doc[];
@@ -58,6 +58,7 @@
   {@const d = files[0]}
   <div class="one">
     {#if d.binary}<p class="note muted">{t('wrapb.doc.binary')}</p>
+    {:else if d.tooLarge}<p class="note muted">{t('revcore.doc.tooLarge')}</p>
     {:else if !d.detail}<p class="note muted">{t('wrapb.doc.noDetail')}</p>
     {:else if !d.hunks.length}<p class="note muted">{t('histc.cv.same')}</p>
     {:else}{@render lines(d)}{/if}
@@ -82,6 +83,7 @@
         <div class="body">
           {#if d.from}<p class="note muted">{t('wrapb.doc.movedFrom')} <bdi dir="ltr">{d.from}</bdi></p>{/if}
           {#if d.binary}<p class="note muted">{t('wrapb.doc.binary')}</p>
+          {:else if d.tooLarge}<p class="note muted">{t('revcore.doc.tooLarge')}</p>
           {:else if !d.detail}<p class="note muted">{t('wrapb.doc.noDetail')}</p>
           {:else}
             {@render lines(d)}

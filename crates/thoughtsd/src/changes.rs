@@ -16,6 +16,9 @@ pub const LINES: usize = 400;
 const REMOVED_LINES: usize = 30;
 /// One very long line (a pasted table, minified text) is cut here.
 const LINE_CHARS: usize = 2000;
+/// The longest list of documents named in one command for their changed lines (bytes): far below
+/// what any system allows on a command line.
+const NAMES_MAX: usize = 24_000;
 
 /// One document that differs between the two points.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,21 +156,41 @@ pub async fn between(state: &AppState, dir: &Path, from: &str, to: &str) -> anyh
     args.extend_from_slice(PLAIN);
     args.extend_from_slice(&[from, to]);
     let entries = parse_name_status(&crate::git::git(state, dir, &args).await?);
-    let detail = if entries.is_empty() { vec![] } else {
+    // How large each side is, looked at before anything is read: a document too large to show line
+    // by line (`diffs::MAX_BYTES`, as for History) is listed by name and its text never read.
+    let (before, after) = if entries.is_empty() { Default::default() } else { (sizes(state, dir, from).await, sizes(state, dir, to).await) };
+    let large: Vec<bool> = entries.iter().map(|e| {
+        let was = e.from.as_deref().unwrap_or(&e.path);
+        (e.change != "added" && before.get(was).map_or(false, |n| *n > crate::diffs::MAX_BYTES))
+            || (e.change != "deleted" && after.get(&e.path).map_or(false, |n| *n > crate::diffs::MAX_BYTES))
+    }).collect();
+    // Only the documents shown line by line are read, each by its exact name (both names for a move).
+    let mut names: Vec<String> = vec![];
+    let mut room = NAMES_MAX;
+    for (e, big) in entries.iter().zip(&large).take(DETAILED) {
+        if *big { continue; }
+        let these: Vec<String> = std::iter::once(&e.path).chain(e.from.as_ref()).map(|n| format!(":(literal){n}")).collect();
+        let len: usize = these.iter().map(|n| n.len() + 1).sum();
+        if len > room { break; }
+        room -= len;
+        names.extend(these);
+    }
+    let detail = if names.is_empty() { vec![None; entries.len()] } else {
         let mut args = vec!["diff", "-U3"];
         args.extend_from_slice(PLAIN);
-        args.extend_from_slice(&[from, to]);
+        args.extend_from_slice(&[from, to, "--"]);
+        args.extend(names.iter().map(String::as_str));
         match crate::git::git(state, dir, &args).await {
             Ok(patch) => details(&entries, &patch, DETAILED),
             Err(e) => { crate::log::warn(format!("changes: could not read the changed lines ({e}); listing names only")); vec![None; entries.len()] }
         }
     };
     let mut counts = json!({"added": 0, "edited": 0, "moved": 0, "deleted": 0});
-    let files: Vec<Value> = entries.iter().zip(detail).map(|(e, d)| {
+    let files: Vec<Value> = entries.iter().zip(detail).zip(&large).map(|((e, d), big)| {
         counts[e.change] = json!(counts[e.change].as_u64().unwrap_or(0) + 1);
         let d = d.as_ref();
         json!({
-            "path": e.path, "from": e.from, "change": e.change, "detail": d.is_some(),
+            "path": e.path, "from": e.from, "change": e.change, "detail": d.is_some(), "tooLarge": big,
             "binary": d.map_or(false, |d| d.binary),
             "added": d.map(|d| d.added), "removed": d.map(|d| d.removed), "more": d.map_or(0, |d| d.more),
             "hunks": d.map(|d| d.hunks.iter().map(|(line, lines)| json!({
@@ -176,6 +199,17 @@ pub async fn between(state: &AppState, dir: &Path, from: &str, to: &str) -> anyh
         })
     }).collect();
     Ok(json!({"files": files, "total": entries.len(), "counts": counts}))
+}
+
+/// The size of every document at `rev` (a commit or a tree), by its name, read from the history's
+/// list of files (nothing of their text is read).
+async fn sizes(state: &AppState, dir: &Path, rev: &str) -> std::collections::HashMap<String, u64> {
+    let out = crate::git::git(state, dir, &["ls-tree", "-r", "-l", "-z", "--full-tree", rev]).await.unwrap_or_default();
+    // `<mode> blob <id> <size>\t<name>`
+    out.split('\0').filter_map(|e| {
+        let (meta, name) = e.split_once('\t')?;
+        Some((name.to_string(), meta.split_whitespace().nth(3)?.parse().ok()?))
+    }).collect()
 }
 
 #[cfg(test)]
@@ -259,6 +293,33 @@ mod tests {
         let first = between(&st, &lib, crate::wraps::EMPTY_TREE, &before).await.unwrap();
         assert_eq!(first["counts"]["added"], 3);
         assert!(between(&st, &lib, "not a point", &after).await.is_err());
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_document_too_large_to_show_is_named_and_never_read() {
+        let (st, lib) = t::library().await;
+        let big = "a line of an exported table, repeated many times over\n".repeat(60_000);
+        assert!(big.len() as u64 > crate::diffs::MAX_BYTES);
+        t::write(&lib, "export.csv", &big);
+        t::sh(&lib, &["add", "-A"]);
+        t::sh(&lib, &["commit", "-q", "-m", "an export"]);
+        let before = t::sh(&lib, &["rev-parse", "HEAD"]);
+        t::write(&lib, "export.csv", &big.replace("exported", "imported"));
+        t::write(&lib, "TODO.md", "# Todo\n\n- [ ] call the bank\n- [ ] order the sign\n");
+        t::sh(&lib, &["add", "-A"]);
+        t::sh(&lib, &["commit", "-q", "-m", "both"]);
+        let after = t::sh(&lib, &["rev-parse", "HEAD"]);
+        let v = between(&st, &lib, &before, &after).await.unwrap();
+        let by = |p: &str| v["files"].as_array().unwrap().iter().find(|f| f["path"] == p).cloned().unwrap();
+        let export = by("export.csv");
+        assert_eq!((export["detail"].as_bool(), export["tooLarge"].as_bool(), export["hunks"].as_array().map(Vec::len)), (Some(false), Some(true), Some(0)));
+        // The small document beside it is shown line by line as usual.
+        let todo = by("TODO.md");
+        assert_eq!((todo["detail"].as_bool(), todo["tooLarge"].as_bool(), todo["added"].as_u64()), (Some(true), Some(false), Some(1)));
+        // Added whole, it is too large as well.
+        let first = between(&st, &lib, crate::wraps::EMPTY_TREE, &before).await.unwrap();
+        assert_eq!(first["files"].as_array().unwrap().iter().find(|f| f["path"] == "export.csv").unwrap()["tooLarge"], true);
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 }
