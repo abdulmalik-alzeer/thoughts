@@ -63,8 +63,13 @@ pub fn write_protected_in(home: &Path) -> Vec<PathBuf> { vec![home.join("app-lay
 pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     const FILES: &[&str] = &["daemon.json", "daemon.lock", "settings.json", "settings.json.bak", "git-credentials", "trusted.json", "secrets.json",
         "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "layer-drafts.json", "workflows-approved.json",
-        "workflows-state.json", "suggestions.json", "base-manifest.json", "layer-requests.json", "backup-state.json", "update-status.json"];
-    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "wrap-copies", "run-tmp", "plugin-data", "history", "app-layer-held"];
+        "workflows-state.json", "suggestions.json", "base-manifest.json", "layer-requests.json", "backup-state.json", "update-status.json",
+        // What the user allowed in chats ("Always for this chat"), access keys and the port, and the
+        // smaller records: a run must not plant them before they exist, any more than change them.
+        "chat-approvals.json", "tokens.json", "port", "calendar-export.json", "release-check.json", "models-seen.json",
+        "codex-seen.json", "context-windows.json", "workflows-library.json", "safe-mode"];
+    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "wrap-copies", "run-tmp", "plugin-data", "history", "app-layer-held",
+        "chats-set-aside"];
     const OPEN: &[&str] = &["app-layer-staging", "app-layer"];
     let mut files: Vec<PathBuf> = FILES.iter().map(|f| home.join(f)).collect();
     let mut dirs: Vec<PathBuf> = DIRS.iter().map(|d| home.join(d)).collect();

@@ -21,6 +21,9 @@ pub const DATA_FILES: &[&str] = &[
     "tokens.json", "port",
     // Kept by the desktop app: customisations switched off from its Recovery menu.
     "safe-mode",
+    // What the user allowed in chats, which library each automatic task belongs to, a change being
+    // drafted, and what the assistant programs said about their models.
+    "chat-approvals.json", "workflows-library.json", "layer-drafts.json", "models-seen.json", "codex-seen.json", "context-windows.json",
 ];
 /// Folders the app keeps directly in its data folder.
 pub const DATA_DIRS: &[&str] = &[
@@ -29,6 +32,8 @@ pub const DATA_DIRS: &[&str] = &[
     // Earlier versions of libraries that carry no repository of their own (`git::history_store`):
     // the notes themselves are in the library and stay.
     "history",
+    // A Wrap's working copies of the library (the library keeps its own files).
+    "wrap-copies",
 ];
 
 /// Where saved passwords live. The real one is the system keychain (`SystemKeyring`).
@@ -272,6 +277,32 @@ pub mod tests {
         assert!(out.folder_removed && !home.exists());
         assert!(root.is_dir() && library.join("note.md").is_file());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Everything the service keeps in its data folder goes with "Remove Thoughts from this computer",
+    /// and is closed to assistant runs even before it exists (`paths::secret_paths_in`) — but for the
+    /// two folders customising works in, which the run rules treat on their own.
+    #[test]
+    fn every_file_the_app_keeps_is_removed_with_it_and_closed_to_runs() {
+        const KEPT_FILES: &[&str] = &["settings.json", "settings.json.bak", "daemon.json", "daemon.lock", "git-credentials", "secrets.json",
+            "trusted.json", "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "layer-requests.json", "layer-drafts.json",
+            "workflows-approved.json", "workflows-state.json", "workflows-library.json", "suggestions.json", "base-manifest.json",
+            "update-status.json", "release-check.json", "backup-state.json", "calendar-export.json", "tokens.json", "port", "safe-mode",
+            "chat-approvals.json", "models-seen.json", "codex-seen.json", "context-windows.json"];
+        const KEPT_DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "wrap-copies",
+            "run-tmp", "plugin-data", "history", "app-layer-held", "chats-set-aside"];
+        let home = tmp();
+        let (files, dirs) = crate::paths::secret_paths_in(&home);
+        for f in KEPT_FILES {
+            assert!(DATA_FILES.contains(f), "{f} is left behind by the removal");
+            assert!(files.contains(&home.join(f)), "{f} is open to assistant runs before it exists");
+        }
+        for d in KEPT_DIRS {
+            assert!(DATA_DIRS.contains(d), "{d} is left behind by the removal");
+            assert!(dirs.contains(&home.join(d)), "{d} is open to assistant runs before it exists");
+        }
+        for d in ["app-layer", "app-layer-staging"] { assert!(DATA_DIRS.contains(&d), "{d}"); }
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[cfg(unix)]
