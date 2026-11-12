@@ -443,6 +443,31 @@ pub async fn put_back(g: Git<'_>, d: &Dirs, a: Aside) {
     let _ = save_meta(d, &a.meta);
 }
 
+/// A pending change that was put aside is now gone for good (the request that replaced it is under
+/// way). Changes that were found in the live layer are not dropped with it: nobody has decided about
+/// them yet, so they go back to the holding folder and are offered for review again later.
+pub async fn let_go(g: Git<'_>, d: &Dirs, a: Aside) {
+    if a.meta.origin != "manual" { return; }
+    let Ok(out) = g.run(&d.layer, &["diff", "--name-status", "--no-renames", "-z", "HEAD", &a.commit]).await else { return };
+    if crate::paths::create_private_dir(&d.held).is_err() { return; }
+    let mut held: Held = std::fs::read_to_string(held_index(d)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let mut it = out.split('\0');
+    while let (Some(status), Some(path)) = (it.next(), it.next()) {
+        if crate::packs::check_path(path).is_err() { continue; }
+        let dest = d.held.join("files").join(path);
+        if status.starts_with('D') {
+            if !held.deleted.iter().any(|p| p == path) { held.deleted.push(path.to_string()); }
+        } else if !dest.exists() {
+            // (A newer copy already waiting there wins.)
+            let Ok(text) = g.run(&d.layer, &["show", &format!("{}:{path}", a.commit)]).await else { continue };
+            if let Some(parent) = dest.parent() { let _ = std::fs::create_dir_all(parent); }
+            let _ = std::fs::write(&dest, text);
+        }
+    }
+    if held.found.is_empty() { held.found = chrono::Utc::now().to_rfc3339(); }
+    if let Ok(t) = serde_json::to_string_pretty(&held) { let _ = crate::paths::write_atomic(&held_index(d), t.as_bytes(), true); }
+}
+
 /// Start a fresh staging copy for a request of chat `chat_id`. The change that was waiting is not
 /// thrown away yet: it is kept until `run_start_result` says whether the request's run started.
 pub async fn replace_for(g: Git<'_>, d: &Dirs, origin: &str, chat_id: &str) -> anyhow::Result<()> {
@@ -464,10 +489,9 @@ pub async fn replace_for(g: Git<'_>, d: &Dirs, origin: &str, chat_id: &str) -> a
 /// for it is dropped and the change it replaced is waiting for review again.
 pub async fn run_start_result(g: Git<'_>, d: &Dirs, chat_id: &str, started: bool) {
     let aside = replaced().lock().unwrap_or_else(|e| e.into_inner()).remove(&(d.staging.clone(), chat_id.to_string()));
-    if started { return; }
     let Some(a) = aside else { return };
-    // Only when the staging copy is still the one made for this request.
-    if load_meta(d).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id)) { put_back(g, d, a).await; }
+    // Put back only when the staging copy is still the one made for this request.
+    if !started && load_meta(d).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id)) { put_back(g, d, a).await; } else { let_go(g, d, a).await; }
 }
 
 // ---------- what is pending ----------
@@ -1101,6 +1125,15 @@ mod tests {
         let p = pending(st, &d, true).await;
         assert_eq!((&p["origin"], paths_of(&p)), (&json!("manual"), vec!["added workflows/sneak.json".to_string()]));
         assert!(p["summary"].as_str().unwrap().starts_with("تغييرات أُجريت من خارج التطبيق"));
+        // A new request that really starts replaces whatever is waiting, but what was found outside
+        // has not been decided about: it goes back to wait and is offered again afterwards.
+        replace_for(st, &d, "customize", "chat-n").await.unwrap();
+        run_start_result(st, &d, "chat-n", true).await;
+        assert_eq!(pending(st, &d, false).await["exists"], false);
+        assert!(d.held.join("files/workflows/sneak.json").exists());
+        discard(st, &d).await.unwrap();
+        assert!(adopt_held(st, &d, false).await);
+        assert_eq!(paths_of(&pending(st, &d, false).await), ["added workflows/sneak.json"]);
         // Undo, rollback and keep no longer record such files as a "snapshot of manual changes".
         discard(st, &d).await.unwrap();
         std::fs::write(d.layer.join("plugins/z.js"), "export default () => {}\n").unwrap();

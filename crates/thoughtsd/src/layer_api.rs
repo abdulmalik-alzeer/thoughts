@@ -53,6 +53,9 @@ pub fn routes() -> Router<Arc<AppState>> {
 pub fn start(state: Arc<AppState>) {
     let st = state.clone();
     tokio::spawn(async move {
+        // Under the layer lock: the new built-in files are written and recorded in one go, so the
+        // first load of the layer never finds them half-way and takes them for outside changes.
+        let _g = LAYER_LOCK.lock().await;
         if let Err(e) = updates::check(&st).await { crate::log::warn(format!("layer: update check failed: {e}")); }
     });
     tokio::spawn(workflows::run_loop(state.clone()));

@@ -236,6 +236,7 @@ pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow:
         }
         return Err(e);
     }
+    if let Some(w) = waiting { crate::staging::let_go(g, d, w).await; }
     // What the pack says about itself is kept apart and shown as the pack's words. It never becomes
     // part of the app's own description of the change, nor of the history entry.
     crate::staging::set_pack(d, &name, &clean_line(pack["description"].as_str().unwrap_or(""), 400));
