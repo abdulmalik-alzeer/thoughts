@@ -143,10 +143,12 @@ pub async fn status(state: &AppState) -> Value {
     };
     let version = version(state).await;
     let auth = auth_status(&bin).await;
-    let has_token = state.settings.read().await.ai.claude.has_api_token;
+    // `provider` says who answers: "account" (the Claude sign-in), "anthropicKey", "service" (another
+    // address with its own key) or "incomplete" (an address without a key: nothing runs).
+    let provider = provider_of(&state.settings.read().await.ai.claude);
     let failed = state.auth_failed.load(std::sync::atomic::Ordering::Relaxed);
-    let logged_in = (auth.get("loggedIn").and_then(Value::as_bool).unwrap_or(false) || has_token) && !failed;
-    json!({"installed": true, "path": bin, "version": version, "loggedIn": logged_in, "authFailed": failed, "auth": auth})
+    let logged_in = (auth.get("loggedIn").and_then(Value::as_bool).unwrap_or(false) || provider.uses_key()) && !failed;
+    json!({"installed": true, "path": bin, "version": version, "loggedIn": logged_in, "authFailed": failed, "auth": auth, "provider": provider.name()})
 }
 
 /// Does this error text from the CLI mean "not signed in" (never signed in, expired, revoked, bad key)?
@@ -156,11 +158,172 @@ pub fn is_auth_failure(text: &str) -> bool {
      "authentication_failed", "oauth token", "invalid bearer token", "invalid authentication credentials"].iter().any(|k| t.contains(k))
 }
 
-/// Is the app using its own provider address or key (then the Claude account sign-in is beside the point)?
-async fn own_provider(state: &AppState) -> bool {
-    let c = state.settings.read().await.ai.claude.clone();
-    c.has_api_token || c.base_url.as_deref().map_or(false, |u| !u.trim().is_empty())
+/// Who answers the assistant's requests, as set up under Settings › Assistant.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Provider {
+    /// The user's own Claude sign-in (what `claude auth login` stored).
+    Account,
+    /// An Anthropic API key, sent to Anthropic itself.
+    AnthropicKey,
+    /// Another Anthropic-compatible service at this address, with the key saved for it.
+    Service(String),
+    /// An address with no key saved for it (or one that is not a valid address). Nothing may run:
+    /// with only an address, Claude Code sends the user's Claude sign-in to that address.
+    Incomplete,
 }
+
+impl Provider {
+    pub fn name(&self) -> &'static str {
+        match self { Provider::Account => "account", Provider::AnthropicKey => "anthropicKey", Provider::Service(_) => "service", Provider::Incomplete => "incomplete" }
+    }
+    /// Does it pay with a key of its own (then the Claude account sign-in is beside the point)?
+    pub fn uses_key(&self) -> bool { matches!(self, Provider::AnthropicKey | Provider::Service(_)) }
+}
+
+/// The address requests go to, when it is not Anthropic's own: `None` for no address and for
+/// Anthropic's address alike. A saved key belongs to exactly one such destination.
+pub fn destination(base_url: Option<&str>) -> Option<&str> {
+    base_url.map(str::trim).filter(|u| !u.is_empty() && !crate::settings::is_anthropic_url(u))
+}
+
+pub fn provider_of(c: &crate::settings::ClaudeSettings) -> Provider {
+    match (destination(c.base_url.as_deref()), c.has_api_token) {
+        (None, false) => Provider::Account,
+        (None, true) => Provider::AnthropicKey,
+        (Some(u), true) if crate::settings::check_base_url(u).is_ok() => Provider::Service(u.to_string()),
+        (Some(_), _) => Provider::Incomplete,
+    }
+}
+
+/// What a run's environment must carry (`set`) and must not inherit from the daemon's own (`unset`).
+#[derive(Debug, Default, PartialEq)]
+pub struct ProviderEnv { pub set: Vec<(&'static str, String)>, pub unset: Vec<&'static str> }
+
+impl ProviderEnv {
+    fn apply(&self, c: &mut Command) {
+        for name in &self.unset { c.env_remove(name); }
+        for (name, value) in &self.set { c.env(name, value); }
+    }
+}
+
+/// The environment for `provider`, given the key read from the password store.
+/// - An Anthropic key travels as `ANTHROPIC_API_KEY` (the `X-Api-Key` header, which is what
+///   Anthropic takes for API keys) and only ever to Anthropic: an address or bearer token inherited
+///   from the daemon's environment is dropped, since either would redirect or outrank it.
+/// - Another service gets its address and the key as `ANTHROPIC_AUTH_TOKEN` (a bearer token, which
+///   is what gateways take); an inherited Anthropic key is dropped so it is never sent there.
+/// - An address without a key never runs.
+pub fn provider_env_for(provider: &Provider, key: Option<String>) -> anyhow::Result<ProviderEnv> {
+    let key = key.filter(|k| !k.trim().is_empty());
+    match provider {
+        Provider::Account => Ok(ProviderEnv::default()),
+        Provider::Incomplete => Err(crate::tr::err("provider.incomplete", &[])),
+        Provider::AnthropicKey => {
+            let key = key.ok_or_else(|| crate::tr::err("provider.key_unreadable", &[]))?;
+            Ok(ProviderEnv { set: vec![("ANTHROPIC_API_KEY", key)], unset: vec!["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"] })
+        }
+        Provider::Service(url) => {
+            let key = key.ok_or_else(|| crate::tr::err("provider.key_unreadable", &[]))?;
+            Ok(ProviderEnv { set: vec![("ANTHROPIC_BASE_URL", url.clone()), ("ANTHROPIC_AUTH_TOKEN", key)], unset: vec!["ANTHROPIC_API_KEY"] })
+        }
+    }
+}
+
+/// Where the provider key is kept. The real one is the system password store.
+pub trait KeyStore: Send + Sync {
+    fn get(&self) -> Option<String>;
+    fn set(&self, key: &str) -> anyhow::Result<()>;
+    fn delete(&self) -> anyhow::Result<()>;
+}
+
+/// The system password store (`secrets.rs`).
+pub struct Keychain;
+impl KeyStore for Keychain {
+    fn get(&self) -> Option<String> { crate::secrets::get("thoughts-ai", "claude") }
+    fn set(&self, key: &str) -> anyhow::Result<()> { crate::secrets::set("thoughts-ai", "claude", key) }
+    fn delete(&self) -> anyhow::Result<()> { crate::secrets::delete("thoughts-ai", "claude") }
+}
+
+/// The saved provider key. Unit tests never touch the real password store.
+fn saved_key() -> Option<String> {
+    if cfg!(test) { return Some("test-key".into()); }
+    Keychain.get()
+}
+
+/// The provider environment for a run that is about to start, or the reason it may not start.
+async fn provider_env(state: &AppState) -> anyhow::Result<ProviderEnv> {
+    let provider = provider_of(&state.settings.read().await.ai.claude);
+    let key = if provider.uses_key() { saved_key() } else { None };
+    provider_env_for(&provider, key).map_err(|e| { crate::log::warn(format!("assistant not started: {e}")); e })
+}
+
+/// What `set_provider` did.
+#[derive(Debug, PartialEq)]
+pub struct ProviderSaved {
+    pub provider: Provider,
+    /// A key saved for the previous address was removed (it is never sent to another one).
+    pub key_removed: bool,
+}
+
+/// Set the provider: its address and its key, together. `base_url` blank = Anthropic itself;
+/// `key` blank = keep the saved key, which is only possible while the destination stays the same.
+/// - A new key is saved for exactly the address given with it.
+/// - Changing to another service without giving its key is refused, and nothing changes.
+/// - Going back to Anthropic without a key removes a key that belonged to another service.
+pub async fn set_provider(state: &AppState, store: &dyn KeyStore, base_url: Option<&str>, key: Option<&str>) -> anyhow::Result<ProviderSaved> {
+    if crate::settings::read_only() { return Err(crate::tr::err("newer_settings", &[])); }
+    let url = base_url.map(str::trim).filter(|u| !u.is_empty());
+    if let Some(u) = url { crate::settings::check_base_url(u)?; }
+    let key = key.map(str::trim).filter(|k| !k.is_empty());
+    let mut s = state.settings.write().await;
+    let cur = s.ai.claude.clone();
+    let moved = destination(cur.base_url.as_deref()) != destination(url);
+    let keeps_key = cur.has_api_token && !moved;
+    if destination(url).is_some() && key.is_none() && !keeps_key { return Err(crate::tr::err("provider.key_needed", &[])); }
+    let drops_old_key = key.is_none() && cur.has_api_token && moved;
+    // The change is made on a copy, saved, and only then swapped in, so a refused save leaves
+    // memory and disk agreeing.
+    let mut next = s.clone();
+    next.ai.claude.base_url = url.map(String::from);
+    next.ai.claude.has_api_token = key.is_some() || keeps_key;
+    // A new key goes into the password store before the settings say it is there…
+    if let Some(k) = key { store.set(k)?; }
+    if let Err(e) = next.save() {
+        // …and comes out again when they could not be saved, unless it only replaced the key of the
+        // same address: the settings on disk still describe the old address, and a key typed for
+        // another one must never be sent there.
+        if key.is_some() && (moved || !cur.has_api_token) { crate::log::ok_or_warn("could not remove the provider key after a failed save", store.delete()); }
+        return Err(e.into());
+    }
+    // A key that belonged to the previous address goes only once "no key" is on disk.
+    if drops_old_key { crate::log::ok_or_warn("could not remove the saved provider key", store.delete()); }
+    let provider = provider_of(&next.ai.claude);
+    *s = next;
+    drop(s);
+    state.forget_auth();
+    crate::log::info(format!("assistant provider set to {}", provider.name()));
+    Ok(ProviderSaved { provider, key_removed: drops_old_key })
+}
+
+/// Back to the Claude account: forget the address and the key.
+pub async fn clear_provider(state: &AppState, store: &dyn KeyStore) -> anyhow::Result<()> {
+    if crate::settings::read_only() { return Err(crate::tr::err("newer_settings", &[])); }
+    let mut s = state.settings.write().await;
+    let mut next = s.clone();
+    next.ai.claude.base_url = None;
+    next.ai.claude.has_api_token = false;
+    // "No key, no address" is saved first: if that is refused, the key is still there and still described.
+    next.save()?;
+    *s = next;
+    drop(s);
+    crate::log::ok_or_warn("could not remove the saved provider key", store.delete());
+    state.forget_auth();
+    crate::log::info("assistant provider removed; using the Claude account");
+    Ok(())
+}
+
+/// What to tell the user when the provider (not the Claude account) refuses the saved key.
+pub fn key_refused_text() -> String { crate::tr::text("provider.key_refused", &[]) }
 
 /// The sentence shown when a run is refused for lack of a sign-in, in the user's language.
 pub fn signed_out_text() -> String {
@@ -170,7 +333,14 @@ pub fn signed_out_text() -> String {
 /// Ask before a chat message is sent, so a missing sign-in is said plainly up front instead of
 /// surfacing as a failed answer. A "yes" is remembered for `AUTH_TTL`; "cannot tell" lets the run go.
 pub async fn require_signed_in(state: &AppState) -> anyhow::Result<()> {
-    if state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).is_some() || own_provider(state).await { return Ok(()); }
+    match provider_of(&state.settings.read().await.ai.claude) {
+        // An address without a key: said now, before the message is saved, not as a failed answer.
+        Provider::Incomplete => return Err(crate::tr::err("provider.incomplete", &[])),
+        // Paid with a key: whether the Claude account is signed in does not matter.
+        Provider::AnthropicKey | Provider::Service(_) => return Ok(()),
+        Provider::Account => {}
+    }
+    if state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).is_some() { return Ok(()); }
     let fresh = state.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()).map_or(false, |at| at.elapsed() < AUTH_TTL);
     if fresh { return Ok(()); }
     let bin = binary(state).await.ok_or_else(|| crate::tr::err("assistant.missing", &[]))?;
@@ -185,13 +355,19 @@ pub async fn require_signed_in(state: &AppState) -> anyhow::Result<()> {
     }
 }
 
-/// A run failed with `text`. When that means "not signed in", remember it (so the app says so
-/// everywhere) and return the plain sentence to show instead of the CLI's own.
-async fn auth_failure(state: &AppState, text: &str) -> Option<String> {
-    if !is_auth_failure(text) || own_provider(state).await { return None; }
+/// A run failed with `text`. When that means the credentials were refused, return the plain
+/// sentence to show instead of the CLI's own, and the code the chat marks the message with:
+/// `signedOut` for the Claude account (remembered, so the app says so everywhere), `providerKey`
+/// when the user's own key was refused (that is about the key, not the account).
+async fn auth_failure(state: &AppState, text: &str) -> Option<(String, &'static str)> {
+    if !is_auth_failure(text) { return None; }
+    if provider_of(&state.settings.read().await.ai.claude).uses_key() {
+        crate::log::warn("the assistant refused a run: the service did not accept the saved key");
+        return Some((key_refused_text(), "providerKey"));
+    }
     crate::log::warn("the assistant refused a run: not signed in, or the sign-in has expired");
     state.note_auth_failed();
-    Some(signed_out_text())
+    Some((signed_out_text(), "signedOut"))
 }
 
 /// Pull the choices for a flag out of `claude --help`, so the UI never ships a
@@ -268,20 +444,6 @@ fn paren_list(block: &str) -> Vec<String> {
 fn quoted(block: &str) -> Vec<String> {
     let re = regex::Regex::new(r"'([A-Za-z0-9._\-\[\]]+)'").unwrap();
     re.captures_iter(block).map(|c| c[1].to_string()).collect()
-}
-
-async fn provider_env(state: &AppState, c: &mut Command) {
-    let s = state.settings.read().await.ai.claude.clone();
-    if let Some(url) = s.base_url.filter(|u| !u.is_empty()) {
-        // Never hand a token to an address that would not pass settings validation.
-        if crate::settings::check_base_url(&url).is_err() { return; }
-        c.env("ANTHROPIC_BASE_URL", url);
-        // The token belongs to the address it was saved for: `has_api_token` is cleared whenever the address changes.
-        if !s.has_api_token { return; }
-        if let Some(tok) = crate::secrets::get("thoughts-ai", "claude") {
-            c.env("ANTHROPIC_AUTH_TOKEN", tok);
-        }
-    }
 }
 
 pub struct RunSpec {
@@ -582,6 +744,8 @@ pub async fn start_run(
         }
         crate::trust::require(dir)?;
     }
+    // Who pays for this run. An address without a key stops here: nothing is recorded, nothing starts.
+    let provider = provider_env(&state).await?;
     let kind = state.chats.with(&spec.chat_id, |c| c.kind.clone()).await.unwrap_or_default();
     // Every run gets an explicit mode. A run that names none uses the app's own default (accept
     // edits), never Claude Code's: that one comes from the user's or the folder's own settings and
@@ -661,7 +825,7 @@ pub async fn start_run(
     let rules = match (&rules_file, &deny) { (Some(f), _) => Some(Passed::File(f)), (None, Some(d)) => Some(Passed::Inline(d)), (None, None) => None };
     let system = match &sys_file { Some(f) => Passed::File(f), None => Passed::Inline(&sys) };
     c.current_dir(&spec.cwd).args(run_args(&spec.options, &mode, budget.as_deref(), spec.resume.as_deref(), &spec.add_dirs, rules, system));
-    provider_env(&state, &mut c).await;
+    provider.apply(&mut c);
     c.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -835,9 +999,9 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
 /// marked (`tool.code = "signedOut"`) so the chat can offer to sign in; the CLI's text is kept as detail.
 async fn error_msg(state: &AppState, text: &str) -> Msg {
     match auth_failure(state, text).await {
-        Some(plain) => {
+        Some((plain, code)) => {
             let mut m = Msg::new("error", plain);
-            m.tool = Some(json!({"code": "signedOut", "detail": text.chars().take(600).collect::<String>()}));
+            m.tool = Some(json!({"code": code, "detail": text.chars().take(600).collect::<String>()}));
             m
         }
         None => Msg::new("error", text),
@@ -853,12 +1017,13 @@ fn tool_label(name: &str, input: &Value) -> String {
 
 /// One-shot, tool-less completion (used for mini-wraps and titles).
 pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> anyhow::Result<String> {
+    let provider = provider_env(state).await?;
     let bin = binary(state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     crate::settings::check_cli_value("model", model.as_deref())?;
     let mut c = cmd(&bin);
     c.current_dir(crate::paths::home())
         .args(one_shot_args(model.as_deref(), language_note(&state.settings.read().await.language)));
-    provider_env(state, &mut c).await;
+    provider.apply(&mut c);
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = c.spawn()?;
     let pid = child.id();
@@ -1038,9 +1203,124 @@ mod tests {
         let m = error_msg(&st, "API Error: 529 Overloaded").await;
         assert!(m.tool.is_none() && m.text.contains("529"));
         assert!(!st.auth_failed.load(std::sync::atomic::Ordering::Relaxed));
-        // With the user's own provider key, a refusal is about that key, not the Claude account.
+        // With the user's own provider key, a refusal is about that key, not the Claude account:
+        // said in plain words, and the app does not start asking the user to sign in.
         st.settings.write().await.ai.claude.has_api_token = true;
-        assert!(error_msg(&st, "Invalid API key").await.tool.is_none());
+        let m = error_msg(&st, "Invalid API key").await;
+        assert_eq!(m.tool.as_ref().unwrap()["code"], "providerKey");
+        assert!(m.text.contains("key") && !m.text.contains("Invalid API key"), "{}", m.text);
+        assert!(!st.auth_failed.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    fn claude_settings(url: Option<&str>, key: bool) -> crate::settings::ClaudeSettings {
+        crate::settings::ClaudeSettings { base_url: url.map(String::from), has_api_token: key, ..Default::default() }
+    }
+
+    #[test]
+    fn a_key_is_sent_the_way_its_destination_takes_it_and_an_address_alone_never_runs() {
+        let env = |url: Option<&str>, has: bool| provider_env_for(&provider_of(&claude_settings(url, has)), has.then(|| "sk-test".to_string()));
+        let pair = |k: &'static str, v: &str| (k, v.to_string());
+        // No address, no key: the Claude sign-in, nothing added and nothing taken away.
+        assert_eq!(env(None, false).unwrap(), ProviderEnv::default());
+        assert_eq!(env(Some("  "), false).unwrap(), ProviderEnv::default());
+        assert_eq!(env(Some("https://api.anthropic.com"), false).unwrap(), ProviderEnv::default());
+        // An Anthropic key with no address (or Anthropic's own): X-Api-Key, to Anthropic only.
+        for url in [None, Some(""), Some("https://api.anthropic.com"), Some("https://api.anthropic.com/")] {
+            let e = env(url, true).unwrap();
+            assert_eq!(e.set, [pair("ANTHROPIC_API_KEY", "sk-test")], "{url:?}");
+            assert!(e.unset.contains(&"ANTHROPIC_AUTH_TOKEN") && e.unset.contains(&"ANTHROPIC_BASE_URL"), "{url:?}");
+        }
+        // Another service: its address and a bearer token; an Anthropic key from the environment stays home.
+        let e = env(Some("https://gateway.example.com/v1"), true).unwrap();
+        assert_eq!(e.set, [pair("ANTHROPIC_BASE_URL", "https://gateway.example.com/v1"), pair("ANTHROPIC_AUTH_TOKEN", "sk-test")]);
+        assert_eq!(e.unset, ["ANTHROPIC_API_KEY"]);
+        // An address without a key (the user's Claude sign-in would go to it), or one that is not a valid address: no run.
+        for (url, has) in [("https://gateway.example.com", false), ("http://localhost:4000", false), ("http://plain.example.com", true), ("gateway.example.com", true)] {
+            let p = provider_of(&claude_settings(Some(url), has));
+            assert_eq!(p, Provider::Incomplete, "{url}");
+            assert!(provider_env_for(&p, Some("sk-test".into())).is_err(), "{url}");
+        }
+        // The flag says a key is saved but the password store has none: say so, do not run without it.
+        assert!(provider_env_for(&Provider::AnthropicKey, None).is_err());
+        assert!(provider_env_for(&Provider::Service("https://gateway.example.com".into()), Some("  ".into())).is_err());
+        assert_eq!(provider_of(&claude_settings(Some("http://localhost:4000"), true)), Provider::Service("http://localhost:4000".into()));
+    }
+
+    #[tokio::test]
+    async fn an_address_without_a_key_is_refused_before_anything_starts() {
+        let st = Arc::new(AppState::for_test());
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        *st.run_hook.lock().unwrap() = Some(Arc::new(move |_info: RunInfo| { flag.store(true, std::sync::atomic::Ordering::SeqCst); Box::pin(async { true }) }));
+        st.settings.write().await.ai.claude.base_url = Some("https://gateway.example.com".into());
+        let chat = crate::chats::Chat::default();
+        st.chats.insert(chat.clone()).await;
+        let dir = std::env::temp_dir().join(format!("thoughts-prov-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = || RunSpec { chat_id: chat.id.clone(), prompt: "hi".into(), cwd: dir.clone(), add_dirs: vec![], options: RunOptions::default(), resume: None, append_system: None, extra_deny: vec![] };
+        let refused = |e: anyhow::Error| crate::tr::classify_in(false, &e);
+        let e = refused(require_signed_in(&st).await.unwrap_err());
+        assert_eq!(e.code, "provider_incomplete");
+        assert!(e.message.contains("key") && e.message.contains("Settings"), "{}", e.message);
+        assert_eq!(refused(start_run(st.clone(), spec(), None).await.unwrap_err()).code, "provider_incomplete");
+        assert_eq!(refused(complete(&st, "hi", None).await.unwrap_err()).code, "provider_incomplete");
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst) && !st.chats.get(&chat.id).await.unwrap().running);
+        // With the key saved for that address the same run starts, and no sign-in check is made.
+        st.settings.write().await.ai.claude.has_api_token = true;
+        require_signed_in(&st).await.unwrap();
+        start_run(st.clone(), spec(), None).await.unwrap();
+        for _ in 0..200 { if ran.load(std::sync::atomic::Ordering::SeqCst) { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A password store that lives in memory.
+    #[derive(Default)]
+    struct MemKeys(std::sync::Mutex<Option<String>>);
+    impl KeyStore for MemKeys {
+        fn get(&self) -> Option<String> { self.0.lock().unwrap().clone() }
+        fn set(&self, key: &str) -> anyhow::Result<()> { *self.0.lock().unwrap() = Some(key.into()); Ok(()) }
+        fn delete(&self) -> anyhow::Result<()> { *self.0.lock().unwrap() = None; Ok(()) }
+    }
+
+    #[tokio::test]
+    async fn the_address_and_its_key_are_saved_together_and_never_part() {
+        let st = AppState::for_test();
+        let keys = MemKeys::default();
+        let now = |st: &AppState| { let c = st.settings.try_read().unwrap().ai.claude.clone(); (c.base_url, c.has_api_token) };
+        let code = |r: anyhow::Result<ProviderSaved>| crate::tr::classify_in(false, &r.unwrap_err()).code;
+        // A key with no address: an Anthropic key, in use at once.
+        let r = set_provider(&st, &keys, None, Some(" sk-ant-1 ")).await.unwrap();
+        assert_eq!(r, ProviderSaved { provider: Provider::AnthropicKey, key_removed: false });
+        assert_eq!((now(&st), keys.get().as_deref()), ((None, true), Some("sk-ant-1")));
+        // Writing Anthropic's own address next to it is the same destination: the key stays.
+        let r = set_provider(&st, &keys, Some("https://api.anthropic.com"), None).await.unwrap();
+        assert_eq!((r.provider, r.key_removed, keys.get().as_deref()), (Provider::AnthropicKey, false, Some("sk-ant-1")));
+        // Another service without its own key: refused, and nothing changes — the Anthropic key is not sent there.
+        assert_eq!(code(set_provider(&st, &keys, Some("https://gateway.example.com"), None).await), "validation");
+        assert_eq!(code(set_provider(&st, &keys, Some("https://gateway.example.com"), Some("   ")).await), "validation");
+        assert_eq!((now(&st), keys.get().as_deref()), ((Some("https://api.anthropic.com".into()), true), Some("sk-ant-1")));
+        // Address and key in one step.
+        let r = set_provider(&st, &keys, Some(" https://gateway.example.com "), Some("gw-key")).await.unwrap();
+        assert_eq!(r.provider, Provider::Service("https://gateway.example.com".into()));
+        assert_eq!((now(&st), keys.get().as_deref()), ((Some("https://gateway.example.com".into()), true), Some("gw-key")));
+        // The same address again with no key typed: the saved key is kept.
+        let r = set_provider(&st, &keys, Some("https://gateway.example.com"), None).await.unwrap();
+        assert_eq!((r.key_removed, keys.get().as_deref()), (false, Some("gw-key")));
+        // Moving to a third address needs that address's key.
+        assert_eq!(code(set_provider(&st, &keys, Some("https://other.example.com"), None).await), "validation");
+        // An address that is not allowed is refused whatever comes with it.
+        assert!(set_provider(&st, &keys, Some("http://plain.example.com"), Some("k")).await.is_err());
+        assert_eq!(keys.get().as_deref(), Some("gw-key"));
+        // Back to Anthropic without a key: the gateway's key is removed, not reused.
+        let r = set_provider(&st, &keys, None, None).await.unwrap();
+        assert_eq!(r, ProviderSaved { provider: Provider::Account, key_removed: true });
+        assert_eq!((now(&st), keys.get()), ((None, false), None));
+        // Removing everything.
+        set_provider(&st, &keys, Some("https://gateway.example.com"), Some("gw-key")).await.unwrap();
+        clear_provider(&st, &keys).await.unwrap();
+        assert_eq!((now(&st), keys.get()), ((None, false), None));
+        assert_eq!(provider_of(&st.settings.read().await.ai.claude), Provider::Account);
     }
 
     fn flag<'a>(args: &'a [std::ffi::OsString], name: &str) -> Option<&'a str> {

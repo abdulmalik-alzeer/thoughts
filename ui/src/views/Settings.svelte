@@ -2,7 +2,7 @@
   import Icon from '../lib/Icon.svelte';
   import { onDestroy, onMount, untrack } from 'svelte';
   import { askNotify, notifState, testNotify, type NotifState } from '../lib/notifyPerm';
-  import { api, del, inTauri, post, reloadApp } from '../lib/api';
+  import { api, del, inTauri, post, put, reloadApp } from '../lib/api';
   import { a11y, app, applyTheme, go, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
   import { recheckSignIn } from '../lib/auth';
   import { isolatedKeys, tip } from '../lib/shortcuts';
@@ -100,8 +100,6 @@
     if (!String(s.libraryPath ?? '').trim()) e.libraryPath = t('set.errLibrary');
     if (!whole(s.idleMinutes)) e.idleMinutes = t('set.errWhole');
     if (!whole(s.wrapNagThreshold)) e.wrapNagThreshold = t('set.errWhole');
-    const u = String(s.ai.claude.baseUrl ?? '').trim();
-    if (u && !/^https?:\/\/\S+$/.test(u)) e.baseUrl = t('set.errUrl');
     if (permValue === '') e.permission = t('set.errPerm');
     if (isGit && cloudWords.some((k) => String(s.libraryPath ?? '').includes(k))) e.sync = t('set.errCloudGit');
     return e;
@@ -225,6 +223,7 @@
   /** Text typed into a field that only acts on its own button (a key, a backup address): not a setting, so not saved by itself. */
   const unsent = () => [
     ...(apiToken.trim() ? [t('set.apiKey')] : []),
+    ...(provUrl.trim() !== savedUrl ? [t('set.baseUrl')] : []),
     ...(remote.url.trim() || remote.username.trim() || remote.token ? [t('shellui.set.typedRemote')] : []),
   ];
 
@@ -250,11 +249,12 @@
     if (!typed.length || readOnly) return true;
     const choice = await choiceDialog({
       title: t('shellui.set.typedTitle'), body: t('shellui.set.typedBody'), list: typed, cancelLabel: t('layer.keepEditing'),
-      choices: [{ id: 'leave', label: t('shellui.set.typedLeave'), danger: true }, ...(apiToken.trim() ? [{ id: 'key', label: t('set.storeKey'), primary: true }] : [])],
+      choices: [{ id: 'leave', label: t('shellui.set.typedLeave'), danger: true }, ...(provDirty && !provErr ? [{ id: 'key', label: t('runa.prov.save'), primary: true }] : [])],
     });
-    if (choice === 'key') { await saveToken(); if (apiToken.trim()) return false; }
+    // The key and its address are one form (see saveProvider): saving stores both together.
+    if (choice === 'key') { await saveProvider(); if (provDirty) return false; }
     else if (choice !== 'leave') return false;
-    apiToken = ''; remote = { name: '', url: '', username: '', token: '' };
+    apiToken = ''; provUrl = savedUrl; remote = { name: '', url: '', username: '', token: '' };
     return true;
   }
   onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; clearTimeout(savedTimer); });
@@ -298,6 +298,7 @@
   async function syncServerFields() {
     app.settings = await api('/settings');
     s.ai.claude.hasApiToken = base.ai.claude.hasApiToken = app.settings.ai.claude.hasApiToken;
+    s.ai.claude.baseUrl = base.ai.claude.baseUrl = app.settings.ai.claude.baseUrl;
     s.modules = structuredClone($state.snapshot(app.settings.modules));
     base.modules = structuredClone($state.snapshot(app.settings.modules));
   }
@@ -307,19 +308,49 @@
   $effect(() => { const c = app.status?.claude; if (c) untrack(() => (claude = c)); });
   const signIn = () => run('login', async () => { await post('/ai/claude/login'); toast(t('set.loginToast')); });
 
-  const saveToken = () => run('token', async () => {
-    if (!apiToken.trim()) return;
-    await post('/ai/claude/token', { token: apiToken.trim() });
-    apiToken = '';
-    await syncServerFields();
-    toast(t('set.keyStored'));
+  // ----- API key or another service -----
+  // The address and its key are saved together and at once, apart from the rest of the page: the
+  // service refuses an address without its key, and never sends a key to an address it was not saved for.
+  let provUrl = $state<string>(app.settings?.ai?.claude?.baseUrl ?? '');
+  let provTest = $state<{ ok: boolean; message?: string } | null>(null);
+  const savedUrl = $derived(String(app.settings?.ai?.claude?.baseUrl ?? '').trim());
+  const hasKey = $derived(!!app.settings?.ai?.claude?.hasApiToken);
+  /** Where requests go when it is not Anthropic itself ('' for no address and for Anthropic's own). */
+  const dest = (u: string) => (!u.trim() || /^https:\/\/api\.anthropic\.com(?:[:/?#]|$)/i.test(u.trim()) ? '' : u.trim());
+  /** Who answers the assistant, as saved: the Claude account, an Anthropic key, another service, or an address with no key. */
+  const provKind = $derived(dest(savedUrl) ? (hasKey ? 'service' : 'incomplete') : hasKey ? 'anthropicKey' : 'account');
+  const provDirty = $derived(provUrl.trim() !== savedUrl || !!apiToken.trim());
+  const provErr = $derived.by(() => {
+    const u = provUrl.trim();
+    if (u && !/^https?:\/\/\S+$/.test(u)) return t('set.errUrl');
+    if (provDirty && dest(u) && !apiToken.trim() && !(hasKey && dest(savedUrl) === dest(u))) return t('runa.prov.needKey');
+    return '';
   });
 
-  async function clearToken() {
-    if (!s.ai.claude.hasApiToken) return;
-    if (!(await confirmDialog({ title: t('set.clearKeyTitle'), body: t('set.clearKeyBody'), confirmLabel: t('set.clearKey'), danger: true }))) return;
-    await run('token', async () => { await post('/ai/claude/token', { token: '' }); await syncServerFields(); toast(t('set.keyCleared')); });
+  const saveProvider = () => run('token', async () => {
+    if (provErr || !provDirty) return;
+    const r = await put('/ai/claude/provider', { baseUrl: provUrl.trim() || null, token: apiToken.trim() || null });
+    apiToken = ''; provTest = null;
+    await syncServerFields();
+    provUrl = app.settings.ai.claude.baseUrl ?? '';
+    refreshClaude();
+    toast(t('runa.prov.saved.' + r.provider) + (r.keyRemoved ? ' ' + t('runa.prov.oldKeyRemoved') : ''), { kind: 'success' });
+  });
+
+  async function removeProvider() {
+    if (provKind === 'account') return;
+    if (!(await confirmDialog({ title: t('runa.prov.removeTitle'), body: t('runa.prov.removeBody'), confirmLabel: t('runa.prov.remove'), danger: true }))) return;
+    await run('token', async () => {
+      await del('/ai/claude/provider');
+      apiToken = ''; provTest = null;
+      await syncServerFields();
+      provUrl = '';
+      refreshClaude();
+      toast(t('runa.prov.removed'));
+    });
   }
+
+  const testProvider = () => run('provtest', async () => { provTest = null; provTest = await post('/ai/claude/provider/test'); });
 
   async function browseLibrary() {
     try {
@@ -487,7 +518,11 @@
       {#if vis(c, 'set.account')}
         <h3>{t('set.account')}</h3>
         <div class="row wrap">
-          {#if claude.installed}
+          {#if claude.installed && (provKind === 'anthropicKey' || provKind === 'service')}
+            <span class="pill accent">{t('runa.acct.' + provKind)}</span>
+          {:else if claude.installed && provKind === 'incomplete'}
+            <span class="pill">{t('runa.acct.incomplete')}</span>
+          {:else if claude.installed}
             <span class="pill" class:accent={claude.loggedIn}>{t(claude.loggedIn ? 'set.signedIn' : 'set.notSignedIn')}</span>
             {#if !claude.loggedIn}<button type="button" class="btn primary" disabled={busy.login} onclick={signIn}>{t('set.signIn')}</button>{/if}
           {:else}
@@ -496,7 +531,7 @@
           {/if}
           <button type="button" class="btn ghost" disabled={busy.claude} aria-busy={busy.claude} onclick={refreshClaude}><Icon name="sync" size={14} /> {busy.claude ? t('set.checking') : t('set.checkAgain')}</button>
         </div>
-        <p class="muted sm">{t('set.accountHint')}</p>
+        <p class="muted sm">{t(provKind === 'incomplete' ? 'runa.acct.incompleteHint' : provKind === 'account' ? 'set.accountHint' : 'runa.acct.keyHint')}</p>
       {/if}
       {#if vis(c, 'set.perm')}
         <fieldset class="perm" aria-describedby={errors.permission ? 'st-err-permission' : undefined}>
@@ -547,16 +582,19 @@
         {/if}
         {#if vis(c, 'set.provider', 'set.baseUrl', 'set.apiKey')}
           <h3>{t('set.provider')}</h3>
-          <p class="muted sm">{t('set.providerHint')}</p>
+          <p class="muted sm">{t('set.providerHint')} {t('runa.prov.how')}</p>
           <label for="st-base">{t('set.baseUrl')}</label>
-          <input id="st-base" dir="ltr" bind:value={s.ai.claude.baseUrl} placeholder="https://api.anthropic.com" aria-invalid={!!errors.baseUrl} autocomplete="off" />
-          {@render err('baseUrl')}
-          <label for="st-key">{t('set.apiKey')} {#if s.ai.claude.hasApiToken}<span class="pill accent">{t('set.keyOn')}</span>{/if}</label>
-          <div class="row wrap">
-            <input id="st-key" dir="ltr" type="password" class="grow" bind:value={apiToken} placeholder="sk-…" autocomplete="off" />
-            <button type="button" class="btn" disabled={!apiToken.trim() || busy.token} onclick={saveToken}>{t('set.storeKey')}</button>
-            <button type="button" class="btn danger" disabled={!s.ai.claude.hasApiToken || busy.token} onclick={clearToken}>{t('set.clearKey')}</button>
+          <input id="st-base" dir="ltr" bind:value={provUrl} placeholder="https://api.anthropic.com" aria-invalid={!!provErr} aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly} />
+          <label for="st-key">{t('set.apiKey')} {#if hasKey}<span class="pill accent">{t('set.keyOn')}</span>{/if}</label>
+          <input id="st-key" dir="ltr" type="password" bind:value={apiToken} placeholder="sk-…" aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly} />
+          {#if provErr}<p class="err" id="st-err-provider" role="alert">{provErr}</p>{/if}
+          <div class="row wrap gap-top">
+            <button type="button" class="btn primary" disabled={!provDirty || !!provErr || busy.token || readOnly} aria-busy={busy.token} onclick={saveProvider}>{t('runa.prov.save')}</button>
+            <button type="button" class="btn" disabled={provDirty || !(provKind === 'anthropicKey' || provKind === 'service') || busy.provtest} aria-busy={busy.provtest} onclick={testProvider}>{busy.provtest ? t('runa.prov.testing') : t('runa.prov.test')}</button>
+            <button type="button" class="btn danger" disabled={provKind === 'account' || busy.token || readOnly} onclick={removeProvider}>{t('runa.prov.remove')}</button>
           </div>
+          {#if provTest}<p class="sm" class:err={!provTest.ok} role="status" dir="auto">{provTest.ok ? t('runa.prov.testOk') : provTest.message}</p>{/if}
+          <p class="muted sm">{t('runa.prov.testHint')}</p>
           <p class="muted sm">{t('set.apiKeyHint')}</p>
         {/if}
       </details>

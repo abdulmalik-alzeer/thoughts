@@ -23,7 +23,11 @@ claude auth login
 ```
 
 > Using an API key or another Anthropic-compatible provider (OpenRouter, DeepSeek, a local
-> gateway…)? Skip the login and enter the base URL and token during onboarding instead.
+> gateway…)? Skip the login and enter the key during onboarding instead (or later under
+> Settings › Assistant). A key from Anthropic needs no address and is sent as `ANTHROPIC_API_KEY`;
+> for another service enter its address too, and the key is sent there as `ANTHROPIC_AUTH_TOKEN`.
+> The address and its key are saved together: an address without a key never runs, because Claude
+> Code would send your Claude sign-in to it.
 
 ### 2. Get the code
 

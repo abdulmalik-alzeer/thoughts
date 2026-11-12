@@ -116,6 +116,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/modules/:id/disable", post(disable_module))
         .route("/api/ai/claude/options", get(claude_options))
         .route("/api/ai/claude/token", post(save_ai_token))
+        .route("/api/ai/claude/provider", axum::routing::put(save_provider).delete(remove_provider))
+        .route("/api/ai/claude/provider/test", post(test_provider))
         .route("/api/ai/claude/login", post(claude_login))
         .route("/api/ai/claude/recheck", post(claude_recheck))
         .route("/api/git/install", post(git_install))
@@ -477,11 +479,6 @@ fn validate(s: &Settings) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Remove the stored provider token. Missing is fine; anything else is an error worth surfacing.
-fn forget_api_token() -> anyhow::Result<()> {
-    crate::secrets::delete("thoughts-ai", "claude")
-}
-
 async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Json(mut new): Json<Settings>) -> R {
     // Settings written by a newer version of the app are never rewritten by this one.
     if crate::settings::read_only() || st.settings_newer.load(std::sync::atomic::Ordering::Relaxed) {
@@ -503,8 +500,9 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
             new.library_path = None;
         }
     }
-    // Everything the client sent is validated; server-owned fields are put back.
-    let url_changed = new.sanitize_update(&old)?;
+    // Everything the client sent is validated; server-owned fields are put back (the provider
+    // address and its key among them: those change through PUT /api/ai/claude/provider only).
+    new.sanitize_update(&old)?;
     // Making "bypass permissions" the default for new chats needs the user's yes (the dialog in Settings).
     if crate::settings::bypass_needs_confirm(old.ai.claude.permission_mode.as_deref(), new.ai.claude.permission_mode.as_deref())
         && q.get("confirm").map(String::as_str) != Some(crate::settings::BYPASS_CONFIRM) {
@@ -521,12 +519,6 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     crate::tr::set_language(&new.language);
     *cur = new.clone();
     drop(cur);
-    if url_changed && old.ai.claude.has_api_token {
-        // A token saved for one provider address must never reach another. Removed only once the
-        // settings saying "no key" are on disk; the run code also refuses to send it while
-        // `hasApiToken` is false, so a keychain hiccup here is not a leak.
-        crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token());
-    }
     st.emit(json!({"type": "settings.changed"}));
     Ok(Json(serde_json::to_value(new)?))
 }
@@ -788,9 +780,16 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     if !o.profession.trim().is_empty() { s.profession = Some(o.profession.clone()); }
     s.library_path = Some(path.to_string_lossy().to_string());
     validate(&s)?;
-    // Same server-side validation as PUT /api/settings.
+    // Same server-side validation as PUT /api/settings. The provider (address and key) is set
+    // further down, the two together.
+    let wanted_url = s.ai.claude.base_url.take();
     let old = st.settings.read().await.clone();
-    if s.sanitize_update(&old)? && old.ai.claude.has_api_token { crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token()); }
+    s.sanitize_update(&old)?;
+    if let Some(u) = wanted_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
+        crate::settings::check_base_url(u)?;
+        // Another service is only set up together with its key.
+        if claude::destination(Some(u)).is_some() && o.api_token.trim().is_empty() { return Err(crate::tr::err("provider.key_needed", &[]).into()); }
+    }
     // Setup has no warning dialog, so it can never switch "bypass permissions" on (same rule as PUT /api/settings).
     if crate::settings::bypass_needs_confirm(old.ai.claude.permission_mode.as_deref(), s.ai.claude.permission_mode.as_deref()) {
         return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
@@ -822,9 +821,16 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
             }
         }
     }
-    if !o.api_token.is_empty() {
-        crate::secrets::set("thoughts-ai", "claude", &o.api_token)?;
-        s.ai.claude.has_api_token = true;
+    // The provider exactly as the form has it: an address and a key together, a key alone (an
+    // Anthropic key), or neither (the Claude account). Saved before setup is marked as done, so a
+    // key that cannot be stored stops here.
+    let key = Some(o.api_token.trim()).filter(|k| !k.is_empty());
+    if key.is_some() || wanted_url.is_some() || s.ai.claude.has_api_token || s.ai.claude.base_url.is_some() {
+        if key.is_none() && claude::destination(wanted_url.as_deref()).is_none() { claude::clear_provider(&st, &claude::Keychain).await?; }
+        else { claude::set_provider(&st, &claude::Keychain, wanted_url.as_deref(), key).await?; }
+        let now = st.settings.read().await.ai.claude.clone();
+        s.ai.claude.base_url = now.base_url;
+        s.ai.claude.has_api_token = now.has_api_token;
     }
     if s.daemon.run_at_login { login_item(true)?; }
     s.onboarded = true;
@@ -933,24 +939,50 @@ async fn claude_options(State(st): S) -> R { Ok(Json(claude::options(&st).await)
 
 #[derive(Deserialize)]
 struct Token { token: String }
+/// The older way to save or remove the key on its own: a key for the address already set.
+/// Removing the key of another service removes its address too (an address alone never runs).
 async fn save_ai_token(State(st): S, Json(t): Json<Token>) -> R {
-    let mut s = st.settings.write().await;
-    if t.token.is_empty() {
-        // "No key" is saved first: if that is refused, the key is still there and still described.
-        change_settings(&mut s, Settings::save, |s| s.ai.claude.has_api_token = false)?;
-        crate::log::ok_or_warn("could not remove the saved provider token", forget_api_token());
-    } else {
-        let had = s.ai.claude.has_api_token;
-        crate::secrets::set("thoughts-ai", "claude", &t.token)?;
-        if let Err(e) = change_settings(&mut s, Settings::save, |s| s.ai.claude.has_api_token = true) {
-            // The settings still say there is no key: do not leave one behind that nothing knows of.
-            if !had { crate::log::ok_or_warn("could not remove the provider token after a failed save", forget_api_token()); }
-            return Err(e.into());
+    let url = st.settings.read().await.ai.claude.base_url.clone();
+    if t.token.trim().is_empty() { claude::clear_provider(&st, &claude::Keychain).await?; }
+    else { claude::set_provider(&st, &claude::Keychain, url.as_deref(), Some(&t.token)).await?; }
+    st.emit(json!({"type": "settings.changed"}));
+    ok()
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct ProviderBody { base_url: Option<String>, token: Option<String> }
+/// Set who answers the assistant: a service address and its key, saved together (see `claude::set_provider`).
+async fn save_provider(State(st): S, Json(b): Json<ProviderBody>) -> R {
+    let saved = claude::set_provider(&st, &claude::Keychain, b.base_url.as_deref(), b.token.as_deref()).await?;
+    st.emit(json!({"type": "settings.changed"}));
+    Ok(Json(json!({"ok": true, "provider": saved.provider.name(), "keyRemoved": saved.key_removed})))
+}
+
+/// Forget the address and the key: the assistant uses the Claude account again.
+async fn remove_provider(State(st): S) -> R {
+    claude::clear_provider(&st, &claude::Keychain).await?;
+    st.emit(json!({"type": "settings.changed"}));
+    Ok(Json(json!({"ok": true, "provider": "account"})))
+}
+
+/// Send one very short message through the provider as it is set up now, so a wrong key or
+/// address shows here instead of inside the first chat. `{ok, refused, message}`.
+async fn test_provider(State(st): S) -> R {
+    let model = st.settings.read().await.ai.claude.mini_wrap_model.clone().or(Some("haiku".into()));
+    Ok(Json(provider_test_result(claude::complete(&st, "Reply with the single word OK.", model).await)))
+}
+
+/// What the provider test reports: plain words when the key was refused, the service's own words otherwise.
+fn provider_test_result(r: anyhow::Result<String>) -> Value {
+    match r {
+        Ok(_) => json!({"ok": true}),
+        Err(e) => {
+            let shown = crate::tr::classify(&e);
+            if claude::is_auth_failure(&e.to_string()) { json!({"ok": false, "refused": true, "message": claude::key_refused_text()}) }
+            else { json!({"ok": false, "refused": false, "message": shown.message}) }
         }
     }
-    drop(s);
-    st.forget_auth();
-    ok()
 }
 
 /// Opens Claude Code's browser login flow.
@@ -2236,6 +2268,21 @@ mod tests {
         chat_patch(State(st.clone()), Path(id.clone()), Json(patch)).await.unwrap();
         let c = st.chats.get(&id).await.unwrap();
         assert_eq!((c.options.permission_mode.as_deref(), c.options.model.as_deref()), (Some("plan"), Some("opus")));
+    }
+
+    #[test]
+    fn the_provider_test_says_plainly_when_the_key_was_refused() {
+        assert_eq!(provider_test_result(Ok("OK".into())), json!({"ok": true}));
+        let refused = provider_test_result(Err(anyhow::Error::msg(r#"API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}"#)));
+        assert_eq!((refused["ok"].as_bool(), refused["refused"].as_bool()), (Some(false), Some(true)));
+        assert!(refused["message"].as_str().unwrap().contains("did not accept the saved key"), "{refused}");
+        let other = provider_test_result(Err(anyhow::anyhow!("API Error: 529 Overloaded")));
+        assert_eq!((other["ok"].as_bool(), other["refused"].as_bool()), (Some(false), Some(false)));
+        assert!(other["message"].as_str().unwrap().contains("529"));
+        // An address without a key is explained, not reported as a refused key.
+        let none = provider_test_result(Err(crate::tr::err("provider.incomplete", &[])));
+        assert_eq!(none["refused"].as_bool(), Some(false));
+        assert!(none["message"].as_str().unwrap().contains("without a key"));
     }
 
     #[test]

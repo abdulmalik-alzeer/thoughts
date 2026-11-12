@@ -137,7 +137,10 @@ pub fn check_cli_value(what: &str, v: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// `https://…` anywhere, or plain `http://` only for this machine (localhost / 127.0.0.1).
-pub fn check_base_url(url: &str) -> anyhow::Result<()> {
+pub fn check_base_url(url: &str) -> anyhow::Result<()> { base_url_host(url).map(|_| ()) }
+
+/// The host of a provider address that passes validation.
+fn base_url_host(url: &str) -> anyhow::Result<&str> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) { anyhow::bail!("the provider address may not contain spaces"); }
     let (https, rest) = if let Some(r) = url.strip_prefix("https://") { (true, r) }
         else if let Some(r) = url.strip_prefix("http://") { (false, r) }
@@ -149,7 +152,13 @@ pub fn check_base_url(url: &str) -> anyhow::Result<()> {
     if !https && host != "localhost" && host != "127.0.0.1" {
         anyhow::bail!("the provider address must use https:// (http:// is only allowed for localhost)");
     }
-    Ok(())
+    Ok(host)
+}
+
+/// Is this Anthropic's own API address (with or without a path)? Naming it is the same as naming
+/// no address at all: requests go where Claude Code sends them anyway.
+pub fn is_anthropic_url(url: &str) -> bool {
+    url.starts_with("https://") && base_url_host(url).map_or(false, |h| h.eq_ignore_ascii_case("api.anthropic.com"))
 }
 
 fn none_if_blank(v: &mut Option<String>) {
@@ -175,8 +184,10 @@ pub struct ClaudeSettings {
     pub permission_mode: Option<String>,
     /// Model used for cheap mini-wraps.
     pub mini_wrap_model: Option<String>,
-    /// Anthropic-compatible provider (sets ANTHROPIC_BASE_URL). Token lives in the keychain.
+    /// Address of an Anthropic-compatible service; None = Anthropic itself. Server-owned, like
+    /// `has_api_token`: the two change together, through `claude::set_provider` only.
     pub base_url: Option<String>,
+    /// A key for that address is saved in the password store (never in this file).
     pub has_api_token: bool,
 }
 
@@ -415,14 +426,17 @@ impl Settings {
     }
 
     /// Validate settings sent by a client against the current ones, and put back every
-    /// server-owned field. Returns `true` when the provider address changed — the caller must
-    /// then forget the stored API token so it can never be sent to the new address.
-    pub fn sanitize_update(&mut self, old: &Settings) -> anyhow::Result<bool> {
+    /// server-owned field.
+    pub fn sanitize_update(&mut self, old: &Settings) -> anyhow::Result<()> {
         // Server-owned.
         self.schema_version = SCHEMA_VERSION;
         self.last_wrap = old.last_wrap;
         self.projects = old.projects.clone(); // projects change only through the project endpoints
+        // The provider address and its key belong together and change only through
+        // `claude::set_provider`. A general save can therefore never drop a saved key, and never
+        // leave an address behind without one.
         self.ai.claude.has_api_token = old.ai.claude.has_api_token;
+        self.ai.claude.base_url = old.ai.claude.base_url.clone();
 
         let c = &mut self.ai.claude;
         for v in [&mut c.binary, &mut c.base_url, &mut c.model, &mut c.effort, &mut c.permission_mode, &mut c.mini_wrap_model] { none_if_blank(v); }
@@ -439,10 +453,6 @@ impl Settings {
             if !p.is_absolute() || !named_claude { anyhow::bail!("the assistant program must be a full path to a file named claude"); }
             if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) { anyhow::bail!("the assistant program was not found at {b}"); }
         }
-        let old_url = old.ai.claude.base_url.as_deref().filter(|u| !u.trim().is_empty());
-        let url_changed = c.base_url.as_deref() != old_url;
-        if let Some(u) = &c.base_url { check_base_url(u)?; }
-        if url_changed { c.has_api_token = false; }
 
         if self.search.extension_repo.trim().is_empty() { self.search.extension_repo = DEFAULT_EXTENSION_REPO.into(); }
         let repo = &self.search.extension_repo;
@@ -464,7 +474,7 @@ impl Settings {
         if !["en", "ar"].contains(&self.language.as_str()) { self.language = old.language.clone(); }
         // Zero is "unset" for these (a client that sent a partial object): fill them like a loaded file.
         *self = std::mem::take(self).with_defaults();
-        Ok(url_changed)
+        Ok(())
     }
 
     pub fn library(&self) -> Option<std::path::PathBuf> {
@@ -548,6 +558,13 @@ mod tests {
         for bad in ["http://api.example.com", "http://localhost.evil.com", "http://localhost@evil.com", "ftp://x", "https://", "https://a b", "api.example.com"] {
             assert!(check_base_url(bad).is_err(), "{bad}");
         }
+        for own in ["https://api.anthropic.com", "https://api.anthropic.com/", "https://API.Anthropic.com/v1", "https://api.anthropic.com:443"] {
+            assert!(is_anthropic_url(own), "{own}");
+        }
+        for other in ["https://api.anthropic.com.evil.example", "https://evil.example/api.anthropic.com", "http://api.anthropic.com", "https://anthropic.com",
+                      "https://user@api.anthropic.com", "https://gateway.example.com", ""] {
+            assert!(!is_anthropic_url(other), "{other}");
+        }
     }
 
     #[test]
@@ -557,25 +574,31 @@ mod tests {
         old.ai.claude.has_api_token = true;
         old.ai.claude.base_url = Some("https://a.example.com".into());
 
-        // Unchanged address keeps the token; projects cannot be replaced.
+        // Projects cannot be replaced; the key flag cannot be set or cleared.
         let mut new = old.clone();
         new.projects.clear();
         new.schema_version = 99;
         new.private_paths = vec!["me/finances/".into(), "./me/finances".into(), " ".into()];
-        assert!(!new.sanitize_update(&old).unwrap());
+        new.ai.claude.has_api_token = false;
+        new.sanitize_update(&old).unwrap();
         assert!(new.ai.claude.has_api_token);
         assert_eq!(new.projects.len(), 1);
         assert_eq!(new.schema_version, SCHEMA_VERSION);
         assert_eq!(new.private_paths, ["me/finances"]);
 
-        // A changed address drops the token flag.
-        let mut new = old.clone();
-        new.ai.claude.base_url = Some("https://b.example.com".into());
-        assert!(new.sanitize_update(&old).unwrap());
-        assert!(!new.ai.claude.has_api_token);
+        // A general save never moves the provider address, and so never separates it from its key:
+        // whatever the request says (another address, none, nonsense), both stay as they were.
+        for sent in [Some("https://b.example.com"), None, Some(""), Some("http://evil.example.com"), Some("not an address")] {
+            let mut new = old.clone();
+            new.ai.claude.base_url = sent.map(String::from);
+            new.user_name = "Sara".into();
+            new.sanitize_update(&old).unwrap();
+            assert_eq!(new.ai.claude.base_url.as_deref(), Some("https://a.example.com"), "{sent:?}");
+            assert!(new.ai.claude.has_api_token, "{sent:?}");
+            assert_eq!(new.user_name, "Sara");
+        }
 
         let bad = |f: &dyn Fn(&mut Settings)| { let mut n = old.clone(); f(&mut n); n.sanitize_update(&old).is_err() };
-        assert!(bad(&|n| n.ai.claude.base_url = Some("http://evil.example.com".into())));
         assert!(bad(&|n| n.ai.claude.permission_mode = Some("dontAsk".into())));
         assert!(bad(&|n| n.search.extension_repo = "ssh://evil/repo".into()));
         assert!(bad(&|n| n.search.extension_repo = "--upload-pack=evil".into()));
