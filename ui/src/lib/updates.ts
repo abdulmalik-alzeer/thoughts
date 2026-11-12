@@ -1,5 +1,5 @@
 // App updates (the native updater in the shell) and updates to the shipped customisation defaults.
-import { api, inTauri, post } from './api';
+import { api, inTauri, on, post } from './api';
 import { app, go, toast } from './store.svelte';
 import { choiceDialog, confirmDialog } from './dialog.svelte';
 import { t, tn } from './i18n';
@@ -56,7 +56,10 @@ export async function checkLayerUpdates() {
     seen.set(key);
     toast(tn('layer.upd.applied', applied.length), { key: 'upd-applied', detail: applied.join('\n') });
   }
-  for (const c of (Array.isArray(s?.conflicts) ? s.conflicts : []) as { path: string }[]) {
+  for (const c of (Array.isArray(s?.conflicts) ? s.conflicts : []) as { path: string; merging?: boolean }[]) {
+    // The assistant is preparing a merged version, or it is waiting for review: the question is
+    // answered by keeping that review. If the merge fails or is discarded, it is asked again.
+    if (c.merging) continue;
     const choice = await choiceDialog({
       title: t('layer.upd.conflictTitle'), body: t('layer.upd.conflictBody'), list: [c.path], note: t('layer.upd.conflictNote'),
       choices: [
@@ -71,6 +74,15 @@ export async function checkLayerUpdates() {
       if (choice === 'merge') {
         toast(t('layer.upd.merging'), { key: 'upd', action: r?.chatId ? { label: t('layer.watch'), run: () => go({ kind: 'chat', id: r.chatId }) } : undefined });
         checkPending(false);
+        // The question stays open until the merged version is kept. If the assistant ends without
+        // leaving anything to review, ask again (a result that is waiting is asked about in its review).
+        if (r?.chatId) {
+          const off = on((e) => {
+            if (e.type !== 'chat.done' || e.chatId !== r.chatId) return;
+            off();
+            setTimeout(() => { checkLayerUpdates(); }, 1500);
+          });
+        }
       }
     } catch (e: any) { toast(t('layer.upd.resolveFailed'), { kind: 'error', detail: e?.message ?? String(e) }); return; }
   }

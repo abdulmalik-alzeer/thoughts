@@ -52,6 +52,15 @@
     exported(r);
   });
 
+  /** A pack's own words (its name, its description) as one plain line: no hidden text, nothing that
+   *  reorders it, no quotation marks that could end the quotation it is shown in. (The review that
+   *  follows shows the service's stricter reading, with anything invisible written out.) */
+  function packWords(v: unknown, max: number): string {
+    return String(v ?? '')
+      .replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u180e\u200b\u2028-\u202e\u2060-\u206f\ufeff]|[\u{e0000}-\u{e0fff}]/gu, ' ')
+      .replace(/["“”«»]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
+  }
+
   function pick(e: Event) {
     const el = e.target as HTMLInputElement;
     const f = el.files?.[0];
@@ -60,10 +69,12 @@
     run('import', 'layer.importFailed', async () => {
       const r = await readPack(f);
       if (r.unsupported) { toast(t('layer3.packNewer'), { kind: 'error' }); return; }
-      // Say what the pack is before anything is staged; the full review still follows.
+      // Say what the pack is before anything is staged; the full review still follows. What the
+      // pack says about itself comes last and in quotation marks: it is its maker's claim, not the app's.
+      const [name, says] = [packWords(r.name, 80), packWords(r.description, 400)];
       const ok = await confirmDialog({
-        title: r.name ? `${t('layer3.importTitle')} ${r.name}` : t('layer3.importTitle'),
-        body: [r.description, t(r.kind === 'feature' ? 'layer3.importFeature' : 'layer3.importFull'), tn('layer3.importFiles', r.files.length)].filter(Boolean).join('\n\n'),
+        title: name ? `${t('layer3.importTitle')} “${name}”` : t('layer3.importTitle'),
+        body: [t(r.kind === 'feature' ? 'layer3.importFeature' : 'layer3.importFull'), tn('layer3.importFiles', r.files.length), says ? `${t('lda.packSaysIntro')}\n“${says}”` : ''].filter(Boolean).join('\n\n'),
         list: r.files.slice(0, 30),
         note: t('layer3.importNote'),
         confirmLabel: t('layer3.importGo'),

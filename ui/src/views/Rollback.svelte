@@ -17,15 +17,39 @@
   let loading = $state(true);
   let failed = $state('');
   let busy = $state(false);
+  // The list is read a page at a time, back to the very first entry.
+  const PAGE = 50;
+  let more = $state(false);
+  let loadingOlder = $state(false);
+  let olderFailed = $state(false);
   const close = () => (app.showRollback = false);
 
+  /** One page of entries after the `offset` newest. One extra is asked for, to know whether more exist. */
+  async function page(offset: number): Promise<any[]> {
+    const list = await api(`/layer/history?offset=${offset}&limit=${PAGE + 1}`);
+    const got = Array.isArray(list) ? list : [];
+    more = got.length > PAGE;
+    return got.slice(0, PAGE);
+  }
   async function load() {
     loading = true; failed = '';
-    try { history = await api('/layer/history'); }
+    try { history = await page(0); }
     catch (e: any) { failed = e.message; }
     finally { loading = false; }
   }
+  async function older() {
+    if (loadingOlder) return;
+    loadingOlder = true; olderFailed = false;
+    try {
+      const next = await page(history.length);
+      const have = new Set(history.map((h) => h.hash));
+      history = [...history, ...next.filter((h) => !have.has(h.hash))];
+    } catch { olderFailed = true; }
+    finally { loadingOlder = false; }
+  }
   onMount(load);
+  /** The first entry and the app's own housekeeping cannot be undone on their own (older services say nothing: allow). */
+  const canUndo = (h: any) => h?.undoable !== false;
 
   async function restore(h: any) {
     const ok = await confirmDialog({
@@ -87,12 +111,24 @@
               </details>
             {/if}
             <div class="row wrap acts">
-              <button class="btn" disabled={busy} onclick={() => undo(h)}><Icon name="undo" size={14} /> {t('layer.undoThis')}</button>
+              {#if canUndo(h)}
+                <button class="btn" disabled={busy} onclick={() => undo(h)}><Icon name="undo" size={14} /> {t('layer.undoThis')}</button>
+              {:else}
+                <span class="muted sm">{t(h.kind === 'start' ? 'lda.hist.start' : 'lda.hist.system')}</span>
+              {/if}
               {#if i > 0}<button class="btn ghost" disabled={busy} onclick={() => restore(h)}>{t('layer.goBackHere')}</button>{/if}
             </div>
           </li>
         {/each}
       </ul>
+      {#if more}
+        <p class="row wrap">
+          <button class="btn" disabled={loadingOlder || busy} aria-busy={loadingOlder} onclick={older}>{t(loadingOlder ? 'lda.hist.olderLoading' : 'lda.hist.older')}</button>
+          {#if olderFailed}<span class="muted" role="alert">{t('lda.hist.olderFailed')}</span>{/if}
+        </p>
+      {:else if history.length > PAGE}
+        <p class="muted sm">{t('lda.hist.end')}</p>
+      {/if}
     {/if}
 {/snippet}
 

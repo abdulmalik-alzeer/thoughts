@@ -44,6 +44,18 @@ Nothing you ask for is applied straight away.
 
 Thoughts checks every change before you see it. If it finds a problem, such as an add-on that does not load or a setting it does not understand, the problem is listed in the review in plain words and **Keep is switched off** until it is fixed. Tell the assistant what the review says and it will correct the same change, or choose Discard.
 
+The review also tells you, in plain words:
+
+- **How the look changes.** "Colours and style settings only" means the change sets colours, shadows and corner shapes and nothing else. If it also moves, resizes or hides things, the review says so, and it warns when a style change prints words of its own, covers parts of the app, hides something, restyles the app's own questions and warnings, or tries to load a file. A theme never needs those.
+- **If the assistant did not finish.** When it was stopped or ran into a problem, the change may be incomplete. Keep stays off until you tick a box saying you want it anyway. Discarding and asking again is the safer choice.
+- **If the change no longer fits.** If you undo something, go back to an earlier point or update the app while a change is waiting, Thoughts carries the waiting change over, so keeping it never brings back what you undid. When the two cannot be combined, the review says the change no longer fits; discard it and ask again.
+- **What a pack says about itself.** A pack's own description is shown as a quotation, marked as its maker's words. Thoughts has not checked it.
+- **Hidden characters.** Text you are asked to approve, such as what an automatic task will tell the assistant, cannot contain invisible characters. Where free text has any, they are written out like `[U+202E]` so you see them.
+
+### Changes made outside the app
+
+Only what you kept is ever loaded. If a customisation file is changed in another way (edited by hand, by another program, or by an assistant working outside its usual limits), Thoughts takes that change out before it can take effect and shows it to you as a review marked **Changed outside the app**. Keep it only if you made the change yourself or expected it. Assistant chats can read your customisations but are not allowed to write them, whatever mode they run in.
+
 If the change includes an automatic task, you are asked to approve the task separately before it can ever run.
 
 ### Permissions, in plain words
@@ -63,7 +75,7 @@ An add-on that asks for nothing can only show things on screen. No add-on can re
 
 ### Undo, any time
 
-Every change you keep is recorded. Under **Customise → History** you can undo any single change, or go back to how the app was at an earlier point, however long ago. Undoing is itself recorded, so you can change your mind again.
+Every change you keep is recorded. Under **Customise → History** you can undo any single change, or go back to how the app was at an earlier point, however long ago: **Show older changes** at the end of the list goes all the way back to where your app started. Undoing is itself recorded, so you can change your mind again. The starting point and the entries the app makes for itself (when an update refreshes its own files) cannot be undone on their own; you can still go back to them.
 
 If a customisation ever leaves the app unusable, the **Recovery** entry in the menu bar restores the standard app. Customisations cannot remove that menu.
 
