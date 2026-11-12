@@ -215,7 +215,7 @@
 
       <h2 id="rv-what">{t('ldb.whatTitle')}</h2>
       <p class="muted" id="rv-what-note" tabindex="-1" data-autofocus={caution ? '' : undefined}>{t('ldb.whatNote')}</p>
-      {#if addsCode}<p class="muted">{t('layer.pluginWarn')}</p>{/if}
+      {#if addsCode}<p class="muted">{t('lua.pluginWarn')}</p>{/if}
       {#if groups.length}
         {#each groups as g (g.area)}
           <h3 class="area">{t('ldb.area.' + g.area)}</h3>

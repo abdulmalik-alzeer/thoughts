@@ -273,6 +273,14 @@ How the Todos page is laid out. All keys optional.
 A plugin is one ES module with a default export. It receives a single object and nothing else: no
 network access, no access to the app's internals, no token.
 
+**What a plugin can and cannot send out.** A plugin (or view) has no way out of the app: web
+requests and sockets, forms, images, fonts and styles from the network, links and new windows,
+frames inside its own page, and peer connections (WebRTC) are all refused or removed before its
+code runs. What it reads with its permissions it can show on screen, keep in its own `storage`, or
+write into the library folders it declared — nothing else. Do not try to work around this (no
+frames, no links that leave the page, no waiting loops): such code is stopped or switched off, and
+the user is told the add-on cannot send their notes anywhere.
+
 ```js
 export default function (thoughts) {
   // thoughts.version === 1

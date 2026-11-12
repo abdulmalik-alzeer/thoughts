@@ -44,8 +44,8 @@ fn the_frame_runtime_hash_is_the_same_in_the_frame_page_and_in_the_app_policy() 
     let page_policy = attr(&page, "http-equiv=\"Content-Security-Policy\" content=\"");
     assert_eq!(hashes(page_policy, "script-src"), [want.clone()], "ui/public/plugin-frame.html is stale: run `node scripts/gen-plugin-frame.mjs`");
     assert!(page.contains(&format!("<script>{inlined}</script>")), "the page does not carry the current runtime: run `node scripts/gen-plugin-frame.mjs`");
-    // The frame may reach nothing and may not be sent anywhere.
-    for must in ["default-src 'none'", "connect-src 'none'", "form-action 'none'", "frame-src 'none'", "base-uri 'none'"] {
+    // The frame may reach nothing and may not be sent anywhere; a frame it builds can run only the runtime.
+    for must in ["default-src 'none'", "connect-src 'none'", "form-action 'none'", "frame-src 'none'", "base-uri 'none'", "'strict-dynamic'", "webrtc 'block'"] {
         assert!(page_policy.contains(must), "the frame policy lost `{must}`");
     }
 
