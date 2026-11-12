@@ -2177,7 +2177,7 @@ mod tests {
         st.chats.update(&wrap, |c| { c.meta["phase"] = json!("applying"); c.meta["snapshot"] = json!(s); }).await;
         t::write(&lib, "ideas/shop/README.md", "half rewritten");
         t::write(&lib, "ideas/shop/log.md", "half a log");
-        wraps::recover(&st).await;
+        wraps::recover_chats(&st).await;
 
         let interrupted = |r: R| { let e = shown(r); assert_eq!((e.message.as_str(), e.status, e.code), (format!("WRAP_INTERRUPTED::{wrap}").as_str(), 409, "wrap_interrupted")); };
         interrupted(git_sync(State(st.clone())).await);

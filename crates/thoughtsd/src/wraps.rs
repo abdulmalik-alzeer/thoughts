@@ -1251,6 +1251,21 @@ pub async fn reorganize_finish(state: &AppState, id: &str, keep: bool) -> anyhow
 /// (the library itself was never touched), and a working copy nobody is reviewing is removed.
 /// Chats from before each chat was tied to a library are given the one that is open now.
 pub async fn recover(state: &AppState) {
+    let reviewing = recover_chats(state).await;
+    let lib = state.settings.read().await.library();
+    let wt = crate::paths::reorganize_worktree();
+    if !reviewing && wt.exists() {
+        crate::log::warn("reorganize: removing a working copy left behind by an earlier run");
+        match &lib {
+            Some(lib) => remove_worktree(state, lib, &wt, "").await,
+            None => { crate::log::ok_or_warn("reorganize: could not remove the working copy", std::fs::remove_dir_all(&wt)); }
+        }
+    }
+}
+
+/// The per-chat half of `recover`. Returns whether a reorganize is waiting to be reviewed (its
+/// working copy must then stay).
+pub(crate) async fn recover_chats(state: &AppState) -> bool {
     let lib = state.settings.read().await.library();
     let ar = is_ar(state).await;
     let scope = Scope::now(state).await;
@@ -1298,14 +1313,7 @@ pub async fn recover(state: &AppState) {
             _ => {}
         }
     }
-    let wt = crate::paths::reorganize_worktree();
-    if !reviewing && wt.exists() {
-        crate::log::warn("reorganize: removing a working copy left behind by an earlier run");
-        match &lib {
-            Some(lib) => remove_worktree(state, lib, &wt, "").await,
-            None => { crate::log::ok_or_warn("reorganize: could not remove the working copy", std::fs::remove_dir_all(&wt)); }
-        }
-    }
+    reviewing
 }
 
 /// Shared by the tests here and in `api.rs`: a library with history, and a stand-in for the assistant.
@@ -1503,7 +1511,7 @@ mod tests {
         let s = snap.clone();
         st.chats.update(&wrap, |c| { c.meta["phase"] = json!("applying"); c.meta["snapshot"] = json!(s); }).await;
         half_a_wrap(lib);
-        recover(st).await;
+        recover_chats(st).await;
         (wrap, chat, snap)
     }
 
@@ -1520,7 +1528,7 @@ mod tests {
         assert_eq!(start(st.clone()).await.unwrap_err().to_string(), format!("WRAP_INTERRUPTED::{wrap}"));
         assert_eq!(reorganize_start(st.clone(), "").await.unwrap_err().to_string(), format!("WRAP_INTERRUPTED::{wrap}"));
         // Recovering again (another restart) changes nothing.
-        recover(&st).await;
+        recover_chats(&st).await;
         assert_eq!(t::phase(&st, &wrap).await, "interrupted");
         // Undo: the library is back at the snapshot, and the chat is still to be wrapped.
         rollback(&st, &wrap).await.unwrap();
@@ -1774,7 +1782,7 @@ mod tests {
         untouched(&lib);
         // A restart closes a plan that was never written to the end.
         st.chats.update(&wrap, |c| { c.meta["previewOk"] = Value::Null; }).await;
-        recover(&st).await;
+        recover_chats(&st).await;
         assert_eq!(t::phase(&st, &wrap).await, "preview_failed");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
@@ -1930,7 +1938,7 @@ mod tests {
         let p = undo_preview(&st, &wrap).await.unwrap();
         assert_eq!((p["precise"].as_bool(), p["files"].as_array().map(Vec::len), p["kept"].as_array().map(Vec::len)), (Some(false), Some(4), Some(0)));
         // The next start notes it, so anything done from then on is safe.
-        recover(&st).await;
+        recover_chats(&st).await;
         assert!(st.chats.meta(&wrap).await.unwrap().meta["partial"]["files"].is_array());
         assert_eq!(undo_preview(&st, &wrap).await.unwrap()["precise"], true);
         // Only a wrap that waits can be previewed.
@@ -2030,7 +2038,7 @@ mod tests {
         st.chats.update(&about_a, |c| c.library = Some(k)).await;
         // A chat from before chats were tied to a library is given the open one at the next start.
         let old = said(&st, "From an older version", &[("user", "also about client A".to_string())]).await;
-        recover(&st).await;
+        recover_chats(&st).await;
         assert_eq!(st.chats.meta(&old).await.unwrap().library.as_deref(), Some(key_a.as_str()));
         assert_eq!(status(&st).await["count"], 2);
         // The same folder spelled another way is still the same library.
@@ -2099,7 +2107,7 @@ mod tests {
         let id = c.id.clone();
         st.chats.insert(c).await;
         t::write(&wt, "README.md", "half reorganized\n");
-        recover(&st).await;
+        recover_chats(&st).await;
         assert_eq!(t::phase(&st, &id).await, "interrupted");
         assert!(!wt.exists());
         assert_eq!(t::sh(&lib, &["branch", "--list", "reorganize/*"]), "");
