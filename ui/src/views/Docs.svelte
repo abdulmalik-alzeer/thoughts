@@ -15,6 +15,9 @@
   import FindBar from '../lib/FindBar.svelte';
   import SearchResults from '../lib/SearchResults.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
+  import Backlinks from './docs/Backlinks.svelte';
+  import DocxPreview from './docs/DocxPreview.svelte';
+  import { docDir, toDocx } from '../lib/content/docx';
 
   let { path }: { path?: string } = $props();
 
@@ -63,6 +66,9 @@
   const EDIT_EXT = /\.(md|txt|csv|json)$/i;
   const isMd = (p: string) => /\.md$/i.test(p);
   const isPdf = (p: string) => /\.pdf$/i.test(p);
+  const isDocx = (p: string) => /\.docx$/i.test(p);
+  /** Bumped on every library change, so "Linked from" stays current. */
+  let libVersion = $state(0);
   const isDir = (f: any) => f?.dir === true || f?.isDir === true || f?.type === 'dir' || f?.kind === 'dir' || String(f?.path ?? '').endsWith('/');
   const baseName = (p: string) => p.split('/').pop() || p;
   const dirName = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
@@ -181,7 +187,7 @@
       if (e.type !== 'library.changed' && e.type !== 'resync') return;
       // Bursts (a wrap writes many files) settle into one refresh.
       clearTimeout(refreshTimer);
-      refreshTimer = setTimeout(async () => { await loadTree(); refreshOpen(); }, 250);
+      refreshTimer = setTimeout(async () => { await loadTree(); refreshOpen(); libVersion++; }, 250);
     });
     await loadTree();
     try {
@@ -520,21 +526,68 @@
 
   /** Prints only the document: a copy of the rendered article is placed at the top of <body> for the print pass.
    *  The "hide everything else" print rules apply only while `html.print-doc` is set, so printing any other view is unaffected. */
-  async function printDoc() {
+  async function printDoc(title?: string | Event) {
     await tick();
     if (!article || editing) { notify(t(editing ? 'docs3.restoreUnsaved' : 'docs3.printNotDoc'), { kind: 'info' }); return; }
     document.getElementById('print-root')?.remove();
     const root = document.createElement('div');
     root.id = 'print-root';
     root.className = 'md';
-    root.dir = 'auto';
+    // The page runs the way most of the note reads (an Arabic note prints right to left).
+    root.dir = docDir(article.textContent ?? '');
     for (const n of article.childNodes) root.appendChild(n.cloneNode(true));
     document.body.appendChild(root);
     const html = document.documentElement;
-    const done = () => { root.remove(); html.classList.remove('print-doc'); window.removeEventListener('afterprint', done); };
+    // The window's title is the name a saved PDF is offered under.
+    const was = document.title;
+    if (typeof title === 'string' && title) document.title = title;
+    const done = () => { root.remove(); html.classList.remove('print-doc'); document.title = was; window.removeEventListener('afterprint', done); };
     window.addEventListener('afterprint', done);
     html.classList.add('print-doc');
     try { window.print(); } catch { done(); notify(t('docs.printFailed'), { kind: 'error' }); }
+  }
+
+  const docTitle = () => String(doc?.frontmatter?.title || info?.title || prettyName(current));
+  /** Where a note's exports go: the idea's `outputs/` folder (beside `notes/`), else one beside the note. */
+  function outputsFolder(p: string): string {
+    const parts = p.split('/').slice(0, -1);
+    if (parts[parts.length - 1] === 'outputs') return parts.join('/');
+    if (parts[parts.length - 1] === 'notes') parts.pop();
+    return [...parts, 'outputs'].join('/');
+  }
+  let makingWord = false;
+  /** The note as a Word document, saved with the idea's outputs (never replacing one). */
+  async function exportDocx() {
+    if (makingWord) return;
+    if (showSource) { showSource = false; await tick(); }
+    const el = exportClone();
+    if (!el || editing) { notify(t('docs3.printNotDoc'), { kind: 'info' }); return; }
+    makingWord = true;
+    const p = current;
+    try {
+      const blob = await toDocx(el, { title: docTitle(), lang: lang() });
+      const folder = outputsFolder(p);
+      const r = await post('/library/output', { folder, name: baseName(p).replace(/\.[a-z0-9]+$/i, '') + '.docx', dataBase64: await readAsDataURL(blob) });
+      await loadTree();
+      const out = String(r?.path ?? '');
+      notify(t('docsb.wordSaved', { folder }), { kind: 'success', duration: 12000, action: out ? { label: t('docsa.open'), run: () => openOutput(out) } : undefined });
+    } catch (e) { failed(t('docsb.wordFailed'), e); }
+    finally { makingWord = false; }
+  }
+  /** A saved export: in Word (or whatever opens it) on the desktop, here otherwise. */
+  async function openOutput(p: string) {
+    if (desktop && canOpenExternal) {
+      try { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_library_file', { path: p }); return; }
+      catch { /* show it here instead */ }
+    }
+    go({ kind: 'docs', path: p });
+  }
+  /** "Save as PDF" goes through the print window, which offers it; the PDF is named after the note. */
+  async function savePdf() {
+    if (showSource) { showSource = false; await tick(); }
+    notify(t(isMac ? 'docsb.pdfHintMac' : 'docsb.pdfHint'), { kind: 'info', duration: 15000, key: 'docs-pdf-hint' });
+    await new Promise((r) => setTimeout(r, 350));
+    printDoc(docTitle());
   }
 
   // ---------- create, rename, move, delete ----------
@@ -598,18 +651,38 @@
 
   const inside = (p: string, what: string) => p === what || p.startsWith(what + '/');
 
-  /** Move or rename a file or folder, then follow the open document to its new place. */
-  async function relocate(from: string, to: string, failKey: string): Promise<boolean> {
+  /** Move or rename a file or folder, then follow the open document to its new place. The library
+   *  rewrites the links that pointed there; `done` gets the success message, completed with how many. */
+  async function relocate(from: string, to: string, failKey: string, done: string): Promise<boolean> {
     if (to === from) return false;
     if (taken(to) && to.toLowerCase() !== from.toLowerCase()) { notify(t('docs3.exists'), { kind: 'error' }); return false; }
     const affected = !!current && inside(current, from);
     if (affected && !(await leaveOk())) return false;
-    try { await post('/library/move', { from, to }); }
+    let r: any;
+    try { r = await post('/library/move', { from, to }); }
     catch (e) { failed(t(failKey), e); return false; }
     for (const k of Object.keys(open)) if (inside(k, from) && open[k]) setOpen(to + k.slice(from.length), true);
+    moveDrafts(from, to);
     await loadTree();
     if (affected) openFile(to + current.slice(from.length), true);
+    const links = Number(r?.links) || 0, notes = Number(r?.notes) || 0;
+    notify(links ? `${done} ${tn('docsb.linksUpdated', links, { notes: tn('docsb.inNotes', notes) })}` : done, { kind: 'success' });
     return true;
+  }
+  /** Unsaved drafts of files that moved go with them. */
+  function moveDrafts(from: string, to: string) {
+    const prefix = `${STASH}${libKey()}\n`;
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (!k?.startsWith(prefix)) continue;
+        const p = k.slice(prefix.length);
+        if (!inside(p, from)) continue;
+        const v = localStorage.getItem(k);
+        localStorage.removeItem(k);
+        if (v !== null) localStorage.setItem(stashKey(to + p.slice(from.length)), v);
+      }
+    } catch { /* storage unavailable */ }
   }
 
   async function renamePath(p: string, folder = false) {
@@ -621,7 +694,7 @@
     const oldExt = /\.[a-z0-9]+$/i.exec(old)?.[0] ?? '';
     if (!folder && oldExt && !/\.[a-z0-9]{1,5}$/i.test(name)) name += oldExt;
     const to = dirName(p) ? `${dirName(p)}/${name}` : name;
-    if (await relocate(p, to, 'docs3.renameFailed')) notify(t('docs3.renamed', { name }), { kind: 'success' });
+    await relocate(p, to, 'docs3.renameFailed', t('docs3.renamed', { name }));
   }
 
   /** Every folder in the library (from the file list already loaded). */
@@ -635,9 +708,8 @@
     moving = null;
     if (inside(dir, p)) { notify(t('docs3.badName'), { kind: 'error' }); return; }
     const to = dir ? `${dir}/${baseName(p)}` : baseName(p);
-    if (await relocate(p, to, 'docs3.moveFailed')) {
+    if (await relocate(p, to, 'docs3.moveFailed', dir ? t('docs3.moved', { folder: dir }) : t('docs3.movedTop'))) {
       if (dir) setOpen(dir, true);
-      notify(dir ? t('docs3.moved', { folder: dir }) : t('docs3.movedTop'), { kind: 'success' });
     }
   }
 
@@ -701,6 +773,7 @@
     return [
       ...(text ? [
         { id: 'versions', label: t('docs3.versions'), icon: 'rollback', run: () => (showVersions = true) },
+        ...(isMd(current) ? [{ id: 'docx', label: t('docsb.saveWord'), icon: 'download', run: exportDocx }, { id: 'pdf', label: t('docsb.savePdf'), icon: 'print', run: savePdf }] : []),
         { id: 'html', label: t('docs3.exportHtml'), icon: 'download', run: exportHtml },
         { id: 'rich', label: t('docs3.copyRich'), icon: 'copy', run: copyRich },
         { id: 'copy', label: t('docs.copyText'), icon: 'copy', run: copyDoc },
@@ -923,13 +996,14 @@
               <div class="muted sm">{[ext(current) && t('docs.fileType', { type: ext(current) }), info ? fmtSize(info.size) : '', info?.modified ? fmtDate(info.modified) : ''].filter(Boolean).join(' · ')}</div>
             </div>
           </div>
-          {#if !isImageName(current) && !isPdf(current)}<p class="muted">{t('docs.notPreviewable')}</p>{/if}
+          {#if !isImageName(current) && !isPdf(current) && !isDocx(current)}<p class="muted">{t('docs.notPreviewable')}</p>{/if}
           <div class="row wrapr">
             {#if desktop && canOpenExternal}<button class="btn primary" onclick={openExternal}><Icon name="external" size={14} /> {t('docs.openDefault')}</button>{/if}
             <button class="btn" onclick={discuss}><Icon name="chat" size={14} /> {t('docs.discussAssistant')}</button>
           </div>
         </div>
         {#if imgUrl}<img class="inline-img" src={imgUrl} alt={baseName(current)} />{/if}
+        {#if isDocx(current)}<DocxPreview path={current} name={baseName(current)} />{/if}
         {#if isPdf(current)}
           {#if pdfUrl}
             <iframe class="pdf" src={pdfUrl} title={t('docs3.pdfTitle', { name: baseName(current) })}></iframe>
@@ -977,7 +1051,9 @@
         {/if}
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
         <article class="md" dir="auto" bind:this={article} onclick={clickLink}>{@html md(doc.content)}</article>
+        <Backlinks path={current} version={libVersion} open={(p) => openFile(p)} />
       {/if}
+      {#if doc.binary}<Backlinks path={current} version={libVersion} open={(p) => openFile(p)} />{/if}
     {:else if docLoading}
       <div class="pad" role="status" aria-busy="true"><div class="skel h"></div><div class="skel"></div><div class="skel w70"></div><div class="skel w50"></div></div>
     {/if}

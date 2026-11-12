@@ -14,6 +14,7 @@ pub mod hello;
 pub mod history;
 pub mod layer_api;
 pub mod library;
+pub mod links;
 pub mod log;
 pub mod modules;
 pub mod packs;

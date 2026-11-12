@@ -190,6 +190,15 @@ pub fn resolve_mention(root: &Path, rel: &str) -> anyhow::Result<std::path::Path
     resolve(root, rel)
 }
 
+/// Every file the file API may touch, as (library-relative path, real path): the same folders the
+/// file list walks (no `.git`, no protected names, no build folders).
+pub fn walk_files(root: &Path) -> Vec<(String, std::path::PathBuf)> {
+    WalkDir::new(root).into_iter().filter_entry(|e| !skip(e)).flatten()
+        .filter(|e| e.file_type().is_file())
+        .filter_map(|e| Some((rel_of(root, e.path())?, e.into_path())))
+        .collect()
+}
+
 fn rel_of(root: &Path, p: &Path) -> Option<String> {
     Some(p.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/"))
 }
@@ -209,16 +218,39 @@ pub const IMPORT_MAX_BYTES: usize = 25 * 1024 * 1024;
 /// Save `bytes` as `<library>/imports/<name>` without ever overwriting: `name (2).ext`, `name (3).ext`…
 /// Returns the library-relative path.
 pub fn import_file(root: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<String> {
-    use std::io::Write;
     let name = sanitize_file_name(name);
     if bytes.len() > IMPORT_MAX_BYTES { return Err(crate::tr::err("too_large", &[("name", &name)])); }
+    save_numbered(root, "imports", &name, bytes)
+}
+
+/// Document types the app itself makes from a note (see `save_output`).
+pub const OUTPUT_EXT: &[&str] = &["docx"];
+
+/// Save a document the app generated (a note exported as Word) as `<folder>/<name>` in the library,
+/// never overwriting: `name (2).docx`… Only the types in `OUTPUT_EXT`. Returns the library-relative path.
+pub fn save_output(root: &Path, folder: &str, name: &str, bytes: &[u8]) -> anyhow::Result<String> {
+    let name = sanitize_file_name(name);
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    if !OUTPUT_EXT.contains(&ext.as_str()) { return Err(crate::tr::err("invalid.path", &[])); }
+    if bytes.len() > IMPORT_MAX_BYTES { return Err(crate::tr::err("too_large", &[("name", &name)])); }
+    let folder = folder.trim().replace('\\', "/");
+    let folder = folder.trim_end_matches('/');
+    if folder.is_empty() { return save_numbered(root, "", &name, bytes); }
+    check_new_path(folder)?;
+    save_numbered(root, folder, &name, bytes)
+}
+
+/// Write `bytes` as `<folder>/<name>`, or `name (2).ext`, `name (3).ext`… when that is taken.
+fn save_numbered(root: &Path, folder: &str, name: &str, bytes: &[u8]) -> anyhow::Result<String> {
+    use std::io::Write;
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
-        _ => (name.clone(), String::new()),
+        _ => (name.to_string(), String::new()),
     };
-    std::fs::create_dir_all(resolve(root, "imports")?)?;
+    let at = |n: &str| if folder.is_empty() { n.to_string() } else { format!("{folder}/{n}") };
+    if !folder.is_empty() { std::fs::create_dir_all(resolve(root, folder)?)?; }
     for n in 1..10_000 {
-        let rel = if n == 1 { format!("imports/{name}") } else { format!("imports/{stem} ({n}){ext}") };
+        let rel = if n == 1 { at(name) } else { at(&format!("{stem} ({n}){ext}")) };
         let p = resolve(root, &rel)?;
         // create_new: fails rather than replaces if the name is taken (also refuses dangling symlinks).
         match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
@@ -862,6 +894,19 @@ mod tests {
         assert_eq!(sanitize_file_name(""), "file");
         assert_eq!(sanitize_file_name("a\nb<c>.txt"), "abc.txt");
         assert_eq!(sanitize_file_name("تقرير الربع.pdf"), "تقرير الربع.pdf");
+    }
+
+    #[test]
+    fn exported_documents_go_where_asked_and_never_overwrite() {
+        let root = tmp();
+        assert_eq!(save_output(&root, "apps/one/outputs", "Plan.docx", b"a").unwrap(), "apps/one/outputs/Plan.docx");
+        assert_eq!(save_output(&root, "apps/one/outputs/", "Plan.docx", b"b").unwrap(), "apps/one/outputs/Plan (2).docx");
+        assert_eq!(std::fs::read(root.join("apps/one/outputs/Plan.docx")).unwrap(), b"a");
+        assert_eq!(save_output(&root, "", "خطة.docx", b"c").unwrap(), "خطة.docx");
+        for (folder, name) in [("apps", "x.html"), ("apps", "x.sh"), ("../out", "x.docx"), (".git", "x.docx"), ("/tmp", "x.docx"), ("a/.claude", "x.docx")] {
+            assert!(save_output(&root, folder, name, b"x").is_err(), "{folder}/{name}");
+        }
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

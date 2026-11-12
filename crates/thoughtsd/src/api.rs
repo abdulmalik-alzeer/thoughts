@@ -4,7 +4,7 @@ use crate::chats::{Chat, Msg, RunOptions};
 use crate::claude::{self, RunSpec};
 use crate::settings::{Project, Settings};
 use crate::state::AppState;
-use crate::{applayer, git, library, modules, paths, todos, wraps};
+use crate::{applayer, git, library, links, modules, paths, todos, wraps};
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, Request, State};
 use axum::extract::DefaultBodyLimit;
@@ -143,6 +143,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/import", post(import_files).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)))
         .route("/api/library/search", get(search))
         .route("/api/search", get(search_all))
+        .route("/api/library/backlinks", get(backlinks))
+        .route("/api/library/output", post(save_output).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)))
         .route("/api/library/stats", get(stats))
         .route("/api/todos", get(todo_list))
         .route("/api/todos/calendar.ics", get(todo_calendar))
@@ -1142,10 +1144,34 @@ async fn move_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(
     let scope = scope_of(&q);
     scope.check_write(&st, &root, &m.from).await?;
     scope.check_write(&st, &root, &to).await?;
-    library::rename(&root, &m.from, &to)?;
+    let from = m.from.trim().replace('\\', "/").trim_matches('/').to_string();
+    // Links to the moved file or folder (and the moved notes' own links) are rewritten to the new
+    // place. Worked out before the move; an add-on only changes notes in its own folders.
+    let plan = {
+        let private = if scope.plugin { st.settings.read().await.private_paths.clone() } else { vec![] };
+        let may = |rel: &str| !scope.plugin || (!paths::is_private(&root, rel, &private) && library::check_plugin_write(&root, rel, &scope.allow).is_ok());
+        links::plan_move(&root, &from, &to, &may)
+    };
+    // With history on, the move and its link changes are one entry (pending edits are recorded first).
+    let recoverable = history_lib(&st).await.is_ok() && wraps::interrupted_wrap(&st).await.is_none();
+    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("changes before moving {from}")), true).await; }
+    library::rename(&root, &from, &to)?;
+    let notes = links::apply(&root, &plan);
+    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("moved {from} to {to}")), true).await; }
     st.emit(json!({"type": "library.changed"}));
     st.emit(json!({"type": "todos.changed"}));
-    Ok(Json(json!({"ok": true, "path": to})))
+    let notes = notes?;
+    Ok(Json(json!({"ok": true, "path": to, "links": if notes > 0 { plan.links } else { 0 }, "notes": notes})))
+}
+
+/// `GET /api/library/backlinks?path=` → `[{path, title, line, text, count}]`: the notes that link to
+/// this file (or, for a README, to its folder). Private folders are left out as in the file list.
+async fn backlinks(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = lib(&st).await?;
+    let rel = q.get("path").map(|p| p.trim().replace('\\', "/")).unwrap_or_default();
+    library::resolve(&root, &rel)?;
+    let exclude = private_filter(&st, &q).await;
+    Ok(Json(json!(tokio::task::spawn_blocking(move || links::backlinks(&root, &rel, &exclude)).await?)))
 }
 
 #[derive(Deserialize, Default)]
@@ -1185,7 +1211,14 @@ async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
     // Ideas inside a private folder are the user's own business: never changed for an add-on (the
     // user's own Ideas page can change them).
     if scope_of(&q).plugin && paths::is_private(&root, &rel, &st.settings.read().await.private_paths) { return Err(crate::tr::err("private", &[("path", &rel)]).into()); }
-    library::set_idea_status(&root, &rel, &i.status, chrono::Local::now().date_naive())?;
+    let today = chrono::Local::now().date_naive();
+    library::set_idea_status(&root, &rel, &i.status, today)?;
+    // The idea's line in the index shows its status too.
+    if let Ok(p) = library::resolve(&root, "INDEX.md") {
+        if let Some(text) = std::fs::read_to_string(&p).ok().and_then(|t| links::index_with_status(&t, &rel, i.status.trim(), &today.to_string())) {
+            if let Err(e) = paths::write_atomic(&p, text.as_bytes(), false) { crate::log::warn(format!("index: could not update the status line ({e})")); }
+        }
+    }
     st.emit(json!({"type": "library.changed"}));
     ok()
 }
@@ -1304,6 +1337,22 @@ async fn import_files(State(st): S, Json(req): Json<ImportReq>) -> R {
     for (name, bytes) in decoded { out.push(library::import_file(&root, name, &bytes)?); }
     st.emit(json!({"type": "library.changed"}));
     Ok(Json(json!({"paths": out})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct SaveOutput { folder: String, name: String, data_base64: String }
+/// `POST /api/library/output {folder, name, dataBase64}` → `{path}`: a document the app made from a
+/// note (Word) saved in the library, next to the note's other outputs; never replaces a file.
+async fn save_output(State(st): S, Json(o): Json<SaveOutput>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st).await?;
+    let b64 = o.data_base64.rsplit(',').next().unwrap_or("").trim();
+    if b64.len() / 4 * 3 > library::IMPORT_MAX_BYTES + 3 { return Err(crate::tr::err("too_large", &[("name", &o.name)]).into()); }
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|_| crate::tr::err("unreadable", &[("name", &o.name)]))?;
+    let path = library::save_output(&root, &o.folder, &o.name, &bytes)?;
+    st.emit(json!({"type": "library.changed"}));
+    Ok(Json(json!({"path": path})))
 }
 
 async fn todo_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
@@ -2485,6 +2534,38 @@ mod tests {
         assert_eq!(top, [("assistant".to_string(), "notes/tidy.md".to_string()), ("edit".to_string(), "notes/mine.md".to_string())]);
         assert!(h[0]["subject"].as_str().unwrap().starts_with("assistant: "));
         assert!(git_sync(State(st.clone())).await.is_ok());
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_move_rewrites_links_and_the_index_in_one_history_entry() {
+        let (st, lib) = t::library().await;
+        write_file(State(st.clone()), none(), save("apps/one/README.md", "---\ntitle: One\nstatus: seed\nupdated: 2026-01-01\n---\n# One\n")).await.unwrap();
+        write_file(State(st.clone()), none(), save("apps/two/README.md", "See [one](../one/README.md).\r\n")).await.unwrap();
+        write_file(State(st.clone()), none(), save("INDEX.md", "- [One](apps/one/README.md) · seed · pitch · 2026-01-01\n")).await.unwrap();
+        git_sync(State(st.clone())).await.unwrap();
+        let v = move_file(State(st.clone()), none(), Json(MoveFile { from: "apps/one".into(), to: "business/one".into() })).await.unwrap().0;
+        assert_eq!((v["links"].as_u64(), v["notes"].as_u64()), (Some(2), Some(2)));
+        assert_eq!(t::read(&lib, "apps/two/README.md"), "See [one](../../business/one/README.md).\r\n");
+        assert_eq!(t::read(&lib, "INDEX.md"), "- [One](business/one/README.md) · seed · pitch · 2026-01-01\n");
+        let h = library_history(State(st.clone()), q(&[("limit", "1")])).await.unwrap().0;
+        assert_eq!(h[0]["subject"], "edit: moved apps/one to business/one");
+        let mut files: Vec<&str> = h[0]["files"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+        files.sort();
+        assert_eq!(files, ["INDEX.md", "apps/one/README.md", "apps/two/README.md", "business/one/README.md"]);
+        // Undoing that one entry puts the folder and every link back.
+        library_undo(State(st.clone()), Json(Undo { hash: h[0]["hash"].as_str().unwrap().into() })).await.unwrap();
+        assert_eq!(t::read(&lib, "apps/two/README.md"), "See [one](../one/README.md).\r\n");
+        assert!(lib.join("apps/one/README.md").exists());
+        // A status change made in the app shows in the index line too.
+        idea_status(State(st.clone()), none(), Json(IdeaStatus { path: "apps/one".into(), status: "active".into() })).await.unwrap();
+        let today = chrono::Local::now().date_naive().to_string();
+        assert_eq!(t::read(&lib, "INDEX.md"), format!("- [One](apps/one/README.md) · active · pitch · {today}\n"));
+        // Who links here.
+        let b = backlinks(State(st.clone()), q(&[("path", "apps/one/README.md")])).await.unwrap().0;
+        let mut from: Vec<&str> = b.as_array().unwrap().iter().filter_map(|x| x["path"].as_str()).collect();
+        from.sort();
+        assert_eq!(from, ["INDEX.md", "apps/two/README.md"]);
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
