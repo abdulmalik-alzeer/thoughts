@@ -30,6 +30,7 @@
   import Attachments from './chat/Attachments.svelte';
   import QueuedCard from './chat/QueuedCard.svelte';
   import ExportMenu from './chat/ExportMenu.svelte';
+  import RunChanges from './chat/RunChanges.svelte';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, prettyName, readAsDataURL } from '../lib/content/util';
   import { imeKey } from '../lib/ime';
   import SetupCard from './SetupCard.svelte';
@@ -192,6 +193,10 @@
     } else if (e.type === 'chat.suggestion') {
       // What the user might say next, from the assistant program; offered under the answer.
       if (!again) chat.suggestion = e.text;
+    } else if (e.type === 'chat.message.changed') {
+      // A message that only changed state (an answer's changes undone or put back): replaced where it is.
+      const at = chat.messages.findIndex((m: any) => m.id === e.message.id);
+      if (at >= 0) chat.messages[at] = e.message;
     } else if (e.type === 'chat.message.removed') {
       // A message whose answer could not be started is taken back: its words are in the box again.
       chat.messages = chat.messages.filter((m: any) => m.id !== e.messageId);
@@ -758,6 +763,9 @@
             <!-- shown inside its tool call above -->
           {:else if m.role === 'approval'}
             <ApprovalCard {m} chatId={id} running={!!chat.running} />
+          {:else if m.role === 'changes'}
+            <!-- What this answer changed in the library, with Undo (FEAT-06). -->
+            <RunChanges {m} chatId={id} busy={!!chat.running} onchange={(x) => { const i = chat.messages.findIndex((y: any) => y.id === x.id); if (i >= 0) chat.messages[i] = x; }} />
           {:else if m.role === 'denied'}
             <div class="msg denied" role="note">
               <div class="deniedhead"><Icon name="shield" size={13} /> <span>{t('runb.denied.title')}</span></div>

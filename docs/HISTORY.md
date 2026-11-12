@@ -43,6 +43,15 @@ If a Wrap saved something you did not want, choose **Undo this Wrap** on the Wra
 
 Any other entry in History can be undone the same way.
 
+## Undoing what one answer changed
+
+When the assistant changes your library during a chat or an automatic task, a line under its answer says so, for example **Changed 3 notes**. Choose it to see every document that answer changed, line by line.
+
+- **Undo these changes** puts back only that answer's documents. Anything you or another chat changed since, in other lines of the same documents or in other documents, stays as it is.
+- If a later change touched the same lines, Thoughts tells you which documents are in the way and changes nothing. Edit those documents yourself, or restore an earlier version (below).
+- The undo is recorded in History too, and **Put them back** makes the answer's changes again.
+- If you saved a document in the app while the answer was being written, or another chat was working in your library at the same time, those changes are never counted as the answer's: the line under the answer names them, and Undo leaves them alone. Changes made outside the app at the same time (in another editor, for example) cannot be told apart from the answer's.
+
 ## Restoring an earlier version of one document
 
 Open the document, then open its **History** (document versions). You see every saved version of that document. Pick one: **What's different** shows how it differs from the text as it is now, and **Whole text** shows it in full. Choose **Restore** to put that version back.

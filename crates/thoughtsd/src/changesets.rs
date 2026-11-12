@@ -674,7 +674,7 @@ pub async fn undo(state: &AppState, lib: &Path, chat: &str, msg: &str, back: boo
         updated = serde_json::to_value(&*m).ok();
     }).await;
     crate::log::info(format!("changes: {} what an answer in chat {chat} changed ({} file(s))", if back { "put back" } else { "undid" }, made.len()));
-    if let Some(m) = &updated { state.emit(json!({"type": "chat.message", "chatId": chat, "message": m})); }
+    if let Some(m) = &updated { state.emit(json!({"type": "chat.message.changed", "chatId": chat, "message": m})); }
     for e in ["library.changed", "todos.changed", "history.changed"] { state.emit(json!({"type": e})); }
     Ok(json!({"ok": true, "message": updated, "hash": hash}))
 }
