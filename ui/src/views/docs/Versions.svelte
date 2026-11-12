@@ -11,7 +11,8 @@
 
   let { path, close, restored }: { path: string; close: () => void; restored: () => void } = $props();
 
-  type Ver = { hash: string; short?: string; date: string; subject?: string; kind?: string };
+  // `path`: the name the file had at that point (it may have been renamed or moved since).
+  type Ver = { hash: string; short?: string; date: string; subject?: string; kind?: string; path?: string };
   let list = $state<Ver[] | null>(null);
   let error = $state('');
   let noHistory = $state(false);
@@ -22,17 +23,31 @@
   let verLoading = $state(false);
   let restoring = $state(false);
   let seq = 0;
+  // Versions are read a page at a time, however many there are: `more` says older ones exist.
+  const PAGE = 50;
+  let more = $state(false);
+  let loadingMore = $state(false);
 
   const kindLabel = (k?: string) => (k === 'start' ? t('hista.hist.kindStart') : t('docs3.kind.' + (['wrap', 'sync', 'edit', 'assistant'].includes(k ?? '') ? k : 'other')));
   /** What a version's entry says it did. The entry a history starts with is described in the reader's language. */
   const subjectOf = (v: Ver) => (v.kind === 'start' ? t('hista.hist.startSubject') : (v.subject ?? '').replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
   const when = (d: string) => { try { return fmtDate(d, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return d; } };
+  /** The name a version was saved under, when that is not the file's name now. */
+  const earlier = (v: Ver) => (v.path && v.path !== path ? v.path : '');
+  /** Where to read a version: under the name it had then. */
+  const atOf = (v: Ver) => (earlier(v) ? `&at=${encodeURIComponent(earlier(v))}` : '');
+
+  /** `PAGE` versions from `skip` on (one more is asked for, to know whether older ones exist). */
+  async function page(skip: number): Promise<Ver[]> {
+    const r = await api(`/library/history?path=${encodeURIComponent(path)}&limit=${PAGE + 1}&skip=${skip}`);
+    return Array.isArray(r) ? r : [];
+  }
 
   async function load() {
-    error = ''; noHistory = false; noGit = false; list = null;
+    error = ''; noHistory = false; noGit = false; list = null; more = false;
     try {
-      const r = await api(`/library/history?path=${encodeURIComponent(path)}&limit=50`);
-      list = Array.isArray(r) ? r : [];
+      const got = await page(0);
+      list = got.slice(0, PAGE); more = got.length > PAGE;
     } catch (e) {
       if (errCode(e) === 'NO_HISTORY') noHistory = true;
       else if (errCode(e) === 'git_missing') noGit = true;
@@ -42,11 +57,23 @@
   }
   onMount(load);
 
+  async function older() {
+    if (!list || loadingMore) return;
+    loadingMore = true;
+    try {
+      const got = await page(list.length);
+      const seen = new Set(list.map((v) => v.hash));
+      list = [...list, ...got.slice(0, PAGE).filter((v) => !seen.has(v.hash))];
+      more = got.length > PAGE;
+    } catch (e) { failed(t('docs3.versionsFailed'), e); }
+    finally { loadingMore = false; }
+  }
+
   async function show(v: Ver) {
     const mine = ++seq;
     sel = v; content = null; verError = ''; verLoading = true;
     try {
-      const r = await api(`/library/version?path=${encodeURIComponent(path)}&hash=${encodeURIComponent(v.hash)}`);
+      const r = await api(`/library/version?path=${encodeURIComponent(path)}&hash=${encodeURIComponent(v.hash)}${atOf(v)}`);
       if (mine === seq) content = String(r?.content ?? '');
     } catch (e) {
       if (mine === seq) verError = errDetail(e) || t('docs3.versionFailed');
@@ -57,7 +84,8 @@
     if (!sel || restoring) return;
     restoring = true;
     try {
-      await post('/library/restore', { path, hash: sel.hash });
+      // An earlier version of a file that was renamed since goes back where the file is now.
+      await post('/library/restore', { path, hash: sel.hash, ...(earlier(sel) ? { at: earlier(sel) } : {}) });
       restored();
       close();
     } catch (e) { failed(t('docs3.restoreFailed'), e); }
@@ -104,9 +132,13 @@
               <button class="v" class:active={sel?.hash === v.hash} aria-current={sel?.hash === v.hash ? 'true' : undefined} onclick={() => show(v)}>
                 <span class="row"><span class="grow when">{when(v.date)}</span><span class="pill">{kindLabel(v.kind)}</span></span>
                 {#if v.subject}<span class="subj" dir="auto">{subjectOf(v)}</span>{/if}
+                {#if earlier(v)}<span class="subj was" title={earlier(v)}>{t('hista.ver.was')} <bdi>{earlier(v)}</bdi></span>{/if}
               </button>
             </li>
           {/each}
+          {#if more}
+            <li class="morerow"><button class="btn sm" disabled={loadingMore} aria-busy={loadingMore} onclick={older}>{t(loadingMore ? 'shell.loading' : 'hista.ver.older')}</button></li>
+          {/if}
         </ul>
         <div class="pv scroll" aria-live="polite">
           {#if !sel}
@@ -136,7 +168,8 @@
 </div>
 
 <style>
-  .ver { width: min(980px, 94vw); display: flex; flex-direction: column; gap: 12px; overflow: hidden; }
+  /* The dialog sits inside the content column, not the window: sized by it, never by the window's width. */
+  .ver { width: min(980px, calc(100% - 32px)); box-sizing: border-box; display: flex; flex-direction: column; gap: 12px; overflow: hidden; container-type: inline-size; }
   .head h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
   .x { padding: 6px 8px; }
   .cols { display: grid; grid-template-columns: minmax(200px, 280px) minmax(0, 1fr); gap: 14px; min-height: 0; flex: 1; height: 60vh; }
@@ -157,5 +190,6 @@
   .pad .skel { height: 13px; }
   .w70 { width: 70%; } .w50 { width: 50%; }
   .sm { font-size: var(--fs-xs); }
-  @media (max-width: 760px) { .cols { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1.4fr); } }
+  .morerow { display: flex; justify-content: center; padding: 6px 0 2px; }
+  @container (max-width: 640px) { .cols { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(0, 1.4fr); } }
 </style>

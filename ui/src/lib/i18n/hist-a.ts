@@ -58,6 +58,8 @@ export default {
     'hista.hist.kindStart': 'Start',
     'hista.hist.startSubject': 'Your library as it was when the history began',
     'hista.hist.first': 'Where the history begins',
+    'hista.ver.was': 'Saved as',
+    'hista.ver.older': 'Show older versions',
 
     'hista.sync.sent': 'Your library is backed up to {names}.',
     'hista.sync.received': 'Changes from your other devices were brought in.',
@@ -120,6 +122,8 @@ export default {
     'hista.hist.kindStart': 'البداية',
     'hista.hist.startSubject': 'مكتبتك كما كانت عند بدء السجلّ',
     'hista.hist.first': 'بداية السجلّ',
+    'hista.ver.was': 'حُفظت باسم',
+    'hista.ver.older': 'اعرض نسخاً أقدم',
 
     'hista.sync.sent': 'نُسخت مكتبتك احتياطياً إلى {names}.',
     'hista.sync.received': 'جُلبت التغييرات من أجهزتك الأخرى.',

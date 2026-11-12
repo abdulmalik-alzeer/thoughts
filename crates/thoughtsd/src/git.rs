@@ -576,6 +576,21 @@ pub mod subject {
         let what: String = what.chars().filter(|c| !c.is_control()).take(80).collect();
         format!("assistant: {}", what.trim())
     }
+    /// A file or folder moved or renamed in the app (with the links that were rewritten for it).
+    pub fn moved(from: &str, to: &str) -> String { edit(&format!("moved {from} to {to}")) }
+    /// For a file `at` that a change with this subject added: the name it had before, when that
+    /// change is a move made in the app (`moved`) of the file itself or of a folder holding it.
+    pub fn moved_from(subject: &str, at: &str) -> Option<String> {
+        let rest = subject.strip_prefix("edit: moved ")?;
+        let clean = |p: &str| p.trim().trim_start_matches("./").trim_matches('/').to_string();
+        // The new name is known, so the split is exact even when a name contains " to ".
+        (1..rest.len()).filter(|&i| rest.is_char_boundary(i) && rest[i..].starts_with(" to ")).find_map(|i| {
+            let (from, to) = (clean(&rest[..i]), clean(&rest[i + 4..]));
+            if from.is_empty() || to.is_empty() { return None; }
+            if at == to { return Some(from); }
+            at.strip_prefix(&format!("{to}/")).map(|inner| format!("{from}/{inner}"))
+        })
+    }
     pub fn restore(path: &str, short: &str) -> String { format!("restore: {path} (from {short})") }
     pub fn undo(of: &str) -> String { format!("undo: {of}") }
     /// The first entry of a history the app starts for a library that already has content.
@@ -600,24 +615,88 @@ pub fn valid_hash(hash: &str) -> bool {
     (7..=64).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `[{hash, short, date, subject, kind, files:[path], first}]`, newest first; with `path`, only the
-/// changes that touched that file.
+/// The newest `limit` entries of the history (see `history_page`).
 pub async fn history(state: &AppState, dir: &Path, path: Option<&str>, limit: usize) -> anyhow::Result<Vec<Value>> {
-    let n = format!("-{}", limit.clamp(1, 500));
-    let mut args = vec!["log", n.as_str(), "--name-only", "--no-renames", "--format=%x1e%H%x1f%h%x1f%s%x1f%cI%x1f%P"];
-    let spec = path.map(|p| format!(":(top,literal){p}"));
-    if let Some(spec) = &spec { args.push("--"); args.push(spec); }
+    history_page(state, dir, path, 0, limit).await
+}
+
+/// One page of the history: `[{hash, short, date, subject, kind, files:[path], first}]`, newest
+/// first, after leaving out the newest `skip` entries — so however long the history is, all of it
+/// can be reached. With `path`, only the changes to that one file, followed back through renames
+/// and moves; each entry then also carries `path`, the name the file had at that point (the name
+/// to read that version by, see `file_at`).
+pub async fn history_page(state: &AppState, dir: &Path, path: Option<&str>, skip: usize, limit: usize) -> anyhow::Result<Vec<Value>> {
     // A repository without commits has no history yet; that is an empty list, not an error.
     if head(state, dir).await.is_none() { return Ok(vec![]); }
-    let out = git(state, dir, &args).await?;
-    Ok(out.split('\x1e').filter_map(|rec| {
-        let mut lines = rec.lines();
-        let p: Vec<_> = lines.next()?.split('\x1f').collect();
+    let limit = limit.clamp(1, 500);
+    if let Some(path) = path {
+        // Following one file, git counts `--skip` in changes of any file — and a rename it skipped
+        // over is a rename it never follows. So there the page is cut here, from the newest `skip + limit`.
+        return Ok(file_history(state, dir, path, skip + limit).await?.into_iter().skip(skip).collect());
+    }
+    let (n, skip_arg) = (format!("-{limit}"), format!("--skip={skip}"));
+    let out = git(state, dir, &["log", n.as_str(), "-z", LOG_FORMAT, skip_arg.as_str(), "--name-only", "--no-renames"]).await?;
+    Ok(log_records(&out).into_iter().map(|(mut entry, names)| { entry["files"] = json!(names); entry }).collect())
+}
+
+/// The header of each entry `log_records` reads.
+const LOG_FORMAT: &str = "--format=%x1e%H%x1f%h%x1f%s%x1f%cI%x1f%P";
+
+/// The entries of `git log -z` run with `LOG_FORMAT`: `{hash, short, subject, date, kind, first}`,
+/// each with what followed its header (file names, or with `--name-status` a status and then the
+/// name, or the old and the new name).
+fn log_records(out: &str) -> Vec<(Value, Vec<&str>)> {
+    out.split('\x1e').filter_map(|rec| {
+        // With -z the header and every name end in a NUL (so any name is read back exactly).
+        let mut fields = rec.split('\0');
+        let p: Vec<_> = fields.next()?.trim_matches('\n').split('\x1f').collect();
         if p.len() != 5 { return None; }
-        let files: Vec<&str> = lines.map(str::trim).filter(|l| !l.is_empty()).collect();
+        let names: Vec<&str> = fields.map(|f| f.trim_start_matches('\n')).filter(|f| !f.is_empty()).collect();
         // `first`: where the history begins (nothing earlier exists, so it cannot be undone).
-        Some(json!({"hash": p[0], "short": p[1], "subject": p[2], "date": p[3], "kind": commit_kind(p[2]), "files": files, "first": p[4].trim().is_empty()}))
-    }).collect())
+        Some((json!({"hash": p[0], "short": p[1], "subject": p[2], "date": p[3], "kind": commit_kind(p[2]), "first": p[4].trim().is_empty()}), names))
+    }).collect()
+}
+
+/// The newest `want` changes to one file, newest first, each with `files: [name]` and `path`: the
+/// name the file had at that point. The file is followed back through every rename and move: the
+/// ones git recognises by their content, and the ones made in the app (`subject::moved`), which are
+/// followed even when the move also changed much of a short note (its links, for instance).
+async fn file_history(state: &AppState, dir: &Path, path: &str, want: usize) -> anyhow::Result<Vec<Value>> {
+    let mut found: Vec<Value> = vec![];
+    let mut name = path.to_string();
+    // Where the part of the history still to read ends: everything (`None`), or what came before a move.
+    let mut before: Option<String> = None;
+    // A move leads to an earlier name, at an earlier change: this ends. (The bound is only a guard.)
+    for _ in 0..1000 {
+        let n = format!("-{}", want - found.len());
+        let spec = format!(":(top,literal){name}");
+        let mut args = vec!["log", n.as_str(), "-z", LOG_FORMAT, "--follow", "-M", "--name-status"];
+        if let Some(rev) = &before { args.push(rev.as_str()); }
+        args.extend(["--", spec.as_str()]);
+        let out = git(state, dir, &args).await?;
+        // The name changes, going back, wherever git saw a rename.
+        let mut now = name.clone();
+        let mut moved_from: Option<(String, String)> = None;
+        for (mut entry, names) in log_records(&out) {
+            let status = names.first().copied().unwrap_or("");
+            let renamed = (status.starts_with('R') || status.starts_with('C')) && names.len() >= 3;
+            let at = if renamed { names[2].to_string() } else { names.get(1).map(|n| n.to_string()).unwrap_or_else(|| now.clone()) };
+            let added = status.starts_with('A');
+            entry["files"] = json!([at]);
+            entry["path"] = json!(at);
+            // Added here by a move made in the app: older versions are under the name it came from.
+            let app_move = if added && entry["first"] != true { subject::moved_from(entry["subject"].as_str().unwrap_or(""), &at) } else { None };
+            let hash = entry["hash"].as_str().unwrap_or_default().to_string();
+            found.push(entry);
+            if renamed { now = names[1].to_string(); }
+            if let Some(old) = app_move { moved_from = Some((hash, old)); break; }
+        }
+        let Some((hash, old)) = moved_from else { break };
+        if found.len() >= want || !valid_hash(&hash) { break; }
+        before = Some(format!("{hash}^"));
+        name = old;
+    }
+    Ok(found)
 }
 
 /// The bytes of library file `rel` as it was at commit `hash`.
@@ -632,9 +711,16 @@ pub async fn file_at(state: &AppState, dir: &Path, rel: &str, hash: &str) -> any
 /// Put one file back as it was at `hash`, as a new history entry. Anything not yet recorded is
 /// recorded first, so the version being replaced can itself be restored.
 pub async fn restore_file(state: &AppState, dir: &Path, rel: &str, hash: &str) -> anyhow::Result<Value> {
+    restore_file_from(state, dir, rel, hash, None).await
+}
+
+/// `restore_file`, for a version from before the file was renamed or moved: `was` is the name it
+/// had at `hash` (the `path` of that history entry). The text goes back into `rel`, where the
+/// file is now.
+pub async fn restore_file_from(state: &AppState, dir: &Path, rel: &str, hash: &str, was: Option<&str>) -> anyhow::Result<Value> {
     let _g = state.git_lock.lock().await;
     crate::trust::require_git(dir)?;
-    let bytes = file_at(state, dir, rel, hash).await?;
+    let bytes = file_at(state, dir, was.unwrap_or(rel), hash).await?;
     commit_all(state, dir, &subject::edit(&format!("changes before restoring {rel}"))).await?;
     let target = crate::library::resolve(dir, rel)?;
     if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }

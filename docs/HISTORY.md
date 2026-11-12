@@ -26,7 +26,7 @@ The history of changes is its own switch. It is on from the start, whichever bac
 - **Sync**: changes that arrived from your online location, for example from another computer.
 - **Start**: the library as it was when its history began. It is the oldest entry and cannot be undone, because nothing exists before it.
 
-Open an entry to see which documents changed.
+Open an entry to see which documents changed. The newest changes are shown first; **Show older changes** at the bottom goes further back, all the way to the first entry.
 
 ## Undoing a Wrap
 
@@ -45,6 +45,7 @@ Open the document, then open its **History** (document versions). You see every 
 - Only that document changes. The rest of the library stays as it is.
 - The version you replaced is not lost: it is in History too, and can be restored in turn.
 - A document you deleted can be brought back the same way, from the History entry that removed it.
+- A document you moved or renamed keeps all its versions, including those from before the move. Versions from before show the name the document had then, and restoring one puts its text back into the document where it is now.
 
 ## Good to know
 

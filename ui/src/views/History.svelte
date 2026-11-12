@@ -17,15 +17,32 @@
   let loadError = $state('');
   let noHistory = $state(false);
   let noGit = $state(false);
-  let limit = $state(50);
   let busy = $state('');
   let open = $state<Record<string, boolean>>({});
+  // The history is read a page at a time, however long it is: `more` says an older page exists.
+  const PAGE = 100;
+  let more = $state(false);
+  let loadingMore = $state(false);
 
+  /** `count` entries from `skip` on, plus whether there are older ones (one more is asked for to know). */
+  async function page(skip: number, count: number): Promise<{ list: Entry[]; more: boolean }> {
+    const list: Entry[] = [];
+    while (list.length <= count) {
+      const want = Math.min(500, count + 1 - list.length);
+      const r = await api(`/library/history?limit=${want}&skip=${skip + list.length}`);
+      const got: Entry[] = Array.isArray(r) ? r : [];
+      list.push(...got);
+      if (got.length < want) break;
+    }
+    return { list: list.slice(0, count), more: list.length > count };
+  }
+
+  /** Read the history again from the newest entry, as far back as was already shown. */
   async function load() {
     loadError = '';
     try {
-      const r = await api(`/library/history?limit=${limit}`);
-      entries = Array.isArray(r) ? r : [];
+      const r = await page(0, Math.max(PAGE, entries.length));
+      entries = r.list; more = r.more;
       noHistory = false; noGit = false;
     } catch (e) {
       if (errCode(e) === 'NO_HISTORY') { noHistory = true; noGit = false; entries = []; }
@@ -35,6 +52,19 @@
     } finally { loading = false; }
   }
   onMount(() => { load(); return on((e) => { if (e.type === 'library.changed' || e.type === 'resync') load(); }); });
+
+  async function older() {
+    if (loadingMore) return;
+    loadingMore = true;
+    try {
+      const r = await page(entries.length, PAGE);
+      // A change recorded meanwhile moves everything down by one: nothing is listed twice.
+      const seen = new Set(entries.map((e) => e.hash));
+      entries = [...entries, ...r.list.filter((e) => !seen.has(e.hash))];
+      more = r.more;
+    } catch (e) { failed(t('ui.hist.loadFailed'), e); }
+    finally { loadingMore = false; }
+  }
 
   const KINDS = ['wrap', 'sync', 'edit', 'assistant'];
   const kindLabel = (k: string) => (k === 'start' ? t('hista.hist.kindStart') : t('ui.hist.kind.' + (KINDS.includes(k) ? k : 'other')));
@@ -147,8 +177,8 @@
           </div>
         </section>
       {/each}
-      {#if entries.length >= limit && limit < 500}
-        <div class="row morerow"><button class="btn" onclick={() => { limit = Math.min(500, limit + 100); load(); }}>{t('ui.hist.older')}</button></div>
+      {#if more}
+        <div class="row morerow"><button class="btn" disabled={loadingMore} aria-busy={loadingMore} onclick={older}>{t(loadingMore ? 'shell.loading' : 'ui.hist.older')}</button></div>
       {/if}
       <p class="muted sm tip">{t('ui.hist.versionsTip')}</p>
     {/if}

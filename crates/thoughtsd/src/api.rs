@@ -1316,7 +1316,7 @@ async fn move_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(
     if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("changes before moving {from}")), true).await; }
     library::rename(&root, &from, &to)?;
     let notes = links::apply(&root, &plan);
-    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("moved {from} to {to}")), true).await; }
+    if recoverable { claude::record_library(&st, &root, &git::subject::moved(&from, &to), true).await; }
     st.emit(json!({"type": "library.changed"}));
     st.emit(json!({"type": "todos.changed"}));
     let notes = notes?;
@@ -1384,32 +1384,47 @@ async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
 
 // ---------- library history ----------
 
-/// `GET /api/library/history?path=&limit=50` → `[{hash, short, date, subject, kind, files}]`, newest first.
+/// `GET /api/library/history?path=&limit=50&skip=0` → `[{hash, short, date, subject, kind, files,
+/// first}]`, newest first. `skip` leaves out that many of the newest entries, so the whole history
+/// can be read page by page (fewer than `limit` entries back means the end was reached). With
+/// `path` it is the history of that one file, followed through renames; each entry then has
+/// `path`, the name the file had at that point (pass it as `at` to read or restore that version).
 async fn library_history(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = history_lib(&st).await?;
-    let limit = q.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(50).clamp(1, 200);
+    let limit = q.get("limit").and_then(|l| l.parse::<usize>().ok()).unwrap_or(50).clamp(1, 500);
+    let skip = q.get("skip").and_then(|l| l.parse::<usize>().ok()).unwrap_or(0);
     let path = q.get("path").map(|p| p.trim().trim_start_matches("./").trim_matches('/').replace('\\', "/")).filter(|p| !p.is_empty());
     if let Some(p) = &path { library::resolve(&root, p)?; }
     // Edits made in the app are only recorded when something saves a point in history; do that now
     // (unless a save is already in progress) so History and Versions always include the latest edits.
     // Never while the assistant is working in the library (its half-written files would be recorded
     // as the user's edits) and never while a save holds the library; record_library also skips an
-    // interrupted wrap. The library lock is held for the length of the commit.
-    if !st.run_active_in(&root) {
+    // interrupted wrap. The library lock is held for the length of the commit. (Only when reading
+    // from the top: a new entry appearing between two pages would shift everything by one.)
+    if skip == 0 && !st.run_active_in(&root) {
         if let Ok(_guard) = st.library_lock.clone().try_lock_owned() {
             claude::record_library_locked(&st, &root, &git::subject::edit("your changes")).await;
         }
     }
-    Ok(Json(json!(git::history(&st, &root, path.as_deref(), limit).await?)))
+    Ok(Json(json!(git::history_page(&st, &root, path.as_deref(), skip, limit).await?)))
 }
 
-/// `GET /api/library/version?path=&hash=` → `{content}`: a file as it was at that point in the history.
+/// The name a file had at an earlier point (`at`, from its history), cleaned the way `path` is.
+fn earlier_name(at: Option<&String>) -> Option<String> {
+    at.map(|p| p.trim().trim_start_matches("./").trim_matches('/').replace('\\', "/")).filter(|p| !p.is_empty())
+}
+
+/// `GET /api/library/version?path=&hash=&at=` → `{content}`: a file as it was at that point in the
+/// history. `at` is the name it had then, when it has been renamed or moved since.
 async fn library_version(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = history_lib(&st).await?;
     let rel = q.get("path").map(String::as_str).unwrap_or("");
     library::resolve(&root, rel)?;
     scope_of(&q).check_read(&st, &root, rel).await?;
-    let bytes = git::file_at(&st, &root, rel, q.get("hash").map(String::as_str).unwrap_or("")).await?;
+    // The earlier name is a library path like any other: same protection, same private folders.
+    let was = earlier_name(q.get("at"));
+    if let Some(w) = &was { library::resolve(&root, w)?; scope_of(&q).check_read(&st, &root, w).await?; }
+    let bytes = git::file_at(&st, &root, was.as_deref().unwrap_or(rel), q.get("hash").map(String::as_str).unwrap_or("")).await?;
     if bytes.len() as u64 > library::RAW_MAX_BYTES { return Err(crate::tr::err("too_large.show", &[]).into()); }
     Ok(Json(json!({"path": rel, "content": String::from_utf8_lossy(&bytes)})))
 }
@@ -1426,12 +1441,16 @@ async fn history_change(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBu
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct Restore { path: String, hash: String }
-/// `POST /api/library/restore {path, hash}`: put that version of one file back, as a new history entry.
+struct Restore { path: String, hash: String, at: Option<String> }
+/// `POST /api/library/restore {path, hash, at?}`: put that version of one file back, as a new
+/// history entry. `at` is the name the file had at that point, when it has been renamed or moved
+/// since; the text goes into `path`, where the file is now.
 async fn library_restore(State(st): S, Json(r): Json<Restore>) -> R {
     let (root, _guard) = history_change(&st).await?;
     library::resolve(&root, &r.path)?;
-    let v = git::restore_file(&st, &root, &r.path, &r.hash).await?;
+    let was = earlier_name(r.at.as_ref());
+    if let Some(w) = &was { library::resolve(&root, w)?; }
+    let v = git::restore_file_from(&st, &root, &r.path, &r.hash, was.as_deref()).await?;
     st.emit(json!({"type": "library.changed"}));
     st.emit(json!({"type": "todos.changed"}));
     Ok(Json(v))
@@ -2569,7 +2588,7 @@ mod tests {
         busy(move_file(State(st.clone()), none(), Json(MoveFile { from: "README.md".into(), to: "READ.md".into() })).await);
         busy(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "README.md".into(), ..Default::default() })).await);
         busy(idea_status(State(st.clone()), none(), Json(IdeaStatus { path: "ideas/shop".into(), status: "active".into() })).await);
-        busy(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
+        busy(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: t::sh(&lib, &["rev-parse", "HEAD"]), ..Default::default() })).await);
         busy(library_undo(State(st.clone()), Json(Undo { hash: t::sh(&lib, &["rev-parse", "HEAD"]) })).await);
         busy(git_sync(State(st.clone())).await);
         busy(git_resolve(State(st.clone()), Json(Resolve { strategy: "mine".into() })).await);
@@ -2666,7 +2685,7 @@ mod tests {
         interrupted(git_sync(State(st.clone())).await);
         interrupted(git_resolve(State(st.clone()), Json(Resolve { strategy: "mine".into() })).await);
         interrupted(wrap_start(State(st.clone())).await);
-        interrupted(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: snap.clone() })).await);
+        interrupted(library_restore(State(st.clone()), Json(Restore { path: "README.md".into(), hash: snap.clone(), ..Default::default() })).await);
         interrupted(library_undo(State(st.clone()), Json(Undo { hash: snap.clone() })).await);
         let status = status(State(st.clone())).await.unwrap().0;
         assert_eq!(status["wrapInterrupted"], wrap.as_str());
@@ -2796,6 +2815,7 @@ mod tests {
     #[tokio::test]
     async fn a_move_rewrites_links_and_the_index_in_one_history_entry() {
         let (st, lib) = t::library().await;
+        online_location(&lib);
         write_file(State(st.clone()), none(), save("apps/one/README.md", "---\ntitle: One\nstatus: seed\nupdated: 2026-01-01\n---\n# One\n")).await.unwrap();
         write_file(State(st.clone()), none(), save("apps/two/README.md", "See [one](../one/README.md).\r\n")).await.unwrap();
         write_file(State(st.clone()), none(), save("INDEX.md", "- [One](apps/one/README.md) · seed · pitch · 2026-01-01\n")).await.unwrap();
@@ -2840,7 +2860,7 @@ mod tests {
         let first = h[1]["hash"].as_str().unwrap().to_string();
         let v = library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", &first)])).await.unwrap().0;
         assert_eq!(v["content"], "first draft\n");
-        library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone() })).await.unwrap();
+        library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone(), ..Default::default() })).await.unwrap();
         assert_eq!(t::read(&lib, "notes/plan.md"), "first draft\n");
         // Undo that restore as a whole change.
         let newest = library_history(State(st.clone()), none()).await.unwrap().0[0]["hash"].as_str().unwrap().to_string();
@@ -2854,7 +2874,7 @@ mod tests {
         let h = library_history(State(st.clone()), q(&[("path", "notes/scratch.md")])).await.unwrap().0;
         assert_eq!(h[0]["subject"], "edit: deleted notes/scratch.md");
         let before = h[1]["hash"].as_str().unwrap().to_string();
-        library_restore(State(st.clone()), Json(Restore { path: "notes/scratch.md".into(), hash: before })).await.unwrap();
+        library_restore(State(st.clone()), Json(Restore { path: "notes/scratch.md".into(), hash: before, ..Default::default() })).await.unwrap();
         assert_eq!(t::read(&lib, "notes/scratch.md"), "never synced\n");
         // A folder goes with everything in it when asked, and comes back from history the same way.
         write_file(State(st.clone()), none(), save("old/project/README.md", "# Old\n")).await.unwrap();
@@ -2877,7 +2897,7 @@ mod tests {
         assert_eq!(shown(git_sync(State(st.clone())).await).code, "sync_off");
         // With history switched off these say so, in a way the UI can recognise.
         st.settings.write().await.keep_history = false;
-        for r in [library_history(State(st.clone()), none()).await, library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone() })).await,
+        for r in [library_history(State(st.clone()), none()).await, library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone(), ..Default::default() })).await,
                   library_undo(State(st.clone()), Json(Undo { hash: first.clone() })).await, library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", &first)])).await] {
             let e = shown(r);
             assert!(e.message.starts_with("NO_HISTORY::") && e.code == "no_history", "{}", e.message);
@@ -2954,7 +2974,7 @@ mod tests {
             let v = library_history(State(st.clone()), q(&[("path", "notes/plan.md")])).await.unwrap().0;
             assert_eq!(v.as_array().unwrap().len(), 2);
             assert_eq!(library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", &first)])).await.unwrap().0["content"], "first draft\n");
-            library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone() })).await.unwrap();
+            library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone(), ..Default::default() })).await.unwrap();
             assert_eq!(t::read(&lib, "notes/plan.md"), "first draft\n");
             // A deleted document can be brought back; a whole change can be undone.
             assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/plan.md".into(), ..Default::default() })).await.unwrap().0["recoverable"], true);
@@ -2972,6 +2992,117 @@ mod tests {
             assert_eq!(git_status(State(st.clone())).await.unwrap().0["history"]["on"], false);
             forget(&lib);
         }
+    }
+
+    #[tokio::test]
+    async fn a_long_history_is_read_page_by_page_and_versions_survive_a_rename() {
+        let (st, lib) = plain_library("none").await;
+        library_history(State(st.clone()), none()).await.unwrap();
+        // Seven saves of other notes, then the plan is edited, moved (as Reorganize does) and edited again.
+        for i in 1..=7 {
+            write_file(State(st.clone()), none(), save(&format!("notes/n{i}.md"), "x\n")).await.unwrap();
+            claude::record_library(&st, &lib, &git::subject::edit("your changes"), true).await;
+        }
+        write_file(State(st.clone()), none(), save("notes/plan.md", "second draft\n")).await.unwrap();
+        claude::record_library(&st, &lib, &git::subject::edit("your changes"), true).await;
+        move_file(State(st.clone()), none(), Json(MoveFile { from: "notes/plan.md".into(), to: "خطط/الخطة.md".into() })).await.unwrap();
+        claude::record_library(&st, &lib, &git::subject::assistant("reorganize"), true).await;
+        write_file(State(st.clone()), none(), save("خطط/الخطة.md", "third draft\n")).await.unwrap();
+
+        // Pages of four reach every one of the eleven entries, in order, with none repeated.
+        let page = |skip: usize| { let st = st.clone(); async move {
+            library_history(State(st), q(&[("limit", "4"), ("skip", &skip.to_string())])).await.unwrap().0.as_array().unwrap().clone() } };
+        let (a, b, c, d) = (page(0).await, page(4).await, page(8).await, page(12).await);
+        assert_eq!((a.len(), b.len(), c.len(), d.len()), (4, 4, 3, 0));
+        let all: Vec<String> = a.iter().chain(&b).chain(&c).map(|e| e["hash"].as_str().unwrap().to_string()).collect();
+        let whole = library_history(State(st.clone()), q(&[("limit", "500")])).await.unwrap().0;
+        assert_eq!(all, whole.as_array().unwrap().iter().map(|e| e["hash"].as_str().unwrap().to_string()).collect::<Vec<_>>());
+        assert_eq!(c[2]["first"], true);
+        // More than the old ceiling of 200 can be asked for in one go.
+        assert_eq!(library_history(State(st.clone()), q(&[("limit", "100000")])).await.unwrap().0.as_array().unwrap().len(), 11);
+
+        // The moved file still has all four of its versions, each under the name it had then.
+        let v = library_history(State(st.clone()), q(&[("path", "خطط/الخطة.md")])).await.unwrap().0;
+        let names: Vec<&str> = v.as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap()).collect();
+        assert_eq!(names, ["خطط/الخطة.md", "خطط/الخطة.md", "notes/plan.md", "notes/plan.md"]);
+        assert_eq!(library_history(State(st.clone()), q(&[("path", "خطط/الخطة.md"), ("limit", "2"), ("skip", "2")])).await.unwrap().0.as_array().unwrap().len(), 2);
+        let oldest = v[3]["hash"].as_str().unwrap().to_string();
+        // Reading the oldest one needs the name it had; restoring it puts the text where the file is now.
+        assert_eq!(shown(library_version(State(st.clone()), q(&[("path", "خطط/الخطة.md"), ("hash", &oldest)])).await).status, 404);
+        let old = library_version(State(st.clone()), q(&[("path", "خطط/الخطة.md"), ("hash", &oldest), ("at", "notes/plan.md")])).await.unwrap().0;
+        assert_eq!(old["content"], "first draft\n");
+        library_restore(State(st.clone()), Json(Restore { path: "خطط/الخطة.md".into(), hash: oldest.clone(), at: Some("notes/plan.md".into()) })).await.unwrap();
+        assert_eq!(t::read(&lib, "خطط/الخطة.md"), "first draft\n");
+        assert!(!lib.join("notes/plan.md").exists(), "the old name is not brought back");
+        // The earlier name is checked like any other path.
+        assert_eq!(shown(library_version(State(st.clone()), q(&[("path", "خطط/الخطة.md"), ("hash", &oldest), ("at", ".git/config")])).await).status, 403);
+        assert_eq!(shown(library_restore(State(st.clone()), Json(Restore { path: "خطط/الخطة.md".into(), hash: oldest, at: Some("../outside.md".into()) })).await).status, 422);
+        forget(&lib);
+    }
+
+    #[tokio::test]
+    async fn versions_follow_a_note_through_moves_in_the_app_and_renames_git_recognises() {
+        let (st, lib) = plain_library("none").await;
+        library_history(State(st.clone()), none()).await.unwrap();
+        let mine = git::subject::edit("your changes");
+        let record = || claude::record_library(&st, &lib, &mine, true);
+        // A short note made of links: when it moves, its links are rewritten and it no longer looks
+        // like the same file to git.
+        write_file(State(st.clone()), none(), save("notes/b.md", "B\n")).await.unwrap();
+        write_file(State(st.clone()), none(), save("notes/a.md", "[b](b.md)\n")).await.unwrap();
+        record().await;
+        write_file(State(st.clone()), none(), save("notes/a.md", "[b](b.md)\n[b, again](b.md)\n")).await.unwrap();
+        record().await;
+        // Renamed outside the app (the assistant, say): git recognises it by its unchanged text.
+        std::fs::rename(lib.join("notes/a.md"), lib.join("notes/alpha.md")).unwrap();
+        claude::record_library(&st, &lib, &git::subject::assistant("reorganize"), true).await;
+        // Moved in the app, two folders deeper: every line of it changes.
+        move_file(State(st.clone()), none(), Json(MoveFile { from: "notes/alpha.md".into(), to: "archive/2026/alpha.md".into() })).await.unwrap();
+        assert_eq!(t::read(&lib, "archive/2026/alpha.md"), "[b](../../notes/b.md)\n[b, again](../../notes/b.md)\n");
+        let names_of = |v: &Value| v.as_array().unwrap().iter().map(|e| e["path"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let v = library_history(State(st.clone()), q(&[("path", "archive/2026/alpha.md")])).await.unwrap().0;
+        assert_eq!(names_of(&v), ["archive/2026/alpha.md", "notes/alpha.md", "notes/a.md", "notes/a.md"]);
+        assert_eq!(v[0]["subject"], "edit: moved notes/alpha.md to archive/2026/alpha.md");
+        // git alone does not see that move as a rename: it is followed because the app made it.
+        let move_hash = v[0]["hash"].as_str().unwrap().to_string();
+        let shown_by_git = git::git(&st, &lib, &["show", "--format=", "-M", "--name-status", &move_hash]).await.unwrap();
+        assert!(shown_by_git.lines().any(|l| l.starts_with('A') && l.ends_with("archive/2026/alpha.md")), "{shown_by_git}");
+        // Every version reads back under the name it had, and the oldest can be put back.
+        let text = |i: usize| { let (st, e) = (st.clone(), v[i].clone()); async move {
+            library_version(State(st), q(&[("path", "archive/2026/alpha.md"), ("hash", e["hash"].as_str().unwrap()), ("at", e["path"].as_str().unwrap())])).await.unwrap().0["content"].as_str().unwrap().to_string() } };
+        assert_eq!(text(3).await, "[b](b.md)\n");
+        assert_eq!(text(1).await, "[b](b.md)\n[b, again](b.md)\n");
+        // Pages of one walk the same way across both renames.
+        let mut paged = vec![];
+        for skip in 0..5 { paged.extend(names_of(&library_history(State(st.clone()), q(&[("path", "archive/2026/alpha.md"), ("limit", "1"), ("skip", &skip.to_string())])).await.unwrap().0)); }
+        assert_eq!(paged, names_of(&v));
+
+        // A folder moved in the app takes the history of every note in it along.
+        write_file(State(st.clone()), none(), save("ideas/shop/README.md", "[b](../../notes/b.md)\n")).await.unwrap();
+        record().await;
+        move_file(State(st.clone()), none(), Json(MoveFile { from: "ideas/shop".into(), to: "archive/2026/ideas/shop".into() })).await.unwrap();
+        assert_eq!(t::read(&lib, "archive/2026/ideas/shop/README.md"), "[b](../../../../notes/b.md)\n");
+        let v = library_history(State(st.clone()), q(&[("path", "archive/2026/ideas/shop/README.md")])).await.unwrap().0;
+        assert_eq!(names_of(&v), ["archive/2026/ideas/shop/README.md", "ideas/shop/README.md"]);
+        // A file that only came to have the same name later starts its own history.
+        write_file(State(st.clone()), none(), save("notes/a.md", "a new note\n")).await.unwrap();
+        record().await;
+        assert_eq!(names_of(&library_history(State(st.clone()), q(&[("path", "notes/a.md")])).await.unwrap().0)[..2], ["notes/a.md".to_string(), "notes/a.md".to_string()]);
+        forget(&lib);
+    }
+
+    #[test]
+    fn the_name_before_a_move_made_in_the_app() {
+        use git::subject::{moved, moved_from};
+        assert_eq!(moved_from(&moved("notes/a.md", "archive/a.md"), "archive/a.md").as_deref(), Some("notes/a.md"));
+        // A folder: every file in it.
+        assert_eq!(moved_from(&moved("ideas/shop", "archive/shop/"), "archive/shop/notes/plan.md").as_deref(), Some("ideas/shop/notes/plan.md"));
+        assert_eq!(moved_from(&moved("ideas/shop", "archive/shop"), "archive/shopping/x.md"), None);
+        // Names that hold " to " themselves are split where the new name says.
+        assert_eq!(moved_from(&moved("go to market.md", "plans/go to market.md"), "plans/go to market.md").as_deref(), Some("go to market.md"));
+        assert_eq!(moved_from(&moved("خطة.md", "خطط/خطة الطريق إلى السوق.md"), "خطط/خطة الطريق إلى السوق.md").as_deref(), Some("خطة.md"));
+        // Anything else is not a move.
+        for s in ["edit: your changes", "assistant: moved a.md to b.md", "edit: moved  to b.md", ""] { assert_eq!(moved_from(s, "b.md"), None, "{s}"); }
     }
 
     #[tokio::test]
