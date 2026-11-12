@@ -86,7 +86,9 @@ pub fn plan(chat: &Chat, to: Program, settings: &crate::settings::Settings) -> O
 }
 
 /// Make the move on the chat itself (see `plan`); `how` is what `plan` said. The note the chat shows
-/// is returned so the caller can announce it.
+/// is returned so the caller can announce it. "Bypass permissions" does not come along: it was
+/// confirmed for the other program's warning, so the chat goes back to the ordinary mode and says so;
+/// switching it on again for the new program needs the user's yes to that program's warning.
 pub fn apply(c: &mut Chat, to: Program, how: Option<How>, settings: &crate::settings::Settings) -> Option<Msg> {
     let from = crate::assistant::of_chat(&c.provider);
     c.provider = to.name().into();
@@ -96,12 +98,16 @@ pub fn apply(c: &mut Chat, to: Program, how: Option<How>, settings: &crate::sett
     let (model, effort) = crate::assistant::chat_defaults(settings, to);
     c.options.model = model;
     c.options.effort = effort;
+    let bypass_off = c.options.permission_mode.as_deref() == Some(crate::settings::BYPASS);
+    if bypass_off { c.options.permission_mode = Some(crate::settings::DEFAULT_PERMISSION_MODE.into()); }
     if !c.meta.is_object() { c.meta = json!({}); }
-    let how = how?;
-    c.meta["handoff"] = json!({"from": from.name(), "to": to.name(), "how": how.name()});
-    let key = if how == How::Replay { "handoff.replay" } else { "handoff.summary" };
-    let mut m = Msg::new("system", crate::tr::text(key, &[("to", to.label())]));
-    m.tool = Some(json!({"code": "handoff", "how": how.name(), "to": to.name()}));
+    if let Some(h) = how { c.meta["handoff"] = json!({"from": from.name(), "to": to.name(), "how": h.name()}); }
+    let mut said: Vec<String> = vec![];
+    if let Some(h) = how { said.push(crate::tr::text(if h == How::Replay { "handoff.replay" } else { "handoff.summary" }, &[("to", to.label())])); }
+    if bypass_off { said.push(crate::tr::text("handoff.bypass_off", &[("to", to.label())])); }
+    if said.is_empty() { return None; }
+    let mut m = Msg::new("system", said.join(" "));
+    m.tool = Some(json!({"code": "handoff", "how": how.map(How::name), "to": to.name(), "bypassOff": bypass_off}));
     Some(m)
 }
 
@@ -215,6 +221,30 @@ mod tests {
         assert!(!settled(&c));
         c.session_id = Some("s-codex".into());
         assert!(settled(&c));
+    }
+
+    #[test]
+    fn bypass_never_comes_along_to_the_other_program() {
+        let s = crate::settings::Settings::default();
+        for (from, to) in [("claude", Program::Codex), ("codex", Program::Claude)] {
+            // With a conversation, and in an empty chat: the mode goes back, and the chat says so.
+            for c0 in [chat_with(10), Chat::default()] {
+                let mut c = Chat { provider: from.into(), ..c0 };
+                c.options.permission_mode = Some(crate::settings::BYPASS.into());
+                let how = plan(&c, to, &s);
+                let note = apply(&mut c, to, how, &s).unwrap();
+                assert_eq!(c.options.permission_mode.as_deref(), Some("acceptEdits"), "{from}");
+                assert!(note.text.contains(&crate::tr::text_in(false, "handoff.bypass_off", &[("to", to.label())])), "{}", note.text);
+                assert_eq!(note.tool.unwrap()["bypassOff"], true);
+                // Switching it on again for the new program is a new switch, and needs the user's yes.
+                assert!(crate::settings::bypass_needs_confirm(c.options.permission_mode.as_deref(), Some(crate::settings::BYPASS)));
+            }
+        }
+        // Any other mode stays what it was, and an empty chat in it moves without a word.
+        let mut c = Chat { provider: "claude".into(), ..Default::default() };
+        c.options.permission_mode = Some("plan".into());
+        assert!(apply(&mut c, Program::Codex, None, &s).is_none());
+        assert_eq!(c.options.permission_mode.as_deref(), Some("plan"));
     }
 
     #[tokio::test]

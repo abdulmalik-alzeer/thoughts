@@ -56,7 +56,11 @@ async fn a_chat_moves_to_codex_and_its_next_message_carries_the_conversation() {
     // The next message passes the whole conversation on, and goes to Codex.
     let seen = Arc::new(std::sync::Mutex::new(Vec::<(String, Program)>::new()));
     let log = seen.clone();
-    t::assistant(&st, move |info| { let log = log.clone(); async move { log.lock().unwrap().push((info.prompt.clone(), info.program)); true } });
+    t::assistant(&st, move |info| { let log = log.clone(); async move {
+        // Codex has no way to put a request to the user: its runs never get the approval tool.
+        assert!(info.prompt_token.is_none() && info.ask.is_empty(), "a Codex run is never given the approval prompt");
+        log.lock().unwrap().push((info.prompt.clone(), info.program)); true
+    } });
     chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "And what else?".into(), ..Default::default() })).await.unwrap();
     for _ in 0..400 { if !seen.lock().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
     let (prompt, program) = seen.lock().unwrap()[0].clone();

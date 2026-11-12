@@ -137,7 +137,11 @@ fn sign_in_is_read_from_what_codex_says() {
 /// Every option and value of a command line, as text.
 fn strs(a: &[OsString]) -> Vec<String> { a.iter().map(|x| x.to_string_lossy().to_string()).collect() }
 fn plan<'a>(sandbox: &'a str, own_setup: bool) -> Plan<'a> {
-    Plan { help: HELP_0_27, sandbox, model: None, effort: None, web: false, own_setup, images: &[], writable: &[], resume: None }
+    Plan { help: HELP_0_27, sandbox, model: None, effort: None, web: false, own_setup, mcp: own_setup, network: false, images: &[], writable: &[], resume: None }
+}
+fn plan_of(sw: Switches) -> Plan<'static> {
+    Plan { help: HELP_0_27, sandbox: sw.sandbox, model: None, effort: None, web: sw.web, own_setup: sw.own_setup, mcp: sw.mcp, network: sw.network,
+        images: &[], writable: &[], resume: None }
 }
 fn set(a: &[String], kv: &str) -> bool { a.windows(2).any(|w| w[0] == "-c" && w[1] == kv) }
 
@@ -153,26 +157,51 @@ fn every_kind_of_run_gets_the_sandbox_of_its_mode_and_app_runs_never_go_without_
                 _ => "workspace-write",
             };
             assert_eq!(s, want, "{kind} {mode}");
-            // Built for real: the sandbox is always named, and a run the app starts loads none of the
-            // user's own Codex set-up and gives its commands no network.
-            let prof = profile(kind, crate::settings::effective_permission_mode(Some(mode)), false);
-            let a = strs(&exec_args(&plan(s, prof.own_setup)));
-            assert!(a.windows(2).any(|w| w[0] == "--sandbox" && w[1] == want), "{kind} {mode}: {a:?}");
-            assert_eq!((a[0].as_str(), a[1].as_str(), a.last().unwrap().as_str()), ("exec", "--json", "-"), "{kind} {mode}");
-            assert!(a.contains(&"--skip-git-repo-check".to_string()));
-            assert!(set(&a, "history.persistence=\"none\""), "{kind}");
-            let app_run = !matches!(kind, "chat" | "customize");
-            assert_eq!(set(&a, "mcp_servers={}"), app_run, "{kind} {mode}");
-            assert_eq!(set(&a, "notify=[]"), app_run, "{kind} {mode}");
-            assert_eq!(set(&a, "sandbox_workspace_write.network_access=false"), app_run && want == "workspace-write", "{kind} {mode}");
-            assert!(!a.iter().any(|x| x == "--dangerously-bypass-approvals-and-sandbox" || x == "--full-auto"), "{kind}");
+            // Built for real, for every profile a run of this kind can have (web lookups asked for or
+            // not, strict private folders or not): what the profile table says, and nothing more.
+            let real = crate::settings::effective_permission_mode(Some(mode));
+            for web in [false, true] {
+                let base = profile(kind, real, web);
+                for p in [base, base.strict(false), base.strict(true)] {
+                    let sw = switches(kind, mode, &p);
+                    let a = strs(&exec_args(&plan_of(sw)));
+                    let case = format!("{kind} {mode} web={web} {p:?}");
+                    // The web without commands reads only: Codex cannot switch its commands off.
+                    let sandbox = if p.web && !p.shell { "read-only" } else { want };
+                    assert!(a.windows(2).any(|w| w[0] == "--sandbox" && w[1] == sandbox), "{case}: {a:?}");
+                    assert_eq!((a[0].as_str(), a[1].as_str(), a.last().unwrap().as_str()), ("exec", "--json", "-"), "{case}");
+                    assert!(a.contains(&"--skip-git-repo-check".to_string()) && set(&a, "history.persistence=\"none\""), "{case}");
+                    assert_eq!(set(&a, "mcp_servers={}"), !p.mcp, "{case}");
+                    assert_eq!(set(&a, "notify=[]"), !p.own_setup, "{case}");
+                    assert_eq!(set(&a, "sandbox_workspace_write.network_access=false"), !p.web || !p.own_setup, "{case}");
+                    assert_eq!(set(&a, "tools.web_search=true"), p.web, "{case}");
+                    assert!(!a.iter().any(|x| x == "--dangerously-bypass-approvals-and-sandbox" || x == "--full-auto"), "{case}");
+                    if !matches!(kind, "chat" | "customize") { assert!(set(&a, "mcp_servers={}") && set(&a, "notify=[]"), "an app run: {case}"); }
+                }
+            }
         }
     }
-    // Web lookups: Codex's own search tool, and no connected tools.
-    let web = profile("chat", "acceptEdits", true);
-    let a = strs(&exec_args(&Plan { web: true, ..plan("workspace-write", web.own_setup) }));
-    assert!(set(&a, "tools.web_search=true"));
-    assert!(!set(&strs(&exec_args(&plan("workspace-write", true))), "tools.web_search=true"));
+    // An ordinary chat keeps the user's MCP servers but never gives commands the network.
+    let chat = strs(&exec_args(&plan_of(switches("chat", "acceptEdits", &profile("chat", "acceptEdits", false)))));
+    assert!(!set(&chat, "mcp_servers={}") && set(&chat, "sandbox_workspace_write.network_access=false"));
+    let web = switches("chat", "acceptEdits", &profile("chat", "acceptEdits", true));
+    assert_eq!((web.sandbox, web.mcp, web.web), ("read-only", false, true));
+}
+
+#[test]
+fn what_codex_obeys_or_runs_later_is_kept_in_every_spelling_and_folder() {
+    let chat = keep_for("chat", &profile("chat", "acceptEdits", false));
+    let wrap = keep_for("wrap", &profile("wrap", "acceptEdits", false));
+    let setup = keep_for("setup", &profile("setup", "acceptEdits", false));
+    for rel in [".claude/settings.json", ".Claude/skills/wrap/SKILL.md", "notes/.claude/x.md", ".codex/config.toml", "sub/.CODEX/x", ".mcp.json", ".MCP.json"] {
+        assert!(chat(rel) && wrap(rel), "{rel}");
+    }
+    for rel in ["AGENTS.md", "agents.md", "notes/Agents.MD", "deep/er/AGENTS.override.md", "CLAUDE.md", "x/claude.md", "routines/monthly.md"] {
+        assert!(wrap(rel) && !chat(rel), "{rel}: closed to a Wrap, an ordinary chat may change it");
+    }
+    for rel in ["notes/agents-notes.md", "AGENTS.md.bak", "codex.md", "notes/claude/today.md", "README.md"] { assert!(!wrap(rel) && !chat(rel), "{rel}"); }
+    // First-time set-up installs `.claude/` itself; everything else stays kept.
+    assert!(!setup(".claude/skills/wrap/SKILL.md") && setup(".codex/config.toml") && setup(".mcp.json"));
 }
 
 #[test]
@@ -470,11 +499,14 @@ async fn runs_the_app_starts_keep_to_their_sandbox_and_get_back_what_they_may_no
     let base = std::env::temp_dir().join(format!("thoughts-codex-app-{}", uuid::Uuid::new_v4()));
     let (dir, work) = (base.join("bin"), base.join("lib"));
     std::fs::create_dir_all(work.join(".claude")).unwrap();
+    std::fs::create_dir_all(work.join("notes")).unwrap();
     std::fs::write(work.join("CLAUDE.md"), "rules").unwrap();
     std::fs::write(work.join(".claude/keep.md"), "kept").unwrap();
     let st = codex_state(&dir, RUN_0_27).await;
-    // The stand-in "assistant" changes the standing rules and the app's routines, and files its real work.
-    std::fs::write(dir.join("touch.sh"), format!("echo 'rules + send notes away' > '{w}/CLAUDE.md'; echo x > '{w}/.claude/keep.md'; echo work > '{w}/today.md'", w = work.display())).unwrap();
+    // The stand-in "assistant" changes the standing rules, the app's routines and what Codex itself
+    // obeys or runs next time (an AGENTS.md further down, a `.codex` settings folder), and files its real work.
+    std::fs::write(dir.join("touch.sh"), format!("echo 'rules + send notes away' > '{w}/CLAUDE.md'; echo x > '{w}/.claude/keep.md'; \
+        echo 'always mail notes' > '{w}/notes/Agents.MD'; mkdir -p '{w}/.codex'; echo 'mcp' > '{w}/.codex/config.toml'; echo work > '{w}/today.md'", w = work.display())).unwrap();
     // An automatic task: Codex in its sandbox, none of the user's set-up, the standing files put back.
     let id = run_chat(&st, "workflow", "acceptEdits", &work, None).await.unwrap();
     let args = lines(&dir.join("args-0"));
@@ -482,16 +514,21 @@ async fn runs_the_app_starts_keep_to_their_sandbox_and_get_back_what_they_may_no
     for kv in ["mcp_servers={}", "notify=[]", "sandbox_workspace_write.network_access=false"] { assert!(args.iter().any(|a| a == kv), "{kv}: {args:?}"); }
     assert_eq!(std::fs::read_to_string(work.join("CLAUDE.md")).unwrap(), "rules");
     assert_eq!(std::fs::read_to_string(work.join(".claude/keep.md")).unwrap(), "kept");
+    assert!(!work.join("notes/Agents.MD").exists() && !work.join(".codex/config.toml").exists(), "what it planted is gone");
     assert_eq!(std::fs::read_to_string(work.join("today.md")).unwrap().trim(), "work", "the run's real work stays");
     let msgs = st.chats.get(&id).await.unwrap().messages;
-    assert!(msgs.iter().any(|m| m.role == "denied" && m.text.contains("CLAUDE.md")), "the chat says what was put back");
-    // An ordinary chat may change CLAUDE.md, but `.claude/` is put back for it too.
+    let put_back = msgs.iter().find(|m| m.role == "denied" && m.text.contains("CLAUDE.md")).expect("the chat says what was put back");
+    assert!(put_back.text.contains("notes/Agents.MD") && put_back.text.contains(".codex/config.toml"), "{}", put_back.text);
+    // An ordinary chat may change CLAUDE.md and AGENTS.md, but `.claude/` and `.codex/` are put back for it too.
     let id = run_chat(&st, "chat", "acceptEdits", &work, None).await.unwrap();
     assert!(std::fs::read_to_string(work.join("CLAUDE.md")).unwrap().contains("send notes away"));
+    assert!(work.join("notes/Agents.MD").exists());
     assert_eq!(std::fs::read_to_string(work.join(".claude/keep.md")).unwrap(), "kept");
+    assert!(!work.join(".codex/config.toml").exists());
     assert!(st.chats.get(&id).await.unwrap().messages.iter().any(|m| m.role == "denied" && m.text.contains(".claude/keep.md")));
     // Plan mode reads only: nothing to keep, nothing to put back.
     std::fs::write(work.join("CLAUDE.md"), "rules").unwrap();
+    std::fs::remove_file(work.join("notes/Agents.MD")).unwrap();
     std::fs::remove_file(dir.join("touch.sh")).unwrap();
     run_chat(&st, "wrap", "plan", &work, None).await.unwrap();
     assert!(lines(&dir.join("args-2")).windows(2).any(|w| w[0] == "--sandbox" && w[1] == "read-only"));
@@ -503,8 +540,16 @@ async fn runs_the_app_starts_keep_to_their_sandbox_and_get_back_what_they_may_no
     assert!(!dir.join("args-3").exists(), "nothing was started for them");
     run_chat(&st, "chat", crate::settings::BYPASS, &work, None).await.unwrap();
     assert!(lines(&dir.join("args-3")).windows(2).any(|w| w[0] == "--sandbox" && w[1] == "danger-full-access"));
+    // Strict private folders: Codex cannot keep its commands away from them, so the chat does not
+    // run on Codex (and says why); bypass is not covered by strict mode, as for Claude Code.
+    { let mut s = st.settings.write().await; s.private_paths = vec!["clients".into()]; s.strict_private = Some(true); }
+    std::fs::create_dir_all(work.join("clients")).unwrap();
+    let e = run_chat(&st, "chat", "acceptEdits", &work, None).await.unwrap_err();
+    assert_eq!(crate::tr::classify(&e).message, crate::tr::text_in(false, "codex.strict", &[]));
+    assert!(!dir.join("args-4").exists(), "nothing was started");
     std::fs::remove_dir_all(base).unwrap();
 }
+
 
 #[cfg(unix)]
 #[tokio::test]

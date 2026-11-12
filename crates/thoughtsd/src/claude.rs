@@ -1570,7 +1570,8 @@ pub async fn start_run(
     // ordinary chat whose program can ask that way; nobody (it is refused) for everything else.
     let hook = state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let help = if hook.is_some() { String::new() } else { help_text(&state).await };
-    let asks = crate::approvals::wanted(&kind, &mode, &prof)
+    // (Codex has no way to ask: its runs never get the prompt tool.)
+    let asks = !on_codex && crate::approvals::wanted(&kind, &mode, &prof)
         && (hook.is_some() || (crate::approvals::supported(&help) && crate::approvals::port() != 0));
     // Strict private folders: commands are put to the user one by one, or closed where nobody can be asked.
     let strict = crate::approvals::strict_applies(settings.strict_private(), &private_paths, &kind, &mode);
