@@ -657,6 +657,26 @@ fn set_dock_icon(app: tauri::AppHandle, png: Vec<u8>) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the app window, or a frame inside it, may load `url`: only the app's own pages and the
+/// documents the page builds itself. Never another site, and never another web server on this
+/// computer, whatever its port. `dev` is the development server's address (development builds only).
+fn nav_allowed(url: &tauri::Url, dev: Option<&tauri::Url>) -> bool {
+    let same_server = |a: &tauri::Url| a.scheme() == url.scheme() && a.host_str() == url.host_str() && a.port_or_known_default() == url.port_or_known_default();
+    match url.scheme() {
+        // Empty frames, and documents made in the page (a PDF preview is a blob).
+        "about" | "blob" | "data" => true,
+        // The bundled app…
+        "tauri" => url.host_str() == Some("localhost") && url.port().is_none(),
+        // …which Windows and Android serve as http(s)://tauri.localhost. Elsewhere that name is just
+        // another way to reach this computer, so it is refused like any other local server.
+        "http" | "https" => {
+            cfg!(any(windows, target_os = "android")) && url.host_str() == Some("tauri.localhost") && url.port().is_none()
+                || dev.is_some_and(same_server)
+        }
+        _ => false,
+    }
+}
+
 fn main() {
     if std::env::var("THOUGHTS_ASKPASS").is_ok() {
         std::process::exit(thoughtsd::askpass::main());
@@ -679,10 +699,9 @@ fn main() {
         // The app window only ever shows the app itself; any attempt to navigate elsewhere is refused.
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("nav-guard")
-                .on_navigation(|_, url| {
-                    matches!(url.scheme(), "tauri" | "asset" | "about" | "blob" | "data")
-                        || matches!(url.host_str(), Some("tauri.localhost") | Some("localhost") | Some("127.0.0.1"))
-                            && (url.host_str() != Some("127.0.0.1") || cfg!(debug_assertions))
+                .on_navigation(|w, url| {
+                    let dev = if tauri::is_dev() { w.config().build.dev_url.clone() } else { None };
+                    nav_allowed(url, dev.as_ref())
                 })
                 // Tell the UI which OS it is on before it renders: only macOS has a
                 // transparent (vibrancy) window.
@@ -794,4 +813,33 @@ fn main() {
             tauri::RunEvent::Reopen { has_visible_windows: false, .. } => show_main(_app),
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn url(s: &str) -> tauri::Url { tauri::Url::parse(s).unwrap() }
+
+    #[test]
+    fn the_window_only_loads_the_app_itself() {
+        let dev = url("http://localhost:1420");
+        // The bundled app and what its pages build for themselves.
+        for ok in ["tauri://localhost", "tauri://localhost/index.html?safe=1", "tauri://localhost/plugin-frame.html", "about:blank", "about:srcdoc", "blob:tauri://localhost/0b1c"] {
+            assert!(nav_allowed(&url(ok), None), "{ok}");
+        }
+        // Another web server on this computer is not the app, whatever port it listens on.
+        for bad in ["http://localhost:8080/login", "http://localhost/", "http://localhost:1420/", "http://127.0.0.1:3000/", "https://localhost:8443/",
+            "https://example.com/", "file:///etc/passwd", "asset://localhost/etc/passwd", "tauri://evil.example/", "tauri://localhost:99/", "javascript:alert(1)"] {
+            assert!(!nav_allowed(&url(bad), None), "{bad}");
+        }
+        // A development build also loads its own dev server, and only that one.
+        assert!(nav_allowed(&url("http://localhost:1420/?safe=1"), Some(&dev)));
+        for bad in ["http://localhost:8080/", "http://localhost/", "https://localhost:1420/", "http://127.0.0.1:1420/", "http://localhost.evil.example:1420/"] {
+            assert!(!nav_allowed(&url(bad), Some(&dev)), "{bad}");
+        }
+        // Only Windows and Android serve the bundle over http(s)://tauri.localhost.
+        assert_eq!(nav_allowed(&url("http://tauri.localhost/index.html"), None), cfg!(any(windows, target_os = "android")));
+        assert!(!nav_allowed(&url("http://tauri.localhost:8080/"), None));
+    }
 }
