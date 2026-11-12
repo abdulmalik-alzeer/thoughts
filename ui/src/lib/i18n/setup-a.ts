@@ -24,6 +24,8 @@ export default {
     'sa.folder.setUp': 'Set it up now',
     'sa.folder.needSetUp': 'This library was never set up. Choose “Set it up now”, or pick another folder.',
     'sa.folder.pickedLibrary': 'That folder already holds a library, so it will be opened as it is.',
+    // On the last step, when "cloud folder" was chosen for a folder that is not in a cloud drive the app knows.
+    'sa.sum.notCloud': 'this folder does not look like it is inside a cloud drive, so check that it really is backed up',
 
     // The setup chat.
     'sa.run.title': 'Your assistant is setting up your library',
@@ -71,6 +73,7 @@ export default {
     'sa.folder.setUp': 'جهّزها الآن',
     'sa.folder.needSetUp': 'هذه المكتبة لم تُجهَّز قط. اختر «جهّزها الآن»، أو اختر مجلداً آخر.',
     'sa.folder.pickedLibrary': 'في ذلك المجلد مكتبة من قبل، وستُفتح كما هي.',
+    'sa.sum.notCloud': 'لا يبدو أن هذا المجلد داخل مساحة سحابية، فتأكد من أن له نسخة احتياطية فعلاً',
 
     'sa.run.title': 'مساعدك يجهّز مكتبتك الآن',
     'sa.run.body': 'يستغرق ذلك عادةً دقيقتين أو ثلاثاً. يمكنك متابعة عمله هنا، أو أخذ جولة قصيرة في التطبيق ريثما ينتهي.',

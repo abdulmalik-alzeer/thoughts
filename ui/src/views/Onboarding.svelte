@@ -454,7 +454,7 @@
       <dl class="sum">
         <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}</dd>
         <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}</dd>
-        <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}</dd>
+        <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if s.sync.mode === 'folder' && !inCloud} · {t('sa.sum.notCloud')}{/if}</dd>
         <dt>{t('hista.historyTitle')}</dt><dd>{t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</dd>
       </dl>
       <h2>{t('ob.lookTitle')}</h2>
