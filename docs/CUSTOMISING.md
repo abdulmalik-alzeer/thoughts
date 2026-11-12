@@ -77,7 +77,7 @@ An add-on can do only what it has asked for, and the review shows the list befor
 | Read your ideas / Change an idea's status | It can list your ideas and items; or also move one between statuses. |
 | Remember its own data | It keeps one small private store for itself, such as the hours you logged. It is not part of your library. |
 | Start a chat | It can open a chat with a prepared message. You see the chat like any other. |
-| Sees only these folders: *folder names* | Whatever else it may read (notes, todos, ideas), it sees only what is inside the folders named. |
+| Sees only these folders: *folder names* | Whatever else it may read (notes, todos, ideas), it sees only what is inside the folders named. It also changes or deletes only files inside them; where else it saves, it can only add new files. |
 | Hand you files to save | It can offer you a spreadsheet, text or data file, such as this month's hours. The app's save dialog opens and you choose where; nothing is saved unless you do. |
 | Show notifications | It can show a short notice under its name, also on your computer when Thoughts is in the background and notifications are on. |
 | Ask your assistant | It can ask the assistant a question and show you the answer, such as a summary of a client. This uses your allowance. The assistant sees only what the add-on sends it. |

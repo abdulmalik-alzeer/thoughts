@@ -419,6 +419,8 @@ async fn import_folder(State(st): S, Json(r): Json<FolderReq>) -> R {
     // Nothing else changes the library meanwhile (a Wrap waits), and what was there before is
     // recorded first when the history starts here, so the copy is an entry of its own.
     let _guard = st.library_lock.clone().try_lock_owned().map_err(|_| tr::err("busy", &[]))?;
+    // With the assistant at work in the library, what is brought in is the user's, never the run's (FEAT-06).
+    let _fence = crate::changesets::fence(&st).await;
     let history = st.settings.read().await.history_enabled() && git::ready(&st, &root).await;
     let (root2, into2) = (root.clone(), into.clone());
     let scan = Arc::new(scan);

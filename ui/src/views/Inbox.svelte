@@ -52,7 +52,8 @@
     busy[c.path] = true;
     const text = c.text.trim() || c.title;
     try {
-      const r = await post('/capture', { kind: 'todo', text });
+      // "Tomorrow" in a capture means the day after it was written, not the day after today.
+      const r = await post('/capture', { kind: 'todo', text, on: (c.captured || '').slice(0, 10) });
       try { await post('/library/delete', { path: c.path }); }
       catch (e) {
         // The todo is saved but the capture is still there: take the todo back so nothing is doubled.
@@ -97,18 +98,18 @@
   const dirOf = (p: string) => p.replace(/\/README\.md$/i, '');
   const matches = $derived((targets ?? []).filter((i) => !q.trim() || fold(`${i.title} ${i.summary ?? ''} ${(i.tags || []).join(' ')} ${areaLabel(i.area)}`).includes(fold(q.trim()))).slice(0, 60));
 
-  /** Moved into the item's notes folder; a plain text file becomes a note (.md) on the way. */
+  /** Moved into the item's notes folder (a plain text file becomes a note, .md, on the way) and
+   *  listed in the item's files, where the assistant looks for its notes. */
   async function fileUnder(c: Capture, item: any) {
     if (busy[c.path]) return;
     busy[c.path] = true;
-    const to = `${dirOf(item.path)}/notes/${c.name.replace(/\.txt$/i, '.md')}`;
     try {
-      await post('/library/move', { from: c.path, to });
+      const r = await post('/inbox/file', { path: c.path, item: dirOf(item.path) });
       filing = null;
       hide(c);
       track('inbox.file');
       toast(t('inbox.filed', { name: item.title }), { kind: 'success', action: { label: t('undo'), run: async () => {
-        try { await post('/library/move', { from: to, to: c.path }); } catch (e) { failed(t('inbox.undoFailed'), e); }
+        try { await post('/inbox/unfile', { path: r.path, to: c.path, line: r.line }); } catch (e) { failed(t('inbox.undoFailed'), e); }
         settle();
       } } });
     } catch (e) { failed(t('inbox.fileFailed'), e); }

@@ -423,7 +423,7 @@ const EDIT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// those out; while the sync waits on the network the edit goes straight through, and is recorded
 /// before anything that arrived is put in. A wrap or a reorganize, which can take its changes back,
 /// still turns it away at once, as does a cut-off wrap waiting for a decision.
-async fn library_edit(st: &Arc<AppState>) -> anyhow::Result<(tokio::sync::OwnedRwLockReadGuard<()>, Option<crate::changesets::Fence>)> {
+pub(crate) async fn library_edit(st: &Arc<AppState>) -> anyhow::Result<(tokio::sync::OwnedRwLockReadGuard<()>, Option<crate::changesets::Fence>)> {
     let files = tokio::time::timeout(EDIT_WAIT, st.sync_files.clone().read_owned()).await.map_err(|_| crate::tr::err("busy.sync", &[]))?;
     if st.library_busy() && !st.syncing.load(std::sync::atomic::Ordering::SeqCst) { return Err(crate::tr::err("busy", &[])); }
     wraps::require_no_interrupted(st).await?;
@@ -482,7 +482,17 @@ impl Scope {
     async fn check_write(&self, st: &AppState, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
         if !self.plugin { return Ok(()); }
         self.check_private(st, root, rel).await?;
-        library::check_plugin_write(root, rel, &self.allow)
+        library::check_plugin_write(root, rel, &self.allow)?;
+        self.check_change(root, rel)
+    }
+    /// An add-on that lists the folders it reads changes, moves or deletes only files it can read
+    /// there: a file already in its write folders but outside its read folders is not its to touch.
+    /// It may still make new files in its write folders.
+    fn check_change(&self, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
+        if self.read.is_none() || self.may_read(root, rel) { return Ok(()); }
+        let there = library::resolve(root, rel).map_or(false, |p| std::fs::symlink_metadata(p).is_ok());
+        if there { return Err(crate::tr::err("plugin.not_changeable", &[("path", rel)])); }
+        Ok(())
     }
 }
 
@@ -1690,15 +1700,17 @@ async fn move_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(
     // place. Worked out before the move; an add-on only changes notes in its own folders.
     let plan = {
         let private = if scope.plugin { st.settings.read().await.private_paths.clone() } else { vec![] };
-        let may = |rel: &str| !scope.plugin || (!paths::is_private(&root, rel, &private) && library::check_plugin_write(&root, rel, &scope.allow).is_ok());
+        let may = |rel: &str| !scope.plugin || (!paths::is_private(&root, rel, &private) && library::check_plugin_write(&root, rel, &scope.allow).is_ok() && scope.may_read(&root, rel));
         links::plan_move(&root, &from, &to, &may)
     };
-    // With history on, the move and its link changes are one entry (pending edits are recorded first).
+    // With history on, the move and its link changes are one entry (pending edits are recorded first;
+    // while the assistant works in the library, only the files the move touches).
     let recoverable = history_lib(&st).await.is_ok() && wraps::interrupted_wrap(&st).await.is_none();
-    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("changes before moving {from}")), true).await; }
+    let touched: Vec<String> = [from.clone(), to.clone()].into_iter().chain(plan.writes.iter().map(|(p, _)| p.clone())).collect();
+    if recoverable { claude::record_app_write(&st, &root, &git::subject::edit(&format!("changes before moving {from}")), &touched, false).await; }
     library::rename(&root, &from, &to)?;
     let notes = links::apply(&root, &plan);
-    if recoverable { claude::record_library(&st, &root, &git::subject::moved(&from, &to), true).await; }
+    if recoverable { claude::record_app_write(&st, &root, &git::subject::moved(&from, &to), &touched, false).await; }
     st.emit(json!({"type": "library.changed"}));
     st.emit(json!({"type": "todos.changed"}));
     let notes = notes?;
@@ -1731,9 +1743,10 @@ async fn delete_file(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
     let target = library::resolve(&root, &d.path)?;
     if std::fs::symlink_metadata(&target).is_err() { return Err(crate::tr::err("not_found.file", &[]).into()); }
     let recoverable = history_lib(&st).await.is_ok() && wraps::interrupted_wrap(&st).await.is_none();
-    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("changes before deleting {}", d.path)), true).await; }
+    let touched = [d.path.clone()];
+    if recoverable { claude::record_app_write(&st, &root, &git::subject::edit(&format!("changes before deleting {}", d.path)), &touched, false).await; }
     if d.recursive { library::remove_all(&root, &d.path)?; } else { library::remove(&root, &d.path)?; }
-    if recoverable { claude::record_library(&st, &root, &git::subject::edit(&format!("deleted {}", d.path)), true).await; }
+    if recoverable { claude::record_app_write(&st, &root, &git::subject::edit(&format!("deleted {}", d.path)), &touched, false).await; }
     st.emit(json!({"type": "library.changed"}));
     st.emit(json!({"type": "todos.changed"}));
     Ok(Json(json!({"ok": true, "recoverable": recoverable})))
@@ -2137,11 +2150,13 @@ async fn todo_week(State(st): S) -> R {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct Capture { kind: String, text: String, file: String }
-/// `POST /api/capture {kind: "todo" | "note", text, file?}`: quick capture straight into the library,
+struct Capture { kind: String, text: String, file: String, on: String }
+/// `POST /api/capture {kind: "todo" | "note", text, file?, on?}`: quick capture straight into the library,
 /// without an assistant run (the Home box today; the tray and a global shortcut can use it too).
 /// - `todo`: added to the general list (or `file`); a date said at the end ("tomorrow", "by
-///   Friday", «غداً») becomes its due date → `{kind, file, line, text, title, due}`.
+///   Friday", «غداً») becomes its due date → `{kind, file, line, text, title, due}`. That date is
+///   read from `on` (`YYYY-MM-DD`, the day the text was written, as for an inbox capture made a
+///   while ago; never later than today), else from today.
 /// - `note`: saved as its own file in `inbox/` → `{kind, path}`.
 /// A leading "todo:" / «مهمة:» or "note:" / «ملاحظة:» is dropped.
 async fn capture(State(st): S, Json(c): Json<Capture>) -> R {
@@ -2160,7 +2175,8 @@ async fn capture(State(st): S, Json(c): Json<Capture>) -> R {
             let file = if c.file.is_empty() { todos::general(&root) } else { c.file.clone() };
             check_todo_file(&file)?;
             let today = chrono::Local::now().date_naive();
-            let (title, due) = if todos::split_task(&text).1.is_some() { (text.clone(), None) } else { todos::quick_due(&text, today, week_start(&st, &root).await) };
+            let written = chrono::NaiveDate::parse_from_str(c.on.trim(), "%Y-%m-%d").map_or(today, |d| d.min(today));
+            let (title, due) = if todos::split_task(&text).1.is_some() { (text.clone(), None) } else { todos::quick_due(&text, written, week_start(&st, &root).await) };
             let due = due.map(|d| d.format("%Y-%m-%d").to_string());
             let line_text = todos::compose(&title, None, due.as_deref());
             let line = todos::add(&root, &file, &line_text)?;
@@ -2711,7 +2727,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     um.attachments = saved;
     um.tool = (!m.mentions.is_empty()).then(|| json!({"mentions": m.mentions}));
     let mut opts = normalized(m.options.unwrap_or(chat.options.clone()), chat.options.permission_mode.as_deref());
-    opts.prompt_suggestions = chat.kind == "chat" && !s.ai.claude.suggestions_off;
+    opts.prompt_suggestions = chat.kind == "chat" && s.ai.claude.suggest_next;
     // How the chat stood before this message, for when the assistant cannot be started (see below).
     let before = (chat.title.clone(), chat.dirty, chat.mini_wrap.clone(), chat.updated, chat.suggestion.clone());
     let updated = st.chats.update(&id, |c| {
@@ -3966,6 +3982,59 @@ mod tests {
     /// them — files, search, ideas, todo lists — by name or through a link, and adds todos only to
     /// lists it can see that already exist.
     #[tokio::test]
+    async fn an_add_on_with_read_folders_changes_only_files_it_reads_and_only_adds_new_ones_elsewhere() {
+        let (st, lib) = t::library().await;
+        t::write(&lib, "clients/acme.md", "client\n");
+        t::write(&lib, "invoices/2026-10.md", "an invoice the user wrote\n");
+        let plugins = crate::applayer::Dirs::real().layer.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let (narrow, wide) = (format!("billing-{tag}.js"), format!("open-{tag}.js"));
+        for (name, extra) in [(&narrow, r#","read":["clients/"]"#), (&wide, "")] {
+            std::fs::write(plugins.join(name), "export default () => {}\n").unwrap();
+            std::fs::write(plugins.join(name.replace(".js", ".json")), format!(r#"{{"apiVersion":1,"permissions":["library:read","library:write"],"write":["clients/","invoices/"]{extra}}}"#)).unwrap();
+        }
+        let as_addon = |name: &str| q(&[("scope", "plugin"), ("plugin", name), ("allow", "clients/,invoices/")]);
+        let save = |path: &str| Json(WriteFile { path: path.into(), content: "by the add-on\n".into(), base_hash: None });
+        let make = |path: &str| Json(NewFile { path: path.into(), content: "new\n".into() });
+        let del = |path: &str| Json(DeleteFile { path: path.into(), ..Default::default() });
+        let mv = |from: &str, to: &str| Json(MoveFile { from: from.into(), to: to.into() });
+        // Inside its read folders: change, move, delete, as before.
+        write_file(State(st.clone()), as_addon(&narrow), save("clients/acme.md")).await.unwrap();
+        move_file(State(st.clone()), as_addon(&narrow), mv("clients/acme.md", "clients/acme-ltd.md")).await.unwrap();
+        // A new file where it saves, also outside what it reads; also as the place a file moves to.
+        new_file(State(st.clone()), as_addon(&narrow), make("invoices/2026-11.md")).await.unwrap();
+        write_file(State(st.clone()), as_addon(&narrow), save("invoices/2026-12.md")).await.unwrap();
+        move_file(State(st.clone()), as_addon(&narrow), mv("clients/acme-ltd.md", "invoices/acme.md")).await.unwrap();
+        // A file already there outside its read folders: never overwritten, moved or deleted, its own new one included.
+        for r in [
+            shown(write_file(State(st.clone()), as_addon(&narrow), save("invoices/2026-10.md")).await),
+            shown(write_file(State(st.clone()), as_addon(&narrow), save("invoices/2026-11.md")).await),
+            shown(delete_file(State(st.clone()), as_addon(&narrow), del("invoices/2026-10.md")).await),
+            shown(move_file(State(st.clone()), as_addon(&narrow), mv("invoices/2026-10.md", "clients/2026-10.md")).await),
+        ] {
+            assert_eq!((r.status, r.code), (403, "forbidden"), "{}", r.message);
+            assert!(r.message.contains("only change or delete files in the folders it reads"), "{}", r.message);
+        }
+        assert_eq!(t::read(&lib, "invoices/2026-10.md"), "an invoice the user wrote\n");
+        assert_eq!(t::read(&lib, "invoices/2026-11.md"), "new\n");
+        #[cfg(unix)]
+        {
+            // A link in its read folder that leads to a file outside it is that file: not its to change.
+            std::os::unix::fs::symlink(lib.join("invoices/2026-10.md"), lib.join("clients/october.md")).unwrap();
+            assert_eq!(shown(write_file(State(st.clone()), as_addon(&narrow), save("clients/october.md")).await).status, 403);
+            assert_eq!(t::read(&lib, "invoices/2026-10.md"), "an invoice the user wrote\n");
+        }
+        // Without a `read` list nothing changes: its write folders are its own, existing files included.
+        write_file(State(st.clone()), as_addon(&wide), save("invoices/2026-10.md")).await.unwrap();
+        delete_file(State(st.clone()), as_addon(&wide), del("invoices/2026-11.md")).await.unwrap();
+        // The user's own app is not narrowed at all.
+        delete_file(State(st.clone()), none(), del("invoices/2026-10.md")).await.unwrap();
+        for name in [&narrow, &wide] { for f in [name.clone(), name.replace(".js", ".json")] { let _ = std::fs::remove_file(plugins.join(f)); } }
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
     async fn an_add_on_with_read_folders_sees_only_them_and_adds_todos_only_to_lists_there() {
         let (st, lib) = t::library().await;
         let idea = |title: &str| format!("---\ntitle: {title}\nstatus: seed\n---\nAbout the invoice.\n");
@@ -4159,6 +4228,13 @@ mod tests {
         let tomorrow = (chrono::Local::now().date_naive() + chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
         assert_eq!((v["file"].as_str(), v["line"].as_u64(), v["title"].as_str(), v["due"].as_str()), (Some("TODO.md"), Some(3), Some("Call the bank"), Some(tomorrow.as_str())));
         assert_eq!(t::read(&lib, "TODO.md"), format!("# Todo\n\n- [ ] call the bank\n- [ ] Call the bank @due({tomorrow})\n"));
+        // An inbox capture written days ago: its "tomorrow" is the day after it was written; a date
+        // still to come, or none that can be read, is today.
+        let on = |text: &str, on: &str| Json(Capture { kind: "todo".into(), text: text.into(), on: on.into(), ..Default::default() });
+        assert_eq!(capture(State(st.clone()), on("Renew the lease tomorrow", "2026-03-09")).await.unwrap().0["due"], "2026-03-10");
+        assert_eq!(capture(State(st.clone()), on("Pay the fee tomorrow", "2999-01-01")).await.unwrap().0["due"], tomorrow.as_str());
+        assert_eq!(capture(State(st.clone()), on("Book the room tomorrow", "soon")).await.unwrap().0["due"], tomorrow.as_str());
+        t::write(&lib, "TODO.md", "# Todo\n\n- [ ] call the bank\n");
         let v = capture(State(st.clone()), cap("note", "ملاحظة: فكرة عن متجر صغير\nبتفاصيل")).await.unwrap().0;
         let path = v["path"].as_str().unwrap();
         assert!(path.starts_with("inbox/") && path.ends_with("-فكرة-عن-متجر-صغير.md"), "{path}");
@@ -4798,7 +4874,7 @@ mod tests {
 
         // Everything else under the library API is closed to a request made for an add-on.
         for path in ["/api/library/restore", "/api/library/undo", "/api/library/history", "/api/library/import", "/api/library/stats",
-                     "/api/library/trust", "/api/todos/calendar.ics", "/api/capture", "/api/library/picture", "/api/inbox", "/api/inbox/prepare"] {
+                     "/api/library/trust", "/api/todos/calendar.ics", "/api/capture", "/api/library/picture", "/api/inbox", "/api/inbox/prepare", "/api/inbox/file", "/api/inbox/unfile"] {
             assert!(!plugin_scope_allowed(path, "scope=plugin"), "{path}");
             assert!(!plugin_scope_allowed(path, "allow=x&scope=plugin&path=a"), "{path}");
             assert!(plugin_scope_allowed(path, ""), "{path}");

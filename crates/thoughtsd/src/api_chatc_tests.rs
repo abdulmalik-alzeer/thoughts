@@ -139,11 +139,11 @@ async fn sending_clears_the_suggestion_and_only_ordinary_chats_ask_for_one() {
     chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "Make it a table".into(), ..Default::default() })).await.unwrap();
     assert!(st.chats.get(&chat).await.unwrap().suggestion.is_none(), "gone once the user has said what comes next");
     t::event(&mut rx, &st, "chat.done").await;
-    // The choice travels with the run's options; it is on unless switched off in Settings.
-    assert!(st.chats.get(&chat).await.unwrap().options.prompt_suggestions);
-    st.settings.write().await.ai.claude.suggestions_off = true;
+    // The choice travels with the run's options; it is off unless switched on in Settings.
+    assert!(!st.chats.get(&chat).await.unwrap().options.prompt_suggestions);
+    st.settings.write().await.ai.claude.suggest_next = true;
     chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "again".into(), ..Default::default() })).await.unwrap();
     t::event(&mut rx, &st, "chat.done").await;
-    assert!(!st.chats.get(&chat).await.unwrap().options.prompt_suggestions);
+    assert!(st.chats.get(&chat).await.unwrap().options.prompt_suggestions);
     std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
 }

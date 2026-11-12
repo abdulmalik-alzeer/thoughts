@@ -36,7 +36,7 @@ function todoValue(key: string, value: unknown): string {
 export function mayDo(kind: 'addon' | 'page', permissions: string[], write: string[], read: string[] = []): string[] {
   if (!permissions.length) return [t(kind === 'page' ? 'ldb.pageAsksNothing' : 'layer.pluginAsksNothing')];
   const lines = permissions.map((p) => p === 'library:write'
-    ? (write.length ? `${permText(p)}: ${list(write)}` : `${permText(p)} — ${t('layer3.writeNone')}`)
+    ? (write.length ? `${permText(p)}: ${list(write)}${read.length ? ` — ${t('cln.addon.changeOnly', { folders: list(read) })}` : ''}` : `${permText(p)} — ${t('layer3.writeNone')}`)
     // An item's status only inside the declared folders (layerui-a, BUG-20).
     : p === 'ideas:write'
       ? (write.length ? `${permText(p)} — ${t('lua.statusIn')} ${list(write)}` : `${permText(p)} — ${t('lua.statusNone')}`)

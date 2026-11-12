@@ -441,7 +441,7 @@
     } },
     accessibility: { list: basic.accessibility, apply: () => setAx({ ...A11Y_DEFAULTS }) },
     ai: { list: ['set.perm', 'set.wrapNag', 'chatc.set.suggest', 'set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle'], apply: () => {
-      const c = s.ai.claude; c.permissionMode = 'acceptEdits'; c.model = null; c.effort = null; c.binary = null; c.miniWrapModel = null; c.suggestionsOff = false;
+      const c = s.ai.claude; c.permissionMode = 'acceptEdits'; c.model = null; c.effort = null; c.binary = null; c.miniWrapModel = null; c.suggestNext = false;
       s.idleMinutes = 15; s.wrapNagThreshold = 5;
     } },
     daemon: { list: ['set.keepRunning', 'set.runAtLogin'], apply: () => { s.daemon.keepRunning = true; s.daemon.runAtLogin = false; } },
@@ -749,7 +749,7 @@
         <p class="muted sm" id="st-nag-hint">{t('set.wrapDef')}</p>
       {/if}
       {#if vis(c, 'chatc.set.suggest')}
-        <label class="check"><input type="checkbox" checked={!s.ai.claude.suggestionsOff} onchange={(e) => (s.ai.claude.suggestionsOff = !e.currentTarget.checked)} aria-describedby="st-suggest-hint" /> {t('chatc.set.suggest')}</label>
+        <label class="check"><input type="checkbox" checked={!!s.ai.claude.suggestNext} onchange={(e) => (s.ai.claude.suggestNext = e.currentTarget.checked)} aria-describedby="st-suggest-hint" /> {t('chatc.set.suggest')}</label>
         <p class="muted sm" id="st-suggest-hint">{t('chatc.set.suggestHint')}</p>
       {/if}
     </div>

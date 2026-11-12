@@ -248,6 +248,7 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
     }
     // 3. Chats.
     let (mut added, mut replaced, mut skipped, mut files) = (0usize, 0usize, 0usize, 0usize);
+    let here = crate::wraps::Scope::now(&st).await.key();
     if ch.chats {
         for c in b.chats {
             if let Some(h) = st.chats.meta(&c.id).await {
@@ -261,7 +262,10 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
             let present: BTreeSet<String> = transfer::write_attachments(&attachments_dir, &c.id, b.attachments.get(&c.id).unwrap_or(&empty))?;
             files += present.len();
             let project = c.project_id.as_ref().and_then(|p| map.get(p).cloned());
-            st.chats.insert(transfer::localised(c, project, &attachments_dir, &present)).await;
+            // A moved chat belongs to the library open here (the file holds one library's chats).
+            let mut c = transfer::localised(c, project, &attachments_dir, &present);
+            c.library = here.clone();
+            st.chats.insert(c).await;
         }
         st.emit(json!({"type": "chat.updated"}));
     }

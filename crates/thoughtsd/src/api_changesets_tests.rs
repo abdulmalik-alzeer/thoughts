@@ -124,3 +124,35 @@ async fn nothing_is_undone_while_the_assistant_works_and_an_answer_that_changed_
     assert_eq!(shown(op(&st, &other, "not-a-message", "undo").await).status, 404);
     std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
 }
+
+#[tokio::test]
+async fn a_move_and_a_delete_made_during_an_answer_are_the_users_and_their_entries_hold_only_their_files() {
+    let (st, lib) = t::library().await;
+    t::write(&lib, "notes/old.md", "old\n");
+    t::write(&lib, "notes/gone.md", "gone\n");
+    t::write(&lib, "notes/index.md", "[old](old.md)\n");
+    t::sh(&lib, &["add", "-A"]);
+    t::sh(&lib, &["commit", "-q", "-m", "notes"]);
+    let chat = t::chat(&st, "Plan").await;
+    let w = crate::changesets::begin(&st, &chat, &lib, &lib).await.expect("watched");
+    // The answer is half way through writing a note when the user moves one and deletes another.
+    t::write(&lib, "notes/plan.md", "the answer's, half written\n");
+    move_file(State(st.clone()), no_query(), Json(MoveFile { from: "notes/old.md".into(), to: "notes/older.md".into() })).await.unwrap();
+    delete_file(State(st.clone()), no_query(), Json(DeleteFile { path: "notes/gone.md".into(), ..Default::default() })).await.unwrap();
+    // Their entries hold only what they touched (the link they kept right included), never the answer's note.
+    let entries = top(&lib, 2);
+    assert_eq!(entries[0], ("edit: deleted notes/gone.md".to_string(), vec!["notes/gone.md".to_string()]));
+    assert_eq!(entries[1].0, "edit: moved notes/old.md to notes/older.md");
+    let moved = &entries[1].1;
+    assert!(moved.contains(&"notes/older.md".to_string()) && moved.contains(&"notes/index.md".to_string()), "{moved:?}");
+    assert!(moved.iter().all(|f| f.starts_with("notes/old") || f == "notes/index.md"), "{moved:?}");
+    assert!(t::sh(&lib, &["status", "--porcelain"]).contains("notes/plan.md"), "the answer's note waits for the answer's own entry");
+    // The answer's changes are its note only; the move and the delete are named as someone else's.
+    assert!(crate::changesets::finish(&st, &chat, "assistant: Plan").await);
+    drop(w);
+    let c = st.chats.with(&chat, |c| changes_msg(c)).await.flatten().unwrap().tool.unwrap();
+    let files: Vec<&str> = c["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert_eq!(files, ["notes/plan.md"]);
+    assert_eq!(top(&lib, 1)[0], ("assistant: Plan".to_string(), vec!["notes/plan.md".to_string()]));
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}

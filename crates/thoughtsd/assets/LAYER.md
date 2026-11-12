@@ -140,6 +140,9 @@ Every plugin that uses a permission has its own small file beside it, with the s
   todo list sits at the top of the library, so a plugin with `read` folders does not see it.)
   Every todo call stays inside them too: `todos.add`, `setDone`, `edit` and `remove` only change
   lists inside the `read` folders, and the status `ideas.setStatus` sets only of items inside them.
+  Files too: with `read`, `library.write` and `library.remove` change or delete only files that are
+  already inside the `read` folders; in the rest of its `write` folders the plugin can only make
+  new files (a file that is already there is refused).
 - `description` — one plain sentence; the user sees it when reviewing.
 
 Because each plugin has its own file, adding or removing one plugin never touches another, and the

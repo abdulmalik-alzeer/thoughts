@@ -390,8 +390,11 @@ pub struct ClaudeSettings {
     pub base_url: Option<String>,
     /// A key for that address is saved in the password store (never in this file).
     pub has_api_token: bool,
-    /// No suggested next message under an answer. (Off by default: the suggestions are on.)
-    pub suggestions_off: bool,
+    /// A suggested next message under each answer. Off unless switched on: asking for one makes
+    /// every answer wait about two seconds longer and costs one more short request. (An earlier
+    /// test build stored the opposite switch, `suggestionsOff`; it is ignored, so whoever never
+    /// chose has them off too.)
+    pub suggest_next: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1287,6 +1290,11 @@ mod tests {
         assert_eq!(s.accessibility, Accessibility::default());
         assert!(!s.release_check, "the version check is off unless switched on");
         assert!(serde_json::from_str::<Settings>(r#"{"releaseCheck":true}"#).unwrap().release_check);
+        assert!(!s.ai.claude.suggest_next, "suggested next messages are off unless switched on");
+        // A file from a test build that stored the old switch, untouched (false = on), gets off as well.
+        let old: Settings = serde_json::from_str(r#"{"ai":{"claude":{"suggestionsOff":false}}}"#).unwrap();
+        assert!(!old.ai.claude.suggest_next);
+        assert!(serde_json::from_str::<Settings>(r#"{"ai":{"claude":{"suggestNext":true}}}"#).unwrap().ai.claude.suggest_next);
     }
 
     #[test]

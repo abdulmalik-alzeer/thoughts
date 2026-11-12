@@ -9,7 +9,7 @@
   import Icon from '../Icon.svelte';
   import { t, fmtDate } from '../i18n';
   import { fmtSize } from '../content/util';
-  import { go } from '../store.svelte';
+  import { app, go } from '../store.svelte';
   import { openItem } from '../item';
   import {
     voice, voiceShell, initVoice, loadVoice, setVoiceLang, langName, startRecording, pauseRecording, stopRecording,
@@ -121,7 +121,7 @@
           </select>
         </div>
       </div>
-      <p class="muted sm" dir="auto"><Icon name="lock" size={12} /> {t('voice.rec.where', { where: item.title })}</p>
+      <p class="muted sm" dir="auto"><Icon name="lock" size={12} /> {t(app.settings?.sync?.mode === 'folder' ? 'cln.voice.whereCloud' : 'cln.voice.where', { where: item.title })}</p>
       <p class="sm consent">{t('voice.rec.consent')}</p>
       <div class="row wrap btns">
         <button class="btn primary" disabled={starting} aria-busy={starting}><Mic size={14} /> {t('voice.rec.go')}</button>

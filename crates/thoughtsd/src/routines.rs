@@ -292,9 +292,12 @@ async fn api_save(State(st): State<Arc<AppState>>, Json(r): Json<SaveReq>) -> R 
     // The library's lock is held from the trust check before the write until the history entry after it.
     let _lib = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
     let _g = LOCK.lock().await;
+    // With the assistant at work in the library, this change is the user's, never the run's (FEAT-06).
+    let _f = crate::changesets::fence(&st).await;
     let id = save(&lib, r.id.as_deref(), r.hash.as_deref(), &r.routine)?;
     crate::log::info(format!("routine {id} {} in the app", if r.id.is_some() { "changed" } else { "created" }));
-    crate::claude::record_library_locked(&st, &lib, &crate::git::subject::edit(&format!("routine {}", one_line(&r.routine.title)))).await;
+    let touched = [format!(".claude/skills/{id}")];
+    crate::claude::record_app_write(&st, &lib, &crate::git::subject::edit(&format!("routine {}", one_line(&r.routine.title))), &touched, true).await;
     st.emit(json!({"type": "library.changed"}));
     Ok(Json(json!({"id": id})))
 }
@@ -308,9 +311,11 @@ async fn api_remove(State(st): State<Arc<AppState>>, Json(r): Json<RemoveReq>) -
     // The library's lock is held from the trust check before the write until the history entry after it.
     let _lib = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
     let _g = LOCK.lock().await;
+    let _f = crate::changesets::fence(&st).await;
     remove(&lib, &r.id, &r.hash)?;
     crate::log::info(format!("routine {} removed in the app", r.id));
-    crate::claude::record_library_locked(&st, &lib, &crate::git::subject::edit(&format!("remove routine {}", r.id))).await;
+    let touched = [format!(".claude/skills/{}", r.id)];
+    crate::claude::record_app_write(&st, &lib, &crate::git::subject::edit(&format!("remove routine {}", r.id)), &touched, true).await;
     st.emit(json!({"type": "library.changed"}));
     Ok(Json(json!({"ok": true})))
 }
@@ -325,6 +330,23 @@ mod tests {
         d
     }
     fn draft(title: &str, steps: &str) -> Draft { Draft { title: title.into(), description: "Use when the user says client intake.".into(), steps: steps.into() } }
+
+    #[tokio::test]
+    async fn a_routine_saved_during_an_answer_is_the_users_and_its_entry_holds_only_the_routine() {
+        let (st, lib) = crate::wraps::testutil::library().await;
+        let chat = crate::wraps::testutil::chat(&st, "Plan").await;
+        let w = crate::changesets::begin(&st, &chat, &lib, &lib).await.expect("watched");
+        crate::wraps::testutil::write(&lib, "notes/plan.md", "the answer's, half written\n");
+        let r = api_save(State(st.clone()), Json(SaveReq { routine: draft("Client intake", "1. Ask for the name."), ..Default::default() })).await.unwrap().0;
+        let id = r["id"].as_str().unwrap().to_string();
+        let last = crate::wraps::testutil::sh(&lib, &["log", "-1", "--name-only", "--format=%s"]);
+        assert_eq!(last.lines().filter(|l| !l.is_empty()).collect::<Vec<_>>(), ["edit: routine Client intake".to_string(), format!(".claude/skills/{id}/SKILL.md")]);
+        assert!(crate::changesets::finish(&st, &chat, "assistant: Plan").await);
+        drop(w);
+        let c = st.chats.with(&chat, |c| c.messages.iter().find(|m| m.role == "changes").and_then(|m| m.tool.clone())).await.flatten().unwrap();
+        assert_eq!(c["files"].as_array().unwrap().iter().map(|f| f["path"].as_str().unwrap()).collect::<Vec<_>>(), ["notes/plan.md"]);
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
 
     #[test]
     fn what_the_app_writes_is_plain_and_reads_back() {

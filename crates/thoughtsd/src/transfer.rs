@@ -48,10 +48,13 @@ fn own_attachment(attachments: &Path, id: &str, path: &str) -> Option<(String, P
 }
 
 /// The settings as they travel: everything except the key flag, which is false (the key itself
-/// never leaves the keychain).
+/// never leaves the keychain), and only the open library's: the other libraries in the switcher,
+/// their folders and their own settings stay on this computer.
 pub fn settings_for_export(s: &Settings) -> Value {
     let mut out = s.clone();
     out.ai.claude.has_api_token = false;
+    out.libraries.retain(|l| s.is_open_library(Path::new(&l.path)));
+    for l in &mut out.libraries { l.parked = None; }
     serde_json::to_value(out).unwrap_or(Value::Null)
 }
 
@@ -87,13 +90,17 @@ fn read_addon_data(v: &Value) -> Option<BTreeMap<String, Value>> {
 }
 
 /// Build the file. Only ordinary chats travel (Wrap, setup and customise runs belong to this
-/// computer's history). `layer` is the customisation layer.
+/// computer's history), and only the open library's: another library's chats, like its folder and
+/// settings, stay here. `layer` is the customisation layer.
 pub fn export(settings: &Settings, chats: Vec<Chat>, attachments_dir: &Path, layer: &Path) -> (Value, Exported) {
     let mut info = Exported::default();
     let mut files: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut total = 0usize;
     let mut out_chats = vec![];
-    for mut c in chats.into_iter().filter(|c| c.kind == "chat" && valid_id(&c.id)) {
+    let open = crate::wraps::Scope::of(settings.library());
+    for mut c in chats.into_iter().filter(|c| c.kind == "chat" && valid_id(&c.id) && open.holds(c.library.as_deref())) {
+        // Which folder it belonged to here means nothing on the other computer: it joins the library open there.
+        c.library = None;
         c.running = false;
         c.interrupted = false;
         // The assistant's own session lives on this computer only; the next message replays the chat instead.
@@ -248,7 +255,7 @@ pub fn merged_settings(cur: &Settings, from: &Settings) -> Settings {
     c.model = f.model.clone();
     c.effort = f.effort.clone();
     c.mini_wrap_model = f.mini_wrap_model.clone();
-    c.suggestions_off = f.suggestions_off;
+    c.suggest_next = f.suggest_next;
     if f.permission_mode.as_deref() != Some(crate::settings::BYPASS) { c.permission_mode = f.permission_mode.clone(); }
     if !cur.ai.claude.has_api_token { c.base_url = f.base_url.clone(); }
     for p in &from.private_paths { if !n.private_paths.contains(p) { n.private_paths.push(p.clone()); } }
@@ -339,6 +346,34 @@ mod tests {
         c.messages.push(m);
         c.mini_wrap = Some("unwrapped summary".into());
         c
+    }
+
+    #[test]
+    fn a_move_file_holds_only_the_open_library_its_folder_settings_and_chats() {
+        let d = tmp();
+        let (work, personal) = ("/Users/sara/Work Library", "/Users/sara/Diary Library");
+        let mut s = Settings::default();
+        s.library_path = Some(work.into());
+        s.private_paths = vec!["clients/secret".into()];
+        let parked = crate::settings::LibrarySettings { private_paths: vec!["therapy".into()], projects: vec![Project { id: "p9".into(), name: "Diary".into(), path: "/Users/sara/Diary Folder".into() }], ..Default::default() };
+        s.libraries = vec![
+            crate::settings::Library { id: "w".into(), name: "Work".into(), path: work.into(), parked: None },
+            crate::settings::Library { id: "p".into(), name: "Personal".into(), path: personal.into(), parked: Some(parked) },
+        ];
+        let mut mine = Chat { title: "Pricing".into(), ..Default::default() };
+        mine.library = Some(work.into());
+        let mut theirs = Chat { title: "Dear diary".into(), ..Default::default() };
+        theirs.library = Some(personal.into());
+        let (v, info) = export(&s, vec![mine.clone(), theirs], &d.join("attachments"), &d.join("app-layer"));
+        assert_eq!(info.chats, 1);
+        assert_eq!(v["chats"][0]["id"], mine.id.as_str());
+        assert!(v["chats"][0]["library"].is_null(), "it joins the library open on the other computer");
+        let libs = v["settings"]["libraries"].as_array().unwrap();
+        assert_eq!((libs.len(), libs[0]["id"].as_str()), (1, Some("w")));
+        assert_eq!(v["settings"]["privatePaths"], json!(["clients/secret"]));
+        let text = v.to_string();
+        for other in ["Diary Library", "Diary Folder", "therapy", "Dear diary", "Personal"] { assert!(!text.contains(other), "{other} left this computer"); }
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]

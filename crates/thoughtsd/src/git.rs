@@ -93,6 +93,41 @@ pub fn enclosing_repo(dir: &Path) -> Option<PathBuf> {
 /// (A library's own `.gitignore` files are honoured as well.)
 const KEPT_EXCLUDE: &str = "# Written by Thoughts.\n.DS_Store\nThumbs.db\ndesktop.ini\n.*.icloud\n.dropbox\n.dropbox.cache/\n.dropbox.attr\n.~lock.*\n~$*\n.*.tmp\n";
 
+/// The first line of the rule that keeps meeting recordings (the sound files in any `meetings/`
+/// folder, FEAT-55) out of a library's history, and so out of every online backup: only the
+/// transcript note beside a recording is recorded. Found by this line, so it is added only once.
+const RECORDINGS_MARK: &str = "# Thoughts: meeting recordings stay on this computer (never in the history, never sent to a backup).";
+
+fn recordings_rule() -> String {
+    let mut s = format!("{RECORDINGS_MARK}\n");
+    for ext in crate::voice::AUDIO_EXT { s.push_str(&format!("**/meetings/*.{ext}\n")); }
+    s
+}
+
+/// Make sure the history of `dir` leaves meeting recordings out. The rule goes into that history's
+/// own list of files to leave out (`info/exclude`, inside the repository: never a `.gitignore`, which
+/// is the user's and would travel with the library), for the history the app keeps and for a
+/// repository of the library's own alike. It only stops files from being added: a recording that
+/// some earlier version already recorded stays recorded. Called before anything is added to the
+/// history; once the rule is there this is one read of a small file.
+pub async fn keep_recordings_out(state: &AppState, dir: &Path) {
+    let file = match repo_of(dir) {
+        Repo::Kept(store) => store.join("info/exclude"),
+        // The usual repository; a `.git` file (a linked working copy) names where git keeps it.
+        Repo::Own if dir.join(".git").is_dir() => dir.join(".git/info/exclude"),
+        Repo::Own => match git(state, dir, &["rev-parse", "--git-path", "info/exclude"]).await {
+            Ok(p) if !p.trim().is_empty() => { let p = PathBuf::from(p.trim()); if p.is_absolute() { p } else { dir.join(p) } }
+            _ => return,
+        },
+        Repo::Missing => return,
+    };
+    let had = std::fs::read_to_string(&file).unwrap_or_default();
+    if had.lines().any(|l| l.trim() == RECORDINGS_MARK) { return; }
+    let sep = if had.is_empty() || had.ends_with('\n') { "" } else { "\n" };
+    crate::log::ok_or_warn("history: could not keep meeting recordings out",
+        file.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&file, format!("{had}{sep}{}", recordings_rule()))));
+}
+
 #[cfg(test)]
 thread_local! {
     /// Set by a test to behave, on its own thread only, like a computer that has no git.
@@ -300,7 +335,7 @@ pub async fn ensure_history(state: &AppState, dir: &Path) -> anyhow::Result<bool
     // The folder is named on every command instead, so the history never points at a stale place.
     let _ = run(state, dir, kept, &["config", "--unset", "core.worktree"]).await;
     crate::log::ok_or_warn("history: could not write the list of files to leave out",
-        std::fs::create_dir_all(store.join("info")).and_then(|_| std::fs::write(store.join("info/exclude"), KEPT_EXCLUDE)));
+        std::fs::create_dir_all(store.join("info")).and_then(|_| std::fs::write(store.join("info/exclude"), format!("{KEPT_EXCLUDE}{}", recordings_rule()))));
     crate::log::info("history: created a history for the library, kept by the app");
     Ok(true)
 }
@@ -311,6 +346,7 @@ pub async fn ensure_history(state: &AppState, dir: &Path) -> anyhow::Result<bool
 /// folder's own repository is damaged).
 pub async fn start_history(state: &AppState, dir: &Path) -> anyhow::Result<()> {
     ensure_history(state, dir).await?;
+    keep_recordings_out(state, dir).await;
     // The first entry is only ever made in a history the app keeps: what goes into a repository
     // the user set up themselves is decided by what they do.
     if matches!(repo_of(dir), Repo::Kept(_)) && head(state, dir).await.is_none() {
@@ -336,11 +372,39 @@ pub async fn commit_all(state: &AppState, dir: &Path, msg: &str) -> anyhow::Resu
     // Never into a combine of changes that stopped halfway: the half-done state (clash marks and
     // all) would become an entry of the history. Repair history settles it first.
     if crate::repair::unfinished(dir).is_some() { return Err(crate::tr::err("history.unfinished", &[])); }
+    keep_recordings_out(state, dir).await;
     git(state, dir, &["add", "-A"]).await?;
     if git(state, dir, &["diff", "--cached", "--quiet"]).await.is_ok() {
         return Ok(false);
     }
     git_ident(state, dir, &["commit", "-q", "-m", msg]).await?;
+    Ok(true)
+}
+
+/// Like `commit_all`, for only `paths` (library-relative files or folders, ones just removed too):
+/// every other change is left for an entry of its own. A path that cannot be added (one that is in
+/// neither the folder nor the history, or one the history leaves out) is passed over. Returns whether
+/// an entry was made.
+pub async fn commit_paths(state: &AppState, dir: &Path, msg: &str, paths: &[String]) -> anyhow::Result<bool> {
+    if crate::repair::unfinished(dir).is_some() { return Err(crate::tr::err("history.unfinished", &[])); }
+    keep_recordings_out(state, dir).await;
+    let mut specs: Vec<String> = vec![];
+    for p in paths {
+        let p = p.trim().replace('\\', "/");
+        let p = p.trim_matches('/');
+        if p.is_empty() { continue; }
+        let spec = format!(":(top,literal){p}");
+        if !specs.contains(&spec) && git(state, dir, &["add", "-A", "--", &spec]).await.is_ok() { specs.push(spec); }
+    }
+    if specs.is_empty() { return Ok(false); }
+    // Exactly the files whose change was just added, so the entry never takes in anything else.
+    let mut changed = vec!["diff", "--cached", "--name-only", "-z", "--no-renames", "--"];
+    changed.extend(specs.iter().map(String::as_str));
+    let names: Vec<String> = git(state, dir, &changed).await?.split('\0').filter(|n| !n.is_empty()).map(|n| format!(":(top,literal){n}")).collect();
+    if names.is_empty() { return Ok(false); }
+    let mut commit = vec!["commit", "-q", "-m", msg, "--"];
+    commit.extend(names.iter().map(String::as_str));
+    git_ident(state, dir, &commit).await?;
     Ok(true)
 }
 
@@ -2373,6 +2437,40 @@ mod tests {
         clear_failure(&lib, "usb");
         assert_eq!(backup_health(&st, &lib).await["state"], "ok");
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn meeting_recordings_never_enter_a_history_but_their_transcripts_do() {
+        let st = AppState::for_test();
+        // A history the app keeps, and a library with a repository of its own (and a .gitignore of the user's).
+        let kept = tmp("rec-kept");
+        let own = tmp("rec-own");
+        sh(&own, &["init", "-q"]);
+        write(&own, ".gitignore", "drafts/\n");
+        for d in [&kept, &own] {
+            write(d, "clients/acme/meetings/2026-11-12-call.m4a", "sound");
+            write(d, "clients/acme/meetings/2026-11-12-call.md", "# Call\n");
+            write(d, "meetings/2026-11-13-all-hands.wav", "sound");
+            write(d, "clients/acme/outputs/jingle.mp3", "a file the user put there");
+            start_history(&st, d).await.unwrap();
+            commit_all(&st, d, "edit: test").await.unwrap();
+            let files = git(&st, d, &["ls-files"]).await.unwrap();
+            assert!(files.contains("clients/acme/meetings/2026-11-12-call.md") && files.contains("clients/acme/outputs/jingle.mp3"), "{files}");
+            assert!(!files.contains(".m4a") && !files.contains(".wav"), "{files}");
+            // A recording made later is left out too; the rule is written once.
+            write(d, "clients/acme/meetings/2026-11-14-review.m4a", "sound");
+            commit_all(&st, d, "edit: later").await.unwrap();
+            assert!(!git(&st, d, &["ls-files"]).await.unwrap().contains("review.m4a"));
+            assert_eq!(git(&st, d, &["status", "--porcelain"]).await.unwrap(), "", "nothing is left waiting to be recorded");
+        }
+        let Repo::Kept(store) = repo_of(&kept) else { panic!("the history should be kept by the app") };
+        assert_eq!(std::fs::read_to_string(store.join("info/exclude")).unwrap().matches(RECORDINGS_MARK).count(), 1);
+        let rule = std::fs::read_to_string(own.join(".git/info/exclude")).unwrap();
+        assert_eq!(rule.matches(RECORDINGS_MARK).count(), 1, "{rule}");
+        // The user's own list of files to leave out is not touched, nor is one made.
+        assert_eq!(read(&own, ".gitignore"), "drafts/\n");
+        assert!(!kept.join(".gitignore").exists() && !kept.join(".git").exists());
+        for d in [kept, own, store] { std::fs::remove_dir_all(d).unwrap(); }
     }
 
     #[test]

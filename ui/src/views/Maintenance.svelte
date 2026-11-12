@@ -10,6 +10,7 @@
   import { failed } from '../lib/errors';
   import { restartService } from '../lib/shell';
   import { healthIssues, type Issue } from '../lib/maintenance';
+  import { libs, openLib } from '../lib/libraries.svelte';
 
   let { show, open }: {
     /** Which parts the Settings search shows (by label key). */
@@ -217,6 +218,7 @@
   <div class="card">
     <h3>{t('care.move.title')}</h3>
     <p class="muted sm">{t('care.move.intro')}</p>
+    {#if libs.list.length > 1}<p class="muted sm">{t('cln.move.oneLibrary', { name: openLib()?.displayName ?? '' })}</p>{/if}
     <div class="row wrap gap-top">
       <button type="button" class="btn" disabled={exporting} aria-busy={exporting} onclick={exportMove}><Icon name="download" size={14} /> {exporting ? t('care.move.exporting') : t('care.move.export')}</button>
       <button type="button" class="btn" disabled={reading || importing} aria-busy={reading} onclick={() => fileInput?.click()}><Icon name="upload" size={14} /> {reading ? t('care.move.reading') : t('care.move.import')}</button>

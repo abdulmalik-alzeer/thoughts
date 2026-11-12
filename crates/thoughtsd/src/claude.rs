@@ -1441,6 +1441,23 @@ pub(crate) async fn record_library_locked(state: &AppState, lib: &Path, subject:
     crate::log::ok_or_warn("history: could not record the library", crate::git::commit_all(state, lib, subject).await);
 }
 
+/// Record the library after a write of the app's own that changed only `paths` (a move, a delete, a
+/// routine). While an assistant run works in that library, only those paths go into the entry: the
+/// run's half-written files must never land in an entry named after something else (they become the
+/// run's own entry when it finishes, FEAT-06). Otherwise the whole library is recorded, as before.
+/// `locked`: the caller holds the library's lock (`record_library_locked`), else `record_library`.
+pub(crate) async fn record_app_write(state: &AppState, lib: &Path, subject: &str, paths: &[String], locked: bool) {
+    if !crate::changesets::watched(lib) {
+        return if locked { record_library_locked(state, lib, subject).await } else { record_library(state, lib, subject, true).await };
+    }
+    if !state.settings.read().await.history_enabled_in(lib) || (!locked && state.library_busy()) { return; }
+    if crate::wraps::interrupted_wrap_in(state, lib).await.is_some() { return; }
+    if !crate::git::ready(state, lib).await { return; }
+    let _g = state.git_lock.lock().await;
+    if let Err(e) = crate::trust::require_git(lib) { crate::log::warn(format!("history: not recording ({e})")); return; }
+    crate::log::ok_or_warn("history: could not record the library", crate::git::commit_paths(state, lib, subject, paths).await);
+}
+
 /// Can this run change the library (so views that show it must reload afterwards)? Its own folder
 /// or a folder it was given beside it is the library, and it is not read-only (plan mode) or the
 /// app-layer's own run.
