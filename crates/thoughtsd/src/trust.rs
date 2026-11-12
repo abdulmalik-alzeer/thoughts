@@ -638,15 +638,36 @@ fn load() -> BTreeMap<String, Stored> {
     std::fs::read_to_string(store()).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
-/// One change to trusted.json at a time (read, add, write back).
+/// One change to trusted.json at a time (read, add, write back). A decision that rests on how a
+/// folder looks takes its last look while holding it too (`record_if`), so no other record can land
+/// between that look and the write.
 static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn record(key: &str, entry: Entry) -> std::io::Result<()> {
+    record_if(key, |_| Some(entry)).map(|_| ())
+}
+
+/// Under the store's lock: `decide` sees the record on file for `key` (and may look at the folder
+/// once more) and returns what to put on record, or `None` to leave it as it is. Returns whether
+/// something was written.
+fn record_if(key: &str, decide: impl FnOnce(Option<&Stored>) -> Option<Entry>) -> std::io::Result<bool> {
     let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut m = load();
+    let Some(entry) = decide(m.get(key)) else { return Ok(false) };
     m.insert(key.to_string(), Stored::Parts(entry));
     let text = serde_json::to_string_pretty(&m).map_err(std::io::Error::other)?;
-    crate::paths::write_atomic(&store(), text.as_bytes(), true)
+    crate::paths::write_atomic(&store(), text.as_bytes(), true)?;
+    Ok(true)
+}
+
+/// Does the record on file trust the folder as `scan` saw it — the way `check` judges the whole
+/// folder once a 0.0.8 record has been carried over? Nothing to trust counts as trusted.
+fn trusts(stored: Option<&Stored>, scan: &Scan) -> bool {
+    let (need_a, need_g) = (scan.needs_assistant(), scan.needs_git());
+    if !need_a && !need_g { return true; }
+    let Some(Stored::Parts(e)) = stored else { return false };
+    let now = scan.entry();
+    (!need_a || e.assistant == now.assistant) && (!need_g || e.git == now.git)
 }
 
 /// The single fingerprint 0.0.8 kept: a hash of its findings *and the bytes of every file they could
@@ -853,21 +874,28 @@ pub fn accept(id: &str) -> anyhow::Result<()> {
         p.iter().position(|q| q.id == id).map(|i| p.remove(i))
     };
     let Some(q) = q else { return Err(crate::tr::err("trust.expired", &[])) };
-    let scan = Scan::of(&q.path);
-    if !scan.trustable { return Err(crate::tr::err("trust.too_large", &[])); }
-    if scan.state() != q.state {
-        // Not what was shown. If it still needs asking, that is a new question; if it no longer
-        // does (the risky file is gone again), there is nothing to record.
-        return Ok(check(&q.path, Scope::Whole)?);
-    }
-    record(&canon(&q.path), scan.entry())?;
-    Ok(())
+    // The look that matches the folder against the question and the write happen under one lock.
+    let mut too_large = false;
+    let recorded = record_if(&canon(&q.path), |_| {
+        let scan = Scan::of(&q.path);
+        too_large = !scan.trustable;
+        (scan.trustable && scan.state() == q.state).then(|| scan.entry())
+    })?;
+    if recorded { return Ok(()); }
+    if too_large { return Err(crate::tr::err("trust.too_large", &[])); }
+    // Not what was shown. If it still needs asking, that is a new question; if it no longer
+    // does (the risky file is gone again), there is nothing to record.
+    Ok(check(&q.path, Scope::Whole)?)
 }
 
 /// Record a folder as trusted the way it is right now, without a question. Never for a path or a
 /// request that comes from a client: the user's yes goes through `accept`. (The daemon's own write
-/// of a reviewed routine goes through `renew_after_app_write`.)
-pub fn trust(p: &Path) -> anyhow::Result<()> { Ok(record(&canon(p), Scan::of(p).entry())?) }
+/// of a reviewed routine goes through `renew_after_app_write`.) The look and the write happen under
+/// the store's lock, the same one `renew_after_app_write` holds for its last look.
+pub fn trust(p: &Path) -> anyhow::Result<()> {
+    record_if(&canon(p), |_| Some(Scan::of(p).entry()))?;
+    Ok(())
+}
 
 /// One app write with trust renewal at a time.
 static APP_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -890,17 +918,24 @@ pub fn renew_after_app_write(path: &Path, file: &Path, expected: Option<&[u8]>, 
         (findings, files, s.git_marks.clone(), s.trustable)
     };
     let on_disk = || std::fs::symlink_metadata(file).ok().filter(|m| m.is_file()).and_then(|_| std::fs::read(file).ok());
+    // `check` first: it carries a 0.0.8 record over, or notes harmless files, before anything is compared.
     let trusted = check(path, Scope::Whole).is_ok();
-    let before = rest(&Scan::of(path));
+    let pre = Scan::of(path);
+    let before = rest(&pre);
     write()?;
     if !trusted { return Ok(false); }
     let after = Scan::of(path);
     if rest(&after) != before || on_disk().as_deref() != expected || !after.trustable { return Ok(false); }
-    // Nothing moved while it was being looked at.
-    let again = Scan::of(path);
-    if again.state() != after.state() || again.files != after.files || on_disk().as_deref() != expected { return Ok(false); }
-    record(&canon(path), after.entry())?;
-    Ok(true)
+    // The last look and the write to the trust store under the store's lock: no other record (a yes
+    // to a question, `trust`) can land in between, and the record on file must still be one that
+    // trusted the folder as it was just before the write.
+    Ok(record_if(&canon(path), |stored| {
+        if !trusts(stored, &pre) { return None; }
+        // Nothing moved while it was being looked at.
+        let again = Scan::of(path);
+        let still = again.state() == after.state() && again.files == after.files && on_disk().as_deref() == expected;
+        still.then(|| after.entry())
+    })?)
 }
 
 /// Compare the assistant-related files of a second checkout (`copy`, e.g. the reorganize working
@@ -1493,6 +1528,39 @@ mod tests {
         assert_eq!((mail["name"].as_str(), mail["detail"].as_str(), mail["new"].as_bool()), (Some("mail"), Some("other-server"), Some(true)));
         assert!(mail["open"].as_str().unwrap().ends_with(".mcp.json"));
         assert_eq!(p["files"][0], json!({"file": ".mcp.json", "what": "changed"}));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// The app's own write renews trust only while the record on file still trusts the folder as
+    /// it was just before the write: a record that landed in between is never overwritten.
+    #[test]
+    fn an_app_write_never_overwrites_a_record_made_meanwhile() {
+        let d = tmp("renew-lock");
+        put(&d, ".claude/skills/notes/SKILL.md", "---\nname: notes\n---\nTidy the notes.\n");
+        trust(&d).unwrap();
+        let file = d.join(".claude/skills/intake/SKILL.md");
+        let text = "---\nname: intake\n---\nAsk for the name.\n";
+        // Written the way the app writes a routine: all at once, never half a file.
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let write = |body: &str| { let (f, body) = (file.clone(), body.to_string()); move || -> anyhow::Result<()> { Ok(crate::paths::write_atomic(&f, body.as_bytes(), false)?) } };
+        assert!(renew_after_app_write(&d, &file, Some(text.as_bytes()), write(text)).unwrap());
+        assert!(require(&d).is_ok());
+        // While the app writes, another record for the folder lands, one that does not trust it as it is.
+        let other = Entry { assistant: Some("something else".into()), ..Default::default() };
+        let changed = "---\nname: intake\n---\nAsk for the date.\n";
+        let w = write(changed);
+        let renewed = renew_after_app_write(&d, &file, Some(changed.as_bytes()), || { w()?; record(&canon(&d), other.clone())?; Ok(()) }).unwrap();
+        assert!(!renewed, "the record it rested on was replaced");
+        assert!(matches!(load().get(&canon(&d)), Some(Stored::Parts(e)) if e.assistant.as_deref() == Some("something else")), "left as it was");
+        assert!(require(&d).is_err());
+        // `trust` and the app's write share the lock: run together they never block each other for good,
+        // and whichever lands last trusts the folder as it is.
+        trust(&d).unwrap();
+        let again = "---\nname: intake\n---\nAsk for both.\n";
+        let t = { let d = d.clone(); std::thread::spawn(move || for _ in 0..3 { trust(&d).unwrap(); }) };
+        renew_after_app_write(&d, &file, Some(again.as_bytes()), write(again)).unwrap();
+        t.join().unwrap();
+        assert!(require(&d).is_ok());
         std::fs::remove_dir_all(d).unwrap();
     }
 
