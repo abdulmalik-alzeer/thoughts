@@ -18,6 +18,8 @@ export type ToastOpts = {
   key?: string;
 };
 export type ToastItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; action?: { label: string; run: () => void }; detail?: string; duration: number; key?: string };
+/** A toast as remembered in "Recent messages" after it has left the screen. */
+export type ToastLogItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; detail?: string; at: number; key?: string };
 
 /** `render(el)` mounts the plugin's sandboxed frame into `el` and returns a cleanup function. */
 export type PluginView = { id: string; title: string; icon?: string; plugin?: string; render: (el: HTMLElement) => any };
@@ -54,6 +56,10 @@ export const app = $state({
   view: { kind: 'home' } as View,
   chats: [] as any[],
   toasts: [] as ToastItem[],
+  /** The last 20 messages shown as toasts, newest first ("Recent messages" in the sidebar), and
+   *  whether an error arrived since that list was last opened. */
+  toastLog: [] as ToastLogItem[],
+  toastLogUnread: false,
   wrap: { count: 0, threshold: 5, chats: [] as any[] },
   pluginViews: [] as PluginView[],
   /** Commands registered by plugins (`pluginApi.addCommand`), listed in the command palette. */
@@ -118,6 +124,9 @@ export function toast(text: string, opts: ToastOpts = {}): number {
   const id = ++toastSeq;
   const rest = app.toasts.filter((x) => !(opts.key && x.key === opts.key));
   app.toasts = [...rest.slice(-4), { id, text: msg, kind, action: opts.action, detail, duration, key: opts.key }];
+  // Kept after the toast is gone (or pushed out by newer ones). A keyed toast replaces its older entry.
+  app.toastLog = [{ id, text: msg, kind, detail, at: Date.now(), key: opts.key }, ...app.toastLog.filter((x) => !(opts.key && x.key === opts.key))].slice(0, 20);
+  if (kind === 'error') app.toastLogUnread = true;
   return id;
 }
 

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { api, connect, daemonStale, on, post, reconnect, reloadApp } from './lib/api';
-  import { app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
+  import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
   import { loadLayer, layerBooted, retryLayer, checkPending, openReview, undoLastLayer } from './lib/layer';
   import { failed } from './lib/errors';
@@ -34,6 +34,8 @@
   import Logo from './lib/Logo.svelte';
   import Dialogs from './lib/Dialogs.svelte';
   import Toasts from './lib/Toasts.svelte';
+  import RecentMessages from './lib/RecentMessages.svelte';
+  import { crashText, reportError } from './lib/crash';
   import CommandPalette, { type PaletteItem } from './lib/CommandPalette.svelte';
 
   let projects = $state<any[]>([]);
@@ -43,6 +45,16 @@
   let dismissedRuns = $state<string[]>([]);
   let ideas = $state<any[]>([]);
   let stale = $state(daemonStale());
+  let showRecent = $state(false);
+  function openRecent() { showRecent = true; app.toastLogUnread = false; }
+
+  // A view that throws while it renders is replaced by a card with a way out, and the error is logged.
+  let crashCopied = $state(false);
+  function viewFailed(err: unknown) { reportError('view:' + app.view.kind, err); }
+  async function copyCrash(err: unknown) {
+    try { await navigator.clipboard.writeText(`Thoughts ${versionLabel()} · ${app.view.kind}\n${crashText(err)}`); crashCopied = true; setTimeout(() => (crashCopied = false), 2000); }
+    catch { crashCopied = false; }
+  }
 
   // ---------- boot ----------
   async function boot() {
@@ -118,6 +130,22 @@
   }
   function onFocus() { if (app.ready && app.online && Date.now() - statusAt > 60_000) refreshStatus(); }
 
+  // At a high zoom (or in a small window) the full sidebar would leave the view little room: below
+  // 720 CSS pixels the shell shows the icon rail, until the user opens the sidebar there themselves.
+  let narrow = $state(false);
+  let openedNarrow = $state(false);
+  function measure() {
+    const z = parseFloat((document.documentElement.style as any).zoom) || 1; // CSS zoom (browser preview) does not shrink innerWidth
+    const n = window.innerWidth / z < 720;
+    if (n !== narrow) { narrow = n; openedNarrow = false; }
+  }
+  $effect(() => { a11y().zoom; const h = setTimeout(measure, 150); return () => clearTimeout(h); });
+  const railed = $derived(app.sidebarCollapsed || (narrow && !openedNarrow));
+  function toggleSidebar() {
+    if (!narrow) { setSidebarCollapsed(!app.sidebarCollapsed); return; }
+    if (railed) { openedNarrow = true; if (app.sidebarCollapsed) setSidebarCollapsed(false); } else openedNarrow = false;
+  }
+
   async function zoom(dir: -1 | 0 | 1) {
     try { toast(t('a11y.zoomNow', { n: await zoomStep(dir) }), { key: 'zoom', duration: 1500 }); }
     catch (e: any) { toast(t('a11y.saveFailed'), { kind: 'error', key: 'zoom', detail: e?.message }); }
@@ -135,18 +163,49 @@
   }
 
   const layerError = (err: any) => toast(t('shell.layerFailed'), { kind: 'error', detail: err.message });
-  // Links in rendered markdown (chats, docs, plugins) must never navigate the app window.
-  // Safe external links open in the default browser; everything else is dropped.
+  // Links in rendered markdown (chats, docs, plugins) must never navigate the app window — image-map
+  // areas and middle clicks included. Safe external links open in the default browser; everything
+  // else is dropped.
+  const linkOf = (e: Event) => (e.target as Element | null)?.closest?.('a, area') as HTMLAnchorElement | HTMLAreaElement | null;
+  const external = (href: string) => /^(https?:|mailto:)/i.test(href);
   function guardLinks(e: MouseEvent) {
     if (e.defaultPrevented) return;
-    const a = (e.target as HTMLElement)?.closest?.('a');
+    if (e.type === 'auxclick' && e.button !== 1) return;
+    const a = linkOf(e);
     if (!a) return;
     const href = a.getAttribute('href') || '';
-    if (href.startsWith('#')) return;
+    if (href.startsWith('#') && e.type === 'click') return;
     e.preventDefault();
-    if (/^(https?:|mailto:)/i.test(href)) {
-      import('@tauri-apps/plugin-opener').then((o) => o.openUrl(href)).catch(() => window.open(href, '_blank', 'noopener'));
+    if (external(href)) openLink(a, href);
+  }
+
+  // A link in a chat or a note can say one thing and go somewhere else, and its address can carry
+  // text out of the library. Before opening such a link, show where it really goes.
+  const bare = (u: string) => u.trim().replace(/^mailto:/i, '').replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/+$/, '').toLowerCase();
+  function longQuery(href: string) {
+    try { const u = new URL(href); return u.search.length + u.hash.length > 80 || href.length > 300; } catch { return true; }
+  }
+  async function openLink(a: Element, href: string) {
+    const inContent = !!a.closest('.md');
+    const long = longQuery(href);
+    if (inContent && (bare(a.textContent || '') !== bare(href) || long)) {
+      let host = href.replace(/^mailto:/i, '');
+      try { if (/^https?:/i.test(href)) host = new URL(href).host; } catch { /* keep the address */ }
+      const yes = await confirmDialog({
+        title: t('shellui.link.title'), body: t('shellui.link.body', { host }), list: [href],
+        note: long ? t('shellui.link.long') : undefined, confirmLabel: t('shellui.link.open'),
+      });
+      if (!yes) return;
     }
+    import('@tauri-apps/plugin-opener').then((o) => o.openUrl(href)).catch(() => window.open(href, '_blank', 'noopener'));
+  }
+
+  // The window has no status bar: hovering or focusing a link shows its full address at the bottom.
+  let linkTip = $state('');
+  function tipFor(e: Event) {
+    const a = linkOf(e);
+    const href = a?.getAttribute('href') || '';
+    linkTip = a && external(href) ? href : '';
   }
 
   onMount(() => {
@@ -202,6 +261,7 @@
     })();
     window.addEventListener('thoughts:command', onCommand);
     window.addEventListener('mouseup', onMouseNav);
+    measure();
     return () => { off(); window.removeEventListener('thoughts:command', onCommand); window.removeEventListener('mouseup', onMouseNav); };
   });
 
@@ -322,7 +382,7 @@
     // Docs prints the open document itself (it listens for this command); every other view prints as shown.
     'print': () => { if (app.view.kind !== 'docs') window.print(); },
     'palette': () => openPalette(!app.showPalette),
-    'sidebar.toggle': () => setSidebarCollapsed(!app.sidebarCollapsed),
+    'sidebar.toggle': () => toggleSidebar(),
     'search.focus': () => focusSearch(),
     'zoom.in': () => zoom(1),
     'zoom.out': () => zoom(-1),
@@ -349,6 +409,7 @@
     if (dismissDialog()) return true;
     if (app.showPalette) { app.showPalette = false; return true; }
     if (showTour) { showTour = false; return true; }
+    if (showRecent) { showRecent = false; return true; }
     if (app.showWrapNag) { app.showWrapNag = false; return true; }
     if (app.showReview) { app.showReview = false; return true; }
     if (app.showRollback) { app.showRollback = false; return true; }
@@ -362,7 +423,7 @@
     if (!id) return;
     if (id === 'escape') { if (closeTop()) e.preventDefault(); return; }
     if (!app.ready || !app.settings?.onboarded) return;
-    const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour;
+    const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour || showRecent;
     if (modal || (app.showPalette && id !== 'palette')) return;
     if (id.startsWith('nav.')) {
       const it = navItems[+id.slice(4) - 1];
@@ -402,7 +463,7 @@
   ]);
 
   async function focusSearch() {
-    if (app.sidebarCollapsed) { setSidebarCollapsed(false); await tick(); }
+    if (railed) { toggleSidebar(); await tick(); }
     searchEl?.focus();
     searchEl?.select();
   }
@@ -451,8 +512,11 @@
   }
 
   // ---------- derived lists ----------
+  const system = $derived(app.chats.filter((c) => c.kind !== 'chat').slice(0, 6));
   const groups = $derived.by(() => {
-    const visible = app.chats.filter((c) => c.kind === 'chat' || c.running || app.view.id === c.id);
+    // Running or open system chats are listed under System already: never twice.
+    const inSystem = new Set(system.map((c) => c.id));
+    const visible = app.chats.filter((c) => c.kind === 'chat' || ((c.running || app.view.id === c.id) && !inSystem.has(c.id)));
     const byProj = new Map<string | null, any[]>();
     for (const c of visible) {
       const k = c.projectId ?? null;
@@ -460,7 +524,6 @@
     }
     return byProj;
   });
-  const system = $derived(app.chats.filter((c) => c.kind !== 'chat').slice(0, 6));
 
   const meOpen = $derived(app.view.kind === 'docs' && (app.view.path ?? '').startsWith('me/'));
   const isActive = (k: string) => app.view.kind === k && !(k === 'docs' && meOpen);
@@ -530,7 +593,7 @@
     if (app.canForward) add('forward', t('ui.forward'), g.go, 'right');
     add('updates.check', t('layer.upd.check'), g.act, 'download', { keywords: 'update version تحديث' });
     add('search.focus', t('shell.pal.search'), g.act, 'search');
-    add('sidebar.toggle', app.sidebarCollapsed ? t('shell.sidebarShow') : t('shell.sidebarHide'), g.act, 'sidebar');
+    add('sidebar.toggle', railed ? t('shell.sidebarShow') : t('shell.sidebarHide'), g.act, 'sidebar');
     add('tour', t('shell.pal.tour'), g.act, 'book');
     add('print', t('shell.pal.print'), g.act, 'print');
     add('zoom.in', t('a11y.zoomIn'), g.look, 'zoomIn', { keywords: 'zoom bigger larger text size تكبير' });
@@ -548,7 +611,8 @@
   });
 </script>
 
-<svelte:window onclick={guardLinks} onkeydown={onKey} onfocus={onFocus} />
+<svelte:window onclick={guardLinks} onauxclick={guardLinks} onkeydown={onKey} onfocus={onFocus} onresize={measure}
+  onmouseover={tipFor} onfocusin={tipFor} onfocusout={() => (linkTip = '')} />
 <Dialogs />
 
 {#if app.error}
@@ -573,8 +637,8 @@
 {:else if !app.settings.onboarded}
   <Onboarding done={onboarded} />
 {:else}
-  <div class="shell" class:collapsed={app.sidebarCollapsed}>
-    {#if !app.sidebarCollapsed}
+  <div class="shell" class:collapsed={railed}>
+    {#if !railed}
     <aside class="sidebar no-print" aria-label={t('shell.sidebar')}>
       <div class="drag" data-tauri-drag-region></div>
       <div class="brand row"><Logo size={24} /><span class="grow">Thoughts</span>
@@ -678,6 +742,7 @@
           <button class="iconbtn" class:on={app.view.kind === 'history'} onclick={() => command('history')} aria-label={t('ui.hist.title')} title={t('shell.rollbackTip')} aria-current={app.view.kind === 'history' ? 'page' : undefined}><Icon name="rollback" /></button>
           <button class="iconbtn" class:on={app.view.kind === 'help'} onclick={() => command('help')} aria-label={t('shell.help')} title={t('shell.help')} aria-current={app.view.kind === 'help' ? 'page' : undefined}><Icon name="help" /></button>
           <button class="iconbtn" onclick={() => command('palette')} aria-label={t('shell.palette')} title={tip(t('shell.palette'), 'palette')}><Icon name="command" /></button>
+          <button class="iconbtn bell" class:on={showRecent} onclick={openRecent} aria-haspopup="dialog" aria-label={app.toastLogUnread ? t('shellui.recent.openUnread') : t('shellui.recent.title')} title={t('shellui.recent.title')}><Icon name="bell" />{#if app.toastLogUnread}<span class="rdot" aria-hidden="true"></span>{/if}</button>
           <span class="grow"></span>
           <button class="iconbtn" class:on={app.view.kind === 'settings'} onclick={() => command('settings')} aria-label={t('settings')} title={tip(t('settings'), 'settings')} aria-current={app.view.kind === 'settings' ? 'page' : undefined}><Icon name="settings" /></button>
         </div>
@@ -709,6 +774,7 @@
       </button>
       <button class="iconbtn rb" class:on={app.view.kind === 'history'} onclick={() => command('history')} aria-label={t('ui.hist.title')} title={t('shell.rollbackTip')}><Icon name="rollback" /></button>
       <button class="iconbtn rb" class:on={app.view.kind === 'help'} onclick={() => command('help')} aria-label={t('shell.help')} title={t('shell.help')}><Icon name="help" /></button>
+      <button class="iconbtn rb" class:on={showRecent} onclick={openRecent} aria-haspopup="dialog" aria-label={app.toastLogUnread ? t('shellui.recent.openUnread') : t('shellui.recent.title')} title={t('shellui.recent.title')}><Icon name="bell" />{#if app.toastLogUnread}<span class="rdot" aria-hidden="true"></span>{/if}</button>
       <button class="iconbtn rb" class:on={app.view.kind === 'settings'} onclick={() => command('settings')} aria-label={t('settings')} title={tip(t('settings'), 'settings')} aria-current={app.view.kind === 'settings' ? 'page' : undefined}><Icon name="settings" /></button>
     </aside>
     {/if}
@@ -744,6 +810,7 @@
       {/if}
       {#if app.preview}<PreviewBanner />{/if}
       {#key viewKey}<div class="view" bind:this={viewEl}>
+      <svelte:boundary onerror={viewFailed}>
       {#if libraryGone && app.view.kind !== 'settings' && app.view.kind !== 'help'}
         <div class="page missing">
           <div class="card" role="alert">
@@ -787,6 +854,22 @@
       {:else if app.view.kind === 'reorganize'}<Reorganize id={app.view.id} />
       {:else if app.view.kind === 'plugin'}{#key app.view.id}<PluginView id={app.view.id!} />{/key}
       {/if}
+      {#snippet failed(error, reset)}
+        <div class="page missing">
+          <div class="card" role="alert">
+            <Icon name="warning" size={28} />
+            <h1>{t('shellui.crash.title')}</h1>
+            <p>{t('shellui.crash.body')}</p>
+            <div class="row wrap">
+              <button class="btn primary" onclick={reset}><Icon name="retry" size={15} /> {t('shell.retry')}</button>
+              <button class="btn" onclick={() => reloadApp()}>{t('shellui.crash.reload')}</button>
+              <button class="btn" onclick={() => (app.showRollback = true)}><Icon name="rollback" size={15} /> {t('rollback')}</button>
+              <button class="btn" onclick={() => copyCrash(error)}><Icon name={crashCopied ? 'check' : 'copy'} size={15} /> {crashCopied ? t('shell.copied') : t('shellui.crash.copy')}</button>
+            </div>
+          </div>
+        </div>
+      {/snippet}
+      </svelte:boundary>
       </div>{/key}
     </main>
   </div>
@@ -796,9 +879,11 @@
 {#if app.showReview && app.pending}<Review />{/if}
 {#if app.showWrapNag}<WrapNag {startWrap} />{/if}
 {#if showTour}<Tour close={() => (showTour = false)} />{/if}
+{#if showRecent}<RecentMessages close={() => (showRecent = false)} />{/if}
 {#if app.showPalette}<CommandPalette items={paletteItems} close={() => (app.showPalette = false)} />{/if}
 
 <Toasts />
+{#if linkTip}<div class="linktip no-print" aria-hidden="true" dir="ltr">{linkTip}</div>{/if}
 
 <style>
   .center { height: 100vh; display: grid; place-items: center; padding: 20px; }
@@ -815,6 +900,10 @@
   .rail nav { margin: 8px 0; align-items: center; gap: 2px; overflow: auto; min-height: 0; }
   .rail .rb { position: relative; width: 34px; height: 32px; }
   .rail .wrapb:not(:disabled) { color: var(--accent); }
+  .bell { position: relative; }
+  .linktip { position: fixed; bottom: 6px; inset-inline-start: 6px; z-index: 110; max-width: min(640px, 70vw); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
+    font-size: var(--fs-xs); padding: 3px 9px; border-radius: 6px; background: var(--panel); color: var(--fg); border: var(--border-w) solid var(--hairline); box-shadow: var(--shadow); }
+  .wrap { flex-wrap: wrap; }
   .rdot { position: absolute; top: 4px; inset-inline-end: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-2); }
   .badge { flex: none; font-size: var(--fs-xxs); font-weight: 600; min-width: 18px; text-align: center; padding: 0 5px; border-radius: 99px; background: var(--accent); color: var(--accent-fg); }
   :global([data-theme="contrast"]) .nav.active .badge { background: var(--accent-fg); color: var(--accent); }
@@ -859,6 +948,8 @@
   .iconbtn.sm { width: 24px; height: 24px; }
   .tools { gap: 2px; }
   nav { display: flex; flex-direction: column; gap: 1px; margin: 10px 0; }
+  /* A short window (or a large zoom): the list scrolls instead of pushing the chats out of sight. */
+  .sidebar nav { flex: 0 1 auto; min-height: 64px; overflow-y: auto; }
   .nav, .chat {
     font: inherit; background: none; border: 0; text-align: start; width: 100%;
     display: flex; align-items: center; gap: 9px; padding: 5px 8px; border-radius: 6px;
@@ -877,7 +968,7 @@
   .foot .notice { margin-bottom: 0; }
   .link { font: inherit; font-weight: 600; color: var(--accent); background: none; border: 0; padding: 2px 0; text-align: start; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; }
 
-  .chats { flex: 1; min-height: 0; border-top: 1px solid var(--hairline); padding-top: 6px; }
+  .chats { flex: 1 1 0; min-height: 72px; border-top: 1px solid var(--hairline); padding-top: 6px; }
   .sect { padding: 0 6px; color: var(--muted); }
   .sect h2 { font-size: var(--fs-xs); font-weight: 600; margin: 0; letter-spacing: 0; }
   .group { font-size: var(--fs-xs); color: var(--muted); padding: 8px 8px 2px; }

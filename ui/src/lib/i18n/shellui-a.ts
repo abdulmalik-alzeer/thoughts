@@ -1,0 +1,70 @@
+// Strings for the shell, Settings and notifications added in 0.0.9 (recent messages, link check,
+// a view that failed, settings that save themselves, notification permission).
+export default {
+  en: {
+    'shellui.recent.title': 'Recent messages',
+    'shellui.recent.openUnread': 'Recent messages — a new problem was reported',
+    'shellui.recent.clear': 'Clear',
+    'shellui.recent.empty': 'Nothing yet. Messages that pop up at the top of the window stay here afterwards, so you can read them again.',
+    'shellui.recent.error': 'Problem',
+
+    'shellui.link.title': 'Open this link?',
+    'shellui.link.body': 'It goes to {host}, which may not be where its text suggests. This is the full address:',
+    'shellui.link.long': 'The address carries a lot of extra text. A link can use that to send information to the site, so open it only if you trust where it came from.',
+    'shellui.link.open': 'Open in browser',
+
+    'shellui.crash.title': 'This page stopped working',
+    'shellui.crash.body': 'Something went wrong while showing it. Your notes and chats are safe. Try again, reload the window, or go back to a previous version if this started after a change.',
+    'shellui.crash.reload': 'Reload window',
+    'shellui.crash.copy': 'Copy details',
+
+    'shellui.set.saved': 'Saved',
+    'shellui.set.fixToSave': 'Not saved yet — fix the highlighted field and it saves by itself.',
+    'shellui.set.notSaved': 'Your last change could not be saved.',
+    'shellui.set.undo': 'Undo change',
+    'shellui.set.typedTitle': 'You typed something that is not saved',
+    'shellui.set.typedBody': 'These fields only take effect with their own button. If you leave now, what you typed is lost:',
+    'shellui.set.typedRemote': 'A backup address',
+    'shellui.set.typedLeave': 'Leave without it',
+
+    'shellui.notif.blocked': 'Your computer is not letting Thoughts show notifications, so reminders stay silent. Allow them for Thoughts in your system’s notification settings (on a Mac: System Settings › Notifications › Thoughts).',
+    'shellui.notif.allowed': 'Your computer allows Thoughts to show notifications.',
+    'shellui.notif.test': 'Send a test notification',
+    'shellui.notif.testTitle': 'Thoughts',
+    'shellui.notif.testBody': 'Notifications are working. Reminders and finished chats will appear like this.',
+    'shellui.notif.cannot': 'Notifications cannot be shown here.',
+  },
+  ar: {
+    'shellui.recent.title': 'الرسائل الأخيرة',
+    'shellui.recent.openUnread': 'الرسائل الأخيرة — وصل تنبيه بمشكلة جديدة',
+    'shellui.recent.clear': 'مسح',
+    'shellui.recent.empty': 'لا شيء بعد. الرسائل التي تظهر في أعلى النافذة تبقى هنا بعد اختفائها لتعود إليها متى شئت.',
+    'shellui.recent.error': 'مشكلة',
+
+    'shellui.link.title': 'هل تفتح هذا الرابط؟',
+    'shellui.link.body': 'يقودك إلى {host}، وقد لا يكون هو ما يوحي به نص الرابط. هذا عنوانه كاملاً:',
+    'shellui.link.long': 'يحمل هذا العنوان نصاً إضافياً طويلاً، وقد يُستخدم لإرسال معلومات إلى الموقع، فلا تفتحه إلا إن كنت تثق بمصدره.',
+    'shellui.link.open': 'فتح في المتصفح',
+
+    'shellui.crash.title': 'توقفت هذه الصفحة عن العمل',
+    'shellui.crash.body': 'حدث خطأ أثناء عرضها، وملاحظاتك ومحادثاتك في أمان. حاول مجدداً، أو أعد تحميل النافذة، أو استعد نسخة سابقة إن بدأ هذا بعد تغيير أجريته.',
+    'shellui.crash.reload': 'إعادة تحميل النافذة',
+    'shellui.crash.copy': 'نسخ التفاصيل',
+
+    'shellui.set.saved': 'حُفظ',
+    'shellui.set.fixToSave': 'لم يُحفظ بعد — صحّح الحقل المشار إليه وسيُحفظ تلقائياً.',
+    'shellui.set.notSaved': 'تعذّر حفظ آخر تغيير أجريته.',
+    'shellui.set.undo': 'تراجع عن التغيير',
+    'shellui.set.typedTitle': 'كتبت شيئاً لم يُحفظ',
+    'shellui.set.typedBody': 'لا تعمل هذه الحقول إلا بالضغط على زرّها. إن غادرت الآن فسيضيع ما كتبته:',
+    'shellui.set.typedRemote': 'عنوان نسخ احتياطي',
+    'shellui.set.typedLeave': 'المغادرة دون حفظه',
+
+    'shellui.notif.blocked': 'جهازك لا يسمح لـ«أفكار» بعرض الإشعارات، لذا تبقى التذكيرات صامتة. اسمح بها لـ«أفكار» من إعدادات الإشعارات في نظامك (على ماك: إعدادات النظام › الإشعارات › Thoughts).',
+    'shellui.notif.allowed': 'جهازك يسمح لـ«أفكار» بعرض الإشعارات.',
+    'shellui.notif.test': 'إرسال إشعار تجريبي',
+    'shellui.notif.testTitle': 'أفكار',
+    'shellui.notif.testBody': 'الإشعارات تعمل. ستظهر التذكيرات والمحادثات المكتملة بهذا الشكل.',
+    'shellui.notif.cannot': 'لا يمكن عرض الإشعارات هنا.',
+  },
+};

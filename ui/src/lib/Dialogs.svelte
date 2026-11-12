@@ -48,6 +48,8 @@
   h2 { margin: 0; font-size: 17px; }
   p { margin: 0; white-space: pre-wrap; }
   ul { margin: 0; padding-inline-start: 18px; display: grid; gap: 4px; font-size: 13px; max-height: 30vh; }
+  /* Long items (a web address, a file path) wrap instead of widening the dialog. */
+  li { overflow-wrap: anywhere; }
   .note { font-size: 13px; color: var(--fg); background: var(--fill); border-radius: var(--radius); padding: 8px 10px; }
   .end { justify-content: flex-end; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
   .btn.primary.danger { background: var(--danger); color: var(--bg); }

@@ -15,7 +15,8 @@ marked.use({
 });
 
 /** Nothing interactive or frame-like may come out of markdown (the copy button is added afterwards, by us). */
-const FORBID_TAGS = ['style', 'form', 'input', 'button', 'textarea', 'select', 'iframe', 'object', 'embed'];
+/** Image maps too: an `<area>` is a link the shell's link guard would otherwise have to catch. */
+const FORBID_TAGS = ['style', 'form', 'input', 'button', 'textarea', 'select', 'iframe', 'object', 'embed', 'map', 'area'];
 
 
 /** Render markdown to sanitized HTML (frontmatter stripped).
