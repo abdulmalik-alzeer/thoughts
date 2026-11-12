@@ -700,14 +700,31 @@ mod tests {
         let mut form = serde_json::to_value(&*st.settings.read().await).unwrap();
         let fresh = a.join("notes/new-library");
         form["libraryPath"] = json!(fresh.to_string_lossy());
-        let body = json!({"settings": form, "libraryMode": "new", "assistantLater": true, "addLibrary": true});
+        let body = json!({"settings": form.clone(), "libraryMode": "new", "assistantLater": true, "addLibrary": true});
         assert_eq!(http(port, "POST", "/api/onboarding", &body.to_string(), None).await.0, 422);
         assert!(!fresh.exists());
+        form["libraryPath"] = json!(root.to_string_lossy());
+        let body = json!({"settings": form.clone(), "libraryMode": "existing", "assistantLater": true, "addLibrary": true});
+        let (code, r) = http(port, "POST", "/api/onboarding", &body.to_string(), None).await;
+        assert_eq!(code, 422, "around: {r}");
+        assert!(r["error"].as_str().unwrap().contains("inside the library"), "{r}");
+        // Setup itself runs once: afterwards it never puts another library in the open one's place.
+        let body = json!({"settings": form.clone(), "libraryMode": "existing", "assistantLater": true});
+        let (code, r) = http(port, "POST", "/api/onboarding", &body.to_string(), None).await;
+        assert_eq!((code, r["error"].as_str().map(|e| e.starts_with("Thoughts is already set up"))), (409, Some(true)), "{r}");
         // Nor by pointing the library folder of Settings there.
         let mut v = serde_json::to_value(&*st.settings.read().await).unwrap();
         v["libraryPath"] = json!(inner.to_string_lossy());
         assert_eq!(http(port, "PUT", "/api/settings", &v.to_string(), None).await.0, 422);
         assert_eq!(st.settings.read().await.libraries.len(), 1);
+        // First-time setup with a list left by an earlier install: not inside one of those either.
+        { let mut s = st.settings.write().await; s.onboarded = false; s.library_path = None; }
+        form["libraryPath"] = json!(fresh.to_string_lossy());
+        let body = json!({"settings": form, "libraryMode": "new", "assistantLater": true});
+        let (code, r) = http(port, "POST", "/api/onboarding", &body.to_string(), None).await;
+        assert_eq!(code, 422, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("inside the library"), "{r}");
+        assert!(!fresh.exists() && !st.settings.read().await.onboarded);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -735,6 +752,12 @@ mod tests {
         let s2 = seen.clone();
         t::assistant(&st, move |info| { let s = s2.clone(); async move { s.lock().unwrap().push(info.deny.clone()); true } });
         let wait = |n: usize| { let seen = seen.clone(); async move { for _ in 0..400 { if seen.lock().unwrap().len() >= n { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; } } };
+        // The pair was there before: settings can still be saved.
+        let port = serve(&st).await;
+        let mut v = serde_json::to_value(&*st.settings.read().await).unwrap();
+        v["userName"] = json!("Sara");
+        let (code, r) = http(port, "PUT", "/api/settings", &v.to_string(), None).await;
+        assert_eq!(code, 200, "{r}");
         crate::claude::start_run(st.clone(), spec(&in_inner, &inner, vec![]), None).await.unwrap();
         wait(1).await;
         let deny = seen.lock().unwrap()[0].clone();

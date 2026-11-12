@@ -881,6 +881,37 @@ impl Settings {
         })
     }
 
+    /// Every library folder these settings name: the open one and every listed one, each once.
+    fn library_folders(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = vec![];
+        let named = self.library_path.iter().filter(|p| !p.trim().is_empty()).map(|p| (p.clone(), self.library_at(std::path::Path::new(p)).map_or_else(
+            || Library { path: p.clone(), ..Default::default() }.display_name(), Library::display_name)));
+        for (p, n) in named.chain(self.libraries.iter().map(|l| (l.path.clone(), l.display_name()))) {
+            if !out.iter().any(|(q, _)| same_folder(std::path::Path::new(q), std::path::Path::new(&p))) { out.push((p, n)); }
+        }
+        out
+    }
+
+    /// Refuse settings in which a library sits inside another one or holds one — whichever way the
+    /// folder came in (setup, "Add a library", the library folder in Settings, a move). Only folders
+    /// that `old` did not name yet are looked at, so a pair listed before this was refused keeps
+    /// working (a run in either is kept out of both libraries' private folders: `libraries::around`).
+    pub fn check_nesting(&self, old: Option<&Settings>) -> anyhow::Result<()> {
+        let all = self.library_folders();
+        let known = old.map(Settings::library_folders).unwrap_or_default();
+        for (p, _) in &all {
+            if known.iter().any(|(q, _)| same_folder(std::path::Path::new(q), std::path::Path::new(p))) { continue; }
+            let real = crate::paths::canonical_lenient(std::path::Path::new(p));
+            for (q, name) in &all {
+                let other = crate::paths::canonical_lenient(std::path::Path::new(q));
+                if other != real && (other.starts_with(&real) || real.starts_with(&other)) {
+                    return Err(crate::tr::err("libs.nested", &[("name", name)]));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Refuse a folder that is inside another listed library or holds one: the outer library's
     /// private folders would then not be closed to runs in the inner one (and the other way round).
     fn check_not_nested(&self, path: &str, except: Option<&str>) -> anyhow::Result<()> {

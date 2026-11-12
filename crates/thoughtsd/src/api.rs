@@ -727,7 +727,12 @@ fn cloud_service(p: &str) -> Option<&'static str> {
 /// folder, or the backup switched to an online location) and not when the user said to use it
 /// anyway (`sync.allowCloud`). A library already set up that way keeps working, so that its other
 /// settings can still be saved; Settings shows the warning.
-fn validate(s: &Settings, old: Option<&Settings>) -> anyhow::Result<()> { validate_with(s, old, |p| cloud_service(p).is_some()) }
+fn validate(s: &Settings, old: Option<&Settings>) -> anyhow::Result<()> {
+    // One library never sits inside another (or around one): checked here, where every change of
+    // the library folder passes (Settings, setup, adding a library).
+    s.check_nesting(old)?;
+    validate_with(s, old, |p| cloud_service(p).is_some())
+}
 
 /// `validate`, with the question "does a cloud drive sync this folder?" answered by `synced`.
 fn validate_with(s: &Settings, old: Option<&Settings>, synced: impl Fn(&str) -> bool) -> anyhow::Result<()> {
@@ -1124,6 +1129,8 @@ fn login_item_check() -> anyhow::Result<()> {
 
 async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     let mut s = o.settings;
+    // The list of libraries is the service's own (put back from the saved settings below).
+    s.libraries.clear();
     if crate::settings::read_only() { return Err(crate::tr::err("newer_settings", &[]).into()); }
     let path = s.library_path.clone().filter(|p| !p.trim().is_empty()).ok_or_else(|| crate::tr::err("library.choose", &[]))?;
     let path = paths::expand_tilde(path.trim())?;
@@ -1134,6 +1141,8 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     // further down, the two together.
     let wanted_url = s.ai.claude.base_url.take();
     let old = st.settings.read().await.clone();
+    // Setup runs once: afterwards another library is added beside the open one, never in its place.
+    if old.onboarded && !o.add_library { return Err(crate::tr::err("libs.already_set_up", &[]).into()); }
     s.sanitize_update(&old)?;
     // Adding a library: everything but the library's own settings stays as it is (the provider too).
     let wanted_url = if o.add_library {
@@ -1141,6 +1150,8 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
         s = crate::libraries::added(&old, s, &path.to_string_lossy(), &o.library_name)?;
         None
     } else { wanted_url };
+    // The libraries as they will be: none inside another (both ways of coming here).
+    validate(&s, Some(&old))?;
     if let Some(u) = wanted_url.as_deref().map(str::trim).filter(|u| !u.is_empty()) {
         crate::settings::check_base_url(u)?;
         // Another service is only set up together with its key.
