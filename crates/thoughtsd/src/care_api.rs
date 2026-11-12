@@ -486,8 +486,10 @@ mod tests {
         assert!(c1.session_id.is_none());
         let proj = st.settings.read().await.projects.iter().find(|p| Some(&p.id) == c1.project_id.as_ref()).cloned().unwrap();
         assert_eq!(PathBuf::from(&proj.path), paths::canonical(&folder).unwrap());
-        assert_eq!(c1.messages[0].attachments, [home.join("attachments/c-1/a.txt").to_string_lossy().to_string()]);
-        assert_eq!(std::fs::read(home.join("attachments/c-1/a.txt")).unwrap(), b"hi");
+        // Named the way this computer names files (backslashes on Windows), like every other attachment.
+        let attached = home.join("attachments").join("c-1").join("a.txt");
+        assert_eq!(c1.messages[0].attachments, [attached.to_string_lossy().to_string()]);
+        assert_eq!(std::fs::read(&attached).unwrap(), b"hi");
         assert_eq!(st.chats.get("c-3").await.unwrap().project_id, None, "a folder left out: the chat belongs to the library");
         // Asked to replace: it is.
         let b = transfer::read(&bundle_with(json!([{"id": "c-2", "title": "Theirs"}]), Value::Null, Value::Null)).unwrap();
