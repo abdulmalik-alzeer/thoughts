@@ -81,7 +81,18 @@ The app validates the staged files before the user can keep them. Any of these b
 - `nav.json` hides `home`, `settings` or `help`;
 - a workflow has no `prompt`, an unknown trigger, a time that is not `"HH:MM"`, a monthly `day`
   outside 1–28 / `"last"`, or a `weekday` outside 0–6;
+- a plugin or view file directly in `plugins/` or `views/` has a name that is not plain: use only
+  English letters, digits, dots, dashes and underscores, 60 characters at most (`hours.js`,
+  `client-intake.json`). The app knows a plugin by its file name and keeps its storage under it.
+  The name the user sees can be in any language: it is the `title` you give `ui.addView`, the
+  widget's title, the `description`;
+- a settings file, declaration or workflow contains a character that does not show on screen
+  (zero-width characters, direction overrides, tag characters and the like), in a key or a value.
+  Write plain text; ordinary Arabic and emoji are fine;
 - a file is larger than 512 KB, is not plain text, or the change has more than 200 files or 4 MB.
+
+File names anywhere in the layer may not contain invisible characters either; such a file is
+left out of the change.
 
 The app also test-loads each plugin in a hidden sandbox; a plugin that throws while loading is
 shown to the user as a problem. So: write the exact shapes below, and do not leave half-finished
@@ -153,6 +164,22 @@ Scope colour changes to a theme and a mode:
 Built-in themes are `saudi`, `contrast` (high contrast — keep text contrast at 7:1 or better) and
 `tech`; modes are `light` and `dark`. Use logical properties (`margin-inline`, `inset-inline`,
 `text-align: start`) so right-to-left keeps working. Never hide focus outlines.
+
+**The user is told what your CSS does.** Before they can keep a change, the app reads the rules
+you added and says so in plain words: "colours and style settings only" when they only set tokens,
+colours, shadows and corner shapes; otherwise that the change also moves, resizes or hides things.
+It warns specifically when CSS
+
+- prints text (`content:` with anything but an empty string),
+- places things on top of the app (`position: fixed`, `absolute` or `sticky`),
+- hides something (`display: none`, `visibility: hidden`, zero opacity or size, transparent text,
+  clipping or masking),
+- names the app's own questions, warnings and notices in a selector (dialogs, modals, toasts), or
+- loads a file (`@import`, `url(...)`).
+
+None of these belongs in a theme. Do not restyle or cover the app's dialogs, warnings, review
+panel or preview banner, and never use CSS to show wording of your own. To hide a page or a Home
+section use `nav.json` / `home.json`; to show something use a plugin.
 
 **Branding — what is and is not possible.** The layer is text only. When a user asks for "our
 logo" or "our company font", say plainly that the app cannot load image or font files, and offer

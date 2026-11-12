@@ -19,6 +19,98 @@ impl Out {
     }
 }
 
+// ---------- characters that do not show ----------
+
+/// Characters that are invisible, or that change the direction text is drawn in: zero-width and
+/// bidi controls, tag characters, variation selectors, blank "filler" letters, line and paragraph
+/// separators (most of Unicode category Cf and a few look-alikes). The visible Arabic signs that
+/// share that category (the number sign, the end-of-ayah mark…) are not in the list.
+pub fn is_hidden_char(c: char) -> bool {
+    matches!(c as u32,
+        0x00AD | 0x034F | 0x061C | 0x115F | 0x1160 | 0x17B4 | 0x17B5 | 0x180B..=0x180F
+        | 0x200B..=0x200F | 0x2028..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F | 0xFEFF
+        | 0xFFA0 | 0xFFF9..=0xFFFB | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
+}
+
+/// Is the character at `i` one a reader would not see? Control characters count (line breaks and
+/// tabs are fine in `multiline` text). A few invisible characters are part of ordinary writing and
+/// pass where they belong: an emoji or text selector right after the character it styles, a joiner
+/// between two non-ASCII characters (inside an emoji such as a family or a profession, or inside
+/// a Persian word), and a single direction mark as Arabic keyboards type them. Runs of them, and
+/// all the others, never pass.
+fn offends(chars: &[char], i: usize, multiline: bool) -> bool {
+    let c = chars[i];
+    if c.is_control() { return !(multiline && matches!(c, '\n' | '\r' | '\t')); }
+    if !is_hidden_char(c) { return false; }
+    let at = |j: Option<usize>| j.and_then(|j| chars.get(j)).copied();
+    let (prev, next) = (at(i.checked_sub(1)), at(Some(i + 1)));
+    let shown = |x: Option<char>| x.map_or(false, |x| !is_hidden_char(x) && !x.is_control() && !x.is_whitespace());
+    let wide = |x: Option<char>| shown(x) && x.map_or(false, |x| !x.is_ascii());
+    match c as u32 {
+        0xFE0E | 0xFE0F => !shown(prev),
+        0x200D => !((wide(prev) || (prev == Some('\u{FE0F}') && shown(at(i.checked_sub(2))))) && wide(next)),
+        0x200C => !(wide(prev) && wide(next)),
+        0x200E | 0x200F | 0x061C => prev.map_or(false, is_hidden_char) || next.map_or(false, is_hidden_char),
+        _ => true,
+    }
+}
+
+/// The first character of `s` that a reader would not see (see `offends`).
+pub fn first_hidden(s: &str, multiline: bool) -> Option<char> {
+    let chars: Vec<char> = s.chars().collect();
+    (0..chars.len()).find(|i| offends(&chars, *i, multiline)).map(|i| chars[i])
+}
+
+/// `s` with every such character written out (`[U+202E]`), so that what is read is what is there.
+/// A long run is shortened to its first few and a count (`[+40]`).
+pub fn show_hidden(s: &str, multiline: bool) -> String {
+    const SHOWN: usize = 8;
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut run = 0usize;
+    for i in 0..chars.len() {
+        if offends(&chars, i, multiline) {
+            run += 1;
+            if run <= SHOWN { out.push_str(&format!("[U+{:04X}]", chars[i] as u32)); }
+            continue;
+        }
+        if run > SHOWN { out.push_str(&format!("[+{}]", run - SHOWN)); }
+        run = 0;
+        out.push(chars[i]);
+    }
+    if run > SHOWN { out.push_str(&format!("[+{}]", run - SHOWN)); }
+    out
+}
+
+/// One problem per file for text a reader would not see, wherever it sits in the file (keys too).
+fn no_hidden_text(out: &mut Out, path: &str, v: &Value) {
+    fn find(v: &Value, at: &str) -> Option<(String, char)> {
+        match v {
+            Value::String(s) => first_hidden(s, true).map(|c| (at.to_string(), c)),
+            Value::Array(a) => a.iter().enumerate().find_map(|(i, x)| find(x, &format!("{at}[{i}]"))),
+            Value::Object(o) => o.iter().find_map(|(k, x)| {
+                let here = if at.is_empty() { k.clone() } else { format!("{at}.{k}") };
+                first_hidden(k, false).map(|c| (show_hidden(&here, false), c)).or_else(|| find(x, &here))
+            }),
+            _ => None,
+        }
+    }
+    if let Some((at, c)) = find(v, "") {
+        let code = format!("U+{:04X}", c as u32);
+        let at = show_hidden(&at, false);
+        out.add(path, format!("This file contains a character that does not show on screen ({code}), in `{at}`. Remove it, so that what you read is all there is."),
+            format!("يحتوي هذا الملف على حرف لا يظهر على الشاشة ({code}) في `{at}`. احذفه ليكون ما تقرؤه هو كل ما في الملف."));
+    }
+}
+
+/// An add-on or page is known to the app by its file name (its storage is kept under it), so the
+/// name must be one every part of the app accepts.
+fn plain_name(out: &mut Out, path: &str, file: &str) {
+    if crate::layer_api::valid_plugin_name(file) { return; }
+    out.add(path, "Add-on and page file names may only use English letters, digits, dots, dashes and underscores, 60 characters at most (for example `hours.js`). Rename this file.",
+        "أسماء ملفات الإضافات والصفحات تقبل الأحرف الإنجليزية والأرقام والنقطة والشرطة والشرطة السفلية فقط، وبحد أقصى ٦٠ حرفاً (مثل `hours.js`). غيّر اسم هذا الملف.");
+}
+
 fn id_like(s: &str) -> bool {
     !s.is_empty() && s.len() <= 80 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
@@ -52,6 +144,10 @@ pub fn problems(staging: &Path, files: &[(String, &str)], arabic: bool) -> Vec<V
             out.add(path, "This file is not plain text.", "هذا الملف ليس نصًّا عاديًا.");
             continue;
         };
+        let parts: Vec<&str> = path.split('/').collect();
+        if let ["plugins" | "views", file] = parts.as_slice() {
+            if [".js", ".html", ".json"].iter().any(|ext| file.ends_with(ext)) { plain_name(&mut out, path, file); }
+        }
         if !path.ends_with(".json") { continue; }
         let v: Value = match serde_json::from_str(&text) {
             Ok(v) => v,
@@ -61,7 +157,8 @@ pub fn problems(staging: &Path, files: &[(String, &str)], arabic: bool) -> Vec<V
                 continue;
             }
         };
-        let parts: Vec<&str> = path.split('/').collect();
+        // Everything the app reads these files for is shown to the user or handed to the assistant.
+        if matches!(parts.as_slice(), [_] | ["plugins" | "views" | "workflows", _]) { no_hidden_text(&mut out, path, &v); }
         match parts.as_slice() {
             ["manifest.json"] => manifest(&mut out, path, &v),
             ["home.json"] => home(&mut out, path, &v),
@@ -170,8 +267,10 @@ fn manifest(out: &mut Out, path: &str, v: &Value) {
             continue;
         };
         for (name, decl) in map {
-            if !name.ends_with(ext) || name.contains('/') {
-                out.add(path, format!("`{name}` under `{key}` must be a file name ending in `{ext}`."), format!("يجب أن يكون `{name}` ضمن `{key}` اسم ملف ينتهي بـ `{ext}`."));
+            if !name.ends_with(ext) || !crate::layer_api::valid_plugin_name(name) {
+                let name = show_hidden(name, false);
+                out.add(path, format!("`{name}` under `{key}` must be a plain file name ending in `{ext}` (English letters, digits, dots, dashes, underscores)."),
+                    format!("يجب أن يكون `{name}` ضمن `{key}` اسم ملف بسيطاً ينتهي بـ `{ext}` (أحرف إنجليزية وأرقام ونقطة وشرطة وشرطة سفلية)."));
             }
             match decl.as_object() {
                 Some(d) => declaration(out, path, d, view, false),
@@ -299,6 +398,140 @@ fn workflow(out: &mut Out, path: &str, v: &Value) {
     out.add(path, en, ar);
 }
 
+// ---------- what a style change does ----------
+
+/// One declaration of a style sheet, with everything it sits inside (selectors, @-rules).
+struct Decl { ctx: String, prop: String, value: String }
+
+/// CSS escapes resolved, lower case, single spaces: `C\6f ntent` reads `content`.
+fn css_norm(raw: &str) -> String {
+    let mut out = String::new();
+    let mut it = raw.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\\' { out.push(c); continue; }
+        let mut hex = String::new();
+        while hex.len() < 6 {
+            match it.peek() { Some(h) if h.is_ascii_hexdigit() => { hex.push(*h); it.next(); } _ => break }
+        }
+        if hex.is_empty() {
+            if let Some(n) = it.next() { if n != '\n' { out.push(n); } }
+            continue;
+        }
+        if it.peek().map_or(false, |w| w.is_whitespace()) { it.next(); }
+        out.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).filter(|c| *c != '\0').unwrap_or('\u{FFFD}'));
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+fn css_flush(buf: &mut String, stack: &[String], out: &mut Vec<Decl>) {
+    let raw = std::mem::take(buf);
+    if raw.trim().is_empty() { return; }
+    let (prop, value) = match raw.split_once(':') {
+        Some((p, v)) if !raw.trim_start().starts_with('@') => (css_norm(p), css_norm(v)),
+        _ => (css_norm(&raw), String::new()),
+    };
+    out.push(Decl { ctx: stack.join(" { "), prop, value });
+}
+
+/// A forgiving reading of a style sheet into its declarations. `None` when it cannot be read with
+/// confidence (an unfinished comment or string, braces that do not pair up).
+fn css_decls(text: &str) -> Option<Vec<Decl>> {
+    let chars: Vec<char> = text.chars().collect();
+    let (mut out, mut stack, mut buf) = (vec![], Vec::<String>::new(), String::new());
+    let (mut paren, mut i) = (0usize, 0usize);
+    while i < chars.len() {
+        let c = chars[i];
+        match c {
+            '/' if chars.get(i + 1) == Some(&'*') => {
+                let end = (i + 2..chars.len().saturating_sub(1)).find(|j| chars[*j] == '*' && chars[*j + 1] == '/')?;
+                buf.push(' ');
+                i = end + 2;
+                continue;
+            }
+            '"' | '\'' => {
+                buf.push(c);
+                i += 1;
+                loop {
+                    let d = *chars.get(i)?;
+                    if d == '\n' { return None; }
+                    buf.push(d);
+                    i += 1;
+                    if d == '\\' { if let Some(e) = chars.get(i) { buf.push(*e); i += 1; } continue; }
+                    if d == c { break; }
+                }
+                continue;
+            }
+            '\\' => { buf.push(c); if let Some(e) = chars.get(i + 1) { buf.push(*e); i += 1; } }
+            '(' => { paren += 1; buf.push(c); }
+            ')' => { paren = paren.saturating_sub(1); buf.push(c); }
+            '{' if paren == 0 => { stack.push(css_norm(&buf)); buf.clear(); }
+            '}' if paren == 0 => { css_flush(&mut buf, &stack, &mut out); stack.pop()?; }
+            ';' if paren == 0 => css_flush(&mut buf, &stack, &mut out),
+            _ => buf.push(c),
+        }
+        i += 1;
+    }
+    if !stack.is_empty() || paren != 0 { return None; }
+    css_flush(&mut buf, &stack, &mut out);
+    Some(out)
+}
+
+/// Declarations that only set colours, shadows and corner shapes (and the theme's own tokens).
+fn css_look_only(d: &Decl) -> bool {
+    const PROPS: &[&str] = &["color", "background", "background-color", "border-color", "outline-color", "accent-color", "caret-color", "fill", "stroke",
+        "text-decoration-color", "column-rule-color", "scrollbar-color", "box-shadow", "text-shadow", "border-radius"];
+    let p = d.prop.as_str();
+    !d.value.contains("url(") && (p.starts_with("--") || PROPS.contains(&p) || (p.starts_with("border-") && (p.ends_with("-color") || p.ends_with("-radius"))))
+}
+
+/// The ways a style rule can mislead rather than decorate (see `css_report`).
+fn css_flags(d: &Decl) -> Vec<&'static str> {
+    let mut flags = vec![];
+    let (p, v) = (d.prop.as_str(), d.value.split('!').next().unwrap_or("").trim());
+    let number = |v: &str| v.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%').trim().parse::<f64>().ok();
+    let zero = |v: &str| number(v) == Some(0.0);
+    if p == "content" && !matches!(v, "" | "none" | "normal" | "\"\"" | "''") { flags.push("text"); }
+    if p == "position" && matches!(v, "fixed" | "sticky" | "absolute") { flags.push("overlay"); }
+    if ["dlg", "modal", "dialog", "toast", "no-print"].iter().any(|n| d.ctx.contains(n)) { flags.push("dialogs"); }
+    let hides = match p {
+        "display" => v == "none",
+        "visibility" => v == "hidden" || v == "collapse",
+        "content-visibility" => v == "hidden",
+        "opacity" | "font-size" | "width" | "height" | "max-width" | "max-height" | "line-height" | "scale" | "zoom" => zero(v),
+        "color" | "-webkit-text-fill-color" => v.starts_with("transparent"),
+        "text-indent" => number(v).map_or(false, |n| n.abs() >= 500.0),
+        "clip" | "clip-path" | "mask" | "mask-image" | "-webkit-mask" | "-webkit-mask-image" => v != "none",
+        "transform" => v.replace(' ', "").contains("scale(0)") || v.replace(' ', "").contains("scale(0,"),
+        _ => false,
+    };
+    if hides { flags.push("hides"); }
+    let loads = |t: &str| t.split("url(").skip(1).any(|rest| !rest.trim_start_matches(|c: char| c == '"' || c == '\'' || c.is_whitespace()).starts_with('#'));
+    if p.starts_with("@import") || loads(&d.prop) || loads(&d.value) { flags.push("remote"); }
+    flags
+}
+
+/// What the staged `custom.css` adds to the one in use, in terms a reviewer can act on:
+/// `{kind, flags}`. `kind` is `removes` (nothing new), `colours` (new rules only set colours,
+/// shadows, corner shapes and theme tokens), `layout` (anything else) or `unreadable`. `flags` names
+/// what deserves a careful look: `text` (prints its own words), `overlay` (places things on top of
+/// the app), `dialogs` (restyles the app's own questions and warnings), `hides` (makes parts
+/// invisible), `remote` (tries to load a file). Rules the user already has are not counted again.
+pub fn css_report(current: &str, staged: &str) -> Value {
+    let Some(new) = css_decls(staged) else { return json!({"kind": "unreadable", "flags": []}) };
+    let mut have: std::collections::HashMap<(String, String, String), usize> = std::collections::HashMap::new();
+    for d in css_decls(current).unwrap_or_default() { *have.entry((d.ctx, d.prop, d.value)).or_default() += 1; }
+    let added: Vec<Decl> = new.into_iter().filter(|d| {
+        match have.get_mut(&(d.ctx.clone(), d.prop.clone(), d.value.clone())) {
+            Some(n) if *n > 0 => { *n -= 1; false }
+            _ => true,
+        }
+    }).collect();
+    let mut flags: Vec<&str> = vec![];
+    for f in added.iter().flat_map(css_flags) { if !flags.contains(&f) { flags.push(f); } }
+    let kind = if added.is_empty() { "removes" } else if flags.is_empty() && added.iter().all(css_look_only) { "colours" } else { "layout" };
+    json!({"kind": kind, "flags": flags})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,5 +637,75 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
         let ar = check(&[("todos.json", r#"{"showDone":1}"#), ("nav.json", "{")], true);
         assert!(ar.iter().any(|(p, m)| p == "todos.json" && m.contains("يجب أن تكون")) && ar.iter().any(|(p, m)| p == "nav.json" && m.contains("السطر")));
+    }
+
+    #[test]
+    fn invisible_and_direction_changing_characters_are_caught_and_shown() {
+        // Refused wherever they hide: a tag-character payload after a prompt, an override in a name.
+        let smuggled = format!("Summarise my week{}", "\u{E0049}\u{E0047}\u{E004E}");
+        assert_eq!(first_hidden(&smuggled, true), Some('\u{E0049}'));
+        assert_eq!(show_hidden(&smuggled, true), "Summarise my week[U+E0049][U+E0047][U+E004E]");
+        for bad in ["a\u{200B}b", "a\u{202E}b", "\u{2066}x\u{2069}", "x\u{FEFF}", "a\u{00AD}b", "line\u{2028}two", "a\u{1F}b", "ab\u{200D}", "a\u{200E}\u{200F}b", "\u{FE0F}x"] {
+            assert!(first_hidden(bad, true).is_some(), "{bad:?}");
+        }
+        // Ordinary writing passes: Arabic, emoji sequences, a Persian joiner, one direction mark, line breaks.
+        for ok in ["تغيير الألوان", "👩\u{200D}💻 Code", "❤\u{FE0F}", "🏳\u{FE0F}\u{200D}🌈", "می\u{200C}خواهم", "سعر (USD)\u{200F}.", "one\ntwo\tthree"] {
+            assert_eq!(first_hidden(ok, true), None, "{ok:?}");
+            assert_eq!(show_hidden(ok, true), ok);
+        }
+        assert_eq!(first_hidden("one\ntwo", false), Some('\n'), "a one-line field has no line breaks");
+        assert_eq!(show_hidden(&"\u{200B}".repeat(50), false), format!("{}[+42]", "[U+200B]".repeat(8)));
+        // In the files the app reads: one problem per file, saying where.
+        let wf = format!(r#"{{"name":"Weekly","trigger":{{"type":"event","on":"wrap.done"}},"prompt":"{smuggled}"}}"#);
+        let p = one("workflows/w.json", &wf);
+        assert!(p.len() == 1 && p[0].contains("U+E0049") && p[0].contains("`prompt`"), "{p:?}");
+        let p = one("home.json", "{\"chips\":[{\"label\":\"Plan\u{202E}\",\"prompt\":\"x\"}]}");
+        assert!(p.len() == 1 && p[0].contains("U+202E") && p[0].contains("chips[0].label"), "{p:?}");
+        assert!(one("nav.json", "{\"labels\":{\"ideas\":{\"en\":\"Cli\u{200B}ents\"}}}")[0].contains("U+200B"));
+        assert!(check(&[("plugins/p.js", ""), ("plugins/p.json", "{\"apiVersion\":1,\"description\":\"Safe\u{2067}\"}")], true)[0].1.contains("لا يظهر"));
+    }
+
+    #[test]
+    fn add_on_file_names_must_be_ones_storage_accepts() {
+        let names = |files: &[(&str, &str)]| check(files, false).into_iter().filter(|(_, m)| m.contains("file names")).map(|(p, _)| p).collect::<Vec<_>>();
+        assert!(names(&[("plugins/hours.js", ""), ("plugins/hours.json", r#"{"apiVersion":1}"#), ("views/cal-2.html", ""), ("plugins/lib/ساعات.js", "")]).is_empty());
+        assert_eq!(names(&[("plugins/ساعات.js", ""), ("plugins/client hours.js", ""), ("views/تقويم.html", "")]), ["plugins/ساعات.js", "plugins/client hours.js", "views/تقويم.html"]);
+        let long = format!("plugins/{}.js", "x".repeat(60));
+        assert_eq!(names(&[(long.as_str(), "")]), [long.as_str()]);
+        assert!(check(&[("plugins/ساعات.js", "")], true)[0].1.contains("hours.js"), "Arabic wording, same example");
+        assert!(one("manifest.json", r#"{"apiVersion":1,"plugins":{"ساعات.js":{}}}"#)[0].contains("plain file name"));
+    }
+
+    #[test]
+    fn style_changes_are_described_by_what_they_do() {
+        let base = "/* Your overrides. */\n:root { --radius: 2px }\n";
+        let r = |staged: &str| css_report(base, staged);
+        assert_eq!(r(base), json!({"kind": "removes", "flags": []}));
+        assert_eq!(r("/* gone */"), json!({"kind": "removes", "flags": []}));
+        let theme = format!("{base}[data-theme=\"sand\"][data-mode=\"light\"] {{ --accent: #0a5c8a; --bg: #fff; }}\n.card {{ border-radius: 12px; box-shadow: 0 1px 2px rgba(0,0,0,.2); color: #222 }}\n");
+        assert_eq!(r(&theme), json!({"kind": "colours", "flags": []}));
+        assert_eq!(r(&format!("{base}.sidebar {{ width: 300px }}")), json!({"kind": "layout", "flags": []}));
+        // The tricks from the audit: hide a dialog's words and print others, cover the window, restyle prompts.
+        let fake = format!("{base}#dlg-body {{ display: none }}\n.dlg::before {{ content: 'Make this chat faster?' }}\n");
+        assert_eq!(r(&fake), json!({"kind": "layout", "flags": ["dialogs", "hides", "text"]}));
+        let cover = "body::after{content:'FAKE';position:fixed;top:0;left:0;right:0;height:90px;z-index:99999;background:#fff;pointer-events:none}";
+        assert_eq!(r(cover)["flags"], json!(["text", "overlay"]));
+        assert_eq!(r(".no-print{-webkit-text-fill-color:transparent!important}")["flags"], json!(["dialogs", "hides"]));
+        // Escapes and comments do not hide a property; a comment in the middle of a word is not one.
+        assert_eq!(r("p::after { c\\6f ntent: \"x\" }")["flags"], json!(["text"]));
+        assert_eq!(r("p::after { CONTENT /* x */ : \"x\" }")["flags"], json!(["text"]));
+        assert_eq!(r("p::after { con/**/tent: \"x\" }")["flags"], json!([]));
+        assert_eq!(r(".x::before { content: \"\" } .y { content: none }")["flags"], json!([]));
+        assert_eq!(r("@media (min-width: 600px) { [role=\"alertdialog\"] p { opacity: 0.0 } }")["flags"], json!(["dialogs", "hides"]));
+        assert_eq!(r("@import url(https://example.org/x.css);")["flags"], json!(["remote"]));
+        assert_eq!(r(":root { --pattern: url(\"data:image/png;base64,AAAA\") }"), json!({"kind": "layout", "flags": ["remote"]}));
+        assert_eq!(r(".a { fill: url(#grad) }")["flags"], json!([]));
+        // Only what is new counts: a rule the user already has is not reported again.
+        let mine = ".toast { position: fixed }\n";
+        assert_eq!(css_report(mine, &format!("{mine}:root {{ --fg: #111 }}")), json!({"kind": "colours", "flags": []}));
+        // What cannot be read is said to be so.
+        for broken in [".a { color: red", "/* never closed", ".a { content: \"x }", ".a } .b {"] {
+            assert_eq!(r(broken)["kind"], "unreadable", "{broken}");
+        }
     }
 }
