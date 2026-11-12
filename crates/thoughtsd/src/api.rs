@@ -174,6 +174,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/ideas/status", post(idea_status))
         .route("/api/library/item", get(item_page))
         .route("/api/library/item/meeting", post(item_meeting))
+        .route("/api/library/item/transcript", post(item_transcript))
         .route("/api/library/new", post(new_file))
         .route("/api/library/move", post(move_file))
         .route("/api/library/delete", post(delete_file))
@@ -1789,6 +1790,28 @@ async fn item_meeting(State(st): S, Json(m): Json<NewMeeting>) -> R {
         d => chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| crate::tr::err("meeting.date", &[]))?,
     };
     let path = library::new_meeting(&root, &m.path, &m.title, date, today, crate::tr::arabic())?;
+    st.emit(json!({"type": "library.changed"}));
+    Ok(Json(json!({"ok": true, "path": path})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct NewTranscript { path: String, recording: String, title: String, date: String, paragraphs: Vec<crate::voice::Para>, seconds: f64, complete: Option<bool> }
+/// `POST /api/library/item/transcript {path: "<area>/<item>", recording: "<item>/meetings/….m4a", title,
+/// date?: "YYYY-MM-DD", paragraphs: [{at, text}], seconds, complete?}` → `{ok, path}`: the transcript of
+/// a meeting recorded and turned into text on this computer (by the desktop app), filed as the
+/// item's meeting note beside the recording (see `voice::transcript_note`).
+async fn item_transcript(State(st): S, Json(m): Json<NewTranscript>) -> R {
+    let root = lib(&st).await?;
+    library_free(&st).await?;
+    let today = chrono::Local::now().date_naive();
+    let date = match m.date.trim() {
+        "" => today,
+        d => chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|_| crate::tr::err("meeting.date", &[]))?,
+    };
+    let complete = m.complete.unwrap_or(true);
+    let path = tokio::task::spawn_blocking(move || crate::voice::transcript_note(&root, &m.path, &m.recording, &m.title, date, today, &m.paragraphs, m.seconds, complete, crate::tr::arabic()))
+        .await.map_err(|e| anyhow::anyhow!("{e}"))??;
     st.emit(json!({"type": "library.changed"}));
     Ok(Json(json!({"ok": true, "path": path})))
 }
@@ -3931,7 +3954,7 @@ mod tests {
         assert_eq!(shown(item_page(State(st.clone()), q(&[("path", "clients/acme"), ("exclude", "private")])).await).status, 403);
         assert_eq!(shown(item_page(State(st.clone()), q(&[("path", "clients/acme"), ("scope", "plugin")])).await).status, 403);
         assert_eq!(item_page(State(st.clone()), q(&[("path", "ideas/shop"), ("exclude", "private")])).await.unwrap().0["title"], "Shop");
-        for path in ["/api/library/item", "/api/library/item/meeting"] {
+        for path in ["/api/library/item", "/api/library/item/meeting", "/api/library/item/transcript"] {
             assert!(!plugin_scope_allowed(path, "scope=plugin"), "{path}");
             assert!(plugin_scope_allowed(path, ""), "{path}");
         }
@@ -3951,6 +3974,29 @@ mod tests {
         let v = item_page(State(st.clone()), q(&[("path", "ideas/shop")])).await.unwrap().0;
         assert_eq!(v["meetings"].as_array().unwrap().len(), 2);
         assert!(v["meetings"].as_array().unwrap().iter().any(|m| m["title"] == "Stall visit"));
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_meeting_transcript_is_filed_beside_its_recording_and_announced() {
+        let (st, lib) = t::library().await;
+        t::write(&lib, "clients/acme/README.md", "---\ntitle: Acme\n---\n");
+        t::write(&lib, "clients/acme/meetings/2026-11-12-weekly-sync.m4a", "audio");
+        let mut rx = st.events.subscribe();
+        let body = |rec: &str, date: &str| Json(NewTranscript { path: "clients/acme".into(), recording: rec.into(), title: "Weekly sync".into(), date: date.into(),
+            paragraphs: vec![crate::voice::Para { at: 3.0, text: "Hello everyone.".into() }], seconds: 61.0, complete: None });
+        let v = item_transcript(State(st.clone()), body("clients/acme/meetings/2026-11-12-weekly-sync.m4a", "2026-11-12")).await.unwrap().0;
+        assert_eq!(v["path"], "clients/acme/meetings/2026-11-12-weekly-sync.md");
+        let text = t::read(&lib, "clients/acme/meetings/2026-11-12-weekly-sync.md");
+        assert!(text.contains("\ndate: 2026-11-12\n") && text.contains("· 01:01 ·") && text.contains("**00:03** Hello everyone.") && !text.contains("stops early"), "{text}");
+        let mut announced = false;
+        while let Ok(e) = rx.try_recv() { if e["type"] == "library.changed" { announced = true; } }
+        assert!(announced);
+        // Not this item's recording, not a recording, a bad date.
+        assert_eq!(shown(item_transcript(State(st.clone()), body("clients/acme/README.md", "")).await).status, 422);
+        assert_eq!(shown(item_transcript(State(st.clone()), body("clients/acme/meetings/gone.m4a", "")).await).status, 422);
+        assert_eq!(shown(item_transcript(State(st.clone()), body("clients/acme/meetings/2026-11-12-weekly-sync.m4a", "12/11/2026")).await).status, 422);
+        assert!(!plugin_scope_allowed("/api/library/item/transcript", "scope=plugin"));
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 

@@ -55,6 +55,7 @@ pub mod transfer;
 pub mod trust;
 pub mod updates;
 pub mod usage;
+pub mod voice;
 pub mod workflows;
 pub mod wraps;
 
