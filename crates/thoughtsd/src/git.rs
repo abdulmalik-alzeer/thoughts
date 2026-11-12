@@ -97,6 +97,9 @@ const KEPT_EXCLUDE: &str = "# Written by Thoughts.\n.DS_Store\nThumbs.db\ndeskto
 thread_local! {
     /// Set by a test to behave, on its own thread only, like a computer that has no git.
     pub(crate) static TEST_NO_GIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Set by a test to behave, on its own thread only, like a computer where git was never told
+    /// who the user is and cannot guess it (no settings of the user's, no name made up).
+    pub(crate) static TEST_NO_IDENTITY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Is there a git that can really run here? On a Mac without Apple's command-line tools
@@ -165,6 +168,11 @@ async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow:
                "http.lowSpeedLimit=1000", "http.lowSpeedTime=30"] {
         c.args(["-c", kv]);
     }
+    #[cfg(test)]
+    if TEST_NO_IDENTITY.with(|c| c.get()) {
+        c.env("GIT_CONFIG_GLOBAL", no_hooks).args(["-c", "user.useConfigOnly=true"]);
+        for var in ["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"] { c.env_remove(var); }
+    }
     // Git for Windows turns line-ending conversion on in its system settings, which this command
     // ignores (see above). Without the line below a library that was cloned with that conversion
     // would look entirely changed here. "input" compares and saves with plain line endings and
@@ -207,15 +215,19 @@ pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<
     Ok(String::from_utf8_lossy(&git_raw(state, dir, args).await?).to_string())
 }
 
-/// Like `git`, for commands that create commits (commit, merge, rebase): when this machine has no
-/// git identity configured, retry as the app.
+/// Like `git`, for commands that create commits (commit, merge, pull): when this machine has no
+/// git identity configured, they run as the app. A commit or a merge refuses before it changes
+/// anything, so it is simply run again as the app. A pull that replays the library's changes on
+/// top of the other devices' would stop halfway instead, and could not be run again: for it the
+/// question is asked first.
 pub async fn git_ident(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    let mut as_app = vec!["-c", "user.name=Thoughts", "-c", "user.email=thoughts@localhost"];
+    as_app.extend_from_slice(args);
+    if !matches!(subcommand(args), "commit" | "merge") && git(state, dir, &["var", "GIT_COMMITTER_IDENT"]).await.is_err() {
+        return git(state, dir, &as_app).await;
+    }
     match git(state, dir, args).await {
-        Err(e) if e.to_string().contains("tell me who you are") => {
-            let mut a = vec!["-c", "user.name=Thoughts", "-c", "user.email=thoughts@localhost"];
-            a.extend_from_slice(args);
-            git(state, dir, &a).await
-        }
+        Err(e) if e.to_string().contains("tell me who you are") => git(state, dir, &as_app).await,
         r => r,
     }
 }
@@ -1299,6 +1311,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_sync_that_rebases_works_on_a_computer_where_git_does_not_know_the_user() {
+        // Most computers that are not a developer's (and the Linux and Windows test machines): git
+        // was never told a name and cannot make one up from the computer's name.
+        TEST_NO_IDENTITY.with(|c| c.set(true));
+        let (root, mine, remote) = diverged();
+        for k in ["user.name", "user.email"] { sh(&mine, &["config", "--unset", k]); }
+        let st = AppState::load().unwrap();
+        sh(&mine, &["checkout", "-q", "--", "notes.md"]);
+        write(&mine, "keep.md", "changed here\n");
+        let v = sync(&st, &mine).await.unwrap();
+        assert_eq!(v["committed"], true);
+        assert_eq!((read(&mine, "notes.md").as_str(), read(&mine, "b.md").as_str()), ("their line\n", "from the other device\n"));
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]));
+        // Recorded and replayed on top of theirs as the app, with nothing half-done left behind.
+        assert_eq!(sh(&mine, &["log", "-1", "--format=%an <%ae> / %cn <%ce>"]), "Thoughts <thoughts@localhost> / Thoughts <thoughts@localhost>");
+        assert!(!mine.join(".git/CHERRY_PICK_HEAD").exists() && !mine.join(".git/rebase-merge").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn a_sync_only_succeeds_when_the_library_really_reached_every_location() {
         let (root, mine, remote) = diverged();
         let st = AppState::load().unwrap();
@@ -1773,6 +1805,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_history_kept_by_the_app_syncs_restores_and_undoes_like_any_other() {
+        // Nobody ever tells the history the app keeps who the user is: on a computer whose git
+        // does not know either, it must still sync (this is how the Linux and Windows test machines are).
+        TEST_NO_IDENTITY.with(|c| c.set(true));
         let root = dunce::canonicalize(tmp("kept")).unwrap();
         let (remote, lib, other) = (root.join("remote.git"), root.join("My Library"), root.join("other"));
         std::fs::create_dir_all(&remote).unwrap();
