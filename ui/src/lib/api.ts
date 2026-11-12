@@ -108,9 +108,11 @@ export async function apiBlob(path: string): Promise<Blob> {
   try { r = await authed(path); }
   catch { const { t } = await import('./i18n'); throw new ApiError(t('shell.unreachable'), 0); }
   if (!r.ok) {
-    let msg = r.statusText;
-    try { msg = JSON.parse(await r.text())?.error || msg; } catch { /* not JSON */ }
-    throw new ApiError(await friendly(msg), r.status, codeOf(msg));
+    let msg = '';
+    let data: any;
+    try { data = JSON.parse(await r.text()); msg = data?.error || ''; } catch { /* not the service's own JSON */ }
+    if (!msg) { const { t } = await import('./i18n'); msg = t('wording.err.generic'); }
+    throw new ApiError(await friendly(msg), r.status, codeOf(msg) || String(data?.code ?? ''), data);
   }
   return r.blob();
 }
