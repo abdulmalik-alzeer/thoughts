@@ -159,7 +159,26 @@ export async function refreshChats() {
 export async function refreshWrap() {
   const prev = app.wrap.count;
   app.wrap = await api('/wrap');
-  if (app.wrap.count > app.wrap.threshold && prev <= app.wrap.threshold && prev !== 0) app.showWrapNag = true;
+  if (app.wrap.count > app.wrap.threshold && prev <= app.wrap.threshold && prev !== 0) remindToWrap();
+}
+
+/** Show the Wrap reminder — but never under someone's fingers. The count crosses the threshold at
+ *  the moment a message is sent, so the person is usually still typing: wait until the keyboard has
+ *  been quiet for a few seconds (and the reminder is still due) before the dialog takes the focus. */
+let nagWait: ReturnType<typeof setTimeout> | undefined;
+function remindToWrap() {
+  if (app.showWrapNag || nagWait !== undefined) return;
+  const QUIET_MS = 4000;
+  const typing = () => {
+    const el = document.activeElement as HTMLElement | null;
+    return !!el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT' || el.isContentEditable);
+  };
+  if (!typing()) { app.showWrapNag = true; return; }
+  const done = () => { clearTimeout(nagWait); nagWait = undefined; window.removeEventListener('keydown', again, true); };
+  const show = () => { done(); if (app.wrap.count > app.wrap.threshold) app.showWrapNag = true; };
+  const again = () => { clearTimeout(nagWait); nagWait = setTimeout(show, QUIET_MS); };
+  window.addEventListener('keydown', again, true);
+  again();
 }
 
 /** Save settings. `query` carries a one-off confirmation (`?confirm=bypassPermissions`). */
