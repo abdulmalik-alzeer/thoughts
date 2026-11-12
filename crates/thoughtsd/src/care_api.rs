@@ -494,8 +494,11 @@ mod tests {
         let chats = json!([
             {"id": "c-1", "title": "From there", "projectId": "p-old", "sessionId": "s", "messages": [msg]},
             {"id": "c-2", "title": "Theirs"},
-            {"id": "c-3", "title": "Unknown folder", "projectId": "p-gone"},
+            {"id": "c-3", "title": "Unknown folder", "projectId": "p-gone", "library": "/there/Thoughts"},
         ]);
+        let here = root.join("Thoughts");
+        std::fs::create_dir_all(&here).unwrap();
+        st.settings.write().await.library_path = Some(here.to_string_lossy().to_string());
         let settings = json!({"projects": [{"id": "p-old", "name": "Client", "path": "/there/Client"}, {"id": "p-gone", "name": "Gone", "path": "/there/Gone"}]});
         let b = transfer::read(&bundle_with(chats, settings, json!({"c-1": {"a.txt": "aGk="}}))).unwrap();
         let mut ch = Choices { chats: true, ..Default::default() };
@@ -513,6 +516,10 @@ mod tests {
         assert_eq!(c1.messages[0].attachments, [attached.to_string_lossy().to_string()]);
         assert_eq!(std::fs::read(&attached).unwrap(), b"hi");
         assert_eq!(st.chats.get("c-3").await.unwrap().project_id, None, "a folder left out: the chat belongs to the library");
+        // The other computer's library folder is not this one's: the chat is listed in the library open here.
+        let c3 = st.chats.get("c-3").await.unwrap();
+        assert_eq!(c3.library.as_deref(), Some(here.to_string_lossy().as_ref()));
+        assert!(crate::wraps::Scope::now(&st).await.holds(c3.library.as_deref()));
         // Asked to replace: it is.
         let b = transfer::read(&bundle_with(json!([{"id": "c-2", "title": "Theirs"}]), Value::Null, Value::Null)).unwrap();
         let r = import(&st, b, &Choices { chats: true, replace: true, ..Default::default() }, &home).await.unwrap();
