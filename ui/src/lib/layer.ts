@@ -49,7 +49,7 @@
 //   which add-on code never gave control back.
 import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
 import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig } from './store.svelte';
-import { confirmDialog } from './dialog.svelte';
+import { confirmDialog, promptDialog } from './dialog.svelte';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang } from './i18n';
 
@@ -1024,13 +1024,42 @@ export function whenText(trigger: any): string {
 }
 
 // ---------- packs ----------
-/** Save the user's customisations as a pack file. Resolves 'saved', 'copied' (clipboard fallback) or 'cancelled'. */
+/** A pack's id: the same for every export under one name from this computer, different for anyone
+ *  else's pack of that name. On import the pack's CSS block is keyed by it, so a newer export replaces
+ *  its own earlier block and never another pack's. */
+function packId(name: string): string {
+  const key = name.trim().toLowerCase();
+  let ids: Record<string, string> = {};
+  try { const v = JSON.parse(store.get('thoughts.packIds') || '{}'); if (v && typeof v === 'object' && !Array.isArray(v)) ids = v; } catch { /* start again */ }
+  if (!/^[a-z0-9]{12}$/.test(ids[key] ?? '')) {
+    const b = new Uint8Array(12);
+    crypto.getRandomValues(b);
+    ids[key] = Array.from(b, (x) => 'abcdefghijklmnopqrstuvwxyz0123456789'[x % 36]).join('');
+    store.set('thoughts.packIds', JSON.stringify(Object.fromEntries(Object.entries(ids).slice(-200))));
+  }
+  return ids[key];
+}
+
+/** Save the user's customisations as a pack file. The person names it first (and may add a line
+ *  about what it does): the name is what whoever imports it sees, and tells packs apart.
+ *  Resolves 'saved', 'copied' (clipboard fallback) or 'cancelled'. */
 export async function exportPack(paths?: string[]): Promise<'saved' | 'copied' | 'cancelled'> {
-  const pack = await api(paths?.length ? '/layer/export?paths=' + encodeURIComponent(paths.join(',')) : '/layer/export');
+  const asked = await promptDialog({ title: t('lua.packNameTitle'), body: t('lua.packNameBody'), placeholder: t('lua.packNameHint'), confirmLabel: t('next') });
+  if (asked === null) return 'cancelled';
+  const title = str(asked, 80).replace(/\s+/g, ' ').trim();
+  if (!title) { toast(t('lua.packNameNeeded'), { kind: 'error', key: 'pack-name' }); return 'cancelled'; }
+  const about = await promptDialog({ title: t('lua.packAboutTitle'), body: t('lua.packAboutBody'), placeholder: t('lua.packAboutHint'), confirmLabel: t('lua.packSave') });
+  if (about === null) return 'cancelled';
+  const q = new URLSearchParams({ name: title, description: str(about, 400).replace(/\s+/g, ' ').trim() });
+  if (paths?.length) q.set('paths', paths.join(','));
+  const pack = await api('/layer/export?' + q.toString());
   if (pack?.format !== 'thoughts-pack') throw new Error(t('layer.packInvalid'));
+  pack.id = packId(title);
   const text = JSON.stringify(pack, null, 2);
   const d = new Date();
-  const name = `thoughts-${paths?.length ? 'feature-' : ''}pack-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
+  // The file is named after the pack, in whatever script the person wrote it; only characters a file name cannot hold are dropped.
+  const slug = title.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 24).replace(/-+$/, '');
+  const name = `thoughts-${paths?.length ? 'feature-' : ''}pack-${slug ? slug + '-' : ''}${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
   if ((window as any).__TAURI_INTERNALS__) {
     // The native window has no download bar: the shell opens the save dialog itself and writes the file.
     try {

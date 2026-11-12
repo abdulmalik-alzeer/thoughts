@@ -446,7 +446,9 @@ The user can export their customisations as a pack file and import someone else'
 carries only some files (a "feature pack" — say, one plugin with its declaration and a bit of CSS)
 is **merged** on import: plugin, view and workflow files are added; `home.json`, `nav.json`,
 `todos.json` and `themes.json` are merged key by key with lists combined; the pack's CSS goes into
-`custom.css` inside a block marked `/* pack:<name> */ … /* end pack:<name> */`. Leave those
+`custom.css` inside a block marked `/* pack:<name> <id> */ … /* end pack:<name> <id> */` (the id is
+a short code the pack carries, so that two packs with the same name keep their own blocks; older
+packs have none). Leave those
 marked blocks as they are unless the user asks to change that pack's look, and keep your own CSS
 outside them. A plugin with its own `.json` declaration travels cleanly in a pack — one more
 reason not to use `manifest.json`.

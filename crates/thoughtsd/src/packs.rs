@@ -171,6 +171,15 @@ fn marker_name(name: &str) -> String {
     if n.trim().is_empty() { "pack".into() } else { n.trim().to_string() }
 }
 
+/// What marks a pack's block in `custom.css`: its name and, when the pack has one, its `id` (a short
+/// code written into the pack when it is exported). Two packs that merely share a name then keep
+/// separate blocks, while a newer export of the same pack still replaces its own. A pack without an
+/// id (made before 0.0.9) is keyed by its name alone, as before.
+pub fn css_block_key(name: &str, id: Option<&str>) -> String {
+    let id: String = id.unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+    if id.len() < 6 { name.to_string() } else { format!("{} {id}", name.chars().take(40).collect::<String>().trim()) }
+}
+
 /// Put a pack's CSS into the user's `custom.css` inside a marked block, replacing an earlier block
 /// of the same pack and leaving every other line alone.
 pub fn merge_css(mine: &str, pack_css: &str, pack_name: &str) -> String {
@@ -208,6 +217,7 @@ pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow:
     let feature = pack["kind"] == "feature";
     let name = clean_line(pack["name"].as_str().unwrap_or(""), 80);
     let name = if name.is_empty() { "pack".to_string() } else { name };
+    let css_key = css_block_key(&name, pack["id"].as_str());
     // The change that was waiting for review is only gone once this pack has really been staged.
     let waiting = crate::staging::put_aside(g, d).await;
     if let Err(e) = crate::staging::recreate(g, d, "import", None).await {
@@ -221,7 +231,7 @@ pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow:
             if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
             if std::fs::symlink_metadata(&target).map_or(false, |m| m.file_type().is_symlink()) { std::fs::remove_file(&target)?; }
             let mine = std::fs::read_to_string(&target).ok();
-            let out = if feature { merged_file(path, mine.as_deref(), text, &name)? } else { text.clone() };
+            let out = if feature { merged_file(path, mine.as_deref(), text, &css_key)? } else { text.clone() };
             if out.len() > MAX_FILE_BYTES { anyhow::bail!("{path} would become too large (limit 512 KB)"); }
             if feature && path.contains('/') && mine.as_deref().map_or(false, |m| m != out) { replaced.push(path.as_str()); }
             std::fs::write(&target, out)?;
@@ -365,6 +375,18 @@ mod tests {
         assert!(again.starts_with("/* Your overrides. */\n:root { --radius: 2px }\n") && again.contains("body { margin: 0 }") && again.contains(".other { color: red }"));
         assert_eq!(again.matches("/* pack:Kanban -- board */").count(), 1);
         assert_eq!(merge_css("", "a{}", ""), "/* pack:pack */\na{}\n/* end pack:pack */\n");
+        // Two packs that share a name keep separate blocks when they carry ids; a newer export of the
+        // same pack (same id) replaces its own block; a pack without an id is keyed by its name alone.
+        let (board, theme) = (css_block_key("My pack", Some("k3j9x0ab12cd")), css_block_key("My pack", Some("zz81mmq04tty")));
+        assert_ne!(board, theme);
+        let css = merge_css(&merge_css("", ".board { gap: 8px }", &board), ".t { color: red }", &theme);
+        assert!(css.contains(".board { gap: 8px }") && css.contains(".t { color: red }"), "{css}");
+        let css = merge_css(&css, ".board { gap: 12px }", &board);
+        assert!(css.contains("gap: 12px") && !css.contains("gap: 8px") && css.contains(".t { color: red }"), "{css}");
+        assert_eq!(css.matches("/* pack:My pack ").count(), 2);
+        assert_eq!(css_block_key("My pack", None), "My pack");
+        assert_eq!(css_block_key("My pack", Some("x*/")), "My pack", "an id too short to tell packs apart is ignored");
+        assert_eq!(css_block_key("My pack", Some("abc*/ def123")), "My pack abcdef123", "only letters and digits of an id are used");
     }
 
     #[tokio::test]
