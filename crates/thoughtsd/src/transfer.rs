@@ -187,6 +187,8 @@ pub fn safe_options(o: RunOptions) -> RunOptions {
         // Web lookups are switched on here, after their warning, like bypass.
         web: false,
         max_budget_usd: None,
+        // Decided when a message is sent (Settings), never carried over.
+        prompt_suggestions: false,
     }
 }
 
@@ -216,6 +218,7 @@ pub fn merged_settings(cur: &Settings, from: &Settings) -> Settings {
     c.model = f.model.clone();
     c.effort = f.effort.clone();
     c.mini_wrap_model = f.mini_wrap_model.clone();
+    c.suggestions_off = f.suggestions_off;
     if f.permission_mode.as_deref() != Some(crate::settings::BYPASS) { c.permission_mode = f.permission_mode.clone(); }
     if !cur.ai.claude.has_api_token { c.base_url = f.base_url.clone(); }
     for p in &from.private_paths { if !n.private_paths.contains(p) { n.private_paths.push(p.clone()); } }
