@@ -322,7 +322,10 @@ when Codex is chosen.
   `.codex/` in any folder and `.mcp.json` (and, where the run may not change them, the standing
   files: CLAUDE.md, the `routines/` checklists, and AGENTS.md / AGENTS.override.md in any folder, all
   in any letter case) are copied before every run that can write and put back afterwards
-  (`codex::keep_for`, `StandingSnapshot::take_with`). Codex itself keeps a
+  (`codex::keep_for`, `StandingSnapshot::take_guarded`). Links under any of those names (a file's,
+  or a kept folder's such as `.Codex`) are recorded by where they point and never followed; a new or
+  changed one goes when the run is over and the chat says so — also in an ordinary chat, which may
+  edit AGENTS.md but never put a link in its place. The Claude Code backstop does the same. Codex itself keeps a
   writable folder's top-level `.git` read-only and gives sandboxed commands no network (checked
   with `codex debug seatbelt`, which runs no model). No spending ceiling: automatic tasks on Codex
   have only their time limits, and Codex runs are not in the month's cost.

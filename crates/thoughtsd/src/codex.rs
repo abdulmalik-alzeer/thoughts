@@ -1041,7 +1041,8 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         let mut roots: Vec<PathBuf> = writable.clone();
         roots.insert(0, l.spec.cwd.clone());
         for r in roots {
-            snapshots.push(tokio::task::spawn_blocking(move || StandingSnapshot::take_with(&r, keep)).await?);
+            // A link is never wanted under any of these names, also where the run may edit the file.
+            snapshots.push(tokio::task::spawn_blocking(move || StandingSnapshot::take_guarded(&r, keep, guarded_and_standing)).await?);
         }
     }
     let args = exec_args(&Plan { help: &help, sandbox, model: l.spec.options.model.as_deref(), effort: effort.as_deref(), web: sw.web,
