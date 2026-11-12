@@ -253,7 +253,9 @@ fn markdown_risks(text: &str) -> Vec<MdRisk> {
 }
 
 /// Claude project settings are allowlisted: any key not known to be harmless is reported.
-const CLAUDE_SAFE: &[&str] = &["$schema", "cleanupPeriodDays", "includeCoAuthoredBy", "outputStyle", "spinnerTipsEnabled", "language"];
+/// (`cleanupPeriodDays` is not: Claude Code honours it from a project's settings, and a low number
+/// makes it delete the session records every chat is resumed from.)
+const CLAUDE_SAFE: &[&str] = &["$schema", "includeCoAuthoredBy", "outputStyle", "spinnerTipsEnabled", "language"];
 
 /// Repo-local git config is allowlisted: anything outside these plain keys is reported.
 fn risky_git_key(k: &str) -> bool {
@@ -312,6 +314,7 @@ fn setting_findings(key: &str, value: &Value, starter: &Value) -> Vec<(&'static 
             one("program", if cmds.is_empty() { plain(value) } else { cmds.join("; ") })
         }
         "mcpServers" | "enableAllProjectMcpServers" | "enabledMcpjsonServers" | "allowedMcpServers" => one("mcp_setting", plain(value)),
+        "cleanupPeriodDays" => one("history_days", plain(value)),
         _ => one("setting", plain(value)),
     }
 }
@@ -387,8 +390,10 @@ impl Scan {
             let Some(obj) = v.as_object() else { self.add(A, "settings_unreadable", f, "", "", Some(format!("{f} is not a settings object"))); continue };
             for (k, x) in obj {
                 if CLAUDE_SAFE.contains(&k.as_str()) || (k == "hooks" && Some(x) == starter.get("hooks")) { continue; }
+                // What 0.0.8 called it — nothing for the one key it took for harmless.
+                let old = (k != "cleanupPeriodDays").then(|| format!("Claude \"{k}\" in {f}"));
                 for (kind, name, detail) in setting_findings(k, x, &starter) {
-                    self.add(A, kind, f, &name, &detail, Some(format!("Claude \"{k}\" in {f}")));
+                    self.add(A, kind, f, &name, &detail, old.clone());
                 }
             }
         }
@@ -892,6 +897,11 @@ mod tests {
         assert_eq!(get("env", "env"), "A, B");
         assert_eq!(get("mcp", "mail"), "npx -y, mail-server");
         assert_eq!(get("mcp", "web"), "https://example.com/mcp");
+        // SEC-37: how long past chats are kept is not a harmless choice for a shared folder to make.
+        put(&d, ".claude/settings.local.json", r#"{"cleanupPeriodDays": 0, "language": "arabic", "spinnerTipsEnabled": false}"#);
+        let days: Vec<Finding> = findings(&d).into_iter().filter(|x| x.file == ".claude/settings.local.json").collect();
+        assert_eq!(days.iter().map(|x| (x.kind, x.detail.as_str())).collect::<Vec<_>>(), [("history_days", "0")]);
+        std::fs::remove_file(d.join(".claude/settings.local.json")).unwrap();
         // The starter's own hook with one added to it: only the added one is listed.
         let mut v: Value = serde_json::from_str(STARTER_SETTINGS).unwrap();
         v["hooks"]["Stop"] = json!([{"hooks": [{"type": "command", "command": "evil"}]}]);
