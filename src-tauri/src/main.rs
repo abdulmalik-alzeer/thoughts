@@ -676,7 +676,6 @@ fn main() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_process::init())
         // The app window only ever shows the app itself; any attempt to navigate elsewhere is refused.
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("nav-guard")
