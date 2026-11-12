@@ -15,6 +15,7 @@
   import Icon from '../lib/Icon.svelte';
   import Emblem from '../lib/Emblem.svelte';
   import { imeKey } from '../lib/ime';
+  import { inbox } from '../lib/inbox.svelte';
 
   let { projects, newChat, startWrap }: { projects: any[]; newChat: (pid?: string | null) => void; startWrap: () => void } = $props();
 
@@ -261,6 +262,7 @@
       <button class="stat" class:attn={app.wrap.count > 0} onclick={() => (app.wrap.count ? startWrap() : go({ kind: 'chats' }))}>
         <b>{#if app.wrap.count}{fmtNum(app.wrap.count)}{:else}<Icon name="check" size={26} />{/if}</b><span>{app.wrap.count ? tn('ui.home.toWrap', app.wrap.count) : t('allSaved')}</span></button>
       <button class="stat" onclick={() => go({ kind: 'docs' })}>{@render num(files, partFailed.files)}<span>{tn('ui.home.notes', files)}</span></button>
+      {#if inbox.count > 0}<button class="stat attn" onclick={() => go({ kind: 'inbox' })}><b>{fmtNum(inbox.count)}</b><span>{tn('inbox.home', inbox.count)}</span></button>{/if}
     {/if}
   </section>
   {#if loadError && !loading}

@@ -23,6 +23,8 @@
   import { itemOf, openItem } from './lib/item';
   import Docs from './views/Docs.svelte';
   import Todos from './views/Todos.svelte';
+  import Inbox from './views/Inbox.svelte';
+  import { inbox, watchInbox } from './lib/inbox.svelte';
   import Projects from './views/Projects.svelte';
   import Settings from './views/Settings.svelte';
   import Rollback from './views/Rollback.svelte';
@@ -220,6 +222,7 @@
 
   onMount(() => {
     boot();
+    watchInbox();
     const off = on(async (e) => {
       try {
         if (e.type === 'connection') {
@@ -588,6 +591,7 @@
     const items: NavItem[] = [];
     const add = (id: string, on = true) => { if (on) items.push({ id, label: navLabel(id), icon: id, active: isActive(id), run: () => { go({ kind: id }); } }); };
     add('home'); add('chats'); add('ideas'); add('todos', m.todos !== false); add('docs', m.docs !== false); add('projects', m.builds !== false);
+    if (inbox.count > 0 || app.view.kind === 'inbox') items.push({ id: 'inbox', label: navLabel('inbox', t('inbox.nav')), icon: 'inbox', active: app.view.kind === 'inbox', run: () => { go({ kind: 'inbox' }); } });
     if (m.me) items.push({ id: 'me', label: navLabel('me'), icon: 'me', active: meOpen, run: () => { go({ kind: 'docs', path: 'me/README.md' }); } });
     for (const v of app.pluginViews) items.push({ id: v.id, label: navLabel(v.id, v.title), icon: v.icon || 'plugin', custom: true, active: app.view.kind === 'plugin' && app.view.id === v.id, run: () => { go({ kind: 'plugin', id: v.id }); } });
     const hidden = new Set((app.nav?.hidden ?? []).filter((id) => id !== 'home'));
@@ -739,6 +743,7 @@
         {#each navItems as it, i (it.id)}
           <button class="nav" class:active={it.active} aria-current={it.active ? 'page' : undefined} title={tip(it.label, 'nav.' + (i + 1))} onclick={it.run}>
             <Icon name={it.icon} /><span class="grow ell" dir="auto">{it.label}</span>
+            {#if it.id === 'inbox' && inbox.count > 0}<span class="badge" title={tn('inbox.badge', inbox.count)}><span aria-hidden="true">{fmtNum(inbox.count)}</span><span class="sr-only">{tn('inbox.badge', inbox.count)}</span></span>{/if}
             {#if it.id === 'todos' && app.dueToday > 0}<span class="badge" title={tn('ui.dueNow', app.dueToday)}><span aria-hidden="true">{fmtNum(app.dueToday)}</span><span class="sr-only">{tn('ui.dueNow', app.dueToday)}</span></span>{/if}
           </button>
         {/each}
@@ -817,6 +822,7 @@
         {#each navItems as it, i (it.id)}
           <button class="iconbtn rb" class:on={it.active} aria-current={it.active ? 'page' : undefined} aria-label={it.label} title={tip(it.label, 'nav.' + (i + 1))} onclick={it.run}>
             <Icon name={it.icon} />
+            {#if it.id === 'inbox' && inbox.count > 0}<span class="rdot" aria-hidden="true"></span><span class="sr-only">— {tn('inbox.badge', inbox.count)}</span>{/if}
             {#if it.id === 'todos' && app.dueToday > 0}<span class="rdot" aria-hidden="true"></span><span class="sr-only">— {tn('ui.dueNow', app.dueToday)}</span>{/if}
           </button>
         {/each}
@@ -891,6 +897,7 @@
       {:else if app.view.kind === 'item'}<Item path={app.view.path} tab={app.view.id} />
       {:else if app.view.kind === 'docs'}<Docs path={app.view.path} />
       {:else if app.view.kind === 'todos'}<Todos mode={app.view.id === 'calendar' ? 'calendar' : 'list'} />
+      {:else if app.view.kind === 'inbox'}<Inbox />
       {:else if app.view.kind === 'history'}<History />
       {:else if app.view.kind === 'projects'}<Projects {projects} reload={loadProjects} {newChat} />
       {:else if app.view.kind === 'settings'}<Settings reload={loadProjects} />

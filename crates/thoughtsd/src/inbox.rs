@@ -305,6 +305,11 @@ mod tests {
     async fn the_inbox_endpoints_follow_the_library_and_its_private_folders() {
         let (st, lib) = crate::wraps::testutil::library().await;
         crate::wraps::testutil::write(&lib, "inbox/a.md", "hello\n");
+        // Waiting captures are not "notes" in the library count, but they are files: search and the tree see them.
+        let stats = crate::library::stats(&lib);
+        assert_eq!(stats["markdownFiles"].as_u64().unwrap(), stats["notes"].as_u64().unwrap() + 1 + 1);
+        assert!(crate::library::search(&lib, "hello", 10, &[]).iter().any(|h| h["path"] == "inbox/a.md"));
+        assert!(crate::library::tree(&lib, &[]).to_string().contains("inbox"));
         let q = |c: bool| Query(if c { HashMap::from([("count".to_string(), "1".to_string())]) } else { HashMap::new() });
         assert_eq!(api_list(State(st.clone()), q(true)).await.unwrap().0, json!({"count": 1}));
         let v = api_list(State(st.clone()), q(false)).await.unwrap().0;
