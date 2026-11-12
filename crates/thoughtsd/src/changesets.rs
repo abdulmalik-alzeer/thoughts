@@ -533,34 +533,73 @@ async fn plan(state: &AppState, lib: &Path, base: &str, goal: &str, now: &str) -
     Ok(steps)
 }
 
-/// Write the planned files: removals first (a file may take the place of a folder that goes).
-fn carry_out(lib: &Path, steps: &[(String, Step)]) -> anyhow::Result<()> {
-    for (rel, _) in steps.iter().filter(|(_, s)| matches!(s, Step::Remove)) {
-        let Some(p) = target(lib, rel) else { continue };
-        if std::fs::symlink_metadata(&p).is_ok() { std::fs::remove_file(&p)?; }
-        // Folders that existed only for it go too (never one that still holds anything).
-        let mut cur = Path::new(rel).parent();
-        while let Some(r) = cur.filter(|r| !r.as_os_str().is_empty()) {
-            if std::fs::remove_dir(lib.join(r)).is_err() { break; }
-            cur = r.parent();
-        }
+/// Is the folder `dir` (which exists) really inside the library, links resolved?
+fn inside(lib: &Path, dir: &Path) -> anyhow::Result<()> {
+    if dunce::canonicalize(dir)?.starts_with(real(lib)) { Ok(()) } else { anyhow::bail!("{} is not inside the library", dir.display()) }
+}
+
+/// Write `bytes` as the library file `rel`, never through a link: a link found there is removed
+/// (its target is never touched) and the file takes its place. Only inside the library, checked on
+/// the real path. The new file is written beside it, given its mode, then renamed over the old name,
+/// so no link is ever followed, for the contents or for the mode.
+fn put_file(lib: &Path, rel: &str, bytes: &[u8], exec: bool) -> anyhow::Result<()> {
+    use std::io::Write;
+    let p = target(lib, rel).ok_or_else(|| anyhow::anyhow!("{rel} is reached through a link"))?;
+    let parent = p.parent().ok_or_else(|| anyhow::anyhow!("{rel} has no folder"))?.to_path_buf();
+    std::fs::create_dir_all(&parent)?;
+    inside(lib, &parent)?;
+    #[allow(unused_mut)]
+    let mut mode: Option<u32> = None;
+    match std::fs::symlink_metadata(&p) {
+        Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&p)?,
+        Ok(m) if m.is_dir() => anyhow::bail!("{rel} is a folder now"),
+        #[cfg(unix)]
+        Ok(m) => { use std::os::unix::fs::PermissionsExt; mode = Some(m.permissions().mode()); }
+        #[cfg(not(unix))]
+        Ok(_) => {}
+        Err(_) => {}
     }
-    for (rel, step) in steps {
-        let Step::Write(bytes, exec) = step else { continue };
-        let Some(p) = target(lib, rel) else { continue };
-        if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
-        crate::paths::write_atomic(&p, bytes, false)?;
+    let tmp = parent.join(format!(".thoughts-{}.tmp", uuid::Uuid::new_v4()));
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let done = (|| -> std::io::Result<()> {
+        f.write_all(bytes)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if let Ok(m) = std::fs::metadata(&p) {
-                let mut perm = m.permissions();
-                perm.set_mode(if *exec { perm.mode() | 0o111 } else { perm.mode() & !0o111 });
-                let _ = std::fs::set_permissions(&p, perm);
-            }
+            let base = mode.unwrap_or(0o644) & 0o7777;
+            f.set_permissions(std::fs::Permissions::from_mode(if exec { base | 0o111 } else { base & !0o111 }))?;
         }
         #[cfg(not(unix))]
-        let _ = exec;
+        let _ = (exec, mode);
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &p)
+    })();
+    if done.is_err() { let _ = std::fs::remove_file(&tmp); }
+    Ok(done?)
+}
+
+/// Remove the library file `rel` (a link is removed itself, never what it points at), and the
+/// folders that held only it.
+fn remove_file_at(lib: &Path, rel: &str) -> anyhow::Result<()> {
+    let p = target(lib, rel).ok_or_else(|| anyhow::anyhow!("{rel} is reached through a link"))?;
+    let Some(parent) = p.parent().filter(|d| d.is_dir()) else { return Ok(()) };
+    inside(lib, parent)?;
+    if std::fs::symlink_metadata(&p).map_or(false, |m| !m.is_dir()) { std::fs::remove_file(&p)?; }
+    // Folders that existed only for it go too (never one that still holds anything).
+    let mut cur = Path::new(rel).parent();
+    while let Some(r) = cur.filter(|r| !r.as_os_str().is_empty()) {
+        if std::fs::remove_dir(lib.join(r)).is_err() { break; }
+        cur = r.parent();
+    }
+    Ok(())
+}
+
+/// Write the planned files: removals first (a file may take the place of a folder that goes).
+fn carry_out(lib: &Path, steps: &[(String, Step)]) -> anyhow::Result<()> {
+    for (rel, _) in steps.iter().filter(|(_, s)| matches!(s, Step::Remove)) { remove_file_at(lib, rel)?; }
+    for (rel, step) in steps {
+        if let Step::Write(bytes, exec) = step { put_file(lib, rel, bytes, *exec)?; }
     }
     Ok(())
 }
@@ -586,7 +625,8 @@ pub async fn restore_all(state: &AppState, dir: &Path, point: &str) -> anyhow::R
     }
     carry_out(dir, &steps)?;
     for p in &special {
-        if std::fs::symlink_metadata(dir.join(p)).map_or(false, |m| !m.is_dir()) { std::fs::remove_file(dir.join(p))?; }
+        // Whatever is there now goes first (a link is removed itself); git then writes the recorded item.
+        remove_file_at(dir, p)?;
         git(state, dir, &["checkout", "-q", point, "--", &format!(":(top,literal){p}")]).await?;
     }
     put_entries(state, dir, None, &back).await?;
@@ -800,6 +840,54 @@ mod tests {
         let (other, w) = watched_chat(&st, &lib, "Never").await;
         drop(w);
         assert!(!finish(&st, &other, "assistant: Never").await);
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_note_turned_into_a_link_to_a_file_elsewhere_is_put_back_in_the_library_and_the_file_elsewhere_is_untouched() {
+        use std::os::unix::fs::PermissionsExt;
+        let (st, lib) = t::library().await;
+        let outside = lib.parent().unwrap().join("dotfile");
+        std::fs::write(&outside, "export SECRET=1\n").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let untouched = |why: &str| {
+            assert_eq!(std::fs::read_to_string(&outside).unwrap(), "export SECRET=1\n", "{why}");
+            assert_eq!(std::fs::metadata(&outside).unwrap().permissions().mode() & 0o777, 0o600, "{why}");
+        };
+        // The run replaced a note with a link to a file outside the library.
+        let (chat, _w) = watched_chat(&st, &lib, "Link it").await;
+        std::fs::remove_file(lib.join("TODO.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, lib.join("TODO.md")).unwrap();
+        assert!(finish(&st, &chat, "assistant: Link it").await);
+        undo(&st, &lib, &chat, &msg_id(&st, &chat).await, false).await.unwrap();
+        untouched("undo");
+        let m = std::fs::symlink_metadata(lib.join("TODO.md")).unwrap();
+        assert!(m.is_file() && !m.file_type().is_symlink(), "a plain note again");
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [ ] call the bank\n");
+
+        // After an answer edited a note, something else replaced it with such a link: Undo refuses.
+        let (chat, _w) = watched_chat(&st, &lib, "Edit").await;
+        t::write(&lib, "README.md", "edited by the answer\n");
+        assert!(finish(&st, &chat, "assistant: Edit").await);
+        std::fs::remove_file(lib.join("README.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, lib.join("README.md")).unwrap();
+        assert!(undo(&st, &lib, &chat, &msg_id(&st, &chat).await, false).await.is_err());
+        untouched("refused undo");
+
+        // Putting the whole folder back as it was (a cut-off Wrap) never writes through it either.
+        std::fs::remove_file(lib.join("README.md")).unwrap();
+        t::write(&lib, "README.md", "my library\n");
+        t::sh(&lib, &["add", "-A"]);
+        t::sh(&lib, &["commit", "-q", "-m", "snapshot before wrap"]);
+        let snap = t::sh(&lib, &["rev-parse", "HEAD"]);
+        std::fs::remove_file(lib.join("README.md")).unwrap();
+        std::os::unix::fs::symlink(&outside, lib.join("README.md")).unwrap();
+        crate::git::rollback_to(&st, &lib, &snap).await.unwrap();
+        untouched("rollback");
+        assert!(!std::fs::symlink_metadata(lib.join("README.md")).unwrap().file_type().is_symlink());
+        assert_eq!(t::read(&lib, "README.md"), "my library\n");
+        assert_eq!(t::sh(&lib, &["status", "--porcelain"]), "");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
