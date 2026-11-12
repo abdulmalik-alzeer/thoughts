@@ -7,7 +7,7 @@
   import { api, post } from '../lib/api';
   import { app, cachedLook } from '../lib/store.svelte';
   import { fmtDate, t } from '../lib/i18n';
-  import { os } from '../lib/quickKeys';
+  import { isolated as iso, os } from '../lib/quickKeys';
 
   type Kind = 'todo' | 'note';
   type Prefill = { text?: string; kind?: Kind | null } | null;
@@ -198,7 +198,6 @@
   }
 
   // Each key is isolated, so it keeps its own order inside an Arabic sentence.
-  const iso = (k: string) => `\u2066${k}\u2069`;
   const keyHint = $derived(t('nativeb.cap.keys', {
     enter: iso(mac ? '↩' : 'Enter'), newline: iso(mac ? '⇧↩' : 'Shift+Enter'), esc: iso(mac ? 'esc' : 'Esc'),
   }));
