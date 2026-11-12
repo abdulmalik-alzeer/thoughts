@@ -381,6 +381,8 @@ struct Recording {
     title: String,
     lang: String,
     date: String,
+    /// The library it is recorded into (another one may be opened before it is turned into text).
+    library: PathBuf,
     seconds: f64,
     paused: bool,
     level: f32,
@@ -409,7 +411,7 @@ static TICKING: AtomicBool = AtomicBool::new(false);
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> { m.lock().unwrap_or_else(|e| e.into_inner()) }
 
 fn rec_json(r: &Recording) -> Value {
-    json!({"path": r.rel, "item": r.item, "title": r.title, "lang": r.lang, "date": r.date,
+    json!({"path": r.rel, "item": r.item, "title": r.title, "lang": r.lang, "date": r.date, "library": r.library.to_string_lossy(),
            "seconds": r.seconds, "paused": r.paused, "level": r.level, "ended": r.ended})
 }
 
@@ -604,6 +606,13 @@ fn library_root() -> Result<PathBuf, String> {
     thoughtsd::settings::Settings::load().library().ok_or_else(|| fail("library", Some("no library")))
 }
 
+/// The library a recording to turn into text is in: the one `meta` names (the recording's own,
+/// handed back by the window), as long as it is still in the list; else the one open now.
+fn library_of(meta: &Value) -> Result<PathBuf, String> {
+    let Some(l) = meta["library"].as_str().filter(|l| !l.trim().is_empty()) else { return library_root() };
+    thoughtsd::settings::Settings::load().library_at(Path::new(l)).map(|x| PathBuf::from(&x.path)).ok_or_else(|| fail("library", Some("not in the list")))
+}
+
 fn make_recorder(abs: &Path) -> Result<Obj, String> {
     let url = file_url(abs);
     let recorder = cls(c"AVAudioRecorder")?;
@@ -653,7 +662,7 @@ pub fn record_start(item: &str, title: &str, lang: &str) -> Result<Value, String
             Err(e) => { let _ = std::fs::remove_file(&abs); return Err(e); }
         };
         let item = rel.split("/meetings/").next().unwrap_or("").to_string();
-        let r = Recording { id: next_id(), recorder, abs, rel, item, title, lang: lang.into(), date: today.format("%Y-%m-%d").to_string(),
+        let r = Recording { id: next_id(), recorder, abs, rel, item, title, lang: lang.into(), date: today.format("%Y-%m-%d").to_string(), library: root,
             seconds: 0.0, paused: false, level: 0.0, ended: None, misses: 0 };
         let v = rec_json(&r);
         *lock(&RECORDING) = Some(r);
@@ -722,7 +731,7 @@ pub fn transcribe(rel: &str, lang: &str, meta: Value) -> Result<Value, String> {
         let rel = rel.trim().trim_start_matches("./").replace('\\', "/");
         if lock(&RECORDING).as_ref().is_some_and(|r| r.rel == rel) { return Err(fail("busy", Some("recording"))); }
         if !v::is_audio(&rel) { return Err(fail("library", Some("not a recording"))); }
-        let root = library_root()?;
+        let root = library_of(&meta)?;
         let abs = thoughtsd::library::resolve(&root, &rel).map_err(|e| fail("library", Some(&e.to_string())))?;
         if !abs.is_file() { return Err(fail("library", Some("not a file"))); }
         let lang = v::lang(lang);

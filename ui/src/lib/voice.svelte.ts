@@ -7,11 +7,12 @@ import { go, refreshChats, toast } from './store.svelte';
 import { t, lang as appLang } from './i18n';
 import { choiceDialog, confirmDialog } from './dialog.svelte';
 import { failed } from './errors';
+import { libs } from './libraries.svelte';
 
 export type VoiceLang = 'en' | 'ar';
 type Perm = 'granted' | 'denied' | 'restricted' | 'ask';
 type LangInfo = { locale: string | null; onDevice: boolean; available: boolean };
-export type Rec = { path: string; item: string; title: string; lang: VoiceLang; date: string; seconds: number; paused: boolean; level: number; ended?: string | null };
+export type Rec = { path: string; item: string; title: string; lang: VoiceLang; date: string; seconds: number; paused: boolean; level: number; ended?: string | null; library?: string };
 export type Job = { path: string; meta: any; done: number; total: number };
 export type Status = {
   supported: boolean; reason?: string; platform?: string; mic?: Perm; speech?: Perm; langs?: Record<VoiceLang, LangInfo>;
@@ -277,7 +278,8 @@ export async function stopRecording(): Promise<void> {
   let r: Rec;
   try { r = await call<Rec>('voice_record_stop'); } catch (e) { voice.rec = null; voiceError(e); return; }
   voice.rec = null;
-  await transcribe(r.path, r.lang, { item: r.item, title: r.title, date: r.date, seconds: r.seconds });
+  // The library it was recorded in goes along: another one may be open by the time it is text.
+  await transcribe(r.path, r.lang, { item: r.item, title: r.title, date: r.date, seconds: r.seconds, library: r.library });
 }
 
 /** Stop and delete the recording, after asking. */
@@ -299,7 +301,7 @@ async function recEnded(reason: string, r: Rec | null) {
 let lastJob: { path: string; lang: VoiceLang; meta: any } | null = null;
 
 /** Turn the recording at `path` into text on this Mac; it is filed as a meeting note when done. */
-export async function transcribe(path: string, l: VoiceLang, meta: { item: string; title: string; date: string; seconds: number }): Promise<boolean> {
+export async function transcribe(path: string, l: VoiceLang, meta: { item: string; title: string; date: string; seconds: number; library?: string }): Promise<boolean> {
   try {
     if (!(await ensurePermission(false))) return false;
     const use = await ensureLang(l);
@@ -322,9 +324,17 @@ async function fileResult(): Promise<void> {
   const item = String(meta.item || String(r.path).split('/meetings/')[0]);
   try {
     const out = await post('/library/item/transcript', { path: item, recording: r.path, title: meta.title || '', date: meta.date || '',
-      paragraphs: r.paragraphs ?? [], seconds: Number(r.seconds) || 0, complete: r.complete !== false });
+      paragraphs: r.paragraphs ?? [], seconds: Number(r.seconds) || 0, complete: r.complete !== false, library: typeof meta.library === 'string' ? meta.library : '' });
     call('voice_result_clear', { path: r.path }).catch(() => {});
     const title = String(meta.title || t('voice.rec.meetingDefault'));
+    // Recorded in a library that is no longer the open one: the note is there, not here.
+    const norm = (p: unknown) => String(p ?? '').replace(/[\\/]+$/, '');
+    const open = libs.list.find((l) => l.open);
+    if (meta.library && open && norm(meta.library) !== norm(open.path)) {
+      const name = libs.list.find((l) => norm(l.path) === norm(meta.library))?.displayName ?? '';
+      toast(t('cln.voice.savedElsewhere', { name }), { kind: r.complete !== false ? 'success' : 'info', key: 'voice-job', duration: 12000 });
+      return;
+    }
     voice.ready = [{ item, path: out.path, title, complete: r.complete !== false }, ...voice.ready.filter((x) => x.item !== item)].slice(0, 10);
     toast(t(r.complete !== false ? 'voice.done.saved' : 'voice.done.partial'), { kind: r.complete !== false ? 'success' : 'info', key: 'voice-job', duration: 12000,
       action: { label: t('voice.done.open'), run: () => { go({ kind: 'docs', path: out.path }); } } });

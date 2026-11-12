@@ -1851,13 +1851,23 @@ async fn item_meeting(State(st): S, Json(m): Json<NewMeeting>) -> R {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct NewTranscript { path: String, recording: String, title: String, date: String, paragraphs: Vec<crate::voice::Para>, seconds: f64, complete: Option<bool> }
+struct NewTranscript { path: String, recording: String, title: String, date: String, paragraphs: Vec<crate::voice::Para>, seconds: f64, complete: Option<bool>, library: String }
 /// `POST /api/library/item/transcript {path: "<area>/<item>", recording: "<item>/meetings/….m4a", title,
-/// date?: "YYYY-MM-DD", paragraphs: [{at, text}], seconds, complete?}` → `{ok, path}`: the transcript of
-/// a meeting recorded and turned into text on this computer (by the desktop app), filed as the
-/// item's meeting note beside the recording (see `voice::transcript_note`).
+/// date?: "YYYY-MM-DD", paragraphs: [{at, text}], seconds, complete?, library?}` → `{ok, path}`: the
+/// transcript of a meeting recorded and turned into text on this computer (by the desktop app), filed
+/// as the item's meeting note beside the recording (see `voice::transcript_note`). `library` is the
+/// folder of the library the recording was made in, when another one has been opened since; it must
+/// be one in the list. Left out: the library open now.
 async fn item_transcript(State(st): S, Json(m): Json<NewTranscript>) -> R {
-    let root = lib(&st).await?;
+    let root = match m.library.trim() {
+        "" => lib(&st).await?,
+        l => {
+            let listed = st.settings.read().await.library_at(std::path::Path::new(l)).map(|x| std::path::PathBuf::from(&x.path));
+            let root = listed.ok_or_else(|| crate::tr::err("libs.not_found", &[]))?;
+            if !root.is_dir() { return Err(crate::tr::err("library.missing", &[("path", &root.display().to_string())]).into()); }
+            root
+        }
+    };
     library_free(&st).await?;
     let today = chrono::Local::now().date_naive();
     let date = match m.date.trim() {
@@ -4220,7 +4230,7 @@ mod tests {
         t::write(&lib, "clients/acme/meetings/2026-11-12-weekly-sync.m4a", "audio");
         let mut rx = st.events.subscribe();
         let body = |rec: &str, date: &str| Json(NewTranscript { path: "clients/acme".into(), recording: rec.into(), title: "Weekly sync".into(), date: date.into(),
-            paragraphs: vec![crate::voice::Para { at: 3.0, text: "Hello everyone.".into() }], seconds: 61.0, complete: None });
+            paragraphs: vec![crate::voice::Para { at: 3.0, text: "Hello everyone.".into() }], seconds: 61.0, complete: None, library: String::new() });
         let v = item_transcript(State(st.clone()), body("clients/acme/meetings/2026-11-12-weekly-sync.m4a", "2026-11-12")).await.unwrap().0;
         assert_eq!(v["path"], "clients/acme/meetings/2026-11-12-weekly-sync.md");
         let text = t::read(&lib, "clients/acme/meetings/2026-11-12-weekly-sync.md");
@@ -4234,6 +4244,38 @@ mod tests {
         assert_eq!(shown(item_transcript(State(st.clone()), body("clients/acme/meetings/2026-11-12-weekly-sync.m4a", "12/11/2026")).await).status, 422);
         assert!(!plugin_scope_allowed("/api/library/item/transcript", "scope=plugin"));
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_recording_made_before_another_library_was_opened_is_filed_in_its_own_library() {
+        let (st, work) = t::library().await;
+        let home = work.parent().unwrap().join("personal");
+        t::write(&home, "README.md", "my other library\n");
+        t::write(&work, "clients/acme/README.md", "---\ntitle: Acme\n---\n");
+        t::write(&work, "clients/acme/meetings/2026-11-12-call.m4a", "audio");
+        {
+            // Recorded in Work; Personal was opened while it was being turned into text.
+            let mut s = st.settings.write().await;
+            s.libraries = vec![
+                crate::settings::Library { id: "w".into(), name: "Work".into(), path: work.to_string_lossy().into(), parked: None },
+                crate::settings::Library { id: "p".into(), name: "Personal".into(), path: home.to_string_lossy().into(), parked: None },
+            ];
+            s.library_path = Some(home.to_string_lossy().into());
+        }
+        let body = |library: &str| Json(NewTranscript { path: "clients/acme".into(), recording: "clients/acme/meetings/2026-11-12-call.m4a".into(), title: "Call".into(),
+            date: "2026-11-12".into(), paragraphs: vec![crate::voice::Para { at: 0.0, text: "Hello.".into() }], seconds: 5.0, library: library.into(), ..Default::default() });
+        // Against the library open now it is not there.
+        assert!(item_transcript(State(st.clone()), body("")).await.is_err());
+        let v = item_transcript(State(st.clone()), body(&format!("{}/", work.display()))).await.unwrap().0;
+        assert_eq!(v["path"], "clients/acme/meetings/2026-11-12-call.md");
+        assert!(t::read(&work, "clients/acme/meetings/2026-11-12-call.md").contains("Hello."));
+        assert!(!home.join("clients").exists());
+        // Only a library in the list: never any other folder.
+        let elsewhere = work.parent().unwrap().join("elsewhere");
+        t::write(&elsewhere, "clients/acme/meetings/2026-11-12-call.m4a", "audio");
+        assert_eq!(shown(item_transcript(State(st.clone()), body(&elsewhere.to_string_lossy())).await).status, 404);
+        assert!(!elsewhere.join("clients/acme/meetings/2026-11-12-call.md").exists());
+        std::fs::remove_dir_all(work.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]
