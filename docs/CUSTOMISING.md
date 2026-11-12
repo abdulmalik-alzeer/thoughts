@@ -38,11 +38,13 @@ Open **Customise** and describe what you want in your own words.
 Nothing you ask for is applied straight away.
 
 1. The assistant prepares the change on the side. The app you are using is not touched.
-2. You see a review: a plain-language summary of what will be different, the list of what was added or changed, and the permissions any new add-on asks for.
+2. You see a review. It starts with **what changes**, which Thoughts reads from the change itself rather than from what the assistant says about it: each new, changed or removed add-on and page, with what it may do and, for one that changes, exactly what it gains or loses ("Now also: create, change and delete files in clients/"); each Home shortcut with the request it will put in front of the assistant; what is hidden, shown, renamed or reordered on Home and in the sidebar; how todos are grouped or shown; themes; the look; automatic tasks. Add-ons and pages the change leaves alone are folded away under **Already installed**. Then comes the assistant's own description of the change, labelled as such, and last the list of files, with **Show the exact changes** for anyone who wants every line.
 3. **Try it** shows the app with the change in place so you can click around. Try it never saves anything: close it and the app is exactly as before.
 4. Choose **Keep** or **Discard**. Discard leaves the app exactly as it was.
 
-Thoughts checks every change before you see it. If it finds a problem, such as an add-on that does not load or a setting it does not understand, the problem is listed in the review in plain words and **Keep is switched off** until it is fixed. Tell the assistant what the review says and it will correct the same change, or choose Discard.
+Thoughts checks every change before you see it. If it finds a problem, such as a setting it does not understand or a file that is not written correctly, the problem is listed in the review in plain words and **Keep is switched off** until it is fixed. Tell the assistant what the review says and it will correct the same change, or choose Discard.
+
+Thoughts also test-runs every new or changed add-on and page in a sealed box with no access to your data. Keep waits until that test has finished. If a part does not start, the review says which one and why, and Keep stays off unless you tick **Keep it anyway** (that part will not work until it is fixed). Asking the assistant to fix it is usually the better choice.
 
 The review also tells you, in plain words:
 
@@ -51,6 +53,11 @@ The review also tells you, in plain words:
 - **If the change no longer fits.** If you undo something, go back to an earlier point or update the app while a change is waiting, Thoughts carries the waiting change over, so keeping it never brings back what you undid. When the two cannot be combined, the review says the change no longer fits; discard it and ask again.
 - **What a pack says about itself.** A pack's own description is shown as a quotation, marked as its maker's words. Thoughts has not checked it.
 - **Hidden characters.** Text you are asked to approve, such as what an automatic task will tell the assistant, cannot contain invisible characters. Where free text has any, they are written out like `[U+202E]` so you see them.
+- **Files that changed while the change was being prepared.** The assistant may only write inside its own copy of your customisations. If files in your library changed while it worked, the review lists them: under a warning when the assistant's own steps name them, and otherwise as changed in the meantime (most likely by you or another chat). None of them is part of the change.
+
+### More than one change at a time
+
+You can ask for something new, import a pack or let the assistant merge an update while another change is still waiting for review. The waiting change is not replaced: it is set aside, Thoughts tells you so, and it stays listed under **Customise** until you deal with it. Each change is reviewed and kept on its own; open one and the one you were looking at waits in its place. A change you set aside is carried over onto your app as it is when you come back to it, so keeping it never undoes another change you kept in the meantime. Continuing the chat that prepared a waiting change picks that change up again.
 
 ### Changes made outside the app
 
@@ -71,7 +78,7 @@ An add-on can do only what it has asked for, and the review shows the list befor
 | Remember its own data | It keeps one small private store for itself, such as the hours you logged. It is not part of your library. |
 | Start a chat | It can open a chat with a prepared message. You see the chat like any other. |
 
-An add-on that asks for nothing can only show things on screen. No add-on can reach the internet, read files outside your library, see your passwords, or change the app's own settings.
+An add-on that asks for nothing can still add pages, boxes on Home, commands, and buttons on your todos and ideas, and show short messages. It sees a todo or an idea only when you use its button on it, and it reads nothing else. No add-on can reach the internet, read files outside your library, see your passwords, or change the app's own settings.
 
 ### Undo, any time
 
@@ -104,9 +111,9 @@ For your customisations, Thoughts compares three things: the original, your vers
 
 - Parts only you changed stay as you made them.
 - Parts only the new version changed are updated.
-- Where both you and the new version changed the same thing, Thoughts asks you, item by item:
-  - **Keep mine** — your version stays; you do not get the new behaviour for that part.
-  - **Use new** — the new version replaces yours.
+- Where both you and the new version changed the same thing, Thoughts tells you once and lists those parts together under **Customise → App updates**. For each one it says what the new version changes (for example "Adds the Home shortcut Weekly review"), and you choose:
+  - **Keep mine** — your version stays; you do not get the new behaviour for that part. The part stays listed, so you can still take the new version or merge later.
+  - **Use the new version** — the new version replaces yours.
   - **Let the assistant merge** — the assistant combines the two and shows you a review first, like any other change.
 - If a new version drops something you were using, Thoughts tells you and leaves your copy in place.
 

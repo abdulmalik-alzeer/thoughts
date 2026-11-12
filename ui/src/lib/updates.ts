@@ -1,7 +1,7 @@
 // App updates (the native updater in the shell) and updates to the shipped customisation defaults.
 import { api, inTauri, on, post } from './api';
-import { app, go, toast } from './store.svelte';
-import { choiceDialog, confirmDialog } from './dialog.svelte';
+import { go, toast } from './store.svelte';
+import { confirmDialog } from './dialog.svelte';
 import { t, tn } from './i18n';
 import { checkPending } from './layer';
 import { withBusyPrompt } from './shell';
@@ -52,7 +52,10 @@ const seen = {
   set: (v: string) => { try { localStorage.setItem('thoughts.updSeen', v); } catch { /* ignore */ } },
 };
 
-/** After an app update: say what was refreshed automatically, and ask about files changed on both sides. */
+/** After an app update: say what was refreshed automatically, and point to the choices left about
+ *  files changed on both sides. Those are made in Settings › Customisations › App updates
+ *  (UpdateChoices.svelte), all on one screen, where each says what the new version changes and
+ *  "Keep mine" can be revisited. */
 export async function checkLayerUpdates() {
   let s: any;
   try { s = await api('/updates/status'); } catch { return; } // older background service
@@ -69,35 +72,44 @@ export async function checkLayerUpdates() {
     seen.set(key);
     toast(tn('layer.upd.applied', applied.length), { key: 'upd-applied', detail: applied.join('\n') });
   }
-  for (const c of (Array.isArray(s?.conflicts) ? s.conflicts : []) as { path: string; merging?: boolean }[]) {
-    // The assistant is preparing a merged version, or it is waiting for review: the question is
-    // answered by keeping that review. If the merge fails or is discarded, it is asked again.
-    if (c.merging) continue;
-    const choice = await choiceDialog({
-      title: t('layer.upd.conflictTitle'), body: t('layer.upd.conflictBody'), list: [c.path], note: t('layer.upd.conflictNote'),
-      choices: [
-        { id: 'merge', label: t('layer.upd.merge') },
-        { id: 'new', label: t('layer.upd.useNew') },
-        { id: 'keep', label: t('layer.upd.keepMine'), primary: true },
-      ],
-    });
-    if (!choice) return; // asked again next start
-    try {
-      const r = await post('/updates/resolve', { path: c.path, choice });
-      if (choice === 'merge') {
-        toast(t('layer.upd.merging'), { key: 'upd', action: r?.chatId ? { label: t('layer.watch'), run: () => go({ kind: 'chat', id: r.chatId }) } : undefined });
-        checkPending(false);
-        // The question stays open until the merged version is kept. If the assistant ends without
-        // leaving anything to review, ask again (a result that is waiting is asked about in its review).
-        if (r?.chatId) {
-          const off = on((e) => {
-            if (e.type !== 'chat.done' || e.chatId !== r.chatId) return;
-            off();
-            setTimeout(() => { checkLayerUpdates(); }, 1500);
-          });
-        }
-      }
-    } catch (e: any) { toast(t('layer.upd.resolveFailed'), { kind: 'error', detail: e?.message ?? String(e) }); return; }
+  // A conflict whose merge is being prepared or waits for review is answered by keeping that review.
+  const open = (Array.isArray(s?.conflicts) ? s.conflicts : []).filter((c: any) => c && typeof c.path === 'string' && !c.merging);
+  if (open.length) {
+    toast(tn('ldb.upd.toast', open.length), { key: 'upd-choose', duration: 20000, action: { label: t('ldb.upd.choose'), run: () => go({ kind: 'settings', id: 'appLayer' }) } });
   }
-  void app;
+  emitUpdates(s);
+}
+
+// ---------- the choices left by an app update (UpdateChoices.svelte) ----------
+
+export type UpdateQuestion = { path: string; from?: string; to?: string; merging?: boolean; changes?: { area: string; op: string; [k: string]: any }[] | null };
+type Listener = (s: any) => void;
+const listeners = new Set<Listener>();
+function emitUpdates(s: any) { for (const l of listeners) l(s); }
+/** Be told whenever the update status was read again. */
+export function onUpdates(l: Listener): () => void { listeners.add(l); return () => { listeners.delete(l); }; }
+
+/** The current status: `{conflicts, kept, …}` (each with what the new version changes). */
+export async function layerUpdateStatus(): Promise<any> {
+  const s = await api('/updates/status');
+  emitUpdates(s);
+  return s;
+}
+
+/** Answer one question: keep mine, use the new version, or let the assistant merge (a review follows). */
+export async function resolveLayerUpdate(path: string, choice: 'keep' | 'new' | 'merge'): Promise<void> {
+  const r = await post('/updates/resolve', { path, choice });
+  if (r?.status) emitUpdates(r.status);
+  if (choice !== 'merge') return;
+  toast(t('layer.upd.merging'), { key: 'upd', action: r?.chatId ? { label: t('layer.watch'), run: () => go({ kind: 'chat', id: r.chatId }) } : undefined });
+  checkPending(false);
+  // The question stays open until the merged version is kept. If the assistant ends without
+  // leaving anything to review, the question is simply open again: read the status anew.
+  if (r?.chatId) {
+    const off = on((e) => {
+      if (e.type !== 'chat.done' || e.chatId !== r.chatId) return;
+      off();
+      setTimeout(() => { layerUpdateStatus().catch(() => {}); }, 1500);
+    });
+  }
 }

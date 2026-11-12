@@ -10,6 +10,8 @@
   import { checkPending, exportPack, layerItems, openReview, packChoices, permText, readPack, stagePack, startCustomise } from '../lib/layer';
   import AutomaticTasks from './AutomaticTasks.svelte';
   import Routines from './Routines.svelte';
+  import WaitingChanges from './WaitingChanges.svelte';
+  import UpdateChoices from './UpdateChoices.svelte';
   import { checkAppUpdate } from '../lib/updates';
 
   let { show }: { show: (...keys: string[]) => boolean } = $props();
@@ -103,6 +105,7 @@
         <button type="button" class="btn" onclick={openReview}>{t('layer.review')}</button>
       </div>
     {/if}
+    <WaitingChanges />
     <div class="row gap-top wrap">
       <button type="button" class="btn" onclick={() => (app.showRollback = true)}><Icon name="rollback" size={15} /> {t('layer3.historyDots')}</button>
       <span class="muted sm grow">{t('layer.historyHint')}</span>
@@ -183,6 +186,7 @@
     <h3>{t('layer.appUpdates')}</h3>
     <p class="muted sm">{t('layer.appUpdatesHint')}</p>
     <button type="button" class="btn" onclick={() => checkAppUpdate(true)}><Icon name="sync" size={15} /> {t('layer.upd.check')}</button>
+    <UpdateChoices />
   </div>
 {/if}
 

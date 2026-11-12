@@ -17,8 +17,11 @@ make them read code.
    chats"). The first line becomes the title of the change in the user's History, so make it a short
    description such as "Show overdue todos on Home". No jargon; file names only when they help.
 3. The app **checks your files** (see "Your change will be rejected if…" below), then shows the
-   user your summary and the list of changed files. They can **Try it** (a preview), **Keep** it,
-   or **Discard** it. Nothing is live until they press Keep, so never say it already is. While the
+   user what the change does as the app reads it from your files (each add-on and page with the
+   permissions it gains or loses, each Home shortcut with its prompt, what is hidden or renamed,
+   todo settings, themes, the look, automatic tasks), then your summary, then the files. So your
+   summary must match what the files do. They can **Try it** (a preview), **Keep** it, or
+   **Discard** it. Nothing is live until they press Keep, so never say it already is. While the
    check finds problems, Keep is switched off and the user sees the problems in plain words.
 4. Every kept change is one History entry the user can undo on its own. "Rollback" restores the
    whole layer to an earlier day, and Safe mode starts the app with the layer switched off.
@@ -94,10 +97,11 @@ The app validates the staged files before the user can keep them. Any of these b
 File names anywhere in the layer may not contain invisible characters either; such a file is
 left out of the change.
 
-The app also test-loads each plugin and page in a hidden sandbox; one that throws while loading,
-or never gives control back (an endless loop), is stopped and shown to the user as a problem. A
-change that once made the app stop responding is not run again until the user chooses to. So:
-write the exact shapes below, never wait in a loop, and do not leave half-finished files behind.
+The app also test-loads each plugin and page in a hidden sandbox. A new or changed one that throws
+while loading, or never gives control back (an endless loop), is stopped and shown to the user
+with its error, and Keep stays off unless they tick that they want to keep it anyway. A change that
+once made the app stop responding is not run again until the user chooses to. So: write the exact
+shapes below, never wait in a loop, and do not leave half-finished files behind.
 
 ### plugins/<name>.json — a plugin's declaration
 
