@@ -305,10 +305,13 @@ impl Scope {
     }
 }
 
-/// History is available when it is switched on and the library really is a repository.
+/// History is there for every library unless the user switched it off (`NO_HISTORY::`). A library
+/// that has none yet gets the one the app keeps for it, here, on first use; when that cannot be
+/// done the real reason is the error (git is not installed, …).
 async fn history_lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
     let l = lib(st).await?;
-    if !st.settings.read().await.git_enabled() || !git::is_repo(st, &l).await { return Err(crate::tr::err("no_history", &[])); }
+    if !st.settings.read().await.history_enabled() { return Err(crate::tr::err("no_history", &[])); }
+    git::start_history(st, &l).await?;
     Ok(l)
 }
 
@@ -375,10 +378,11 @@ fn redacted_settings(s: &Settings) -> Value {
 async fn diagnostics(State(st): S) -> R {
     let s = st.settings.read().await.clone();
     let git_state = match s.library().filter(|l| l.is_dir()) {
-        Some(l) if s.git_enabled() => {
+        Some(l) if s.history_enabled() || s.sync_enabled() => {
             let g = git::status(&st, &l).await;
             json!({"repo": g["repo"], "branch": g["branch"], "ahead": g["ahead"], "behind": g["behind"], "changedFiles": g["dirty"],
-                   "backupLocations": g["remotes"].as_array().map_or(0, |r| r.len())})
+                   "backupLocations": g["remotes"].as_array().map_or(0, |r| r.len()),
+                   "historyOn": s.history_enabled(), "keptByApp": g["kept"], "backup": s.sync.mode})
         }
         Some(_) => json!({"repo": false, "off": true}),
         None => json!({"repo": false, "libraryMissing": s.library_path.is_some()}),
@@ -472,7 +476,7 @@ fn cloud_folder(p: &str) -> bool {
 
 fn validate(s: &Settings) -> anyhow::Result<()> {
     if let Some(p) = &s.library_path {
-        if s.git_enabled() && cloud_folder(p) {
+        if s.sync_enabled() && cloud_folder(p) {
             return Err(crate::tr::err("library.cloud", &[]));
         }
     }
@@ -795,7 +799,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
         return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
     }
     let remote_url = o.remote_url.trim().to_string();
-    if s.git_enabled() && !remote_url.is_empty() { check_remote_url(&remote_url)?; }
+    if s.sync_enabled() && !remote_url.is_empty() { check_remote_url(&remote_url)?; }
     let fresh = o.library_mode != "existing";
     if fresh {
         library::create_from_starter(&path)?;
@@ -812,8 +816,10 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     } else {
         crate::trust::require(&path)?;
     }
-    if s.git_enabled() {
-        git::init(&st, &path).await?;
+    // Without git the app still works, minus the history — but an online location cannot.
+    let began = begin_history(&st, &s, &path, fresh).await;
+    if !s.sync_enabled() { crate::log::ok_or_warn("onboarding: the history of changes could not be started", began); } else {
+        began?;
         if !remote_url.is_empty() {
             crate::log::ok_or_warn("onboarding: could not add the sync address", git::git(&st, &path, &["remote", "add", "--", "origin", &remote_url]).await);
             if !o.remote_token.is_empty() {
@@ -870,21 +876,32 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     let spec = RunSpec { chat_id: id.clone(), prompt, cwd: path.clone(), add_dirs: vec![],
         options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, resume: None, append_system: None, extra_deny: vec![] };
     let name = s.user_name.clone();
-    let git_on = s.git_enabled();
+    let (git_on, sync_on) = (s.history_enabled(), s.sync_enabled());
     claude::start_run(st.clone(), spec, Some(Box::new(move |st: Arc<AppState>, _ok| Box::pin(async move {
         let _ = std::fs::remove_dir_all(path.join(".claude/skills/init-library"));
         let _ = std::fs::remove_file(path.join("START-HERE.md"));
         // The starter's presets are installed under .claude/ during setup; drop the copy left at the top.
         library::remove_leftover_presets(&path);
-        if git_on {
+        if git_on && git::ready(&st, &path).await {
             let first = { let _g = st.git_lock.lock().await;
                 git::commit_all(&st, &path, &git::subject::assistant(&format!("library set up for {}", if name.is_empty() { "me" } else { &name }))).await };
             crate::log::ok_or_warn("onboarding: first commit failed", first);
-            if !git::remotes(&st, &path).await.is_empty() { crate::log::ok_or_warn("onboarding: first sync failed", git::sync(&st, &path).await); }
+            if sync_on && !git::remotes(&st, &path).await.is_empty() { crate::log::ok_or_warn("onboarding: first sync failed", git::sync(&st, &path).await); }
         }
         st.emit(json!({"type": "library.changed"}));
     })))).await?;
     Ok(Json(json!({"ok": true, "setupChatId": id})))
+}
+
+/// The history of changes a library starts with when setup finishes (nothing when it is switched
+/// off). A library that syncs with an online location becomes a repository itself, the usual git
+/// way — unless it sits inside someone else's repository, which must not notice. Every other
+/// library has its history kept by the app, outside the folder. A new library gets its first
+/// entry once the assistant has set it up; an existing one is recorded as it stands.
+async fn begin_history(st: &AppState, s: &Settings, path: &std::path::Path, fresh: bool) -> anyhow::Result<()> {
+    if !s.history_enabled() { return Ok(()); }
+    if s.sync_enabled() && git::repo_of(path) == git::Repo::Missing && git::enclosing_repo(path).is_none() { git::init(st, path).await?; }
+    if fresh { git::ensure_history(st, path).await.map(|_| ()) } else { git::start_history(st, path).await }
 }
 
 /// The line of the setup prompt that tells the assistant who it is setting the library up for.
@@ -1704,6 +1721,8 @@ async fn git_status(State(st): S) -> R {
     let Some(l) = s.library() else { return Ok(Json(json!({"repo": false}))) };
     let mut v = git::status(&st, &l).await;
     v["mode"] = json!(s.sync.mode);
+    // History is its own switch: `on` is the setting, `ready` whether there is one to read yet.
+    v["history"] = json!({"on": s.history_enabled(), "ready": v["repo"]});
     Ok(Json(v))
 }
 /// What a sync needs before it may touch the library: sync switched on, no wrap or reorganize in
@@ -1712,7 +1731,7 @@ async fn git_status(State(st): S) -> R {
 /// undo), and no assistant at work in it (`BUSY::`).
 async fn sync_guard(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, tokio::sync::OwnedMutexGuard<()>)> {
     let l = lib(st).await?;
-    if !st.settings.read().await.git_enabled() { return Err(crate::tr::err("git.off", &[])); }
+    if !st.settings.read().await.sync_enabled() { return Err(crate::tr::err("git.off", &[])); }
     let guard = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
     wraps::require_no_interrupted(st).await?;
     if st.run_active_in(&l) { return Err(crate::tr::err("busy.run", &[])); }
@@ -1749,7 +1768,8 @@ async fn remote_add(State(st): S, Json(r): Json<Remote>) -> R {
     check_remote_url(url)?;
     let host = git::host_of(url);
     if !r.token.is_empty() { if let Some(h) = &host { check_host(h)?; } }
-    git::init(&st, &l).await?;
+    // The location is added to whichever history the library has (its own, or the app-kept one).
+    git::ensure_history(&st, &l).await?;
     git::git(&st, &l, &["remote", "add", "--", &name, url]).await?;
     if !r.token.is_empty() {
         if let Some(h) = host { git::save_credential(&st, &h, &r.username, &r.token).await?; }
@@ -2200,8 +2220,12 @@ mod tests {
         assert_eq!(shown(library_version(State(st.clone()), q(&[("path", ".git/config"), ("hash", &first)])).await).status, 403);
         assert_eq!(shown(library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", "HEAD")])).await).status, 422);
         assert_eq!(shown(library_version(State(st.clone()), q(&[("path", "notes/never.md"), ("hash", &first)])).await).status, 404);
-        // With history switched off these say so, in a way the UI can recognise.
+        // "This computer only" is a choice about backup, not about history: everything above still works.
         st.settings.write().await.sync.mode = "none".into();
+        assert!(!library_history(State(st.clone()), none()).await.unwrap().0.as_array().unwrap().is_empty());
+        assert_eq!(shown(git_sync(State(st.clone())).await).code, "sync_off");
+        // With history switched off these say so, in a way the UI can recognise.
+        st.settings.write().await.keep_history = false;
         for r in [library_history(State(st.clone()), none()).await, library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone() })).await,
                   library_undo(State(st.clone()), Json(Undo { hash: first.clone() })).await, library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", &first)])).await] {
             let e = shown(r);
@@ -2211,6 +2235,107 @@ mod tests {
         assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/scratch.md".into(), ..Default::default() })).await.unwrap().0["recoverable"], false);
         assert_eq!(shown(git_sync(State(st.clone())).await).code, "sync_off");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    /// A state whose library is a plain folder of notes: no repository in it or above it.
+    async fn plain_library(mode: &str) -> (Arc<AppState>, std::path::PathBuf) {
+        let root = dunce::canonicalize(std::env::temp_dir()).unwrap().join(format!("thoughts-api-{}", uuid::Uuid::new_v4()));
+        let lib = root.join("library");
+        t::write(&lib, "INDEX.md", "# Index\n");
+        t::write(&lib, "notes/plan.md", "first draft\n");
+        let st = Arc::new(AppState::for_test());
+        { let mut s = st.settings.write().await; s.library_path = Some(lib.to_string_lossy().to_string()); s.sync.mode = mode.into(); }
+        (st, lib)
+    }
+    fn forget(lib: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(git::history_store(lib));
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_library_has_history_whatever_its_backup() {
+        for mode in ["none", "folder"] {
+            let (st, lib) = plain_library(mode).await;
+            // Opening History is enough: the library as it stands becomes the first entry.
+            let h = library_history(State(st.clone()), none()).await.unwrap().0;
+            assert_eq!(h.as_array().unwrap().len(), 1, "{mode}");
+            assert_eq!((h[0]["kind"].as_str(), h[0]["first"].as_bool()), (Some("start"), Some(true)));
+            let first = h[0]["hash"].as_str().unwrap().to_string();
+            assert!(!lib.join(".git").exists(), "nothing of the history is put in the library folder");
+            let g = git_status(State(st.clone())).await.unwrap().0;
+            assert_eq!((g["repo"].as_bool(), g["kept"].as_bool(), g["history"]["on"].as_bool(), g["history"]["ready"].as_bool()), (Some(true), Some(true), Some(true), Some(true)));
+            assert_eq!(g["mode"], mode);
+            // An edit, its versions, and putting the earlier one back.
+            write_file(State(st.clone()), none(), save("notes/plan.md", "second draft\n")).await.unwrap();
+            let v = library_history(State(st.clone()), q(&[("path", "notes/plan.md")])).await.unwrap().0;
+            assert_eq!(v.as_array().unwrap().len(), 2);
+            assert_eq!(library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", &first)])).await.unwrap().0["content"], "first draft\n");
+            library_restore(State(st.clone()), Json(Restore { path: "notes/plan.md".into(), hash: first.clone() })).await.unwrap();
+            assert_eq!(t::read(&lib, "notes/plan.md"), "first draft\n");
+            // A deleted document can be brought back; a whole change can be undone.
+            assert_eq!(delete_file(State(st.clone()), none(), Json(DeleteFile { path: "notes/plan.md".into() })).await.unwrap().0["recoverable"], true);
+            let newest = library_history(State(st.clone()), none()).await.unwrap().0[0]["hash"].as_str().unwrap().to_string();
+            library_undo(State(st.clone()), Json(Undo { hash: newest })).await.unwrap();
+            assert_eq!(t::read(&lib, "notes/plan.md"), "first draft\n");
+            // The starting point is not something to undo.
+            assert_eq!(shown(library_undo(State(st.clone()), Json(Undo { hash: first.clone() })).await).status, 409);
+            assert!(lib.join("INDEX.md").exists());
+            // Sync belongs to the online location, which this library does not have.
+            assert_eq!(shown(git_sync(State(st.clone())).await).code, "sync_off");
+            // Switching history off is the only thing that takes it away.
+            st.settings.write().await.keep_history = false;
+            assert_eq!(shown(library_history(State(st.clone()), none()).await).code, "no_history");
+            assert_eq!(git_status(State(st.clone())).await.unwrap().0["history"]["on"], false);
+            forget(&lib);
+        }
+    }
+
+    #[tokio::test]
+    async fn setup_gives_each_kind_of_library_the_right_history() {
+        // A new library kept on this computer only: an empty history kept by the app; the first
+        // entry is made when the assistant has finished setting the library up.
+        let (st, lib) = plain_library("none").await;
+        let s = st.settings.read().await.clone();
+        begin_history(&st, &s, &lib, true).await.unwrap();
+        assert!(matches!(git::repo_of(&lib), git::Repo::Kept(_)) && git::head(&st, &lib).await.is_none() && !lib.join(".git").exists());
+        forget(&lib);
+        // An existing library in a cloud folder: recorded as it stands, nothing added to the folder.
+        let (st, lib) = plain_library("folder").await;
+        let s = st.settings.read().await.clone();
+        begin_history(&st, &s, &lib, false).await.unwrap();
+        let h = git::history(&st, &lib, None, 10).await.unwrap();
+        assert_eq!((h.len(), h[0]["kind"].as_str()), (1, Some("start")));
+        assert!(!lib.join(".git").exists());
+        forget(&lib);
+        // An online location: the library is a repository itself, the usual git way.
+        let (st, lib) = plain_library("git-manual").await;
+        let s = st.settings.read().await.clone();
+        begin_history(&st, &s, &lib, true).await.unwrap();
+        assert_eq!(git::repo_of(&lib), git::Repo::Own);
+        assert!(!git::history_store(&lib).exists());
+        forget(&lib);
+        // …unless it sits inside someone else's repository, which is left exactly as it is.
+        let (st, lib) = plain_library("git-manual").await;
+        let vault = lib.parent().unwrap().to_path_buf();
+        t::sh(&vault, &["init", "-q", "-b", "main"]);
+        t::write(&vault, "other.txt", "x\n");
+        let s = st.settings.read().await.clone();
+        begin_history(&st, &s, &lib, false).await.unwrap();
+        assert!(matches!(git::repo_of(&lib), git::Repo::Kept(_)) && !lib.join(".git").exists());
+        assert_eq!(t::sh(&vault, &["status", "--porcelain"]).lines().count(), 2, "the vault has no commits and nothing staged");
+        assert!(t::sh(&vault, &["status", "--porcelain"]).lines().all(|l| l.starts_with("??")));
+        // An online location added later goes to that same history.
+        remote_add(State(st.clone()), Json(Remote { name: String::new(), url: "https://example.com/me/notes.git".into(), ..Default::default() })).await.unwrap();
+        assert_eq!(git::remotes(&st, &lib).await[0]["name"], "origin");
+        assert!(!lib.join(".git").exists());
+        forget(&lib);
+        // History switched off and no online location: nothing is created anywhere.
+        let (st, lib) = plain_library("none").await;
+        st.settings.write().await.keep_history = false;
+        let s = st.settings.read().await.clone();
+        begin_history(&st, &s, &lib, false).await.unwrap();
+        assert_eq!(git::repo_of(&lib), git::Repo::Missing);
+        forget(&lib);
     }
 
     #[tokio::test]

@@ -17,6 +17,9 @@ pub struct Settings {
     pub library_path: Option<String>,
     pub ai: AiSettings,
     pub sync: SyncSettings,
+    /// Keep a history of changes to the library on this computer, so any change can be undone.
+    /// On unless the user switches it off; it has nothing to do with where the library is backed up.
+    pub keep_history: bool,
     /// module id -> enabled
     pub modules: BTreeMap<String, bool>,
     pub daemon: DaemonSettings,
@@ -197,7 +200,10 @@ pub struct ClaudeSettings {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SyncSettings {
-    /// "git-auto" | "git-manual" | "folder" | "none"
+    /// Where the library is backed up: "none" (this computer only), "folder" (the library sits in
+    /// a cloud folder that keeps the copy), or an online location the app sends to — "git-manual"
+    /// (when Sync is pressed) or "git-auto" (after every Wrap). History is a separate switch
+    /// (`Settings::keep_history`).
     pub mode: String,
     /// "keychain" | "file"
     pub credential_store: String,
@@ -240,6 +246,7 @@ impl Default for Settings {
             library_path: None,
             ai: AiSettings::default(),
             sync: SyncSettings::default(),
+            keep_history: true,
             modules: BTreeMap::new(),
             daemon: DaemonSettings { run_at_login: false, keep_running: true },
             notifications: true,
@@ -485,9 +492,16 @@ impl Settings {
         self.library_path.as_ref().map(std::path::PathBuf::from)
     }
 
-    pub fn git_enabled(&self) -> bool {
-        self.sync.mode.starts_with("git")
-    }
+    /// Is a history of changes kept for the library? It is, for every kind of backup, unless the
+    /// user switched it off — and always with an online location, which is sent that very history.
+    pub fn history_enabled(&self) -> bool { self.keep_history || self.sync_enabled() }
+
+    /// Is the library backed up to an online location (the modes "git-manual" and "git-auto")?
+    pub fn sync_enabled(&self) -> bool { self.sync.mode.starts_with("git") }
+
+    /// The older name of `history_enabled`, from when history existed only together with an
+    /// online backup. Everything that records, lists or undoes changes asks this.
+    pub fn git_enabled(&self) -> bool { self.history_enabled() }
 }
 
 #[cfg(test)]
@@ -775,6 +789,31 @@ mod tests {
         assert!(s.usage_signals, "on unless the user turns it off");
         assert!(!serde_json::from_str::<Settings>(r#"{"usageSignals":false}"#).unwrap().usage_signals);
         assert_eq!(s.accessibility, Accessibility::default());
+    }
+
+    #[test]
+    fn history_is_on_for_every_kind_of_backup_unless_switched_off() {
+        // Files written before the switch existed, whatever backup they chose: history is on.
+        for mode in ["none", "folder", "git-manual", "git-auto"] {
+            let s = parse(&format!(r#"{{"sync":{{"mode":"{mode}"}}}}"#)).unwrap();
+            assert!(s.keep_history && s.history_enabled() && s.git_enabled(), "{mode}");
+            assert_eq!(s.sync_enabled(), mode.starts_with("git"), "{mode}");
+        }
+        assert!(Settings::default().history_enabled());
+        // Switching it off is the user's choice and survives a round trip; the backup is untouched.
+        for mode in ["none", "folder"] {
+            let off = parse(&format!(r#"{{"keepHistory":false,"sync":{{"mode":"{mode}"}}}}"#)).unwrap();
+            assert!(!off.history_enabled() && !off.git_enabled() && !off.sync_enabled(), "{mode}");
+            assert_eq!(off.sync.mode, mode);
+            let again: Settings = serde_json::from_str(&serde_json::to_string(&off).unwrap()).unwrap();
+            assert!(!again.keep_history);
+            let mut updated = off.clone();
+            updated.sanitize_update(&Settings::default()).unwrap();
+            assert!(!updated.keep_history);
+        }
+        // An online location is sent the history itself, so there the history is always kept.
+        let online = parse(r#"{"keepHistory":false,"sync":{"mode":"git-auto"}}"#).unwrap();
+        assert!(online.history_enabled() && online.sync_enabled());
     }
 
     #[test]

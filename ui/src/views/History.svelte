@@ -9,13 +9,14 @@
   import { errCode, errDetail, failed } from '../lib/errors';
   import { t, tn, fmtDate } from '../lib/i18n';
 
-  type Entry = { hash: string; short?: string; date: string; subject: string; kind: string; files: string[] };
+  type Entry = { hash: string; short?: string; date: string; subject: string; kind: string; files: string[]; first?: boolean };
 
   let tab = $state<'notes' | 'app'>('notes');
   let entries = $state<Entry[]>([]);
   let loading = $state(true);
   let loadError = $state('');
   let noHistory = $state(false);
+  let noGit = $state(false);
   let limit = $state(50);
   let busy = $state('');
   let open = $state<Record<string, boolean>>({});
@@ -25,17 +26,21 @@
     try {
       const r = await api(`/library/history?limit=${limit}`);
       entries = Array.isArray(r) ? r : [];
-      noHistory = false;
+      noHistory = false; noGit = false;
     } catch (e) {
-      if (errCode(e) === 'NO_HISTORY') { noHistory = true; entries = []; }
+      if (errCode(e) === 'NO_HISTORY') { noHistory = true; noGit = false; entries = []; }
+      // History is on, but the tool that records it is not installed on this computer yet.
+      else if (errCode(e) === 'git_missing') { noGit = true; noHistory = false; entries = []; }
       else loadError = errDetail(e) || t('ui.hist.loadFailed');
     } finally { loading = false; }
   }
   onMount(() => { load(); return on((e) => { if (e.type === 'library.changed' || e.type === 'resync') load(); }); });
 
   const KINDS = ['wrap', 'sync', 'edit', 'assistant'];
-  const kindLabel = (k: string) => t('ui.hist.kind.' + (KINDS.includes(k) ? k : 'other'));
+  const kindLabel = (k: string) => (k === 'start' ? t('hista.hist.kindStart') : t('ui.hist.kind.' + (KINDS.includes(k) ? k : 'other')));
   const kindIcon = (k: string) => ({ wrap: 'wrap', sync: 'sync', edit: 'edit', assistant: 'ai' } as Record<string, string>)[k] ?? 'clock';
+  /** What an entry says it did. The entry a history starts with is described in the reader's language. */
+  const subjectOf = (e: Entry) => (e.kind === 'start' ? t('hista.hist.startSubject') : e.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
 
   // Grouped by calendar day, newest first (the list already arrives newest first).
   const days = $derived.by(() => {
@@ -90,7 +95,14 @@
         <Icon name="rollback" size={28} />
         <h2>{t('ui.hist.offTitle')}</h2>
         <p class="muted">{t('err.noHistory')}</p>
-        <button class="btn primary" onclick={() => go({ kind: 'settings', id: 'git' })}><Icon name="settings" size={14} /> {t('ui.hist.openBackup')}</button>
+        <button class="btn primary" onclick={() => go({ kind: 'settings', id: 'git' })}><Icon name="settings" size={14} /> {t('hista.openSettings')}</button>
+      </div>
+    {:else if noGit}
+      <div class="state">
+        <Icon name="rollback" size={28} />
+        <h2>{t('hista.hist.noGitTitle')}</h2>
+        <p class="muted">{t('hista.hist.noGitBody')}</p>
+        <button class="btn primary" onclick={() => go({ kind: 'settings', id: 'git' })}><Icon name="settings" size={14} /> {t('hista.openSettings')}</button>
       </div>
     {:else if loadError}
       <div class="state" role="alert">
@@ -112,7 +124,7 @@
                     <span class="pill">{kindLabel(e.kind)}</span>
                     <span class="muted sm">{time(e)}</span>
                   </div>
-                  <div class="subj" dir="auto">{e.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize):\s*/i, '')}</div>
+                  <div class="subj" dir="auto">{subjectOf(e)}</div>
                   {#if e.files?.length}
                     <div class="files">
                       {#each (open[e.hash] ? e.files : e.files.slice(0, 4)) as f (f)}
@@ -124,7 +136,12 @@
                     </div>
                   {/if}
                 </div>
-                <button class="btn" disabled={!!busy} aria-busy={busy === e.hash} onclick={() => undo(e)}><Icon name="undo" size={14} /> {t('ui.hist.undo')}</button>
+                {#if e.first}
+                  <!-- Nothing exists before the first entry, so there is nothing to go back to. -->
+                  <span class="muted sm firstmark">{t('hista.hist.first')}</span>
+                {:else}
+                  <button class="btn" disabled={!!busy} aria-busy={busy === e.hash} onclick={() => undo(e)}><Icon name="undo" size={14} /> {t('ui.hist.undo')}</button>
+                {/if}
               </div>
             {/each}
           </div>
@@ -153,7 +170,8 @@
   .file { font: inherit; font-size: var(--fs-xs); color: var(--muted); background: var(--fill); border: 0; border-radius: 6px; padding: 3px 8px; min-height: 24px; cursor: pointer; max-width: 100%; overflow-wrap: anywhere; text-align: start; }
   .file:hover { color: var(--fg); background: var(--fill-2); }
   .file.more { color: var(--on-tint); background: none; text-decoration: underline; text-underline-offset: 3px; }
-  .entry > .btn { flex: none; }
+  .entry > .btn, .firstmark { flex: none; }
+  .firstmark { align-self: center; }
   .morerow { justify-content: center; margin-top: 14px; }
   .tip { margin-top: 18px; }
   .state { display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 40px 0; color: var(--muted); }

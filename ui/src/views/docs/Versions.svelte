@@ -15,6 +15,7 @@
   let list = $state<Ver[] | null>(null);
   let error = $state('');
   let noHistory = $state(false);
+  let noGit = $state(false);
   let sel = $state<Ver | null>(null);
   let content = $state<string | null>(null);
   let verError = $state('');
@@ -22,16 +23,20 @@
   let restoring = $state(false);
   let seq = 0;
 
-  const kindLabel = (k?: string) => t('docs3.kind.' + (['wrap', 'sync', 'edit', 'assistant'].includes(k ?? '') ? k : 'other'));
+  const kindLabel = (k?: string) => (k === 'start' ? t('hista.hist.kindStart') : t('docs3.kind.' + (['wrap', 'sync', 'edit', 'assistant'].includes(k ?? '') ? k : 'other')));
+  /** What a version's entry says it did. The entry a history starts with is described in the reader's language. */
+  const subjectOf = (v: Ver) => (v.kind === 'start' ? t('hista.hist.startSubject') : (v.subject ?? '').replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
   const when = (d: string) => { try { return fmtDate(d, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return d; } };
 
   async function load() {
-    error = ''; noHistory = false; list = null;
+    error = ''; noHistory = false; noGit = false; list = null;
     try {
       const r = await api(`/library/history?path=${encodeURIComponent(path)}&limit=50`);
       list = Array.isArray(r) ? r : [];
     } catch (e) {
-      if (errCode(e) === 'NO_HISTORY') noHistory = true; else error = errDetail(e) || t('docs3.versionsFailed');
+      if (errCode(e) === 'NO_HISTORY') noHistory = true;
+      else if (errCode(e) === 'git_missing') noGit = true;
+      else error = errDetail(e) || t('docs3.versionsFailed');
       list = [];
     }
   }
@@ -73,7 +78,14 @@
         <Icon name="rollback" size={26} />
         <h3>{t('docs3.noHistoryTitle')}</h3>
         <p class="muted">{t('docs3.noHistory')}</p>
-        <button class="btn primary" data-autofocus onclick={() => { close(); go({ kind: 'settings', id: 'git' }); }}><Icon name="settings" size={14} /> {t('docs3.openBackup')}</button>
+        <button class="btn primary" data-autofocus onclick={() => { close(); go({ kind: 'settings', id: 'git' }); }}><Icon name="settings" size={14} /> {t('hista.openSettings')}</button>
+      </div>
+    {:else if noGit}
+      <div class="state" role="status">
+        <Icon name="rollback" size={26} />
+        <h3>{t('hista.hist.noGitTitle')}</h3>
+        <p class="muted">{t('hista.hist.noGitBody')}</p>
+        <button class="btn primary" data-autofocus onclick={() => { close(); go({ kind: 'settings', id: 'git' }); }}><Icon name="settings" size={14} /> {t('hista.openSettings')}</button>
       </div>
     {:else if error}
       <div class="state" role="alert">
@@ -91,7 +103,7 @@
             <li>
               <button class="v" class:active={sel?.hash === v.hash} aria-current={sel?.hash === v.hash ? 'true' : undefined} onclick={() => show(v)}>
                 <span class="row"><span class="grow when">{when(v.date)}</span><span class="pill">{kindLabel(v.kind)}</span></span>
-                {#if v.subject}<span class="subj" dir="auto">{v.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize):\s*/i, '')}</span>{/if}
+                {#if v.subject}<span class="subj" dir="auto">{subjectOf(v)}</span>{/if}
               </button>
             </li>
           {/each}

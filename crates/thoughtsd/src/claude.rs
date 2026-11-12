@@ -676,8 +676,9 @@ type OnDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<
 pub(crate) async fn record_library(state: &AppState, lib: &Path, subject: &str, wait: bool) {
     if !state.settings.read().await.git_enabled() || state.library_busy() { return; }
     if crate::wraps::interrupted_wrap(state).await.is_some() { return; }
+    // Every library has a history: its own repository, or the one the app keeps for it.
+    if !crate::git::ready(state, lib).await { return; }
     let _g = if wait { state.git_lock.lock().await } else { match state.git_lock.try_lock() { Ok(g) => g, Err(_) => return } };
-    if !lib.join(".git").exists() || !crate::git::is_repo(state, lib).await { return; }
     if let Err(e) = crate::trust::require_git(lib) { crate::log::warn(format!("history: not recording ({e})")); return; }
     crate::log::ok_or_warn("history: could not record the library", crate::git::commit_all(state, lib, subject).await);
 }
@@ -686,8 +687,8 @@ pub(crate) async fn record_library(state: &AppState, lib: &Path, subject: &str, 
 pub(crate) async fn record_library_locked(state: &AppState, lib: &Path, subject: &str) {
     if !state.settings.read().await.git_enabled() { return; }
     if crate::wraps::interrupted_wrap(state).await.is_some() { return; }
+    if !crate::git::ready(state, lib).await { return; }
     let _g = state.git_lock.lock().await;
-    if !lib.join(".git").exists() || !crate::git::is_repo(state, lib).await { return; }
     if let Err(e) = crate::trust::require_git(lib) { crate::log::warn(format!("history: not recording ({e})")); return; }
     crate::log::ok_or_warn("history: could not record the library", crate::git::commit_all(state, lib, subject).await);
 }

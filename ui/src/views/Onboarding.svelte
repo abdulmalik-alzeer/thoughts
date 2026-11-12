@@ -34,7 +34,9 @@
   const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
 
   // Start with the safest choice: nothing leaves this computer until the user asks for a backup.
+  // The history of changes is a separate switch, and it starts on.
   s.sync.mode = 'none';
+  s.keepHistory = true;
   s.libraryPath = app.status?.home ? app.status.home + '/Thoughts' : '~/Thoughts';
   // First screen in the system's language: Arabic systems start in Arabic (an explicit choice wins on a re-run).
   const LANG_KEY = 'thoughts.ob.lang';
@@ -117,7 +119,13 @@
     if (on && !s.ai.claude.baseUrl) s.ai.claude.baseUrl = 'https://api.anthropic.com';
   }
 
-  function setGit(on: boolean) { s.sync.mode = on ? 'git-manual' : 'none'; }
+  /** Backup is one of: no backup, a cloud folder, an online location (sent when Sync is pressed, or after every Wrap). */
+  function setBackup(kind: 'none' | 'folder' | 'online') {
+    s.sync.mode = kind === 'online' ? (isGit ? s.sync.mode : 'git-manual') : kind;
+    if (kind === 'online') s.keepHistory = true;
+  }
+  // An online location is sent the history itself, so there the history is always kept.
+  const historyOn = $derived(isGit || s.keepHistory !== false);
 
   /** Why the Next button is disabled on the current step ('' = good to go). */
   const blocker = $derived.by(() => {
@@ -134,9 +142,9 @@
       if (!/^(~\/|\/|[A-Za-z]:[\\/])/.test(p)) return t('ob.needFullPath');
     }
     if (step === 2) {
-      // Git is only needed for a Git backup; without it the app still works, minus the notes history.
-      if (isGit && !git.installed) return t('ob3.needGitForBackup');
-      if (isGit && inCloud) return t('ob.gitCloudClash');
+      // Git is only a must for an online location; without it the app still works, minus the history.
+      if (isGit && !git.installed) return t('hista.online.needGit');
+      if (isGit && inCloud) return t('hista.online.cloudClash');
       if (isGit && remoteUrl.trim()) {
         if (!validRemote(remoteUrl)) return t('ob.needRemoteUrl');
         if (!remoteAck) return t('ob.needAck');
@@ -147,7 +155,7 @@
 
   const modName = (m: any) => (ar && m.nameAr) || m.name;
   const modDesc = (m: any) => (ar && m.descriptionAr) || m.description;
-  const syncLabel = $derived(t(isGit ? 'ob.sumGit' : s.sync.mode === 'folder' ? 'ob.sumFolder' : 'ob.sumLocal'));
+  const syncLabel = $derived(t(isGit ? 'hista.backup.online' : s.sync.mode === 'folder' ? 'hista.backup.folder' : 'hista.backup.none'));
 
   async function finish() {
     if (busy) return;
@@ -257,14 +265,29 @@
         <textarea id="ob-seeds" rows="2" dir="auto" bind:value={seeds} placeholder={t('ob.seedsPh')}></textarea>
       {/if}
 
+      <h2 id="ob-history">{t('hista.historyTitle')}</h2>
+      <label class="check"><input type="checkbox" checked={historyOn} disabled={isGit} onchange={(e) => (s.keepHistory = e.currentTarget.checked)} /> {t('hista.keep')}</label>
+      <p class="muted sm">{t(isGit ? 'hista.keepForced' : historyOn ? 'hista.keepHint' : 'hista.keepOffHint')}</p>
+      {#if historyOn && !git.installed}
+        <div class="card status" role="note">
+          <p class="row"><Icon name="info" size={16} /> <b>{t('hista.needsGitTitle')}</b></p>
+          <p class="muted">{t(isGit ? 'hista.needsGitOnline' : 'hista.needsGitBody')}</p>
+          <div class="row gap-top">
+            <button type="button" class="btn" class:primary={isGit} disabled={working.git} onclick={installGit}>{working.git ? t('ob.opening') : t('ob3.installGit')}</button>
+            <button type="button" class="btn" disabled={checking} aria-busy={checking} onclick={checkAgain}><Icon name="sync" size={14} class={checking ? 'spin' : ''} /> {checking ? t('ob.checking') : t('ob.checkAgain')}</button>
+          </div>
+        </div>
+      {/if}
+
       <h2 id="ob-backup">{t('ob3.backupTitle')}</h2>
-      <p class="muted">{t('ob.syncBody')}</p>
-      <div class="opts" role="group" aria-labelledby="ob-backup">
-        <button type="button" class="opt" class:sel={s.sync.mode === 'none'} aria-pressed={s.sync.mode === 'none'} onclick={() => (s.sync.mode = 'none')}><b>{t('ob.syncLocal')}</b><span class="muted">{t('ob.syncLocalHint')}</span></button>
-        <button type="button" class="opt" class:sel={s.sync.mode === 'folder'} aria-pressed={s.sync.mode === 'folder'} onclick={() => (s.sync.mode = 'folder')}><b>{t('ob.syncFolder')}</b><span class="muted">{t('ob.syncFolderHint')}</span></button>
+      <p class="muted">{t('hista.backupBody')}</p>
+      <div class="opts three" role="group" aria-labelledby="ob-backup">
+        <button type="button" class="opt" class:sel={s.sync.mode === 'none'} aria-pressed={s.sync.mode === 'none'} onclick={() => setBackup('none')}><b>{t('hista.backup.none')}</b><span class="muted">{t('hista.backup.noneHint')}</span></button>
+        <button type="button" class="opt" class:sel={s.sync.mode === 'folder'} aria-pressed={s.sync.mode === 'folder'} onclick={() => setBackup('folder')}><b>{t('hista.backup.folder')}</b><span class="muted">{t('hista.backup.folderHint')}</span></button>
+        <button type="button" class="opt" class:sel={isGit} aria-pressed={isGit} onclick={() => setBackup('online')}><b>{t('hista.backup.online')}</b><span class="muted">{t('hista.backup.onlineHint')}</span></button>
       </div>
       {#if s.sync.mode === 'none'}
-        <p class="warn"><Icon name="warning" size={15} /> <span>{t('ob.syncLocalWarn')}</span></p>
+        <p class="warn"><Icon name="warning" size={15} /> <span>{t('hista.backup.noneWarn')}</span></p>
       {:else if s.sync.mode === 'folder'}
         <div class="card status">
           <p>{t('ob.folderPick')}</p>
@@ -273,33 +296,16 @@
           {:else}<p class="warn"><Icon name="warning" size={15} /> <span>{t('ob.folderNotCloud')}</span></p>{/if}
           <p class="muted sm">{t('ob.cloudPrivacy')}</p>
         </div>
-      {/if}
-
-      {#if !git.installed}
-        <div class="card status" role="note">
-          <p class="row"><Icon name="info" size={16} /> <b>{t(isGit ? 'ob3.gitNeededTitle' : 'ob3.noHistoryTitle')}</b></p>
-          <p class="muted">{t(isGit ? 'ob3.gitNeededBody' : 'ob3.noHistoryBody')}</p>
-          <div class="row gap-top">
-            <button type="button" class="btn" class:primary={isGit} disabled={working.git} onclick={installGit}>{working.git ? t('ob.opening') : t('ob3.installGit')}</button>
-            <button type="button" class="btn" disabled={checking} aria-busy={checking} onclick={checkAgain}><Icon name="sync" size={14} class={checking ? 'spin' : ''} /> {checking ? t('ob.checking') : t('ob.checkAgain')}</button>
-          </div>
-        </div>
       {:else}
-        <p class="okline"><Icon name="check" size={15} /> <span>{t('ob3.historyOn')}</span></p>
-      {/if}
-
-      <details class="adv" open={isGit}>
-        <summary>{t('ob.advGit')}</summary>
-        <p class="muted sm">{t('ob.gitBody')}</p>
-        <label class="check"><input type="checkbox" checked={isGit} onchange={(e) => setGit(e.currentTarget.checked)} /> {t('ob.useGit')}</label>
-        {#if isGit}
-          <label for="ob-gitmode">{t('ob.gitWhen')}</label>
+        <div class="card status">
+          <p class="muted sm">{t('hista.online.body')}</p>
+          <label for="ob-gitmode">{t('hista.online.when')}</label>
           <select id="ob-gitmode" bind:value={s.sync.mode}>
-            <option value="git-manual">{t('ob.gitManual')}</option>
-            <option value="git-auto">{t('ob.gitAuto')}</option>
+            <option value="git-manual">{t('hista.online.manual')}</option>
+            <option value="git-auto">{t('hista.online.auto')}</option>
           </select>
           <p class="muted sm">{t('ob.wrapDef')}</p>
-          <label for="ob-remote">{t('ob.remoteUrl')}</label>
+          <label for="ob-remote">{t('hista.online.address')}</label>
           <input id="ob-remote" dir="ltr" bind:value={remoteUrl} placeholder="https://github.com/you/thoughts.git" autocomplete="off" />
           {#if remoteUrl.trim()}
             <div class="warn box" role="note">
@@ -318,8 +324,8 @@
             <select id="ob-cred" bind:value={s.sync.credentialStore}><option value="keychain">{t('ob.credKeychain')}</option><option value="file">{t('ob.credFile')}</option></select>
             <p class="muted sm">{t(s.sync.credentialStore === 'file' ? 'ob3.credFileNote' : 'ob3.credKeychainNote')}</p>
           {/if}
-        {/if}
-      </details>
+        </div>
+      {/if}
 
       <details class="adv">
         <summary>{t('ob3.featuresAdv')}</summary>
@@ -353,7 +359,8 @@
       <dl class="sum">
         <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}</dd>
         <dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}</dd>
-        <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if !git.installed} · {t('ob3.sumNoHistory')}{/if}</dd>
+        <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isGit && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}</dd>
+        <dt>{t('hista.historyTitle')}</dt><dd>{t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</dd>
       </dl>
       <h2>{t('ob.lookTitle')}</h2>
       <ThemePicker bind:theme={s.theme} bind:mode={s.mode} />
@@ -397,6 +404,8 @@
   .hero-logo { margin-bottom: 14px; filter: drop-shadow(0 10px 24px rgba(0,0,0,.25)); }
   .lbl { font-size: var(--fs-xs); font-weight: 500; color: var(--muted); margin: 10px 0 4px; }
   .opts { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+  .opts.three { grid-template-columns: repeat(3, 1fr); }
+  @media (max-width: 640px) { .opts.three { grid-template-columns: 1fr; } }
   .opt { font: inherit; color: inherit; text-align: start; cursor: pointer; border: var(--border-w) solid var(--border); border-radius: var(--radius); padding: 12px; display: flex; flex-direction: column; gap: 4px; background: var(--bg); }
   .opt.sel { border-color: var(--accent); outline: 2px solid var(--accent); box-shadow: var(--glow); }
   .opt:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 60%, transparent); outline-offset: 2px; }

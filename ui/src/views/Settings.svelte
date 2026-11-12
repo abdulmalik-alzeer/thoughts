@@ -24,7 +24,7 @@
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify'],
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['set.account', 'set.perm', 'set.wrapNag'],
-    git: ['set.libraryPath', 'set.backup', 'reorganize'],
+    git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations', 'reorganize'],
     privacy: ['set.privTitle', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
@@ -34,7 +34,7 @@
     general: [],
     accessibility: [],
     ai: ['set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle', 'set.provider', 'set.baseUrl', 'set.apiKey'],
-    git: ['set.gitWhen', 'set.credStore', 'set.remotes'],
+    git: [],
     privacy: [],
     modules: [],
     daemon: ['set.restart'],
@@ -51,7 +51,7 @@
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));
-    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null;
+    x.privatePaths ??= []; x.usageSignals ??= true; x.profession ??= null; x.keepHistory ??= true;
     if (x.ai?.claude) x.ai.claude.permissionMode = realPerm(x.ai.claude.permissionMode);
     return x;
   };
@@ -77,6 +77,11 @@
   const dirty = $derived(isDirty());
   const isGit = $derived(String(s.sync.mode).startsWith('git'));
   const syncKind = $derived(isGit ? 'git' : s.sync.mode === 'folder' ? 'folder' : 'none');
+  // An online location is sent the history itself, so there the history is always kept.
+  const historyOn = $derived(isGit || s.keepHistory !== false);
+  /** What the saved settings say (the status lines describe what is really happening, not the draft). */
+  const historySaved = $derived(String(base.sync?.mode ?? '').startsWith('git') || base.keepHistory !== false);
+  const gitMissing = $derived(app.status?.git?.installed === false);
   const pm = $derived(s.ai.claude.permissionMode);
   const permValue = $derived((perms as readonly string[]).includes(realPerm(pm)) ? realPerm(pm) : '');
   /** A settings file written by a newer version is never rewritten: everything here is read-only. */
@@ -101,7 +106,7 @@
     if (!whole(s.idleMinutes)) e.idleMinutes = t('set.errWhole');
     if (!whole(s.wrapNagThreshold)) e.wrapNagThreshold = t('set.errWhole');
     if (permValue === '') e.permission = t('set.errPerm');
-    if (isGit && cloudWords.some((k) => String(s.libraryPath ?? '').includes(k))) e.sync = t('set.errCloudGit');
+    if (isGit && cloudWords.some((k) => String(s.libraryPath ?? '').includes(k))) e.sync = t('hista.online.cloudClash');
     return e;
   });
   const invalid = $derived(Object.keys(errors).length > 0);
@@ -359,7 +364,17 @@
     } catch { toast(t('set.browseFail'), { kind: 'error' }); }
   }
 
-  function setSyncKind(k: string) { s.sync.mode = k === 'git' ? (isGit ? s.sync.mode : 'git-manual') : k; }
+  function setSyncKind(k: string) {
+    s.sync.mode = k === 'git' ? (isGit ? s.sync.mode : 'git-manual') : k;
+    if (k === 'git') s.keepHistory = true;
+  }
+
+  /** The history needs the free tool Git: start its installer (macOS), or show where to get it. */
+  const installGit = () => run('gitInstall', async () => {
+    const r = await post('/git/install');
+    if (r?.url) { try { const { openUrl } = await import('@tauri-apps/plugin-opener'); await openUrl(r.url); } catch { window.open(r.url, '_blank', 'noopener'); } }
+    if (r?.hint) toast(t('ob.gitInstallToast'), { detail: String(r.hint), duration: 0 }); else toast(t('ob.gitInstallToast'));
+  });
 
   async function addRemote() {
     if (!validRemote) return;
@@ -601,33 +616,42 @@
         {@render err('libraryPath')}
         <p class="muted sm">{t('set.libraryHint')}</p>
       {/if}
-      {#if vis(c, 'set.backup')}
-        <label for="st-sync">{t('set.backup')}</label>
-        <select id="st-sync" value={syncKind} onchange={(e) => setSyncKind(e.currentTarget.value)} aria-invalid={!!errors.sync}>
-          <option value="none">{t('set.backupNone')}</option>
-          <option value="folder">{t('set.backupFolder')}</option>
-          <option value="git">{t('set.backupGit')}</option>
+      {#if vis(c, 'hista.historyTitle', 'hista.keep')}
+        <h3>{t('hista.historyTitle')}</h3>
+        <label class="check"><input type="checkbox" checked={historyOn} disabled={isGit} onchange={(e) => (s.keepHistory = e.currentTarget.checked)} aria-describedby="st-history-hint" /> {t('hista.keep')}</label>
+        <p class="muted sm" id="st-history-hint">{t(isGit ? 'hista.keepForced' : historyOn ? 'hista.keepHint' : 'hista.state.off')}</p>
+        {#if historyOn && historySaved}
+          {#if gitMissing}
+            <p class="note"><Icon name="warning" size={15} /> <span>{t('hista.state.noGit')}</span></p>
+            <button type="button" class="btn" disabled={busy.gitInstall} onclick={installGit}>{t('ob3.installGit')}</button>
+          {:else if gitStatus.repo}
+            <div class="row wrap"><span class="muted sm grow">{t(gitStatus.kept ? 'hista.state.kept' : 'hista.state.own')}</span><button type="button" class="btn" onclick={() => go({ kind: 'history' })}><Icon name="rollback" size={14} /> {t('shell.openRollback')}</button></div>
+          {:else if !loading.git && !loadErr.git}
+            <p class="muted sm">{t('hista.state.starting')}</p>
+          {/if}
+        {/if}
+      {/if}
+      {#if vis(c, 'set.backup', 'hista.backup.online')}
+        <h3>{t('set.backup')}</h3>
+        <label for="st-sync" class="sr-only">{t('set.backup')}</label>
+        <select id="st-sync" value={syncKind} onchange={(e) => setSyncKind(e.currentTarget.value)} aria-invalid={!!errors.sync} aria-describedby="st-sync-hint">
+          <option value="none">{t('hista.backup.none')}</option>
+          <option value="folder">{t('hista.backup.folder')}</option>
+          <option value="git">{t('hista.backup.online')}</option>
         </select>
         {@render err('sync')}
-        <p class="muted sm">{t(syncKind === 'none' ? 'set.backupNoneHint' : syncKind === 'folder' ? 'set.backupFolderHint' : 'set.backupGitHint')}</p>
+        <p class="muted sm" id="st-sync-hint">{t(syncKind === 'none' ? 'hista.backup.noneNote' : syncKind === 'folder' ? 'hista.backup.folderNote' : 'hista.backup.onlineNote')}</p>
       {/if}
-      {#if vis(c, 'reorganize')}
-        <h3>{t('reorganize')}</h3>
-        <div class="row wrap"><button type="button" class="btn" disabled={busy.reorg} onclick={reorganize}>{t('reorganize')}…</button><span class="muted sm grow">{t('set.reorgHint')}</span></div>
-      {/if}
-    </div>
-    {#if vis(c, ...adv.git)}
-      <details class="card adv" open={!!q || advOpen.git} ontoggle={(e) => { if (!q) advOpen.git = e.currentTarget.open; }}>
-        <summary>{t('set.advancedGit')}</summary>
-        {#if !isGit}<p class="muted sm">{t('set.gitOff')}</p>{/if}
-        {#if isGit && vis(c, 'set.gitWhen')}
-          <label for="st-gitmode">{t('set.gitWhen')}</label>
+      {#if isGit && vis(c, 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations')}
+        <p class="muted sm">{t('hista.online.body')}</p>
+        {#if vis(c, 'hista.backup.online', 'hista.online.when')}
+          <label for="st-gitmode">{t('hista.online.when')}</label>
           <select id="st-gitmode" bind:value={s.sync.mode}>
-            <option value="git-manual">{t('set.gitManual')}</option>
-            <option value="git-auto">{t('set.gitAuto')}</option>
+            <option value="git-manual">{t('hista.online.manual')}</option>
+            <option value="git-auto">{t('hista.online.auto')}</option>
           </select>
         {/if}
-        {#if isGit && vis(c, 'set.credStore')}
+        {#if vis(c, 'hista.backup.online', 'set.credStore')}
           <label for="st-cred">{t('set.credStore')}</label>
           <select id="st-cred" bind:value={s.sync.credentialStore}>
             <option value="keychain">{t('set.credKeychain')}</option>
@@ -635,8 +659,8 @@
           </select>
           <p class="muted sm">{t(s.sync.credentialStore === 'file' ? 'ui.set.credFileHint' : 'ui.set.credKeychainHint')}</p>
         {/if}
-        {#if isGit && vis(c, 'set.remotes')}
-          <h3>{t('set.remotes')}</h3>
+        {#if vis(c, 'hista.backup.online', 'hista.online.locations')}
+          <h3>{t('hista.online.locations')}</h3>
           {#if loadErr.git}<p class="err" role="alert">{loadErr.git} <button type="button" class="btn ghost" onclick={loadGit}>{t('set.retry')}</button></p>{/if}
           {#if gitStatus.repo}<p class="muted sm">{t('set.gitState', { branch: gitStatus.branch, changed: fmtNum(gitStatus.dirty ?? 0), ahead: fmtNum(gitStatus.ahead ?? 0), behind: fmtNum(gitStatus.behind ?? 0) })}</p>{/if}
           {#each gitStatus.remotes || [] as r, i (r.name)}
@@ -646,7 +670,7 @@
           {/each}
           <p class="muted sm">{t('set.remotesHint')}</p>
           <div class="grid2">
-            <div><label for="st-rurl">{t('set.remoteUrl')}</label><input id="st-rurl" dir="ltr" bind:value={remote.url} placeholder="https://github.com/me/thoughts.git" autocomplete="off" /></div>
+            <div><label for="st-rurl">{t('hista.online.addressShort')}</label><input id="st-rurl" dir="ltr" bind:value={remote.url} placeholder="https://github.com/me/thoughts.git" autocomplete="off" /></div>
             <div><label for="st-rname">{t('set.remoteName')}</label><input id="st-rname" dir="ltr" bind:value={remote.name} placeholder="origin" autocomplete="off" /></div>
             <div><label for="st-ruser">{t('set.remoteUser')}</label><input id="st-ruser" dir="ltr" bind:value={remote.username} autocomplete="off" /></div>
             <div><label for="st-rtoken">{t('set.remoteToken')}</label><input id="st-rtoken" dir="ltr" type="password" bind:value={remote.token} autocomplete="off" /></div>
@@ -655,8 +679,12 @@
           <p class="note"><Icon name="warning" size={15} /> <span>{t('set.uploadBody')}</span></p>
           <button type="button" class="btn" onclick={addRemote} disabled={!validRemote || busy.remote}>{t('set.addRemote')}</button>
         {/if}
-      </details>
-    {/if}
+      {/if}
+      {#if vis(c, 'reorganize')}
+        <h3>{t('reorganize')}</h3>
+        <div class="row wrap"><button type="button" class="btn" disabled={busy.reorg} onclick={reorganize}>{t('reorganize')}…</button><span class="muted sm grow">{t('set.reorgHint')}</span></div>
+      {/if}
+    </div>
   {:else if c === 'privacy'}
     {#if vis(c, 'set.privTitle')}
       <div class="card">

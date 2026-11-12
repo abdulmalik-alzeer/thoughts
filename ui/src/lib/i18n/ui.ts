@@ -85,7 +85,7 @@ Object.assign(en, {
 
   'err.wrapInterrupted': 'A Wrap was interrupted before it finished saving. Open it and choose “Finish” or “Undo” — until then, Sync and new Wraps wait.',
   'err.openWrap': 'Open the Wrap',
-  'err.noHistory': 'History needs backup with history turned on. Without it, Thoughts keeps only the current copy of your notes, so there is nothing to go back to. Turn it on under Settings → Library & backup.',
+  'err.noHistory': 'The history of changes is switched off, so Thoughts keeps only the current copy of your notes and there is nothing to go back to. Turn on “Keep a history of changes on this computer” under Settings → Library & backup.',
   'err.newerSettings': 'Settings can’t be changed here: they were saved by a newer version of Thoughts.',
 
   'ui.hist.title': 'History',
@@ -215,7 +215,7 @@ Object.assign(ar, {
 
   'err.wrapInterrupted': 'انقطع «تلخيص وحفظ» قبل أن يكتمل. افتحه واختر «إكمال» أو «تراجع» — وإلى ذلك الحين تتوقف المزامنة وأي تلخيص جديد.',
   'err.openWrap': 'افتح التلخيص',
-  'err.noHistory': 'السجل يحتاج إلى تفعيل النسخ الاحتياطي مع السجل. من دونه يحتفظ Thoughts بالنسخة الحالية من ملاحظاتك فقط، فلا توجد نسخة سابقة للعودة إليها. فعّله من الإعدادات ← المكتبة والنسخ الاحتياطي.',
+  'err.noHistory': 'سجلّ التغييرات متوقف، فلا يحتفظ Thoughts إلا بالنسخة الحالية من ملاحظاتك ولا توجد نسخة سابقة للعودة إليها. فعّل «الاحتفاظ بسجلّ للتغييرات على هذا الجهاز» من الإعدادات ← المكتبة والنسخ الاحتياطي.',
   'err.newerSettings': 'لا يمكن تغيير الإعدادات من هنا: فقد حُفظت بإصدار أحدث من Thoughts.',
 
   'ui.hist.title': 'السجل',

@@ -285,7 +285,7 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
     let ar = is_ar(&state).await;
     let ids: Vec<String> = w.meta["chatIds"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
     let preview_at = w.meta["previewAt"].as_str().and_then(|t| t.parse::<DateTime<Utc>>().ok()).unwrap_or(w.created);
-    let git_on = state.settings.read().await.git_enabled() && crate::git::is_repo(&state, &lib).await;
+    let git_on = state.settings.read().await.git_enabled() && crate::git::ready(&state, &lib).await;
     // Finishing a wrap that was cut off: its undo point is still the state from before it began.
     let earlier = w.meta["snapshot"].as_str().filter(|_| w.meta["phase"] == "interrupted").map(String::from);
     let snapshot = if git_on {
@@ -453,7 +453,8 @@ pub async fn reorganize_conclude(state: &AppState, lib: &Path, wt: &Path, branch
 
 pub async fn reorganize_start(state: Arc<AppState>, instructions: &str) -> anyhow::Result<String> {
     let lib = library(state.settings.read().await.library())?;
-    if !crate::git::is_repo(&state, &lib).await { anyhow::bail!("Reorganize needs the library to be a git repo (it works on a branch)"); }
+    // Reorganize works on a copy and is reviewed and undone through the history of changes.
+    if !state.settings.read().await.git_enabled() || !crate::git::ready(&state, &lib).await { return Err(crate::tr::err("no_history", &[])); }
     if state.chats.list().await.iter().any(|c| c.kind == "reorganize" && matches!(c.meta["phase"].as_str(), Some("running") | Some("review"))) {
         anyhow::bail!("A reorganize is already in progress or waiting for your review. Keep or discard it first.");
     }

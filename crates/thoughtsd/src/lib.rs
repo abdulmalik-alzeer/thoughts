@@ -11,6 +11,7 @@ pub mod chats;
 pub mod claude;
 pub mod git;
 pub mod hello;
+pub mod history;
 pub mod layer_api;
 pub mod library;
 pub mod log;
@@ -100,6 +101,8 @@ pub async fn run() -> anyhow::Result<()> {
     tokio::spawn(wraps::idle_loop(state.clone()));
     // The customisation layer's background work (default-file updates, workflows, usage log).
     layer_api::start(state.clone());
+    // Every library has a history of changes: one that has none yet (from before 0.0.9) gets it now.
+    history::start(state.clone());
     // Streaming chats are written to disk at most every couple of seconds; this picks up the rest.
     let flusher = state.clone();
     tokio::spawn(async move {

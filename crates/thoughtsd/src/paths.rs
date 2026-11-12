@@ -40,6 +40,11 @@ pub fn secrets_file() -> PathBuf { home().join("secrets.json") }
 pub fn trusted_file() -> PathBuf { home().join("trusted.json") }
 /// The staging copy of the customisation layer (a git worktree of the app layer).
 pub fn app_layer_staging_dir() -> PathBuf { home().join("app-layer-staging") }
+/// Histories of libraries that carry no repository of their own (see `git::history_store`): kept
+/// here, outside the library, so a cloud drive that syncs the library never sees them.
+pub fn history_dir() -> PathBuf { home().join("history") }
+/// When each library was last backed up to an online location, and where (see `git::note_backup`).
+pub fn backup_state_file() -> PathBuf { home().join("backup-state.json") }
 
 /// Everything under the app's home (`home`) that a customise run must never read or change: every
 /// file and folder the daemon keeps there (credentials, token, settings, chats, workflow approvals,
@@ -49,8 +54,8 @@ pub fn app_layer_staging_dir() -> PathBuf { home().join("app-layer-staging") }
 pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     const FILES: &[&str] = &["daemon.json", "daemon.lock", "settings.json", "settings.json.bak", "git-credentials", "trusted.json", "secrets.json",
         "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "workflows-approved.json",
-        "workflows-state.json", "suggestions.json", "base-manifest.json", "layer-requests.json"];
-    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "run-tmp", "plugin-data"];
+        "workflows-state.json", "suggestions.json", "base-manifest.json", "layer-requests.json", "backup-state.json"];
+    const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "run-tmp", "plugin-data", "history"];
     const OPEN: &[&str] = &["app-layer-staging", "app-layer"];
     let mut files: Vec<PathBuf> = FILES.iter().map(|f| home.join(f)).collect();
     let mut dirs: Vec<PathBuf> = DIRS.iter().map(|d| home.join(d)).collect();

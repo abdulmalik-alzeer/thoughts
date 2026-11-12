@@ -1,10 +1,17 @@
 //! Git via the system `git` binary. Credentials are served through GIT_ASKPASS
 //! (this same executable in askpass mode, reading the OS keychain) or a
 //! `git-credentials` file outside the library.
+//!
+//! Every library has a history. A library that is a repository itself (it has its own `.git`,
+//! the usual arrangement for one that syncs with an online location) keeps it there. Any other
+//! library — "this computer only", or one inside iCloud Drive or Dropbox — has its history kept by
+//! the app under `~/.thoughts/history/`, outside the folder, and nothing is added to the folder
+//! itself (see `Repo`). Either way every command below works on exactly that repository and never
+//! on one further up the folder tree.
 
 use crate::state::AppState;
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Longest a git command that only touches this machine may run.
 pub const LOCAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -41,14 +48,72 @@ pub fn credential_helper(file: &Path) -> String {
     format!("store --file=\"{quoted}\"")
 }
 
+/// Where git finds the repository of a folder the app works in.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Repo {
+    /// The folder is a repository itself: it has its own `.git` (a library set up the usual git
+    /// way, the customisation layer, a working copy).
+    Own,
+    /// The app keeps the folder's history outside it, in this folder (see `history_store`).
+    Kept(PathBuf),
+    /// Nothing has been recorded for the folder yet.
+    Missing,
+}
+
+/// Where the app keeps the history of a folder that carries no repository of its own:
+/// `<app home>/history/<folder name>-<digest of its full path>`. Outside the folder on purpose: a
+/// cloud drive that syncs the library (iCloud, Dropbox…) must never see git's own files, which it
+/// would damage, and a library that sits inside someone else's repository must not become part of
+/// that repository's history.
+pub fn history_store(dir: &Path) -> PathBuf {
+    use sha2::Digest;
+    let real = crate::paths::canonical_lenient(dir);
+    let name: String = real.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+        .chars().filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_').take(32).collect();
+    let hex: String = sha2::Sha256::digest(real.to_string_lossy().as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect();
+    crate::paths::history_dir().join(format!("{}-{hex}", if name.is_empty() { "library" } else { name.as_str() }))
+}
+
+/// Which repository belongs to `dir`: its own when it has one, else the one the app keeps for it.
+pub fn repo_of(dir: &Path) -> Repo {
+    if std::fs::symlink_metadata(dir.join(".git")).is_ok() { return Repo::Own; }
+    let store = history_store(dir);
+    if store.join("HEAD").is_file() { Repo::Kept(store) } else { Repo::Missing }
+}
+
+/// The repository `dir` sits inside without being one itself (a notes vault, a dotfiles folder…):
+/// the nearest folder above it that has a `.git`. The app never touches that repository; it only
+/// needs to know, so that it does not plant a second repository in the middle of it.
+pub fn enclosing_repo(dir: &Path) -> Option<PathBuf> {
+    let real = crate::paths::canonical_lenient(dir);
+    real.ancestors().skip(1).find(|a| std::fs::symlink_metadata(a.join(".git")).is_ok()).map(Path::to_path_buf)
+}
+
+/// Files a history the app keeps never records: what the system and cloud drives scatter around.
+/// (A library's own `.gitignore` files are honoured as well.)
+const KEPT_EXCLUDE: &str = "# Written by Thoughts.\n.DS_Store\nThumbs.db\ndesktop.ini\n.*.icloud\n.dropbox\n.dropbox.cache/\n.dropbox.attr\n.~lock.*\n~$*\n.*.tmp\n";
+
 /// Run git in `dir` and return its raw output. Hardened against a library's own configuration, never
 /// waits for a terminal, and never runs longer than `timeout_for(args)`: a stalled command is killed
 /// (with any helper it started) and reported as a plain error, so nothing stays locked behind it.
 pub async fn git_raw(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     if !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &dir.display().to_string())])); }
+    run(state, dir, repo_of(dir), args).await
+}
+
+/// `git_raw` on a repository named by the caller (creating one is the only time it is not `repo_of`).
+async fn run(state: &AppState, dir: &Path, repo: Repo, args: &[&str]) -> anyhow::Result<Vec<u8>> {
     let store = state.settings.read().await.sync.credential_store.clone();
     let mut c = crate::proc::command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
     c.current_dir(dir).env("PATH", crate::claude::shell_path()).env("GIT_TERMINAL_PROMPT", "0");
+    // Which repository a command works on is decided here and nowhere else — never by whatever the
+    // app itself was started with, and never by searching upwards: a library inside another
+    // repository (a vault, a dotfiles folder) is not that repository, so the search stops at `dir`.
+    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_CEILING_DIRECTORIES"] { c.env_remove(var); }
+    match repo {
+        Repo::Kept(kept) => { c.env("GIT_DIR", kept).env("GIT_WORK_TREE", dir); }
+        Repo::Own | Repo::Missing => if let Some(parent) = crate::paths::canonical_lenient(dir).parent() { c.env("GIT_CEILING_DIRECTORIES", parent); },
+    }
     // Never run code a library's own git config could smuggle in (hooks, fsmonitor, ssh command).
     #[cfg(windows)] let no_hooks = "NUL";
     #[cfg(not(windows))] let no_hooks = "/dev/null";
@@ -119,15 +184,65 @@ pub async fn git_ident(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::R
     }
 }
 
+/// Does `dir` have a repository — its own, or the history the app keeps for it? Never true merely
+/// because a folder further up is a repository.
 pub async fn is_repo(state: &AppState, dir: &Path) -> bool {
     git(state, dir, &["rev-parse", "--git-dir"]).await.is_ok()
 }
 
+/// Make `dir` a repository of its own (`.git` inside it), unless it already has a history. Only
+/// for a library the user asked to sync the usual git way; everything else gets `ensure_history`.
 pub async fn init(state: &AppState, dir: &Path) -> anyhow::Result<()> {
     if !is_repo(state, dir).await {
         git(state, dir, &["init", "-b", "main"]).await?;
     }
     Ok(())
+}
+
+/// Give `dir` a history when it has none: an empty one kept by the app (see `history_store`).
+/// Nothing in `dir` is created, changed or removed. Returns whether a history was created.
+pub async fn ensure_history(state: &AppState, dir: &Path) -> anyhow::Result<bool> {
+    if repo_of(dir) != Repo::Missing { return Ok(false); }
+    if !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &dir.display().to_string())])); }
+    let _g = state.git_lock.lock().await;
+    if repo_of(dir) != Repo::Missing { return Ok(false); }
+    let store = history_store(dir);
+    crate::paths::create_private_dir(&store)?;
+    let kept = Repo::Kept(store.clone());
+    run(state, dir, kept.clone(), &["init", "-q", "-b", "main"]).await?;
+    // The folder is named on every command instead, so the history never points at a stale place.
+    let _ = run(state, dir, kept, &["config", "--unset", "core.worktree"]).await;
+    crate::log::ok_or_warn("history: could not write the list of files to leave out",
+        std::fs::create_dir_all(store.join("info")).and_then(|_| std::fs::write(store.join("info/exclude"), KEPT_EXCLUDE)));
+    crate::log::info("history: created a history for the library, kept by the app");
+    Ok(true)
+}
+
+/// Make sure `dir` has a history with its starting point recorded: the app-kept one is created
+/// when the folder has none, and what is in the folder right now becomes the first entry (so the
+/// first real change can be undone). Fails when no history can be kept (git is not installed, the
+/// folder's own repository is damaged).
+pub async fn start_history(state: &AppState, dir: &Path) -> anyhow::Result<()> {
+    ensure_history(state, dir).await?;
+    // The first entry is only ever made in a history the app keeps: what goes into a repository
+    // the user set up themselves is decided by what they do.
+    if matches!(repo_of(dir), Repo::Kept(_)) && head(state, dir).await.is_none() {
+        let _g = state.git_lock.lock().await;
+        if head(state, dir).await.is_none() && commit_all(state, dir, &subject::start()).await? {
+            crate::log::info("history: recorded the library as it is now as the starting point");
+        }
+    }
+    // A plain question that fails with the real reason when there is no usable repository.
+    git(state, dir, &["rev-parse", "--git-dir"]).await.map(|_| ())
+}
+
+/// Is there a history to record into? (Creates the app-kept one on first use; see `start_history`.)
+/// Must not be called while holding `git_lock`.
+pub async fn ready(state: &AppState, dir: &Path) -> bool {
+    match start_history(state, dir).await {
+        Ok(()) => true,
+        Err(e) => { crate::log::warn(format!("history: not available ({e})")); false }
+    }
 }
 
 pub async fn commit_all(state: &AppState, dir: &Path, msg: &str) -> anyhow::Result<bool> {
@@ -184,7 +299,9 @@ pub async fn status(state: &AppState, dir: &Path) -> Value {
     }).unwrap_or((0, 0));
     let last = git(state, dir, &["log", "-1", "--format=%h %s (%cr)"]).await.unwrap_or_default().trim().to_string();
     json!({"repo": true, "branch": branch, "dirty": dirty, "ahead": ahead, "behind": behind,
-           "last": last, "remotes": remotes(state, dir).await})
+           "last": last, "remotes": remotes(state, dir).await,
+           // Is the history kept by the app, outside the library folder?
+           "kept": matches!(repo_of(dir), Repo::Kept(_))})
 }
 
 /// The branch a sync works on. The app's own bookkeeping branches are never pushed.
@@ -364,14 +481,17 @@ pub mod subject {
     }
     pub fn restore(path: &str, short: &str) -> String { format!("restore: {path} (from {short})") }
     pub fn undo(of: &str) -> String { format!("undo: {of}") }
+    /// The first entry of a history the app starts for a library that already has content.
+    pub fn start() -> String { "start: the library as it was when its history began".into() }
 }
 
 /// What kind of change a commit is, from the subject line the daemon gave it:
-/// `wrap` | `sync` | `edit` | `assistant` | `other`.
+/// `wrap` | `sync` | `edit` | `assistant` | `start` | `other`.
 pub fn commit_kind(subject: &str) -> &'static str {
     let s = subject.trim();
     let starts = |prefixes: &[&str]| prefixes.iter().any(|p| s.starts_with(p));
     if starts(&["wrap: "]) { "wrap" }
+    else if starts(&["start: "]) { "start" }
     else if starts(&["sync: ", "Merge ", "sync:"]) { "sync" }
     else if starts(&["assistant: ", "module: ", "init: ", "reorganize: "]) { "assistant" }
     else if starts(&["edit: ", "restore: ", "undo: ", "snapshot before "]) { "edit" }
@@ -383,11 +503,11 @@ pub fn valid_hash(hash: &str) -> bool {
     (7..=64).contains(&hash.len()) && hash.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
-/// `[{hash, short, date, subject, kind, files:[path]}]`, newest first; with `path`, only the
+/// `[{hash, short, date, subject, kind, files:[path], first}]`, newest first; with `path`, only the
 /// changes that touched that file.
 pub async fn history(state: &AppState, dir: &Path, path: Option<&str>, limit: usize) -> anyhow::Result<Vec<Value>> {
     let n = format!("-{}", limit.clamp(1, 500));
-    let mut args = vec!["log", n.as_str(), "--name-only", "--no-renames", "--format=%x1e%H%x1f%h%x1f%s%x1f%cI"];
+    let mut args = vec!["log", n.as_str(), "--name-only", "--no-renames", "--format=%x1e%H%x1f%h%x1f%s%x1f%cI%x1f%P"];
     let spec = path.map(|p| format!(":(top,literal){p}"));
     if let Some(spec) = &spec { args.push("--"); args.push(spec); }
     // A repository without commits has no history yet; that is an empty list, not an error.
@@ -396,9 +516,10 @@ pub async fn history(state: &AppState, dir: &Path, path: Option<&str>, limit: us
     Ok(out.split('\x1e').filter_map(|rec| {
         let mut lines = rec.lines();
         let p: Vec<_> = lines.next()?.split('\x1f').collect();
-        if p.len() != 4 { return None; }
+        if p.len() != 5 { return None; }
         let files: Vec<&str> = lines.map(str::trim).filter(|l| !l.is_empty()).collect();
-        Some(json!({"hash": p[0], "short": p[1], "subject": p[2], "date": p[3], "kind": commit_kind(p[2]), "files": files}))
+        // `first`: where the history begins (nothing earlier exists, so it cannot be undone).
+        Some(json!({"hash": p[0], "short": p[1], "subject": p[2], "date": p[3], "kind": commit_kind(p[2]), "files": files, "first": p[4].trim().is_empty()}))
     }).collect())
 }
 
@@ -436,7 +557,13 @@ pub async fn undo_commit(state: &AppState, dir: &Path, hash: &str) -> anyhow::Re
     let commit = format!("{hash}^{{commit}}");
     let parents = git(state, dir, &["rev-list", "--parents", "-n", "1", "--end-of-options", &commit]).await
         .map_err(|_| crate::tr::err("history.bad_entry", &[]))?;
-    if parents.split_whitespace().count() > 2 { return Err(crate::tr::err("history.merge", &[])); }
+    match parents.split_whitespace().count() {
+        // The very first entry is the library as it was when its history began: undoing it would
+        // mean removing every file it lists.
+        0 | 1 => return Err(crate::tr::err("history.first", &[])),
+        2 => {}
+        _ => return Err(crate::tr::err("history.merge", &[])),
+    }
     let subject = git(state, dir, &["log", "-1", "--format=%s", "--end-of-options", &commit]).await?.trim().to_string();
     commit_all(state, dir, &subject::edit("changes before undoing an earlier change")).await?;
     if let Err(e) = git(state, dir, &["revert", "--no-commit", "--end-of-options", hash]).await {
@@ -869,6 +996,131 @@ mod tests {
         }
         assert!(git(&st, &d, &["diff", "HEAD~1", "HEAD", "--"]).await.unwrap().contains("أفكار/متجر/خطة العمل.md"));
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_library_inside_another_repository_never_touches_that_repository() {
+        // A notes vault (or a dotfiles folder) that is a repository, with the library in a sub-folder.
+        let vault = dunce::canonicalize(tmp("vault")).unwrap();
+        sh(&vault, &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Tester"), ("user.email", "tester@example.com")] { sh(&vault, &["config", k, v]); }
+        write(&vault, "dotfiles.txt", "mine\n");
+        write(&vault, "thoughts/INDEX.md", "# Index\n");
+        sh(&vault, &["add", "-A"]);
+        sh(&vault, &["commit", "-q", "-m", "vault"]);
+        // Work in progress elsewhere in the vault, which is none of the app's business.
+        write(&vault, "dotfiles.txt", "edited, not committed\n");
+        write(&vault, "scratch.txt", "new\n");
+        let vault_head = sh(&vault, &["rev-parse", "HEAD"]);
+        let lib = vault.join("thoughts");
+        let st = AppState::load().unwrap();
+
+        // The vault's repository is not the library's: nothing is read from it or written to it.
+        assert!(!is_repo(&st, &lib).await);
+        assert_eq!(status(&st, &lib).await["repo"], false);
+        assert_eq!(enclosing_repo(&lib), Some(vault.clone()));
+        assert_eq!(enclosing_repo(&vault), None);
+        assert!(head(&st, &lib).await.is_none() && remotes(&st, &lib).await.is_empty());
+        assert!(commit_all(&st, &lib, "sync: must not reach the vault").await.is_err());
+        assert!(sync(&st, &lib).await.is_err());
+        assert!(rollback_to(&st, &lib, &vault_head).await.is_err());
+        assert_eq!(sh(&vault, &["rev-parse", "HEAD"]), vault_head);
+        assert_eq!(sh(&vault, &["diff", "--cached", "--name-only"]), "", "nothing of the vault was staged");
+        assert_eq!(read(&vault, "dotfiles.txt"), "edited, not committed\n");
+
+        // The library gets a history of its own, kept by the app, that knows only the library's files.
+        start_history(&st, &lib).await.unwrap();
+        let Repo::Kept(store) = repo_of(&lib) else { panic!("expected a history kept by the app") };
+        assert!(is_repo(&st, &lib).await && !lib.join(".git").exists());
+        let h = history(&st, &lib, None, 10).await.unwrap();
+        assert_eq!(h.len(), 1);
+        assert_eq!(h[0]["files"], json!(["INDEX.md"]));
+        // A wrap that fails halfway puts the library back — and only the library.
+        let snap = head(&st, &lib).await.unwrap();
+        write(&lib, "INDEX.md", "half rewritten");
+        write(&lib, "ideas/new/README.md", "new idea\n");
+        let created = rollback_to(&st, &lib, &snap).await.unwrap();
+        assert_eq!(created, ["ideas/new/README.md"]);
+        assert_eq!(read(&lib, "INDEX.md"), "# Index\n");
+        assert_eq!(read(&vault, "dotfiles.txt"), "edited, not committed\n");
+        assert_eq!(read(&vault, "scratch.txt"), "new\n");
+        assert_eq!(sh(&vault, &["rev-parse", "HEAD"]), vault_head);
+        assert_eq!(sh(&vault, &["log", "--oneline"]).lines().count(), 1);
+        assert_eq!(sh(&vault, &["diff", "--cached", "--name-only"]), "");
+        std::fs::remove_dir_all(store).unwrap();
+        std::fs::remove_dir_all(vault).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_history_kept_by_the_app_syncs_restores_and_undoes_like_any_other() {
+        let root = dunce::canonicalize(tmp("kept")).unwrap();
+        let (remote, lib, other) = (root.join("remote.git"), root.join("My Library"), root.join("other"));
+        std::fs::create_dir_all(&remote).unwrap();
+        sh(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        write(&lib, "notes.md", "one\n");
+        write(&lib, "keep.md", "untouched\n");
+        let st = AppState::load().unwrap();
+        // Where the history goes depends on the folder alone, and is the same however it is spelled.
+        assert_eq!(repo_of(&lib), Repo::Missing);
+        assert_eq!(history_store(&lib), history_store(&lib.join("../My Library/.")));
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&lib, root.join("shortcut")).unwrap();
+            assert_eq!(history_store(&lib), history_store(&root.join("shortcut")));
+        }
+        assert_ne!(history_store(&lib), history_store(&other));
+        assert!(history_store(&lib).file_name().unwrap().to_string_lossy().starts_with("MyLibrary-"));
+        assert!(ensure_history(&st, &lib).await.unwrap());
+        assert!(!ensure_history(&st, &lib).await.unwrap(), "a second call finds it there");
+        let Repo::Kept(store) = repo_of(&lib) else { panic!("expected a history kept by the app") };
+        assert!(head(&st, &lib).await.is_none());
+        start_history(&st, &lib).await.unwrap();
+        let first = head(&st, &lib).await.unwrap();
+        start_history(&st, &lib).await.unwrap();
+        assert_eq!(head(&st, &lib).await.unwrap(), first, "the starting point is recorded once");
+        assert_eq!(status(&st, &lib).await["kept"], true);
+        // Nothing of git's is ever put in the library folder.
+        let names = |d: &Path| { let mut v: Vec<String> = std::fs::read_dir(d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect(); v.sort(); v };
+        assert_eq!(names(&lib), ["keep.md", "notes.md"]);
+
+        // An online location works from that history exactly as from a repository in the folder.
+        git(&st, &lib, &["remote", "add", "--", "origin", remote.to_str().unwrap()]).await.unwrap();
+        sync(&st, &lib).await.unwrap();
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), first);
+        sh(&root, &["clone", "-q", remote.to_str().unwrap(), "other"]);
+        write(&other, "notes.md", "their line\n");
+        write(&other, "b.md", "from the other device\n");
+        sh(&other, &["add", "-A"]);
+        sh(&other, &["commit", "-q", "-m", "theirs"]);
+        sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+        write(&lib, "keep.md", "changed here\n");
+        sync(&st, &lib).await.unwrap();
+        assert_eq!((read(&lib, "notes.md").as_str(), read(&lib, "b.md").as_str()), ("their line\n", "from the other device\n"));
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), head(&st, &lib).await.unwrap());
+        // A clash is reported and undone, then settled, the same way too.
+        write(&other, "notes.md", "theirs again\n");
+        sh(&other, &["pull", "-q", "origin", "main"]);
+        sh(&other, &["commit", "-q", "-am", "theirs again"]);
+        sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+        write(&lib, "notes.md", "mine\n");
+        assert_eq!(sync(&st, &lib).await.unwrap_err().to_string(), "CONFLICT::notes.md");
+        assert_eq!(read(&lib, "notes.md"), "mine\n");
+        let v = resolve(&st, &lib, "mine").await.unwrap();
+        assert!(v["backup"].as_str().unwrap().starts_with("backup/"));
+        assert_eq!(read(&lib, "notes.md"), "mine\n");
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), head(&st, &lib).await.unwrap());
+
+        // One file back to an earlier version; one whole change undone.
+        assert_eq!(file_at(&st, &lib, "notes.md", &first).await.unwrap(), b"one\n");
+        restore_file(&st, &lib, "notes.md", &first).await.unwrap();
+        assert_eq!(read(&lib, "notes.md"), "one\n");
+        let newest = history(&st, &lib, None, 1).await.unwrap()[0]["hash"].as_str().unwrap().to_string();
+        undo_commit(&st, &lib, &newest).await.unwrap();
+        assert_eq!(read(&lib, "notes.md"), "mine\n");
+        assert_eq!(git(&st, &lib, &["status", "--porcelain"]).await.unwrap(), "");
+        assert_eq!(names(&lib), ["b.md", "keep.md", "notes.md"]);
+        std::fs::remove_dir_all(store).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
