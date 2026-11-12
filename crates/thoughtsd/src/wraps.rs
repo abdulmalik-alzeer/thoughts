@@ -319,10 +319,15 @@ pub async fn status(state: &AppState) -> Value {
         .map(|c| json!({"id": c.id, "title": c.title, "updated": c.updated, "hasMiniWrap": c.has_mini_wrap && !c.dirty}))
         .collect();
     let interrupted = interrupted_wrap(state).await;
+    // Whether "Undo" can be offered for it (a library without history has nothing to go back to).
+    let can_undo = match &interrupted {
+        Some(id) => state.chats.meta(id).await.map_or(false, |w| w.meta["snapshot"].is_string() && w.meta["canRollback"] != false),
+        None => false,
+    };
     let s = state.settings.read().await;
     json!({"count": chats.len(), "chats": chats, "threshold": s.wrap_nag_threshold, "lastWrap": s.last_wrap,
            "busy": state.library_busy(), "miniWrapsPaused": state.mini_wraps_blocked.load(Ordering::Relaxed),
-           "interrupted": interrupted})
+           "interrupted": interrupted, "interruptedCanUndo": can_undo})
 }
 
 /// The wrap (if any) of the open library that was cut off while saving and has been neither

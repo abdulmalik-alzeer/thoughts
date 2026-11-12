@@ -67,6 +67,8 @@ export function reloadApp(query = '') {
 async function friendly(msg: string): Promise<string> {
   const m = /(?:^|\s)BUSY::(.*)$/s.exec(msg);
   if (m) { const { t } = await import('./i18n'); return m[1].trim() || t('layer.busy'); }
+  // A Wrap that was cut off is waiting for a decision (the banner offers it): never the bare id.
+  if (/(?:^|\s)WRAP_INTERRUPTED::/.test(msg)) { const { t } = await import('./i18n'); return t('wrapa.waiting'); }
   return msg;
 }
 

@@ -23,6 +23,7 @@
   import { normalizeCapture } from '../lib/capture';
   import { confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { openReview } from '../lib/layer';
+  import WrapPanel from './WrapPanel.svelte';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, readAsDataURL } from '../lib/content/util';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
@@ -40,7 +41,6 @@
   let tree = $state<string[]>([]);
   let mentionQ = $state<string | null>(null);
   let mentionIdx = $state(0);
-  let note = $state('');
   let openTools = $state<Record<string, boolean>>({});
   let stick = $state(true);      // user is at (or near) the bottom, so new output may scroll the view
   let unseen = $state(false);    // new output arrived while the user was reading further up
@@ -364,20 +364,6 @@
     } catch (e) { failed(t('chat3.deleteFailed'), e); }
   }
 
-  async function applyWrap() {
-    try { await post(`/wrap/${id}/apply`, { note }); note = ''; chat.running = true; }
-    catch (e) { failed(t('chat3.wrapApplyFailed'), e); }
-  }
-
-  let undoing = $state(false);
-  async function undoPartialWrap() {
-    if (undoing) return;
-    if (!(await confirmDialog({ title: t('layer.wrap.undoTitle'), body: t('layer.wrap.undoBody'), confirmLabel: t('layer.wrap.undo') }))) return;
-    undoing = true;
-    try { await post(`/wrap/${id}/rollback`); notify(t('layer.wrap.undone'), { kind: 'success' }); await load(); }
-    catch (e) { failed(t('chat3.wrapUndoFailed'), e); }
-    finally { undoing = false; }
-  }
   const phase = $derived(chat?.meta?.phase as string | undefined);
 
   const resultFor = $derived.by(() => {
@@ -521,21 +507,7 @@
       {/if}
     </div>
 
-    {#if chat.kind === 'wrap' && !chat.running && chat.meta?.phase === 'preview' && chat.messages.some((m: any) => m.role === 'assistant')}
-      <div class="approve card row">
-        <input class="grow" placeholder={t('chat.wrapNotePlaceholder')} aria-label={t('chat.wrapNotePlaceholder')} bind:value={note} dir="auto" />
-        <button class="btn primary" onclick={applyWrap}><Icon name="check" size={15} /> {t('chat.approveApply')}</button>
-      </div>
-    {/if}
-    {#if chat.kind === 'wrap' && !chat.running && phase === 'failed'}
-      <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t(chat.meta?.rolledBack === false ? 'layer.wrap.failedKept' : 'layer.wrap.failedRolledBack')}</span>
-        {#if chat.meta?.rolledBack === false && chat.meta?.canRollback}<button class="btn" disabled={undoing} onclick={undoPartialWrap}><Icon name="undo" size={14} /> {t('layer.wrap.undo')}</button>{/if}</div>
-    {/if}
-    {#if chat.kind === 'wrap' && !chat.running && phase === 'interrupted'}
-      <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t('layer.wrap.interrupted')} {t('chat3.wrapChoose')}</span>
-        <button class="btn primary" disabled={undoing} onclick={applyWrap} title={t('chat3.wrapFinishTip')}><Icon name="check" size={14} /> {t('chat3.wrapFinish')}</button>
-        {#if chat.meta?.canRollback !== false}<button class="btn" disabled={undoing} onclick={undoPartialWrap}><Icon name="undo" size={14} /> {t('layer.wrap.undo')}</button>{/if}</div>
-    {/if}
+    {#if chat.kind === 'wrap'}<WrapPanel {chat} {id} reload={() => load()} />{/if}
     {#if chat.kind === 'reorganize' && !chat.running && (phase === 'interrupted' || phase === 'failed')}
       <div class="approve card row" role="alert"><Icon name="warning" size={15} /> <span class="grow">{t(phase === 'failed' ? 'layer.reorg.failed' : 'layer.reorg.interrupted')}</span></div>
     {/if}

@@ -23,6 +23,7 @@
   import Rollback from './views/Rollback.svelte';
   import Review from './views/Review.svelte';
   import WrapNag from './views/WrapNag.svelte';
+  import WrapWaiting from './views/WrapWaiting.svelte';
   import PluginView from './views/PluginView.svelte';
   import Reorganize from './views/Reorganize.svelte';
   import Tour from './views/Tour.svelte';
@@ -234,7 +235,7 @@
         if (e.type === 'wrap.failed') { toast(t(e.rolledBack === false ? 'layer.wrap.failedKept' : 'layer.wrap.failedRolledBack'), { kind: 'error', key: 'wrap', action: e.chatId ? { label: t('layer.details'), run: () => go({ kind: 'chat', id: e.chatId }) } : undefined }); refreshWrap().catch(() => {}); }
         if (e.type === 'wrap.done') refreshWrap().catch(() => {});
         if (e.type === 'reorganize.ready' && e.chatId && app.view.id !== e.chatId) toast(t(e.ok === false ? 'layer.reorg.failed' : 'layer.reorg.ready'), { kind: e.ok === false ? 'error' : 'info', action: { label: t('layer.details'), run: () => go(e.ok === false ? { kind: 'chat', id: e.chatId } : { kind: 'reorganize', id: e.chatId }) } });
-        if (e.type === 'settings.changed') { app.settings = await api('/settings'); applyTheme(); loadProjects(); refreshStatus(); }
+        if (e.type === 'settings.changed') { app.settings = await api('/settings'); applyTheme(); loadProjects(); refreshStatus(); refreshChats().catch(() => {}); refreshWrap().catch(() => {}); }
         if (e.type === 'auth.changed') authChanged();
         if (e.type === 'library.changed') ideas = [];
         if (e.type === 'resync') { refreshChats().catch(() => {}); refreshWrap().catch(() => {}); refreshStatus(); }
@@ -813,6 +814,7 @@
           <button class="btn" disabled={authBusy} aria-busy={authBusy} onclick={checkSignIn}><Icon name="retry" size={14} /> {t('auth.check')}</button>
         </div>
       {/if}
+      <WrapWaiting />
       {#if app.safeMode}
         <div class="safe no-print" role={app.safeReason === 'crash' ? 'alert' : 'status'}>
           <Icon name="shield" size={16} />

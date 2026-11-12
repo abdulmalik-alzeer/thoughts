@@ -1,7 +1,7 @@
 // Turning a failed call into a toast: the headline is always a plain, localised sentence about what
 // the user was doing; whatever the background service said (already in the app language) is the detail.
 import { ApiError, codeOf } from './api';
-import { go, toast, type ToastOpts } from './store.svelte';
+import { app, go, refreshWrap, toast, type ToastOpts } from './store.svelte';
 import { t } from './i18n';
 import { signIn } from './auth';
 
@@ -23,8 +23,10 @@ export function failed(headline: string, e: unknown, opts: ToastOpts = {}): void
   const code = errCode(e);
   const detail = errDetail(e);
   if (code === 'WRAP_INTERRUPTED') {
-    const chatId = detail.split(/\s/)[0];
-    toast(t('err.wrapInterrupted'), { kind: 'error', key: 'wrap-interrupted', duration: 0, action: chatId ? { label: t('err.openWrap'), run: () => go({ kind: 'chat', id: chatId }) } : undefined });
+    // Which Wrap: the one the shell already knows is waiting (its banner offers the same choices).
+    const chatId = String((app.wrap as any).interrupted ?? '');
+    refreshWrap().catch(() => {});
+    toast(t('wrapa.waiting'), { kind: 'error', key: 'wrap-interrupted', action: chatId ? { label: t('err.openWrap'), run: () => go({ kind: 'chat', id: chatId }) } : undefined });
     return;
   }
   if (code === 'NO_HISTORY') {
