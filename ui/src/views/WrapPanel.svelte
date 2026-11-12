@@ -88,13 +88,18 @@
 
   // ---- the changes: waiting for review, or made by a saved Wrap ----
   async function loadDocs() {
+    const asked = phase;
     docsState = 'loading';
-    try { docs = await api(`/wrap/${id}/changes`); docsState = 'idle'; }
-    catch { docs = null; docsState = 'failed'; }
+    try {
+      const d = await api(`/wrap/${id}/changes`);
+      // An answer about a phase this page has left (kept or discarded meanwhile) is not shown.
+      if (phase === asked) { docs = d; docsState = 'idle'; }
+    } catch { if (phase === asked) { docs = null; docsState = 'failed'; } }
   }
-  // Changes waiting for review are shown straight away (and again after each revision).
+  // The changes are shown straight away: waiting for review (again after each revision), or saved.
   $effect(() => {
-    const key = phase === 'review' && !chat.running ? `${id}|${meta.reviewCount}|${chat.messageCount ?? chat.messages?.length}` : '';
+    const key = chat.running ? '' : phase === 'review' ? `${id}|review|${meta.reviewCount}|${chat.messages?.length}`
+      : phase === 'done' && meta.commit ? `${id}|done|${meta.commit}` : '';
     if (!key || key === docsFor) return;
     docsFor = key;
     untrack(loadDocs);
@@ -113,7 +118,8 @@
   async function keep() {
     let clash: string[] | null = null;
     await act(async () => {
-      try { await post(`/wrap/${id}/save`); toast(t('wrapb.kept'), { kind: 'success', key: 'wrap' }); refreshWrap().catch(() => {}); }
+      // The page itself (and the service's "Wrap complete") says how it went.
+      try { await post(`/wrap/${id}/save`); refreshWrap().catch(() => {}); }
       catch (e) {
         if (errCode(e) === 'WRAP_CONFLICT') clash = errDetail(e).split(';').map((f) => f.trim()).filter(Boolean);
         else failed(t('wrapb.keepFailed'), e);
@@ -246,7 +252,7 @@
       {#if meta.saved && meta.commit}<button class="btn" disabled={busy} onclick={() => act(() => undoSavedWrap(id))}><Icon name="undo" size={14} /> {t('wrapa.undoWrap')}</button>{/if}
     </div>
     {#if docs?.files?.length}
-      <div class="scroll review"><DocChanges files={docs.files} canOpen /></div>
+      <div class="scroll review saved"><DocChanges files={docs.files} canOpen /></div>
     {:else if changed.length}
       <ul class="docs scroll">
         {#each changed as c (c.path)}
@@ -258,9 +264,8 @@
         {/each}
         {#if total > changed.length}<li class="muted">{t('wrapa.more', { n: fmtNum(total - changed.length) })}</li>{/if}
       </ul>
-      {#if meta.commit}
-        <button class="btn ghost sm lines" disabled={docsState === 'loading'} onclick={loadDocs}><Icon name="eye" size={13} /> {t('wrapb.done.showLines')}</button>
-        {#if docsState === 'failed'}<p class="muted sm" role="alert">{t('wrapb.review.loadFailed')}</p>{/if}
+      {#if meta.commit && docsState === 'failed'}
+        <button class="btn ghost sm lines" onclick={loadDocs}><Icon name="retry" size={13} /> {t('wrapb.done.showLines')}</button>
       {/if}
     {/if}
   </div>
@@ -277,6 +282,7 @@
   .hint { margin: 0 0 8px; font-size: var(--fs-sm); display: flex; gap: 8px; align-items: flex-start; }
   .hint :global(.icon) { flex: none; margin-top: 2px; color: var(--accent-2); }
   .acts { flex-wrap: wrap; }
+  .acts input { flex: 1 1 220px; }
   .acts + .hint { margin: 8px 0 0; }
   .eyebrow { margin: 0 0 4px; }
   .sm { font-size: var(--fs-xs); }
@@ -288,6 +294,8 @@
   .pick { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: var(--fs-sm); cursor: pointer; }
   .pick input { flex: none; }
   .review { max-height: 46vh; margin: 0 0 10px; }
+  /* After saving, the conversation above matters as much: the list stays smaller. */
+  .review.saved { max-height: 30vh; margin: 8px 0 0; }
   .lines { margin-top: 8px; }
   .docs { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 4px; max-height: 24vh; font-size: var(--fs-sm); }
   .docs li { display: flex; align-items: center; gap: 8px; min-width: 0; }

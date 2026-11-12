@@ -250,7 +250,6 @@
         if (e.type === 'wrap.done') refreshWrap().catch(() => {});
         // First-run setup ended while the user was looking at something else.
         if (e.type === 'setup.finished' && e.chatId && !(app.view.kind === 'chat' && app.view.id === e.chatId)) toast(t(e.ok ? 'sa.toast.ready' : 'sa.toast.failed'), { kind: e.ok ? 'success' : 'error', key: 'setup', action: { label: t(e.ok ? 'sa.toast.open' : 'sa.toast.see'), run: () => go({ kind: 'chat', id: e.chatId }) } });
-        if (e.type === 'wrap.review' && e.chatId && app.view.id !== e.chatId) toast(t('wrapb.readyToast'), { key: 'wrap', action: { label: t('wrapb.look'), run: () => go({ kind: 'chat', id: e.chatId }) } });
         if (e.type === 'reorganize.ready' && e.chatId && app.view.id !== e.chatId) toast(t(e.ok === false ? 'layer.reorg.failed' : 'layer.reorg.ready'), { kind: e.ok === false ? 'error' : 'info', action: { label: t('layer.details'), run: () => go(e.ok === false ? { kind: 'chat', id: e.chatId } : { kind: 'reorganize', id: e.chatId }) } });
         if (e.type === 'settings.changed') { app.settings = await api('/settings'); applyTheme(); loadProjects(); refreshStatus(); refreshChats().catch(() => {}); refreshWrap().catch(() => {}); }
         if (e.type === 'auth.changed') authChanged();

@@ -141,7 +141,7 @@ export default {
     'shell.wn.title': 'Time to wrap',
     'shell.wn.body_one': 'You have {n} chat that isn’t saved into your library yet. Wrapping distills it into your ideas, notes and todos, so nothing you thought through gets lost.',
     'shell.wn.body_other': 'You have {n} chats that aren’t saved into your library yet. Wrapping distills them into your ideas, notes and todos, so nothing you thought through gets lost.',
-    'shell.wn.preview': 'It’s quick: each chat already has a short summary, and you see a preview of every change before anything is written.',
+    'shell.wn.preview': 'It’s quick: each chat already has a short summary. You choose the chats, read the plan, and see every change before it is kept.',
     'shell.wn.later': 'Later',
     'shell.wn.now': 'Wrap now',
 
@@ -383,7 +383,7 @@ export default {
     'shell.wn.body_few': 'لديك {n} محادثات لم تُحفظ في مكتبتك بعد. التلخيص والحفظ يستخلص منها أفكارك وملاحظاتك ومهامك، حتى لا يضيع شيء مما فكّرت فيه.',
     'shell.wn.body_many': 'لديك {n} محادثة لم تُحفظ في مكتبتك بعد. التلخيص والحفظ يستخلص منها أفكارك وملاحظاتك ومهامك، حتى لا يضيع شيء مما فكّرت فيه.',
     'shell.wn.body_other': 'لديك {n} محادثة لم تُحفظ في مكتبتك بعد. التلخيص والحفظ يستخلص منها أفكارك وملاحظاتك ومهامك، حتى لا يضيع شيء مما فكّرت فيه.',
-    'shell.wn.preview': 'الأمر سريع: لكل محادثة ملخص قصير جاهز، وسترى معاينة لكل تغيير قبل كتابة أي شيء.',
+    'shell.wn.preview': 'الأمر سريع: لكل محادثة ملخص قصير جاهز. تختار المحادثات، وتقرأ الخطة، وترى كل تغيير قبل أن يُعتمد.',
     'shell.wn.later': 'لاحقاً',
     'shell.wn.now': 'لخّص واحفظ الآن',
 

@@ -24,7 +24,8 @@ See [Making Thoughts your own](docs/CUSTOMISING.md).
 
 - **Think out loud.** Chat with an AI assistant about anything: a client project, a plan, a decision.
 - **Nothing evaporates.** When you're done, **Wrap** turns the conversation into tidy notes,
-  ideas and todos. You see what will be saved before it's saved.
+  ideas and todos. You choose which chats to save, read the plan, and see every change before
+  it is kept.
 - **Pick up anywhere.** The home screen shows what you were working on, what's open, and what's
   waiting to be wrapped.
 - **Yours, in plain files.** Everything is ordinary text files in a folder on your computer. No

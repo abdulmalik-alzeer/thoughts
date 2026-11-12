@@ -28,9 +28,13 @@ The history of changes is its own switch. It is on from the start, whichever bac
 
 Open an entry to see which documents changed. The newest changes are shown first; **Show older changes** at the bottom goes further back, all the way to the first entry.
 
+## Before a Wrap is kept
+
+When your library keeps a history, a Wrap does not write into your library straight away. You tick the chats to save, read the plan (and can correct what is saved from a chat, or ask for a different plan), and after you approve it the assistant writes the changes into a copy of your library. You then see every document it changed, line by line, and choose **Keep these changes**, **Change this** (say what should be different) or **Discard**. You can go on working meanwhile; if you change the same lines of a document before keeping, Thoughts says so and offers to write the Wrap's changes again on your library as it is now.
+
 ## Undoing a Wrap
 
-If a Wrap saved something you did not want, open **History**, find that Wrap and choose **Undo**. Everything that Wrap changed goes back to how it was before: notes it wrote are removed, notes it edited return to their earlier text, todos it added disappear.
+If a Wrap saved something you did not want, choose **Undo this Wrap** on the Wrap's own page, or open **History**, find that Wrap and choose **Undo**. Everything that Wrap changed goes back to how it was before: notes it wrote are removed, notes it edited return to their earlier text, todos it added disappear.
 
 - The undo is itself recorded in History, so you can change your mind again.
 - The conversation is not deleted. You can Wrap it again.
@@ -53,4 +57,4 @@ Open the document, then open its **History** (document versions). You see every 
 - History is saved at certain moments: after a Wrap, after the assistant finishes a piece of work, and a few seconds after you save a document, change a todo or an idea's status. Saves made one right after another become one entry. Text you typed and never saved is not in it.
 - With **Online location** as the backup, the history is uploaded with the library, so earlier versions are also available on your other computers. This also means that deleting something from a note does not delete it from the history or from your backup. See [Privacy](PRIVACY.md).
 - The history takes disk space of its own: about the size of your library to begin with, growing slowly as you make changes.
-- While a Wrap is running, the library is briefly locked and restore waits until it finishes.
+- While a Wrap's changes are being kept (or, in a library without a copy to write into, while it saves), the library is briefly locked and restore waits until it finishes.
