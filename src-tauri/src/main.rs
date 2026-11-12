@@ -426,7 +426,9 @@ async fn save_file(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> R
 /// Document and media types the system may open in their own app: none of them can run code when
 /// opened (no scripts, programs, web pages, shortcuts or macro-enabled documents).
 const SAFE_TO_OPEN: &[&str] = &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "tsv", "txt", "md", "rtf", "odt",
-    "ods", "odp", "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "mp3", "m4a", "wav", "mp4", "mov", "epub"];
+    "ods", "odp", "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "mp3", "m4a", "wav", "mp4", "mov", "epub",
+    // Every kind of sound a meeting recording may be (`thoughtsd::voice::AUDIO_EXT`): the Meetings tab plays them.
+    "aac", "caf", "aiff", "aif"];
 
 /// Open a document from the library in the user's default app. Only regular files inside the
 /// library, and only document/media types that cannot run code when opened.
@@ -1306,6 +1308,14 @@ mod tests {
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), std::process::id(), Some(daemon), exe), Unproven::Leave);
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 1, Some(daemon), exe), Unproven::Leave);
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 0, Some(daemon), exe), Unproven::Leave);
+    }
+
+    #[test]
+    fn every_meeting_recording_can_be_played() {
+        // The Meetings tab offers Play for each of these; opening one must not be refused.
+        for ext in thoughtsd::voice::AUDIO_EXT {
+            assert!(SAFE_TO_OPEN.contains(ext), "{ext}");
+        }
     }
 
     #[test]
