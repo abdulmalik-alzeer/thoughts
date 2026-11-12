@@ -444,3 +444,95 @@ async fn saving_options_answers_with_what_was_saved_and_lists_mark_bypass() {
     wrap.meta = json!({"phase": "applying"});
     assert_eq!(wrap.summary()["phase"], "applying");
 }
+
+#[tokio::test]
+async fn pin_and_archive_are_saved_and_sending_brings_an_archived_chat_back() {
+    let st = Arc::new(AppState::for_test());
+    let id = t::chat(&st, "to keep").await;
+    let v = chat_patch(State(st.clone()), Path(id.clone()), Json(ChatPatch { pinned: Some(true), archived: Some(true), ..Default::default() })).await.unwrap().0;
+    assert_eq!((v["pinned"].as_bool(), v["archived"].as_bool()), (Some(true), Some(true)));
+    // Fields not sent stay as they were; the title the person typed stops the app naming the chat.
+    let v = chat_patch(State(st.clone()), Path(id.clone()), Json(ChatPatch { title: Some("Taxes".into()), ..Default::default() })).await.unwrap().0;
+    assert_eq!((v["pinned"].as_bool(), v["archived"].as_bool(), v["title"].as_str()), (Some(true), Some(true), Some("Taxes")));
+    assert!(!st.chats.get(&id).await.unwrap().title_is_auto());
+    let v = chat_patch(State(st.clone()), Path(id.clone()), Json(ChatPatch { archived: Some(false), ..Default::default() })).await.unwrap().0;
+    assert_eq!((v["pinned"].as_bool(), v["archived"].as_bool()), (Some(true), Some(false)));
+}
+
+#[tokio::test]
+async fn new_chat_reuses_the_empty_one_instead_of_piling_up() {
+    let st = Arc::new(AppState::for_test());
+    let by_user = || Json(NewChat { by_user: true, ..Default::default() });
+    let first = chat_create(State(st.clone()), by_user()).await.unwrap().0;
+    let again = chat_create(State(st.clone()), by_user()).await.unwrap().0;
+    assert_eq!(first["id"], again["id"]);
+    assert_eq!(st.chats.list().await.len(), 1);
+    // A different group gets its own; one started for the person (not by hand) is always new.
+    let other = chat_create(State(st.clone()), Json(NewChat { by_user: true, project_id: Some("p1".into()), ..Default::default() })).await.unwrap().0;
+    assert_ne!(first["id"], other["id"]);
+    let pre = chat_create(State(st.clone()), Json(NewChat { by_user: false, ..Default::default() })).await.unwrap().0;
+    assert_ne!(first["id"], pre["id"]);
+    // Once something is said in it, or it is pinned, the next New chat is a new one.
+    let id = first["id"].as_str().unwrap().to_string();
+    st.chats.update(&id, |c| c.messages.push(crate::chats::Msg::new("user", "hello"))).await;
+    let next = chat_create(State(st.clone()), by_user()).await.unwrap().0;
+    assert_ne!(next["id"], first["id"]);
+    st.chats.update(next["id"].as_str().unwrap(), |c| c.pinned = true).await;
+    let after = chat_create(State(st.clone()), by_user()).await.unwrap().0;
+    assert_ne!(after["id"], next["id"]);
+}
+
+#[tokio::test]
+async fn bulk_delete_and_the_clean_up_setting_work_over_http() {
+    let st = Arc::new(AppState::for_test());
+    let port = serve(&st).await;
+    let (a, b, running) = (t::chat(&st, "a").await, t::chat(&st, "b").await, t::chat(&st, "c").await);
+    st.chats.update(&running, |c| c.running = true).await;
+    let body = json!({"ids": [a, b, running, "../x", uuid::Uuid::new_v4().to_string()]}).to_string();
+    let (status, out) = http(port, "POST", "/api/chats/bulk-delete", body.as_bytes()).await;
+    assert_eq!(status, 200, "{out}");
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((v["deleted"].as_u64(), v["skipped"].as_u64()), (Some(2), Some(3)));
+    assert_eq!(st.chats.list().await.len(), 1);
+    // The clean-up: off by default, what it would do is shown before it is switched on.
+    let old = {
+        let mut c = Chat::default();
+        c.messages.push(crate::chats::Msg::new("user", "old")); c.updated = chrono::Utc::now() - chrono::Duration::days(200); c.wrapped_at = Some(chrono::Utc::now() - chrono::Duration::days(199));
+        let id = c.id.clone(); st.chats.insert(c).await; id
+    };
+    let (status, out) = http(port, "GET", "/api/chats/retention?days=90", b"").await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((status, v["days"].as_u64(), v["preview"]["total"].as_u64(), v["preview"]["chats"].as_u64()), (200, Some(0), Some(1), Some(1)), "{out}");
+    let (status, _) = http(port, "PUT", "/api/chats/retention", br#"{"days": 3}"#).await;
+    assert_eq!(status, 400);
+    assert!(st.chats.get(&old).await.is_some());
+    let (status, out) = http(port, "PUT", "/api/chats/retention", br#"{"days": 90}"#).await;
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!((status, v["days"].as_u64(), v["removed"].as_u64()), (200, Some(90), Some(1)), "{out}");
+    assert!(st.chats.get(&old).await.is_none());
+    // A general settings save cannot switch it on or off.
+    let mut s = st.settings.read().await.clone();
+    let before = s.clone();
+    s.chat_retention_days = 0;
+    s.sanitize_update(&before).unwrap();
+    assert_eq!(s.chat_retention_days, 90);
+}
+
+#[tokio::test]
+async fn the_first_message_names_a_chat_at_a_word_and_talking_brings_an_archived_chat_back() {
+    let (st, lib) = t::library().await;
+    t::assistant(&st, |_| async { true });
+    let id = chat_create(State(st.clone()), Json(NewChat { by_user: true, ..Default::default() })).await.unwrap().0["id"].as_str().unwrap().to_string();
+    st.chats.update(&id, |c| c.archived = true).await;
+    let long = "Please help me plan the migration of our whole accounting system to the new provider by March, with a budget";
+    let mut rx = st.events.subscribe();
+    chat_send(State(st.clone()), Path(id.clone()), Json(SendBody { text: long.into(), ..Default::default() })).await.unwrap();
+    t::event(&mut rx, &st, "chat.done").await;
+    let c = st.chats.get(&id).await.unwrap();
+    assert!(c.title.ends_with("accounting…"), "{}", c.title);
+    assert!(!c.archived);
+    // A second message does not rename it.
+    chat_send(State(st.clone()), Path(id.clone()), Json(SendBody { text: "and another thing".into(), ..Default::default() })).await.unwrap();
+    assert!(st.chats.get(&id).await.unwrap().title.ends_with("accounting…"));
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}

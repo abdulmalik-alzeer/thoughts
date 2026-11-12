@@ -185,6 +185,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/todos/:op", post(todo_op))
         // chats
         .route("/api/chats", get(chat_list).post(chat_create))
+        .route("/api/chats/bulk-delete", post(chat_bulk_delete))
+        .route("/api/chats/retention", get(chat_retention_get).put(chat_retention_put))
         .route("/api/chats/:id", get(chat_get).delete(chat_delete).patch(chat_patch))
         .route("/api/chats/:id/send", post(chat_send_route).layer(DefaultBodyLimit::max(SEND_BODY_LIMIT)))
         .route("/api/chats/:id/stop", post(chat_stop))
@@ -1713,6 +1715,7 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     let ar = s.language == "ar";
     let mut c = Chat::default();
     if ar { c.title = "محادثة جديدة".into(); }
+    let default_title = c.title.clone();
     if let Some(t) = n.title { c.title = t; }
     c.project_id = n.project_id;
     if let Some(k) = n.kind.filter(|k| k == "chat" || k == "customize") { c.kind = k; }
@@ -1722,6 +1725,19 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     // A chat belongs to the library it was started in (customising the app belongs to none).
     if c.kind == "chat" { c.library = s.library_path.clone(); }
     c.options.permission_mode = inherited_mode(c.options.permission_mode.take(), &c.kind, n.by_user);
+    // "New chat" while an empty one is already there (a double press, key repeat, a second window)
+    // opens that one instead of piling up another.
+    if n.by_user && c.kind == "chat" && c.title == default_title {
+        let mine = c.project_id.clone();
+        let free = st.chats.list().await.into_iter().find(|m| crate::tidy::is_empty_chat(m) && m.title_is_default() && m.project_id == mine && m.library == c.library && !m.archived);
+        if let Some(m) = free {
+            let (title, options) = (c.title.clone(), c.options.clone());
+            if let Some(meta) = st.chats.update(&m.id, |e| { e.title = title; e.options = options; }).await {
+                st.emit(json!({"type": "chat.updated", "chat": meta.summary()}));
+            }
+            if let Some(v) = st.chats.with(&m.id, |c| serde_json::to_value(c)).await { return Ok(Json(v?)); }
+        }
+    }
     let id = c.id.clone();
     let v = serde_json::to_value(&c)?;
     st.chats.insert(c).await;
@@ -1780,31 +1796,65 @@ async fn chat_get(State(st): S, Path(id): Path<String>) -> R {
 }
 
 async fn chat_delete(State(st): S, Path(id): Path<String>) -> R {
-    // Only one of the user's own chats: the id comes from the request and names what gets deleted.
-    if !crate::chats::valid_id(&id) || st.chats.meta(&id).await.is_none() { return Err(no_chat().into()); }
+    if !remove_chat(&st, &id).await { return Err(no_chat().into()); }
+    st.emit(json!({"type": "chat.removed", "chatIds": [id]}));
+    ok()
+}
+
+/// Delete one chat for good: stop its run, remove its file and attachments, and what the assistant
+/// program kept about it. `false` when there is no such chat (only one of the user's own chats can be
+/// named: the id comes from the request and names what gets deleted).
+pub(crate) async fn remove_chat(st: &AppState, id: &str) -> bool {
+    if !crate::chats::valid_id(id) || st.chats.meta(id).await.is_none() { return false; }
     // Stop its run and give the assistant program a moment to exit: until then it is still
     // writing its own record of the conversation.
-    let stopping = st.runs.lock().await.remove(&id).map(|k| { let _ = k.send(()); }).is_some();
+    let stopping = st.runs.lock().await.remove(id).map(|k| { let _ = k.send(()); }).is_some();
     if stopping {
         for _ in 0..100 {
-            if !st.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) { break; }
+            if !st.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).contains_key(id) { break; }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
-    let chat = st.chats.remove(&id).await.ok_or_else(no_chat)?;
+    let Some(chat) = st.chats.remove(id).await else { return false };
     // "Deleted from this computer" includes what Claude Code kept about the conversation: the
-    // transcript of each session this chat had, and the plan file such a session wrote.
+    // transcript of each session this chat had, the folders and files it keeps per session, and the plan file.
     let sessions = chat.all_sessions();
     if let (false, Some(dir)) = (sessions.is_empty(), crate::traces::config_dir()) {
         let removed = tokio::task::spawn_blocking(move || crate::traces::remove_sessions(&dir, &sessions)).await.unwrap_or_default();
-        crate::log::info(format!("chat {id} deleted ({} assistant transcript(s) and {} plan file(s) removed with it)", removed.transcripts, removed.plans));
+        crate::log::info(format!("chat {id} deleted ({} assistant transcript(s), {} plan file(s) and {} other item(s) removed with it)", removed.transcripts, removed.plans, removed.other));
     }
-    ok()
+    true
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct BulkDelete { ids: Vec<String> }
+/// `POST /api/chats/bulk-delete {ids}` → `{deleted, skipped}`. A chat that is answering right now is skipped.
+async fn chat_bulk_delete(State(st): S, Json(b): Json<BulkDelete>) -> R {
+    let ids: Vec<String> = b.ids.into_iter().take(5000).collect();
+    let (deleted, skipped) = crate::tidy::delete_chats(&st, &ids).await;
+    Ok(Json(json!({"deleted": deleted, "skipped": skipped})))
+}
+
+#[derive(Deserialize, Default)]
+struct RetentionQuery { days: Option<u32> }
+/// `GET /api/chats/retention[?days=N]` → the setting, and what a clean-up after N days would remove now.
+async fn chat_retention_get(State(st): S, Query(q): Query<RetentionQuery>) -> R { Ok(Json(crate::tidy::describe(&st, q.days).await)) }
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RetentionBody { days: u32 }
+/// `PUT /api/chats/retention {days}` (0 = off) → the setting after, and how many chats went at once.
+async fn chat_retention_put(State(st): S, Json(b): Json<RetentionBody>) -> R {
+    let removed = crate::tidy::set_retention(&st, b.days).await?;
+    let mut v = crate::tidy::describe(&st, None).await;
+    v["removed"] = json!(removed);
+    Ok(Json(v))
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct ChatPatch { title: Option<String>, project_id: Option<Option<String>>, options: Option<RunOptions>, confirm_bypass: bool }
+struct ChatPatch { title: Option<String>, pinned: Option<bool>, archived: Option<bool>, project_id: Option<Option<String>>, options: Option<RunOptions>, confirm_bypass: bool }
 async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatch>) -> R {
     if let Some(o) = &p.options {
         check_run_options(o)?;
@@ -1812,7 +1862,10 @@ async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatc
         check_bypass(&kind, current.as_deref(), o.permission_mode.as_deref(), p.confirm_bypass)?;
     }
     let c = st.chats.update(&id, |c| {
-        if let Some(t) = p.title { c.title = t; }
+        // A title the person typed is theirs: the app no longer replaces it with one of its own.
+        if let Some(t) = p.title { if t != c.title { c.auto_title = None; } c.title = t; }
+        if let Some(v) = p.pinned { c.pinned = v; }
+        if let Some(v) = p.archived { c.archived = v; }
         if let Some(pid) = p.project_id { c.project_id = pid; }
         if let Some(o) = p.options { c.options = normalized(o, c.options.permission_mode.as_deref()); }
     }).await.ok_or_else(no_chat)?;
@@ -2029,7 +2082,9 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         c.mini_wrap = None; // engaged again: the mini-wrap is stale
         c.updated = chrono::Utc::now();
         c.options = opts.clone();
-        if first && c.kind == "chat" { c.title = m.text.lines().next().unwrap_or("Chat").chars().take(60).collect(); }
+        // Talking in an archived chat brings it back. The first message names a chat nobody has named yet.
+        c.archived = false;
+        if first && c.title_is_auto() { let t = crate::chats::short_title(&m.text); if !t.is_empty() { c.set_auto_title(t); } }
     }).await.ok_or_else(no_chat)?;
     st.emit(json!({"type": "chat.message", "chatId": id, "message": um}));
     st.emit(json!({"type": "chat.updated", "chat": updated.summary()}));

@@ -49,6 +49,15 @@ pub struct Chat {
     pub schema_version: u32,
     pub id: String,
     pub title: String,
+    /// The title the app itself last gave this chat (from its first message, then from its summary's
+    /// topic). While the title is still this, the app may improve it; once the person renames the
+    /// chat it no longer is, and the title is theirs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_title: Option<String>,
+    /// Kept at the top of the lists, and never removed by the automatic clean-up.
+    pub pinned: bool,
+    /// Put away: out of the sidebar and the default Chats list, still kept (and still saved by Wrap).
+    pub archived: bool,
     /// None = the library itself.
     pub project_id: Option<String>,
     /// "chat" | "wrap" | "customize" | "setup" | "module" | "reorganize"
@@ -93,12 +102,44 @@ pub fn valid_id(id: &str) -> bool {
     (1..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
+/// The longest title the app makes up itself.
+const TITLE_MAX: usize = 60;
+
+/// A one-line title out of some text: its first line, spaces tidied, cut at a word (with "…") when
+/// longer than a title should be. Empty when the text has no words.
+pub fn short_title(text: &str) -> String {
+    let line = text.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).find(|l| !l.is_empty()).unwrap_or_default();
+    if line.chars().count() <= TITLE_MAX { return line; }
+    let cut: String = line.chars().take(TITLE_MAX).collect();
+    // Back to the last whole word, unless that would leave almost nothing.
+    let at_word = line.chars().nth(TITLE_MAX).map_or(true, char::is_whitespace);
+    let head = if at_word { cut.as_str() } else {
+        match cut.rfind(' ') { Some(i) if cut[..i].chars().count() >= TITLE_MAX / 3 => &cut[..i], _ => cut.as_str() }
+    };
+    format!("{}…", head.trim_end_matches(|c: char| c.is_whitespace() || ",.;:-–—".contains(c)))
+}
+
+/// The topic line of a summary (`- **Topic:** …`) as a title. `None` when it has none.
+pub fn topic_of(summary: &str) -> Option<String> {
+    let line = summary.lines().find(|l| {
+        let l = l.trim_start_matches(|c: char| c == '-' || c == '*' || c == '•' || c.is_whitespace()).to_lowercase();
+        l.starts_with("topic:") || l.starts_with("topic :") || l.starts_with("الموضوع")
+    })?;
+    let after = line.split_once(':').map(|(_, r)| r)?;
+    let clean = after.replace("**", "").replace('`', "");
+    let clean = clean.trim().trim_matches(|c: char| c == '"' || c == '“' || c == '”' || c == '.' || c.is_whitespace());
+    let title = short_title(clean);
+    (title.chars().filter(|c| c.is_alphanumeric()).count() >= 2).then_some(title)
+}
+
 /// Everything about a chat except its messages: what lists, the wrap logic and background loops
 /// need. Cheap to copy, however long the conversation is.
 #[derive(Clone, Debug)]
 pub struct ChatMeta {
     pub id: String,
     pub title: String,
+    pub pinned: bool,
+    pub archived: bool,
     pub project_id: Option<String>,
     pub kind: String,
     pub provider: String,
@@ -115,11 +156,16 @@ pub struct ChatMeta {
     pub cost_usd: f64,
     pub meta: Value,
     pub message_count: usize,
+    /// What the person would call messages: their own and the assistant's replies (no tool calls or results).
+    pub turn_count: usize,
     /// Has the user said anything in it?
     pub has_user_message: bool,
 }
 
 impl ChatMeta {
+    /// Still named "New chat" (in either language): nobody has named it, and it has said nothing to name it by.
+    pub fn title_is_default(&self) -> bool { matches!(self.title.as_str(), "New chat" | "محادثة جديدة") }
+
     /// Chats that count toward the next Wrap.
     pub fn is_unwrapped(&self) -> bool {
         self.kind == "chat" && self.has_user_message && self.wrapped_at.map_or(true, |w| self.updated > w)
@@ -131,7 +177,9 @@ impl ChatMeta {
             "kind": self.kind, "provider": self.provider, "created": self.created,
             "updated": self.updated, "running": self.running, "interrupted": self.interrupted,
             "unwrapped": self.is_unwrapped(), "hasMiniWrap": self.has_mini_wrap,
-            "messageCount": self.message_count,
+            // Their messages and the replies only: tool calls and results are not "messages" to the person.
+            "messageCount": self.turn_count,
+            "pinned": self.pinned, "archived": self.archived,
             // Where a wrap or reorganize stands (preview, applying, review…), so an open view follows it.
             "phase": self.meta["phase"],
             // Every permission check is off in this chat: lists mark it, not only the chat's own picker.
@@ -147,6 +195,9 @@ impl Default for Chat {
             schema_version: CHAT_SCHEMA_VERSION,
             id: uuid::Uuid::new_v4().to_string(),
             title: "New chat".into(),
+            auto_title: None,
+            pinned: false,
+            archived: false,
             project_id: None,
             kind: "chat".into(),
             provider: "claude".into(),
@@ -181,16 +232,38 @@ impl Chat {
     /// The chat without its messages.
     pub fn meta_only(&self) -> ChatMeta {
         ChatMeta {
-            id: self.id.clone(), title: self.title.clone(), project_id: self.project_id.clone(), kind: self.kind.clone(),
+            id: self.id.clone(), title: self.title.clone(), pinned: self.pinned, archived: self.archived, project_id: self.project_id.clone(), kind: self.kind.clone(),
             provider: self.provider.clone(), session_id: self.session_id.clone(), created: self.created, updated: self.updated,
             options: self.options.clone(), has_mini_wrap: self.mini_wrap.is_some(), wrapped_at: self.wrapped_at,
             library: self.library.clone(), dirty: self.dirty, running: self.running, interrupted: self.interrupted, cost_usd: self.cost_usd,
             meta: self.meta.clone(), message_count: self.messages.len(),
+            turn_count: self.messages.iter().filter(|m| m.role == "user" || m.role == "assistant").count(),
             has_user_message: self.messages.iter().any(|m| m.role == "user"),
         }
     }
 
     pub fn summary(&self) -> Value { self.meta_only().summary() }
+
+    /// Is the title still the one the app gave (so the app may replace it), rather than the person's own?
+    /// Chats from before this was tracked count as the app's when they still read as the cut-off first line.
+    pub fn title_is_auto(&self) -> bool {
+        if self.kind != "chat" { return false; }
+        if self.auto_title.as_deref() == Some(self.title.as_str()) { return true; }
+        if matches!(self.title.as_str(), "New chat" | "محادثة جديدة") { return true; }
+        match self.messages.iter().find(|m| m.role == "user") {
+            Some(m) => {
+                let first = m.text.lines().next().unwrap_or("");
+                self.title == first.chars().take(60).collect::<String>() || self.title == short_title(&m.text)
+            }
+            None => false,
+        }
+    }
+
+    /// Give the chat a title of the app's own making.
+    pub fn set_auto_title(&mut self, title: String) {
+        self.title = title.clone();
+        self.auto_title = Some(title);
+    }
 
     /// Remember the current session among the ones this chat has had.
     fn note_session(&mut self) {
@@ -734,5 +807,57 @@ mod tests {
         s.flush(true).await;
         assert!(d.join("missing-folder").join(format!("{id}.json")).exists());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn titles_are_cut_at_a_word_and_topics_come_from_the_summary() {
+        assert_eq!(short_title("hi"), "hi");
+        assert_eq!(short_title("\n  todo:   call the bank \nsecond line"), "todo: call the bank");
+        assert_eq!(short_title(""), "");
+        let long = "Please help me plan the migration of our whole accounting system to the new provider by March";
+        let t = short_title(long);
+        assert!(t.ends_with('…') && t.chars().count() <= 61 && long.starts_with(t.trim_end_matches('…')), "{t}");
+        assert!(!t.trim_end_matches('…').ends_with(' ') && t.trim_end_matches('…').ends_with("accounting"), "cut at a whole word: {t}");
+        // Exactly at the limit stays whole; one word with no spaces is cut where it must be.
+        assert_eq!(short_title(&"a".repeat(60)), "a".repeat(60));
+        assert_eq!(short_title(&"a".repeat(80)).chars().count(), 61);
+        assert_eq!(short_title(&"ب".repeat(70)).chars().count(), 61);
+        assert_eq!(topic_of("- **Topic:** Planning the shop launch\n- **Decided:** x").as_deref(), Some("Planning the shop launch"));
+        assert_eq!(topic_of("**Topic:** \"Quoted.\"").as_deref(), Some("Quoted"));
+        assert_eq!(topic_of("Topic: plain").as_deref(), Some("plain"));
+        assert_eq!(topic_of("- **الموضوع:** خطة المتجر").as_deref(), Some("خطة المتجر"));
+        for none in ["", "- **Decided:** a topic: here", "- **Topic:**", "- **Topic:** …", "no preamble"] { assert_eq!(topic_of(none), None, "{none:?}"); }
+    }
+
+    #[test]
+    fn the_app_replaces_only_titles_it_made() {
+        let mut c = Chat::default();
+        assert!(c.title_is_auto(), "a fresh chat");
+        c.messages.push(Msg::new("user", "hi there\nmore"));
+        c.title = "hi there".into();
+        assert!(c.title_is_auto(), "a title from before auto titles were tracked: the first line");
+        c.set_auto_title("Shop launch".into());
+        assert!(c.title_is_auto());
+        // The person renamed it: not the app's any more, even if the app made another one meanwhile.
+        c.title = "My shop".into();
+        assert!(!c.title_is_auto());
+        let mut old = Chat::default();
+        old.messages.push(Msg::new("user", "x".repeat(100)));
+        old.title = "x".repeat(60);
+        assert!(old.title_is_auto());
+        old.title = "Taxes 2026".into();
+        assert!(!old.title_is_auto());
+        // Only ordinary chats are named by the app.
+        let w = Chat { kind: "wrap".into(), ..Default::default() };
+        assert!(!w.title_is_auto());
+    }
+
+    #[test]
+    fn messages_are_counted_as_the_person_sees_them() {
+        let mut c = Chat::default();
+        for (r, t) in [("user", "a"), ("tool", "Read"), ("tool_result", "x"), ("assistant", "b"), ("tool", "Edit"), ("system", "s"), ("assistant", "c")] { c.messages.push(Msg::new(r, t)); }
+        let s = c.summary();
+        assert_eq!((s["messageCount"].as_u64(), s["pinned"].as_bool(), s["archived"].as_bool()), (Some(3), Some(false), Some(false)));
+        assert_eq!(c.meta_only().message_count, 7);
     }
 }

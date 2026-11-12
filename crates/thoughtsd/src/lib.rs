@@ -33,6 +33,7 @@ pub mod settings;
 pub mod staging;
 pub mod state;
 pub mod suggestions;
+pub mod tidy;
 pub mod todos;
 pub mod tr;
 pub mod traces;
@@ -117,6 +118,8 @@ pub async fn run() -> anyhow::Result<()> {
     history::start(state.clone());
     // The weekly "is there a newer version?" check, for users who switched it on.
     tokio::spawn(release::weekly(state.clone()));
+    // Old and never-used chats are removed in the background (the old-chat part only when the person asked for it).
+    tidy::start(state.clone());
     // Streaming chats are written to disk at most every couple of seconds; this picks up the rest.
     let flusher = state.clone();
     tokio::spawn(async move {

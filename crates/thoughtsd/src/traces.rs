@@ -6,10 +6,16 @@
 //! `<config>/plans/<slug>.md`; the slug is written on the lines of the session's own transcript.
 //! `<config>` is `~/.claude`, or `$CLAUDE_CONFIG_DIR` when that is set.
 //!
-//! Deleting here is deliberately narrow. Only regular files are removed, each under one exact name
-//! built from a session id the app itself was given by the CLI for that chat (or from a slug read
-//! out of that session's transcript). Never a folder, never a link, never a name found by
-//! matching a pattern — and nothing at all when an id or a slug does not have the expected shape.
+//! Per session Claude Code also keeps a folder named after the session next to the transcript
+//! (helper transcripts, large tool results), `<config>/file-history/<session id>/` (copies of files
+//! it edited), `<config>/todos/<session id>-agent-<helper>.json` and the helpers' plan files
+//! `<config>/plans/<slug>-agent-<helper>.md`.
+//!
+//! Deleting here is deliberately narrow. Everything removed is named exactly after a session id the
+//! app itself was given by the CLI for that chat (or a slug read out of that session's transcript);
+//! the only matching is on a file name that starts with that exact id (or slug) and ends in a plain
+//! helper id. Nothing is removed unless the id/slug has the expected shape, nothing that is a link,
+//! and nothing that does not lie inside the config folder.
 
 use std::collections::BTreeSet;
 use std::io::BufRead;
@@ -46,9 +52,10 @@ fn is_plain_file(p: &Path) -> bool { std::fs::symlink_metadata(p).map_or(false, 
 /// A real folder — not a link to one.
 fn is_real_dir(p: &Path) -> bool { std::fs::symlink_metadata(p).map_or(false, |m| m.file_type().is_dir()) }
 
-/// How many files were deleted.
+/// What was deleted. `plans` counts plan files (a session's own and its helpers'); `other` counts
+/// the session's per-session folders (helper transcripts, file copies) and its to-do files.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct Removed { pub transcripts: usize, pub plans: usize }
+pub struct Removed { pub transcripts: usize, pub plans: usize, pub other: usize }
 
 /// The plan slugs a transcript names on lines that belong to session `sid`.
 fn plan_slugs(transcript: &Path, sid: &str) -> BTreeSet<String> {
@@ -71,39 +78,94 @@ fn plan_slugs(transcript: &Path, sid: &str) -> BTreeSet<String> {
     out
 }
 
-/// Delete what Claude Code kept under `config` for these sessions: each session's transcript and
-/// the plan file that transcript names. Ids that are not session ids are ignored. See the module
-/// notes for what is, and is never, removed.
-pub fn remove_sessions(config: &Path, session_ids: &[String]) -> Removed {
-    let mut out = Removed::default();
-    let ids: BTreeSet<&str> = session_ids.iter().map(String::as_str).filter(|s| is_session_id(s)).collect();
+/// A helper's id as it appears in `...-agent-<id>` file names: letters, digits and dashes only
+/// (the main helper is named with a session id).
+fn is_agent_id(s: &str) -> bool { (1..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') }
+
+/// Remove a folder that is named exactly after a session, if it is a real folder (not a link) that
+/// really lies inside `config`. Everything in it goes; links inside it are removed, never followed.
+fn remove_session_folder(config: &Path, dir: &Path) -> bool {
+    if !is_real_dir(dir) { return false; }
+    let inside = match (dir.canonicalize(), config.canonicalize()) { (Ok(d), Ok(c)) => d.starts_with(c), _ => false };
+    if !inside { return false; }
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => true,
+        Err(e) => { crate::log::warn(format!("a folder the assistant kept for a deleted chat could not be removed: {e}")); false }
+    }
+}
+
+/// The files directly in `dir` named `<prefix><id><suffix>` — the prefix being exact, the middle a plain helper id.
+fn named_like(dir: &Path, prefix: &str, suffix: &str) -> Vec<PathBuf> {
+    if !is_real_dir(dir) { return vec![]; }
+    std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| {
+        let name = e.file_name().into_string().ok()?;
+        let mid = name.strip_prefix(prefix)?.strip_suffix(suffix)?;
+        (is_agent_id(mid) && is_plain_file(&e.path())).then(|| e.path())
+    }).collect()
+}
+
+fn remove_file(p: &Path, what: &str) -> bool {
+    match std::fs::remove_file(p) {
+        Ok(()) => true,
+        Err(e) => { crate::log::warn(format!("{what} of a deleted chat could not be removed: {e}")); false }
+    }
+}
+
+/// The folders of `config/projects` (one per working folder the assistant has run in).
+fn project_folders(config: &Path) -> Vec<PathBuf> {
     let projects = config.join("projects");
-    if ids.is_empty() || !is_real_dir(&projects) { return out; }
-    // One folder per working folder the assistant has run in; a session's transcript is in one of them.
-    let folders: Vec<PathBuf> = std::fs::read_dir(&projects).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| is_real_dir(p)).collect();
+    if !is_real_dir(&projects) { return vec![]; }
+    std::fs::read_dir(&projects).into_iter().flatten().flatten().map(|e| e.path()).filter(|p| is_real_dir(p)).collect()
+}
+
+fn valid_ids(session_ids: &[String]) -> BTreeSet<&str> { session_ids.iter().map(String::as_str).filter(|s| is_session_id(s)).collect() }
+
+/// Remove the plan files of these sessions (the plan a session's transcript names, and that plan's
+/// helper files), leaving transcripts and everything else alone. Returns how many files went.
+fn remove_plan_files(config: &Path, ids: &BTreeSet<&str>, folders: &[PathBuf]) -> usize {
+    let plans = config.join("plans");
+    if ids.is_empty() || !is_real_dir(&plans) { return 0; }
     let mut slugs = BTreeSet::new();
-    for sid in &ids {
-        let name = format!("{sid}.jsonl");
-        for folder in &folders {
-            let file = folder.join(&name);
-            if !is_plain_file(&file) { continue; }
-            slugs.extend(plan_slugs(&file, sid));
-            match std::fs::remove_file(&file) {
-                Ok(()) => out.transcripts += 1,
-                Err(e) => crate::log::warn(format!("the assistant's transcript of a deleted chat could not be removed: {e}")),
-            }
+    for sid in ids {
+        for folder in folders {
+            let file = folder.join(format!("{sid}.jsonl"));
+            if is_plain_file(&file) { slugs.extend(plan_slugs(&file, sid)); }
         }
     }
-    let plans = config.join("plans");
-    if !slugs.is_empty() && is_real_dir(&plans) {
-        for slug in &slugs {
-            let file = plans.join(format!("{slug}.md"));
-            if !is_plain_file(&file) { continue; }
-            match std::fs::remove_file(&file) {
-                Ok(()) => out.plans += 1,
-                Err(e) => crate::log::warn(format!("the assistant's plan file of a deleted chat could not be removed: {e}")),
-            }
+    let mut n = 0;
+    for slug in &slugs {
+        let file = plans.join(format!("{slug}.md"));
+        if is_plain_file(&file) && remove_file(&file, "the assistant's plan file") { n += 1; }
+        for f in named_like(&plans, &format!("{slug}-agent-"), ".md") { if remove_file(&f, "a helper's plan file") { n += 1; } }
+    }
+    n
+}
+
+/// Delete the plan file(s) a Wrap preview left, once the plan is no longer needed. Nothing else.
+pub fn remove_plans(config: &Path, session_ids: &[String]) -> usize {
+    remove_plan_files(config, &valid_ids(session_ids), &project_folders(config))
+}
+
+/// Delete what Claude Code kept under `config` for these sessions, each by an exact name built from
+/// the session id: the transcript, the folder named after the session next to it, the folder of
+/// file copies `file-history/<id>`, the to-do files `todos/<id>-agent-<helper>.json`, and the plan
+/// files (see `remove_plans`). Ids that are not session ids are ignored. Never a name found by any
+/// other pattern, never a link, never anything that lies outside `config`.
+pub fn remove_sessions(config: &Path, session_ids: &[String]) -> Removed {
+    let mut out = Removed::default();
+    let ids = valid_ids(session_ids);
+    if ids.is_empty() { return out; }
+    let folders = project_folders(config);
+    // Plans first: they are found through the transcripts, which are about to go.
+    out.plans = remove_plan_files(config, &ids, &folders);
+    for sid in &ids {
+        for folder in &folders {
+            let file = folder.join(format!("{sid}.jsonl"));
+            if is_plain_file(&file) && remove_file(&file, "the assistant's transcript") { out.transcripts += 1; }
+            if remove_session_folder(config, &folder.join(sid)) { out.other += 1; }
         }
+        if remove_session_folder(config, &config.join("file-history").join(sid)) { out.other += 1; }
+        for f in named_like(&config.join("todos"), &format!("{sid}-agent-"), ".json") { if remove_file(&f, "the assistant's to-do file") { out.other += 1; } }
     }
     out
 }
@@ -153,20 +215,36 @@ mod tests {
     }
 
     #[test]
-    fn only_the_sessions_own_transcript_and_plan_are_removed() {
+    fn only_the_sessions_own_files_are_removed() {
         let (home, config) = home();
         let (mine, resumed, other) = (sid(), sid(), sid());
         // This chat: a first session with a plan (a Wrap preview), and a later session in another working folder.
         write(&config.join(format!("projects/-Users-sara-Notes/{mine}.jsonl")), &transcript(&mine, Some("wrap-the-user-elegant-hippo")));
         write(&config.join("plans/wrap-the-user-elegant-hippo.md"), "# Plan\nclient text\n");
+        write(&config.join("plans/wrap-the-user-elegant-hippo-agent-a1b2.md"), "a helper's plan\n");
         write(&config.join(format!("projects/-Users-sara-Work/{resumed}.jsonl")), &transcript(&resumed, None));
+        // What else Claude Code keeps for those sessions.
+        write(&config.join(format!("projects/-Users-sara-Notes/{mine}/subagents/agent-1.jsonl")), "{}\n");
+        write(&config.join(format!("projects/-Users-sara-Notes/{mine}/tool-results/big.txt")), "client text");
+        write(&config.join(format!("file-history/{mine}/abc@v1")), "client file");
+        write(&config.join(format!("file-history/{resumed}/def@v1")), "client file");
+        write(&config.join(format!("todos/{mine}-agent-{mine}.json")), "[]");
+        write(&config.join(format!("todos/{resumed}-agent-9f3.json")), "[]");
         // Everything else under ~/.claude belongs to someone else and must survive.
         write(&config.join(format!("projects/-Users-sara-Notes/{other}.jsonl")), &transcript(&other, Some("quirky-hopping-starfish")));
+        write(&config.join(format!("projects/-Users-sara-Notes/{other}/subagents/agent-1.jsonl")), "{}\n");
         write(&config.join("plans/quirky-hopping-starfish.md"), "another session's plan\n");
-        write(&config.join("plans/wrap-the-user-elegant-hippo-agent-a1b2.md"), "a helper's plan\n");
-        write(&config.join(format!("projects/-Users-sara-Notes/{mine}/subagents/agent-1.jsonl")), "{}\n");
+        write(&config.join("plans/quirky-hopping-starfish-agent-zz.md"), "another session's helper plan\n");
+        write(&config.join("plans/wrap-the-user-elegant-hippo.md.bak"), "a copy the user made\n");
+        write(&config.join("plans/wrap-the-user-elegant-hippo-agent-a.b.md"), "odd name\n");
         write(&config.join(format!("projects/-Users-sara-Notes/{mine}.jsonl.bak")), "a copy the user made\n");
-        write(&config.join(format!("todos/{mine}-agent-{mine}.json")), "[]");
+        write(&config.join(format!("projects/-Users-sara-Notes/{mine}x/keep.txt")), "a folder that only starts like the id\n");
+        write(&config.join(format!("file-history/{other}/ghi@v1")), "keep");
+        write(&config.join(format!("file-history/{mine}-old/keep")), "keep");
+        write(&config.join(format!("todos/{other}-agent-{other}.json")), "[]");
+        write(&config.join(format!("todos/{mine}.json")), "[]");
+        write(&config.join(format!("todos/{mine}-agent-{mine}.json.bak")), "[]");
+        write(&config.join(format!("todos/{mine}-agent-x/y.json")), "[]");
         write(&config.join("settings.json"), "{}");
         write(&config.join(".credentials.json"), "{}");
         write(&config.join("CLAUDE.md"), "my instructions\n");
@@ -174,15 +252,39 @@ mod tests {
         let before = listing(&home);
 
         let removed = remove_sessions(&config, &[mine.clone(), resumed.clone()]);
-        assert_eq!(removed, Removed { transcripts: 2, plans: 1 });
-        let gone = [format!(".claude/projects/-Users-sara-Notes/{mine}.jsonl"), format!(".claude/projects/-Users-sara-Work/{resumed}.jsonl"),
-            ".claude/plans/wrap-the-user-elegant-hippo.md".to_string()];
+        // Two transcripts; the plan and its helper's; the session folder, two file-history folders and two to-do files.
+        assert_eq!(removed, Removed { transcripts: 2, plans: 2, other: 5 });
+        let gone = [
+            format!(".claude/projects/-Users-sara-Notes/{mine}.jsonl"), format!(".claude/projects/-Users-sara-Work/{resumed}.jsonl"),
+            format!(".claude/projects/-Users-sara-Notes/{mine}/subagents/agent-1.jsonl"), format!(".claude/projects/-Users-sara-Notes/{mine}/tool-results/big.txt"),
+            format!(".claude/file-history/{mine}/abc@v1"), format!(".claude/file-history/{resumed}/def@v1"),
+            format!(".claude/todos/{mine}-agent-{mine}.json"), format!(".claude/todos/{resumed}-agent-9f3.json"),
+            ".claude/plans/wrap-the-user-elegant-hippo.md".to_string(), ".claude/plans/wrap-the-user-elegant-hippo-agent-a1b2.md".to_string()];
         let expected: Vec<String> = before.iter().filter(|p| !gone.contains(p)).cloned().collect();
-        assert_eq!(listing(&home), expected, "exactly the two transcripts and the one plan file go");
-        // No folder is ever removed, not even one left empty.
-        assert!(config.join("projects/-Users-sara-Work").is_dir() && config.join(format!("projects/-Users-sara-Notes/{mine}/subagents")).is_dir());
+        assert_eq!(listing(&home), expected, "exactly those files go, nothing else");
+        // The folders the project folders stay (only the session's own folders go).
+        assert!(config.join("projects/-Users-sara-Work").is_dir() && config.join("projects/-Users-sara-Notes").is_dir());
+        assert!(!config.join(format!("projects/-Users-sara-Notes/{mine}")).exists() && !config.join(format!("file-history/{mine}")).exists());
         // Doing it again finds nothing.
         assert_eq!(remove_sessions(&config, &[mine, resumed]), Removed::default());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_plan_alone_can_be_removed_and_the_conversation_stays() {
+        let (home, config) = home();
+        let (mine, other) = (sid(), sid());
+        write(&config.join(format!("projects/-p/{mine}.jsonl")), &transcript(&mine, Some("wrap-the-user-elegant-hippo")));
+        write(&config.join(format!("projects/-p/{mine}/subagents/a.jsonl")), "{}\n");
+        write(&config.join("plans/wrap-the-user-elegant-hippo.md"), "plan");
+        write(&config.join("plans/wrap-the-user-elegant-hippo-agent-q1.md"), "plan");
+        write(&config.join(format!("projects/-p/{other}.jsonl")), &transcript(&other, Some("quirky-hopping-starfish")));
+        write(&config.join("plans/quirky-hopping-starfish.md"), "other plan");
+        let before = listing(&home);
+        assert_eq!(remove_plans(&config, &[mine.clone(), "../x".into()]), 2);
+        let gone = [".claude/plans/wrap-the-user-elegant-hippo.md".to_string(), ".claude/plans/wrap-the-user-elegant-hippo-agent-q1.md".to_string()];
+        assert_eq!(listing(&home), before.iter().filter(|p| !gone.contains(p)).cloned().collect::<Vec<_>>());
+        assert_eq!(remove_plans(&config, &[mine]), 0);
         std::fs::remove_dir_all(home).unwrap();
     }
 
@@ -210,7 +312,7 @@ mod tests {
         // A slug on a line of some *other* session is not this session's plan either.
         let lines = format!("{lines}{{\"sessionId\":\"{}\",\"type\":\"user\",\"slug\":\"keep\"}}\n{{\"type\":\"user\",\"slug\":\"keep\"}}\nnot json \"slug\":\"keep\"\n", sid());
         write(&config.join(format!("projects/-p/{evil}.jsonl")), &lines);
-        assert_eq!(remove_sessions(&config, &[evil.clone()]), Removed { transcripts: 1, plans: 0 });
+        assert_eq!(remove_sessions(&config, &[evil.clone()]), Removed { transcripts: 1, ..Default::default() });
         assert_eq!(listing(&home), before);
 
         #[cfg(unix)]
@@ -229,11 +331,35 @@ mod tests {
             let d = sid();
             std::fs::create_dir_all(config.join(format!("projects/-p/{d}.jsonl"))).unwrap();
             write(&config.join(format!("projects/-p/{d}.jsonl/inner.txt")), "keep");
-            assert_eq!(remove_sessions(&config, &[a.clone(), b.clone(), c.clone(), d.clone()]), Removed { transcripts: 1, plans: 0 });
+            assert_eq!(remove_sessions(&config, &[a.clone(), b.clone(), c.clone(), d.clone()]), Removed { transcripts: 1, ..Default::default() });
             assert!(home.join("outside/notes.jsonl").exists() && home.join("outside.md").exists());
             assert!(home.join(format!("elsewhere/{b}.jsonl")).exists());
             assert!(std::fs::symlink_metadata(config.join(format!("projects/-p/{a}.jsonl"))).is_ok() && std::fs::symlink_metadata(config.join("plans/linked-plan.md")).is_ok());
             assert!(config.join(format!("projects/-p/{d}.jsonl/inner.txt")).exists());
+
+            // A session folder, a file-history folder and a to-do folder that are links: not followed, not removed.
+            let (f, g) = (sid(), sid());
+            write(&home.join("outside/keep-folder/inner.txt"), "keep");
+            symlink(home.join("outside/keep-folder"), config.join(format!("projects/-p/{f}"))).unwrap();
+            std::fs::create_dir_all(config.join("file-history")).unwrap();
+            symlink(home.join("outside/keep-folder"), config.join(format!("file-history/{f}"))).ok();
+            write(&home.join(format!("outside/{g}-agent-1.json")), "keep");
+            std::fs::create_dir_all(config.join("todos")).unwrap();
+            symlink(home.join(format!("outside/{g}-agent-1.json")), config.join(format!("todos/{g}-agent-1.json"))).unwrap();
+            let before_links = listing(&home);
+            assert_eq!(remove_sessions(&config, &[f.clone(), g.clone()]), Removed::default());
+            assert_eq!(listing(&home), before_links);
+            assert!(home.join("outside/keep-folder/inner.txt").exists() && home.join(format!("outside/{g}-agent-1.json")).exists());
+            // `todos` and `file-history` being links themselves: nothing is done through them.
+            let h = sid();
+            write(&home.join(format!("elsewhere-todos/{h}-agent-1.json")), "keep");
+            write(&home.join(format!("elsewhere-history/{h}/x")), "keep");
+            let (home3, config3) = self::home();
+            symlink(home.join("elsewhere-todos"), config3.join("todos")).unwrap();
+            symlink(home.join("elsewhere-history"), config3.join("file-history")).unwrap();
+            assert_eq!(remove_sessions(&config3, &[h.clone()]), Removed::default());
+            assert!(home.join(format!("elsewhere-todos/{h}-agent-1.json")).exists() && home.join(format!("elsewhere-history/{h}/x")).exists());
+            std::fs::remove_dir_all(home3).unwrap();
 
             // `projects` or `plans` being links themselves: nothing is done through them.
             let (home2, config2) = self::home();
@@ -248,6 +374,14 @@ mod tests {
             assert!(home2.join(format!("real-projects/-p/{e}.jsonl")).exists() && home2.join("real-plans/some-plan.md").exists());
             std::fs::remove_dir_all(home2).unwrap();
         }
+        // Hostile names inside the to-do folder and the plans folder are not matched.
+        let t = sid();
+        for name in [format!("{t}-agent-..json"), format!("{t}-agent-a.b.json"), format!("{t}-agent-.json"), format!("{t}-agent-a b.json"), format!("{t}-agentx-1.json"), format!("{t}.json")] {
+            write(&config.join("todos").join(&name), "keep");
+        }
+        let before_names = listing(&home);
+        assert_eq!(remove_sessions(&config, &[t]), Removed::default());
+        assert_eq!(listing(&home), before_names);
         // The one real transcript was never asked for and is still there.
         assert!(config.join(format!("projects/-p/{real}.jsonl")).exists());
         // No config folder at all is not an error.

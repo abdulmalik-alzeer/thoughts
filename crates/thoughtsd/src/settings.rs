@@ -28,6 +28,9 @@ pub struct Settings {
     pub idle_minutes: u64,
     /// Popup when this many chats are unwrapped.
     pub wrap_nag_threshold: usize,
+    /// Delete finished chats this many days after their last activity. 0 = never (the default).
+    /// Changed only through `PUT /api/chats/retention` (see `tidy.rs`), never by a general save.
+    pub chat_retention_days: u32,
     /// Summarise a chat in the background once it goes quiet or another one starts. Off = a chat's
     /// text is only sent for a summary when the user presses Wrap.
     pub auto_summaries: bool,
@@ -299,6 +302,7 @@ impl Default for Settings {
             notifications: true,
             idle_minutes: 15,
             wrap_nag_threshold: 5,
+            chat_retention_days: 0,
             auto_summaries: true,
             projects: vec![],
             last_wrap: None,
@@ -492,6 +496,7 @@ impl Settings {
         self.schema_version = SCHEMA_VERSION;
         self.last_wrap = old.last_wrap;
         self.projects = old.projects.clone(); // projects change only through the project endpoints
+        self.chat_retention_days = old.chat_retention_days; // deleting chats automatically is switched only on its own endpoint
         // The provider address and its key belong together and change only through
         // `claude::set_provider`. A general save can therefore never drop a saved key, and never
         // leave an address behind without one.

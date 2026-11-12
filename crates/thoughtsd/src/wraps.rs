@@ -296,12 +296,15 @@ pub async fn summarise(state: &AppState, id: &str, fallback: bool) -> anyhow::Re
     }
     let text = done.join("\n\n");
     let kept = text.clone();
+    let topic = crate::chats::topic_of(&text);
     let updated = state.chats.update(id, |c| {
         // Only keep it if nobody engaged the chat, and no wrap saved it, while we were summarising.
         if c.updated == started && c.wrapped_at == since {
             c.mini_wrap = Some(kept);
             c.mini_wrap_at = Some(Utc::now());
             c.dirty = false;
+            // The summary's topic is a better name than the first line typed — unless the person named the chat.
+            if let (Some(t), true) = (topic, c.title_is_auto()) { c.set_auto_title(t); }
         }
     }).await;
     if let Some(ch) = updated { state.emit(json!({"type": "chat.updated", "chat": ch.summary()})); }
@@ -923,6 +926,10 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
             crate::log::ok_or_warn("wrap: could not save settings", s.save());
         }
         st.chats.update(&wid, |c| { c.meta["phase"] = json!("done"); c.meta["stamps"] = Value::Object(stamps); c.meta["partial"] = Value::Null; }).await;
+        // The plan the preview left in the assistant's own folder has done its job.
+        if let (Some(dir), Some(sessions)) = (crate::traces::config_dir(), st.chats.with(&wid, |c| c.all_sessions()).await) {
+            let _ = tokio::task::spawn_blocking(move || crate::traces::remove_plans(&dir, &sessions)).await;
+        }
         let git_mode = st.settings.read().await.sync.mode.clone();
         let mut saved: Result<bool, String> = Ok(true);
         let mut docs: Vec<Change> = vec![];
@@ -1719,6 +1726,27 @@ mod tests {
         // Nothing has been said since: the summary is reused, not asked for again.
         let again = summarise(&st, &chat, true).await.unwrap().unwrap();
         assert_eq!((again.text, n.load(Ordering::SeqCst)), (s.text, asked.len()));
+    }
+
+    #[tokio::test]
+    async fn a_summary_names_the_chat_unless_the_person_did() {
+        let st = AppState::for_test();
+        let chat = said(&st, "hi", &[("user", "hi".to_string())]).await;
+        st.chats.update(&chat, |c| c.title = "hi".into()).await;
+        summaries(&st, |_, _| Ok("- **Topic:** Shop launch plan\n- **Decided:** blue".into()));
+        mini_wrap(&st, &chat).await.unwrap();
+        assert_eq!(st.chats.meta(&chat).await.unwrap().title, "Shop launch plan");
+        // The next summary may improve it again while it is the app's own…
+        say(&st, &chat, "and the logo").await;
+        summaries(&st, |_, _| Ok("- **Topic:** Shop launch and logo".into()));
+        mini_wrap(&st, &chat).await.unwrap();
+        assert_eq!(st.chats.meta(&chat).await.unwrap().title, "Shop launch and logo");
+        // …but a title the person typed stays.
+        st.chats.update(&chat, |c| { c.title = "Our shop".into(); c.auto_title = None; }).await;
+        say(&st, &chat, "more").await;
+        summaries(&st, |_, _| Ok("- **Topic:** Something else".into()));
+        mini_wrap(&st, &chat).await.unwrap();
+        assert_eq!(st.chats.meta(&chat).await.unwrap().title, "Our shop");
     }
 
     #[tokio::test]
