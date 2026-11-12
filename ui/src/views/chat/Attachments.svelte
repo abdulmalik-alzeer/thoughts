@@ -7,7 +7,8 @@
   // The files sent with a message: pictures as thumbnails, PDFs and pictures open in a viewer
   // inside the app, anything else is named. The service serves only this chat's own files.
   import Icon from '../../lib/Icon.svelte';
-  import { apiBlob } from '../../lib/api';
+  import { apiBlob, inTauri } from '../../lib/api';
+  import { toast } from '../../lib/store.svelte';
   import { t } from '../../lib/i18n';
   import { isImageName } from '../../lib/content/util';
   import { trapFocus } from '../../lib/focus';
@@ -30,6 +31,17 @@
       urls.set(k, u);
     }
     return u;
+  }
+
+  // Other documents (Word, Excel…) open in their own app on the desktop; kinds that could run
+  // something when opened never do (the desktop app checks the same list).
+  const OWN_APP = /\.(docx?|xlsx?|pptx?|csv|tsv|txt|md|rtf|od[tsp]|epub|heic|tiff|bmp|mp3|m4a|wav|mp4|mov)$/i;
+  const openable = (name: string) => inTauri() && OWN_APP.test(name);
+  async function openOutside(name: string) {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+      await invoke('open_chat_attachment', { chatId, name });
+    } catch { toast(t('nativeb.att.openFailed', { name }), { kind: 'error' }); }
   }
 
   let viewing = $state<F | null>(null);
@@ -59,6 +71,8 @@
       {/await}
     {:else if f.pdf}
       <button type="button" class="fchip open" onclick={() => view(f)} title={t('chatc.att.open', { name: f.name })}><Icon name="docs" size={12} /><bdi class="ell">{f.name}</bdi></button>
+    {:else if openable(f.name)}
+      <button type="button" class="fchip open" onclick={() => openOutside(f.name)} title={t('nativeb.att.open', { name: f.name })}><Icon name="attach" size={12} /><bdi class="ell">{f.name}</bdi></button>
     {:else}
       <span class="fchip"><Icon name="attach" size={12} /><bdi class="ell">{f.name}</bdi></span>
     {/if}

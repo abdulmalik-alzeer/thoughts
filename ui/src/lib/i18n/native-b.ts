@@ -68,6 +68,10 @@ export default {
     'nativeb.link.copied': 'Link copied. Paste it into a calendar event or another app to come back to this note.',
     'nativeb.link.copyFailed': 'The link could not be copied.',
 
+    // Files sent in a chat
+    'nativeb.att.open': 'Open “{name}” in its own app',
+    'nativeb.att.openFailed': '“{name}” could not be opened. It may have been removed from this computer.',
+
     // Word
     'nativeb.word.saveAs': 'Save as Word document to…',
     'nativeb.word.download': 'Download as Word document',
@@ -136,6 +140,9 @@ export default {
     'nativeb.link.copy': 'نسخ رابط هذه الملاحظة',
     'nativeb.link.copied': 'نُسخ الرابط. الصقه في موعد بالتقويم أو في تطبيق آخر لتعود إلى هذه الملاحظة.',
     'nativeb.link.copyFailed': 'تعذّر نسخ الرابط.',
+
+    'nativeb.att.open': 'فتح «{name}» في تطبيقه',
+    'nativeb.att.openFailed': 'تعذّر فتح «{name}». ربما حُذف من هذا الحاسوب.',
 
     'nativeb.word.saveAs': 'حفظ كمستند Word في مكان تختاره…',
     'nativeb.word.download': 'تنزيل كمستند Word',
