@@ -36,6 +36,7 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/libraries", get(list))
         .route("/api/libraries/switch", post(switch))
+        .route("/api/libraries/add", post(add_back))
         .route("/api/libraries/:id", patch(rename).delete(remove))
 }
 
@@ -95,6 +96,32 @@ async fn switch(State(st): S, Json(b): Json<SwitchReq>) -> R {
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
+struct AddReq { path: String }
+
+/// `POST /api/libraries/add {path}` → the entry: put a library folder (back) on the list without
+/// opening it — "Add it back" for a chat whose library was taken off. Only a folder that holds a
+/// Thoughts library (its rules page or its index), looked at like any folder the app is pointed at.
+async fn add_back(State(st): S, Json(b): Json<AddReq>) -> R {
+    let typed = b.path.trim();
+    let folder = crate::paths::expand_tilde(typed)?;
+    if typed.is_empty() || !folder.is_absolute() || !folder.is_dir() { return Err(crate::tr::err("library.no_folder", &[("path", typed)]).into()); }
+    if !folder.join("CLAUDE.md").is_file() && !folder.join("INDEX.md").is_file() { return Err(crate::tr::err("libs.not_library", &[("path", typed)]).into()); }
+    crate::trust::require(&folder)?;
+    let (s, id) = {
+        let mut cur = st.settings.write().await;
+        let mut next = cur.clone();
+        let id = next.list_folder(&folder.to_string_lossy());
+        next.save()?;
+        *cur = next.clone();
+        (next, id)
+    };
+    st.emit(json!({"type": "libraries.changed"}));
+    let l = s.libraries.iter().find(|l| l.id == id).cloned().ok_or_else(|| crate::tr::err("libs.not_found", &[]))?;
+    Ok(Json(entry_json(&st, &s, &l).await))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
 struct RenameReq { name: String }
 
 /// `PATCH /api/libraries/:id {name}`: the name the switcher shows (empty: the folder's own).
@@ -118,6 +145,10 @@ async fn remove(State(st): S, Path(id): Path<String>) -> R {
     let gone = {
         let mut cur = st.settings.write().await;
         let mut next = cur.clone();
+        // Work still going on there (a chat, a Wrap, an automatic task) keeps it on the list until it ends.
+        if let Some(l) = next.libraries.iter().find(|l| l.id == id) {
+            if activity(&st, &l.path).await.0 > 0 { return Err(crate::tr::err("libs.remove_busy", &[("name", &l.display_name())]).into()); }
+        }
         let gone = next.remove_library(&id)?;
         next.save()?;
         *cur = next;
@@ -150,9 +181,45 @@ pub async fn elsewhere(st: &AppState, lib: &std::path::Path) -> Option<String> {
     s.library_at(lib).map(Library::display_name)
 }
 
-/// The library a chat's work belongs to: the folder it was started in, else the open one.
-pub fn of_chat(s: &Settings, chat_library: Option<&str>) -> Option<PathBuf> {
-    chat_library.filter(|l| !l.trim().is_empty()).map(PathBuf::from).or_else(|| s.library())
+/// The listed library (the open one or another) whose folder is `p` or holds it — the innermost
+/// one, should one library sit inside another.
+fn library_holding(s: &Settings, p: &std::path::Path) -> Option<PathBuf> {
+    let real = crate::paths::canonical_lenient(p);
+    s.library().into_iter().chain(s.libraries.iter().map(|l| PathBuf::from(&l.path)))
+        .filter(|l| real.starts_with(crate::paths::canonical_lenient(l)))
+        .max_by_key(|l| crate::paths::canonical_lenient(l).components().count())
+}
+
+/// Is `lib` the open library or one in the list?
+fn listed(s: &Settings, lib: &std::path::Path) -> bool { s.is_open_library(lib) || s.library_at(lib).is_some() }
+
+/// The library a run works for — whose private folders it is denied and whose trust it needs —
+/// decided from one place. Where the run works (`cwd`) decides when that is inside a library;
+/// otherwise (a linked folder, a Wrap's working copy, the app's own folders) the library its chat
+/// belongs to. It fails closed: a run inside one library for a chat of another, a folder given
+/// beside it that is a different library, or a chat whose library is no longer in the list, does
+/// not start. Only a chat from before 0.0.9, which names no library at all, works for the open one.
+pub fn of_run(s: &Settings, cwd: &std::path::Path, add_dirs: &[PathBuf], chat_library: Option<&str>) -> anyhow::Result<Option<PathBuf>> {
+    let chat = chat_library.map(str::trim).filter(|l| !l.is_empty()).map(PathBuf::from);
+    let other = |c: &std::path::Path| crate::tr::err("chat.other_library", &[("path", &c.to_string_lossy())]);
+    if let Some(c) = &chat { if !listed(s, c) { return Err(crate::tr::err("libs.chat_unlisted", &[("path", &c.to_string_lossy())])); } }
+    let lib = match (library_holding(s, cwd), &chat) {
+        (Some(l), Some(c)) if !crate::settings::same_folder(&l, c) => return Err(other(c)),
+        (Some(l), _) => Some(l),
+        (None, Some(c)) => Some(c.clone()),
+        (None, None) => s.library(),
+    };
+    for d in add_dirs {
+        if let Some(l) = library_holding(s, d) {
+            if !lib.as_deref().map_or(false, |x| crate::settings::same_folder(x, &l)) { return Err(other(&l)); }
+        }
+    }
+    Ok(lib)
+}
+
+/// A chat whose library is not in the list any more: it cannot run, and no Wrap files it.
+pub fn chat_unlisted(s: &Settings, chat_library: Option<&str>) -> Option<String> {
+    chat_library.map(str::trim).filter(|l| !l.is_empty() && !listed(s, std::path::Path::new(l))).map(String::from)
 }
 
 /// Is a change asked for by a window that shows another library than the open one? Reading is
@@ -506,6 +573,98 @@ mod tests {
         st.settings.write().await.onboarded = false;
         assert_eq!(http(port, "POST", "/api/onboarding", &body.to_string(), None).await.0, 409);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn spec(chat: &str, cwd: &Path, add_dirs: Vec<PathBuf>) -> crate::claude::RunSpec {
+        crate::claude::RunSpec { chat_id: chat.into(), prompt: "go".into(), cwd: cwd.to_path_buf(), add_dirs,
+            options: crate::chats::RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, resume: None, append_system: None, extra_deny: vec![] }
+    }
+
+    #[tokio::test]
+    async fn a_chat_whose_library_left_the_list_cannot_run_and_is_never_wrapped() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "old-client");
+        t::write(&b, "CLAUDE.md", "# Rules\n");
+        let (_, b_id) = two(&st, &a, &b).await;
+        let gone = t::chat(&st, "about the old client").await;
+        st.chats.update(&gone, |c| c.library = Some(b.to_string_lossy().to_string())).await;
+        t::assistant(&st, |_| async { panic!("nothing may run for a library that is no longer listed") });
+        let port = serve(&st).await;
+        assert_eq!(http(port, "DELETE", &format!("/api/libraries/{b_id}"), "", None).await.0, 200);
+        // It cannot run: not by sending, and not by any run started for it, wherever that would work.
+        let (code, r) = http(port, "POST", &format!("/api/chats/{gone}/send"), &json!({"text": "go on"}).to_string(), None).await;
+        assert_eq!((code, r["code"].as_str()), (409, Some("library_unlisted")), "{r}");
+        for cwd in [&a, &b] {
+            let e = crate::claude::start_run(st.clone(), spec(&gone, cwd, vec![]), None).await.unwrap_err();
+            assert_eq!(crate::tr::classify_in(false, &e).code, "library_unlisted", "{}", cwd.display());
+        }
+        // No Wrap files it, in the open library or anywhere else.
+        assert_eq!(wraps::status(&st).await["count"], 0);
+        let e = wraps::start(st.clone(), false).await.unwrap_err();
+        assert_eq!(crate::tr::classify_in(false, &e).message, crate::tr::text_in(false, "wrap.nothing", &[]));
+        // "Add it back": listed again (not opened), and it is that library's chat once more.
+        let (code, r) = http(port, "POST", "/api/libraries/add", &json!({"path": b.to_string_lossy()}).to_string(), None).await;
+        assert_eq!((code, r["open"].as_bool()), (200, Some(false)), "{r}");
+        assert!(crate::libraries::chat_unlisted(&*st.settings.read().await, Some(&b.to_string_lossy())).is_none());
+        // Only a folder that holds a library can be added.
+        let plain = a.parent().unwrap().join("plain");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(http(port, "POST", "/api/libraries/add", &json!({"path": plain.to_string_lossy()}).to_string(), None).await.0, 422);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_run_works_for_one_library_only_and_is_denied_that_librarys_private_folders() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "personal");
+        let (_, b_id) = two(&st, &a, &b).await;
+        { let mut s = st.settings.write().await; s.switch_to(&b_id).unwrap(); s.private_paths = vec!["diary".into()]; }
+        let in_a = t::chat(&st, "about the first library").await;
+        st.chats.update(&in_a, |c| c.library = Some(a.to_string_lossy().to_string())).await;
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
+        let s2 = seen.clone();
+        t::assistant(&st, move |info| { let s = s2.clone(); async move { s.lock().unwrap().push((info.cwd.clone(), info.deny.clone())); true } });
+        // Working in the second library for a chat of the first: refused, whichever way it is put.
+        let linked = a.parent().unwrap().join("linked-project");
+        std::fs::create_dir_all(&linked).unwrap();
+        for s in [spec(&in_a, &b, vec![]), spec(&in_a, &b.join("notes"), vec![]), spec(&in_a, &linked, vec![b.clone()])] {
+            let e = crate::claude::start_run(st.clone(), s, None).await.unwrap_err();
+            let m = crate::tr::classify_in(false, &e).message;
+            assert!(m.starts_with("This chat belongs to another library"), "{m}");
+        }
+        assert!(seen.lock().unwrap().is_empty());
+        // In its own library — not the open one — with that library's private folders denied, not the open one's.
+        crate::claude::start_run(st.clone(), spec(&in_a, &a, vec![]), None).await.unwrap();
+        for _ in 0..400 { if !seen.lock().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        let (cwd, deny) = seen.lock().unwrap()[0].clone();
+        assert_eq!(cwd, a);
+        assert!(deny.iter().any(|d| d.contains("clients")), "{deny:?}");
+        assert!(!deny.iter().any(|d| d.contains("diary")), "{deny:?}");
+        // A chat from before 0.0.9 (no library named) works for the open library, with its private folders.
+        let old = t::chat(&st, "from an older version").await;
+        crate::claude::start_run(st.clone(), spec(&old, &b, vec![]), None).await.unwrap();
+        for _ in 0..400 { if seen.lock().unwrap().len() > 1 { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        let (cwd, deny) = seen.lock().unwrap()[1].clone();
+        assert_eq!(cwd, b);
+        assert!(deny.iter().any(|d| d.contains("diary")) && !deny.iter().any(|d| d.contains("clients")), "{deny:?}");
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_library_with_work_going_on_stays_on_the_list() {
+        let (st, a) = t::library().await;
+        let b = second(&a, "personal");
+        let (_, b_id) = two(&st, &a, &b).await;
+        let busy = t::chat(&st, "still answering").await;
+        st.chats.update(&busy, |c| { c.library = Some(b.to_string_lossy().to_string()); c.running = true; }).await;
+        let port = serve(&st).await;
+        let (code, r) = http(port, "DELETE", &format!("/api/libraries/{b_id}"), "", None).await;
+        assert_eq!(code, 409, "{r}");
+        assert!(r["error"].as_str().unwrap().contains("\"personal\""), "{r}");
+        assert_eq!(st.settings.read().await.libraries.len(), 2);
+        st.chats.update(&busy, |c| c.running = false).await;
+        assert_eq!(http(port, "DELETE", &format!("/api/libraries/{b_id}"), "", None).await.0, 200);
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
     }
 
     #[test]

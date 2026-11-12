@@ -2476,6 +2476,10 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         check_bypass(&chat.kind, chat.options.permission_mode.as_deref(), o.permission_mode.as_deref(), m.confirm_bypass)?;
     }
     if let Some(lib) = st.settings.read().await.library() { crate::trust::require(&lib)?; }
+    // A chat of a library taken off the list stays closed until that library is added back.
+    if let Some(gone) = crate::libraries::chat_unlisted(&*st.settings.read().await, chat.library.as_deref()) {
+        return Err(crate::tr::err("libs.chat_unlisted", &[("path", &gone)]).into());
+    }
     // Its session, and the wrap it will be saved by, live in the library it was started in.
     if !wraps::Scope::now(&st).await.holds(chat.library.as_deref()) {
         return Err(crate::tr::err("chat.other_library", &[("path", chat.library.as_deref().unwrap_or_default())]).into());

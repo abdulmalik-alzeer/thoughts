@@ -832,19 +832,21 @@ impl Settings {
     /// one's settings. `own`: the new library's settings when the user just chose them (setup);
     /// otherwise a listed one gets its own back and a new one starts from `for_new`. Returns its id.
     pub fn open_folder(&mut self, path: &str, own: Option<LibrarySettings>) -> String {
-        self.list_open_library();
-        let id = match self.library_at(std::path::Path::new(path)) {
-            Some(l) => l.id.clone(),
-            None => {
-                let mut id = library_id_for(path);
-                while self.libraries.iter().any(|l| l.id == id) { id = format!("lib-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]); }
-                self.libraries.push(Library { id: id.clone(), name: String::new(), path: path.to_string(), parked: None });
-                id
-            }
-        };
+        let id = self.list_folder(path);
         // Cannot fail: the id was just found or made.
         let _ = self.switch_to(&id);
         if let Some(o) = own { self.set_own(o); }
+        id
+    }
+
+    /// Put the library in folder `path` on the list without opening it (the one there already, or a
+    /// new entry that will start from `for_new`). Returns its id.
+    pub fn list_folder(&mut self, path: &str) -> String {
+        self.list_open_library();
+        if let Some(l) = self.library_at(std::path::Path::new(path)) { return l.id.clone(); }
+        let mut id = library_id_for(path);
+        while self.libraries.iter().any(|l| l.id == id) { id = format!("lib-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]); }
+        self.libraries.push(Library { id: id.clone(), name: String::new(), path: path.to_string(), parked: None });
         id
     }
 

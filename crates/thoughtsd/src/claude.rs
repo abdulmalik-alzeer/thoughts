@@ -1494,10 +1494,11 @@ pub async fn start_run(
     crate::settings::check_cli_value("effort", spec.options.effort.as_deref())?;
     crate::settings::check_cli_value("session", spec.resume.as_deref())?;
     let settings = state.settings.read().await.clone();
-    // The library this run belongs to: the one its chat was started in, else the open one. That
-    // library's own private folders apply, whichever library is open by the time it starts.
+    // The library this run works for, from where it works and the library its chat belongs to
+    // (`libraries::of_run`, which refuses the two disagreeing). That library's own private folders
+    // apply, whichever library is open by the time it starts.
     let chat_library = state.chats.with(&spec.chat_id, |c| c.library.clone()).await.flatten();
-    let library = crate::libraries::of_chat(&settings, chat_library.as_deref());
+    let library = crate::libraries::of_run(&settings, &spec.cwd, &spec.add_dirs, chat_library.as_deref())?;
     let private_paths = settings.private_paths_of(library.as_deref());
     // Nothing runs in a folder the user has not trusted. The app layer is the app's own folder.
     // Its staging copy likewise: the app creates it, strips any settings from it, and runs there
@@ -1961,7 +1962,7 @@ async fn denied_msg(state: &AppState, id: &str, list: &Value) -> Option<Msg> {
     // The library the run belongs to, with its own private folders.
     let chat_library = state.chats.with(id, |c| c.library.clone()).await.flatten();
     let settings = state.settings.read().await;
-    let library = crate::libraries::of_chat(&settings, chat_library.as_deref());
+    let library = crate::libraries::of_run(&settings, &cwd, &[], chat_library.as_deref()).ok().flatten();
     let private = settings.private_paths_of(library.as_deref());
     let home = crate::paths::home();
     let mut prof = profile(&kind, &mode, options.web);
