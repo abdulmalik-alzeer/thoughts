@@ -48,8 +48,8 @@ pub fn record_after(state: &Arc<AppState>, root: &Path, quiet: Duration) {
 /// assistant is working in the library, or a wrap or a save holds it), try again later.
 async fn record_saved(state: &Arc<AppState>, root: &Path) -> bool {
     // Another library was chosen meanwhile, or the history was switched off: nothing to do.
-    let current = state.settings.read().await.library().map(|l| crate::paths::canonical_lenient(&l));
-    if current.as_deref() != Some(crate::paths::canonical_lenient(root).as_path()) { return true; }
+    let (current, on) = { let s = state.settings.read().await; (s.library().map(|l| crate::paths::canonical_lenient(&l)), s.git_enabled()) };
+    if !on || current.as_deref() != Some(crate::paths::canonical_lenient(root).as_path()) { return true; }
     // The assistant's half-written files are not the user's version; its own entry follows its work.
     if state.run_active_in(root) { return false; }
     let Ok(_guard) = state.library_lock.clone().try_lock_owned() else { return false };
@@ -213,6 +213,13 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The next thing the app announces. Recording a version runs git several times, which takes
+    /// far longer on some computers (Windows) than on others: wait for the app to say it recorded,
+    /// never for a fixed time.
+    async fn next_event(events: &mut tokio::sync::broadcast::Receiver<serde_json::Value>) -> serde_json::Value {
+        tokio::time::timeout(Duration::from_secs(60), events.recv()).await.expect("nothing was announced within a minute").unwrap()
+    }
+
     #[tokio::test]
     async fn every_save_becomes_a_version_once_the_editing_pauses() {
         let (st, lib, root) = plain_library("none").await;
@@ -220,31 +227,33 @@ mod tests {
         let git::Repo::Kept(store) = git::repo_of(&lib) else { panic!("the history should be kept by the app") };
         let quiet = Duration::from_millis(60);
         let versions = || async { git::history(&st, &lib, Some("notes/plan.md"), 50).await.unwrap() };
+        // Long enough for a save that must not be recorded yet to have been looked at and left.
         let wait = || tokio::time::sleep(Duration::from_millis(400));
         let mut events = st.events.subscribe();
         // Saved at 10:00 …
         t::write(&lib, "notes/plan.md", "the ten o'clock text\n");
         record_after(&st, &lib, quiet);
-        wait().await;
+        assert_eq!(next_event(&mut events).await["type"], "history.changed");
         assert_eq!(versions().await.len(), 1, "recorded without opening History");
-        assert_eq!(events.try_recv().unwrap()["type"], "history.changed");
         // … overwritten and saved again at 11:00: both versions are there to go back to.
         t::write(&lib, "notes/plan.md", "the eleven o'clock text\n");
         record_after(&st, &lib, quiet);
-        wait().await;
+        assert_eq!(next_event(&mut events).await["type"], "history.changed");
         let v = versions().await;
         assert_eq!(v.len(), 2);
         assert_eq!(v[0]["subject"], "edit: your changes");
         assert_eq!(git::file_at(&st, &lib, "notes/plan.md", v[1]["hash"].as_str().unwrap()).await.unwrap(), b"the ten o'clock text\n");
 
         // A burst of saves is one version, recorded after the last of them.
+        let before = git::history(&st, &lib, None, 500).await.unwrap().len();
         for n in 1..=5 {
             t::write(&lib, "TODO.md", &format!("- [ ] call the bank\n- [x] task {n}\n"));
             record_after(&st, &lib, Duration::from_millis(150));
             tokio::time::sleep(Duration::from_millis(30)).await;
         }
-        let before = git::history(&st, &lib, None, 500).await.unwrap().len();
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(next_event(&mut events).await["type"], "history.changed");
+        wait().await;
+        assert!(events.try_recv().is_err(), "one version for the whole burst");
         let all = git::history(&st, &lib, None, 500).await.unwrap();
         assert_eq!(all.len(), before + 1);
         assert_eq!(all[0]["files"], serde_json::json!(["TODO.md"]));
@@ -261,7 +270,7 @@ mod tests {
         wait().await;
         assert_eq!(versions().await.len(), 2, "not while the assistant is at work");
         st.run_dirs.lock().unwrap().clear();
-        wait().await;
+        assert_eq!(next_event(&mut events).await["type"], "history.changed");
         assert_eq!(versions().await.len(), 3);
 
         // Nothing is recorded with the history switched off, or for a library no longer chosen.
