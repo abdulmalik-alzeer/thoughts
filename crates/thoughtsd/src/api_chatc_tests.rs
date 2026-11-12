@@ -46,3 +46,104 @@ async fn a_message_whose_answer_cannot_start_is_taken_back_with_its_files() {
     assert_eq!(shown(chat_send(State(st.clone()), Path("not-a-chat".into()), Json(SendBody::default())).await).status, 404);
     std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
 }
+
+/// Serve the real router on a local port; one request with the test token → (status, headers, body bytes).
+async fn serve(st: &Arc<AppState>) -> u16 {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let app = router(st.clone());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    port
+}
+async fn get_raw(port: u16, path: &str) -> (u16, String, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer test-token\r\nConnection: close\r\n\r\n");
+    s.write_all(head.as_bytes()).await.unwrap();
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out).await;
+    let at = out.windows(4).position(|w| w == b"\r\n\r\n").map_or(out.len(), |i| i + 4);
+    let head = String::from_utf8_lossy(&out[..at]).to_string();
+    let status = head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).unwrap_or(0);
+    (status, head.to_lowercase(), out[at..].to_vec())
+}
+
+#[tokio::test]
+async fn a_chats_own_attachments_are_shown_and_nothing_else_is() {
+    let st = Arc::new(AppState::for_test());
+    let chat = t::chat(&st, "look at this").await;
+    let other = t::chat(&st, "another").await;
+    let dir = paths::attachments_dir().join(&chat);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("photo (2).png"), b"\x89PNG picture").unwrap();
+    std::fs::write(dir.join("صورة.jpg"), b"jpeg").unwrap();
+    std::fs::write(dir.join("page.html"), b"<script>alert(1)</script>").unwrap();
+    let elsewhere = paths::home().join(format!("outside-{}.txt", uuid::Uuid::new_v4()));
+    std::fs::write(&elsewhere, b"not the chat's").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&elsewhere, dir.join("link.txt")).unwrap();
+    let odir = paths::attachments_dir().join(&other);
+    std::fs::create_dir_all(&odir).unwrap();
+    std::fs::write(odir.join("theirs.png"), b"other chat").unwrap();
+    let port = serve(&st).await;
+
+    let (status, head, body) = get_raw(port, &format!("/api/chats/{chat}/attachments/photo%20(2).png")).await;
+    assert_eq!((status, body.as_slice()), (200, &b"\x89PNG picture"[..]));
+    assert!(head.contains("content-type: image/png") && head.contains("nosniff") && head.contains("sandbox"), "{head}");
+    let (status, _, body) = get_raw(port, &format!("/api/chats/{chat}/attachments/{}", "%D8%B5%D9%88%D8%B1%D8%A9.jpg")).await;
+    assert_eq!((status, body.as_slice()), (200, &b"jpeg"[..]));
+    // A page is only ever text: it cannot run.
+    let (_, head, _) = get_raw(port, &format!("/api/chats/{chat}/attachments/page.html")).await;
+    assert!(head.contains("content-type: text/plain"), "{head}");
+    for bad in ["..%2F..%2Fsettings.json", "%2E%2E", "..", ".", "link.txt", "missing.png", "..%5Ctheirs.png", &format!("..%2F{other}%2Ftheirs.png"), "%00.png"] {
+        let (status, _, body) = get_raw(port, &format!("/api/chats/{chat}/attachments/{bad}")).await;
+        assert!(matches!(status, 400 | 404), "{bad}: {status}");
+        assert!(!body.windows(5).any(|w| w == b"other" || w == b"not t"), "{bad} leaked a file");
+    }
+    // Only a real chat's folder.
+    for id in ["..", "not-a-chat", &format!("{chat}%2F..")] {
+        let (status, _, _) = get_raw(port, &format!("/api/chats/{id}/attachments/theirs.png")).await;
+        assert!(matches!(status, 400 | 404), "{id}: {status}");
+    }
+    std::fs::remove_file(&elsewhere).unwrap();
+}
+
+#[tokio::test]
+async fn the_mention_list_comes_by_title_and_leaves_private_folders_out() {
+    let (st, lib) = t::library().await;
+    t::write(&lib, "clients/acme/README.md", "---\ntitle: Acme Trading\n---\n");
+    t::write(&lib, "diary/today.md", "# Today\n");
+    st.settings.write().await.private_paths = vec!["diary".into()];
+    let v = mention_list(State(st.clone())).await.unwrap().0;
+    let list = v.as_array().unwrap();
+    assert!(list.iter().any(|x| x["path"] == "clients/acme/README.md" && x["title"] == "Acme Trading" && x["kind"] == "idea"));
+    assert!(list.iter().any(|x| x["path"] == "ideas/shop/README.md" && x["title"] == "Shop"));
+    assert!(list.iter().all(|x| !x["path"].as_str().unwrap().starts_with("diary")), "{list:?}");
+    // A folder can be mentioned like a file; a private one cannot.
+    t::assistant(&st, |_| async { true });
+    let chat = t::chat(&st, "x").await;
+    let mut rx = st.events.subscribe();
+    chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "Look at @Acme Trading".into(), mentions: vec!["clients/acme".into()], ..Default::default() })).await.unwrap();
+    t::event(&mut rx, &st, "chat.done").await;
+    assert_eq!(shown(chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "and".into(), mentions: vec!["diary".into()], ..Default::default() })).await).status, 403);
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn sending_clears_the_suggestion_and_only_ordinary_chats_ask_for_one() {
+    let (st, lib) = t::library().await;
+    t::assistant(&st, |_| async { true });
+    let chat = t::chat(&st, "plan the week").await;
+    st.chats.update(&chat, |c| c.suggestion = Some("Make it a table".into())).await;
+    let mut rx = st.events.subscribe();
+    chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "Make it a table".into(), ..Default::default() })).await.unwrap();
+    assert!(st.chats.get(&chat).await.unwrap().suggestion.is_none(), "gone once the user has said what comes next");
+    t::event(&mut rx, &st, "chat.done").await;
+    // The choice travels with the run's options; it is on unless switched off in Settings.
+    assert!(st.chats.get(&chat).await.unwrap().options.prompt_suggestions);
+    st.settings.write().await.ai.claude.suggestions_off = true;
+    chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "again".into(), ..Default::default() })).await.unwrap();
+    t::event(&mut rx, &st, "chat.done").await;
+    assert!(!st.chats.get(&chat).await.unwrap().options.prompt_suggestions);
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}

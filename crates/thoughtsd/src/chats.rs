@@ -43,6 +43,10 @@ pub struct RunOptions {
     /// Spending ceiling for one run (automatic tasks). Set by the app only: never stored, never read from a client.
     #[serde(skip)]
     pub max_budget_usd: Option<f64>,
+    /// Ask the assistant program for a suggested next message after the answer (ordinary chats,
+    /// unless switched off in Settings). Set by the app only, like the spending ceiling.
+    #[serde(skip)]
+    pub prompt_suggestions: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -93,6 +97,10 @@ pub struct Chat {
     pub cost_usd: f64,
     /// Kind-specific data (wrap: chat ids; reorganize: branches).
     pub meta: Value,
+    /// What the assistant program predicted the user might say next, after the last answer.
+    /// Cleared as soon as the user sends something.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 /// Current shape of a chat file.
@@ -220,6 +228,7 @@ impl Default for Chat {
             interrupted: false,
             cost_usd: 0.0,
             meta: Value::Null,
+            suggestion: None,
         }
     }
 }

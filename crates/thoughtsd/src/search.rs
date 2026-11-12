@@ -176,7 +176,7 @@ fn file_cache() -> &'static Mutex<HashMap<PathBuf, FileEntry>> {
 }
 
 /// A note's title: `title:` in its frontmatter, else its first `# ` heading.
-fn title_of(text: &str) -> Option<String> {
+pub(crate) fn title_of(text: &str) -> Option<String> {
     let clean = |s: &str| { let s = s.trim().trim_matches(['"', '\'']).trim(); (!s.is_empty()).then(|| s.chars().take(200).collect::<String>()) };
     let mut lines = text.lines();
     if text.starts_with("---") {

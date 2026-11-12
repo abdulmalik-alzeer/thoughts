@@ -267,6 +267,8 @@ pub struct ClaudeSettings {
     pub base_url: Option<String>,
     /// A key for that address is saved in the password store (never in this file).
     pub has_api_token: bool,
+    /// No suggested next message under an answer. (Off by default: the suggestions are on.)
+    pub suggestions_off: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

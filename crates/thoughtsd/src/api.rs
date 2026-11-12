@@ -175,6 +175,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/restore", post(library_restore))
         .route("/api/library/undo", post(library_undo))
         .route("/api/library/tree", get(tree))
+        .route("/api/library/mentions", get(mention_list))
         .route("/api/library/file", get(read_file).put(write_file))
         .route("/api/library/raw", get(raw_file))
         .route("/api/library/import", post(import_files).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)))
@@ -197,6 +198,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/chats/:id/send", post(chat_send_route).layer(DefaultBodyLimit::max(SEND_BODY_LIMIT)))
         .route("/api/chats/:id/stop", post(chat_stop))
         .route("/api/chats/:id/ack-interrupted", post(chat_ack_interrupted))
+        .route("/api/chats/:id/attachments/:name", get(chat_attachment))
         // wrap & reorganize
         .route("/api/wrap", get(wrap_status).post(wrap_start))
         .route("/api/wrap/:id/apply", post(wrap_apply))
@@ -1372,6 +1374,12 @@ async fn tree(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     Ok(Json(json!(library::tree(&lib(&st).await?, &private_filter(&st, &q).await))))
 }
 async fn stats(State(st): S) -> R { Ok(Json(library::stats(&lib(&st).await?))) }
+/// What the chat's @-list offers (see `mentions::list`): never anything in a private folder.
+async fn mention_list(State(st): S) -> R {
+    let root = lib(&st).await?;
+    let private = st.settings.read().await.private_paths.clone();
+    Ok(Json(json!(tokio::task::spawn_blocking(move || crate::mentions::list(&root, &private)).await?)))
+}
 
 async fn read_file(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = lib(&st).await?;
@@ -2255,7 +2263,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     }
     drop(files);
     if !m.mentions.is_empty() {
-        prompt.push_str("\n\nReferenced library files (read them):\n");
+        prompt.push_str("\n\nReferenced library files and folders (read them; for a folder, look at what is in it):\n");
         for abs in &mention_paths { prompt.push_str(&format!("- {abs}\n")); }
     }
     let has_history = chat.messages.iter().any(|x| x.role == "assistant");
@@ -2268,13 +2276,15 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let mut um = Msg::new("user", &m.text);
     um.attachments = saved;
     um.tool = (!m.mentions.is_empty()).then(|| json!({"mentions": m.mentions}));
-    let opts = normalized(m.options.unwrap_or(chat.options.clone()), chat.options.permission_mode.as_deref());
+    let mut opts = normalized(m.options.unwrap_or(chat.options.clone()), chat.options.permission_mode.as_deref());
+    opts.prompt_suggestions = chat.kind == "chat" && !s.ai.claude.suggestions_off;
     // How the chat stood before this message, for when the assistant cannot be started (see below).
-    let before = (chat.title.clone(), chat.dirty, chat.mini_wrap.clone(), chat.updated);
+    let before = (chat.title.clone(), chat.dirty, chat.mini_wrap.clone(), chat.updated, chat.suggestion.clone());
     let updated = st.chats.update(&id, |c| {
         c.messages.push(um.clone());
         c.dirty = true;
         c.mini_wrap = None; // engaged again: the mini-wrap is stale
+        c.suggestion = None; // the user has said what comes next
         c.updated = chrono::Utc::now();
         c.options = opts.clone();
         // Talking in an archived chat brings it back. The first message names a chat nobody has named yet.
@@ -2313,16 +2323,38 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
 /// The assistant could not be started for this message: it is taken out of the chat again (with
 /// its files), so the message box — which gets the words back — is the only place it is. Sending
 /// it again then shows it once, not twice.
-async fn take_back_message(st: &Arc<AppState>, id: &str, um: &Msg, (title, dirty, mini_wrap, updated): (String, bool, Option<String>, chrono::DateTime<chrono::Utc>)) {
+async fn take_back_message(st: &Arc<AppState>, id: &str, um: &Msg, before: (String, bool, Option<String>, chrono::DateTime<chrono::Utc>, Option<String>)) {
+    let (title, dirty, mini_wrap, updated, suggestion) = before;
     let summary = st.chats.update(id, |c| {
         let n = c.messages.len();
         c.messages.retain(|x| x.id != um.id);
         if c.messages.len() == n { return; }
-        (c.title, c.dirty, c.mini_wrap, c.updated) = (title, dirty, mini_wrap, updated);
+        (c.title, c.dirty, c.mini_wrap, c.updated, c.suggestion) = (title, dirty, mini_wrap, updated, suggestion);
     }).await;
     for p in &um.attachments { let _ = std::fs::remove_file(p); }
     st.emit(json!({"type": "chat.message.removed", "chatId": id, "messageId": um.id}));
     if let Some(c) = summary { st.emit(json!({"type": "chat.updated", "chat": c.summary()})); }
+}
+
+/// One file attached to a message of this chat, to show it there (a picture, a PDF). Only a plain
+/// file name, exactly as it was saved, from this chat's own folder: never a path, never a link.
+async fn chat_attachment(State(st): S, Path((id, name)): Path<(String, String)>) -> Result<Response, ApiErr> {
+    if !crate::chats::valid_id(&id) || st.chats.meta(&id).await.is_none() { return Err(no_chat().into()); }
+    let gone = || ApiErr(crate::tr::err("not_found.file", &[]));
+    let plain = !name.is_empty() && name.len() <= 400 && !name.starts_with('.') && !name.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control());
+    if !plain { return Err(gone()); }
+    let dir = paths::attachments_dir().join(&id);
+    if !std::fs::symlink_metadata(&dir).map_or(false, |m| m.is_dir()) { return Err(gone()); }
+    let p = dir.join(&name);
+    let meta = std::fs::symlink_metadata(&p).map_err(|_| gone())?;
+    if !meta.file_type().is_file() || meta.len() > library::RAW_MAX_BYTES { return Err(gone()); }
+    let bytes = tokio::fs::read(&p).await.map_err(|_| gone())?;
+    Ok(([
+        (header::CONTENT_TYPE, HeaderValue::from_static(library::mime_for(&name))),
+        (header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff")),
+        (header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox; default-src 'none'")),
+        (header::CACHE_CONTROL, HeaderValue::from_static("no-store")),
+    ], bytes).into_response())
 }
 
 /// The user has seen that this chat's last run was cut off by a restart.

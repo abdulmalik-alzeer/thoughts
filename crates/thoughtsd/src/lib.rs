@@ -20,6 +20,7 @@ pub mod layer_api;
 pub mod library;
 pub mod links;
 pub mod log;
+pub mod mentions;
 pub mod modules;
 pub mod packs;
 pub mod paths;

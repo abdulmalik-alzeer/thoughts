@@ -1369,6 +1369,8 @@ fn run_args(opts: &RunOptions, mode: &str, budget: Option<&str>, resume: Option<
     a.push("--permission-mode".into());
     a.push(mode.into());
     if let Some(b) = budget { a.push("--max-budget-usd".into()); a.push(b.into()); }
+    // A predicted next message after the answer (a `prompt_suggestion` event, see `handle_event`).
+    if opts.prompt_suggestions { a.push("--prompt-suggestions".into()); a.push("true".into()); }
     for d in add_dirs { a.push("--add-dir".into()); a.push(d.into()); }
     match system {
         Passed::Inline(text) => { a.push("--append-system-prompt".into()); a.push(text.into()); }
@@ -1612,7 +1614,10 @@ pub async fn start_run(
     };
     let sys_file = if via_files { Some(temp.add(&tmp_dir, "system.txt", &sys)?) } else { None };
     let system = match &sys_file { Some(f) => Passed::File(f), None => Passed::Inline(&sys) };
-    c.current_dir(&spec.cwd).args(run_args(&spec.options, &mode, budget.as_deref(), spec.resume.as_deref(), &spec.add_dirs, rules_file.as_deref(), system));
+    // Suggested next messages only where the user can take them up, and only if this version has them.
+    let mut options = spec.options.clone();
+    options.prompt_suggestions = options.prompt_suggestions && kind == "chat" && supports(&help, "--prompt-suggestions");
+    c.current_dir(&spec.cwd).args(run_args(&options, &mode, budget.as_deref(), spec.resume.as_deref(), &spec.add_dirs, rules_file.as_deref(), system));
     c.args(profile_flags(&prof, &help));
     provider.apply(&mut c);
     c.stdin(std::process::Stdio::piped())
@@ -1985,6 +1990,16 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
             }
             None
         }
+        // After the answer: what the user might say next. Shown under the answer as a suggestion
+        // they can take up (or ignore); it goes as soon as they send anything.
+        "prompt_suggestion" => {
+            let text: String = ev["suggestion"].as_str().unwrap_or("").trim().chars().take(SUGGESTION_MAX_CHARS).collect();
+            if !text.is_empty() {
+                state.chats.update(id, |c| c.suggestion = Some(text.clone())).await;
+                state.emit(json!({"type": "chat.suggestion", "chatId": id, "text": text}));
+            }
+            None
+        }
         "result" => {
             let is_err = ev["is_error"].as_bool().unwrap_or(false) || ev["subtype"] != "success";
             let cost = ev["total_cost_usd"].as_f64().unwrap_or(0.0);
@@ -2043,6 +2058,9 @@ async fn note_plan_limit(state: &AppState, text: &str) -> Option<String> {
 /// `tool.code` of the chat message for a run that could not resume its session.
 pub const SESSION_LOST: &str = "sessionLost";
 
+/// The longest suggested next message kept (the CLI's are a sentence or two).
+pub const SUGGESTION_MAX_CHARS: usize = 600;
+
 /// Did a run fail because the CLI no longer has the session it was asked to resume? (It clears
 /// old sessions out, and a session belongs to the folder it ran in.)
 pub fn is_session_lost(text: &str) -> bool { text.contains("No conversation found with session ID") }
@@ -2050,6 +2068,9 @@ pub fn is_session_lost(text: &str) -> bool { text.contains("No conversation foun
 #[cfg(test)]
 #[path = "claude_session_tests.rs"]
 mod session_tests;
+#[cfg(test)]
+#[path = "claude_suggestion_tests.rs"]
+mod suggestion_tests;
 
 /// The chat message for a failed run. A missing or expired sign-in is said in plain words and
 /// marked (`tool.code = "signedOut"`) so the chat can offer to sign in; the CLI's text is kept as detail.

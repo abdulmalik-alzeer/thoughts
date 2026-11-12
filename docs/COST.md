@@ -30,6 +30,7 @@ What drives usage is how much the assistant has to read and write, not how many 
 - **Reading files adds up.** A question that makes the assistant open twenty notes uses more than one about the note in front of you.
 - **Work done for you in the background counts too**: Wrap, automatic tasks and customisation requests are all assistant runs.
 - **So do automatic summaries.** After a chat goes quiet, or when you start another one, its text is sent once more for a short summary that Wrap later works from. It uses a small, inexpensive model, and a very long chat is read in several parts. You can switch this off in Settings → Privacy; Wrap then summarises the chats when you press it.
+- **And so do suggested next messages.** After an answer in a chat, the assistant works out something you might say next and offers it under the answer. That is one more short request over the same conversation, and the answer waits a few seconds longer before it counts as finished. You can switch this off in Settings → Assistant.
 - **Reading, searching and editing in the app without chatting uses nothing.**
 
 On a subscription the practical effect of heavy use is reaching your plan's usage limit sooner, after which the provider makes you wait or offers an upgrade. On an API key the effect is a larger bill.
