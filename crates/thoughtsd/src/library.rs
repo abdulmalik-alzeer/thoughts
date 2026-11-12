@@ -481,6 +481,17 @@ pub fn read_raw(root: &Path, rel: &str) -> anyhow::Result<(Vec<u8>, &'static str
 /// still there if they change their line of work. A preset already installed there is kept and the
 /// copy at the top removed. Only the kit's own file names are touched; anything else in a folder
 /// called `presets` stays where it is. Returns whether anything was moved or removed.
+/// Does the way from `root` down to `path` (not counting `path` itself) pass through a link? The
+/// app never moves, writes or removes one of the kit's files by way of a link: where a link leads
+/// is not the library.
+fn via_link(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else { return true };
+    let mut parts: Vec<_> = rel.components().collect();
+    parts.pop();
+    let mut at = root.to_path_buf();
+    parts.into_iter().any(|c| { at.push(c); std::fs::symlink_metadata(&at).map_or(false, |m| m.file_type().is_symlink()) })
+}
+
 pub fn install_presets(root: &Path) -> bool {
     let (top, home) = (root.join("presets"), root.join(".claude/presets"));
     let is = |p: &Path, dir: bool| std::fs::symlink_metadata(p).map_or(false, |m| if dir { m.is_dir() } else { m.is_file() });
@@ -493,7 +504,7 @@ pub fn install_presets(root: &Path) -> bool {
         for f in d.files() {
             let Ok(rel) = f.path().strip_prefix("presets") else { continue };
             let (from, to) = (top.join(rel), home.join(rel));
-            if !is(&from, false) { continue; }
+            if !is(&from, false) || via_link(root, &from) || via_link(root, &to) { continue; }
             let done = if std::fs::symlink_metadata(&to).is_ok() { std::fs::remove_file(&from) } else {
                 to.parent().map_or(Ok(()), std::fs::create_dir_all)
                     // A rename can fail across volumes: copy, then remove.
@@ -567,9 +578,9 @@ pub fn tidy_kit_leftovers(root: &Path) -> usize {
         dirs.push(d.path().to_path_buf());
         for f in d.files() {
             let rel = f.path().to_string_lossy().replace('\\', "/");
-            if !untouched_kit_file(root, &rel) { continue; }
             // Installed as the kit ships it today, so it stays one of the app's own files.
             let home = root.join(".claude").join(f.path());
+            if !untouched_kit_file(root, &rel) || via_link(root, &root.join(&rel)) || via_link(root, &home) { continue; }
             if std::fs::symlink_metadata(&home).is_err() {
                 let put = home.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|_| std::fs::write(&home, f.contents()));
                 if let Err(e) = put { crate::log::warn(format!("could not install the preset {rel}: {e}")); continue; }
@@ -1157,7 +1168,28 @@ mod tests {
             std::os::unix::fs::symlink(&elsewhere, d.join("presets")).unwrap();
             assert!(!install_presets(&d));
             assert!(elsewhere.join("legal.md").exists() && !d.join(".claude").exists());
-            std::fs::remove_dir_all(elsewhere).unwrap();
+            std::fs::remove_dir_all(&elsewhere).unwrap();
+            // A link where the presets are installed, or inside the kit's folder: nothing is moved
+            // or written through it, at setup or when an older library is tidied.
+            for tidy in [false, true] {
+                let (lib, outside) = (tmp(), tmp());
+                create_from_starter(&lib).unwrap();
+                if tidy { std::fs::remove_dir_all(lib.join(SETUP_ROUTINE)).unwrap(); }
+                std::fs::create_dir_all(lib.join(".claude")).unwrap();
+                std::os::unix::fs::symlink(&outside, lib.join(".claude/presets")).unwrap();
+                if tidy { tidy_kit_leftovers(&lib); } else { install_presets(&lib); }
+                assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "nothing lands where the link leads");
+                assert!(lib.join("presets/legal.md").exists() && lib.join("presets/ar/legal.md").exists());
+                std::fs::remove_file(lib.join(".claude/presets")).unwrap();
+                // The Arabic presets reached through a link stay where they are, the rest is tidied.
+                std::fs::rename(lib.join("presets/ar"), outside.join("ar")).unwrap();
+                std::os::unix::fs::symlink(outside.join("ar"), lib.join("presets/ar")).unwrap();
+                if tidy { tidy_kit_leftovers(&lib); } else { install_presets(&lib); }
+                assert!(outside.join("ar/legal.md").exists() && !lib.join(".claude/presets/ar").exists());
+                assert!(lib.join(".claude/presets/legal.md").exists() && !lib.join("presets/legal.md").exists());
+                std::fs::remove_dir_all(lib).unwrap();
+                std::fs::remove_dir_all(outside).unwrap();
+            }
         }
         std::fs::remove_dir_all(d).unwrap();
     }
