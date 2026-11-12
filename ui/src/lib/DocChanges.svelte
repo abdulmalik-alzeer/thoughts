@@ -9,7 +9,15 @@
   type Hunk = { line: number; lines: [string, string][] };
   export type Doc = { path: string; from?: string | null; change: string; detail: boolean; binary: boolean; added?: number | null; removed?: number | null; more: number; hunks: Hunk[] };
 
-  let { files, canOpen = false }: { files: Doc[]; canOpen?: boolean } = $props();
+  let { files, canOpen = false, labels, single = false }: {
+    files: Doc[];
+    canOpen?: boolean;
+    /** When comparing two versions (not showing a change): what a `+` and a `-` line mean here
+     *  ("Only in this version"…). Shown as a key above the documents and read out for each line. */
+    labels?: { added: string; removed: string };
+    /** One document whose name is already shown around this view: its lines only. */
+    single?: boolean;
+  } = $props();
 
   // A few documents are all shown open; with many, the first ones are, and the rest are a tap away.
   let open = $state<Record<string, boolean>>({});
@@ -25,6 +33,36 @@
   }
 </script>
 
+{#if labels && files.some((d) => d.hunks?.length)}
+  <p class="key muted" aria-hidden="true">
+    <span><span class="sw add">+</span> {labels.added}</span>
+    <span><span class="sw rem">−</span> {labels.removed}</span>
+  </p>
+{/if}
+{#snippet lines(d: Doc)}
+  {#each d.hunks as h, hi}
+    {#if hi > 0 || h.line > 1}<p class="gap muted">{t('wrapb.doc.at', { n: fmtNum(h.line) })}</p>{/if}
+    <div class="lines">
+      {#each h.lines as [k, s]}
+        <div class="ln" class:add={k === '+'} class:rem={k === '-'}>
+          <span class="sign" aria-hidden="true">{k === '+' ? '+' : k === '-' ? '−' : ''}</span>
+          {#if k !== ' '}<span class="sr">{labels ? (k === '+' ? labels.added : labels.removed) + ': ' : t(k === '+' ? 'wrapb.doc.added.line' : 'wrapb.doc.removed.line')}</span>{/if}
+          <span class="txt" dir="auto">{s || ' '}</span>
+        </div>
+      {/each}
+    </div>
+  {/each}
+  {#if d.more}<p class="note muted">{tn('wrapb.doc.more', d.more)}</p>{/if}
+{/snippet}
+{#if single && files.length === 1}
+  {@const d = files[0]}
+  <div class="one">
+    {#if d.binary}<p class="note muted">{t('wrapb.doc.binary')}</p>
+    {:else if !d.detail}<p class="note muted">{t('wrapb.doc.noDetail')}</p>
+    {:else if !d.hunks.length}<p class="note muted">{t('histc.cv.same')}</p>
+    {:else}{@render lines(d)}{/if}
+  </div>
+{:else}
 <ul class="docs" aria-label={t('wrapb.doc.list')}>
   {#each files as d, i (d.path)}
     {@const shown = isOpen(d, i) && hasBody(d)}
@@ -46,25 +84,14 @@
           {#if d.binary}<p class="note muted">{t('wrapb.doc.binary')}</p>
           {:else if !d.detail}<p class="note muted">{t('wrapb.doc.noDetail')}</p>
           {:else}
-            {#each d.hunks as h, hi}
-              {#if hi > 0 || h.line > 1}<p class="gap muted">{t('wrapb.doc.at', { n: fmtNum(h.line) })}</p>{/if}
-              <div class="lines">
-                {#each h.lines as [k, s]}
-                  <div class="ln" class:add={k === '+'} class:rem={k === '-'}>
-                    <span class="sign" aria-hidden="true">{k === '+' ? '+' : k === '-' ? '−' : ''}</span>
-                    {#if k !== ' '}<span class="sr">{t(k === '+' ? 'wrapb.doc.added.line' : 'wrapb.doc.removed.line')}</span>{/if}
-                    <span class="txt" dir="auto">{s || ' '}</span>
-                  </div>
-                {/each}
-              </div>
-            {/each}
-            {#if d.more}<p class="note muted">{tn('wrapb.doc.more', d.more)}</p>{/if}
+            {@render lines(d)}
           {/if}
         </div>
       {/if}
     </li>
   {/each}
 </ul>
+{/if}
 
 <style>
   .docs { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
@@ -91,5 +118,11 @@
   .sign { flex: none; width: 1ch; font-family: var(--mono); color: var(--muted); }
   .ln.add .sign { color: var(--ok); } .ln.rem .sign { color: var(--danger); }
   .txt { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+  .key { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 0 0 6px; font-size: var(--fs-xs); }
+  .key > span { display: inline-flex; align-items: center; gap: 6px; }
+  .sw { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 4px; font-weight: 600; }
+  .sw.add { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+  .sw.rem { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+  .one { min-width: 0; }
   .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; padding: 0; border: 0; }
 </style>

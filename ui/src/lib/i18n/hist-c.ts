@@ -1,30 +1,10 @@
-// Reading and repairing the history (0.0.9): what a change did (ChangeView, shared by History,
-// Versions, a sync clash and a repair), the per-document choice when two devices clash, and the
-// history's health check and repair.
+// Reading and repairing the history (0.0.9): what a change did and how a version differs (shown
+// with lib/DocChanges.svelte, shared with Wrap and Reorganize), the per-document choice when two
+// devices clash, and the history's health check and repair.
 export default {
   en: {
-    // --- ChangeView: what changed, document by document ---
-    'histc.cv.added': 'Added',
-    'histc.cv.removed': 'Removed',
-    'histc.cv.change.added': 'New',
-    'histc.cv.change.edited': 'Changed',
-    'histc.cv.change.moved': 'Moved',
-    'histc.cv.change.deleted': 'Removed',
-    'histc.cv.nAdded_one': '{n} line added',
-    'histc.cv.nAdded_other': '{n} lines added',
-    'histc.cv.nRemoved_one': '{n} line removed',
-    'histc.cv.nRemoved_other': '{n} lines removed',
-    'histc.cv.and': ', ',
-    'histc.cv.binary': 'This file is not text, so what changed in it cannot be shown here.',
-    'histc.cv.noDetail': 'This document is too large to show line by line, or there are too many documents to show each one.',
-    'histc.cv.movedOnly': 'Moved, with no change to its text.',
+    // --- DocChanges: one document compared, with nothing different ---
     'histc.cv.same': 'No difference in the text.',
-    'histc.cv.line': 'Line {n}',
-    'histc.cv.more_one': 'And {n} more changed line, not shown here.',
-    'histc.cv.more_other': 'And {n} more changed lines, not shown here.',
-    'histc.cv.none': 'Nothing changed.',
-    'histc.cv.open': 'Open this document',
-    'histc.cv.from': 'moved from',
 
     // --- History ---
     'histc.hist.showChanges': 'What changed',
@@ -127,38 +107,7 @@ export default {
     'care.fix.repair-history': 'Repair history',
   },
   ar: {
-    'histc.cv.added': 'أُضيف',
-    'histc.cv.removed': 'حُذف',
-    'histc.cv.change.added': 'جديد',
-    'histc.cv.change.edited': 'معدَّل',
-    'histc.cv.change.moved': 'منقول',
-    'histc.cv.change.deleted': 'محذوف',
-    'histc.cv.nAdded_zero': 'لم يُضف أي سطر',
-    'histc.cv.nAdded_one': 'أُضيف سطر واحد',
-    'histc.cv.nAdded_two': 'أُضيف سطران',
-    'histc.cv.nAdded_few': 'أُضيفت {n} أسطر',
-    'histc.cv.nAdded_many': 'أُضيف {n} سطراً',
-    'histc.cv.nAdded_other': 'أُضيف {n} سطر',
-    'histc.cv.nRemoved_zero': 'لم يُحذف أي سطر',
-    'histc.cv.nRemoved_one': 'حُذف سطر واحد',
-    'histc.cv.nRemoved_two': 'حُذف سطران',
-    'histc.cv.nRemoved_few': 'حُذفت {n} أسطر',
-    'histc.cv.nRemoved_many': 'حُذف {n} سطراً',
-    'histc.cv.nRemoved_other': 'حُذف {n} سطر',
-    'histc.cv.and': '، ',
-    'histc.cv.binary': 'هذا الملف ليس نصاً، فلا يمكن عرض ما تغيّر فيه هنا.',
-    'histc.cv.noDetail': 'هذا المستند أكبر من أن يُعرض سطراً سطراً، أو أن المستندات أكثر من أن يُعرض كل منها.',
-    'histc.cv.movedOnly': 'نُقل دون أي تغيير في نصّه.',
     'histc.cv.same': 'لا فرق في النص.',
-    'histc.cv.line': 'السطر {n}',
-    'histc.cv.more_one': 'وسطر آخر تغيّر ولم يُعرض هنا.',
-    'histc.cv.more_two': 'وسطران آخران تغيّرا ولم يُعرضا هنا.',
-    'histc.cv.more_few': 'و{n} أسطر أخرى تغيّرت ولم تُعرض هنا.',
-    'histc.cv.more_many': 'و{n} سطراً آخر تغيّرت ولم تُعرض هنا.',
-    'histc.cv.more_other': 'و{n} سطر آخر تغيّرت ولم تُعرض هنا.',
-    'histc.cv.none': 'لم يتغيّر شيء.',
-    'histc.cv.open': 'افتح هذا المستند',
-    'histc.cv.from': 'نُقل من',
 
     'histc.hist.showChanges': 'ما الذي تغيّر',
     'histc.hist.hideChanges': 'إخفاء التغييرات',

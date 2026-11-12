@@ -3,7 +3,7 @@
   // take the other device's, or keep both (the other one saved beside it). Each can be compared
   // first. Mounted once in App; opened by `askClash` (lib/conflict.svelte.ts).
   import Icon from './Icon.svelte';
-  import ChangeView, { type ChangeFile } from './ChangeView.svelte';
+  import DocChanges, { type Doc } from './DocChanges.svelte';
   import { api } from './api';
   import { errDetail } from './errors';
   import { trapFocus } from './focus';
@@ -12,7 +12,7 @@
 
   const CHOICES: Choice[] = ['mine', 'theirs', 'both'];
   const label = (c: Choice) => t('histc.clash.' + c);
-  let shown = $state<Record<string, { loading: boolean; error: string; files: ChangeFile[] | null }>>({});
+  let shown = $state<Record<string, { loading: boolean; error: string; files: Doc[] | null }>>({});
   // A fresh list (asked again with more documents): what was opened before is forgotten.
   $effect(() => { if (clash.answer) shown = {}; });
 
@@ -69,7 +69,7 @@
                 {:else if shown[f].error}
                   <p class="muted sm" role="alert" dir="auto"><Icon name="warning" size={14} /> {shown[f].error}</p>
                 {:else if shown[f].files}
-                  <ChangeView files={shown[f].files ?? []} single labels={{ added: t('histc.clash.onlyTheirs'), removed: t('histc.clash.onlyMine') }} />
+                  <DocChanges files={shown[f].files ?? []} single labels={{ added: t('histc.clash.onlyTheirs'), removed: t('histc.clash.onlyMine') }} />
                 {/if}
               </div>
             {/if}

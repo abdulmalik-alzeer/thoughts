@@ -4,7 +4,7 @@
   // it is, and afterwards lists any document that differs from that copy, to compare and bring back.
   import { onMount } from 'svelte';
   import Icon from '../lib/Icon.svelte';
-  import ChangeView, { type ChangeFile } from '../lib/ChangeView.svelte';
+  import DocChanges, { type Doc } from '../lib/DocChanges.svelte';
   import { api, post } from '../lib/api';
   import { toast } from '../lib/store.svelte';
   import { confirmDialog } from '../lib/dialog.svelte';
@@ -23,7 +23,7 @@
   let rebuilt = $state<{ fromLocation: boolean } | null>(null);
   let broughtBack = $state<Record<string, boolean>>({});
   let busy = $state('');
-  let shown = $state<Record<string, { loading: boolean; error: string; files: ChangeFile[] | null }>>({});
+  let shown = $state<Record<string, { loading: boolean; error: string; files: Doc[] | null }>>({});
 
   async function check() {
     phase = 'checking'; checkError = '';
@@ -139,7 +139,7 @@
               <div class="cmp" aria-live="polite">
                 {#if shown[d].loading}<div class="skel"></div>
                 {:else if shown[d].error}<p class="muted sm" role="alert" dir="auto">{shown[d].error}</p>
-                {:else}<ChangeView files={shown[d].files ?? []} single labels={{ added: t('histc.repair.onlyNow'), removed: t('histc.repair.onlyCopy') }} />{/if}
+                {:else}<DocChanges files={shown[d].files ?? []} single labels={{ added: t('histc.repair.onlyNow'), removed: t('histc.repair.onlyCopy') }} />{/if}
               </div>
             {/if}
           </li>

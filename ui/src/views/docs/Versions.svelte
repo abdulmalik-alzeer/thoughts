@@ -2,7 +2,7 @@
   // Earlier versions of one library file: list → preview → restore.
   import { onMount } from 'svelte';
   import Icon from '../../lib/Icon.svelte';
-  import ChangeView, { type ChangeFile } from '../../lib/ChangeView.svelte';
+  import DocChanges, { type Doc } from '../../lib/DocChanges.svelte';
   import { api, post } from '../../lib/api';
   import { errCode, errDetail, failed } from '../../lib/errors';
   import { trapFocus } from '../../lib/focus';
@@ -26,7 +26,7 @@
   let seq = 0;
   // How the chosen version is shown: what differs from the text now, or its whole text.
   let view = $state<'diff' | 'text'>('diff');
-  let diff = $state<ChangeFile[] | null>(null);
+  let diff = $state<Doc[] | null>(null);
   let diffError = $state('');
   // Versions are read a page at a time, however many there are: `more` says older ones exist.
   const PAGE = 50;
@@ -170,7 +170,7 @@
                 <p class="muted"><Icon name="check" size={14} /> {t('histc.ver.same')}</p>
               {:else if diff}
                 <p class="muted sm">{t('histc.ver.diffIntro')}</p>
-                <ChangeView files={diff} single labels={{ added: t('histc.ver.onlyNow'), removed: t('histc.ver.onlyThen') }} />
+                <DocChanges files={diff} single labels={{ added: t('histc.ver.onlyNow'), removed: t('histc.ver.onlyThen') }} />
               {/if}
             {:else if /\.md$/i.test(path)}
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->

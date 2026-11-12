@@ -4,7 +4,7 @@
   import Icon from '../lib/Icon.svelte';
   import Rollback from './Rollback.svelte';
   import HistoryRepair from './HistoryRepair.svelte';
-  import ChangeView, { type ChangeFile } from '../lib/ChangeView.svelte';
+  import DocChanges, { type Doc } from '../lib/DocChanges.svelte';
   import { api, on, post } from '../lib/api';
   import { app, go, toast } from '../lib/store.svelte';
   import { confirmDialog } from '../lib/dialog.svelte';
@@ -32,7 +32,7 @@
   let historyState = $state(false);
   $effect(() => { if (app.view.kind === 'history' && app.view.id === 'repair') { tab = 'notes'; showRepair = true; } });
   // What each entry changed, read when it is first unfolded.
-  let changes = $state<Record<string, { loading: boolean; error: string; files: ChangeFile[] | null }>>({});
+  let changes = $state<Record<string, { loading: boolean; error: string; files: Doc[] | null }>>({});
 
   /** `count` entries from `skip` on, plus whether there are older ones (one more is asked for to know). */
   async function page(skip: number, count: number): Promise<{ list: Entry[]; more: boolean }> {
@@ -221,7 +221,7 @@
                     {:else if c.error}<p class="muted sm" role="alert" dir="auto"><Icon name="warning" size={13} /> {c.error}</p>
                     {:else if c.files}
                       {#if e.merge}<p class="muted sm">{t('histc.hist.mergeChanges')}</p>{/if}
-                      <ChangeView files={c.files} openCount={3} onopen={(p) => go({ kind: 'docs', path: p })} />
+                      <DocChanges files={c.files} canOpen />
                     {/if}
                   </div>
                 {/if}
