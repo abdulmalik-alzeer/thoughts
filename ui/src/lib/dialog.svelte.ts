@@ -1,4 +1,6 @@
 // In-app replacements for window.confirm / window.prompt. Rendered by lib/Dialogs.svelte (mounted once in App).
+import type { TrustInfo } from './trust';
+
 export type DialogChoice = { id: string; label: string; primary?: boolean; danger?: boolean };
 export type DialogReq = {
   kind: 'confirm' | 'prompt' | 'choice';
@@ -7,6 +9,8 @@ export type DialogReq = {
   list?: string[];
   /** Small reassuring line shown under the list (e.g. "a backup is always kept"). */
   note?: string;
+  /** The background service's trust question: the dialog then shows the folder and what it found (lib/TrustBody.svelte). */
+  trust?: TrustInfo;
   confirmLabel?: string;
   cancelLabel?: string;
   danger?: boolean;

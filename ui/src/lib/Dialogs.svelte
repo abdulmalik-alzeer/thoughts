@@ -2,6 +2,7 @@
   import { dialogs, dismissDialog } from './dialog.svelte';
   import { t } from './i18n';
   import { trapFocus } from './focus';
+  import TrustBody from './TrustBody.svelte';
 
   let value = $state('');
   $effect(() => { if (dialogs.current) value = dialogs.current.value ?? ''; });
@@ -18,10 +19,10 @@
 {#if dialogs.current}
   {@const d = dialogs.current}
   <div class="modal-bg top" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) cancel(); }}>
-    <div class="modal dlg" role="alertdialog" aria-modal="true" aria-labelledby="dlg-title" aria-describedby={d.body ? 'dlg-body' : undefined} tabindex="-1"
+    <div class="modal dlg" class:wide={!!d.trust} role="alertdialog" aria-modal="true" aria-labelledby="dlg-title" aria-describedby={d.body || d.trust ? 'dlg-body' : undefined} tabindex="-1"
       use:trapFocus={{ onEscape: cancel }}>
       <h2 id="dlg-title" dir="auto">{d.title}</h2>
-      {#if d.body}<p id="dlg-body" class="muted" dir="auto">{d.body}</p>{/if}
+      {#if d.trust}<TrustBody info={d.trust} />{:else if d.body}<p id="dlg-body" class="muted" dir="auto">{d.body}</p>{/if}
       {#if d.list?.length}<ul class="scroll">{#each d.list as li}<li><bdi>{li}</bdi></li>{/each}</ul>{/if}
       {#if d.note}<p class="note" dir="auto">{d.note}</p>{/if}
       {#if d.kind === 'prompt'}
@@ -45,6 +46,7 @@
 
 <style>
   .dlg { max-width: 480px; display: grid; gap: 12px; }
+  .dlg.wide { max-width: 600px; }
   h2 { margin: 0; font-size: 17px; }
   p { margin: 0; white-space: pre-wrap; }
   ul { margin: 0; padding-inline-start: 18px; display: grid; gap: 4px; font-size: 13px; max-height: 30vh; }

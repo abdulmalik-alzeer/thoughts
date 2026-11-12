@@ -151,7 +151,22 @@ export class ApiError extends Error {
   status: number;
   /** Stable machine string: the daemon's `code`, or the `XXX::` prefix of the message ('' when none). */
   code: string;
-  constructor(message: string, status: number, code = '') { super(message); this.status = status; this.code = code; }
+  /** The parsed error body, when the daemon sent one (`{error, code, …}`). */
+  data?: any;
+  constructor(message: string, status: number, code = '', data?: any) { super(message); this.status = status; this.code = code; this.data = data; }
+}
+
+const trustAsked = new Map<string, Promise<boolean>>();
+
+/** The user's yes to trust question `id`. Resolves a newer question when the folder changed while
+ *  the dialog was open (the daemon then refuses the old answer and asks again), null once recorded. */
+async function answerTrust(id: string) {
+  const { isTrustInfo } = await import('./trust');
+  try { await api('/library/trust', { method: 'POST', body: { id } }); return null; }
+  catch (e) {
+    if (e instanceof ApiError && e.status === 403 && e.data?.code === 'untrusted' && isTrustInfo(e.data?.trust)) return e.data.trust;
+    throw e;
+  }
 }
 
 export async function api<T = any>(path: string, opts: { method?: string; body?: any } = {}): Promise<T> {
@@ -174,17 +189,24 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
   try { data = text ? JSON.parse(text) : null; } catch { data = { error: text.slice(0, 300) }; }
   if (!r.ok) {
     const msg: string = data?.error || r.statusText;
-    // The daemon refuses to work in a library that can run programs until the user trusts it.
-    const m = msg.match(/UNTRUSTED::(.*?)::(.*)/s);
-    if (m && path !== '/library/trust') {
-      const { confirmDialog } = await import('./dialog.svelte');
-      const { t } = await import('./i18n');
-      const ok = await confirmDialog({ title: t('trustTitle'), body: t('trustBody'), list: m[2].split('; '), confirmLabel: t('trustConfirm'), danger: true });
-      if (!ok) throw new ApiError(t('shell.libraryNotOpened'), r.status);
-      await api('/library/trust', { method: 'POST', body: { path: m[1] } });
-      return api<T>(path, opts);
+    // The daemon refuses to work in a folder that can run programs until the user trusts it. The
+    // question is opened only by the structured `trust` object of a 403 `untrusted` answer — never
+    // by anything in the message text, which can carry file names and other outside words.
+    if (r.status === 403 && data?.code === 'untrusted' && path !== '/library/trust') {
+      const { askTrust, isTrustInfo } = await import('./trust');
+      if (isTrustInfo(data.trust)) {
+        // Several calls refused over the same folder share one question (and one dialog).
+        const id = data.trust.id;
+        let asked = trustAsked.get(id);
+        if (!asked) { asked = askTrust(data.trust, answerTrust).finally(() => trustAsked.delete(id)); trustAsked.set(id, asked); }
+        if (!(await asked)) {
+          const { t } = await import('./i18n');
+          throw new ApiError(t('seca.trust.declined'), r.status, 'untrusted');
+        }
+        return api<T>(path, opts);
+      }
     }
-    throw new ApiError(await friendly(msg), r.status, codeOf(msg) || String(data?.code ?? ''));
+    throw new ApiError(await friendly(msg), r.status, codeOf(msg) || String(data?.code ?? ''), data);
   }
   return data as T;
 }

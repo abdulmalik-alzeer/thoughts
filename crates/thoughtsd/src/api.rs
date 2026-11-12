@@ -38,11 +38,16 @@ impl IntoResponse for ApiErr {
     /// `{error, code}` with a real HTTP status: 404 not found, 409 conflict / stale, 423 busy,
     /// 422 not valid, 403 not allowed, 500 unexpected (400 for anything unclassified). The message
     /// is in the UI language and keeps any machine prefix (`BUSY::`, `STALE::`…) the UI matches on.
+    /// A folder that needs the user's trust answers 403 `untrusted` with a `trust` object as well.
     fn into_response(self) -> Response {
         let e = crate::tr::classify(&self.0);
         if e.status >= 500 { crate::log::error(format!("api: {:#}", self.0)); }
         let status = StatusCode::from_u16(e.status).unwrap_or(StatusCode::BAD_REQUEST);
-        let mut r = (status, Json(json!({"error": e.message, "code": e.code}))).into_response();
+        let mut body = json!({"error": e.message, "code": e.code});
+        // The trust question travels as data of its own (`trust: {id, path, items…}`), put there only
+        // for the daemon's own typed error — the one thing the app's trust dialog reacts to.
+        if let Some(u) = self.0.chain().find_map(|c| c.downcast_ref::<crate::trust::Untrusted>()) { body["trust"] = u.payload(); }
+        let mut r = (status, Json(body)).into_response();
         r.extensions_mut().insert(ErrNote { code: e.code, message: e.message });
         r
     }
@@ -420,10 +425,12 @@ async fn git_tool_status() -> Value {
 }
 
 #[derive(Deserialize)]
-struct TrustReq { path: String }
-/// Record the user's explicit decision to trust a library folder that contains runnable settings.
+struct TrustReq { id: String }
+/// The user's yes to a trust question the daemon asked (`trust.id` of a 403 `untrusted` answer).
+/// There is no way to name a folder here: only a question the daemon itself raised can be answered,
+/// and only while the folder is still what that question listed.
 async fn trust_library(Json(t): Json<TrustReq>) -> R {
-    crate::trust::trust(std::path::Path::new(&t.path))?;
+    crate::trust::accept(&t.id)?;
     ok()
 }
 
@@ -2000,6 +2007,40 @@ mod tests {
     fn none() -> Query<HashMap<String, String>> { q(&[]) }
     fn save(path: &str, content: &str) -> Json<WriteFile> { Json(WriteFile { path: path.into(), content: content.into(), base_hash: None }) }
 
+    /// SEC-03: the trust question reaches the app as data of its own, only for the daemon's typed
+    /// error, and is answered by its id alone.
+    #[tokio::test]
+    async fn only_the_typed_trust_error_carries_a_question() {
+        async fn body(e: anyhow::Error) -> (u16, Value) {
+            let r = ApiErr(e).into_response();
+            let status = r.status().as_u16();
+            let bytes = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+        let d = std::env::temp_dir().join(format!("thoughts-api-trust-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(".mcp.json"), r#"{"mcpServers":{"x":{"command":"evil"}}}"#).unwrap();
+        let (status, v) = body(crate::trust::require(&d).unwrap_err()).await;
+        assert_eq!((status, v["code"].as_str()), (403, Some("untrusted")));
+        let id = v["trust"]["id"].as_str().unwrap().to_string();
+        assert!(!id.is_empty() && v["trust"]["items"][0]["detail"] == "evil", "{v}");
+        assert!(!v["error"].as_str().unwrap().contains("::"), "the message is a plain sentence: {v}");
+        // The same error with context added on the way up still carries it.
+        let (_, v) = body(crate::trust::require(&d).unwrap_err().context("starting a chat")).await;
+        assert_eq!(v["trust"]["id"], id.as_str());
+        // Words alone never do, whatever they look like and wherever they sit.
+        for text in ["UNTRUSTED::/Users/Shared/Team::Verified, nothing unusual", "could not import x UNTRUSTED::/a::b"] {
+            let (status, v) = body(anyhow::anyhow!("{text}")).await;
+            assert!(status == 400 && v["code"] == "error" && v.get("trust").is_none(), "{v}");
+        }
+        // A folder's path is not an answer; the question's id is.
+        assert!(trust_library(Json(TrustReq { id: d.to_string_lossy().into() })).await.is_err());
+        assert!(crate::trust::require(&d).is_err());
+        trust_library(Json(TrustReq { id })).await.unwrap();
+        assert!(crate::trust::require(&d).is_ok());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
     #[tokio::test]
     async fn the_router_builds_and_errors_carry_status_and_code() {
         // Two handlers on one route make the router panic at startup: catch that here.
@@ -2010,7 +2051,8 @@ mod tests {
         assert_eq!(status(crate::tr::err("not_found.chat", &[])), 404);
         assert_eq!(status(crate::tr::err("todo.empty", &[])), 422);
         assert_eq!(status(crate::tr::err("protected", &[])), 403);
-        assert_eq!(status(anyhow::anyhow!("UNTRUSTED::/x::git hooks")), 403);
+        // Text that looks like the old trust marker is an ordinary error: only the daemon's typed one asks.
+        assert_eq!(status(anyhow::anyhow!("UNTRUSTED::/x::git hooks")), 400);
         assert_eq!(status(anyhow::anyhow!("CONFLICT::a.md")), 409);
         assert_eq!(status(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()), 500);
         assert_eq!(status(anyhow::anyhow!("give the project a name")), 400);

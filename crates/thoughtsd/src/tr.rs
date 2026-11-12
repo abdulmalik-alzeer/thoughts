@@ -259,6 +259,15 @@ const TABLE: &[Entry] = &[
     e("bypass.chat_only", "forbidden", 403, "",
         "Bypassing permissions is only available in ordinary chats.",
         "تجاوز الأذونات متاح في المحادثات العادية فقط."),
+    e("untrusted", "untrusted", 403, "",
+        "This folder contains things that can run programs on your computer, and you have not trusted it yet: {path}",
+        "هذا المجلد يحوي ما يمكنه تشغيل برامج على جهازك، ولم تمنحه ثقتك بعد: {path}"),
+    e("trust.expired", "trust_expired", 409, "",
+        "That question is no longer current. Try what you were doing again.",
+        "هذا السؤال لم يعد قائماً. أعد ما كنت تفعله."),
+    e("trust.too_large", "validation", 422, "",
+        "A settings folder inside this folder holds too many files to check, so it cannot be trusted yet. Remove what is not needed from it and try again.",
+        "في هذا المجلد مجلد إعدادات يحوي ملفات أكثر مما يمكن فحصه، فلا يمكن الوثوق به بعد. احذف منه ما لا حاجة إليه ثم حاول مرة أخرى."),
     e("reorganize.untrusted", "forbidden", 403, "",
         "Your library's saved history contains assistant settings that differ from the ones in the folder ({files}). Reorganize was not started.",
         "السجلّ المحفوظ لمكتبتك يحوي إعدادات للمساعد تختلف عمّا في المجلد ({files}). لم تبدأ إعادة التنظيم."),
@@ -350,7 +359,7 @@ pub fn err(key: &str, args: &[(&str, &str)]) -> anyhow::Error { user_err_in(arab
 /// Machine prefixes other parts of the daemon raise as plain strings, with their status and code.
 const PREFIXES: &[(&str, u16, &str)] = &[
     ("BUSY::", 423, "busy"), ("WRAP_INTERRUPTED::", 409, "wrap_interrupted"), ("CONFLICT::", 409, "conflict"),
-    ("REORG_CONFLICT::", 409, "conflict"), ("STALE::", 409, "stale"), ("UNTRUSTED::", 403, "untrusted"),
+    ("REORG_CONFLICT::", 409, "conflict"), ("STALE::", 409, "stale"),
     ("NO_HISTORY::", 409, "no_history"), ("NEWER_SETTINGS::", 409, "newer_settings"), ("CHANGED::", 409, "changed"),
     ("SIGNED_OUT::", 409, "signed_out"),
 ];
@@ -377,6 +386,11 @@ fn known_raw(msg: &str) -> Option<&'static str> {
 /// Turn any error that reaches the API into what the person should see: status, code, message.
 pub fn classify_in(ar: bool, err: &anyhow::Error) -> UserErr {
     if let Some(u) = err.chain().find_map(|c| c.downcast_ref::<UserErr>()) { return u.clone(); }
+    // A folder that needs the user's trust is known by its type alone. No wording can stand in for
+    // it: text that merely contains a trust marker is an ordinary message.
+    if let Some(u) = err.chain().find_map(|c| c.downcast_ref::<crate::trust::Untrusted>()) {
+        return UserErr { code: "untrusted", status: 403, message: u.message_in(ar) };
+    }
     let msg = err.to_string();
     // Machine-readable errors keep their exact text (the UI parses it).
     for (prefix, status, code) in PREFIXES {
@@ -446,8 +460,12 @@ mod tests {
         let typed = c(anyhow::Error::from(user_err_in(false, "stale.gone", &[])).context("saving"), false);
         assert_eq!((typed.status, typed.code), (409, "stale"));
         // Machine prefixes keep their text and get a proper status.
-        let u = c(anyhow::anyhow!("UNTRUSTED::/x::git hooks"), true);
-        assert_eq!((u.status, u.code, u.message.as_str()), (403, "untrusted", "UNTRUSTED::/x::git hooks"));
+        // …but never "untrusted": text that looks like the old trust marker is an ordinary message,
+        // wherever it sits, so nothing echoed into an error can raise the trust question.
+        for text in ["UNTRUSTED::/x::git hooks", "This add-on is not allowed to change a UNTRUSTED::/Users/Shared/lib::Looks fine.md"] {
+            let u = c(anyhow::anyhow!("{text}"), false);
+            assert_eq!((u.status, u.code, u.message.as_str()), (400, "error", text));
+        }
         assert_eq!(c(anyhow::anyhow!("CONFLICT::a.md;b.md"), false).status, 409);
         assert_eq!(c(anyhow::anyhow!("CHANGED::the pending change is different now"), false).status, 409);
         // The operating system's own words never reach the person.
