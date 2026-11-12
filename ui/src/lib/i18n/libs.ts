@@ -48,7 +48,7 @@ export default {
     'libs.addBackFailed': 'The library could not be added back.',
     'libs.tasksElsewhere_one': '1 automatic task belongs to another library and runs there.',
     'libs.tasksElsewhere_other': '{n} automatic tasks belong to other libraries and run there.',
-    'libs.taskOrphan': 'The library this task belonged to is no longer in your list, so it does not run. Allow it here to run it in this library.',
+    'libs.taskOrphan': 'The library this automatic task belonged to is no longer in your list, so it does not run. Allow it here to run it in this library.',
     'libs.allowHere': 'Allow it here',
   },
   ar: {
@@ -70,7 +70,7 @@ export default {
     'libs.removeFailed': 'تعذّرت إزالة المكتبة من القائمة.',
     'libs.removed': 'أُزيلت «{name}» من القائمة، ولم يُمَسّ مجلدها.',
     'libs.renameTitle': 'سمِّ هذه المكتبة',
-    'libs.renameBody': 'يظهر الاسم داخل «أفكار» فقط. اتركه فارغاً ليُستعمل اسم المجلد، ويبقى للمجلد نفسه اسمه.',
+    'libs.renameBody': 'يظهر الاسم داخل Thoughts فقط. اتركه فارغاً ليُستعمل اسم المجلد، ويبقى للمجلد نفسه اسمه.',
     'libs.renameFailed': 'تعذّر حفظ الاسم.',
     'libs.loadFailed': 'تعذّر عرض مكتباتك.',
     'libs.switchFailed': 'تعذّر فتح المكتبة الأخرى.',
@@ -104,7 +104,7 @@ export default {
     'libs.tasksElsewhere_few': '{n} مهام تلقائية تتبع مكتبات أخرى وتعمل فيها.',
     'libs.tasksElsewhere_many': '{n} مهمة تلقائية تتبع مكتبات أخرى وتعمل فيها.',
     'libs.tasksElsewhere_other': '{n} مهمة تلقائية تتبع مكتبات أخرى وتعمل فيها.',
-    'libs.taskOrphan': 'المكتبة التي كانت تتبعها هذه المهمة لم تعد في قائمتك، فهي لا تعمل. اسمح بها هنا لتعمل في هذه المكتبة.',
+    'libs.taskOrphan': 'المكتبة التي كانت تتبعها هذه المهمة التلقائية لم تعد في قائمتك، فهي لا تعمل. اسمح بها هنا لتعمل في هذه المكتبة.',
     'libs.allowHere': 'اسمح بها هنا',
   },
 };

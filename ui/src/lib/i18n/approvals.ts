@@ -63,7 +63,7 @@ export default {
     'appr.notifyBody': 'In “{title}”',
     'appr.open': 'Open the chat',
 
-    'appr.privBody': 'Folders listed here are closed to the assistant’s file tools in every chat and task, and it is told to leave them alone. Use this for confidential client files.',
+    'appr.privBody': 'Folders listed here are closed to the assistant’s file tools in every chat and automatic task, and it is told to leave them alone. Use this for confidential client files.',
     'appr.strict.title': 'Strict private folders',
     'appr.strict.body': 'Normally the assistant can still run some commands in a chat — to look through files or to move them, for example — and such a command could reach a private folder. With this on, while you have private folders, no chat runs a command on its own: an ordinary chat asks you before each command, with a warning, and in other chats commands are switched off. The cost: the assistant cannot move, rename or delete files, run scripts or install anything without asking you every time. Chats in Bypass permissions are not affected.',
     'appr.strict.none': 'This has no effect until you mark a folder private.',
@@ -138,7 +138,7 @@ export default {
     'appr.notifyBody': 'في «{title}»',
     'appr.open': 'افتح المحادثة',
 
-    'appr.privBody': 'المجلدات المدرجة هنا مغلقة أمام أدوات الملفات لدى المساعد في كل محادثة ومهمة، ويُطلب منه أن يتركها وشأنها. استخدمها لملفات العملاء السرّية.',
+    'appr.privBody': 'المجلدات المدرجة هنا مغلقة أمام أدوات الملفات لدى المساعد في كل محادثة ومهمة تلقائية، ويُطلب منه أن يتركها وشأنها. استخدمها لملفات العملاء السرّية.',
     'appr.strict.title': 'المجلدات الخاصة بصرامة',
     'appr.strict.body': 'في العادة يظل المساعد قادراً على تشغيل بعض الأوامر في المحادثة — كالبحث بين الملفات أو نقلها — وقد يصل أمرٌ كهذا إلى مجلد خاص. وحين تفعّل هذا الخيار، وما دامت لديك مجلدات خاصة، فلن تشغّل أي محادثة أمراً من تلقاء نفسها: فالمحادثة العادية تستأذنك قبل كل أمر مع تنبيه، وتتوقف الأوامر في المحادثات الأخرى. والثمن: لا يستطيع المساعد نقل الملفات أو إعادة تسميتها أو حذفها، ولا تشغيل البرامج النصية أو تثبيت أي شيء، دون أن يستأذنك في كل مرة. ولا يتأثر بهذا ما كان من المحادثات في وضع «تجاوز الأذونات».',
     'appr.strict.none': 'لا أثر لهذا الخيار حتى تحدّد مجلداً على أنه خاص.',
