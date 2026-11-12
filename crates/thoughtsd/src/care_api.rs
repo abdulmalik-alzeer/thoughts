@@ -199,6 +199,14 @@ struct Choices {
 #[derive(Deserialize)]
 struct Import { bundle: Value, choices: Choices }
 
+/// Is chat id `id`, new here, already used in any letter case — by a chat, its saved file or an
+/// attachments folder (a disk that ignores case finds `ABC` under `abc`)?
+async fn id_taken(st: &AppState, attachments_dir: &Path, id: &str) -> bool {
+    st.chats.list().await.iter().any(|m| m.id.eq_ignore_ascii_case(id))
+        || std::fs::symlink_metadata(attachments_dir.join(id)).is_ok()
+        || std::fs::symlink_metadata(paths::chats_dir().join(format!("{id}.json"))).is_ok()
+}
+
 async fn move_import(State(st): S, Json(i): Json<Import>) -> R {
     let b = read_bundle(&i.bundle)?;
     Ok(Json(import(&st, b, &i.choices, &paths::home()).await?))
@@ -257,19 +265,26 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
     let here = crate::wraps::Scope::now(&st).await.key();
     if ch.chats {
         for c in b.chats {
+            let mut c = c;
+            // Its attachments in the file, whatever id it ends up with here.
+            let in_file = c.id.clone();
             let existing = st.chats.meta(&c.id).await;
             if existing.as_ref().map_or(false, |h| !ch.replace || h.running) { skipped += 1; continue; }
+            // A new chat whose id is another chat's here in other letter case, or whose files would
+            // land where something already is (on a disk that ignores case, the same place): it gets
+            // an id of its own, so nothing of another chat is ever replaced.
+            if existing.is_none() && id_taken(st, &attachments_dir, &c.id).await { c.id = uuid::Uuid::new_v4().to_string(); }
             // What comes in is written first, beside the chat already here: a write that fails (a
             // full disk) leaves that chat and its files exactly as they were.
             let empty = BTreeMap::new();
-            let staged = transfer::stage_attachments(&attachments_dir, &c.id, b.attachments.get(&c.id).unwrap_or(&empty))?;
+            let staged = transfer::stage_attachments(&attachments_dir, &c.id, b.attachments.get(&in_file).unwrap_or(&empty))?;
             if existing.is_some() {
                 st.chats.remove(&c.id).await;
                 replaced += 1;
             } else {
                 added += 1;
             }
-            let present: BTreeSet<String> = transfer::place_attachments(&attachments_dir, &c.id, staged)?;
+            let present: BTreeSet<String> = transfer::place_attachments(&attachments_dir, &c.id, staged, existing.is_some())?;
             files += present.len();
             let project = c.project_id.as_ref().and_then(|p| map.get(p).cloned());
             // A moved chat belongs to the library open here (the file holds one library's chats).
@@ -544,6 +559,41 @@ mod tests {
         assert_eq!(names, ["c-9"]);
         assert!(!att.join("c-9/old.txt").exists());
         assert_eq!(std::fs::read(att.join("c-9/new.txt")).unwrap(), b"hi");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_id_in_other_letter_case_never_reaches_another_chats_files() {
+        let root = tmp();
+        let home = root.join("data");
+        let att = home.join("attachments");
+        let st = AppState::for_test();
+        // Here: a chat whose id has capitals (an older import), with its files…
+        std::fs::create_dir_all(att.join("Abc-3")).unwrap();
+        std::fs::write(att.join("Abc-3/mine.txt"), "mine").unwrap();
+        st.chats.insert(Chat { id: "Abc-3".into(), title: "Mine here".into(), ..Default::default() }).await;
+        // …and files found under a name that, on a disk ignoring case, is the one a new chat would use.
+        std::fs::create_dir_all(att.join("abc-4")).unwrap();
+        std::fs::write(att.join("abc-4/other.txt"), "another chat's").unwrap();
+        let msg = |a: &str| json!({"id": "m", "role": "user", "text": "hi", "ts": "2026-01-01T00:00:00Z", "attachments": [a]});
+        let chats = json!([{"id": "ABC-3", "title": "From there", "messages": [msg("a.txt")]}, {"id": "ABC-4", "title": "Also from there", "messages": [msg("b.txt")]}]);
+        let bundle = bundle_with(chats, Value::Null, json!({"ABC-3": {"a.txt": "aGk="}, "ABC-4": {"b.txt": "aGk="}}));
+        // Even when told to replace, neither takes the place of what is here: each gets an id of its own.
+        let r = import(&st, transfer::read(&bundle).unwrap(), &Choices { chats: true, replace: true, ..Default::default() }, &home).await.unwrap();
+        assert_eq!((r["chatsAdded"].as_u64(), r["chatsReplaced"].as_u64()), (Some(2), Some(0)), "{r}");
+        assert_eq!(st.chats.get("Abc-3").await.unwrap().title, "Mine here");
+        assert_eq!(std::fs::read_to_string(att.join("Abc-3/mine.txt")).unwrap(), "mine");
+        assert_eq!(std::fs::read_to_string(att.join("abc-4/other.txt")).unwrap(), "another chat's");
+        for title in ["From there", "Also from there"] {
+            let c = st.chats.list().await.into_iter().find(|m| m.title == title).unwrap();
+            assert!(!["abc-3", "abc-4"].contains(&c.id.to_lowercase().as_str()), "{title}: {}", c.id);
+            let full = st.chats.get(&c.id).await.unwrap();
+            let file = PathBuf::from(&full.messages[0].attachments[0]);
+            assert_eq!((file.parent().unwrap(), std::fs::read(&file).unwrap()), (att.join(&c.id).as_path(), b"hi".to_vec()));
+        }
+        // One file naming the same chat twice in other letter cases is refused whole.
+        let twice = bundle_with(json!([{"id": "abc-5", "title": "a"}, {"id": "ABC-5", "title": "b"}]), Value::Null, Value::Null);
+        assert!(transfer::read(&twice).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
 

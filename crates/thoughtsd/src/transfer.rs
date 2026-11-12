@@ -172,6 +172,9 @@ pub fn read(v: &Value) -> anyhow::Result<Bundle> {
     let mut seen = BTreeSet::new();
     for c in raw_chats {
         let mut c: Chat = serde_json::from_value(c.clone()).map_err(|_| bad("chats"))?;
+        // Ids are made in lower case. One that differs from another only in letter case would name
+        // the same files on a computer whose disk ignores case: it is the same id (two in one file are refused).
+        c.id = c.id.to_ascii_lowercase();
         if !valid_id(&c.id) || !seen.insert(c.id.clone()) { return Err(bad("chats")); }
         if c.kind != "chat" { continue; }
         for m in &c.messages {
@@ -186,7 +189,8 @@ pub fn read(v: &Value) -> anyhow::Result<Bundle> {
         Value::Null => {}
         Value::Object(per_chat) => {
             for (id, files) in per_chat {
-                if !valid_id(id) || !seen.contains(id) { return Err(bad("attachments")); }
+                let id = &id.to_ascii_lowercase();
+                if !valid_id(id) || !seen.contains(id) || attachments.contains_key(id) { return Err(bad("attachments")); }
                 let files = files.as_object().ok_or_else(|| bad("attachments"))?;
                 let mut out = BTreeMap::new();
                 for (name, data) in files {
@@ -318,15 +322,21 @@ pub fn stage_attachments(attachments_dir: &Path, id: &str, files: &BTreeMap<Stri
     Ok(Staged { dir: Some(dir), names: files.keys().cloned().collect() })
 }
 
-/// Put staged attachments in place as `attachments_dir/<id>`, instead of whatever is there. Returns
-/// the names now there.
-pub fn place_attachments(attachments_dir: &Path, id: &str, staged: Staged) -> anyhow::Result<BTreeSet<String>> {
+/// Put staged attachments in place as `attachments_dir/<id>`. What is there already is removed
+/// only when `replacing` (the person chose to replace the chat of that very id here); otherwise
+/// anything there — another chat's files, under the same name in other letter case on a disk that
+/// ignores case — is never touched, and this fails. Returns the names now there.
+pub fn place_attachments(attachments_dir: &Path, id: &str, staged: Staged, replacing: bool) -> anyhow::Result<BTreeSet<String>> {
     if !valid_id(id) { anyhow::bail!("MOVE_BAD::attachments"); }
     let target = attachments_dir.join(id);
     match std::fs::symlink_metadata(&target) {
         // Only a real folder is emptied; a link placed there goes, never what it points at.
-        Ok(m) if m.is_dir() => std::fs::remove_dir_all(&target)?,
-        Ok(_) => std::fs::remove_file(&target)?,
+        Ok(m) if replacing && m.is_dir() => std::fs::remove_dir_all(&target)?,
+        Ok(_) if replacing => std::fs::remove_file(&target)?,
+        Ok(_) => {
+            if let Some(dir) = staged.dir { let _ = std::fs::remove_dir_all(dir); }
+            anyhow::bail!("MOVE_BAD::attachments");
+        }
         Err(_) => {}
     }
     if let Some(dir) = staged.dir { std::fs::rename(&dir, &target)?; }
@@ -530,6 +540,27 @@ mod tests {
         assert!(n.daemon.run_at_login && n.sync.mode == cur.sync.mode && n.ai.claude.has_api_token);
         cur.ai.claude.has_api_token = false;
         assert_eq!(merged_settings(&cur, &from).ai.claude.base_url.as_deref(), Some("https://there.example.com"));
+    }
+
+    #[test]
+    fn staged_attachments_replace_a_folder_only_when_its_chat_is_replaced() {
+        let d = tmp();
+        let att = d.join("attachments");
+        std::fs::create_dir_all(att.join("c-1")).unwrap();
+        std::fs::write(att.join("c-1/keep.txt"), "here").unwrap();
+        let mut files = BTreeMap::new();
+        files.insert("new.txt".to_string(), b"in".to_vec());
+        // Not replacing that chat: what is there is never removed, and nothing is left beside it.
+        let staged = stage_attachments(&att, "c-1", &files).unwrap();
+        assert!(place_attachments(&att, "c-1", staged, false).is_err());
+        assert_eq!(std::fs::read_to_string(att.join("c-1/keep.txt")).unwrap(), "here");
+        assert_eq!(std::fs::read_dir(&att).unwrap().count(), 1);
+        // Replacing it: swapped whole.
+        let staged = stage_attachments(&att, "c-1", &files).unwrap();
+        assert_eq!(place_attachments(&att, "c-1", staged, true).unwrap(), BTreeSet::from(["new.txt".to_string()]));
+        assert!(!att.join("c-1/keep.txt").exists() && att.join("c-1/new.txt").is_file());
+        assert_eq!(std::fs::read_dir(&att).unwrap().count(), 1);
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     #[test]
