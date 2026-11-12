@@ -257,15 +257,19 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
     let here = crate::wraps::Scope::now(&st).await.key();
     if ch.chats {
         for c in b.chats {
-            if let Some(h) = st.chats.meta(&c.id).await {
-                if !ch.replace || h.running { skipped += 1; continue; }
+            let existing = st.chats.meta(&c.id).await;
+            if existing.as_ref().map_or(false, |h| !ch.replace || h.running) { skipped += 1; continue; }
+            // What comes in is written first, beside the chat already here: a write that fails (a
+            // full disk) leaves that chat and its files exactly as they were.
+            let empty = BTreeMap::new();
+            let staged = transfer::stage_attachments(&attachments_dir, &c.id, b.attachments.get(&c.id).unwrap_or(&empty))?;
+            if existing.is_some() {
                 st.chats.remove(&c.id).await;
                 replaced += 1;
             } else {
                 added += 1;
             }
-            let empty = BTreeMap::new();
-            let present: BTreeSet<String> = transfer::write_attachments(&attachments_dir, &c.id, b.attachments.get(&c.id).unwrap_or(&empty))?;
+            let present: BTreeSet<String> = transfer::place_attachments(&attachments_dir, &c.id, staged)?;
             files += present.len();
             let project = c.project_id.as_ref().and_then(|p| map.get(p).cloned());
             // A moved chat belongs to the library open here (the file holds one library's chats).
@@ -509,6 +513,38 @@ mod tests {
         assert!(!detached());
         assert!(!st.library_busy());
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacing_a_chat_that_cannot_be_written_leaves_the_one_here_as_it_was() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp();
+        let home = root.join("data");
+        let att = home.join("attachments");
+        std::fs::create_dir_all(att.join("c-9")).unwrap();
+        std::fs::write(att.join("c-9/old.txt"), "mine").unwrap();
+        let st = AppState::for_test();
+        st.chats.insert(Chat { id: "c-9".into(), title: "Mine here".into(), ..Default::default() }).await;
+        let msg = json!({"id": "m", "role": "user", "text": "hi", "ts": "2026-01-01T00:00:00Z", "attachments": ["new.txt"]});
+        let bundle = bundle_with(json!([{"id": "c-9", "title": "Theirs", "messages": [msg]}]), Value::Null, json!({"c-9": {"new.txt": "aGk="}}));
+        let replace = Choices { chats: true, replace: true, ..Default::default() };
+        // Nothing can be written where attachments go (a full disk, say): the import fails…
+        std::fs::set_permissions(&att, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(import(&st, transfer::read(&bundle).unwrap(), &replace, &home).await.is_err());
+        std::fs::set_permissions(&att, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // …and the chat here, with its files, is exactly as it was.
+        assert_eq!(st.chats.get("c-9").await.unwrap().title, "Mine here");
+        assert_eq!(std::fs::read_to_string(att.join("c-9/old.txt")).unwrap(), "mine");
+        // Once it can be written, the chat is replaced whole, its files too, and nothing is left beside them.
+        let r = import(&st, transfer::read(&bundle).unwrap(), &replace, &home).await.unwrap();
+        assert_eq!(r["chatsReplaced"], 1);
+        assert_eq!(st.chats.get("c-9").await.unwrap().title, "Theirs");
+        let names: Vec<String> = std::fs::read_dir(&att).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        assert_eq!(names, ["c-9"]);
+        assert!(!att.join("c-9/old.txt").exists());
+        assert_eq!(std::fs::read(att.join("c-9/new.txt")).unwrap(), b"hi");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

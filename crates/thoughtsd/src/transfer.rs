@@ -299,6 +299,40 @@ pub fn write_attachments(attachments_dir: &Path, id: &str, files: &BTreeMap<Stri
     Ok(out)
 }
 
+/// One chat's imported attachments, written beside where they go and not swapped in yet.
+pub struct Staged { dir: Option<PathBuf>, names: BTreeSet<String> }
+
+/// Write one chat's attachments into a new private folder of their own beside `attachments_dir/<id>`
+/// (whatever is there is not touched). A write that fails (a full disk) removes what it wrote.
+pub fn stage_attachments(attachments_dir: &Path, id: &str, files: &BTreeMap<String, Vec<u8>>) -> anyhow::Result<Staged> {
+    if !valid_id(id) || files.keys().any(|n| !valid_name(n)) { anyhow::bail!("MOVE_BAD::attachments"); }
+    if files.is_empty() { return Ok(Staged { dir: None, names: BTreeSet::new() }); }
+    // Not a chat id (it starts with a dot): nothing takes it for a chat's folder.
+    let dir = attachments_dir.join(format!(".import-{id}-{}", uuid::Uuid::new_v4().simple()));
+    let written = (|| -> anyhow::Result<()> {
+        crate::paths::create_private_dir(&dir)?;
+        for (name, bytes) in files { crate::paths::write_atomic(&dir.join(name), bytes, true)?; }
+        Ok(())
+    })();
+    if let Err(e) = written { let _ = std::fs::remove_dir_all(&dir); return Err(e); }
+    Ok(Staged { dir: Some(dir), names: files.keys().cloned().collect() })
+}
+
+/// Put staged attachments in place as `attachments_dir/<id>`, instead of whatever is there. Returns
+/// the names now there.
+pub fn place_attachments(attachments_dir: &Path, id: &str, staged: Staged) -> anyhow::Result<BTreeSet<String>> {
+    if !valid_id(id) { anyhow::bail!("MOVE_BAD::attachments"); }
+    let target = attachments_dir.join(id);
+    match std::fs::symlink_metadata(&target) {
+        // Only a real folder is emptied; a link placed there goes, never what it points at.
+        Ok(m) if m.is_dir() => std::fs::remove_dir_all(&target)?,
+        Ok(_) => std::fs::remove_file(&target)?,
+        Err(_) => {}
+    }
+    if let Some(dir) = staged.dir { std::fs::rename(&dir, &target)?; }
+    Ok(staged.names)
+}
+
 /// Where an export is saved: the Downloads folder (the home folder when there is none), under a
 /// name that is not taken yet. The file is created here, readable by its owner only.
 pub fn save_export(dir: &Path, text: &[u8]) -> anyhow::Result<PathBuf> {
