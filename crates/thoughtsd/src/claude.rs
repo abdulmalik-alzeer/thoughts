@@ -1022,6 +1022,20 @@ async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathB
     if let Some(f) = on_done { f(state.clone(), ok).await; }
 }
 
+/// Before anything runs in `dir`: a library made with 0.0.8 or earlier still has the kit's old
+/// session hook, which pulled from the backup inside every app run (`trust::refresh_starter_hook`
+/// swaps it). In the library this happens only with `library_lock` held across the look, the
+/// rewrite and the renewal of trust, so no sync, wrap or other app write lands in between. While
+/// the library is busy (or a cut-off wrap waits for the user, whose undo must find the library as
+/// it left it) the swap waits for a later run; the daemon's start does it too, before anything runs.
+pub(crate) async fn refresh_starter_hook(state: &AppState, dir: &Path) {
+    let in_library = state.settings.read().await.library().map_or(false, |lib| dir.starts_with(&lib));
+    if !in_library { crate::trust::refresh_starter_hook(dir); return; }
+    if crate::wraps::interrupted_wrap(state).await.is_some() { return; }
+    let Ok(_held) = state.library_lock.clone().try_lock_owned() else { return };
+    crate::trust::refresh_starter_hook(dir);
+}
+
 /// Start a streaming run in the background. Events go out on the broadcast
 /// channel; the finished chat is persisted. `on_done` runs after completion.
 pub async fn start_run(
@@ -1055,6 +1069,7 @@ pub async fn start_run(
             }
             continue;
         }
+        refresh_starter_hook(&state, dir).await;
         crate::trust::require(dir)?;
     }
     // Who pays for this run. An address without a key stops here: nothing is recorded, nothing starts.

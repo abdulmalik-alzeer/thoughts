@@ -109,6 +109,8 @@ pub async fn run() -> anyhow::Result<()> {
         if let Some(lib) = s.library().filter(|l| s.onboarded && l.is_dir()) {
             let cleared = library::tidy_kit_leftovers(&lib);
             if cleared > 0 { log::info(format!("cleared away {cleared} leftover starter-kit file(s) from the library")); }
+            // …and its old session hook, which pulled inside app runs (with the library held, see there).
+            claude::refresh_starter_hook(&state, &lib).await;
         }
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

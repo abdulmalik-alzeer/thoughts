@@ -47,6 +47,10 @@ fn legacy_starter_hooks() -> Option<Value> {
 /// file then holds exactly the old text with that one command replaced. In every other case the
 /// record is left alone and the usual question appears. A folder that was not trusted is not
 /// trusted by this.
+///
+/// For the library, the caller holds `state.library_lock` across the whole call — the look, the
+/// rewrite and the renewal — so no sync, wrap or other app write to the library lands in between
+/// (`claude::refresh_starter_hook`; the daemon's start does the same).
 pub fn refresh_starter_hook(path: &Path) -> bool { swap_starter_hook(path, || {}) }
 
 /// `meanwhile` runs just before the file is written, between the two looks at the folder: nothing
@@ -831,11 +835,7 @@ fn check(path: &Path, scope: Scope) -> Result<(), Untrusted> {
 /// A folder whose `.claude` folders hold anything the starter kit did not put there always has its
 /// state on record — written silently the first time when nothing in it is risky — so that a later
 /// change to those files asks again.
-pub fn require(path: &Path) -> anyhow::Result<()> {
-    // Before anything runs here: the kit's own session hook must be the one that skips app runs.
-    refresh_starter_hook(path);
-    Ok(check(path, Scope::Whole)?)
-}
+pub fn require(path: &Path) -> anyhow::Result<()> { Ok(check(path, Scope::Whole)?) }
 
 /// Before the daemon itself runs git in a library: nothing that makes git run programs (hooks,
 /// filters, aliases, ssh commands…) may have appeared or changed since the folder was trusted.
@@ -983,6 +983,8 @@ mod tests {
         put(&d, ".claude/settings.json", SETTINGS_0_0_8);
         assert!(findings(&d).is_empty(), "the old hook is still the kit's own");
         assert!(require(&d).is_ok());
+        assert_eq!(settings_of(&d), SETTINGS_0_0_8, "the check only looks: the swap is the caller's, under the library lock");
+        assert!(refresh_starter_hook(&d));
         assert_eq!(settings_of(&d), STARTER_SETTINGS);
         assert!(matches!(load().get(&canon(&d)), Some(Stored::Parts(e)) if e.assistant.is_none() && e.git.is_none() && e.files.is_empty()), "nothing of the folder's own left to remember");
         assert!(!refresh_starter_hook(&d), "a second pass has nothing left to do");
@@ -994,6 +996,7 @@ mod tests {
         put(&d, ".claude/settings.json", SETTINGS_0_0_8);
         put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
         trust(&d).unwrap();
+        assert!(refresh_starter_hook(&d));
         assert!(require(&d).is_ok(), "the app's own update must not un-trust the folder");
         assert_eq!(settings_of(&d), STARTER_SETTINGS);
         assert!(require(&d).is_ok());
@@ -1019,6 +1022,7 @@ mod tests {
         put(&d, ".claude/settings.json", SETTINGS_0_0_8);
         put(&d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
         assert!(!question(require(&d)).known);
+        assert!(refresh_starter_hook(&d));
         assert_eq!(settings_of(&d), STARTER_SETTINGS);
         assert_eq!(recorded(&d), None);
         assert!(require(&d).is_err());
@@ -1073,6 +1077,36 @@ mod tests {
         assert_eq!(recorded(&d), decision);
         assert!(question(require(&d)).items.iter().any(|(f, _)| f.name == "apiKeyHelper"));
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_library_is_held_while_its_session_hook_is_swapped() {
+        let st = crate::state::AppState::for_test();
+        let lib = tmp("oldhook-locked");
+        put(&lib, ".claude/settings.json", SETTINGS_0_0_8);
+        put(&lib, ".claude/skills/deploy/SKILL.md", RISKY_SKILL);
+        trust(&lib).unwrap();
+        let decision = recorded(&lib);
+        st.settings.write().await.library_path = Some(lib.to_string_lossy().to_string());
+        // A sync, wrap or routine save has the library: the swap waits, nothing is written or recorded.
+        let held = st.library_lock.clone().try_lock_owned().unwrap();
+        crate::claude::refresh_starter_hook(&st, &lib).await;
+        assert_eq!(settings_of(&lib), SETTINGS_0_0_8);
+        assert_eq!(recorded(&lib), decision);
+        drop(held);
+        // Free again: swapped with the lock held, trusted and otherwise unchanged, so still trusted.
+        crate::claude::refresh_starter_hook(&st, &lib).await;
+        assert_eq!(settings_of(&lib), STARTER_SETTINGS);
+        assert!(require(&lib).is_ok());
+        assert!(!st.library_busy(), "the lock is let go again");
+        // A folder outside the library has no such lock to wait for (nothing in the app writes there).
+        let other = tmp("oldhook-other");
+        put(&other, ".claude/settings.json", SETTINGS_0_0_8);
+        let _held = st.library_lock.clone().try_lock_owned().unwrap();
+        crate::claude::refresh_starter_hook(&st, &other).await;
+        assert_eq!(settings_of(&other), STARTER_SETTINGS);
+        std::fs::remove_dir_all(lib).unwrap();
+        std::fs::remove_dir_all(other).unwrap();
     }
 
     #[test]

@@ -1177,6 +1177,8 @@ pub async fn reorganize_start(state: Arc<AppState>, instructions: &str) -> anyho
     if state.chats.list().await.iter().any(|c| c.kind == "reorganize" && matches!(c.meta["phase"].as_str(), Some("running") | Some("review"))) {
         anyhow::bail!("A reorganize is already in progress or waiting for your review. Keep or discard it first.");
     }
+    // The working copy is cut from what is recorded: the kit's session hook must be the current one first.
+    crate::claude::refresh_starter_hook(&state, &lib).await;
     crate::trust::require(&lib)?;
     if state.library_busy() { return Err(busy()); }
     require_no_interrupted(&state).await?;
