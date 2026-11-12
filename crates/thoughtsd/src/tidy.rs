@@ -4,7 +4,8 @@
 //! The clean-up is off until the person switches it on (`Settings::chat_retention_days`). Whatever
 //! the setting, it never removes a chat that is pinned, running, cut off and not yet seen, or not
 //! yet saved into the library (one the next Wrap would still save), nor a Wrap or Reorganize that
-//! is waiting for the person's decision.
+//! is waiting for the person's decision, nor the newest finished Wrap (it holds the undo of the
+//! last save into the library).
 
 use crate::chats::ChatMeta;
 use crate::state::AppState;
@@ -57,7 +58,8 @@ pub fn plan(all: &[ChatMeta], days: u32, now: DateTime<Utc>) -> (Vec<String>, Pr
     let mut ids = vec![];
     if days == 0 { return (ids, p); }
     let limit = now - Duration::days(days as i64);
-    for c in all.iter().filter(|c| c.updated < limit && !c.running) {
+    let newest_wrap = all.iter().filter(|c| c.kind == "wrap" && c.meta["phase"] == "done").max_by_key(|c| c.updated).map(|c| c.id.as_str());
+    for c in all.iter().filter(|c| c.updated < limit && !c.running && Some(c.id.as_str()) != newest_wrap) {
         if c.pinned { p.pinned += 1; }
         else if c.is_unwrapped() { p.unsaved += 1; }
         else if removable(c) {
@@ -152,6 +154,9 @@ mod tests {
         let mut w = old(100, Chat { kind: "wrap".into(), ..Default::default() }); w.meta = json!({"phase": "done"});
         let done_wrap = put(&st, w).await;
         let task = put(&st, old(100, Chat { kind: "workflow".into(), ..Default::default() })).await;
+        // Stays, though old: the newest finished wrap (it holds the undo of the last save).
+        let mut w = old(60, Chat { kind: "wrap".into(), ..Default::default() }); w.meta = json!({"phase": "done"});
+        let newest_wrap = put(&st, w).await;
         // Stays: never saved, pinned, running, cut off, a wrap awaiting approval, a wrap applying, recent, and a chat changed after its wrap.
         let unsaved = put(&st, old(100, said("never saved"))).await;
         let mut p = saved(said("pinned")); p.pinned = true;
@@ -184,7 +189,7 @@ mod tests {
 
         assert_eq!(set_retention(&st, 30).await.unwrap(), 3);
         for gone in [&saved_chat, &done_wrap, &task] { assert!(!kept(&st, gone)); }
-        for stays in [&unsaved, &pinned, &running, &cut, &waiting, &applying, &review, &recent, &later] { assert!(kept(&st, stays)); }
+        for stays in [&newest_wrap, &unsaved, &pinned, &running, &cut, &waiting, &applying, &review, &recent, &later] { assert!(kept(&st, stays)); }
         assert_eq!(st.settings.read().await.chat_retention_days, 30);
         // Pinning protects, unpinning does not rescue an old chat from the next pass.
         st.chats.update(&pinned, |c| c.pinned = false).await;
