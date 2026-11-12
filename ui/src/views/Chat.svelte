@@ -248,7 +248,8 @@
   }
   const canSend = $derived(!!text.trim() || files.some((f) => !f.missing));
 
-  const lastUser = $derived(chat ? [...chat.messages].reverse().find((m: any) => m.role === 'user') : null);
+  // (In a chat that began as first-run setup, the setup's own "Set up my library." is never sent again.)
+  const lastUser = $derived(chat ? chat.messages.slice(Number(chat.meta?.doneAt) || 0).reverse().find((m: any) => m.role === 'user') : null);
   const lastAnswerId = $derived(chat ? [...chat.messages].reverse().find((m: any) => m.role === 'assistant' || m.role === 'error')?.id : null);
   const canCompose = $derived(!!chat && !['wrap', 'reorganize', 'setup'].includes(chat.kind));
 
