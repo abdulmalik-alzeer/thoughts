@@ -77,7 +77,8 @@ pub fn start(state: Arc<AppState>) {
         let mut rx = state.events.subscribe();
         loop {
             match rx.recv().await {
-                Ok(e) if e["type"] == "wrap.done" => { let _ = usage::append(&crate::paths::home(), "wrap.done", chrono::Local::now()); }
+                // Like every other entry of the local usage log: only while the user keeps it on.
+                Ok(e) if e["type"] == "wrap.done" => { if state.settings.read().await.usage_signals { let _ = usage::append(&crate::paths::home(), "wrap.done", chrono::Local::now()); } }
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(_) => return,
             }

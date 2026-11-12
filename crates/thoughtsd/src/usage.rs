@@ -72,8 +72,12 @@ pub fn summary(events: &[(DateTime<Local>, String)], now: DateTime<Local>) -> St
 
 pub fn append(home: &Path, event: &str, now: DateTime<Local>) -> anyhow::Result<()> {
     use std::io::Write;
+    // One writer at a time: the window reports events side by side, and trimming the file (read,
+    // then replace) must not drop a line appended meanwhile.
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let event = clean_event(event)?;
     let path = file(home);
+    let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
     if std::fs::metadata(&path).map_or(false, |m| m.len() > MAX_BYTES) {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let lines: Vec<&str> = text.lines().collect();
@@ -85,7 +89,8 @@ pub fn append(home: &Path, event: &str, now: DateTime<Local>) -> anyhow::Result<
     #[cfg(unix)]
     { use std::os::unix::fs::OpenOptionsExt; opts.mode(0o600); }
     let mut f = opts.open(&path)?;
-    writeln!(f, "{}", json!({"t": now.to_rfc3339(), "e": event}))?;
+    // The whole line in one write, never in pieces another line could land between.
+    f.write_all(format!("{}\n", json!({"t": now.to_rfc3339(), "e": event})).as_bytes())?;
     Ok(())
 }
 
@@ -114,6 +119,24 @@ mod tests {
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0].1, "view.todos");
         assert_eq!(ev[1].1.len(), 120);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn no_line_is_lost_or_garbled_when_events_come_in_side_by_side() {
+        let d = std::env::temp_dir().join(format!("thoughts-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        // Just over the size at which the file is trimmed, so the trim races the appends.
+        let old = format!("{}\n", json!({"t": Local::now().to_rfc3339(), "e": "x".repeat(100)}));
+        std::fs::write(file(&d), old.repeat((MAX_BYTES as usize / old.len()) + 2)).unwrap();
+        let threads: Vec<_> = (0..8).map(|i| { let d = d.clone(); std::thread::spawn(move || {
+            for n in 0..200 { append(&d, &format!("view.t{i}-{n}"), Local::now()).unwrap(); }
+        }) }).collect();
+        for t in threads { t.join().unwrap(); }
+        let text = std::fs::read_to_string(file(&d)).unwrap();
+        assert!(text.lines().all(|l| serde_json::from_str::<Value>(l).is_ok()), "a garbled line");
+        let ours = read(&d).iter().filter(|(_, e)| e.starts_with("view.t")).count();
+        assert_eq!(ours, 1600, "every event is there once");
         std::fs::remove_dir_all(d).unwrap();
     }
 
