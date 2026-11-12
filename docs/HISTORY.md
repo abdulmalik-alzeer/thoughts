@@ -23,10 +23,11 @@ The history of changes is its own switch. It is on from the start, whichever bac
 - **Wrap**: what a Wrap saved from a conversation.
 - **Assistant**: changes the assistant made during a chat or an automatic task.
 - **Edit**: changes you made yourself in the app.
-- **Sync**: changes that arrived from your backup location, for example from another computer.
+- **Sync**: changes that arrived from your backup location, for example from another computer. Edits you made here and had not saved to the history yet are recorded as your own edits before anything arrives.
+- **Combined**: changes from another computer combined with yours after a clash (see below). This entry cannot be undone in one step; restore the documents you need one by one instead.
 - **Start**: the library as it was when its history began. It is the oldest entry and cannot be undone, because nothing exists before it.
 
-Open an entry to see which documents changed. The newest changes are shown first; **Show older changes** at the bottom goes further back, all the way to the first entry.
+Each entry lists the documents it touched. Choose **What changed** under it to see, document by document, the lines it added and removed, with a few unchanged lines around them; a document's name opens it. The newest changes are shown first; **Show older changes** at the bottom goes further back, all the way to the first entry.
 
 ## Before a Wrap is kept
 
@@ -44,12 +45,31 @@ Any other entry in History can be undone the same way.
 
 ## Restoring an earlier version of one document
 
-Open the document, then open its **History** (document versions). You see every saved version of that document. Pick one to read it, and choose **Restore** to put that version back.
+Open the document, then open its **History** (document versions). You see every saved version of that document. Pick one: **What's different** shows how it differs from the text as it is now, and **Whole text** shows it in full. Choose **Restore** to put that version back.
 
 - Only that document changes. The rest of the library stays as it is.
 - The version you replaced is not lost: it is in History too, and can be restored in turn.
 - A document you deleted can be brought back the same way, from the History entry that removed it.
-- A document you moved or renamed keeps all its versions, including those from before the move. Versions from before show the name the document had then, and restoring one puts its text back into the document where it is now.
+- A document you moved or renamed keeps all its versions, including those from before the move. Versions from before show the name the document had then, and restoring one puts its text back into the document where it is now, with its links pointed again at what they meant from the new place.
+
+## When the same document changed on two computers
+
+If a Sync finds that a document was changed here and on another computer in the same places, it stops and asks you about each such document:
+
+- **Keep mine**: your version wins where the two disagree.
+- **Use the other**: the other computer's version wins where they disagree.
+- **Keep both**: your version stays as it is, and the other computer's is saved next to it, with "(other device)" at the end of its name.
+
+**Compare** shows the two versions side by side in one view. **For all** sets every document at once. Changes made to different parts of a document are kept either way, and a backup of this computer's version is always kept first.
+
+## Repairing the history
+
+Sometimes the history is left in a state where nothing can be saved or synced: a sync or a combination of changes that stopped halfway (the computer was turned off, the app was closed), a lock left behind by a program that stopped, or a history moved off its usual line by another program. When that happens, History shows a **History check** at the top and errors offer **Repair history**. You can also run the check at any time: **Check the history for problems**, at the bottom of History.
+
+- The check says what is wrong in plain words.
+- **Repair history** first keeps a copy of your library exactly as it is in the folder, then puts the history right.
+- Afterwards it lists every document that is different from that copy. **Compare** shows the difference and **Bring back** restores that document from the copy (as a new entry, which can itself be undone).
+- If part of the history is damaged and cannot be read, it can **start again**: from your backup location if you have one, otherwise from your library as it is now. Your notes are not touched, and the damaged history is set aside on this computer, not deleted.
 
 ## Backup locations
 
