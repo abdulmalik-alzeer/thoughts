@@ -24,9 +24,16 @@
   import { confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { openReview } from '../lib/layer';
   import WrapPanel from './WrapPanel.svelte';
-  import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, readAsDataURL } from '../lib/content/util';
+  import StreamText from './chat/StreamText.svelte';
+  import ChatOptions from './chat/ChatOptions.svelte';
+  import Attachments from './chat/Attachments.svelte';
+  import QueuedCard from './chat/QueuedCard.svelte';
+  import ExportMenu from './chat/ExportMenu.svelte';
+  import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, prettyName, readAsDataURL } from '../lib/content/util';
   import { imeKey } from '../lib/ime';
   import SetupCard from './SetupCard.svelte';
+  import { foldMap } from '../lib/search';
+  import { enqueue, restored, sendNowOrAfterStop, take, waiting as queuedBy, type Mention } from '../lib/chatQueue.svelte';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
 
@@ -38,9 +45,8 @@
   let thinking = $state('');
   let text = $state('');
   let files = $state<Attachment[]>([]);
-  let mentions = $state<string[]>([]);
+  let mentions = $state<Mention[]>([]);
   let opts = $state<any>({ models: [], efforts: [], permissionModes: [] });
-  let tree = $state<string[]>([]);
   let mentionQ = $state<string | null>(null);
   let mentionIdx = $state(0);
   let openTools = $state<Record<string, boolean>>({});
@@ -61,7 +67,10 @@
     try { d = JSON.parse(localStorage.getItem(draftKey(id)) || 'null'); } catch { /* no draft */ }
     if (d && typeof d === 'object') {
       text = String(d.text ?? '').slice(0, DRAFT_MAX);
-      mentions = Array.isArray(d.mentions) ? d.mentions.filter((p: any) => typeof p === 'string').slice(0, 30) : [];
+      // (A draft from before mentions had names holds bare paths, shown as written.)
+      const asMention = (x: any): Mention | null => typeof x === 'string' ? { path: x, label: x }
+        : x && typeof x.path === 'string' ? { path: x.path, label: String(x.label || x.path) } : null;
+      mentions = Array.isArray(d.mentions) ? d.mentions.map(asMention).filter((m: Mention | null): m is Mention => !!m).slice(0, 30) : [];
       const mem = pendingFiles.get(id) ?? [];
       const meta: any[] = Array.isArray(d.files) ? d.files.slice(0, 20) : [];
       files = meta.map((m) => mem.find((f) => f.name === m.name && f.size === m.size) ?? { name: String(m.name ?? ''), size: Number(m.size) || 0, image: !!m.image, data: '', missing: true });
@@ -77,9 +86,9 @@
     } catch { /* storage full or unavailable: the draft just isn't kept */ }
   });
 
-  // A mention lives only as long as its "@path" is still in the text.
+  // A mention lives only as long as its "@name" is still in the text.
   $effect(() => {
-    const keep = mentions.filter((p) => text.includes('@' + p));
+    const keep = mentions.filter((m) => text.includes('@' + m.label));
     if (keep.length !== mentions.length) mentions = keep;
   });
 
@@ -128,6 +137,8 @@
       if (pendingPerm !== undefined) c.options.permissionMode = pendingPerm;
       chat = c;
       applyPartial(c.partial);
+      // Files named in sent messages are shown by their titles.
+      if (c.messages.some((m: any) => m.tool?.mentions?.length)) loadMentionables();
       // What arrived while this copy was on its way: anything it does not have yet is added.
       const again = heldEvents;
       heldEvents = [];
@@ -139,8 +150,16 @@
       if (initial) {
         const missing = files.filter((f) => f.missing).length;
         if (missing) notify(tn('chat3.reattachNote', missing), { kind: 'info', key: 'reattach:' + id });
-        // Only a brand-new chat takes the cursor; otherwise the shell puts focus on the title.
-        if (!c.messages.length && !c.running && !['wrap', 'reorganize', 'setup'].includes(c.kind)) { await tick(); input?.focus(); }
+        // A message that was waiting to be sent when the app closed is back in the box, unsent.
+        if (restored.delete(id)) notify(t('chatc.queue.restored'), { kind: 'info', key: 'requeue:' + id });
+        // The cursor goes straight into the message box, so typing can start at once (the shell
+        // announces the chat's title). Not while a dialog is open, nor away from where the user is typing.
+        if (!['wrap', 'reorganize', 'setup'].includes(c.kind)) {
+          await tick();
+          const a = document.activeElement as HTMLElement | null;
+          const elsewhere = !!a && a !== document.body && a !== input && !!a.closest('input, textarea, select, [contenteditable="true"]');
+          if (!document.querySelector('[aria-modal="true"]') && !elsewhere) input?.focus({ preventScroll: true });
+        }
       }
     } catch (e: any) {
       if (chat && !initial) return failed(t('chat3.refreshFailed'), e); // keep what is on screen; a refresh failed
@@ -164,13 +183,17 @@
       if (at >= 0) chat.messages[at] = e.message; else chat.messages.push(e.message);
       if (e.message.role === 'assistant') streaming = '';
       if (e.message.role !== 'user') thinking = '';
+      if (e.message.role === 'user') chat.suggestion = null;
       scrollDown(e.message.role === 'user');
+    } else if (e.type === 'chat.suggestion') {
+      // What the user might say next, from the assistant program; offered under the answer.
+      if (!again) chat.suggestion = e.text;
     } else if (e.type === 'chat.message.removed') {
       // A message whose answer could not be started is taken back: its words are in the box again.
       chat.messages = chat.messages.filter((m: any) => m.id !== e.messageId);
     } else if (e.type === 'chat.delta') {
       const seq = typeof e.seq === 'number' ? e.seq : streamSeq + 1;
-      if (seq === streamSeq + 1) { streaming += e.text; streamSeq = seq; scrollDown(); }
+      if (seq === streamSeq + 1) { streaming += e.text; streamSeq = seq; }
       // Pieces in between never arrived: take the service's copy rather than show a text with holes.
       else if (seq > streamSeq + 1 && !again && !loads) load();
     } else if (e.type === 'chat.thinking') {
@@ -192,23 +215,41 @@
   }
 
   async function scrollDown(force = false) {
-    if (!force && !stick) { unseen = true; return; }
+    // While the reader is selecting text in the conversation, nothing moves under the mouse.
+    if (!force && (!stick || selecting())) { unseen = true; return; }
     await tick();
-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    if (scroller) { scroller.scrollTop = scroller.scrollHeight; lastTop = scroller.scrollTop; }
     stick = true; unseen = false;
   }
 
+  /** Is part of the conversation selected (or being selected)? */
+  function selecting(): boolean {
+    const sel = window.getSelection();
+    return !!sel && !sel.isCollapsed && !!scroller && !!sel.anchorNode && scroller.contains(sel.anchorNode);
+  }
+
+  // The view follows new text only while the reader is at the very bottom. Any move up lets go at
+  // once — a wheel turn, a swipe, a key — so reading further up is never pulled back down; reaching
+  // the bottom again takes hold again.
+  let lastTop = 0;
   function onscroll() {
     if (!scroller) return;
-    stick = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
-    if (stick) unseen = false;
+    const top = scroller.scrollTop;
+    const atBottom = scroller.scrollHeight - top - scroller.clientHeight < 8;
+    if (atBottom) { stick = true; unseen = false; }
+    else if (top < lastTop - 1) stick = false;
+    lastTop = top;
   }
+  function letGo() { if (scroller && scroller.scrollHeight > scroller.clientHeight) stick = false; }
+  function onwheel(e: WheelEvent) { if (e.deltaY < 0) letGo(); }
+  function onscrollkey(e: KeyboardEvent) { if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) letGo(); }
+  let touchY = 0;
+  function ontouchmove(e: TouchEvent) { const y = e.touches[0]?.clientY ?? 0; if (y > touchY) letGo(); touchY = y; }
 
   onMount(() => {
     load(true);
     window.addEventListener('resize', grow);
     api('/ai/claude/options').then((o) => (opts = { models: [], efforts: [], permissionModes: [], ...o })).catch(() => {});
-    api('/library/tree?exclude=private').then((x: any[]) => (tree = x.map((f) => f.path).filter((p) => p.endsWith('.md')))).catch(() => {});
     const off = on((e) => {
       if (e.type === 'resync') { load(); return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
@@ -241,13 +282,49 @@
     if (!canSend || chat.running || sending) return;
     const keep = { text, files: [...files], mentions: [...mentions] };
     const ready = files.filter((f) => !f.missing);
-    // Files may go on their own; the assistant still needs a sentence to answer.
-    const words = text.trim() ? normalizeCapture(text) : tn('chat3.seeAttached', ready.length);
-    const body = { text: words, attachments: ready.map(({ name, data }) => ({ name, data })), mentions: [...mentions], options: chat.options };
+    // Files may go on their own; the assistant still needs a sentence to answer. A quick-capture
+    // prefix ("idea: …", «مهمة: …») only means a capture as the chat's first message: later in a
+    // conversation it is just how a sentence starts, and is sent as typed.
+    const first = !chat.messages.some((m: any) => m.role === 'user');
+    const words = text.trim() ? (first ? normalizeCapture(text) : text) : tn('chat3.seeAttached', ready.length);
+    const body = { text: words, attachments: ready.map(({ name, data }) => ({ name, data })), mentions: mentions.map((m) => m.path), options: chat.options };
     text = ''; files = []; mentions = []; mentionQ = null;
     // Nothing the user typed is lost when sending fails.
     if (!(await sendBody(body))) { text = keep.text; files = keep.files; mentions = keep.mentions; }
     else lastSent.set(id, { text: words, files: ready.map((f) => ({ ...f })) });
+  }
+
+  /** The suggested next message goes into the box (after anything typed), to send or change. */
+  function useSuggestion() {
+    const s = String(chat?.suggestion ?? '');
+    if (!s) return;
+    text = text.trim() ? text.replace(/\s*$/, '') + '\n' + s : s;
+    tick().then(() => { input?.focus(); input?.setSelectionRange(text.length, text.length); });
+  }
+
+  // ---- the next message, written while the assistant is still answering ----
+  const queued = $derived(queuedBy[id]);
+  /** It waits, visible above the box, and goes as soon as the answer has finished. */
+  function queueMsg() {
+    if (!canSend) return;
+    const ready = files.filter((f) => !f.missing);
+    enqueue(id, {
+      text: text.trim() ? text : tn('chat3.seeAttached', ready.length),
+      files: ready.map(({ name, data, size, image }) => ({ name, data, size, image })),
+      mentions: mentions.map((m) => ({ ...m })),
+    });
+    text = ''; files = files.filter((f) => f.missing); mentions = []; mentionQ = null;
+    say(t('chatc.queue.waits'));
+    input?.focus();
+  }
+  /** Back into the box, ahead of anything typed since. */
+  function editQueued() {
+    const q = take(id);
+    if (!q) return;
+    text = [q.text, text].filter((x) => x.trim()).join('\n\n');
+    files = [...q.files, ...files];
+    mentions = [...q.mentions, ...mentions.filter((m) => !q.mentions.some((x) => x.path === m.path))];
+    input?.focus();
   }
   const canSend = $derived(!!text.trim() || files.some((f) => !f.missing));
 
@@ -292,32 +369,66 @@
       return;
     }
     // Enter sends, Shift+Enter makes a new line (Cmd/Ctrl+Enter also sends). Never while an IME is composing.
-    if (e.key === 'Enter' && !e.shiftKey && !imeKey(e)) { e.preventDefault(); send(); }
+    // While an answer is being written, Enter puts the message in line for when it has finished.
+    if (e.key === 'Enter' && !e.shiftKey && !imeKey(e)) { e.preventDefault(); if (chat?.running || sending) queueMsg(); else send(); }
   }
 
+  // ---- @-mentions: ideas, notes, other files and folders, found by the name people know them by ----
+  type Mentionable = { path: string; kind: string; label: string; tf: string; pf: string };
+  let mentionables = $state<Mentionable[]>([]);
+  let mentionablesAt = 0;
+  const fold = (s: string) => foldMap(s).s;
+  /** Fetched when "@" is first typed, and again when the list is older than half a minute. */
+  function loadMentionables() {
+    if (Date.now() - mentionablesAt < 30_000) return;
+    mentionablesAt = Date.now();
+    api('/library/mentions').then((x: any[]) => {
+      mentionables = x.map((m) => {
+        const label = String(m.title || prettyName(m.path)).replace(/\s+/g, ' ').trim() || m.path;
+        return { path: m.path, kind: m.kind, label, tf: fold(label), pf: fold(m.path) };
+      });
+    }).catch(() => { mentionablesAt = 0; });
+  }
+  // "@" at the start or after a space, then what is typed so far (spaces allowed: titles have them).
+  const MENTION_AT = /(?:^|[\s(\[«"'])@([^\s@][^@\n]{0,39})?$/u;
   function oninput() {
-    const before = text.slice(0, input!.selectionStart);
-    const m = before.match(/@([\p{L}\p{N}_\-./]*)$/u);
-    mentionQ = m ? m[1] : null;
+    const m = text.slice(0, input!.selectionStart).match(MENTION_AT);
+    mentionQ = m ? (m[1] ?? '') : null;
+    if (mentionQ !== null) loadMentionables();
     mentionIdx = 0;
   }
 
-  function pickMention(p: string) {
+  function pickMention(h: Mentionable) {
     const pos = input!.selectionStart;
-    const before = text.slice(0, pos).replace(/@([\p{L}\p{N}_\-./]*)$/u, '@' + p + ' ');
+    const before = text.slice(0, pos).replace(/@([^\s@][^@\n]{0,39})?$/u, '@' + h.label + ' ');
     text = before + text.slice(pos);
-    if (!mentions.includes(p)) mentions.push(p);
+    if (!mentions.some((m) => m.path === h.path)) mentions.push({ path: h.path, label: h.label });
     mentionQ = null;
-    input!.focus();
+    tick().then(() => { input?.focus(); input?.setSelectionRange(before.length, before.length); });
   }
 
-  function dropMention(p: string) {
-    text = text.split('@' + p + ' ').join('').split('@' + p).join('');
-    mentions = mentions.filter((x) => x !== p);
+  function dropMention(m: Mention) {
+    text = text.split('@' + m.label + ' ').join('').split('@' + m.label).join('');
+    mentions = mentions.filter((x) => x.path !== m.path);
     input?.focus();
   }
 
-  const mentionHits = $derived(mentionQ === null ? [] : tree.filter((p) => p.toLowerCase().includes(mentionQ!.toLowerCase())).slice(0, 8));
+  const KIND_RANK: Record<string, number> = { idea: 0, note: 1, folder: 2, file: 3 };
+  const mentionIcon = (k: string) => (k === 'idea' ? 'ideas' : k === 'note' ? 'docs' : k === 'folder' ? 'folder' : 'attach');
+  // Ideas first, then notes, folders and other files; a name that starts with what was typed before
+  // one that only contains it, and either before a match on where the file is.
+  const mentionHits = $derived.by(() => {
+    if (mentionQ === null) return [];
+    const q = fold(mentionQ);
+    const hits: { h: Mentionable; s: number }[] = [];
+    for (const h of mentionables) {
+      const s = !q || h.tf.startsWith(q) ? 0 : h.tf.includes(q) ? 1 : h.pf.includes(q) ? 2 : -1;
+      if (s >= 0) hits.push({ h, s: s * 10 + (KIND_RANK[h.kind] ?? 3) });
+    }
+    return hits.sort((a, b) => a.s - b.s || a.h.label.length - b.h.label.length).slice(0, 8).map((x) => x.h);
+  });
+  /** A mentioned file's name in a sent message: its title when the list has it. */
+  const mentionName = (p: string) => mentionables.find((m) => m.path === p)?.label ?? prettyName(p);
 
   async function addFiles(list: Iterable<File>) {
     for (const f of list) {
@@ -533,6 +644,7 @@
         <button class="btn ghost" class:on={chat.pinned} aria-pressed={!!chat.pinned} onclick={() => flag('pinned')} title={chat.pinned ? t('chatb.unpin') : t('chatb.pin')} aria-label={chat.pinned ? t('chatb.unpin') : t('chatb.pin')}><Icon name="pin" /></button>
         <button class="btn ghost" onclick={() => flag('archived')} title={t('chatb.archive')} aria-label={t('chatb.archive')}><Icon name="archive" /></button>
       {/if}
+      <ExportMenu {chat} />
       <button class="btn ghost" onclick={remove} title={t('chat.deleteChat')} aria-label={t('chat.deleteChat')}><Icon name="trash" /></button>
     </header>
 
@@ -557,13 +669,14 @@
 
     <div class="msgs-wrap">
       <FindBar root={() => scroller} where={'chat:' + id} anchors=":scope > .msg.user, :scope > .msg.ai" />
-      <div class="msgs scroll" bind:this={scroller} {onscroll} role="group" aria-label={t('chat.conversation')}>
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+      <div class="msgs scroll" bind:this={scroller} {onscroll} {onwheel} onkeydown={onscrollkey} ontouchstart={(e) => (touchY = e.touches[0]?.clientY ?? 0)} {ontouchmove}
+        role="group" aria-label={t('chat.conversation')}>
         {#each chat.messages as m (m.id)}
           {#if m.role === 'user'}
             <div class="msg user">
               <div class="bubble" dir="auto">{m.text}
-                {#if m.attachments?.length}<div class="sm att"><Icon name="attach" size={12} /> <bdi>{m.attachments.map((a: string) => a.split('/').pop()).join(', ')}</bdi></div>{/if}
-                {#if m.tool?.mentions?.length}<div class="sm att"><bdi>@ {m.tool.mentions.join(', ')}</bdi></div>{/if}
+                {#if m.attachments?.length}<Attachments chatId={id} paths={m.attachments} />{/if}{#if m.tool?.mentions?.length}<div class="sm att refs">{#each m.tool.mentions as p (p)}<button type="button" class="ref" onclick={() => go({ kind: 'docs', path: p })} title={t('chatc.mention.open', { path: p })}>@<bdi>{mentionName(p)}</bdi></button>{/each}</div>{/if}
               </div>
               <div class="acts">
                 <button class="act" onclick={() => copyMsg(m.text)} aria-label={t('chat.copyMessage')} title={t('chat.copyMessage')}><Icon name="copy" size={14} /></button>
@@ -620,6 +733,9 @@
               <div class="errline"><Icon name="warning" size={14} /> <span dir="auto">{m.text}</span></div>
               {#if m.tool?.code === 'signedOut' && m.id === lastAnswerId}
                 <button class="act show" onclick={signIn}><Icon name="external" size={14} /><span>{t('auth.signIn')}</span></button>
+              {:else if m.tool?.code === 'providerKey' && m.id === lastAnswerId}
+                <!-- The service refused the saved key: it is changed in Settings, under Assistant. -->
+                <button class="act show" onclick={() => go({ kind: 'settings', id: 'ai' })}><Icon name="settings" size={14} /><span>{t('chatc.openSettings')}</span></button>
               {/if}
               {#if m.id === lastAnswerId && !chat.running && lastUser && canCompose}
                 <button class="act show" onclick={retry}><Icon name="retry" size={14} /><span>{t('chat.tryAgain')}</span></button>
@@ -631,10 +747,13 @@
         {:else}
           {#if !chat.running}<div class="hint muted"><Icon name="chat" size={22} /><span>{t('chat.emptyHint')}</span></div>{/if}
         {/each}
+        {#if chat.suggestion && !chat.running && canCompose}
+          <div class="suggest"><button type="button" class="sugg" onclick={useSuggestion} title={t('chatc.suggest.tip')} aria-label={t('chatc.suggest.aria', { text: chat.suggestion })}>
+            <Icon name="wrap" size={13} /><span dir="auto">{chat.suggestion}</span></button></div>
+        {/if}
         {#if thinking}<div class="msg sys muted ell think"><Icon name="thinking" size={13} /> <span class="ell" dir="auto">{thinking.slice(-160)}</span></div>{/if}
         {#if streaming}
-          <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-          <div class="msg ai" aria-busy="true"><div class="md" dir="auto" onclick={mdClick}>{@html md(streaming)}</div></div>
+          <div class="msg ai" aria-busy="true"><StreamText text={streaming} onrender={() => scrollDown()} /></div>
         {/if}
         {#if chat.running && !streaming}<div class="msg sys muted working" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> {t('chat.working')}</div>{/if}
       </div>
@@ -670,9 +789,12 @@
       <div class="composer card">
         {#if mentionHits.length}
           <div class="mentions" role="listbox" id="mention-list" aria-label={t('chat.mentionList')}>
-            {#each mentionHits as p, i}
+            {#each mentionHits as h, i (h.path)}
               <button type="button" role="option" id="mention-{i}" aria-selected={i === mentionIdx} class:sel={i === mentionIdx} tabindex="-1"
-                onmousedown={(e) => e.preventDefault()} onclick={() => pickMention(p)} onmouseenter={() => (mentionIdx = i)}><bdi>{p}</bdi></button>
+                onmousedown={(e) => e.preventDefault()} onclick={() => pickMention(h)} onmouseenter={() => (mentionIdx = i)}>
+                <Icon name={mentionIcon(h.kind)} size={14} />
+                <span class="mt"><bdi class="ell">{h.label}</bdi><bdi class="ell mp" dir="ltr">{h.path}</bdi></span>
+              </button>
             {/each}
           </div>
         {/if}
@@ -689,36 +811,25 @@
         {/if}
         {#if mentions.length}
           <ul class="files chips" aria-label={t('chat3.mentioned')}>
-            {#each mentions as p (p)}
-              <li class="chip"><span aria-hidden="true">@</span><bdi class="ell">{p}</bdi>
-                <button class="x" type="button" onclick={() => dropMention(p)} aria-label={t('chat3.removeMention', { path: p })} title={t('chat3.removeMention', { path: p })}><Icon name="close" size={13} /></button>
+            {#each mentions as m (m.path)}
+              <li class="chip" title={m.path}><span aria-hidden="true">@</span><bdi class="ell">{m.label}</bdi>
+                <button class="x" type="button" onclick={() => dropMention(m)} aria-label={t('chat3.removeMention', { path: m.label })} title={t('chat3.removeMention', { path: m.label })}><Icon name="close" size={13} /></button>
               </li>
             {/each}
           </ul>
         {/if}
+        {#if queued}
+          <QueuedCard q={queued} running={chat.running} onedit={editQueued} oncancel={() => take(id)} onsend={() => sendNowOrAfterStop(id, chat.running)} />
+        {/if}
         <textarea bind:this={input} bind:value={text} {oninput} onkeydown={keydown} {onpaste} rows="2" dir="auto"
-          placeholder={t('chat.placeholder')} aria-label={t('chat.messageLabel')}
+          placeholder={chat.running ? t('chatc.queue.placeholder') : t('chatc.placeholder')} aria-label={t('chat.messageLabel')}
           aria-controls={mentionHits.length ? 'mention-list' : undefined} aria-activedescendant={mentionHits.length ? `mention-${mentionIdx}` : undefined}></textarea>
         <div class="row controls">
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
-          <select value={chat.options.model ?? ''} onchange={modelChanged} title={t('model')} aria-label={t('model')}>
-            <option value="">{t('model')}: {t('default')}</option>
-            {#each opts.models as m}<option value={m}>{m}</option>{/each}
-            {#if chat.options.model && !opts.models.includes(chat.options.model)}<option value={chat.options.model}>{chat.options.model}</option>{/if}
-            <option value={MODEL_OTHER}>{t('runc.model.other')}</option>
-          </select>
-          {#if opts.efforts.length}
-            <select bind:value={chat.options.effort} onchange={() => saveOpts()} title={t('effort')} aria-label={t('effort')}>
-              <option value={null}>{t('effort')}: {t('default')}</option>
-              {#each opts.efforts as m}<option value={m}>{label('chat.effort', m)}</option>{/each}
-            </select>
-          {/if}
-          {#if permModes.length}
-            <select bind:value={chat.options.permissionMode} onchange={permChanged} class:bypass={chat.options.permissionMode === BYPASS}
-              title={chat.options.permissionMode === BYPASS ? t('perm.bypass.on') : t('chat.permissionTip')} aria-label={t('permission')}>
-              {#each permModes as m}<option value={m}>{label('chat3.perm', m)}</option>{/each}
-            </select>
-          {/if}
+          <!-- Model, effort and what the assistant may do: one control; the mode is always named on it. -->
+          <ChatOptions options={chat.options} models={opts.models} efforts={opts.efforts} modes={permModes} {label}
+            onmodel={modelChanged} extraModel={{ value: MODEL_OTHER, label: t('runc.model.other') }} oneffort={(v) => { chat.options.effort = v; saveOpts(); }}
+            onperm={(v) => { chat.options.permissionMode = v; permChanged(); }} />
           {#if chat.kind === 'chat' && savedPerm !== BYPASS}
             <label class="btn ghost webtoggle" class:on={!!chat.options.web} title={t('runb.web.tip')}>
               <input type="checkbox" checked={!!chat.options.web} onchange={async (e) => { const box = e.currentTarget; await setWeb(box.checked); box.checked = !!chat.options.web; }} />
@@ -728,6 +839,7 @@
           <span class="grow"></span>
           <span class="esc muted" role="status" aria-live="polite">{#if escHint}{t('chat3.escHint')}{/if}</span>
           {#if chat.running}
+            {#if canSend}<button class="btn" onclick={queueMsg} title={t('chatc.queue.tip')}><Icon name="clock" size={13} /> {t('chatc.queue.add')}</button>{/if}
             <button class="btn danger" onclick={stop} title={t('chat.stopTip')}><Icon name="stop" size={13} /> {t('stop')}</button>
           {:else}
             <button class="btn primary send" onclick={send} disabled={!canSend} title={t('chat.sendTip')} aria-label={t('send')}><Icon name="send" size={16} stroke={2.25} /></button>
@@ -821,13 +933,24 @@
   .esc { font-size: var(--fs-xs); }
   .composer:focus-within { box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
   .controls { flex-wrap: wrap; }
-  .controls select { width: auto; font-size: var(--fs-xs); padding: 4px 6px; }
-  .controls select.bypass { color: var(--danger); border-color: var(--danger); font-weight: 600; }
   .controls label { position: relative; margin: 0; color: var(--fg); font-size: 14px; }
   .controls label:focus-within { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent); }
 
   .mentions { position: absolute; bottom: 100%; inset-inline-start: 8px; margin-bottom: 4px; padding: 4px; background: var(--panel); border: var(--border-w) solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-lg); display: flex; flex-direction: column; min-width: 320px; max-width: calc(100% - 16px); z-index: 5; }
-  .mentions button { font: inherit; color: inherit; background: none; border: 0; border-radius: 6px; text-align: start; padding: 5px 10px; cursor: pointer; font-family: var(--mono); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mentions button { font: inherit; color: inherit; background: none; border: 0; border-radius: 6px; text-align: start; padding: 5px 10px; cursor: pointer; font-size: var(--fs-sm);
+    display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .mentions button > :global(.icon) { flex: none; color: var(--muted); }
+  .mentions button.sel > :global(.icon) { color: inherit; }
+  .mt { display: flex; flex-direction: column; min-width: 0; line-height: 1.3; }
+  .mp { font-size: var(--fs-xs); opacity: .7; text-align: start; }
+  .mt .ell { display: block; }
+  .refs { flex-wrap: wrap; gap: 4px 8px; }
+  .suggest { display: flex; }
+  .sugg { font: inherit; font-size: var(--fs-sm); color: var(--fg); background: var(--panel); border: var(--border-w) solid var(--border); border-radius: 14px;
+    padding: 6px 12px; cursor: pointer; display: inline-flex; align-items: flex-start; gap: 7px; text-align: start; max-width: 100%; box-shadow: var(--shadow); }
+  .sugg:hover { border-color: var(--accent); }
+  .sugg > :global(.icon) { color: var(--accent); flex: none; margin-top: 3px; }
+  .ref { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; opacity: .9; }
   .mentions button.sel { background: var(--accent); color: var(--accent-fg); }
 
   .files { list-style: none; margin: 0 0 6px; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
@@ -839,7 +962,7 @@
   .file.gone { outline: 1px dashed var(--muted); outline-offset: -1px; }
   .file.gone .fname { color: var(--muted); }
   .chips { margin-bottom: 4px; }
-  .chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 0 2px 0 8px; padding-inline: 8px 2px; border-radius: 99px; background: var(--tint); color: var(--on-tint); font-family: var(--mono); font-size: var(--fs-xs); }
+  .chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 0 2px 0 8px; padding-inline: 8px 2px; border-radius: 99px; background: var(--tint); color: var(--on-tint); font-size: var(--fs-xs); }
   .chip .x { color: inherit; }
   .x { font: inherit; color: var(--muted); background: none; border: 0; border-radius: 6px; padding: 4px; min-width: 24px; min-height: 24px; flex: none; cursor: pointer; display: grid; place-items: center; }
   .x:hover { color: var(--fg); background: var(--fill-2); }
@@ -860,7 +983,7 @@
     .msgs { padding: 12px 0 0; }
     .msgs > :global(*) { margin-bottom: 10px; }
     .bubble { max-width: 100%; box-shadow: none; }
-    header select, header .btn, .cost, .acts, .jump, .composer, .runbar, .approve, .dropzone, .banner .btn, .working, .think, .hint { display: none !important; }
+    header select, header .btn, .cost, .acts, .jump, .composer, .runbar, .approve, .dropzone, .banner .btn, .working, .think, .hint, .suggest { display: none !important; }
     .tooldetail pre { max-height: none; overflow: visible; }
   }
 </style>

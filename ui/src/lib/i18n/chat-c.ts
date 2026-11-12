@@ -1,0 +1,107 @@
+// Chat composer and messages, 0.0.9 (agent chat-c). Keys are prefixed `chatc.`.
+export default {
+  en: {
+    'chatc.openSettings': 'Open Settings',
+    'chatc.placeholder': 'Message… (type @ to point to a note, file or folder; Enter sends, Shift+Enter starts a new line)',
+
+    // A suggested next message under the answer
+    'chatc.suggest.tip': 'Put this in the message box, to send or change',
+    'chatc.suggest.aria': 'Suggested next message: {text}. Puts it in the message box.',
+    'chatc.set.suggest': 'Suggest a next message after each answer',
+    'chatc.set.suggestHint': 'After an answer, the assistant proposes something you might say next, which you can use with one click. Working it out takes a few seconds and uses a little of your plan.',
+
+    // One control for how the assistant works in this chat
+    'chatc.opt.tip': 'What the assistant may do in this chat, and which model it uses',
+    'chatc.opt.aria': 'Chat settings: {mode}',
+    'chatc.opt.title': 'Chat settings',
+    'chatc.opt.may': 'What the assistant may do',
+    'chatc.opt.auto': 'Automatic',
+    'chatc.opt.modelHint': 'Leave model and effort on Automatic unless you need something specific. A larger model or more effort is slower and uses more of your plan.',
+
+    // The next message, written while an answer is still coming
+    'chatc.queue.label': 'Next message',
+    'chatc.queue.waits': 'Sends when the answer has finished',
+    'chatc.queue.held': 'Not sent: the last answer did not finish',
+    'chatc.queue.files_one': '{n} file', 'chatc.queue.files_other': '{n} files',
+    'chatc.queue.now': 'Stop and send now',
+    'chatc.queue.nowTip': 'Stops the answer that is being written and sends this message instead',
+    'chatc.queue.sendNow': 'Send now',
+    'chatc.queue.cancel': 'Remove',
+    'chatc.queue.failed': 'Your next message could not be sent. It is still waiting above the message box.',
+    'chatc.queue.restored': 'A message you had waiting was not sent before the app closed. It is back in the message box.',
+    'chatc.queue.placeholder': 'Write your next message — it is sent when this answer has finished',
+    'chatc.queue.tip': 'Send this message as soon as the answer has finished',
+    'chatc.queue.add': 'Send next',
+
+    // Files in sent messages
+    'chatc.att.open': 'Open {name}',
+    'chatc.att.gone': 'This file is no longer available.',
+    'chatc.att.loading': 'Opening…',
+    'chatc.mention.open': 'Open {path}',
+
+    // Taking a conversation out of the app
+    'chatc.export.tip': 'Save or print this conversation',
+    'chatc.export.md': 'Save as a Markdown file…',
+    'chatc.export.copy': 'Copy the whole conversation',
+    'chatc.export.print': 'Print or save as PDF…',
+    'chatc.export.saved': 'Conversation saved.',
+    'chatc.export.copied': 'Conversation copied. You can paste it into an email or a document.',
+    'chatc.export.untitled': 'Conversation',
+    'chatc.export.started': 'Started {date}',
+    'chatc.export.you': 'You',
+    'chatc.export.assistant': 'Assistant',
+    'chatc.export.attached': 'Attached: {files}',
+    'chatc.export.mentioned': 'Referred to: {files}',
+    'chatc.export.failed': 'Did not finish',
+  },
+  ar: {
+    'chatc.openSettings': 'افتح الإعدادات',
+    'chatc.placeholder': 'اكتب رسالتك… (اكتب @ للإشارة إلى ملاحظة أو ملف أو مجلد؛ ⁦Enter⁩ للإرسال، و⁦Shift+Enter⁩ لسطر جديد)',
+
+    'chatc.suggest.tip': 'ضعها في مربع الرسالة لترسلها أو تعدّلها',
+    'chatc.suggest.aria': 'رسالة تالية مقترحة: {text}. تضعها في مربع الرسالة.',
+    'chatc.set.suggest': 'اقترح رسالة تالية بعد كل رد',
+    'chatc.set.suggestHint': 'بعد كل رد يقترح المساعد ما قد تقوله بعده، فتستخدمه بنقرة واحدة. يستغرق إعداد الاقتراح بضع ثوانٍ ويستهلك قليلاً من باقتك.',
+
+    'chatc.opt.tip': 'ما يُسمح للمساعد بفعله في هذه المحادثة، والنموذج الذي يستخدمه',
+    'chatc.opt.aria': 'إعدادات المحادثة: {mode}',
+    'chatc.opt.title': 'إعدادات المحادثة',
+    'chatc.opt.may': 'ما يُسمح للمساعد بفعله',
+    'chatc.opt.auto': 'تلقائي',
+    'chatc.opt.modelHint': 'اترك النموذج والجهد على «تلقائي» ما لم تحتج إلى شيء بعينه. النموذج الأكبر أو الجهد الأعلى أبطأ ويستهلك من باقتك أكثر.',
+
+    'chatc.queue.label': 'الرسالة التالية',
+    'chatc.queue.waits': 'تُرسل حين ينتهي الرد',
+    'chatc.queue.held': 'لم تُرسل: الرد الأخير لم يكتمل',
+    'chatc.queue.files_zero': 'لا ملفات', 'chatc.queue.files_one': 'ملف واحد', 'chatc.queue.files_two': 'ملفان',
+    'chatc.queue.files_few': '{n} ملفات', 'chatc.queue.files_many': '{n} ملفاً', 'chatc.queue.files_other': '{n} ملف',
+    'chatc.queue.now': 'أوقف الرد وأرسلها الآن',
+    'chatc.queue.nowTip': 'يوقف الرد الجاري ويرسل هذه الرسالة مكانه',
+    'chatc.queue.sendNow': 'أرسلها الآن',
+    'chatc.queue.cancel': 'إزالة',
+    'chatc.queue.failed': 'تعذّر إرسال رسالتك التالية، وما زالت تنتظر فوق مربع الرسالة.',
+    'chatc.queue.restored': 'رسالة كانت تنتظر الإرسال لم تُرسل قبل إغلاق التطبيق، وقد أعدناها إلى مربع الرسالة.',
+    'chatc.queue.placeholder': 'اكتب رسالتك التالية — تُرسل حين ينتهي هذا الرد',
+    'chatc.queue.tip': 'أرسل هذه الرسالة فور انتهاء الرد',
+    'chatc.queue.add': 'أرسلها بعده',
+
+    'chatc.att.open': 'افتح {name}',
+    'chatc.att.gone': 'هذا الملف لم يعد متاحاً.',
+    'chatc.att.loading': 'جارٍ الفتح…',
+    'chatc.mention.open': 'افتح {path}',
+
+    'chatc.export.tip': 'احفظ هذه المحادثة أو اطبعها',
+    'chatc.export.md': 'احفظها ملفَّ Markdown…',
+    'chatc.export.copy': 'انسخ المحادثة كاملة',
+    'chatc.export.print': 'اطبعها أو احفظها بصيغة PDF…',
+    'chatc.export.saved': 'حُفظت المحادثة.',
+    'chatc.export.copied': 'نُسخت المحادثة، ويمكنك لصقها في رسالة بريد أو مستند.',
+    'chatc.export.untitled': 'محادثة',
+    'chatc.export.started': 'بدأت في {date}',
+    'chatc.export.you': 'أنت',
+    'chatc.export.assistant': 'المساعد',
+    'chatc.export.attached': 'المرفقات: {files}',
+    'chatc.export.mentioned': 'الملفات المشار إليها: {files}',
+    'chatc.export.failed': 'لم يكتمل',
+  },
+};

@@ -32,7 +32,7 @@
   const basic: Record<Cat, string[]> = {
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates'],
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
-    ai: ['set.account', 'set.perm', 'set.wrapNag'],
+    ai: ['set.account', 'set.perm', 'set.wrapNag', 'chatc.set.suggest'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'hista.online.when', 'set.credStore', 'hista.online.locations', 'reorganize'],
     privacy: ['set.privTitle', 'seca.access.title', 'wrapa.set.auto', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost'],
     modules: ['set.modulesIntro'],
@@ -340,8 +340,8 @@
       saveSettings({ theme: 'saudi', mode: 'system' }).catch((e) => failed(t('shell.themeNotSaved'), e));
     } },
     accessibility: { list: basic.accessibility, apply: () => setAx({ ...A11Y_DEFAULTS }) },
-    ai: { list: ['set.perm', 'set.wrapNag', 'set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle'], apply: () => {
-      const c = s.ai.claude; c.permissionMode = 'acceptEdits'; c.model = null; c.effort = null; c.binary = null; c.miniWrapModel = null;
+    ai: { list: ['set.perm', 'set.wrapNag', 'chatc.set.suggest', 'set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle'], apply: () => {
+      const c = s.ai.claude; c.permissionMode = 'acceptEdits'; c.model = null; c.effort = null; c.binary = null; c.miniWrapModel = null; c.suggestionsOff = false;
       s.idleMinutes = 15; s.wrapNagThreshold = 5;
     } },
     daemon: { list: ['set.keepRunning', 'set.runAtLogin'], apply: () => { s.daemon.keepRunning = true; s.daemon.runAtLogin = false; } },
@@ -640,6 +640,10 @@
         <input id="st-nag" class="num" type="number" min="1" step="1" bind:value={s.wrapNagThreshold} aria-invalid={!!errors.wrapNagThreshold} aria-describedby="st-nag-hint" />
         {@render err('wrapNagThreshold')}
         <p class="muted sm" id="st-nag-hint">{t('set.wrapDef')}</p>
+      {/if}
+      {#if vis(c, 'chatc.set.suggest')}
+        <label class="check"><input type="checkbox" checked={!s.ai.claude.suggestionsOff} onchange={(e) => (s.ai.claude.suggestionsOff = !e.currentTarget.checked)} aria-describedby="st-suggest-hint" /> {t('chatc.set.suggest')}</label>
+        <p class="muted sm" id="st-suggest-hint">{t('chatc.set.suggestHint')}</p>
       {/if}
     </div>
     {#if vis(c, ...adv.ai)}
