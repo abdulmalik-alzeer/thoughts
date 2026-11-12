@@ -3994,7 +3994,8 @@ mod tests {
         let h = library_history(State(st.clone()), q(&[("path", "notes/plan.md"), ("limit", "10")])).await.unwrap().0;
         let h = h.as_array().unwrap().clone();
         assert_eq!(h.len(), 2);
-        assert_eq!(h[0]["kind"], "sync");
+        // UX-23: the user's own edits that a sync records are their edits, not something that arrived.
+        assert_eq!(h[0]["kind"], "edit");
         let first = h[1]["hash"].as_str().unwrap().to_string();
         let v = library_version(State(st.clone()), q(&[("path", "notes/plan.md"), ("hash", &first)])).await.unwrap().0;
         assert_eq!(v["content"], "first draft\n");
