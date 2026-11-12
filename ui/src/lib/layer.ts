@@ -31,8 +31,16 @@
 //   setDone/edit/remove, `ideas:write` → ideas.setStatus. Permissions, `write`, `apiVersion`,
 //   `description` and `unsupported` arrive resolved per plugin from `GET /api/layer` (the per-plugin
 //   `plugins/<name>.json`, falling back to manifest.json). Unsupported items are never loaded.
-// * While a staged change is being tried ("Try it") nothing a plugin does is saved: every call that
-//   would write is rejected and the user sees "Preview — nothing was saved".
+// * While a staged change is being tried ("Try it") nothing a plugin does is saved, yet it works as it
+//   will: what it saves goes to a throwaway copy that is read back to it (its storage, files it
+//   writes or removes, an item's status) and is dropped when the preview ends; todo changes are
+//   answered as done. Each time, a toast says what would have been saved and where. Chats and
+//   questions for the assistant are not started.
+// * v1.2 (additive): `read` folders narrow every library read to them (the DAEMON reads them from the
+//   add-on's own declaration: each call names the add-on with `plugin=`); `todos.add(text, {list,
+//   group})`; `ui.confirm`, `ui.print`; `ui.notify` (notify), `ui.saveFile` (files:save) and
+//   `assistant.ask` (assistant:ask), the last three checked again by the daemon (crates/thoughtsd/src/addons.rs).
+// * The app's own shortcuts (Cmd/Ctrl + key, Escape) pressed inside an add-on's page reach the app.
 // * One hidden "background" frame per plugin runs for the whole session: it registers views,
 //   widgets, chips, commands and item actions and receives events. Callbacks (`run`) are invoked
 //   in that frame by handle. `render(el)` callbacks cannot draw into the app, so each visible
@@ -52,7 +60,8 @@
 //   hourly ceiling per add-on.
 import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
 import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
-import { confirmDialog, promptDialog } from './dialog.svelte';
+import { confirmDialog, promptDialog, dialogs } from './dialog.svelte';
+import { saveFile as offerFile } from './download';
 import { aboveShield } from './layer/shield';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang } from './i18n';
@@ -141,6 +150,8 @@ type Plugin = {
   disposers: (() => void)[]; frames: Set<Frame>; warned: Set<string>;
   /** Library-relative folders (each ending in "/") this plugin may create and change files in. */
   write: string[];
+  /** The only folders it may read in (each ending in "/"); empty = the whole library but private folders. */
+  read: string[];
   /** What the plugin says it is for; used as the accessible name of its frames. */
   description: string;
   /** Review-time test load: every data call answers with nothing and nothing is registered. */
@@ -148,7 +159,7 @@ type Plugin = {
 };
 /** A plugin or view of the layer as the user should see it listed (Settings, Review). `error`: it did
  *  not start when test-loaded; `skipped`: why it was not test-loaded at all. */
-export type LayerItem = { name: string; kind: 'plugin' | 'view'; permissions: string[]; write: string[]; description: string; apiVersion: number; unsupported: boolean; message: string; error?: string; skipped?: string };
+export type LayerItem = { name: string; kind: 'plugin' | 'view'; permissions: string[]; write: string[]; read: string[]; description: string; apiVersion: number; unsupported: boolean; message: string; error?: string; skipped?: string };
 type Frame = {
   el: HTMLIFrameElement; plugin: Plugin; surface: Surface | null; events: Set<string>;
   /** Handed to the frame's runtime with `init`; every message it sends afterwards must carry it. */
@@ -158,13 +169,15 @@ type Frame = {
   loads: number; closed: boolean;
   /** For a page or widget: the mount it belongs to, so the frame can be started again in place. */
   slot?: { f: Frame };
+  /** How tall the frame's page last said it is (for printing a page whole). */
+  height?: number;
 };
 
 let plugins: Plugin[] = [];
 const frames = new Set<Frame>();
 let bg: HTMLElement | null = null;
 
-const PERMS = ['library:read', 'library:write', 'todos:read', 'todos:write', 'ideas:read', 'ideas:write', 'chat:start', 'storage'];
+const PERMS = ['library:read', 'library:write', 'todos:read', 'todos:write', 'ideas:read', 'ideas:write', 'chat:start', 'storage', 'files:save', 'notify', 'assistant:ask'];
 const VIEW_PERMS = ['library:read', 'todos:read', 'ideas:read'];
 const NEEDS: Record<string, string> = {
   'library.list': 'library:read', 'library.read': 'library:read', 'library.search': 'library:read',
@@ -174,9 +187,11 @@ const NEEDS: Record<string, string> = {
   // A Home chip puts a request in front of the assistant, so it needs the same permission as starting a chat.
   'ui.addHomeChip': 'chat:start',
   'storage.get': 'storage', 'storage.set': 'storage',
+  'ui.saveFile': 'files:save', 'ui.notify': 'notify', 'assistant.ask': 'assistant:ask',
 };
-/** Calls that change something. Rejected while a staged change is only being tried. */
-const WRITES = new Set(['library.write', 'library.remove', 'todos.add', 'todos.setDone', 'todos.edit', 'todos.remove', 'ideas.setStatus', 'storage.set', 'chat.start']);
+/** Calls that change something. While a staged change is only being tried none of them reaches the
+ *  library or the add-on's storage (see `pretend`), and chats or questions are not started. */
+const WRITES = new Set(['library.write', 'library.remove', 'todos.add', 'todos.setDone', 'todos.edit', 'todos.remove', 'ideas.setStatus', 'storage.set', 'chat.start', 'assistant.ask']);
 const WRITE_EXT = /\.(md|json|csv|txt)$/i;
 const STATUSES = ['seed', 'active', 'parked', 'done', 'dropped'];
 const STORAGE_MAX = 256 * 1024;
@@ -472,8 +487,8 @@ function background(): HTMLElement {
 // ---------- host side of the RPC ----------
 /** Plain words for a permission (the v1.1 ones, and the widened todos:write, live in the layer3 dictionary). */
 export function permText(perm: string): string {
-  const k3 = 'layer3.perm.' + perm, s3 = t(k3);
-  return s3 !== k3 ? s3 : t('layer.perm.' + perm);
+  for (const k of ['lub.perm.' + perm, 'layer3.perm.' + perm]) { const s = t(k); if (s !== k) return s; }
+  return t('layer.perm.' + perm);
 }
 
 function denied(p: Plugin, perm: string): Error {
@@ -497,13 +512,18 @@ function cleanPath(v: any): string {
 function writePath(p: Plugin, v: any): string {
   const path = cleanPath(v);
   if (!WRITE_EXT.test(path)) throw new Error('Add-ons can only write .md, .json, .csv and .txt files');
-  const low = path.toLowerCase();
-  if (!p.write.some((w) => { const f = w.toLowerCase().replace(/\/+$/, ''); return low === f || low.startsWith(f + '/'); })) throw new Error(p.write.length ? `"${path}" is outside the folders this add-on declared (${p.write.join(', ')})` : 'This add-on declared no "write" folders');
+  if (!inFolders(p.write, path)) throw new Error(p.write.length ? `"${path}" is outside the folders this add-on declared (${p.write.join(', ')})` : 'This add-on declared no "write" folders');
   return path;
 }
+/** What every library call made for an add-on carries: the daemon keeps private folders closed, and
+ *  reads the add-on's own declaration (its `read` folders, the permission for a status change) from
+ *  the layer it runs from — the staged one while a change is tried. */
+const scopeQuery = (p: Plugin) => `scope=plugin&plugin=${encodeURIComponent(p.name)}&kind=${p.kind}${app.preview ? '&preview=1' : ''}`;
 // The folders go as `a,b`; when a folder name itself has a comma they go as a JSON list instead,
 // which the daemon reads when the value starts with `[`.
-const allowQuery = (p: Plugin) => 'scope=plugin&allow=' + encodeURIComponent(p.write.some((w) => w.includes(',')) ? JSON.stringify(p.write) : p.write.join(','));
+const allowQuery = (p: Plugin) => scopeQuery(p) + '&allow=' + encodeURIComponent(p.write.some((w) => w.includes(',')) ? JSON.stringify(p.write) : p.write.join(','));
+/** Is library path `path` inside one of `folders` ("a/" each)? */
+const inFolders = (folders: string[], path: string) => { const low = path.toLowerCase(); return folders.some((w) => { const f = w.toLowerCase().replace(/\/+$/, ''); return low === f || low.startsWith(f + '/'); }); };
 /** The `{file, line, text}` reference of a todo, from an item as todos.list() or an item action gave it. */
 function todoRef(v: any): { file: string; line: number; text: string } {
   const it = v && typeof v === 'object' && v.item && typeof v.item === 'object' ? v.item : v;
@@ -513,9 +533,34 @@ function todoRef(v: any): { file: string; line: number; text: string } {
 }
 // The daemon keys storage by the plugin's file name (e.g. `hours.js`).
 const storageName = (p: Plugin) => encodeURIComponent(p.name);
-function previewOnly(): Error {
-  toast(t('layer3.previewReadOnly'), { key: 'preview-readonly' });
-  return Object.assign(new Error('Preview: nothing was saved'), { code: 'preview' });
+// ---------- Try it: what add-ons save is kept aside (UX-28) ----------
+// While a staged change is tried, an add-on works as it will once kept — a form saves, a card moves —
+// but nothing reaches the library or its storage: what it saves goes here, is read back to it, and is
+// dropped when the preview ends (every reload of the customisations starts afresh).
+type Pretend = { storage: Map<string, any>; files: Map<string, string | null>; status: Map<string, string>; told: Set<string> };
+const freshPretend = (): Pretend => ({ storage: new Map(), files: new Map(), status: new Map(), told: new Set() });
+let pretend = freshPretend();
+/** Say what an add-on would have saved: one toast per add-on, replaced by the next one. */
+function wouldDo(p: Plugin, what: string, vars: Record<string, string | number> = {}) {
+  toast(t('lub.would.' + what, { name: shortName(p.name), ...vars }), { key: 'preview:' + p.name, detail: t('lub.would.detail') });
+}
+/** A chat or a question the add-on would start: not while only trying a change. */
+function previewOnly(p: Plugin, what: 'chat' | 'ask'): Error {
+  toast(t('lub.would.' + what, { name: shortName(p.name) }), { key: 'preview:' + p.name });
+  return Object.assign(new Error(what === 'chat' ? 'Preview: no chat is started while a change is tried' : 'Preview: the assistant is not asked while a change is tried'), { code: 'preview' });
+}
+/** Every write the service makes for an add-on goes through here: never while only trying a change. */
+function commit<T>(run: () => Promise<T>): Promise<T> {
+  return app.preview ? Promise.reject(Object.assign(new Error('Preview: nothing was saved'), { code: 'preview' })) : run();
+}
+const ideaKey = (path: string) => (/\.md$/i.test(path) ? path : path.replace(/\/+$/, '') + '/README.md');
+const statusWord = (s: string) => t('idea.status.' + s);
+/** The library list as the add-on would see it with what it saved while trying. */
+function pretendList(list: any[]): any[] {
+  if (!pretend.files.size) return list;
+  const out = list.filter((x) => !pretend.files.has(x.path));
+  for (const [path, text] of pretend.files) if (text !== null) out.push({ path, size: new Blob([text]).size, modified: new Date().toISOString() });
+  return out.sort((a, b) => String(a.path).localeCompare(String(b.path)));
 }
 /** What a test load answers: empty data in the shape the real call gives (so a correct add-on does
  *  not trip over it), and nothing is ever registered, written or shown. */
@@ -524,6 +569,9 @@ function dryAnswer(method: string): any {
   if (/\.(list|search)$/.test(method)) return [];
   if (method === 'storage.get') return {};
   if (method === 'chat.start') return { chatId: '' };
+  if (method === 'assistant.ask') return '';
+  if (method === 'ui.confirm') return false;
+  if (method === 'ui.saveFile') return { saved: false };
   if (/^(library\.(write|remove)|todos\.(add|setDone|edit|remove)|ideas\.setStatus|storage\.set)$/.test(method)) return { ok: true };
   return null;
 }
@@ -558,6 +606,33 @@ export function findView(id: string): PluginView | undefined {
   return app.pluginViews.find((x) => x.id === id) ?? app.pluginViews.find((x) => x.short === id || x.id === 'view:' + id);
 }
 
+/** Add-ons with one of their questions (`ui.confirm`) open right now. */
+const confirming = new Set<string>();
+
+/** Print an add-on's page whole (`ui.print`): for the print its frame is as tall as its page, and the
+ *  app's print rules leave out everything around it. */
+function printPage(f: Frame) {
+  const el = f.el, html = document.documentElement;
+  const was = { height: el.style.height, title: document.title };
+  const done = () => { el.style.height = was.height; html.classList.remove('print-addon'); document.title = was.title; window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  if (f.height) el.style.height = Math.max(f.height, el.clientHeight) + 'px';
+  html.classList.add('print-addon');
+  // The window's title is the name a saved PDF is offered under.
+  const view = app.pluginViews.find((v) => v.plugin === f.plugin.name && shortOf(v) === f.surface?.id);
+  if (view?.title) document.title = view.title;
+  try { window.print(); } catch { done(); toast(t('docs.printFailed'), { kind: 'error' }); }
+}
+
+/** A shortcut the person pressed inside an add-on's page (UX-31), handed to the app's own key handler
+ *  as if it had been pressed outside the frame. */
+function pressKey(m: any) {
+  window.dispatchEvent(new KeyboardEvent('keydown', {
+    key: str(m.key, 20), code: str(m.code, 30), metaKey: m.meta === true, ctrlKey: m.ctrl === true,
+    shiftKey: m.shift === true, altKey: m.alt === true, bubbles: true, cancelable: true,
+  }));
+}
+
 /** `asked`: the person pressed or typed something in this very frame a moment ago (its runtime says
  *  so, see plugin-frame.js), or just ran one of the add-on's commands or item actions. */
 async function handle(f: Frame, method: string, args: any[], asked = false): Promise<any> {
@@ -567,25 +642,42 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
   if (p.dry) return dryAnswer(method);
   const perm = NEEDS[method];
   if (perm && !p.perms.has(perm)) throw denied(p, perm);
-  if (app.preview && WRITES.has(method)) throw previewOnly();
   const a = Array.isArray(args) ? args : [];
+  const trying = app.preview;
   asked ||= Date.now() - (pressed.get(p.name) ?? 0) < 10_000;
+  /** Something that is only for right after the person pressed something of this add-on. */
+  const onlyAsked = (what: string) => { if (!asked) throw Object.assign(new Error(`${what}: only right after the person pressed something in this add-on`), { code: 'limit' }); };
   // Running a command or an item action is the person asking this add-on for something.
   const invoke = (cb: any) => (...x: any[]) => { if (!p.dead) { pressed.set(p.name, Date.now()); deliver(f, { type: 'invoke', cb, args: x.map(plain) }); } };
+  const scope = scopeQuery(p);
   switch (method) {
-    case 'library.list': return ((await api('/library/tree?scope=plugin&exclude=private')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
-    case 'library.read': { const d = await api(`/library/file?scope=plugin&path=${encodeURIComponent(cleanPath(a[0]))}`); return String(d.content ?? ''); }
-    case 'library.search': { const q = str(a[0], 200).trim(); return q ? ((await api('/library/search?scope=plugin&q=' + encodeURIComponent(q))) as any[]).filter((x) => !isPrivate(x.path)).map(plain) : []; }
+    case 'library.list': {
+      const list = ((await api(`/library/tree?${scope}&exclude=private`)) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
+      return trying ? pretendList(list) : list;
+    }
+    case 'library.read': {
+      const path = cleanPath(a[0]);
+      if (trying && pretend.files.has(path)) {
+        const text = pretend.files.get(path);
+        if (text == null) throw new Error(`library.read: "${path}" does not exist`);
+        return text;
+      }
+      const d = await api(`/library/file?${scope}&path=${encodeURIComponent(path)}`);
+      return String(d.content ?? '');
+    }
+    case 'library.search': { const q = str(a[0], 200).trim(); return q ? ((await api(`/library/search?${scope}&q=` + encodeURIComponent(q))) as any[]).filter((x) => !isPrivate(x.path)).map(plain) : []; }
     case 'library.write': {
       const path = writePath(p, a[0]);
       if (typeof a[1] !== 'string') throw new Error('library.write(path, text): text must be a string');
       if (a[1].length > 2 * 1024 * 1024) throw new Error('library.write: the text is too large (2 MB at most)');
-      await put('/library/file?' + allowQuery(p), { path, content: a[1] });
+      if (trying) { pretend.files.set(path, a[1]); wouldDo(p, 'save', { path }); return { ok: true, path }; }
+      await commit(() => put('/library/file?' + allowQuery(p), { path, content: a[1] }));
       return { ok: true, path };
     }
     case 'library.remove': {
       const path = writePath(p, a[0]);
-      await post('/library/delete?' + allowQuery(p), { path });
+      if (trying) { pretend.files.set(path, null); wouldDo(p, 'remove', { path }); return { ok: true, path }; }
+      await commit(() => post('/library/delete?' + allowQuery(p), { path }));
       return { ok: true, path };
     }
     case 'todos.setDone': {
@@ -594,26 +686,43 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
       const want = a.length < 2 ? true : !!a[1];
       // The daemon toggles; when the plugin told us the current state, do nothing if it already matches.
       if (typeof it?.done === 'boolean' && it.done === want) return { ok: true };
-      await post('/todos/toggle?scope=plugin', ref);
+      if (trying) { wouldDo(p, want ? 'tick' : 'untick', { text: str(it?.title ?? ref.text, 80) }); return { ok: true }; }
+      await commit(() => post(`/todos/toggle?${scope}`, ref));
       return { ok: true };
     }
     case 'todos.edit': {
       const text = str(a[1], 500).replace(/\s*\n\s*/g, ' ').trim();
       if (!text) throw new Error('todos.edit(item, text): text is empty');
-      await post('/todos/edit?scope=plugin', { ...todoRef(a[0]), new_text: text });
+      const ref = todoRef(a[0]);
+      if (trying) { wouldDo(p, 'edit', { text: str(text, 80) }); return { ok: true }; }
+      await commit(() => post(`/todos/edit?${scope}`, { ...ref, new_text: text }));
       return { ok: true };
     }
-    case 'todos.remove': await post('/todos/delete?scope=plugin', todoRef(a[0])); return { ok: true };
+    case 'todos.remove': {
+      const ref = todoRef(a[0]);
+      if (trying) { wouldDo(p, 'delete', { text: str(a[0]?.title ?? a[0]?.item?.title ?? ref.text, 80) }); return { ok: true }; }
+      await commit(() => post(`/todos/delete?${scope}`, ref));
+      return { ok: true };
+    }
     case 'ideas.setStatus': {
       const path = cleanPath(typeof a[0] === 'string' ? a[0] : a[0]?.item?.path ?? a[0]?.path);
       const status = str(a[1], 20).toLowerCase();
       if (!STATUSES.includes(status)) throw new Error(`ideas.setStatus: status must be one of ${STATUSES.join(', ')}`);
+      if (trying) {
+        // The same folders the service holds it to once kept.
+        if (!inFolders(p.write, ideaKey(path))) throw new Error(`ideas.setStatus: "${path}" is outside the folders this add-on declared`);
+        pretend.status.set(ideaKey(path), status);
+        wouldDo(p, 'status', { path: ideaKey(path).replace(/\/README\.md$/i, ''), status: statusWord(status) });
+        return { ok: true };
+      }
       // The service checks again that this add-on declares ideas:write, that `path` is an item's page
       // as the Ideas list shows it, and that it lies inside the folders the add-on may write in.
-      await post(`/library/ideas/status?${allowQuery(p)}&plugin=${encodeURIComponent(p.name)}`, { path, status });
+      await commit(() => post(`/library/ideas/status?${allowQuery(p)}`, { path, status }));
       return { ok: true };
     }
     case 'storage.get': {
+      // While trying, what it saved since the preview began (a copy: the add-on cannot change ours).
+      if (trying && pretend.storage.has(p.name)) return plain(pretend.storage.get(p.name));
       // The daemon answers with the add-on's own object, exactly as it was saved (`{}` before the first save).
       try { const r = plain(await api('/layer/storage/' + storageName(p))); return r && typeof r === 'object' && !Array.isArray(r) ? r : {}; }
       catch (e) { if (e instanceof ApiError && e.status === 404) return {}; throw e; }
@@ -621,19 +730,44 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
     case 'storage.set': {
       const doc = plain(a[0]);
       if (JSON.stringify(doc).length > STORAGE_MAX) throw new Error('storage.set: the document is too large (256 KB at most)');
-      await put('/layer/storage/' + storageName(p), doc);
+      if (trying) {
+        pretend.storage.set(p.name, doc);
+        // Its own data: said once per preview, not on every save.
+        if (!pretend.told.has('storage:' + p.name)) { pretend.told.add('storage:' + p.name); wouldDo(p, 'storage'); }
+        return { ok: true };
+      }
+      await commit(() => put('/layer/storage/' + storageName(p), doc));
       return { ok: true };
     }
     // Each item also carries its list's `file`, so it can be passed straight to setDone/edit/remove.
-    case 'todos.list': return ((await api('/todos?scope=plugin')) as any[]).filter((l) => !isPrivate(l.file)).map((l) => plain({ ...l, items: (Array.isArray(l.items) ? l.items : []).map((it: any) => ({ ...it, file: l.file })) }));
+    case 'todos.list': return ((await api(`/todos?${scope}`)) as any[]).filter((l) => !isPrivate(l.file)).map((l) => plain({ ...l, items: (Array.isArray(l.items) ? l.items : []).map((it: any) => ({ ...it, file: l.file })) }));
     case 'todos.add': {
       const text = str(a[0], 500).replace(/\s*\n\s*/g, ' ').trim();
       if (!text) throw new Error('todos.add(text): text is empty');
-      // No file named: the service adds it to the library's general list, wherever that is kept.
-      await post('/todos/add?scope=plugin', { file: '', text });
+      // Where (FEAT-47): a list the add-on can see that already exists, and one of its groups. No list
+      // named: the service adds it to the library's general list, wherever that is kept.
+      const o = a[1] && typeof a[1] === 'object' ? a[1] : {};
+      const file = o.list ? cleanPath(o.list) : '';
+      const group = str(o.group, 80).trim();
+      if (file && !/(^|\/)(TODO|todo)\.md$/.test(file)) throw new Error(`todos.add: "${file}" is not a todo list (give the "file" of a list from todos.list())`);
+      if (trying) {
+        // The same checks the service makes, on the lists the add-on can see.
+        if (file || group) {
+          const lists = (await api(`/todos?${scope}`)) as any[];
+          const target = file ? lists.find((l) => l.file === file) : lists.find((l) => l.file === 'tasks/TODO.md') ?? lists.find((l) => l.file === 'TODO.md');
+          if (file && !target) throw new Error(t('lub.noList', { file }));
+          if (group && target && !(target.groups ?? []).includes(group)) throw new Error(t('lub.noGroup', { group }));
+        }
+        wouldDo(p, file ? 'addTo' : 'add', { text: str(text, 80), list: file });
+        return { ok: true };
+      }
+      await commit(() => post(`/todos/add?${scope}`, { file, text, ...(group ? { group } : {}) }));
       return { ok: true };
     }
-    case 'ideas.list': return ((await api('/library/ideas?scope=plugin')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
+    case 'ideas.list': {
+      const list = ((await api(`/library/ideas?${scope}`)) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
+      return trying && pretend.status.size ? list.map((x) => (pretend.status.has(x.path) ? { ...x, status: pretend.status.get(x.path) } : x)) : list;
+    }
     case 'chat.start': {
       const prompt = str(a[0], 8000).trim();
       if (!prompt) throw new Error('chat.start(prompt): prompt is empty');
@@ -641,6 +775,7 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
       // pressed something of its own (never from a timer, or from the end of the chat before), a few
       // seconds apart, and no more than CHATS_PER_HOUR in an hour.
       if (!asked) throw refused(p, 'chatUnasked');
+      if (trying) throw previewOnly(p, 'chat');
       const started = recent('chat:' + p.name, 3_600_000);
       if (started.length && Date.now() - started[started.length - 1] < 5000) throw new Error('chat.start: wait a few seconds between chats');
       if (started.length >= CHATS_PER_HOUR) throw refused(p, 'chatBudget');
@@ -652,6 +787,18 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
       go({ kind: 'chat', id: c.id });
       return { chatId: c.id };
     }
+    case 'assistant.ask': {
+      // FEAT-48. The answer comes back to the add-on; the assistant sees only the question (it has no
+      // tools), so asking never shows an add-on more of the library than it may read. Like a chat it
+      // costs money: only right after a press of the add-on's own, and the service holds each add-on
+      // to one question at a time and to an hourly and a daily budget.
+      const question = str(a[0], 40_000).trim();
+      if (!question) throw new Error('assistant.ask(question): question is empty');
+      onlyAsked('assistant.ask');
+      if (trying) throw previewOnly(p, 'ask');
+      const r = await post('/layer/addon/ask', { plugin: p.name, question });
+      return String(r?.text ?? '');
+    }
     case 'ui.toast': {
       // Always under the add-on's name, and no more than three in any ten seconds.
       const shown = recent('toast:' + p.name, 10_000);
@@ -659,6 +806,48 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
       shown.push(Date.now());
       const k = a[1]?.kind;
       toast(t('lua.says', { name: shortName(p.name), text: str(a[0], 500) }), { kind: k === 'error' || k === 'success' ? k : 'info' });
+      return null;
+    }
+    case 'ui.confirm': {
+      // FEAT-58. Drawn by the app with the add-on's name on it; a yes or no, nothing typed. Only
+      // right after a press, one at a time, and never in place of a question the app itself is asking.
+      const text = str(a[0], 600).trim();
+      if (!text) throw new Error('ui.confirm(text): text is empty');
+      onlyAsked('ui.confirm');
+      if (confirming.has(p.name) || dialogs.current) throw Object.assign(new Error('ui.confirm: another question is open'), { code: 'limit' });
+      const o = a[1] && typeof a[1] === 'object' ? a[1] : {};
+      confirming.add(p.name);
+      try {
+        return await confirmDialog({ title: t('lub.confirmTitle', { name: shortName(p.name) }), body: text, confirmLabel: str(o.confirm, 30).replace(/\s+/g, ' ').trim() || t('lub.confirmYes'), danger: o.danger === true });
+      } finally { confirming.delete(p.name); }
+    }
+    case 'ui.notify': {
+      // FEAT-58. The service checks the permission and how often, and sends the app's own notice: a
+      // toast, and a system notification while the window is in the background (if they are on).
+      const text = str(a[0], 200).trim();
+      if (!text) throw new Error('ui.notify(text): text is empty');
+      await post('/layer/addon/notify', { plugin: p.name, preview: trying, text });
+      return null;
+    }
+    case 'ui.saveFile': {
+      // FEAT-43. The person chooses where in the app's own save dialog; the service checks the
+      // permission and the kind of file and makes it safe to open (no formulas, pictures or HTML
+      // that could reach the internet).
+      onlyAsked('ui.saveFile');
+      if (typeof a[1] !== 'string') throw new Error('ui.saveFile(name, text): text must be a string');
+      if (a[1].length > 5 * 1024 * 1024) throw new Error('ui.saveFile: the file is too large (5 MB at most)');
+      const r = await post('/layer/addon/file', { plugin: p.name, preview: trying, name: str(a[0], 200), content: a[1] });
+      const ext = String(r.name).split('.').pop()?.toLowerCase();
+      const mime = ext === 'csv' ? 'text/csv' : ext === 'json' ? 'application/json' : ext === 'md' ? 'text/markdown' : 'text/plain';
+      const how = await offerFile(String(r.name), String(r.content), mime);
+      if (how === 'unsupported') toast(t('lub.saveUnsupported', { name: shortName(p.name) }), { kind: 'error', key: 'save:' + p.name });
+      return { saved: how === 'saved' };
+    }
+    case 'ui.print': {
+      // FEAT-43. Only the add-on's own page, whole, as the person sees it (the app's print dialog).
+      onlyAsked('ui.print');
+      if (f.surface?.kind !== 'view') throw new Error('ui.print: only a page of the add-on can be printed');
+      printPage(f);
       return null;
     }
     case 'ui.go': {
@@ -750,6 +939,10 @@ function onMessage(e: MessageEvent) {
   } else if (m.type === 'bye') {
     left(f);
     return;
+  } else if (m.type === 'key') {
+    // Only from a frame the person can be typing in; never from a test load.
+    if (f.surface && !p.dry && !p.dead) pressKey(m);
+    return;
   } else if (m.type === 'loaded' || m.type === 'failed') {
     landed(f);
   }
@@ -764,6 +957,7 @@ function onMessage(e: MessageEvent) {
     if (m.code === 'permission' || m.code === 'limit' || m.code === 'preview') return; // the person was already told
     fail(p, new Error(m.code === 'hang' ? t('lua.hang') : str(m.error, 2000)));
   } else if (m.type === 'size') {
+    f.height = Math.max(0, Math.min(100_000, Number(m.height) || 0));
     if (f.surface?.kind === 'widget') f.el.style.height = Math.max(24, Math.min(900, Number(m.height) || 0)) + 'px';
   } else if (rpc) {
     handle(frame, m.method, m.args, m.k === frame.key && m.ua === true).then(
@@ -816,10 +1010,12 @@ function describe(src: any, kind: 'plugin' | 'view', manifest: any): LayerItem {
   const apiVersion = Number(src?.apiVersion ?? fallback?.apiVersion ?? manifest?.apiVersion ?? 1) || 1;
   const unsupported = src?.unsupported === true || apiVersion > API_VERSION;
   const write = kind === 'view' ? [] : (Array.isArray(src?.write) ? src.write : Array.isArray(fallback?.write) ? fallback.write : []).map(writeFolder).filter((x: string | null): x is string => !!x).slice(0, 20);
+  // The only folders it reads in (the daemon holds it to them whatever is said here).
+  const read = (Array.isArray(src?.read) ? src.read : Array.isArray(fallback?.read) ? fallback.read : []).map(writeFolder).filter((x: string | null): x is string => !!x).slice(0, 20);
   return {
     name, kind, apiVersion, unsupported,
     permissions: declared.filter((x) => allowed.includes(x)),
-    write,
+    write, read,
     description: str(src?.description ?? fallback?.description, 300).trim(),
     message: unsupported ? str(src?.message, 300).trim() || t('layer3.unsupported', { version: apiVersion }) : '',
   };
@@ -833,6 +1029,8 @@ const setLayerItems = (v: LayerItem[]) => { (app as any).layerItems = v; };
 function unload() {
   for (const p of plugins) { p.dead = true; dispose(p); }
   plugins = [];
+  // What add-ons saved while a change was tried goes with the preview.
+  pretend = freshPretend();
   app.pluginViews = [];
   app.commands = [];
   app.homeWidgets = [];
@@ -902,7 +1100,7 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
   app.todosCfg = todosConfig(m.todos);
   const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
   const mk = (it: LayerItem, code: string): Plugin =>
-    ({ name: it.name, kind: it.kind, code: String(code ?? ''), perms: new Set(it.permissions), write: it.write, description: it.description, dead: false, disposers: [], frames: new Set(), warned: new Set() });
+    ({ name: it.name, kind: it.kind, code: String(code ?? ''), perms: new Set(it.permissions), write: it.write, read: it.read, description: it.description, dead: false, disposers: [], frames: new Set(), warned: new Set() });
   const views: any[] = Array.isArray(m.views) ? m.views : [];
   const list: any[] = Array.isArray(m.plugins) ? m.plugins : [];
   const items: LayerItem[] = [...list.map((x) => describe(x, 'plugin', manifest)), ...views.map((x) => describe(x, 'view', manifest))];
@@ -1065,7 +1263,7 @@ export async function dryLoadStaged(): Promise<LayerItem[]> {
       let f: Frame | null = null;
       const timer = setTimeout(() => finish(t('layer3.dryTimeout')), 8000);
       function finish(err: string | null) { clearTimeout(timer); if (f) destroyFrame(f); f = null; resolve(err); }
-      const p: Plugin = { name: it.name, kind, code: String(src.code ?? ''), perms: new Set(), write: [], description: '', dead: false, disposers: [], frames: new Set(), warned: new Set(), dry: { done: finish } };
+      const p: Plugin = { name: it.name, kind, code: String(src.code ?? ''), perms: new Set(), write: [], read: [], description: '', dead: false, disposers: [], frames: new Set(), warned: new Set(), dry: { done: finish } };
       try { f = createFrame(p, null, background()); } catch (e: any) { finish(String(e?.message ?? e)); }
     });
     out.push(error ? { ...it, error } : it);

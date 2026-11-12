@@ -50,7 +50,7 @@
   const groups = $derived(fxGroups(p?.effects));
   const changedItems = $derived(new Set(groups.flatMap((g) => g.lines).filter((l) => l.tag === 'added' || l.tag === 'changed').map((l) => l.key)));
   const addsCode = $derived(groups.some((g) => (g.area === 'addon' || g.area === 'page') && g.lines.some((l) => l.tag !== 'removed')));
-  const installed = $derived((Array.isArray(p?.installed) ? p!.installed : []).filter((x: any) => x && typeof x.name === 'string') as { area: string; name: string; description?: string; permissions?: string[]; write?: string[] }[]);
+  const installed = $derived((Array.isArray(p?.installed) ? p!.installed : []).filter((x: any) => x && typeof x.name === 'string') as { area: string; name: string; description?: string; permissions?: string[]; write?: string[]; read?: string[] }[]);
   const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
   // Files changed outside the staging copy while it was prepared: those the run's own steps name,
@@ -307,7 +307,7 @@
             {#each installed as x (x.area + ':' + x.name)}
               <li>
                 <div class="head"><span class="pill">{t(x.area === 'page' ? 'layer3.kind.view' : 'layer3.kind.plugin')}</span> <bdi>{x.name}</bdi></div>
-                <ul class="more">{#each mayDo(x.area === 'page' ? 'page' : 'addon', strs(x.permissions), strs(x.write)) as m}<li dir="auto">{m}</li>{/each}</ul>
+                <ul class="more">{#each mayDo(x.area === 'page' ? 'page' : 'addon', strs(x.permissions), strs(x.write), strs(x.read)) as m}<li dir="auto">{m}</li>{/each}</ul>
               </li>
             {/each}
           </ul>

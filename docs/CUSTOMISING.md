@@ -39,7 +39,7 @@ Nothing you ask for is applied straight away.
 
 1. The assistant prepares the change on the side. The app you are using is not touched.
 2. You see a review. It starts with **what changes**, which Thoughts reads from the change itself rather than from what the assistant says about it: each new, changed or removed add-on and page, with what it may do and, for one that changes, exactly what it gains or loses ("Now also: create, change and delete files in clients/"); each Home shortcut with the request it will put in front of the assistant; what is hidden, shown, renamed or reordered on Home and in the sidebar; how todos are grouped or shown; themes; the look; automatic tasks. Add-ons and pages the change leaves alone are folded away under **Already installed**. Then comes the assistant's own description of the change, labelled as such, and last the list of files, with **Show the exact changes** for anyone who wants every line.
-3. **Try it** shows the app with the change in place so you can click around. Try it never saves anything: close it and the app is exactly as before.
+3. **Try it** shows the app with the change in place so you can click around. Forms, boards and trackers work as they will, but nothing is saved: a message says what an add-on would have saved and where, and what it saved while you try is gone when you stop. Close it and the app is exactly as before.
 4. Choose **Keep** or **Discard**. Discard leaves the app exactly as it was.
 
 Thoughts checks every change before you see it. If it finds a problem, such as a setting it does not understand or a file that is not written correctly, the problem is listed in the review in plain words and **Keep is switched off** until it is fixed. Tell the assistant what the review says and it will correct the same change, or choose Discard.
@@ -77,8 +77,12 @@ An add-on can do only what it has asked for, and the review shows the list befor
 | Read your ideas / Change an idea's status | It can list your ideas and items; or also move one between statuses. |
 | Remember its own data | It keeps one small private store for itself, such as the hours you logged. It is not part of your library. |
 | Start a chat | It can open a chat with a prepared message. You see the chat like any other. |
+| Sees only these folders: *folder names* | Whatever else it may read (notes, todos, ideas), it sees only what is inside the folders named. |
+| Hand you files to save | It can offer you a spreadsheet, text or data file, such as this month's hours. The app's save dialog opens and you choose where; nothing is saved unless you do. |
+| Show notifications | It can show a short notice under its name, also on your computer when Thoughts is in the background and notifications are on. |
+| Ask your assistant | It can ask the assistant a question and show you the answer, such as a summary of a client. This uses your allowance. The assistant sees only what the add-on sends it. |
 
-An add-on that asks for nothing can still add pages, boxes on Home, commands, and buttons on your todos and ideas, and show short messages. It sees a todo or an idea only when you use its button on it, and it reads nothing else. No add-on can reach the internet, read files outside your library, see your passwords, or change the app's own settings.
+An add-on that asks for nothing can still add pages, boxes on Home, commands, and buttons on your todos and ideas, show short messages, ask you yes-or-no questions in the app's own dialog and print its page. It sees a todo or an idea only when you use its button on it, and it reads nothing else. No add-on can reach the internet, read files outside your library, see your passwords, or change the app's own settings.
 
 ### Undo, any time
 
@@ -152,4 +156,4 @@ If you ask for something outside these limits, the assistant should say so inste
 - Ask for one thing at a time. Small changes are easier to judge in a review.
 - Say what you want to see, not how to build it: "I want to see overdue todos in red at the top".
 - If a result is close but not right, say what is off. The assistant adjusts the same change.
-- Use Try it before Keep, especially for boards and forms: click the buttons and check that things land where you expect.
+- Use Try it before Keep, especially for boards and forms: click the buttons and check, in the messages that appear, that things would land where you expect.

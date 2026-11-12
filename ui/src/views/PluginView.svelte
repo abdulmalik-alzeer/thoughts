@@ -47,4 +47,6 @@
   .from :global(.icon) { flex: none; }
   .pv { height: calc(100vh - 26px - 24px); }
   .hide { display: none; }
+  /* `ui.print` (lib/layer.ts): the page is printed whole; its frame is made as tall as its page. */
+  @media print { :global(html.print-addon) .pv { height: auto; } }
 </style>

@@ -31,43 +31,51 @@ function todoValue(key: string, value: unknown): string {
   return t(`ldb.todos.${key}`, { value: t(`ldb.todos.${key}.${String(value)}`) });
 }
 
-/** What an add-on or page may do, one line each (an add-on that asks for nothing still adds things). */
-export function mayDo(kind: 'addon' | 'page', permissions: string[], write: string[]): string[] {
+/** What an add-on or page may do, one line each (an add-on that asks for nothing still adds things).
+ *  `read`: the only folders it reads in (layerui-b, FEAT-44), said on each line that reads. */
+export function mayDo(kind: 'addon' | 'page', permissions: string[], write: string[], read: string[] = []): string[] {
   if (!permissions.length) return [t(kind === 'page' ? 'ldb.pageAsksNothing' : 'layer.pluginAsksNothing')];
-  return permissions.map((p) => p === 'library:write'
+  const lines = permissions.map((p) => p === 'library:write'
     ? (write.length ? `${permText(p)}: ${list(write)}` : `${permText(p)} — ${t('layer3.writeNone')}`)
     // An item's status only inside the declared folders (layerui-a, BUG-20).
     : p === 'ideas:write'
       ? (write.length ? `${permText(p)} — ${t('lua.statusIn')} ${list(write)}` : `${permText(p)} — ${t('lua.statusNone')}`)
-      : permText(p));
+      // Reading only in the `read` folders (layerui-b, FEAT-44).
+      : read.length && READS.includes(p) ? `${permText(p)} — ${t('lub.onlyIn')} ${list(read)}` : permText(p));
+  return lines;
 }
+/** The permissions a `read` list narrows. */
+const READS = ['library:read', 'todos:read', 'ideas:read'];
 
 function item(e: Effect): FxLine {
   const kind = e.area === 'page' ? 'page' : 'addon';
   const name = q(e.name);
-  const perms = strs(e.permissions), write = strs(e.write);
+  const perms = strs(e.permissions), write = strs(e.write), read = strs(e.read);
   const detail: string[] = [];
   const key = `${kind}:${e.name}`;
   if (e.description) detail.push(t('ldb.fx.saysItIs', { text: q(e.description) }));
   if (e.op === 'added') {
     if (e.unsupported) return { tag: 'added', text: t(`ldb.fx.${kind}.added`, { name }), detail: [...detail, t('ldb.fx.unsupported')], key };
     // (One that asks for nothing gets one sentence saying what it can still do, not a list.)
-    if (!perms.length) return { tag: 'added', text: t(`ldb.fx.${kind}.added`, { name }), detail: [...detail, ...mayDo(kind, perms, write)], key };
-    return { tag: 'added', text: t(`ldb.fx.${kind}.added`, { name }), detail, mayTitle: t('ldb.fx.mayTitle'), may: mayDo(kind, perms, write), key };
+    if (!perms.length) return { tag: 'added', text: t(`ldb.fx.${kind}.added`, { name }), detail: [...detail, ...mayDo(kind, perms, write, read)], key };
+    return { tag: 'added', text: t(`ldb.fx.${kind}.added`, { name }), detail, mayTitle: t('ldb.fx.mayTitle'), may: mayDo(kind, perms, write, read), key };
   }
   if (e.op === 'removed') return { tag: 'removed', text: t(`ldb.fx.${kind}.removed`, { name }), detail: [], key };
   const gained = strs(e.gained), lost = strs(e.lost), wGained = strs(e.writeGained), wLost = strs(e.writeLost);
-  const asks = gained.length || lost.length || wGained.length || wLost.length;
+  // Reading the other way round (layerui-b): a list that appears narrows it, one that goes widens it.
+  const readBefore = strs(e.readBefore), readChanged = e.readChanged === true;
+  const asks = gained.length || lost.length || wGained.length || wLost.length || readChanged;
   for (const p of gained) detail.push(t('ldb.fx.nowAlso', { what: p === 'library:write' && write.length ? `${permText(p)}: ${list(write)}` : permText(p) }));
   if (wGained.length && !gained.includes('library:write')) detail.push(t('ldb.fx.nowAlsoFolders', { folders: list(wGained) }));
   for (const p of lost) detail.push(t('ldb.fx.noLonger', { what: permText(p) }));
   if (wLost.length && !lost.includes('library:write')) detail.push(t('ldb.fx.noLongerFolders', { folders: list(wLost) }));
+  if (readChanged) detail.push(!read.length ? t('lub.readWide', { folders: list(readBefore) }) : readBefore.length ? t('lub.readMoved', { folders: list(read), before: list(readBefore) }) : t('lub.readNow', { folders: list(read) }));
   if (e.code) detail.push(t(asks ? 'ldb.fx.codeToo' : 'ldb.fx.codeOnly'));
   if (e.descriptionChanged && !e.description) detail.push(t('ldb.fx.descriptionGone'));
   if (e.unsupported) detail.push(t('ldb.fx.unsupported'));
   const line: FxLine = { tag: 'changed', text: t(`ldb.fx.${kind}.changed`, { name }), detail, key };
   if (asks && !e.unsupported) {
-    if (perms.length) { line.mayTitle = t('ldb.fx.fromNowOn'); line.may = mayDo(kind, perms, write); } else detail.push(...mayDo(kind, perms, write));
+    if (perms.length) { line.mayTitle = t('ldb.fx.fromNowOn'); line.may = mayDo(kind, perms, write, read); } else detail.push(...mayDo(kind, perms, write, read));
   }
   return line;
 }
