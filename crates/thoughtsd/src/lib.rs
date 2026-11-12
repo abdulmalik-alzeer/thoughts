@@ -231,7 +231,10 @@ mod tests {
         assert!(first.is_some());
         assert!(super::acquire_lock(&p).unwrap().is_none(), "a second daemon must be refused");
         drop(first);
-        assert!(super::acquire_lock(&p).unwrap().is_some(), "the lock is free again once its holder is gone");
+        // Another test may fork a child at this very moment; until that child execs it shares the
+        // lock's open file, so the lock can stay held for a few milliseconds after the drop.
+        let freed = (0..100).any(|_| super::acquire_lock(&p).unwrap().is_some() || { std::thread::sleep(std::time::Duration::from_millis(20)); false });
+        assert!(freed, "the lock is free again once its holder is gone");
         std::fs::remove_dir_all(d).unwrap();
     }
 }
