@@ -4,6 +4,7 @@
   import Icon from '../../lib/Icon.svelte';
   import { trapFocus } from '../../lib/focus';
   import { t } from '../../lib/i18n';
+  import { imeKey } from '../../lib/ime';
 
   let { item, folder, folders, clean, pick, close }: {
     /** Library path of what is being moved. */
@@ -89,7 +90,7 @@
       <label class="newf">
         <span class="sm">{sel ? t('docsa.newFolderIn', { folder: sel }) : t('docsa.newFolderTop')}</span>
         <input bind:this={nameEl} bind:value={newName} placeholder={t('docs3.folderPlaceholder')} aria-label={t('docsa.newFolderName')} dir="auto"
-          aria-invalid={newErr ? 'true' : undefined} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); confirm(); } }} />
+          aria-invalid={newErr ? 'true' : undefined} onkeydown={(e) => { if (e.key === 'Enter' && !imeKey(e)) { e.preventDefault(); confirm(); } }} />
         {#if newErr}<span class="err sm" role="alert">{newErr}</span>{/if}
       </label>
     {/if}
