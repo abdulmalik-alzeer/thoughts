@@ -123,7 +123,9 @@ fn plugin_scope_allowed(path: &str, query: &str) -> bool {
     if !plugin_scoped(query) { return true; }
     let guarded = path.starts_with("/api/library/") || path == "/api/todos/calendar.ics" || path == "/api/capture" || path.starts_with("/api/inbox")
         // The changes a Wrap or a Reorganize makes show documents' contents, private folders included.
-        || (path.starts_with("/api/wrap/") && path.ends_with("/changes")) || (path.starts_with("/api/reorganize/") && path.matches('/').count() == 3);
+        || (path.starts_with("/api/wrap/") && path.ends_with("/changes")) || (path.starts_with("/api/reorganize/") && path.matches('/').count() == 3)
+        // So do (and may be undone through) the changes an answer made in the library.
+        || (path.starts_with("/api/chats/") && path.contains("/changes/"));
     !guarded || PLUGIN_SCOPED.contains(&path)
 }
 
@@ -215,6 +217,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/chats/:id/stop", post(chat_stop))
         .route("/api/chats/:id/ack-interrupted", post(chat_ack_interrupted))
         .route("/api/chats/:id/attachments/:name", get(chat_attachment))
+        .route("/api/chats/:id/changes/:msg", get(run_changes))
+        .route("/api/chats/:id/changes/:msg/:op", post(run_changes_op))
         // wrap & reorganize
         .route("/api/wrap", get(wrap_status).post(wrap_start))
         .route("/api/wrap/:id/apply", post(wrap_apply))
@@ -416,11 +420,12 @@ const EDIT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// those out; while the sync waits on the network the edit goes straight through, and is recorded
 /// before anything that arrived is put in. A wrap or a reorganize, which can take its changes back,
 /// still turns it away at once, as does a cut-off wrap waiting for a decision.
-async fn library_edit(st: &AppState) -> anyhow::Result<tokio::sync::OwnedRwLockReadGuard<()>> {
+async fn library_edit(st: &Arc<AppState>) -> anyhow::Result<(tokio::sync::OwnedRwLockReadGuard<()>, Option<crate::changesets::Fence>)> {
     let files = tokio::time::timeout(EDIT_WAIT, st.sync_files.clone().read_owned()).await.map_err(|_| crate::tr::err("busy.sync", &[]))?;
     if st.library_busy() && !st.syncing.load(std::sync::atomic::Ordering::SeqCst) { return Err(crate::tr::err("busy", &[])); }
     wraps::require_no_interrupted(st).await?;
-    Ok(files)
+    // With the assistant at work in the library, what this edit changes is the user's, never the run's (FEAT-06).
+    Ok((files, crate::changesets::fence(st).await))
 }
 
 /// Requests made on behalf of an add-on carry `scope=plugin`: the daemon then keeps private
@@ -2785,6 +2790,26 @@ async fn chat_stop(State(st): S, Path(id): Path<String>) -> R {
     if let Some(k) = st.runs.lock().await.remove(&id) { let _ = k.send(()); }
     ok()
 }
+
+/// `GET /api/chats/:id/changes/:msg`: what that answer changed in the library, document by document
+/// (`changes::between`), with `others` (what changed meanwhile otherwise, left out) and `undone`.
+async fn run_changes(State(st): S, Path((id, msg)): Path<(String, String)>) -> R {
+    let root = history_lib(&st).await?;
+    Ok(Json(crate::changesets::view(&st, &root, &id, &msg).await?))
+}
+
+/// `POST /api/chats/:id/changes/:msg/undo` (or `/redo`, to put them back): take back exactly what
+/// that answer changed, file by file, as a new history entry → `{ok, message, hash}`.
+async fn run_changes_op(State(st): S, Path((id, msg, op)): Path<(String, String, String)>) -> R {
+    let back = match op.as_str() { "undo" => false, "redo" => true, _ => return Err(crate::tr::err("changes.not_found", &[]).into()) };
+    let (root, _guard) = history_change(&st).await?;
+    Ok(Json(crate::changesets::undo(&st, &root, &id, &msg, back).await?))
+}
+
+#[cfg(test)]
+#[allow(unused_must_use)]
+#[path = "api_changesets_tests.rs"]
+mod changesets_tests;
 
 #[cfg(test)]
 #[allow(unused_must_use)]

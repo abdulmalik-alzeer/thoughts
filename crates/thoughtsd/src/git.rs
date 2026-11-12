@@ -1231,30 +1231,13 @@ pub fn untracked_from_status(porcelain_z: &str) -> Vec<String> {
     out
 }
 
-/// Put the working tree back exactly as it was at commit `snapshot`: tracked files are reset, and
-/// files created since are removed — only those, never anything git was ignoring. Returns the
-/// created paths that were removed.
+/// Put the working tree back exactly as it was at commit `snapshot`: every file that changed since
+/// gets its recorded version again and files created since are removed — one by one, never by
+/// resetting the folder, and never anything git was ignoring. Returns the created paths that were removed.
 pub async fn rollback_to(state: &AppState, dir: &Path, snapshot: &str) -> anyhow::Result<Vec<String>> {
     if snapshot.len() < 7 || !snapshot.bytes().all(|b| b.is_ascii_hexdigit()) { anyhow::bail!("invalid snapshot"); }
-    let status = git(state, dir, &["status", "--porcelain", "-z", "--untracked-files=all"]).await?;
-    let created = untracked_from_status(&status);
-    git(state, dir, &["reset", "-q", "--hard", snapshot]).await?;
-    // Exact paths from the repository root: no pattern matching, whatever the names contain.
-    let specs: Vec<String> = created.iter().map(|p| format!(":(top,literal){p}")).collect();
-    for chunk in specs.chunks(100) {
-        let mut args = vec!["clean", "-q", "-f", "-d", "--"];
-        args.extend(chunk.iter().map(String::as_str));
-        git(state, dir, &args).await?;
-    }
-    // Folders that existed only for those files go too (never one that still holds anything).
-    for p in &created {
-        let mut cur = Path::new(p).parent();
-        while let Some(rel) = cur.filter(|r| !r.as_os_str().is_empty()) {
-            if std::fs::remove_dir(dir.join(rel)).is_err() { break; }
-            cur = rel.parent();
-        }
-    }
-    Ok(created)
+    let full = git(state, dir, &["rev-parse", "--verify", "-q", &format!("{snapshot}^{{commit}}")]).await?;
+    crate::changesets::restore_all(state, dir, full.trim()).await
 }
 
 pub async fn log(state: &AppState, dir: &Path, n: usize) -> Vec<Value> {

@@ -12,6 +12,7 @@ pub mod assistant;
 pub mod askpass;
 pub mod care_api;
 pub mod changes;
+pub mod changesets;
 pub mod chats;
 pub mod claude;
 pub mod cloud;

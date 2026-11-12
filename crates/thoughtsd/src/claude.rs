@@ -1450,12 +1450,17 @@ fn touches_library(library: Option<&Path>, cwd: &Path, add_dirs: &[PathBuf], kin
 
 /// Everything that happens once a run is over, however it ended.
 pub(crate) async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathBuf>, touches_library: bool, on_done: Option<OnDone>) {
+    // What this run changed in the library, told apart from what the user or another chat changed
+    // meanwhile, becomes its own history entry and a list under its answer (FEAT-06). Worked out
+    // while the run still counts as at work, so a save of the user's waiting for it records only theirs.
+    let what = state.chats.with(&id, |c| if c.kind == "workflow" { format!("workflow {}", c.title) } else { c.title.clone() }).await.unwrap_or_default();
+    let recorded = crate::changesets::finish(&state, &id, &crate::git::subject::assistant(&what)).await;
     state.runs.lock().await.remove(&id);
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     let done = state.chats.update(&id, |c| { c.running = false; c.updated = chrono::Utc::now(); }).await;
     // What the assistant changed in the library becomes its own history entry, apart from the user's edits.
-    if let (Some(lib), Some(ch)) = (&record, &done) {
-        let what = if ch.kind == "workflow" { format!("workflow {}", ch.title) } else { ch.title.clone() };
+    // (Without a change set — no history, or it could not be worked out — the library is recorded as one entry.)
+    if let (Some(lib), Some(_), false) = (&record, &done, recorded) {
         record_library(&state, lib, &crate::git::subject::assistant(&what), true).await;
     }
     // Views that show the library (todos, ideas, documents, the sidebar badge) reload. A chat that
@@ -1599,6 +1604,11 @@ pub async fn start_run(
         record_library(&state, lib, &crate::git::subject::edit("your changes"), false).await;
     }
     let touches_library = touches_library(library.as_deref(), &spec.cwd, &spec.add_dirs, &kind, &mode);
+    // From here on, what changes in the library is this run's, unless someone else changed it meanwhile (FEAT-06).
+    let watching = match &library {
+        Some(lib) if touches_library && matches!(kind.as_str(), "chat" | "workflow") => crate::changesets::begin(&state, &spec.chat_id, lib, &spec.cwd).await,
+        _ => None,
+    };
     // What the run is told on top of its prompt: the caller's own instructions, that `.claude/` is
     // not its to change (all runs but first-time setup), whether CLAUDE.md is, which folders are
     // private (named only when the instructions travel in a private file), and the user's language.
@@ -1630,6 +1640,7 @@ pub async fn start_run(
             state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
         }
         tokio::spawn(async move {
+            let _watching = watching;
             let ok = tokio::select! {
                 _ = &mut kill_rx => { push(&state, &id, Msg::new("system", stopped)).await; false }
                 ok = hook(info) => ok,
@@ -1721,6 +1732,7 @@ pub async fn start_run(
         // Removed when the run is over, however it ends.
         let _temp = temp;
         let ticket = ticket;
+        let _watching = watching;
         let (st, cid) = (state.clone(), id.clone());
         let f = follow(&mut child, &mut kill_rx, limits, move |line| {
             let (st, cid) = (st.clone(), cid.clone());
