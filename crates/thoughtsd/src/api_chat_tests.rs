@@ -78,3 +78,71 @@ async fn deleting_a_chat_takes_only_a_real_chat_id() {
     intact();
     std::fs::remove_dir_all(home.join(&neighbour)).unwrap();
 }
+
+/// Claude Code's folder under test: always inside the throwaway test home.
+fn claude_dir() -> std::path::PathBuf {
+    let dir = crate::traces::config_dir().unwrap();
+    assert!(dir.starts_with(paths::home()), "tests must never touch the real ~/.claude");
+    dir
+}
+fn transcript_line(sid: &str, slug: &str) -> String { format!("{{\"sessionId\":\"{sid}\",\"type\":\"user\",\"slug\":\"{slug}\"}}\n") }
+
+#[tokio::test]
+async fn deleting_a_chat_also_deletes_the_assistants_own_record_of_it() {
+    let st = Arc::new(AppState::for_test());
+    let config = claude_dir();
+    let id = || uuid::Uuid::new_v4().to_string();
+    let (first, second, other) = (id(), id(), id());
+    let (plan, other_plan) = (format!("wrap-the-user-{}", uuid::Uuid::new_v4().simple()), format!("someone-elses-{}", uuid::Uuid::new_v4().simple()));
+    let project = config.join(format!("projects/-Users-sara-{}", uuid::Uuid::new_v4().simple()));
+    t::write(&project, &format!("{first}.jsonl"), &transcript_line(&first, &plan));
+    t::write(&project, &format!("{second}.jsonl"), "{\"type\":\"user\"}\n");
+    t::write(&project, &format!("{other}.jsonl"), &transcript_line(&other, &other_plan));
+    t::write(&config, &format!("plans/{plan}.md"), "what the chats said\n");
+    t::write(&config, &format!("plans/{other_plan}.md"), "not this chat's\n");
+
+    let chat = t::chat(&st, "a client matter").await;
+    // The chat ran twice; the second run was given a new session by the CLI.
+    st.chats.update(&chat, |c| c.session_id = Some(first.clone())).await;
+    st.chats.update(&chat, |c| c.session_id = Some(second.clone())).await;
+    let untouched = t::chat(&st, "another chat").await;
+    st.chats.update(&untouched, |c| c.session_id = Some(other.clone())).await;
+
+    chat_delete(State(st.clone()), Path(chat.clone())).await.unwrap();
+    assert!(!project.join(format!("{first}.jsonl")).exists() && !project.join(format!("{second}.jsonl")).exists(), "both sessions' transcripts go");
+    assert!(!config.join(format!("plans/{plan}.md")).exists(), "the plan file its preview wrote goes");
+    assert!(project.join(format!("{other}.jsonl")).exists() && config.join(format!("plans/{other_plan}.md")).exists(), "another chat's records stay");
+    assert!(project.is_dir() && config.join("plans").is_dir());
+    // A chat that never ran has nothing there, and deleting it is as quiet as before.
+    let never_ran = t::chat(&st, "never sent").await;
+    chat_delete(State(st.clone()), Path(never_ran)).await.unwrap();
+    assert!(project.join(format!("{other}.jsonl")).exists());
+}
+
+#[tokio::test]
+async fn deleting_a_chat_mid_answer_waits_for_the_assistant_to_stop_writing() {
+    let (st, lib) = t::library().await;
+    let config = claude_dir();
+    let sid = uuid::Uuid::new_v4().to_string();
+    let file = config.join(format!("projects/-running-{}/{sid}.jsonl", uuid::Uuid::new_v4().simple()));
+    let chat = t::chat(&st, "long answer").await;
+    st.chats.update(&chat, |c| c.session_id = Some(sid.clone())).await;
+    // The stand-in assistant keeps appending to its transcript until it is stopped.
+    let f = file.clone();
+    t::assistant(&st, move |_| { let f = f.clone(); async move {
+        loop {
+            t::write(f.parent().unwrap(), &f.file_name().unwrap().to_string_lossy(), "{\"type\":\"assistant\"}\n");
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    } });
+    chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "go".into(), ..Default::default() })).await.unwrap();
+    for _ in 0..500 { if file.exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+    assert!(file.exists() && st.run_active_in(&lib));
+
+    chat_delete(State(st.clone()), Path(chat.clone())).await.unwrap();
+    assert!(!st.run_active_in(&lib), "the run was stopped first");
+    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+    assert!(!file.exists(), "nothing wrote the transcript back after it was deleted");
+    assert!(st.chats.get(&chat).await.is_none());
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}

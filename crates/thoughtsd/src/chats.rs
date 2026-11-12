@@ -56,6 +56,10 @@ pub struct Chat {
     pub provider: String,
     /// Provider-side session id for resume.
     pub session_id: Option<String>,
+    /// Every provider-side session this chat has had (kept by the store, see `note_session`), so
+    /// deleting the chat can also delete what the assistant program itself kept about it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub session_ids: Vec<String>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
     pub messages: Vec<Msg>,
@@ -136,6 +140,7 @@ impl Default for Chat {
             kind: "chat".into(),
             provider: "claude".into(),
             session_id: None,
+            session_ids: vec![],
             created: now,
             updated: now,
             messages: vec![],
@@ -173,6 +178,20 @@ impl Chat {
     }
 
     pub fn summary(&self) -> Value { self.meta_only().summary() }
+
+    /// Remember the current session among the ones this chat has had.
+    fn note_session(&mut self) {
+        if let Some(s) = &self.session_id {
+            if !self.session_ids.iter().any(|x| x == s) { self.session_ids.push(s.clone()); }
+        }
+    }
+
+    /// Every session this chat is known to have had, the current one included.
+    pub fn all_sessions(&self) -> Vec<String> {
+        let mut all = self.session_ids.clone();
+        if let Some(s) = &self.session_id { if !all.contains(s) { all.push(s.clone()); } }
+        all
+    }
 
     /// Plain-text transcript, newest content kept when truncating.
     pub fn transcript(&self, max_chars: usize) -> String {
@@ -302,7 +321,8 @@ impl ChatStore {
         self.chats.read().await.get(id).cloned()
     }
 
-    pub async fn insert(&self, c: Chat) {
+    pub async fn insert(&self, mut c: Chat) {
+        c.note_session();
         let mut w = self.chats.write().await;
         self.persist_now(&c);
         w.insert(c.id.clone(), c);
@@ -316,6 +336,7 @@ impl ChatStore {
         let c = w.get_mut(id)?;
         let was_running = c.running;
         f(c);
+        c.note_session();
         let streaming = was_running && c.running;
         let due = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get(id).map_or(true, |d| d.last.elapsed() >= PERSIST_DEBOUNCE);
         if !streaming || due {
@@ -504,6 +525,28 @@ mod tests {
         // Nothing was written back under the hostile name, and the files are left for recovery.
         assert!(!d.parent().unwrap().parent().unwrap().join("outside.json").exists());
         assert!(d.join("evil.json").exists() && d.join("empty.json").exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn every_session_a_chat_had_is_remembered() {
+        let d = dir();
+        let s = ChatStore::load_from(&d);
+        let c = Chat::default();
+        let id = c.id.clone();
+        s.insert(c).await;
+        assert!(s.get(&id).await.unwrap().all_sessions().is_empty());
+        for sid in ["s1", "s1", "s2"] { s.update(&id, |c| c.session_id = Some(sid.into())).await; }
+        // A session that can no longer be resumed is dropped as the current one, but not forgotten.
+        s.update(&id, |c| c.session_id = None).await;
+        assert_eq!(s.get(&id).await.unwrap().all_sessions(), ["s1", "s2"]);
+        assert_eq!(on_disk(&d, &id).session_ids, ["s1", "s2"]);
+        s.update(&id, |c| c.session_id = Some("s3".into())).await;
+        assert_eq!(s.remove(&id).await.unwrap().all_sessions(), ["s1", "s2", "s3"]);
+        // A chat saved before the list existed still knows its current session.
+        std::fs::write(d.join("old.json"), r#"{"id":"old","sessionId":"s9"}"#).unwrap();
+        let s = ChatStore::load_from(&d);
+        assert_eq!(s.get("old").await.unwrap().all_sessions(), ["s9"]);
         std::fs::remove_dir_all(d).unwrap();
     }
 

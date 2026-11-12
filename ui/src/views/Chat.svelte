@@ -339,7 +339,7 @@
   }
 
   async function remove() {
-    if (!(await confirmDialog({ title: t('chat.deleteTitle'), body: t('chat.deleteBody'), confirmLabel: t('delete'), danger: true }))) return;
+    if (!(await confirmDialog({ title: t('chat.deleteTitle'), body: t('chata.deleteBody'), confirmLabel: t('delete'), danger: true }))) return;
     try {
       // A chat that is already gone (deleted in another window) counts as deleted.
       await del(`/chats/${id}`).catch((e) => { if (!(e instanceof ApiError && e.status === 404)) throw e; });

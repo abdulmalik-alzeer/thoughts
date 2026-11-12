@@ -22,6 +22,8 @@ This page describes what the Thoughts app does with your information. It is a de
 
 The assistant that Thoughts runs (Claude Code) also keeps its own record of sessions on your computer, in a folder named `.claude` in your home folder.
 
+When you delete a chat in Thoughts, the assistant's transcript of that conversation is deleted from the `.claude` folder with it, and so is the plan file a Wrap preview leaves there (in `.claude/plans`). Smaller working files the assistant keeps for a session, such as its backup copies of files it edited, are not removed by Thoughts; Claude Code clears its older records out on its own schedule (after about 30 days unless you changed that). Deleting a chat does not recall anything already sent to the AI provider.
+
 The part of Thoughts that runs in the background only accepts connections from your own computer.
 
 ### Saved passwords

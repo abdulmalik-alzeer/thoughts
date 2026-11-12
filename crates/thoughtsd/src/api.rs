@@ -1377,8 +1377,23 @@ async fn chat_get(State(st): S, Path(id): Path<String>) -> R {
 async fn chat_delete(State(st): S, Path(id): Path<String>) -> R {
     // Only one of the user's own chats: the id comes from the request and names what gets deleted.
     if !crate::chats::valid_id(&id) || st.chats.meta(&id).await.is_none() { return Err(no_chat().into()); }
-    if let Some(k) = st.runs.lock().await.remove(&id) { let _ = k.send(()); }
-    st.chats.remove(&id).await.ok_or_else(no_chat)?;
+    // Stop its run and give the assistant program a moment to exit: until then it is still
+    // writing its own record of the conversation.
+    let stopping = st.runs.lock().await.remove(&id).map(|k| { let _ = k.send(()); }).is_some();
+    if stopping {
+        for _ in 0..100 {
+            if !st.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&id) { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+    let chat = st.chats.remove(&id).await.ok_or_else(no_chat)?;
+    // "Deleted from this computer" includes what Claude Code kept about the conversation: the
+    // transcript of each session this chat had, and the plan file such a session wrote.
+    let sessions = chat.all_sessions();
+    if let (false, Some(dir)) = (sessions.is_empty(), crate::traces::config_dir()) {
+        let removed = tokio::task::spawn_blocking(move || crate::traces::remove_sessions(&dir, &sessions)).await.unwrap_or_default();
+        crate::log::info(format!("chat {id} deleted ({} assistant transcript(s) and {} plan file(s) removed with it)", removed.transcripts, removed.plans));
+    }
     ok()
 }
 
@@ -1514,6 +1529,7 @@ async fn chat_stop(State(st): S, Path(id): Path<String>) -> R {
 }
 
 #[cfg(test)]
+#[allow(unused_must_use)]
 #[path = "api_chat_tests.rs"]
 mod chat_tests;
 
