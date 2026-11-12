@@ -168,8 +168,8 @@ const TABLE: &[Entry] = &[
     // --- history and sync ---
     e("conflict", "conflict", 409, "CONFLICT::", "{files}", "{files}"),
     e("no_history", "no_history", 409, "NO_HISTORY::",
-        "The history of changes is switched off for this library. Turn on \"Keep a history of changes\" in Settings to use this.",
-        "سجلّ التغييرات متوقف لهذه المكتبة. فعّل «الاحتفاظ بسجلّ للتغييرات» من الإعدادات لاستخدام هذه الخاصية."),
+        "The history of changes is switched off for this library. Turn on \"Keep a history of changes on this computer\" in Settings to use this.",
+        "سجلّ التغييرات متوقف لهذه المكتبة. فعّل «الاحتفاظ بسجلّ للتغييرات على هذا الجهاز» من الإعدادات لاستخدام هذه الخاصية."),
     e("history.bad_entry", "validation", 422, "",
         "That is not an entry in your history.",
         "هذا ليس عنصراً في سجلّك."),
