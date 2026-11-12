@@ -738,6 +738,8 @@ pub struct RunInfo {
     pub profile: Profile,
     /// The instructions it would have been given on top of its prompt.
     pub system: String,
+    /// The program that would have done the work.
+    pub program: crate::assistant::Program,
 }
 
 /// Stands in for the assistant program: does the "work" of a run and says whether it succeeded.
@@ -1271,7 +1273,7 @@ pub enum Ended {
 }
 
 /// What `follow` reports.
-struct Followed { ended: Ended, exit: std::io::Result<std::process::ExitStatus>, stderr: String }
+pub(crate) struct Followed { pub(crate) ended: Ended, pub(crate) exit: std::io::Result<std::process::ExitStatus>, pub(crate) stderr: String }
 
 /// Follow a started assistant program to its end. Every line it prints goes to `on_line`, which
 /// answers `Some(success)` for the final result. And it does end: when `kill` fires (the Stop
@@ -1279,7 +1281,7 @@ struct Followed { ended: Ended, exit: std::io::Result<std::process::ExitStatus>,
 /// closed its output and still does not exit. The kill switch is honoured the whole time,
 /// including after the output is over — the process (and everything it started) is always gone
 /// when this returns.
-async fn follow<F, Fut>(child: &mut tokio::process::Child, kill: &mut tokio::sync::oneshot::Receiver<()>, limits: RunLimits, mut on_line: F) -> Followed
+pub(crate) async fn follow<F, Fut>(child: &mut tokio::process::Child, kill: &mut tokio::sync::oneshot::Receiver<()>, limits: RunLimits, mut on_line: F) -> Followed
 where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Option<bool>> {
     let pid = child.id();
     // What it says on stderr is collected on the side, and can be read even if that stream never closes.
@@ -1413,7 +1415,7 @@ fn one_shot_args(model: Option<&str>, note: &str) -> Vec<String> {
     a
 }
 
-type OnDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'static, ()> + Send>;
+pub(crate) type OnDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'static, ()> + Send>;
 
 /// Record what is in the library as one history entry, when history is on and nothing forbids it
 /// (an interrupted wrap must keep its undo point; git settings must still be the trusted ones).
@@ -1447,7 +1449,7 @@ fn touches_library(library: Option<&Path>, cwd: &Path, add_dirs: &[PathBuf], kin
 }
 
 /// Everything that happens once a run is over, however it ended.
-async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathBuf>, touches_library: bool, on_done: Option<OnDone>) {
+pub(crate) async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathBuf>, touches_library: bool, on_done: Option<OnDone>) {
     state.runs.lock().await.remove(&id);
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
     let done = state.chats.update(&id, |c| { c.running = false; c.updated = chrono::Utc::now(); }).await;
@@ -1522,9 +1524,12 @@ pub async fn start_run(
         refresh_starter_hook(&state, dir).await;
         crate::trust::require(dir)?;
     }
-    // Who pays for this run. An address without a key stops here: nothing is recorded, nothing starts.
-    let provider = provider_env(&state).await?;
     let kind = state.chats.with(&spec.chat_id, |c| c.kind.clone()).await.unwrap_or_default();
+    // Which program does the work (`assistant::for_run`). Everything decided below holds for both.
+    let program = crate::assistant::for_run(&state, &spec.chat_id, &kind, spec.resume.is_some()).await;
+    let on_codex = program == crate::assistant::Program::Codex;
+    // Who pays for this run. An address without a key stops here: nothing is recorded, nothing starts.
+    let provider = if on_codex { ProviderEnv::default() } else { provider_env(&state).await? };
     if let Some(lib) = &library {
         // A library that holds half a wrap waits for the user's decision: anything written into it
         // now would be thrown away with the wrap if it is undone. (Finishing that wrap is the exception.)
@@ -1610,7 +1615,7 @@ pub async fn start_run(
             .iter().filter_map(|r| r.as_str().map(String::from)).collect() };
         let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: Some(mode.clone()),
             deny: rules("deny"), allow: rules("allow"), ask: rules("ask"), prompt_token: ticket.as_ref().map(|t| t.token().to_string()),
-            profile: prof, system: system_text(true) };
+            profile: prof, system: system_text(true), program };
         let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
         state.runs.lock().await.insert(id.clone(), kill_tx);
         state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
@@ -1630,6 +1635,10 @@ pub async fn start_run(
         return Ok(());
     }
 
+    if on_codex {
+        return crate::codex::launch(state, crate::codex::Launch { spec, kind, mode, profile: prof, standing, record, touches_library, on_done,
+            library, private: settings.private_paths.clone(), language: settings.language.clone() }).await;
+    }
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
     let budget = match spec.options.max_budget_usd.filter(|b| b.is_finite() && *b > 0.0) {
@@ -1856,14 +1865,18 @@ const KEPT_MAX: u64 = 1024 * 1024;
 /// through anyway (a spelling no rule names, a program that reads the rules differently), `restore`
 /// puts everything back when the run is over: changed files get their old contents, removed ones
 /// come back, new ones go.
-pub struct StandingSnapshot { root: PathBuf, files: std::collections::BTreeMap<String, Kept> }
+pub struct StandingSnapshot { root: PathBuf, files: std::collections::BTreeMap<String, Kept>, keep: fn(&str) -> bool }
 
 impl StandingSnapshot {
-    pub fn take(root: &Path) -> Self { Self { root: root.to_path_buf(), files: Self::scan(root) } }
+    pub fn take(root: &Path) -> Self { Self::take_with(root, kept_by_backstop) }
+
+    /// Like `take`, for the files `keep` names (by library-relative path) — what a Codex run, which has
+    /// no rule that closes a single file, may not change (`codex::launch`).
+    pub fn take_with(root: &Path, keep: fn(&str) -> bool) -> Self { Self { root: root.to_path_buf(), files: Self::scan(root, keep), keep } }
 
     /// Every kept file under `root`, by library-relative path. Links are never followed and `.git` is
     /// not entered; a very large library is looked through only so far.
-    fn scan(root: &Path) -> std::collections::BTreeMap<String, Kept> {
+    fn scan(root: &Path, keep: fn(&str) -> bool) -> std::collections::BTreeMap<String, Kept> {
         let mut out = std::collections::BTreeMap::new();
         let (mut stack, mut entries) = (vec![(root.to_path_buf(), String::new(), 0usize)], 0usize);
         while let Some((dir, rel, depth)) = stack.pop() {
@@ -1875,7 +1888,7 @@ impl StandingSnapshot {
                 let Ok(ft) = e.file_type() else { continue };
                 if ft.is_dir() {
                     if !name.eq_ignore_ascii_case(".git") && depth < 24 { stack.push((e.path(), r, depth + 1)); }
-                } else if kept_by_backstop(&r) {
+                } else if keep(&r) {
                     let small = ft.is_file() && e.metadata().map_or(false, |m| m.len() <= KEPT_MAX);
                     let kept = if small { std::fs::read(e.path()).map(Kept::Bytes).unwrap_or(Kept::Untouched) } else { Kept::Untouched };
                     out.insert(r, kept);
@@ -1888,7 +1901,7 @@ impl StandingSnapshot {
     /// Put back what changed since `take`. Returns the library-relative paths put back. Nothing is
     /// ever written through a link: a file whose folder became a link is left as it is.
     pub fn restore(&self) -> Vec<String> {
-        let now = Self::scan(&self.root);
+        let now = Self::scan(&self.root, self.keep);
         let through_link = |p: &Path| p.strip_prefix(&self.root).ok().map_or(true, |rel| {
             let mut cur = self.root.clone();
             rel.parent().into_iter().flat_map(|r| r.components()).any(|c| { cur.push(c); std::fs::symlink_metadata(&cur).map_or(false, |m| m.file_type().is_symlink()) })
@@ -1915,7 +1928,7 @@ impl StandingSnapshot {
 }
 
 /// After a run nobody watched: put back the standing files it changed, and say so in its chat.
-async fn put_back_standing(state: &AppState, id: &str, snap: StandingSnapshot) {
+pub(crate) async fn put_back_standing(state: &AppState, id: &str, snap: StandingSnapshot) {
     let changed = tokio::task::spawn_blocking(move || snap.restore()).await.unwrap_or_default();
     if changed.is_empty() { return; }
     crate::log::warn(format!("run {id}: changed {} standing file(s) it may not change; put back: {}", changed.len(), changed.join(", ")));
@@ -2071,7 +2084,7 @@ pub(crate) async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Opti
                 if sid.is_some() { c.session_id = sid; }
             }).await;
             state.add_usage(cost).await;
-            if let Some(used) = ev["modelUsage"].as_object() { note_models(state, used.keys().cloned()).await; }
+            if let Some(used) = ev["modelUsage"].as_object() { note_models(state, used.keys().cloned()).await; crate::handoff::note_claude(used); }
             // What the assistant was not allowed to do goes under its answer — and before an error,
             // which must stay the last message of a run that failed.
             let denied = denied_msg(state, id, &ev["permission_denials"]).await;
@@ -2166,8 +2179,24 @@ fn tool_label(name: &str, input: &Value) -> String {
     if arg.is_empty() { name.to_string() } else { format!("{name}: {arg}") }
 }
 
-/// One-shot, tool-less completion (used for mini-wraps and titles).
+/// One-shot, tool-less completion (used for mini-wraps and titles), by the program chosen in
+/// Settings (`model` is one of its models: `assistant::one_shot_model`).
 pub async fn complete(state: &AppState, prompt: &str, model: Option<String>) -> anyhow::Result<String> {
+    let codex = crate::assistant::primary(&*state.settings.read().await) == crate::assistant::Program::Codex;
+    if codex { return crate::codex::complete(state, prompt, model, false).await; }
+    complete_with(state, prompt, model, None).await
+}
+
+/// A one-shot answer from Claude Code, whichever program is chosen in Settings (a chat moved to it).
+pub async fn complete_claude(state: &AppState, prompt: &str, model: Option<String>) -> anyhow::Result<String> {
+    complete_with(state, prompt, model, None).await
+}
+
+/// `complete` for a summary the app makes by itself: as cheaply as the chosen program allows (with
+/// Codex, at its lowest effort; Claude Code's cheap model is already the one asked for).
+pub async fn complete_cheap(state: &AppState, prompt: &str, model: Option<String>) -> anyhow::Result<String> {
+    let codex = crate::assistant::primary(&*state.settings.read().await) == crate::assistant::Program::Codex;
+    if codex { return crate::codex::complete(state, prompt, model, true).await; }
     complete_with(state, prompt, model, None).await
 }
 

@@ -276,7 +276,7 @@ struct DraftReq { request: String, current: Option<Draft> }
 /// `{request, current?}` → a proposed `{title, description, steps}`. Nothing is written.
 async fn api_draft(State(st): State<Arc<AppState>>, Json(r): Json<DraftReq>) -> R {
     if r.request.trim().is_empty() { return Err(crate::tr::err("routine.empty", &[]).into()); }
-    let model = st.settings.read().await.ai.claude.model.clone();
+    let model = crate::assistant::one_shot_model(&*st.settings.read().await, false);
     let answer = crate::claude::complete(&st, &draft_prompt(&r.request, r.current.as_ref()), model).await?;
     let d = parse_draft(&answer).ok_or_else(|| crate::tr::err("routine.draft_failed", &[]))?;
     Ok(Json(json!(d)))

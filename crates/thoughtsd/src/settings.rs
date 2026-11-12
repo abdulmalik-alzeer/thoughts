@@ -353,10 +353,26 @@ fn none_if_blank(v: &mut Option<String>) {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AiSettings {
-    /// Provider used by default: "claude" (codex lands in milestone 2).
+    /// The assistant program that answers new chats and everything the app starts itself (Wrap,
+    /// Reorganize, set-up, automatic tasks, summaries): "claude" (Claude Code) or "codex" (Codex).
     pub primary: String,
     pub secondary: Option<String>,
     pub claude: ClaudeSettings,
+    pub codex: CodexSettings,
+}
+
+/// Codex (`codex.rs`). The permission mode new chats start with is the app's one setting
+/// (`ClaudeSettings::permission_mode`), mapped onto Codex's sandbox.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default, rename_all = "camelCase")]
+pub struct CodexSettings {
+    /// Custom path to the `codex` program; None = search PATH.
+    pub binary: Option<String>,
+    pub model: Option<String>,
+    /// Reasoning effort (`model_reasoning_effort`), one of the values the installed Codex accepts.
+    pub effort: Option<String>,
+    /// Model for background summaries; None = Codex's own default, at its lowest effort.
+    pub mini_wrap_model: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -464,7 +480,7 @@ impl Default for Settings {
 
 impl Default for AiSettings {
     fn default() -> Self {
-        Self { primary: "claude".into(), secondary: None, claude: ClaudeSettings::default() }
+        Self { primary: "claude".into(), secondary: None, claude: ClaudeSettings::default(), codex: CodexSettings::default() }
     }
 }
 
@@ -686,6 +702,19 @@ impl Settings {
             let named_claude = p.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.to_lowercase().starts_with("claude"));
             if !p.is_absolute() || !named_claude { anyhow::bail!("the assistant program must be a full path to a file named claude"); }
             if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) { anyhow::bail!("the assistant program was not found at {b}"); }
+        }
+        // Codex: which program answers, and its own choices (all plain tokens, like Claude's).
+        if !matches!(self.ai.primary.as_str(), "claude" | "codex") { self.ai.primary = old.ai.primary.clone(); }
+        let x = &mut self.ai.codex;
+        for v in [&mut x.binary, &mut x.model, &mut x.effort, &mut x.mini_wrap_model] { none_if_blank(v); }
+        check_cli_value("model", x.model.as_deref())?;
+        check_cli_value("effort", x.effort.as_deref())?;
+        check_cli_value("mini-wrap model", x.mini_wrap_model.as_deref())?;
+        if let Some(b) = x.binary.as_deref().filter(|b| Some(*b) != old.ai.codex.binary.as_deref()) {
+            let p = std::path::Path::new(b);
+            let named_codex = p.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.to_lowercase().starts_with("codex"));
+            if !p.is_absolute() || !named_codex { anyhow::bail!("the Codex program must be a full path to a file named codex"); }
+            if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) { anyhow::bail!("the Codex program was not found at {b}"); }
         }
 
         self.spending.sanitize()?;
@@ -1021,6 +1050,19 @@ mod tests {
         assert!(bad(&|n| n.ai.claude.binary = Some("claude".into())));
         assert!(bad(&|n| n.ai.claude.binary = Some("/bin/sh".into())));
         assert!(bad(&|n| n.ai.claude.binary = Some("/nonexistent/dir/claude".into())));
+        // Codex's choices are plain tokens and its program is a real file named codex.
+        assert!(bad(&|n| n.ai.codex.binary = Some("/bin/sh".into())));
+        assert!(bad(&|n| n.ai.codex.binary = Some("codex".into())));
+        assert!(bad(&|n| n.ai.codex.model = Some("--dangerously-bypass-approvals-and-sandbox".into())));
+        assert!(bad(&|n| n.ai.codex.effort = Some("high; rm".into())));
+        // Which program answers is one of the two, or stays what it was.
+        for (sent, kept) in [("codex", "codex"), ("claude", "claude"), ("openai", "claude"), ("", "claude")] {
+            let mut n = old.clone();
+            n.ai.primary = sent.into();
+            n.ai.codex.model = Some("  ".into());
+            n.sanitize_update(&old).unwrap();
+            assert_eq!((n.ai.primary.as_str(), n.ai.codex.model.as_deref()), (kept, None), "{sent}");
+        }
     }
 
     #[test]

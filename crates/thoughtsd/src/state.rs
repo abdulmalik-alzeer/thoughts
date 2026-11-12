@@ -66,6 +66,8 @@ pub struct AppState {
     pub keys: crate::tokens::Store,
     /// What the assistant asks the user from inside a chat, and what was allowed there (`approvals.rs`).
     pub approvals: crate::approvals::Approvals,
+    /// Codex's sign-in, as far as the app knows it (`codex.rs`).
+    pub codex: crate::codex::CodexState,
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
@@ -131,6 +133,7 @@ impl AppState {
             plan_limit: Default::default(),
             keys: crate::tokens::Store::load(crate::paths::tokens_file()),
             approvals: crate::approvals::Approvals::at(crate::paths::home().join("chat-approvals.json")),
+            codex: Default::default(),
         })
     }
 
@@ -173,6 +176,7 @@ impl AppState {
             plan_limit: Default::default(),
             keys: crate::tokens::Store::load(dir.join("tokens.json")),
             approvals: crate::approvals::Approvals::at(dir.join("chat-approvals.json")),
+            codex: Default::default(),
         }
     }
 

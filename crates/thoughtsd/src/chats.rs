@@ -101,7 +101,12 @@ pub struct Chat {
     /// Cleared as soon as the user sends something.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suggestion: Option<String>,
+    /// Tokens the assistant used in this chat, where it reports tokens but no cost (Codex).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub usage_tokens: u64,
 }
+
+fn is_zero(n: &u64) -> bool { *n == 0 }
 
 /// Current shape of a chat file.
 pub const CHAT_SCHEMA_VERSION: u32 = 1;
@@ -229,6 +234,7 @@ impl Default for Chat {
             cost_usd: 0.0,
             meta: Value::Null,
             suggestion: None,
+            usage_tokens: 0,
         }
     }
 }

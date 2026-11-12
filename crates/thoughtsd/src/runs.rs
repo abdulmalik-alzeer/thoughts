@@ -44,7 +44,9 @@ pub fn forget(pid: Option<u32>) { if let Some(pid) = pid { forget_in(&crate::pat
 /// process on its number alone.)
 pub fn looks_like_assistant_run(cmdline: &str) -> bool {
     let c = cmdline.to_lowercase();
-    c.contains("claude") && c.contains("--output-format")
+    (c.contains("claude") && c.contains("--output-format"))
+        // A Codex run: `codex exec --json …` (or the older `--experimental-json`).
+        || (c.contains("codex") && c.contains(" exec ") && c.contains("json"))
 }
 
 /// The command line of a live process, or None when there is no such process.
@@ -68,7 +70,7 @@ pub fn image_from_tasklist(csv: &str) -> Option<String> {
 /// (The native program, or the npm install: `cmd.exe` running `claude.cmd`, which runs `node.exe`.)
 #[cfg_attr(not(windows), allow(dead_code))]
 pub fn windows_image_is_assistant(image: &str) -> bool {
-    matches!(image.to_lowercase().as_str(), "claude.exe" | "node.exe" | "cmd.exe")
+    matches!(image.to_lowercase().as_str(), "claude.exe" | "codex.exe" | "node.exe" | "cmd.exe")
 }
 
 #[cfg(windows)]
@@ -237,7 +239,10 @@ mod tests {
     fn only_assistant_processes_are_matched() {
         assert!(looks_like_assistant_run("/Users/a/.local/bin/claude -p --output-format stream-json --verbose"));
         assert!(looks_like_assistant_run("node /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/cli.js -p --output-format json"));
-        for other in ["/usr/bin/vim notes.md", "claude", "/Applications/Claude.app/Contents/MacOS/Claude", "sleep 300", ""] {
+        assert!(looks_like_assistant_run("/opt/homebrew/bin/codex exec --json --skip-git-repo-check --sandbox read-only -"));
+        assert!(looks_like_assistant_run("node /usr/local/lib/node_modules/@openai/codex/bin/codex.js exec --experimental-json -"));
+        for other in ["/usr/bin/vim notes.md", "claude", "/Applications/Claude.app/Contents/MacOS/Claude", "sleep 300", "",
+                      "codex", "/opt/homebrew/bin/codex login", "vim codex-notes.json"] {
             assert!(!looks_like_assistant_run(other), "{other}");
         }
     }

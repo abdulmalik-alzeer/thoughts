@@ -668,7 +668,9 @@ async fn storage_put(State(st): S, Path(plugin): Path<String>, body: axum::body:
 /// whether the installed assistant can be held to a spending limit (read from its own help).
 async fn workflow_list(State(st): S) -> R {
     let mut list = workflows::status(&crate::paths::app_layer_dir(), &crate::paths::home(), chrono::Local::now().naive_local());
-    let budget = crate::claude::has_flag(&st, "--max-budget-usd").await;
+    // Codex cannot be held to a spending limit at all.
+    let codex = crate::assistant::primary(&*st.settings.read().await) == crate::assistant::Program::Codex;
+    let budget = !codex && crate::claude::has_flag(&st, "--max-budget-usd").await;
     workflows::add_libraries(&st, &mut list).await;
     for w in &mut list {
         w["budgetSupported"] = json!(budget);

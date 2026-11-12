@@ -165,6 +165,9 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/claude/login", post(claude_login))
         .route("/api/ai/claude/recheck", post(claude_recheck))
         .route("/api/ai/claude/status", get(claude_status))
+        .route("/api/ai/codex/options", get(codex_options))
+        .route("/api/ai/codex/login", post(codex_login))
+        .route("/api/ai/codex/recheck", post(codex_recheck))
         .route("/api/git/install", post(git_install))
         .route("/api/library/trust", post(trust_library))
         .route("/api/library/access", get(library_access).post(library_keep_to_owner))
@@ -493,6 +496,8 @@ async fn status(State(st): S) -> R {
         "version": env!("CARGO_PKG_VERSION"), "onboarded": s.onboarded,
         "library": s.library_path, "claude": claude::status(&st).await,
         "libraryId": s.library_id(), "libraryName": s.open_library().map(|l| l.display_name()), "libraries": s.libraries.len(),
+        // Codex, and which of the two answers new chats and everything the app starts itself.
+        "codex": crate::codex::status(&st).await, "primary": crate::assistant::primary(&s).name(),
         "git": git_tool_status().await,
         "interrupted": interrupted_here(&st).await,
         "usage": crate::spend::usage_json(&st).await,
@@ -583,6 +588,7 @@ async fn diagnostics(State(st): S) -> R {
         "version": env!("CARGO_PKG_VERSION"),
         "platform": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
         "assistant": {"installed": claude::binary(&st).await.is_some(), "version": claude::version(&st).await},
+        "codex": {"installed": crate::codex::binary(&st).await.is_some(), "version": crate::codex::version(&st).await, "primary": s.ai.primary},
         "gitTool": git_tool_status().await,
         "git": git_state,
         "settings": redacted_settings(&s),
@@ -1344,7 +1350,7 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
     let mut prompt = chat.meta["prompt"].as_str().filter(|p| !p.is_empty()).ok_or_else(no_chat)?.to_string();
     if again {
         library_free(&st).await?;
-        claude::require_signed_in(&st).await?;
+        crate::assistant::require_signed_in(&st, crate::assistant::primary(&*st.settings.read().await)).await?;
         if !waited { prompt.push_str(SETUP_AGAIN); }
     }
     let s = st.settings.read().await.clone();
@@ -1547,6 +1553,15 @@ async fn claude_recheck(State(st): S) -> R {
     st.forget_auth();
     Ok(Json(claude::status(&st).await))
 }
+
+/// Codex's models, efforts and the permission modes it can enforce (see `codex::options`).
+async fn codex_options(State(st): S) -> R { Ok(Json(crate::codex::options(&st).await)) }
+
+/// Opens Codex's browser sign-in (`codex login`): one attempt at a time, ended after ten minutes.
+async fn codex_login(State(st): S) -> R { crate::codex::login(st.clone()).await?; ok() }
+
+/// "Check again" for Codex.
+async fn codex_recheck(State(st): S) -> R { Ok(Json(crate::codex::recheck(&st).await)) }
 
 // ---------- library ----------
 
@@ -2268,8 +2283,11 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     if let Some(t) = n.title { c.title = t; }
     c.project_id = n.project_id;
     if let Some(k) = n.kind.filter(|k| k == "chat" || k == "customize") { c.kind = k; }
-    c.provider = n.provider.unwrap_or(s.ai.primary.clone());
-    c.options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(), permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() }, None);
+    // The program asked for (one this version knows), else the one chosen in Settings; with its own model and effort.
+    let program = n.provider.as_deref().and_then(crate::assistant::Program::from_name).unwrap_or_else(|| crate::assistant::primary(&s));
+    c.provider = program.name().into();
+    let (model, effort) = crate::assistant::chat_defaults(&s, program);
+    c.options = normalized(RunOptions { model, effort, permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() }, None);
     if c.kind == "customize" { c.title = customize_title(ar).into(); }
     // A chat belongs to the library it was started in (customising the app belongs to none).
     if c.kind == "chat" { c.library = s.library_path.clone(); }
@@ -2373,6 +2391,12 @@ pub(crate) async fn remove_chat(st: &AppState, id: &str) -> bool {
         let removed = tokio::task::spawn_blocking(move || crate::traces::remove_sessions(&dir, &sessions)).await.unwrap_or_default();
         crate::log::info(format!("chat {id} deleted ({} assistant transcript(s), {} plan file(s) and {} other item(s) removed with it)", removed.transcripts, removed.plans, removed.other));
     }
+    // And what Codex kept of it (a chat may have had sessions with both programs).
+    let codex_sessions = chat.all_sessions();
+    if !codex_sessions.is_empty() {
+        let n = tokio::task::spawn_blocking(move || crate::codex::remove_sessions(&crate::codex::codex_home(), &codex_sessions)).await.unwrap_or(0);
+        if n > 0 { crate::log::info(format!("chat {id}: {n} Codex session file(s) removed with it")); }
+    }
     true
 }
 
@@ -2404,8 +2428,11 @@ async fn chat_retention_put(State(st): S, Json(b): Json<RetentionBody>) -> R {
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct ChatPatch { title: Option<String>, pinned: Option<bool>, archived: Option<bool>, project_id: Option<Option<String>>, options: Option<RunOptions>, confirm_bypass: bool }
+struct ChatPatch { title: Option<String>, pinned: Option<bool>, archived: Option<bool>, project_id: Option<Option<String>>, options: Option<RunOptions>, confirm_bypass: bool,
+    /// Move the chat to the other assistant program ("claude" | "codex"), see `handoff.rs`.
+    provider: Option<String> }
 async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatch>) -> R {
+    let moved = match p.provider.as_deref() { Some(to) => move_chat(&st, &id, to).await?, None => None };
     if let Some(o) = &p.options {
         check_run_options(o)?;
         let (kind, current) = st.chats.with(&id, |c| (c.kind.clone(), c.options.permission_mode.clone())).await.ok_or_else(no_chat)?;
@@ -2423,7 +2450,30 @@ async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatc
     // The options as they now are: what the view shows must be what was saved, not what it asked for.
     let mut v = c.summary();
     v["options"] = json!(c.options);
+    if let Some(how) = moved { v["handoff"] = json!(how.name()); }
     Ok(Json(v))
+}
+
+/// Move an ordinary chat to the other assistant program, while it is not answering. The chat says
+/// how its conversation will be passed on with the next message (the whole of it, or a summary);
+/// that is also what this returns (`None`: nothing has been said yet, nothing to pass on).
+async fn move_chat(st: &Arc<AppState>, id: &str, to: &str) -> anyhow::Result<Option<crate::handoff::How>> {
+    let to = crate::assistant::Program::from_name(to).ok_or_else(|| crate::tr::err("handoff.unknown", &[]))?;
+    // No message may start while the chat changes hands.
+    let _claim = st.chats.claim_send(id).ok_or_else(|| crate::tr::err("chat.running", &[]))?;
+    let chat = st.chats.get(id).await.ok_or_else(no_chat)?;
+    if chat.kind != "chat" { return Err(crate::tr::err("handoff.chat_only", &[])); }
+    if chat.running { return Err(crate::tr::err("chat.running", &[])); }
+    if crate::assistant::of_chat(&chat.provider) == to { return Ok(None); }
+    let installed = match to { crate::assistant::Program::Claude => claude::binary(st).await.is_some(), crate::assistant::Program::Codex => crate::codex::binary(st).await.is_some() };
+    if !installed { return Err(crate::tr::err(if to == crate::assistant::Program::Codex { "codex.missing" } else { "assistant.missing" }, &[])); }
+    let s = st.settings.read().await.clone();
+    let how = crate::handoff::plan(&chat, to, &s);
+    let mut note = None;
+    st.chats.update(id, |c| { note = crate::handoff::apply(c, to, how, &s); if let Some(m) = &note { c.messages.push(m.clone()); } }).await;
+    if let Some(m) = note { st.emit(json!({"type": "chat.message", "chatId": id, "message": m})); }
+    crate::log::info(format!("chat {id} moved to {} ({})", to.label(), how.map_or("nothing to pass on", |h| h.name())));
+    Ok(how)
 }
 
 #[derive(Deserialize)]
@@ -2546,6 +2596,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let _claim = st.chats.claim_send(&id).ok_or_else(|| crate::tr::err("chat.running", &[]))?;
     let chat = st.chats.get(&id).await.ok_or_else(no_chat)?;
     if chat.running { return Err(crate::tr::err("chat.running", &[]).into()); }
+    // A move to the other program is over once that program has a session of its own.
+    if crate::handoff::settled(&chat) { st.chats.update(&id, |c| { if let Some(o) = c.meta.as_object_mut() { o.remove("handoff"); } }).await; }
     if let Some(o) = &m.options {
         check_run_options(o)?;
         check_bypass(&chat.kind, chat.options.permission_mode.as_deref(), o.permission_mode.as_deref(), m.confirm_bypass)?;
@@ -2559,9 +2611,9 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     if !wraps::Scope::now(&st).await.holds(chat.library.as_deref()) {
         return Err(crate::tr::err("chat.other_library", &[("path", chat.library.as_deref().unwrap_or_default())]).into());
     }
-    if chat.provider != "claude" { bail!("Codex support arrives in the next milestone"); }
-    // Say "not signed in" before the message is saved, not as a failed answer afterwards.
-    claude::require_signed_in(&st).await?;
+    // Say "not signed in" before the message is saved, not as a failed answer afterwards — by the
+    // program this chat uses.
+    crate::assistant::require_signed_in(&st, crate::assistant::of_chat(&chat.provider)).await?;
     let s = st.settings.read().await.clone();
     let library = s.library();
     // Where the session runs: a project folder, the app layer, or the library.
@@ -2623,8 +2675,10 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let with_history = |p: &str| format!("Earlier conversation (continue from it):\n\n{}\n\n---\n\n{p}", chat.transcript(120_000));
     // What goes instead if the CLI turns out not to have the session any more (see `resend_without_session`).
     let fallback = chat.session_id.as_ref().map(|_| if has_history { with_history(&prompt) } else { prompt.clone() });
-    // Handoff from another provider / a chat without a session: replay history.
-    if chat.session_id.is_none() && has_history { prompt = with_history(&prompt); }
+    // A chat moved to the other program passes its conversation on, whole or summarised
+    // (`handoff.rs`); any other chat without a session replays its history.
+    if let Some(pre) = crate::handoff::prefix(&st, &chat).await { prompt = format!("{pre}{prompt}"); }
+    else if chat.session_id.is_none() && has_history { prompt = with_history(&prompt); }
     let first = !chat.messages.iter().any(|x| x.role == "user");
     let mut um = Msg::new("user", &m.text);
     um.attachments = saved;
@@ -2729,6 +2783,10 @@ mod chat_tests;
 #[allow(unused_must_use)]
 #[path = "api_chatc_tests.rs"]
 mod chatc_tests;
+#[cfg(test)]
+#[allow(unused_must_use)]
+#[path = "api_codex_tests.rs"]
+mod codex_tests;
 
 // ---------- wrap & reorganize ----------
 

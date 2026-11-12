@@ -68,7 +68,9 @@ pub fn pauses_mini_wraps(err: &str) -> bool {
     ["not logged in", "/login", "log in", "authentication", "unauthorized", "401", "403", "invalid api key", "invalid x-api-key",
      "api key", "oauth", "credit balance", "cli not found",
      "enotfound", "econnrefused", "econnreset", "etimedout", "eai_again", "getaddrinfo", "network", "offline", "fetch failed",
-     "connection error", "could not resolve", "unable to connect"].iter().any(|k| e.contains(k))
+     "connection error", "could not resolve", "unable to connect",
+     // Codex's words for the same: offline, signed out, the plan's limit reached.
+     "error sending request", "stream disconnected", "usage limit", "codex is not installed"].iter().any(|k| e.contains(k))
 }
 
 fn tr<'a>(ar: bool, en: &'a str, arabic: &'a str) -> &'a str { if ar { arabic } else { en } }
@@ -264,12 +266,13 @@ fn summary_prompt(earlier: Option<&str>, before: &[String], part: usize, parts: 
 /// reason of its own (a name another provider does not know, a timeout), the user's usual model is
 /// asked once. Background summaries never fall back: nobody chose to spend more on them.
 async fn complete_summary(state: &AppState, prompt: &str, fallback: bool) -> anyhow::Result<String> {
+    // The models of the program chosen in Settings (a Claude name is never sent to Codex).
     let (mini, main) = {
         let s = state.settings.read().await;
-        (claude::background_model(&s.ai.claude), s.ai.claude.model.clone())
+        (crate::assistant::one_shot_model(&s, true), crate::assistant::one_shot_model(&s, false))
     };
     let empty = || anyhow::anyhow!("the assistant returned an empty summary");
-    let first = match claude::complete(state, prompt, mini.clone()).await {
+    let first = match claude::complete_cheap(state, prompt, mini.clone()).await {
         Ok(t) if !t.trim().is_empty() => return Ok(t),
         Ok(_) => empty(),
         Err(e) => e,
