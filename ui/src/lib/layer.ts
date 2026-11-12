@@ -60,12 +60,26 @@ const flag = {
 };
 let firstLoad = true;
 
+// The desktop app loads the page with `?recovered=1` after its Recovery menu undid a change or went
+// back to an earlier version. The customisations that failed to start are then no longer the ones
+// in place, so the marker goes. The note is taken out of the address at once, so that a later
+// reload does not repeat it.
+try {
+  const q = new URLSearchParams(location.search);
+  if (q.has('recovered')) {
+    flag.clear();
+    q.delete('recovered');
+    const rest = q.toString();
+    history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
+  }
+} catch { /* ignore */ }
+
 /** Called by the shell when the app has finished booting with the layer loaded. */
 export function layerBooted() { if (app.safeReason !== 'crash') flag.clear(); }
 /** Forget a failed start (after a rollback, or when the user chooses to try again). */
 export function clearLayerBootFlag() { flag.clear(); }
 /** Leave safe mode and load customisations again. */
-export function retryLayer() { flag.clear(); reloadApp(); }
+export function retryLayer() { flag.clear(); reloadApp('', { leaveSafe: true }); }
 
 // ---------- per-plugin bookkeeping ----------
 type Surface = { kind: 'view' | 'widget' | 'html'; id: string };
@@ -670,20 +684,6 @@ export async function discardPending() {
 export async function revertChange(hash: string) {
   await post('/layer/revert', { hash });
   if (!app.preview) await loadLayer().catch(() => {});
-}
-
-/** Undo the most recent kept customisation (the native "Undo last app change" menu item). */
-export async function undoLastLayer(): Promise<void> {
-  try {
-    const r = await post('/layer/undo-last');
-    if (!app.preview) await loadLayer().catch(() => {});
-    const what = str(r?.summary ?? r?.undone ?? r?.subject, 120).replace(/^Undo:\s*/i, '').trim();
-    toast(what ? t('layer3.undidLast', { summary: what }) : t('layer.undone'), { kind: 'success', key: 'layer' });
-  } catch (e) {
-    const status = e instanceof ApiError ? e.status : 0;
-    if (errCode(e) === 'NOTHING' || ((status === 404 || status === 409) && !errCode(e))) toast(t('layer3.nothingToUndo'), { key: 'layer' });
-    else failed(t('layer3.undoLastFailed'), e, { key: 'layer' });
-  }
 }
 
 /** What the staged layer's add-ons and pages are allowed to do — read as data, nothing is run in the app. */

@@ -4,6 +4,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Thoughts",
         "width": 1320,
         "height": 860,

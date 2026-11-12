@@ -64,13 +64,19 @@ export async function reconnect(force = false) {
   }
 }
 
-/** Reload the window (`query` e.g. `?safe=1`). In browser-preview mode the connection details ride
- *  along in the URL for the reload only — they are stripped again on boot. */
-export function reloadApp(query = '') {
+/** Reload the window. `safe=1` in `query` turns customisations off; without it the window comes
+ *  back as it is (customisations stay off if they were), unless `leaveSafe` turns them on again.
+ *  The desktop app keeps "customisations off" across restarts and shows it in its Recovery menu,
+ *  so it is told first. In browser-preview mode the connection details ride along in the URL for
+ *  the reload only — they are stripped again on boot. */
+export function reloadApp(query = '', opts: { leaveSafe?: boolean } = {}) {
   const q = new URLSearchParams(query);
+  if (!q.has('safe') && !opts.leaveSafe && new URLSearchParams(location.search).has('safe')) q.set('safe', '1');
   if (!inTauri() && info) { q.set('port', String(info.port)); q.set('token', info.token); }
   const s = q.toString();
-  location.replace(location.pathname + (s ? '?' + s : ''));
+  const go = () => location.replace(location.pathname + (s ? '?' + s : ''));
+  if (!inTauri()) { go(); return; }
+  import('@tauri-apps/api/core').then(({ invoke }) => invoke('set_safe_mode', { on: q.has('safe') })).catch(() => {}).finally(go);
 }
 
 /** Machine-readable daemon errors that have one plain-language meaning everywhere. */

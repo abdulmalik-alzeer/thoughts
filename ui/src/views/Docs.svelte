@@ -4,6 +4,7 @@
   import { api, apiBlob, inTauri, on, post, put } from '../lib/api';
   import { hasHiddenText, md, mdClick, resolveLink, revealInvisible } from '../lib/md';
   import { app, go, refreshChats, track } from '../lib/store.svelte';
+  import { reportUnsaved } from '../lib/unsaved';
   import { t, tn, lang, fmtDate, fmtNum } from '../lib/i18n';
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { errCode, errDetail, failed } from '../lib/errors';
@@ -75,6 +76,8 @@
   const desktop = inTauri();
   const isMac = /mac/i.test(navigator.platform || navigator.userAgent);
   const dirty = $derived(editing && !!doc && draft !== doc.content);
+  // The desktop app asks before quitting while this is set (the draft itself is kept: see the stash below).
+  $effect(() => { reportUnsaved('docs', dirty && current ? baseName(current) : null, true); });
   const info = $derived(files.find((f) => f.path === current));
   const absPath = $derived(app.status?.library ? `${String(app.status.library).replace(/[\\/]+$/, '')}/${current}` : '');
 
@@ -245,6 +248,7 @@
     if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     dropInline();
     if (app.leaveGuard === leaveOk) app.leaveGuard = null;
+    reportUnsaved('docs', null);
   });
 
   /** Resolves true when it is safe to replace what is on screen. */

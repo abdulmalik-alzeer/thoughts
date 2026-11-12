@@ -3,6 +3,7 @@
   import { onDestroy, onMount, untrack } from 'svelte';
   import { askNotify, notifState, testNotify, type NotifState } from '../lib/notifyPerm';
   import { api, del, inTauri, post, put, reloadApp } from '../lib/api';
+  import { reportUnsaved } from '../lib/unsaved';
   import { a11y, app, applyTheme, go, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
   import { recheckSignIn } from '../lib/auth';
   import { isolatedKeys, tip } from '../lib/shortcuts';
@@ -309,7 +310,9 @@
     apiToken = ''; provUrl = savedUrl; remote = { name: '', url: '', username: '', token: '' };
     return true;
   }
-  onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; clearTimeout(savedTimer); });
+  onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; clearTimeout(savedTimer); reportUnsaved('settings', null); });
+  // The desktop app asks before quitting while a change is not saved or a typed key or address was not sent.
+  $effect(() => { reportUnsaved('settings', !readOnly && (dirty || unsent().length > 0) ? t('settings') : null); });
 
   function onBeforeUnload(e: BeforeUnloadEvent) { if (isDirty() || unsent().length) { e.preventDefault(); e.returnValue = ''; } }
 

@@ -6,8 +6,11 @@
 //   * THOUGHTS_ASKPASS=1   — git credential helper backed by the OS keychain
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod quit;
+mod recovery;
+
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -26,6 +29,11 @@ static QUIT_ALL: AtomicBool = AtomicBool::new(false);
 static VERSION_CHECKED: AtomicBool = AtomicBool::new(false);
 /// Serialises daemon start/stop so concurrent callers cannot spawn two.
 static DAEMON_LOCK: Mutex<()> = Mutex::new(());
+/// The label of the window that is "the" app window right now: `main` at first, then `main-2`,
+/// `main-3`… for each window Recovery opened in its place (see `open_main_window`).
+static MAIN_LABEL: Mutex<String> = Mutex::new(String::new());
+/// How many app windows have been opened since the app started.
+static WINDOWS_OPENED: AtomicU32 = AtomicU32::new(0);
 
 /// Whether an updater public key and endpoint are configured in this build.
 struct UpdaterConfigured(bool);
@@ -275,7 +283,8 @@ fn stop_daemon(wait: bool) {
         _ => false,
     };
     let waited = Instant::now();
-    let mut refused = busy(shutdown(false));
+    // Unless the user chose "Quit now" knowing that a save in progress stops (`quit`).
+    let mut refused = busy(shutdown(quit::cut_short()));
     while refused && waited.elapsed() < Duration::from_secs(60) {
         std::thread::sleep(Duration::from_secs(2));
         refused = busy(shutdown(false));
@@ -490,11 +499,68 @@ fn quit_app(app: tauri::AppHandle) {
 /// Rebuild the native menus after the UI language changed.
 #[tauri::command]
 fn refresh_menu(app: tauri::AppHandle) -> Result<(), String> {
+    recovery::refresh_versions_soon(&app);
     install_menus(&app).map_err(|e| e.to_string())
 }
 
+/// The page turned customisations off or back on (its own "Reload without customisations" and
+/// "Turn customisations back on" buttons). The shell remembers it, so the choice survives a
+/// restart and the Recovery menu shows the same thing as the page.
+#[tauri::command]
+fn set_safe_mode(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    recovery::set_safe_mode(on);
+    install_menus(&app).map_err(|e| e.to_string())
+}
+
+fn is_main_label(label: &str) -> bool {
+    label == "main" || label.starts_with("main-")
+}
+
+/// The app window, if it exists (it may be hidden in the tray).
+fn main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
+    let label = MAIN_LABEL.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    app.get_webview_window(if label.is_empty() { "main" } else { &label })
+}
+
+/// Open the app window: at start-up, and again whenever Recovery replaces a window whose page no
+/// longer answers. The new window is built first and takes the old one's place and size; only
+/// then is the old one destroyed, with its page process, so the app is never without a window.
+/// The page is loaded with customisations off when that was chosen (`recovery::safe_mode`), and
+/// with `recovered` after Recovery changed the customisations.
+fn open_main_window(app: &tauri::AppHandle, recovered: bool) -> tauri::Result<tauri::WebviewWindow> {
+    let old = main_window(app);
+    let mut config = app.config().app.windows.iter().find(|w| w.label == "main").cloned().ok_or(tauri::Error::WindowNotFound)?;
+    let n = WINDOWS_OPENED.fetch_add(1, Ordering::SeqCst) + 1;
+    if n > 1 {
+        config.label = format!("main-{n}");
+    }
+    let page = match recovery::page_query(recovery::safe_mode(), recovered) {
+        Some(query) => format!("index.html?{query}"),
+        None => "index.html".to_string(),
+    };
+    config.url = tauri::WebviewUrl::App(page.into());
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app, &config)?;
+    let in_place = |w: &&tauri::WebviewWindow| w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false) && !w.is_fullscreen().unwrap_or(false);
+    if let Some(o) = old.as_ref().filter(in_place) {
+        if o.is_maximized().unwrap_or(false) {
+            builder = builder.maximized(true);
+        } else if let (Ok(at), Ok(size), Ok(scale)) = (o.outer_position(), o.inner_size(), o.scale_factor()) {
+            builder = builder.position(at.x as f64 / scale, at.y as f64 / scale).inner_size(size.width as f64 / scale, size.height as f64 / scale);
+        }
+    }
+    let window = builder.build()?;
+    *MAIN_LABEL.lock().unwrap_or_else(|e| e.into_inner()) = config.label;
+    if let Some(o) = old {
+        let _ = o.destroy();
+    }
+    Ok(window)
+}
+
 fn show_main(app: &tauri::AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+    // Whoever opens the window again is still using the app: a quit that was only waiting for
+    // running work to finish is called off.
+    quit::still_here(app);
+    if let Some(w) = main_window(app) {
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -510,10 +576,16 @@ fn label(ar: bool, key: &str) -> &'static str {
     let (en, arabic) = match key {
         "settings" => ("Settings…", "الإعدادات…"),
         "recovery" => ("Recovery", "الاستعادة"),
-        "rollback" => ("Rollback app…", "استعادة نسخة سابقة…"),
-        "undo-layer" => ("Undo last app change", "التراجع عن آخر تغيير في التطبيق"),
-        "safe-mode" => ("Reload in safe mode (no customisations)", "إعادة التحميل في الوضع الآمن"),
+        "undo-layer" => ("Undo last app change…", "التراجع عن آخر تغيير في التطبيق…"),
+        "rollback" => ("Go back to an earlier version", "العودة إلى نسخة سابقة"),
+        "rollback-none" => ("No earlier versions yet", "لا توجد نسخ سابقة بعد"),
+        "rollback-find" => ("Look for earlier versions…", "البحث عن نسخ سابقة…"),
+        "rollback-first" => ("The app as it first was (no customisations)", "التطبيق كما كان أول مرة (بلا تخصيصات)"),
+        "rollback-more" => ("More versions…", "نسخ أخرى…"),
+        "discard-pending" => ("Discard the change waiting for review…", "تجاهل التغيير المنتظر للمراجعة…"),
+        "safe-mode" => ("Customisations off (safe mode)", "إيقاف التخصيصات (الوضع الآمن)"),
         "reload" => ("Reload", "إعادة التحميل"),
+        "fresh-window" => ("Open a fresh window", "فتح نافذة جديدة"),
         "restart-daemon" => ("Restart background service", "إعادة تشغيل خدمة الخلفية"),
         "help" => ("Thoughts Help", "مساعدة Thoughts"),
         "check-updates" => ("Check for Updates…", "التحقق من وجود تحديثات…"),
@@ -627,24 +699,6 @@ fn about_metadata(h: &tauri::AppHandle) -> tauri::menu::AboutMetadata<'static> {
     }
 }
 
-fn recovery_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Submenu<tauri::Wry>> {
-    // The Recovery menu lives in the native shell, outside the app layer,
-    // so no customisation can remove it.
-    Submenu::with_items(
-        h,
-        label(ar, "recovery"),
-        true,
-        &[
-            &item(h, ar, "rollback", None)?,
-            &item(h, ar, "undo-layer", None)?,
-            &PredefinedMenuItem::separator(h)?,
-            &item(h, ar, "safe-mode", None)?,
-            &item(h, ar, "reload", Some("CmdOrCtrl+R"))?,
-            &item(h, ar, "restart-daemon", None)?,
-        ],
-    )
-}
-
 /// macOS: the standard menu bar (same layout as Tauri's default menu, built here so every item
 /// can carry Arabic text), with Check for Updates… and Settings… (⌘,) in the app menu.
 #[cfg(target_os = "macos")]
@@ -684,7 +738,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
     )?;
     // Recovery goes before Help, which stays last.
     let help = Submenu::with_id_and_items(h, HELP_SUBMENU_ID, label(ar, "help-menu"), true, &[&item(h, ar, "help", None)?])?;
-    Menu::with_items(h, &[&app_menu, &file, &edit_menu(h, ar)?, &view, &window, &recovery_menu(h, ar)?, &help])
+    Menu::with_items(h, &[&app_menu, &file, &edit_menu(h, ar)?, &view, &window, &recovery::menu(h, ar)?, &help])
 }
 
 /// Windows / Linux: File (Settings…, Close, Quit) · Edit · Window · Recovery · Help.
@@ -722,7 +776,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
             &PredefinedMenuItem::about(h, std_text(ar, "about"), Some(about_metadata(h)))?,
         ],
     )?;
-    Menu::with_items(h, &[&file, &edit_menu(h, ar)?, &window, &recovery_menu(h, ar)?, &help])
+    Menu::with_items(h, &[&file, &edit_menu(h, ar)?, &window, &recovery::menu(h, ar)?, &help])
 }
 
 /// Hide the main window and leave the tray icon as the way back.
@@ -730,7 +784,7 @@ fn hide_to_tray(app: &tauri::AppHandle) {
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_visible(true);
     }
-    if let Some(w) = app.get_webview_window("main") {
+    if let Some(w) = main_window(app) {
         let _ = w.hide();
     }
 }
@@ -746,7 +800,8 @@ fn quit_requested(app: &tauri::AppHandle) {
     if keep_running() && !QUIT_ALL.load(Ordering::SeqCst) {
         hide_to_tray(app);
     } else {
-        app.exit(0);
+        // Really quitting stops running chats and drops unsaved edits: `quit` asks first.
+        quit::request(app, false);
     }
 }
 
@@ -852,8 +907,16 @@ fn main() {
             update_check,
             update_install,
             refresh_menu,
-            quit_app
+            quit_app,
+            set_safe_mode,
+            quit::set_unsaved
         ])
+        // A page that starts loading holds nothing unsaved yet, whatever the last one reported.
+        .on_page_load(|webview, payload| {
+            if payload.event() == tauri::webview::PageLoadEvent::Started && is_main_label(webview.label()) {
+                quit::page_started();
+            }
+        })
         .setup(|app| {
             let h = app.handle();
             // The updater only exists when this build carries a public key and an endpoint
@@ -877,32 +940,43 @@ fn main() {
             let tray = tray.build(app)?;
             let _ = tray.set_visible(keep_running());
             install_menus(h)?;
+            // The window is opened here rather than by the config ("create": false), so that it
+            // can start with customisations off when that was chosen in the Recovery menu.
+            open_main_window(h, false)?;
+            recovery::watch_versions(h);
             Ok(())
         })
         .on_window_event(|window, ev| {
-            // With "keep running in the background" on, closing the window hides it and
-            // leaves the tray icon; otherwise closing quits (and stops the daemon) as before.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = ev {
-                if window.label() == "main" && keep_running() && !QUIT_ALL.load(Ordering::SeqCst) {
+            if !is_main_label(window.label()) {
+                return;
+            }
+            match ev {
+                // With "keep running in the background" on, closing the window hides it and leaves
+                // the tray icon. Otherwise closing quits and stops the daemon, and like every real
+                // quit it first asks about chats still running and unsaved edits (`quit`).
+                tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
-                    hide_to_tray(window.app_handle());
+                    quit_requested(window.app_handle());
                 }
+                // Back in front: the list of earlier versions in the Recovery menu may be out of date.
+                tauri::WindowEvent::Focused(true) => recovery::refresh_versions_soon(window.app_handle()),
+                _ => {}
             }
         })
         .on_menu_event(|app, ev| {
-            let win = app.get_webview_window("main");
-            match ev.id().as_ref() {
+            let id = ev.id().as_ref();
+            // Recovery is done natively, start to finish: it must work when the page does not.
+            if recovery::handle(app, id) {
+                return;
+            }
+            let win = main_window(app);
+            match id {
                 "settings" => { show_main(app); let _ = app.emit("open-settings", ()); }
                 "help" => { show_main(app); let _ = app.emit("open-help", ()); }
                 "check-updates" => { show_main(app); let _ = app.emit("check-updates", ()); }
                 "tray-open" => show_main(app),
-                "tray-quit" => {
-                    QUIT_ALL.store(true, Ordering::SeqCst);
-                    app.exit(0);
-                }
-                "rollback" => { let _ = app.emit("recovery", "rollback"); }
-                // The UI does the undo (POST /api/layer/undo-last) so it can confirm and report.
-                "undo-layer" => { show_main(app); let _ = app.emit("undo-layer", ()); }
+                // The one action that stops everything, "keep running" or not: asks first.
+                "tray-quit" => quit::request(app, true),
                 "quit" => quit_requested(app),
                 // Linux stand-ins for the standard items GTK does not provide (see `std_item`).
                 "std-close" => if let Some(w) = win { let _ = w.close(); },
@@ -912,24 +986,6 @@ fn main() {
                 },
                 "std-undo" => if let Some(w) = win { let _ = w.eval("document.execCommand('undo')"); },
                 "std-redo" => if let Some(w) = win { let _ = w.eval("document.execCommand('redo')"); },
-                "safe-mode" => if let Some(w) = win {
-                    let _ = w.eval("location.replace(location.pathname + '?safe=1')");
-                },
-                "reload" => if let Some(w) = win { let _ = w.eval("location.reload()"); },
-                // Refused while a save or a chat is running: the UI is told with `daemon-busy`
-                // `{action: "restart", saving, chats}` and may call `restart_daemon {force: true}`.
-                "restart-daemon" => {
-                    let app = app.clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(e) = restart_daemon(None).await {
-                            let mut work = e.strip_prefix("BUSY::").and_then(|j| serde_json::from_str::<Value>(j).ok())
-                                .unwrap_or_else(|| json!({"error": e}));
-                            work["action"] = json!("restart");
-                            show_main(&app);
-                            let _ = app.emit("daemon-busy", work);
-                        }
-                    });
-                }
                 _ => {}
             }
         })

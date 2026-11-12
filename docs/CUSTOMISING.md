@@ -77,7 +77,7 @@ An add-on that asks for nothing can only show things on screen. No add-on can re
 
 Every change you keep is recorded. Under **Customise → History** you can undo any single change, or go back to how the app was at an earlier point, however long ago: **Show older changes** at the end of the list goes all the way back to where your app started. Undoing is itself recorded, so you can change your mind again. The starting point and the entries the app makes for itself (when an update refreshes its own files) cannot be undone on their own; you can still go back to them.
 
-If a customisation ever leaves the app unusable, the **Recovery** entry in the menu bar restores the standard app. Customisations cannot remove that menu.
+If a customisation ever leaves the app unusable, even with a blank or frozen window, the **Recovery** menu in the menu bar still works, because the desktop app does it itself: undo the last change, go back to an earlier version, discard a change waiting for review, switch customisations off (they stay off until you switch them back on), reload, or open a fresh window. Each step says what it will change and asks first, and afterwards offers to put things back. Customisations cannot remove that menu.
 
 ### The monthly tune-up
 

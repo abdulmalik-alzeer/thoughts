@@ -302,7 +302,12 @@ OS version and result of each line in the release notes draft.
 - Keychain prompt on first password save, and no repeated prompts after an update.
 - The LaunchAgent `app.thoughts.daemon.plist` is created, points at the installed app (not a
   translocated or `.dmg` path), and is replaced correctly on upgrade.
-- The translucent window, the Recovery menu and "Undo last app change" in the native menu.
+- The translucent window, and every item of the Recovery menu with a page that is blank or frozen
+  (a customisation with `while(true){}`): undo, go back, discard, customisations off (still off
+  after a restart), reload, open a fresh window, restart; each confirms and offers "Put it back".
+- Quitting (⌘Q, closing the window with "keep running" off, the tray's "Quit Thoughts completely")
+  while a chat runs and while a note has unsaved edits: the question names both; "Quit when
+  finished" hides the window and quits once the work is done.
 - Printing a document from the command palette prints the document, not a blank page.
 
 ### Windows

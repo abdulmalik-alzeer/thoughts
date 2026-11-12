@@ -62,7 +62,7 @@
     try {
       await post('/layer/rollback', { hash: h.hash });
       clearLayerBootFlag();
-      reloadApp();
+      reloadApp('', { leaveSafe: true });
     } catch (e) { failToast(t('shell.rb.failed'), e); busy = false; }
   }
 

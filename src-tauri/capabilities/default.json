@@ -3,7 +3,8 @@
   "identifier": "default",
   "description": "The app window. It gets only what the UI calls; anything new the UI uses must be added here by name.",
   "windows": [
-    "main"
+    "main",
+    "main-*"
   ],
   "permissions": [
     "core:event:allow-listen",

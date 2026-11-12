@@ -3,12 +3,11 @@
   import { api, connect, daemonStale, on, post, reconnect, reloadApp } from './lib/api';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
-  import { loadLayer, layerBooted, retryLayer, checkPending, openReview, undoLastLayer } from './lib/layer';
+  import { loadLayer, layerBooted, retryLayer, checkPending, openReview } from './lib/layer';
   import { failed } from './lib/errors';
   import { lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
   import { startReminders } from './lib/reminders';
-  import { askBusy } from './lib/shell';
   import { fold } from './lib/CommandPalette.svelte';
   import { checkAppUpdate, checkLayerUpdates } from './lib/updates';
   import { announceWhatsNew, markWhatsNewSeen } from './lib/whatsnew';
@@ -256,13 +255,8 @@
         listen('open-settings', () => command('settings'));
         listen('open-help', () => command('help'));
         listen('check-updates', () => checkAppUpdate(true));
-        // "Undo last app change" in the native menu: the shell only tells us; we ask the background service.
-        listen('undo-layer', () => { undoLastLayer(); });
-        // The Recovery menu asked for a restart while work is running: say what, and let the user decide.
-        listen('daemon-busy', async (ev: any) => {
-          const w = ev?.payload ?? {};
-          if (await askBusy({ saving: !!w.saving, chats: Array.isArray(w.chats) ? w.chats.map(String) : [] }, 'restart')) forceRestart();
-        });
+        // Everything else in the Recovery menu (undo, going back, safe mode, reload, restart) is done
+        // by the desktop app itself, with its own dialogs: it must work when this page does not.
       }
     })();
     window.addEventListener('thoughts:command', onCommand);
