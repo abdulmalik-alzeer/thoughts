@@ -86,8 +86,7 @@
   <div id="cz-panel" class="panel" role="tabpanel" aria-labelledby={'cz-tab-' + tab}>
     {#if tab === 'ask'}
       <div class="card">
-        <h3>{t('layer.customise')}</h3>
-        <p class="muted sm">{t('layer.askHint')}</p>
+        <p class="muted sm hint">{t('layer.askHint')}</p>
         <form class="row wrap" onsubmit={(e) => { e.preventDefault(); ask(); }}>
           <input class="grow" dir="auto" bind:value={text} aria-label={t('layer.customise')} placeholder={t('set.customizePh')} />
           <button type="submit" class="btn primary" disabled={!text.trim() || asking}>{asking ? t('set.starting') : t('layer.askGo')}</button>
@@ -141,6 +140,7 @@
   .wrap { flex-wrap: wrap; }
   .gap { margin: 10px 0 0; }
   .sm { font-size: var(--fs-xs); }
+  .hint { margin: 0 0 8px; }
   .pend { margin: 0 0 12px; padding: 8px 10px; border-radius: var(--radius); background: var(--fill); font-size: 13px; gap: 8px; align-items: center; }
   .pend :global(.icon) { flex: none; color: var(--accent-2); }
 </style>

@@ -55,14 +55,13 @@
           <div class="sm">
             <span class="muted">{t('ldc.ready.mayDo')}</span>
             <ul class="perms">
-              {#each p.permissions as perm (perm)}<li>{permText(perm)}{#if perm === 'library:write' && p.write.length} — {t('layer3.writeIn')} {#each p.write as w, i}{i ? ' · ' : ''}<bdi>{w}</bdi>{/each}{/if}</li>{/each}
+              {#each p.permissions as perm (perm)}<li>{permText(perm)}{#if perm === 'library:write' && p.write.length}<br /><span class="muted">{t('layer3.writeIn')}</span> {#each p.write as w, i}{i ? ' · ' : ''}<bdi>{w}</bdi>{/each}{/if}</li>{/each}
             </ul>
           </div>
-        {:else}
+        {:else if !p.workflow}
+          <!-- (An automatic task asks for nothing but runs the assistant in the library: its description says what, and when it may run.) -->
           <p class="muted sm">{t('ldc.ready.nothing')}</p>
         {/if}
-        {#if p.workflow}<p class="muted sm">{t('ldc.ready.workflow')}</p>{/if}
-        {#if p.theme}<p class="muted sm">{t('ldc.ready.theme')}</p>{/if}
         <p class="muted xs"><bdi class="code">{t('ldc.ready.from', { fp: p.code })}</bdi></p>
         {#if !p.added}
           <div class="row end">

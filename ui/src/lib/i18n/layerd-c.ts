@@ -85,8 +85,6 @@ export default {
     'ldc.ready.added': 'In your app',
     'ldc.ready.mayDo': 'It may:',
     'ldc.ready.nothing': 'It needs no permissions.',
-    'ldc.ready.workflow': 'An automatic task never runs on its own until you allow it under Automatic tasks.',
-    'ldc.ready.theme': 'Choose it in the theme picker once you keep it.',
     'ldc.ready.failed': 'This pack could not be prepared.',
     'ldc.ready.from': 'From Thoughts · fingerprint {fp}',
 
@@ -231,8 +229,6 @@ export default {
     'ldc.ready.added': 'موجودة في تطبيقك',
     'ldc.ready.mayDo': 'يُسمح لها بأن:',
     'ldc.ready.nothing': 'لا تحتاج إلى أي صلاحية.',
-    'ldc.ready.workflow': 'المهمة التلقائية لا تعمل وحدها أبداً قبل أن تسمح لها من «المهام التلقائية».',
-    'ldc.ready.theme': 'اخترها من قائمة السمات بعد أن تعتمدها.',
     'ldc.ready.failed': 'تعذّر تجهيز هذه الحزمة.',
     'ldc.ready.from': 'من «أفكار» · البصمة {fp}',
 

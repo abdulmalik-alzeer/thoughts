@@ -53,6 +53,12 @@
     finally { busy.save = false; }
   }
 
+  /** The dialog belongs to the whole window: a page's entry animation would otherwise hold it inside the page. */
+  function portal(node: HTMLElement) {
+    document.body.appendChild(node);
+    return { destroy() { node.remove(); } };
+  }
+
   async function copyFp() {
     if (!result) return;
     try { await navigator.clipboard.writeText(result.fp); toast(t('ldc.share.fpCopied'), { kind: 'success' }); } catch { /* the code is on screen */ }
@@ -129,7 +135,7 @@
 </div>
 
 {#if form}
-  <div class="modal-bg no-print" role="presentation" onclick={(e) => e.target === e.currentTarget && (form = null)}>
+  <div class="modal-bg no-print" role="presentation" use:portal onclick={(e) => e.target === e.currentTarget && (form = null)}>
     <div class="modal share" role="dialog" aria-modal="true" aria-labelledby="sp-title" tabindex="-1" use:trapFocus={{ onEscape: () => (form = null) }}>
       <h2 id="sp-title">{t(form.some ? 'ldc.share.dialogSome' : 'ldc.share.dialog')}</h2>
       <form class="fields" onsubmit={(e) => { e.preventDefault(); save(); }}>

@@ -152,7 +152,7 @@
               <ul class="perms">
                 {#each a.permissions as p (p)}
                   <li class="row">
-                    <span class="grow">{permText(p)}{#if p === 'library:write' && a.write.length} — {t('layer3.writeIn')} {#each a.write as w, i}{i ? ' · ' : ''}<bdi>{w}</bdi>{/each}{/if}</span>
+                    <span class="grow">{permText(p)}{#if p === 'library:write' && a.write.length}<br /><span class="muted">{t('layer3.writeIn')}</span> {#each a.write as w, i}{i ? ' · ' : ''}<bdi>{w}</bdi>{/each}{/if}</span>
                     {#if a.manageable}<button type="button" class="btn ghost sm" disabled={!!busy} aria-label={t('ldc.addons.takeLabel', { perm: permText(p), name: a.label })} onclick={() => take(a, p)}>{t('ldc.addons.take')}</button>{/if}
                   </li>
                 {/each}
