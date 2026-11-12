@@ -620,7 +620,7 @@
           {/if}
           <button type="button" class="btn ghost" disabled={busy.claude} aria-busy={busy.claude} onclick={refreshClaude}><Icon name="sync" size={14} /> {busy.claude ? t('set.checking') : t('set.checkAgain')}</button>
         </div>
-        {#if app.wrap?.summariesFailing}<p class="err sm" role="status">{t('runc.sumFail')}</p>{/if}
+        {#if (app.wrap as any)?.summariesFailing}<p class="err sm" role="status">{t('runc.sumFail')}</p>{/if}
         <p class="muted sm">{t(provKind === 'incomplete' ? 'runa.acct.incompleteHint' : provKind === 'account' ? 'set.accountHint' : 'runa.acct.keyHint')}</p>
       {/if}
       {#if vis(c, 'set.perm')}
