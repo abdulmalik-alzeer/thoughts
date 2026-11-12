@@ -129,7 +129,10 @@ function openSocket() {
   if (!info) return;
   if (ws) { ws.onclose = null; ws.onopen = null; ws.onmessage = null; ws.close(); }
   if (retry) { clearTimeout(retry); retry = null; }
-  const sock = (ws = new WebSocket(`ws://127.0.0.1:${info.port}/api/events?token=${info.token}`));
+  // A browser cannot put `Authorization` on a WebSocket, so the token rides in the offered
+  // sub-protocols — a header — and never in the address, which is what ends up in proxy scripts and
+  // in the console when a connection fails. The daemon answers with `thoughts.events`.
+  const sock = (ws = new WebSocket(`ws://127.0.0.1:${info.port}/api/events`, ['thoughts.events', `thoughts.token.${info.token}`]));
   sock.onopen = () => {
     setOnline(true);
     // Any socket after the first means events may have been missed: ask views to refresh.

@@ -193,21 +193,38 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(tower_http::cors::CorsLayer::new()
             .allow_origin(tower_http::cors::AllowOrigin::predicate(|o: &HeaderValue, _| o.to_str().map_or(false, origin_allowed)))
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
-            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]));
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+            // Without this a webview asks again (an extra request before every call) after five
+            // seconds. Each webview caps it at its own limit (ten minutes to a day); the answer only
+            // says which origins, methods and headers are allowed — every real request is still
+            // checked for its origin and its token.
+            .max_age(PREFLIGHT_MAX_AGE));
     // Added after the layers, so it is the one route that needs no token: a client uses it to check
     // who is answering on this port before it sends the token anywhere (see `hello.rs`).
     api.merge(crate::hello::routes()).with_state(state)
 }
 
+/// How long a webview may remember the answer to a CORS preflight.
+const PREFLIGHT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// Uploads are base64 inside JSON: room for a few 25 MB files per request.
 const IMPORT_BODY_LIMIT: usize = 150 * 1024 * 1024;
 
-/// The app's own web origins: the Tauri webview, and a local dev/preview server on any port.
-fn origin_allowed(origin: &str) -> bool {
+/// May pages served by a local development server (`http://localhost:<port>`) use the API? Only in
+/// a development build, or when whoever starts the daemon says so with `THOUGHTS_DEV_ORIGINS=1`
+/// (previewing the UI in a browser against a release build). A released app is never one of these.
+fn dev_origins() -> bool {
+    cfg!(debug_assertions) || std::env::var_os("THOUGHTS_DEV_ORIGINS").is_some_and(|v| v == "1")
+}
+
+/// The app's own web origins: the Tauri webview — and, with `dev`, a local dev/preview server on any port.
+fn origin_allowed_in(origin: &str, dev: bool) -> bool {
     if ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].contains(&origin) { return true; }
-    ["http://localhost:", "http://127.0.0.1:"].iter().any(|pre| origin.strip_prefix(pre)
+    dev && ["http://localhost:", "http://127.0.0.1:"].iter().any(|pre| origin.strip_prefix(pre)
         .map_or(false, |port| !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit())))
 }
+
+fn origin_allowed(origin: &str) -> bool { origin_allowed_in(origin, dev_origins()) }
 
 /// Compare without leaking, through timing, how much of the token matched.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -215,11 +232,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// The bearer token a request presents. The query string is honoured only on the WebSocket
-/// route (browsers cannot set headers on a WebSocket); everywhere else it must be the header.
-fn presented_token<'a>(path: &str, authorization: &'a str, query: &'a str) -> Option<&'a str> {
+/// The WebSocket sub-protocol the events route speaks, and the prefix of the entry that carries the
+/// token: a browser cannot set `Authorization` on a WebSocket, but it can offer sub-protocols, and
+/// those travel in a header (`Sec-WebSocket-Protocol: thoughts.events, thoughts.token.<token>`).
+const WS_PROTOCOL: &str = "thoughts.events";
+const WS_TOKEN_PREFIX: &str = "thoughts.token.";
+
+/// The bearer token a request presents: the `Authorization` header, or on the WebSocket route only
+/// the token entry of its offered sub-protocols. Never the address — a URL reaches places a header
+/// does not (proxy auto-config scripts, console messages when a connection fails, logs), and this
+/// token lives as long as the daemon does.
+fn presented_token<'a>(path: &str, authorization: &'a str, protocols: &'a str) -> Option<&'a str> {
     if let Some(t) = authorization.strip_prefix("Bearer ") { return Some(t); }
-    if path == "/api/events" { return query.split('&').find_map(|kv| kv.strip_prefix("token=")); }
+    if path == "/api/events" { return protocols.split(',').find_map(|p| p.trim().strip_prefix(WS_TOKEN_PREFIX)); }
     None
 }
 
@@ -228,9 +253,11 @@ async fn auth(State(st): S, req: Request, next: Next) -> Response {
     if let Some(o) = req.headers().get(header::ORIGIN) {
         if !o.to_str().map_or(false, origin_allowed) { return (StatusCode::FORBIDDEN, "origin not allowed").into_response(); }
     }
-    let authz = req.headers().get(header::AUTHORIZATION).and_then(|h| h.to_str().ok()).unwrap_or("");
-    let token_ok = presented_token(req.uri().path(), authz, req.uri().query().unwrap_or(""))
-        .map_or(false, |t| constant_time_eq(t.as_bytes(), st.token.as_bytes()));
+    let token_ok = {
+        let text = |name: header::HeaderName| req.headers().get(name).and_then(|h| h.to_str().ok()).unwrap_or("");
+        presented_token(req.uri().path(), text(header::AUTHORIZATION), text(header::SEC_WEBSOCKET_PROTOCOL))
+            .map_or(false, |t| constant_time_eq(t.as_bytes(), st.token.as_bytes()))
+    };
     if !token_ok { return (StatusCode::UNAUTHORIZED, "unauthorized").into_response(); }
     next.run(req).await
 }
@@ -2132,7 +2159,8 @@ async fn search_ext(State(st): S, Path(op): Path<String>) -> R {
 // ---------- events ----------
 
 async fn events(State(st): S, ws: WebSocketUpgrade) -> Response {
-    ws.on_upgrade(move |socket| pump(st, socket))
+    // Name the sub-protocol in the answer: a browser that offered some closes the socket otherwise.
+    ws.protocols([WS_PROTOCOL]).on_upgrade(move |socket| pump(st, socket))
 }
 
 async fn pump(st: Arc<AppState>, mut socket: WebSocket) {
@@ -2183,22 +2211,75 @@ mod tests {
 
     #[test]
     fn origins() {
-        for ok in ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost", "http://localhost:1420", "http://127.0.0.1:4173"] {
-            assert!(origin_allowed(ok), "{ok}");
-        }
+        let app = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"];
+        let dev = ["http://localhost:1420", "http://127.0.0.1:4173"];
+        // A development build (which is what the tests are) also serves a local dev server…
+        for ok in app.iter().chain(&dev) { assert!(origin_allowed_in(ok, true) && origin_allowed(ok), "{ok}"); }
+        // …a released one serves the app's own window and nothing else (SEC-30).
+        for ok in app { assert!(origin_allowed_in(ok, false), "{ok}"); }
+        for no in dev { assert!(!origin_allowed_in(no, false), "{no}"); }
         for bad in ["https://evil.example.com", "http://localhost", "http://localhost:1420.evil.com", "http://localhost:", "http://localhost.evil.com:80",
                     "https://localhost:1420", "null", "http://tauri.localhost.evil.com", "http://127.0.0.1:80/x"] {
-            assert!(!origin_allowed(bad), "{bad}");
+            assert!(!origin_allowed_in(bad, true) && !origin_allowed_in(bad, false), "{bad}");
         }
+    }
+
+    /// One raw HTTP request to a daemon listening on a real port; returns the response head.
+    async fn raw_request(port: u16, head: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        s.write_all(head.as_bytes()).await.unwrap();
+        let mut buf = vec![0u8; 4096];
+        let n = tokio::time::timeout(std::time::Duration::from_secs(10), s.read(&mut buf)).await.unwrap().unwrap();
+        String::from_utf8_lossy(&buf[..n]).to_lowercase()
+    }
+
+    /// SEC-36 and UX-57 over a real connection: the events socket opens with the token in a header
+    /// (never in the address), and a preflight answer may be remembered.
+    #[tokio::test]
+    async fn the_events_socket_takes_its_token_from_a_header_and_preflights_are_remembered() {
+        let st = Arc::new(AppState::for_test());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move { axum::serve(listener, router(st)).await.unwrap() });
+        let upgrade = |path: &str, extra: &str| format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: tauri://localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+            Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{extra}\r\n");
+        // The way the app connects: accepted, and the answer names the sub-protocol.
+        let r = raw_request(port, &upgrade("/api/events", "Sec-WebSocket-Protocol: thoughts.events, thoughts.token.test-token\r\n")).await;
+        assert!(r.starts_with("http/1.1 101") && r.contains("sec-websocket-protocol: thoughts.events"), "{r}");
+        assert!(!r.contains("test-token"), "the token is never echoed: {r}");
+        // The token in the address is no longer a way in; nor is a wrong token, or none.
+        for (path, extra) in [("/api/events?token=test-token", ""), ("/api/events", "Sec-WebSocket-Protocol: thoughts.events, thoughts.token.wrong\r\n"),
+                              ("/api/events", "Sec-WebSocket-Protocol: thoughts.events\r\n"), ("/api/events", "")] {
+            let r = raw_request(port, &upgrade(path, extra)).await;
+            assert!(r.starts_with("http/1.1 401"), "{path} {extra}: {r}");
+        }
+        // A page that is not the app is refused whatever it presents.
+        let r = raw_request(port, &upgrade("/api/events", "Sec-WebSocket-Protocol: thoughts.events, thoughts.token.test-token\r\n").replace("tauri://localhost", "https://evil.example.com")).await;
+        assert!(r.starts_with("http/1.1 403"), "{r}");
+        // The preflight the webview sends before an API call: allowed for the app, and cacheable.
+        let preflight = |origin: &str| format!("OPTIONS /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {origin}\r\nAccess-Control-Request-Method: GET\r\n\
+            Access-Control-Request-Headers: authorization,content-type\r\nConnection: close\r\n\r\n");
+        let r = raw_request(port, &preflight("tauri://localhost")).await;
+        assert!(r.starts_with("http/1.1 200") && r.contains("access-control-allow-origin: tauri://localhost") && r.contains("access-control-max-age: 86400"), "{r}");
+        // Another site gets no permission from it, and the route itself still needs the token.
+        let r = raw_request(port, &preflight("https://evil.example.com")).await;
+        assert!(!r.contains("access-control-allow-origin"), "{r}");
+        let r = raw_request(port, &format!("GET /api/status HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: tauri://localhost\r\nConnection: close\r\n\r\n")).await;
+        assert!(r.starts_with("http/1.1 401"), "{r}");
+        server.abort();
     }
 
     #[test]
     fn token_sources() {
         assert_eq!(presented_token("/api/status", "Bearer abc", ""), Some("abc"));
-        // The query string works for the WebSocket route only.
-        assert_eq!(presented_token("/api/status", "", "token=abc"), None);
-        assert_eq!(presented_token("/api/library/file", "", "path=x&token=abc"), None);
-        assert_eq!(presented_token("/api/events", "", "token=abc"), Some("abc"));
+        // The sub-protocol entry works for the WebSocket route only, and the address never does.
+        assert_eq!(presented_token("/api/status", "", "thoughts.events, thoughts.token.abc"), None);
+        assert_eq!(presented_token("/api/library/file", "", "thoughts.token.abc"), None);
+        assert_eq!(presented_token("/api/events", "", "thoughts.events, thoughts.token.abc"), Some("abc"));
+        assert_eq!(presented_token("/api/events", "", "thoughts.token.abc,thoughts.events"), Some("abc"));
+        assert_eq!(presented_token("/api/events", "", "token=abc"), None);
+        assert_eq!(presented_token("/api/events", "", "thoughts.events"), None);
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd") && !constant_time_eq(b"abc", b"ab") && !constant_time_eq(b"", b"a"));
     }
