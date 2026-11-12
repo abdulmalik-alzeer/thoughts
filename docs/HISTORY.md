@@ -6,10 +6,10 @@ Thoughts keeps every earlier version of your library, so a change you regret can
 
 ## History is on for every library
 
-The history of changes is its own switch. It is on from the start, whichever backup you chose (**No backup**, **Cloud folder** or **Online location**), and you can turn it off and on again with **Keep a history of changes on this computer** under Settings → Library & backup.
+The history of changes is its own switch. It is on from the start, whichever backup you chose (**No backup**, **Cloud folder**, **Online location** or **Drive or folder**), and you can turn it off and on again with **Keep a history of changes on this computer** under Settings → Library & backup.
 
 - **Where it is kept.** On this computer, in Thoughts' own data folder, outside your library folder. Nothing is added to your notes. A cloud drive that syncs your library (iCloud Drive, Dropbox and the like) never sees the history, so it cannot damage it. The one exception is a library that was set up with an **Online location** from the beginning: its history sits inside the library folder, which is how that kind of backup normally works.
-- **It is not a backup.** The history lets you undo changes. It does not protect your notes if this computer is lost or damaged; for that, choose a backup. With **Online location** the history is sent along with the library, so there it is always kept.
+- **It is not a backup.** The history lets you undo changes. It does not protect your notes if this computer is lost or damaged; for that, choose a backup. With **Online location** or **Drive or folder** the history is sent along with the library, so there it is always kept.
 - **It needs a free tool called Git.** If Git is not installed, History says so and Settings → Library & backup offers to install it. The history starts by itself once Git is there. Until then a change cannot be undone.
 - **A library from before version 0.0.9** that used **No backup** or **Cloud folder** had no history. It gets one the first time the new version starts: the library as it stands becomes the first entry, labelled **Start**. Your files are not touched, and nothing from before that day can be recovered.
 - **If you move or rename the library folder** and choose it again in Settings, a new history starts for it at its new place.
@@ -23,7 +23,7 @@ The history of changes is its own switch. It is on from the start, whichever bac
 - **Wrap**: what a Wrap saved from a conversation.
 - **Assistant**: changes the assistant made during a chat or an automatic task.
 - **Edit**: changes you made yourself in the app.
-- **Sync**: changes that arrived from your online location, for example from another computer.
+- **Sync**: changes that arrived from your backup location, for example from another computer.
 - **Start**: the library as it was when its history began. It is the oldest entry and cannot be undone, because nothing exists before it.
 
 Open an entry to see which documents changed. The newest changes are shown first; **Show older changes** at the bottom goes further back, all the way to the first entry.
@@ -51,10 +51,29 @@ Open the document, then open its **History** (document versions). You see every 
 - A document you deleted can be brought back the same way, from the History entry that removed it.
 - A document you moved or renamed keeps all its versions, including those from before the move. Versions from before show the name the document had then, and restoring one puts its text back into the document where it is now.
 
+## Backup locations
+
+With **Online location** or **Drive or folder** as the backup (Settings → Library & backup), Thoughts sends your library, with its history, to every location in the list: when you press **Sync**, or after every Wrap if you chose that. You can mix both kinds. Changes from your other computers are received from the location marked **main**.
+
+**A drive or folder.** Choose **Drive or folder**, then **Choose a drive or folder…** and pick a folder on an external drive, a USB stick or a network folder. Thoughts keeps the backup there in one folder named after your library (for example `Notes.git`). It is not a copy you open and read: it is the library and its history in the form Thoughts can bring back.
+
+- **When the drive is not plugged in**, Sync says so plainly and sends the library to your other locations, if you have any. Plug the drive in and press Sync again. The location shows **Not connected right now** until then.
+- **On a new computer**, or after reinstalling, set up an empty library, choose **Drive or folder** and pick the same drive: Thoughts finds the earlier backup of this library and the next Sync brings your notes back.
+- A drive that already holds the backup of a *different* library with the same name is refused, so two libraries are never mixed. A folder inside the library, or one a cloud drive keeps in sync, is refused too.
+- Removing a location stops sending to it. The copy kept there is not deleted.
+
+**How the backup stands.** Under **Backup locations** each location shows when it last received your library, how many changes it does not have yet and, when the last try did not work, why. A line above the list sums it up. The Sync button gets a dot when something needs you: a location that failed (red), or changes that have waited more than seven days, or a backup that has never happened (yellow).
+
+**Sign-ins.** An online location that starts with `https://` signs in with a username and a password or access token, saved in this computer's password store (or, if you chose it, a private file in Thoughts' own folder — never in the library). Beside each such location you see who it signs in as, with **Update sign-in** (for a token that expired: paste the new one; Thoughts checks it with the location straight away) and **Forget sign-in**. When you remove the last location on a site, its sign-in is forgotten too. A saved password is only ever sent to an `https://` address; an address that starts with `http://` is not encrypted and never gets one. When a Sync fails because a sign-in is needed, its message has an **Update sign-in** button that takes you there.
+
+**Locations that sign in with a key** (`ssh://…` or `git@…`) use this computer's own SSH key. Thoughts cannot type a key's passphrase: if your key has one, add it to your computer's key agent first. The first time this computer connects to a server it does not know, Sync stops and the location offers **Check the server…**: it shows the server's key fingerprints, to compare with the ones the server's owner publishes (GitHub, GitLab and others list theirs), and trusts the one you pick, exactly as answering "yes" in a terminal would. If a server's identity has *changed* since the last connection, nothing is sent and nothing is offered: ask whoever runs the server.
+
+**Editing while a Sync runs.** You can keep working. A Sync only holds your files for the moments when it records them or puts in what arrived; a save, a ticked todo or an import made meanwhile waits those moments out and goes through, and is included in the backup. (While a Wrap or a Reorganize is being applied, an edit is still refused until it has finished.)
+
 ## Good to know
 
 - History covers the library only. Chats, settings and customisations are not part of it.
 - History is saved at certain moments: after a Wrap, after the assistant finishes a piece of work, and a few seconds after you save a document, change a todo or an idea's status. Saves made one right after another become one entry. Text you typed and never saved is not in it.
-- With **Online location** as the backup, the history is uploaded with the library, so earlier versions are also available on your other computers. This also means that deleting something from a note does not delete it from the history or from your backup. See [Privacy](PRIVACY.md).
+- With **Online location** or **Drive or folder** as the backup, the history is sent with the library, so earlier versions are also available on your other computers. This also means that deleting something from a note does not delete it from the history or from your backup. See [Privacy](PRIVACY.md).
 - The history takes disk space of its own: about the size of your library to begin with, growing slowly as you make changes.
 - While a Wrap's changes are being kept (or, in a library without a copy to write into, while it saves), the library is briefly locked and restore waits until it finishes.
