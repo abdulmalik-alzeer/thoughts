@@ -313,27 +313,95 @@ async fn syncable_branch(state: &AppState, dir: &Path) -> anyhow::Result<String>
     Ok(branch)
 }
 
-async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log: &mut Vec<String>) {
+/// Send `branch` to every location. Returns, per location, `None` when it was sent, or why not
+/// (a key of `tr`'s table, see `why_not_sent`).
+async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log: &mut Vec<String>) -> Vec<(String, Option<&'static str>)> {
+    let mut sent = vec![];
     for r in rs {
         let name = r["name"].as_str().unwrap_or_default();
         match git(state, dir, &["push", "-u", "--", name, branch]).await {
-            Ok(_) => log.push(format!("pushed {name}")),
+            Ok(_) => { log.push(format!("pushed {name}")); sent.push((name.to_string(), None)); }
             Err(e) => {
                 crate::log::warn(format!("sync: push to {name} failed: {e}"));
-                log.push(format!("push {name} failed: {e}"));
+                log.push(format!("push {name} failed"));
+                sent.push((name.to_string(), Some(why_not_sent(&e))));
             }
         }
     }
+    sent
+}
+
+/// The plain reason a location did not take the library, as a key of `tr`'s table.
+fn why_not_sent(e: &anyhow::Error) -> &'static str {
+    match crate::tr::classify_in(false, e).code {
+        "sign_in" => return "sync.why.sign_in",
+        "offline" => return "sync.why.offline",
+        "timeout" => return "sync.why.timeout",
+        _ => {}
+    }
+    let m = e.to_string().to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| m.contains(n));
+    if has(&["non-fast-forward", "fetch first", "(stale info)", "tip of your current branch is behind"]) { "sync.why.rejected" }
+    else if has(&["file size limit", "too large", "exceeds", "larger than"]) { "sync.why.too_large" }
+    else { "sync.why.refused" }
+}
+
+/// When each library last reached an online location, and which: `{<library folder>: {at, location}}`.
+fn backup_state() -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(crate::paths::backup_state_file()).ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| v.as_object().cloned()).unwrap_or_default()
+}
+
+fn backup_key(dir: &Path) -> String { crate::paths::canonical_lenient(dir).to_string_lossy().to_string() }
+
+/// Remember that the library in `dir` was sent, whole, to the location `name` just now.
+fn note_backup(dir: &Path, name: &str) {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = backup_state();
+    all.insert(backup_key(dir), json!({"at": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), "location": name}));
+    crate::log::ok_or_warn("sync: could not note the time of the backup",
+        serde_json::to_string_pretty(&all).map_err(std::io::Error::other).and_then(|t| crate::paths::write_atomic(&crate::paths::backup_state_file(), t.as_bytes(), true)));
+}
+
+/// `{at, location}`: the last time the library in `dir` really reached an online location. Null
+/// when it never has (or the note of it is gone).
+pub fn last_backup(dir: &Path) -> Value {
+    backup_state().get(&backup_key(dir)).cloned().unwrap_or(Value::Null)
+}
+
+/// Close a sync. The time is noted for the first location that took the library, and unless
+/// every location took it the sync fails, naming each one and saying why — a sync is never
+/// reported as done while something was not sent. Returns `[{name, sent: true}]`.
+fn sync_outcome(dir: &Path, sent: &[(String, Option<&'static str>)]) -> anyhow::Result<Vec<Value>> {
+    if let Some((name, _)) = sent.iter().find(|(_, why)| why.is_none()) { note_backup(dir, name); }
+    let failed: Vec<&(String, Option<&'static str>)> = sent.iter().filter(|(_, why)| why.is_some()).collect();
+    if failed.is_empty() { return Ok(sent.iter().map(|(name, _)| json!({"name": name, "sent": true})).collect()); }
+    let ar = crate::tr::arabic();
+    let ok: Vec<&str> = sent.iter().filter(|(_, why)| why.is_none()).map(|(n, _)| n.as_str()).collect();
+    let mut parts = vec![];
+    let quoted: Vec<String> = ok.iter().map(|n| if ar { format!("«{n}»") } else { format!("\"{n}\"") }).collect();
+    if !ok.is_empty() { parts.push(crate::tr::text_in(ar, "sync.sent_to", &[("names", &quoted.join(if ar { "، " } else { ", " }))])); }
+    for (name, why) in failed {
+        let why = crate::tr::text_in(ar, why.unwrap_or("sync.why.refused"), &[]);
+        parts.push(crate::tr::text_in(ar, "sync.not_sent_to", &[("name", name), ("why", &why)]));
+    }
+    Err(crate::tr::UserErr { code: "sync_failed", status: 409, message: parts.join(" ") }.into())
 }
 
 /// Commit local changes, pull --rebase from the first remote, push to all.
 /// A pull that conflicts is undone and reported as `CONFLICT::<file;file;…>` (see `resolve`).
+/// Fails (`no_location`) when there is nowhere to send the library, and (`sync_failed`, naming the
+/// location and the reason) when any location did not take it: `Ok` means it is backed up.
 pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
     let _g = state.git_lock.lock().await;
     crate::trust::require_git(dir)?;
     let branch = syncable_branch(state, dir).await?;
     let committed = commit_all(state, dir, &subject::sync()).await?;
     let rs = remotes(state, dir).await;
+    // Nothing leaves this computer without a location: that is not a sync that worked.
+    if rs.is_empty() { return Err(crate::tr::err("sync.no_location", &[])); }
+    let before = head(state, dir).await;
     let mut log = vec![];
     if let Some(primary) = rs.first().and_then(|r| r["name"].as_str()) {
         match git_ident(state, dir, &["pull", "--rebase", "--autostash", "--", primary, &branch]).await {
@@ -355,9 +423,12 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
             }
         }
     }
-    push_all(state, dir, &rs, &branch, &mut log).await;
+    // Did anything arrive from the other devices?
+    let received = head(state, dir).await != before;
+    let sent = push_all(state, dir, &rs, &branch, &mut log).await;
     crate::log::info(format!("sync: {}", log.join(", ")));
-    Ok(json!({"committed": committed, "log": log}))
+    let locations = sync_outcome(dir, &sent)?;
+    Ok(json!({"committed": committed, "log": log, "received": received, "locations": locations, "lastBackup": last_backup(dir)}))
 }
 
 /// How many `backup/…` branches are kept; older ones are removed when a new one is made.
@@ -461,9 +532,10 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
         Err(e) if e.to_string().contains("couldn't find remote ref") => log.push(format!("{primary}: new branch")),
         Err(e) => anyhow::bail!("pull failed: {e}"),
     }
-    push_all(state, dir, &rs, &branch, &mut log).await;
+    let sent = push_all(state, dir, &rs, &branch, &mut log).await;
     crate::log::info(format!("sync: {}", log.join(", ")));
-    Ok(json!({"committed": committed, "backup": backup, "strategy": strategy, "log": log}))
+    let locations = sync_outcome(dir, &sent)?;
+    Ok(json!({"committed": committed, "backup": backup, "strategy": strategy, "log": log, "locations": locations, "lastBackup": last_backup(dir)}))
 }
 
 // ---------- library history ----------
@@ -726,6 +798,92 @@ mod tests {
         assert_eq!(read(&mine, "b.md"), "from the other device\n");
         assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_sync_only_succeeds_when_the_library_really_reached_every_location() {
+        let (root, mine, remote) = diverged();
+        let st = AppState::load().unwrap();
+        sh(&mine, &["checkout", "-q", "--", "notes.md"]);
+        assert_eq!(last_backup(&mine), Value::Null);
+        // One location, and it takes the library: that is a backup, and its time is noted.
+        let v = sync(&st, &mine).await.unwrap();
+        assert_eq!((v["received"].as_bool(), &v["locations"]), (Some(true), &json!([{"name": "origin", "sent": true}])));
+        assert_eq!(v["lastBackup"]["location"], "origin");
+        let noted = last_backup(&mine);
+        assert!(noted["at"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]));
+        // A second location that holds other work refuses the library. The sync says so, by name
+        // and with the reason, instead of "synced" — and says where it did arrive.
+        let elsewhere = root.join("zeta.git");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        sh(&elsewhere, &["init", "-q", "--bare", "-b", "main"]);
+        sh(&root, &["clone", "-q", elsewhere.to_str().unwrap(), "elsewhere-work"]);
+        let work = root.join("elsewhere-work");
+        write(&work, "unrelated.md", "x\n");
+        sh(&work, &["add", "-A"]);
+        sh(&work, &["commit", "-q", "-m", "unrelated"]);
+        sh(&work, &["push", "-q", "origin", "HEAD:main"]);
+        sh(&mine, &["remote", "add", "zeta", elsewhere.to_str().unwrap()]);
+        write(&mine, "keep.md", "changed here\n");
+        let before = sh(&elsewhere, &["rev-parse", "main"]);
+        let err = sync(&st, &mine).await.unwrap_err();
+        let shown = crate::tr::classify_in(false, &err);
+        assert_eq!((shown.code, shown.status), ("sync_failed", 409));
+        assert_eq!(shown.message, "Your library was sent to \"origin\". It was not sent to \"zeta\": it holds changes that this computer does not have, so it did not accept yours.");
+        assert_eq!(sh(&elsewhere, &["rev-parse", "main"]), before);
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]), "the location that works still got it");
+        assert_eq!(last_backup(&mine)["location"], "origin");
+        // No location at all: nothing was backed up, and that is what the answer says.
+        sh(&mine, &["remote", "remove", "zeta"]);
+        sh(&mine, &["remote", "remove", "origin"]);
+        write(&mine, "keep.md", "changed again\n");
+        let err = sync(&st, &mine).await.unwrap_err();
+        assert_eq!(crate::tr::classify_in(false, &err).code, "no_location");
+        assert_eq!(sh(&mine, &["status", "--porcelain"]), "", "the change is still recorded in the history");
+        assert!(resolve(&st, &mine, "mine").await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_location_that_cannot_be_written_to_is_not_a_backup() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, mine, remote) = diverged();
+        let st = AppState::load().unwrap();
+        sh(&mine, &["checkout", "-q", "--", "notes.md"]);
+        write(&mine, "keep.md", "changed here\n");
+        // Reading from the location works (so changes are received), writing to it does not.
+        let lock = |mode: u32| for d in ["objects", "refs/heads", "."] { std::fs::set_permissions(remote.join(d), std::fs::Permissions::from_mode(mode)).unwrap(); };
+        lock(0o555);
+        let before = sh(&remote, &["rev-parse", "main"]);
+        let err = sync(&st, &mine).await.unwrap_err();
+        lock(0o755);
+        let shown = crate::tr::classify_in(false, &err);
+        assert_eq!(shown.code, "sync_failed");
+        assert!(shown.message.starts_with("It was not sent to \"origin\":"), "{}", shown.message);
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), before);
+        assert_eq!(last_backup(&mine), Value::Null, "no backup time is noted for a sync that sent nothing");
+        // What was received is in the library all the same.
+        assert_eq!(read(&mine, "b.md"), "from the other device\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn why_a_location_did_not_take_the_library() {
+        let why = |raw: &str| why_not_sent(&anyhow::anyhow!("git push -u -- origin main: {raw}"));
+        assert_eq!(why("remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/a/b.git/'"), "sync.why.sign_in");
+        assert_eq!(why("fatal: could not read Username for 'https://github.com': terminal prompts disabled"), "sync.why.sign_in");
+        assert_eq!(why("fatal: unable to access 'https://x/': Could not resolve host: x"), "sync.why.offline");
+        assert_eq!(why("! [rejected] main -> main (fetch first)\nerror: failed to push some refs"), "sync.why.rejected");
+        assert_eq!(why("! [rejected] main -> main (non-fast-forward)"), "sync.why.rejected");
+        assert_eq!(why("remote: error: File big.pdf is 150.00 MB; this exceeds GitHub's file size limit of 100.00 MB"), "sync.why.too_large");
+        assert_eq!(why("remote: error: GH006: Protected branch update failed for refs/heads/main."), "sync.why.refused");
+        assert_eq!(why_not_sent(&crate::tr::err("git.timeout", &[])), "sync.why.timeout");
+        // Every reason has its sentence in both languages.
+        for key in ["sync.why.sign_in", "sync.why.offline", "sync.why.timeout", "sync.why.rejected", "sync.why.too_large", "sync.why.refused"] {
+            assert!(!crate::tr::text_in(false, key, &[]).contains("unexpected") && crate::tr::text_in(true, key, &[]) != crate::tr::text_in(false, key, &[]), "{key}");
+        }
     }
 
     #[tokio::test]

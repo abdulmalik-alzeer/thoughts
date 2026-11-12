@@ -5,6 +5,7 @@
   import { recheckSignIn, signIn } from './lib/auth';
   import { loadLayer, layerBooted, retryLayer, checkPending, openReview, undoLastLayer } from './lib/layer';
   import { failed } from './lib/errors';
+  import { lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
   import { startReminders } from './lib/reminders';
   import { askBusy } from './lib/shell';
@@ -319,6 +320,9 @@
   }
 
   const syncOn = $derived(!!app.settings?.sync?.mode?.startsWith('git'));
+  // The Sync button says when the library last really reached an online location.
+  $effect(() => { if (syncOn && app.settings?.libraryPath) refreshBackup(); });
+  const syncTitle = $derived([t('shell.syncTip'), lastBackupText() || t('hista.sync.never')].join(' · '));
 
   async function sync() {
     if (syncing) return;
@@ -326,13 +330,12 @@
     if (!syncOn) { toast(t('shell.syncOff'), { action: { label: t('settings'), run: () => go({ kind: 'settings' }) } }); return; }
     syncing = true;
     try {
-      const r = await post('/git/sync');
-      const log: string[] = Array.isArray(r?.log) ? r.log : [];
-      toast(t('shell.synced'), { kind: 'success', key: 'sync', detail: log.length ? log.join('\n') : undefined });
+      // An answer means every online location has the library; anything else is an error that names the location.
+      syncDone(await post('/git/sync'), t('shell.synced'));
     } catch (e: any) {
       const m = /CONFLICT::(.*)/s.exec(e.message || '');
       if (m) await resolveConflict(m[1].split(';').map((f) => f.trim()).filter(Boolean));
-      else failed(t('shell.syncFailed'), e, { key: 'sync' });
+      else syncFailed(e, t('shell.syncFailed'));
     } finally { syncing = false; }
   }
 
@@ -350,10 +353,8 @@
     });
     if (!strategy) { toast(t('shell.conflict.cancelled')); return; }
     try {
-      const r = await post('/git/resolve', { strategy });
-      const log: string[] = Array.isArray(r?.log) ? r.log : [];
-      toast(strategy === 'mine' ? t('shell.conflict.keptMine') : t('shell.conflict.usedTheirs'), { kind: 'success', key: 'sync', detail: log.length ? log.join('\n') : undefined });
-    } catch (e: any) { toast(t('shell.conflict.failed'), { kind: 'error', key: 'sync', detail: e.message }); }
+      syncDone(await post('/git/resolve', { strategy }), strategy === 'mine' ? t('shell.conflict.keptMine') : t('shell.conflict.usedTheirs'));
+    } catch (e: any) { syncFailed(e, t('shell.conflict.failed')); }
   }
 
   async function setLook(patch: { theme?: string; mode?: string }) {
@@ -755,7 +756,7 @@
           {#if app.wrap.count}<span class="pill" aria-hidden="true">{fmtNum(app.wrap.count)}</span><span class="sr-only">— {tn('shell.chatsToWrap', app.wrap.count)}</span>{/if}
         </button>
         <div class="row tools">
-          {#if syncOn}<button class="iconbtn" class:busy={syncing} disabled={syncing || wrapRunning} aria-busy={syncing} onclick={() => command('sync')} aria-label={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : t('shell.syncTip')} title={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : t('shell.syncTip')}><Icon name="sync" /></button>{/if}
+          {#if syncOn}<button class="iconbtn" class:busy={syncing} disabled={syncing || wrapRunning} aria-busy={syncing} onclick={() => command('sync')} aria-label={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : syncTitle} title={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : syncTitle}><Icon name="sync" /></button>{/if}
           <button class="iconbtn" class:on={app.view.kind === 'history'} onclick={() => command('history')} aria-label={t('ui.hist.title')} title={t('shell.rollbackTip')} aria-current={app.view.kind === 'history' ? 'page' : undefined}><Icon name="rollback" /></button>
           <button class="iconbtn" class:on={app.view.kind === 'help'} onclick={() => command('help')} aria-label={t('shell.help')} title={t('shell.help')} aria-current={app.view.kind === 'help' ? 'page' : undefined}><Icon name="help" /></button>
           <button class="iconbtn" onclick={() => command('palette')} aria-label={t('shell.palette')} title={tip(t('shell.palette'), 'palette')}><Icon name="command" /></button>

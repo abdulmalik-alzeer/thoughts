@@ -2066,6 +2066,8 @@ async fn git_status(State(st): S) -> R {
     v["mode"] = json!(s.sync.mode);
     // History is its own switch: `on` is the setting, `ready` whether there is one to read yet.
     v["history"] = json!({"on": s.history_enabled(), "ready": v["repo"]});
+    // `{at, location}`: the last time the library really reached an online location (null: never).
+    v["lastBackup"] = git::last_backup(&l);
     Ok(Json(v))
 }
 /// What a sync needs before it may touch the library: sync switched on, no wrap or reorganize in
@@ -2081,11 +2083,16 @@ async fn sync_guard(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, t
     Ok((l, guard))
 }
 
+/// `POST /api/git/sync`: record, receive from the main location, send to every location →
+/// `{committed, received, locations: [{name, sent}], lastBackup, log}`. An answer means the library
+/// is backed up; with nowhere to send it (`no_location`) or a location that did not take it
+/// (`sync_failed`, naming it and why) this is an error.
 async fn git_sync(State(st): S) -> R {
     let (l, _busy) = sync_guard(&st).await?;
-    let v = git::sync(&st, &l).await?;
+    let v = git::sync(&st, &l).await;
+    // Whatever was received is in the library by now, even when sending it on failed.
     st.emit(json!({"type": "library.changed"}));
-    Ok(Json(v))
+    Ok(Json(v?))
 }
 
 #[derive(Deserialize)]
@@ -2095,9 +2102,9 @@ struct Resolve { strategy: String }
 /// (`backup` in the answer; `null` when there was nothing to settle and no backup was needed).
 async fn git_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
     let (l, _busy) = sync_guard(&st).await?;
-    let v = git::resolve(&st, &l, &r.strategy).await?;
+    let v = git::resolve(&st, &l, &r.strategy).await;
     st.emit(json!({"type": "library.changed"}));
-    Ok(Json(v))
+    Ok(Json(v?))
 }
 
 #[derive(Deserialize, Default)]
@@ -2666,14 +2673,28 @@ mod tests {
         write_file(State(st.clone()), none(), save("notes/today.md", "typed after the wrap was undone")).await.unwrap();
         std::fs::remove_file(lib.join("notes/today.md")).unwrap();
         std::fs::remove_dir(lib.join("notes")).unwrap();
-        // Sync is allowed again (this library has no backup location, so it only records).
+        // Sync is allowed again. With nowhere to send the library it says so instead of "synced"…
+        assert_eq!(shown(git_sync(State(st.clone())).await).code, "no_location");
+        // …and with an online location it goes through (there was nothing new to record).
+        let online = online_location(&lib);
         let v = git_sync(State(st.clone())).await.unwrap().0;
         assert_eq!(v["committed"], false);
+        assert_eq!(v["locations"], json!([{"name": "origin", "sent": true}]));
+        assert_eq!(t::sh(&online, &["rev-parse", "main"]), t::sh(&lib, &["rev-parse", "HEAD"]));
         assert_eq!(status_of(&st).await["wrapInterrupted"], Value::Null);
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
     async fn status_of(st: &Arc<AppState>) -> Value { status(State(st.clone())).await.unwrap().0 }
+
+    /// Give the library an online location to sync with: an empty repository beside it, named origin.
+    fn online_location(lib: &std::path::Path) -> std::path::PathBuf {
+        let remote = lib.parent().unwrap().join("online.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        t::sh(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        t::sh(lib, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        remote
+    }
 
     #[tokio::test]
     async fn chats_are_listed_and_continued_only_in_their_own_library() {
@@ -2708,6 +2729,7 @@ mod tests {
     #[tokio::test]
     async fn sync_waits_for_the_assistant_and_its_work_gets_its_own_history_entry() {
         let (st, lib) = t::library().await;
+        online_location(&lib);
         let chat = t::chat(&st, "Tidy my notes").await;
         st.chats.update(&chat, |c| c.options.permission_mode = Some("acceptEdits".into())).await;
         // The user edited something by hand before asking.
@@ -2778,6 +2800,7 @@ mod tests {
     #[tokio::test]
     async fn history_endpoints_restore_undo_and_bring_back_deleted_files() {
         let (st, lib) = t::library().await;
+        online_location(&lib);
         write_file(State(st.clone()), none(), save("notes/plan.md", "first draft\n")).await.unwrap();
         git_sync(State(st.clone())).await.unwrap();
         write_file(State(st.clone()), none(), save("notes/plan.md", "second draft\n")).await.unwrap();

@@ -9,6 +9,7 @@
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
   import { fmtMoney, fmtNum, t, tn } from '../lib/i18n';
   import { failed } from '../lib/errors';
+  import { lastBackupText } from '../lib/backup.svelte';
   import { restartService } from '../lib/shell';
   import { keepLibraryToMe, libraryOpenToOthers, offerIndexCleanup } from '../lib/privacy';
   import ThemePicker from './ThemePicker.svelte';
@@ -714,6 +715,7 @@
             {#if !loading.git && !loadErr.git}<p class="muted sm">{t('set.noRemotes')}</p>{/if}
           {/each}
           <p class="muted sm">{t('set.remotesHint')}</p>
+          {#if !loading.git && !loadErr.git && (gitStatus.remotes || []).length}<p class="muted sm">{lastBackupText(gitStatus.lastBackup ?? null) || t('hista.sync.never')}</p>{/if}
           <div class="grid2">
             <div><label for="st-rurl">{t('hista.online.addressShort')}</label><input id="st-rurl" dir="ltr" bind:value={remote.url} placeholder="https://github.com/me/thoughts.git" autocomplete="off" /></div>
             <div><label for="st-rname">{t('set.remoteName')}</label><input id="st-rname" dir="ltr" bind:value={remote.name} placeholder="origin" autocomplete="off" /></div>

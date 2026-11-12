@@ -49,6 +49,11 @@ export default {
     'hista.hist.kindStart': 'Start',
     'hista.hist.startSubject': 'Your library as it was when the history began',
     'hista.hist.first': 'Where the history begins',
+
+    'hista.sync.sent': 'Your library is backed up to {names}.',
+    'hista.sync.received': 'Changes from your other devices were brought in.',
+    'hista.sync.last': 'Last backed up {when} to “{name}”',
+    'hista.sync.never': 'Not backed up to an online location yet.',
   },
   ar: {
     'hista.historyTitle': 'سجلّ التغييرات',
@@ -97,5 +102,10 @@ export default {
     'hista.hist.kindStart': 'البداية',
     'hista.hist.startSubject': 'مكتبتك كما كانت عند بدء السجلّ',
     'hista.hist.first': 'بداية السجلّ',
+
+    'hista.sync.sent': 'نُسخت مكتبتك احتياطياً إلى {names}.',
+    'hista.sync.received': 'جُلبت التغييرات من أجهزتك الأخرى.',
+    'hista.sync.last': 'آخر نسخ احتياطي: {when}، إلى «{name}»',
+    'hista.sync.never': 'لم تُنسخ احتياطياً إلى موقع على الإنترنت بعد.',
   },
 };
