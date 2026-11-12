@@ -268,6 +268,65 @@ once only. A customise chat, a web chat, or a chat whose CLI cannot ask gets `de
 are unchanged: Wrap, automatic tasks and adding a feature have no commands anyway; set-up and
 Reorganize keep theirs.
 
+### Codex (the second assistant)
+
+Settings › Assistant names the program that answers new chats and everything the app starts
+itself (`ai.primary`: `claude` or `codex`); each chat keeps its own (`Chat.provider`) and can be
+moved (`handoff.rs`). `claude::start_run` decides everything about a run first — trust, the
+permission mode, bypass only for ordinary chats, the profile, the standing-file backstop — and then
+hands Codex runs to `codex::launch` (`assistant::for_run`: a chat uses its own program; an app run
+the one in Settings, recorded on its chat; a Wrap's saving step the one that made its preview).
+One-shot answers go through `claude::complete` / `complete_cheap`, which call `codex::complete`
+when Codex is chosen.
+
+- **Discovery, never a list.** Sandbox modes from `codex exec --help` (`--sandbox`'s possible
+  values); options (`--json`, `--image`, `--skip-git-repo-check`, the `resume` sub-command) from
+  the same help; reasoning efforts from Codex's own refusal of a value it does not know (one start
+  with an empty, private `CODEX_HOME`, no key and every address pointed at `127.0.0.1:9`, so it
+  can cost nothing and reach no one); models from what runs report (`codex-seen.json`).
+- **Modes.** The app's mode maps onto the sandbox (`codex::sandbox_for`): Plan → `read-only`,
+  Accept edits → `workspace-write`, Bypass → `danger-full-access` (ordinary chats only, after the
+  confirmed warning; `check_bypass` and `start_run` refuse it otherwise). App runs get the least
+  that does their job (`run_sandbox`): a Wrap preview is read-only, its saving step, set-up,
+  Reorganize, adding a feature and automatic tasks write in their own folder.
+- **The command line** (`codex::exec_args`): `exec [--image …] --json --skip-git-repo-check
+  --sandbox <mode> -c history.persistence="none" [-c model=…] [-c model_reasoning_effort=…]
+  [-c tools.web_search=true] … -`, the prompt on stdin. Runs without the user's own set-up add
+  `-c mcp_servers={}`, `-c notify=[]` and `-c sandbox_workspace_write.network_access=false`. A
+  project chat may also write the library (`sandbox_workspace_write.writable_roots`).
+- **What a run is told** (`codex::instructions`, in front of the prompt, never on the command
+  line): where the standing rules (CLAUDE.md) and routines (`.claude/skills`) are, the private
+  folders by name with the plain fact that Codex cannot close them, the app's data folder, and the
+  same standing-rule and web notes as Claude Code runs, worded for what Codex can enforce.
+- **Output.** Both formats are read (`codex::parse_line`): the 0.2x event stream (`{"id","msg"}`,
+  after a settings line; no answer word by word, no session id, no final result line) and the later
+  one (`thread.started`, `item.*`, `turn.completed`). Commands, file changes, connected tools, web
+  searches and plans become the chat's `tool` / `tool_result` messages; a command the sandbox
+  refused is listed as `denied` (`why: "codexSandbox"`); tokens are added to `Chat.usage_tokens`
+  (Codex reports no cost, so none is counted). Errors are told apart (`codex::problem`):
+  signed out (`signedOut`, `provider: "codex"`), the plan's limit (`codexLimit`), offline
+  (`network`), anything else in Codex's words.
+- **Sessions.** A later Codex prints its session id and has `codex exec resume <id>`. Codex 0.2x
+  prints neither: the session is found after the run by a mark in its prompt
+  (`codex::find_session`, in `$CODEX_HOME/sessions`), and continued with
+  `-c experimental_resume="<its file>"`. A session Codex no longer has is reported as
+  `sessionLost`, and the chat carries on from its saved conversation. Deleting a chat deletes its
+  session files by exact name; one-shot answers delete theirs at once.
+- **What Codex cannot enforce, and what stands in for it.** It has no rule that closes one file or
+  folder: private folders, the app's data folder and other chats' attachments can be read (the UI
+  says so in every Codex chat while private folders exist, and in Settings). `.claude/` and
+  `.mcp.json` (and, where the run may not change them, the standing files) are copied before every
+  run that can write and put back afterwards (`StandingSnapshot::take_with`). Codex itself keeps a
+  writable folder's top-level `.git` read-only and gives sandboxed commands no network (checked
+  with `codex debug seatbelt`, which runs no model). No spending ceiling: automatic tasks on Codex
+  have only their time limits, and Codex runs are not in the month's cost.
+- **Moving a chat** (`PATCH /api/chats/:id {provider}`, `handoff.rs`): the old session stays
+  behind (kept in `session_ids`), the model and effort become the new program's own, the mode
+  stays. The next message carries the whole transcript when it fits half of the new model's
+  window (as the program reported it, else 128,000 tokens; three bytes a token), otherwise a summary
+  the new program writes (kept on the chat) plus the last messages. The chat says which at the
+  move, and says so again if the summary could not be made.
+
 ### Library busy and history
 
 - While a Wrap or a Reorganize apply holds the library, every library mutation (file writes, todo
@@ -411,7 +470,6 @@ docs/              user docs (English, Arabic in docs/ar/), this file, RELEASING
   what was refused is listed under the answer)
 - Reminders when the app is not running
 - Previews for PDF, Word and Excel files
-- Codex as a second assistant (switch per chat; history carries over)
 - Optional semantic-search extension for very large libraries
 
 ## License

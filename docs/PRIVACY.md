@@ -52,6 +52,8 @@ The same applies to everything the assistant does for you without a chat window 
 
 **Automatic summaries.** So that Wrap is quick, Thoughts prepares a short summary of each chat in the background: once the chat has been quiet for a while (15 minutes unless you change it), or when you start another chat, the text of that chat is sent to the AI provider a second time and a few lines come back. This happens without you pressing anything, for every chat in your library, including ones you never mean to wrap. The summary is kept on your computer with the chat. To stop it, switch off **Settings → Privacy → Summarise chats automatically**: a chat is then only read again when you press Wrap.
 
+**Codex.** If you choose Codex under Settings › Assistant (or move a chat to it), the same kinds of text go to OpenAI instead, through your ChatGPT plan or OpenAI key, under the terms of that account. Codex is not told about the chats that stay with Claude Code, and the other way round; moving a chat passes its conversation (or a summary of it) on to the other one.
+
 Nothing is sent to an AI provider when you are only reading, searching or editing your library in the app.
 
 ## Voice: dictation and meeting recordings
@@ -110,6 +112,8 @@ What it does not do:
 - **Private folders are still backed up and synced.** They are ordinary folders in your library, so sync uploads them with everything else. To keep a folder out of sync, keep it **outside the library folder** (anywhere else on your computer) and link to it from your notes if you need to remember where it is.
 - **It does not go back over what is already written elsewhere.** An item's title and one-line summary in your library's index, and anything from the folder that was copied into other notes, stay where they are, and the assistant reads the index in most chats. When you mark a folder private, the app tells you if the index still mentions its items and offers to remove those lines. Text in other notes is yours to tidy.
 - A private folder cannot be used with the assistant. You cannot ask it to summarise or search something it is blocked from reading.
+
+**With Codex, private folders are only an instruction.** Codex has no way to close a single folder: it is told which folders are private and to leave them alone, but nothing stops it from reading them, or other chats' files and the app's own data. Each Codex chat says so while you have private folders. If that is not acceptable, keep those chats with Claude Code. What Codex does enforce is its sandbox: in Read only it changes nothing, in Edit in this folder it changes only that folder and its commands cannot reach the internet; changes it makes to the app's routines (and, for Wrap and automatic tasks, to CLAUDE.md) are put back when it finishes.
 
 Good candidates: anything a client or employer has asked you not to put through AI tools, and records about named individuals.
 

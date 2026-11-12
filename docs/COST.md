@@ -49,6 +49,10 @@ Under Settings → Privacy you can set the most you want to spend in a month, an
 
 If you are on a Claude plan and reach its usage limit, Thoughts says so in plain words, with the time it resets, instead of showing an error.
 
+## Codex
+
+Codex reports how many tokens a run used, but not what they cost. A Codex chat shows its tokens instead of an estimated cost, Codex runs are not part of the month's figure, and the monthly limit cannot stop them: an automatic task on Codex has only its time limit. Background summaries on Codex use the model chosen for summaries (or Codex's own) at the lowest effort Codex offers. What you pay is set by your ChatGPT plan or your OpenAI account; their own usage pages are the authority.
+
 ## Keeping usage down
 
 - **Wrap more often.** Wrap saves what matters from a conversation into your library. Then start a fresh chat: the assistant picks up from the short saved notes instead of carrying a long conversation along.
