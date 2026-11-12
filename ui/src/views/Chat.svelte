@@ -165,6 +165,9 @@
       if (e.message.role === 'assistant') streaming = '';
       if (e.message.role !== 'user') thinking = '';
       scrollDown(e.message.role === 'user');
+    } else if (e.type === 'chat.message.removed') {
+      // A message whose answer could not be started is taken back: its words are in the box again.
+      chat.messages = chat.messages.filter((m: any) => m.id !== e.messageId);
     } else if (e.type === 'chat.delta') {
       const seq = typeof e.seq === 'number' ? e.seq : streamSeq + 1;
       if (seq === streamSeq + 1) { streaming += e.text; streamSeq = seq; scrollDown(); }

@@ -2269,6 +2269,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     um.attachments = saved;
     um.tool = (!m.mentions.is_empty()).then(|| json!({"mentions": m.mentions}));
     let opts = normalized(m.options.unwrap_or(chat.options.clone()), chat.options.permission_mode.as_deref());
+    // How the chat stood before this message, for when the assistant cannot be started (see below).
+    let before = (chat.title.clone(), chat.dirty, chat.mini_wrap.clone(), chat.updated);
     let updated = st.chats.update(&id, |c| {
         c.messages.push(um.clone());
         c.dirty = true;
@@ -2303,8 +2305,24 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let started = claude::start_run(st.clone(), spec(prompt, chat.session_id.clone()), on_done).await;
     // A customise run that never started must not cost the user the change it was about to replace.
     if kind == "customize" { crate::staging::run_start_result(applayer::Git(Some(&st)), &applayer::Dirs::real(), &id, started.is_ok()).await; }
+    if started.is_err() { take_back_message(&st, &id, &um, before).await; }
     started?;
     ok()
+}
+
+/// The assistant could not be started for this message: it is taken out of the chat again (with
+/// its files), so the message box — which gets the words back — is the only place it is. Sending
+/// it again then shows it once, not twice.
+async fn take_back_message(st: &Arc<AppState>, id: &str, um: &Msg, (title, dirty, mini_wrap, updated): (String, bool, Option<String>, chrono::DateTime<chrono::Utc>)) {
+    let summary = st.chats.update(id, |c| {
+        let n = c.messages.len();
+        c.messages.retain(|x| x.id != um.id);
+        if c.messages.len() == n { return; }
+        (c.title, c.dirty, c.mini_wrap, c.updated) = (title, dirty, mini_wrap, updated);
+    }).await;
+    for p in &um.attachments { let _ = std::fs::remove_file(p); }
+    st.emit(json!({"type": "chat.message.removed", "chatId": id, "messageId": um.id}));
+    if let Some(c) = summary { st.emit(json!({"type": "chat.updated", "chat": c.summary()})); }
 }
 
 /// The user has seen that this chat's last run was cut off by a restart.
@@ -2322,6 +2340,10 @@ async fn chat_stop(State(st): S, Path(id): Path<String>) -> R {
 #[allow(unused_must_use)]
 #[path = "api_chat_tests.rs"]
 mod chat_tests;
+#[cfg(test)]
+#[allow(unused_must_use)]
+#[path = "api_chatc_tests.rs"]
+mod chatc_tests;
 
 // ---------- wrap & reorganize ----------
 
