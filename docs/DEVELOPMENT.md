@@ -157,23 +157,48 @@ every Claude Code version (a deny rule beats every allow rule and every permissi
 included). The flags are added only when the installed CLI's `--help` lists them; each falls back
 to the rules alone.
 
-| Profile | Runs | Commands | Web | User's own Claude Code set-up | Standing rules (CLAUDE.md) | Flags added |
-|---|---|---|---|---|---|---|
-| `chat` | ordinary chat, customise chat | what the mode allows; **none while web lookups are on** | per-chat switch "Web lookups" (ordinary chats only, off by default): allow `WebSearch`, `WebFetch` | kept (settings, hooks, plugins, MCP servers) | may change | `--permission-prompts none` |
-| `shaping` | first-time set-up, Reorganize | what accept-edits allows on its own (moving, deleting, read-only commands) | denied | ignored: `--setting-sources project,local`, no MCP servers | may change (Reorganize's diff is reviewed) | `--permission-prompts none --setting-sources project,local --strict-mcp-config` |
-| `upkeep` | Wrap (preview and apply), adding a feature | denied (`Bash`, `PowerShell`) | denied | ignored | Wrap: denied; adding a feature: may change | `--permission-prompts none --restricted --strict-mcp-config` |
-| `unattended` | automatic task | denied | denied | ignored | denied | as `upkeep`, plus `--max-budget-usd` and the time limits |
-| one-shot | titles, mini-wraps, routine drafts, the provider test | no tools (`--tools ""`) | no | none: `--safe-mode` (no CLAUDE.md, skills, plugins, hooks, MCP servers) | — | `--safe-mode --strict-mcp-config --disable-slash-commands --disallowedTools mcp__* --permission-prompts none` |
+| Profile | Runs | Commands | Web | User's own settings (allow rules, hooks, plugins) | Connected tools (MCP) | Standing files | Flags added |
+|---|---|---|---|---|---|---|---|
+| `chat` | ordinary chat, customise chat | what the mode allows | off | kept | kept | may change | `--permission-prompts none` |
+| `chat`, web lookups on | an ordinary chat whose switch "Web lookups" is on (never in bypass mode) | denied | allowed: `WebSearch`, `WebFetch` | kept | denied | denied | `--permission-prompts none --strict-mcp-config` |
+| `shaping` | first-time set-up, Reorganize | what accept-edits allows on its own (moving, deleting, read-only commands) | denied | not loaded | denied | may change (Reorganize's diff is reviewed) | `--permission-prompts none --setting-sources project,local --strict-mcp-config` |
+| `upkeep` | Wrap (preview and apply), adding a feature | denied (`Bash`, `PowerShell`) | denied | not loaded | denied | Wrap: denied, and put back if changed anyway; adding a feature: may change | `--permission-prompts none --setting-sources project,local --restricted --strict-mcp-config` |
+| `unattended` | automatic task | denied | denied | not loaded | denied | denied, and put back if changed anyway | as `upkeep`, plus `--max-budget-usd` and the time limits |
+| one-shot | titles, mini-wraps, routine drafts, the provider test | no tools (`--tools ""`) | no | none: `--safe-mode` (no CLAUDE.md, skills, plugins, hooks, MCP servers) | none | — | `--safe-mode --strict-mcp-config --disable-slash-commands --disallowedTools mcp__* --permission-prompts none` |
 
-- Every profile without the user's own set-up also denies `mcp__*` (every MCP tool) and both web
-  tools, whatever the user's own allow rules say. `--restricted` additionally removes every
-  code-running tool and keeps the file tools inside the run's folders; without it (older CLIs)
-  the user's personal settings are still dropped through `--setting-sources` where available.
+- **The rules are the lock that is always there; each flag is a second one.** Denied commands are
+  the rules `Bash` and `PowerShell`, denied web tools `WebSearch` and `WebFetch`, denied connected
+  tools `mcp__*` — whatever the user's own allow rules say. Each flag is added whenever the profile
+  needs it and the CLI lists it, independently of the others (`profile_flags_never_fail_open` tests
+  every profile against every mix): `--setting-sources project,local` for every profile without
+  the user's own settings, `--restricted` on top of it when there are no commands either (it also
+  removes every other code-running tool and keeps the file tools inside the run's folders), and
+  `--strict-mcp-config` whenever connected tools are denied.
+- **Standing files** are what every later session follows: `CLAUDE.md` and `CLAUDE.local.md` in
+  any folder, and the checklists in `routines/` (`.claude/`, where the app keeps the routines the
+  assistant follows, is closed to every run but first-time set-up). Rules name them as written, in
+  lower case and in every letter case at once (`[Cc][Ll][Aa][Uu][Dd][Ee].[Mm][Dd]`, `claude::any_case`):
+  rules follow gitignore's syntax, where `[…]` is a character class, and macOS and Windows volumes
+  ignore case. The protective `.claude`, `.git` and `.mcp.json` rules and the private-folder rules
+  get the same every-case spelling.
+- **Backstop for runs nobody watches** (Wrap, automatic task: `Profile::restores_standing`): before
+  the run the daemon keeps a copy of every standing file, everything under `.claude/` and
+  `.mcp.json` (`claude::StandingSnapshot`; links are never followed, `.git` is not entered). When
+  the run ends, however it ends, a changed file gets its old contents back, a removed one comes
+  back, a new one goes, and the chat lists them (a `denied` message, item `what: "restored"`).
+  Nothing is written through a link. A chat is never second-guessed this way: the user is there,
+  and may be editing those files themselves.
+- Runs that may not change the standing files are told so (`claude::standing_rules_note`); a web
+  chat is also told that page text is material, never instructions, and never to put library
+  content into a search or an address. The Wrap preview fences the mini-wraps between two lines
+  carrying a random mark, as material to file; the mini-wrap prompt says the same about the
+  chat transcript.
+- Switching web lookups on asks first, in plain words: pages can carry instructions, and the
+  assistant may send what it read (notes included) to the sites it opens. It is per chat and off
+  by default; the CLI cannot ask per page in a `-p` run, so there is no per-fetch approval.
 - The library's own project settings are kept by `--setting-sources project,local` (the trust
-  question covers them) and dropped by `--restricted`; nothing in the app's runs depends on them.
-- Runs that may not change CLAUDE.md are told so (`claude::standing_rules_note`), and the Wrap
-  preview fences the mini-wraps between two lines carrying a random mark, as material to file,
-  never instructions. The mini-wrap prompt says the same about the chat transcript.
+  question covers them); `--restricted` is documented to load only managed settings and
+  `--settings`. Nothing in the app's runs depends on project settings.
 - A user who set a gateway only in `~/.claude/settings.json` (its `env`) rather than under
   Settings › Assistant gets it in ordinary chats only. Settings › Assistant is the supported way.
 

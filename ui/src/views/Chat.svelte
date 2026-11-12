@@ -414,6 +414,8 @@
   /** Web lookups for this chat: an ordinary chat's own choice, off until switched on. */
   async function setWeb(on: boolean) {
     const before = !!chat.options.web;
+    // Switching it on says first, plainly, what it lets in and what it may send out.
+    if (on && !before && !(await confirmDialog({ title: t('runb.web.confirmTitle'), body: t('runb.web.confirmBody'), confirmLabel: t('runb.web.confirm') }))) return;
     chat.options.web = on;
     try {
       const saved = await patch(`/chats/${id}`, { options: chat.options });
@@ -423,7 +425,7 @@
 
   /** One thing the assistant was not allowed to do, in plain words. What it named (a command, an
    *  address, a file) is kept apart from the sentence around it, so it reads the right way in Arabic too. */
-  const DENIED = ['command', 'page', 'search', 'open', 'look', 'change', 'connected', 'tool'];
+  const DENIED = ['command', 'page', 'search', 'open', 'look', 'change', 'connected', 'tool', 'restored'];
   const ISOLATE = [String.fromCharCode(0x2068), String.fromCharCode(0x2069)]; // first-strong isolate … pop
   function deniedText(d: any): string {
     if (d?.why === 'appData') return t('runb.denied.appData');
@@ -602,7 +604,7 @@
               {#if m.tool?.denials?.length}
                 <ul>
                   {#each m.tool.denials as d}
-                    <li><span dir="auto">{deniedText(d)}</span>{#if d.why !== 'appData'} <span class="muted">{t('runb.why.' + (d.why || 'none'))}</span>{/if}</li>
+                    <li><span dir="auto">{deniedText(d)}</span>{#if d.why !== 'appData'}<span class="muted why" dir="auto">{t('runb.why.' + (d.why || 'none'))}</span>{/if}</li>
                   {/each}
                 </ul>
                 {#if chat.kind === 'chat' && !chat.options.web && savedPerm !== BYPASS && m.tool.denials.some((d: any) => d.why === 'webOff')}
@@ -716,7 +718,7 @@
           {/if}
           {#if chat.kind === 'chat' && savedPerm !== BYPASS}
             <label class="btn ghost webtoggle" class:on={!!chat.options.web} title={t('runb.web.tip')}>
-              <input type="checkbox" checked={!!chat.options.web} onchange={(e) => setWeb(e.currentTarget.checked)} />
+              <input type="checkbox" checked={!!chat.options.web} onchange={async (e) => { const box = e.currentTarget; await setWeb(box.checked); box.checked = !!chat.options.web; }} />
               <Icon name="search" size={14} /><span>{t('runb.web.label')}</span>
             </label>
           {/if}
@@ -781,7 +783,8 @@
   .msg.sys { font-size: var(--fs-sm); }
   .msg.denied { font-size: var(--fs-sm); padding: 6px 10px; border-radius: var(--radius); border: var(--border-w) dashed var(--border); display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
   .deniedhead { display: flex; gap: 6px; align-items: center; font-weight: 500; }
-  .msg.denied ul { margin: 0; padding-inline-start: 20px; display: grid; gap: 2px; overflow-wrap: anywhere; }
+  .msg.denied ul { margin: 0; padding-inline-start: 20px; display: grid; gap: 4px; overflow-wrap: anywhere; }
+  .msg.denied .why { display: block; font-size: var(--fs-xs); }
   .controls .webtoggle { display: inline-flex; align-items: center; gap: 5px; font-size: var(--fs-xs); padding: 4px 8px; cursor: pointer; }
   .controls .webtoggle input { margin: 0; }
   .controls .webtoggle.on { color: var(--accent); }
