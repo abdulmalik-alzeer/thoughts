@@ -1653,8 +1653,11 @@ pub async fn start_run(
     }
 
     if on_codex {
-        return crate::codex::launch(state, crate::codex::Launch { spec, kind, mode, profile: prof, standing, record, touches_library, on_done,
+        let launched = crate::codex::launch(state, crate::codex::Launch { spec, kind, mode, profile: prof, standing, record, touches_library, on_done,
             library, private: settings.private_paths.clone(), language: settings.language.clone() }).await;
+        // Started: its end (`finish`) closes the watch on what it changes.
+        if launched.is_ok() { if let Some(w) = watching { w.hand_over(); } }
+        return launched;
     }
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);

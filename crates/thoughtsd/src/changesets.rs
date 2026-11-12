@@ -263,7 +263,12 @@ fn sort_out(changed: Vec<Delta>, own: &BTreeSet<String>, foreign: &BTreeSet<Stri
 /// stopping), the watch is forgotten.
 pub struct Watching { token: String }
 impl Drop for Watching {
-    fn drop(&mut self) { watches().retain(|w| w.token != self.token); }
+    fn drop(&mut self) { if !self.token.is_empty() { watches().retain(|w| w.token != self.token); } }
+}
+impl Watching {
+    /// The run was started by something that ends it with `finish` on its own (the Codex runner):
+    /// the watch stays until then.
+    pub fn hand_over(mut self) { self.token.clear(); }
 }
 
 /// A chat or automatic task is about to work in `lib` (from `cwd`): record the library as it is.
