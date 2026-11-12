@@ -144,7 +144,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         // chats
         .route("/api/chats", get(chat_list).post(chat_create))
         .route("/api/chats/:id", get(chat_get).delete(chat_delete).patch(chat_patch))
-        .route("/api/chats/:id/send", post(chat_send))
+        .route("/api/chats/:id/send", post(chat_send_route).layer(DefaultBodyLimit::max(SEND_BODY_LIMIT)))
         .route("/api/chats/:id/stop", post(chat_stop))
         .route("/api/chats/:id/ack-interrupted", post(chat_ack_interrupted))
         // wrap & reorganize
@@ -1421,7 +1421,118 @@ struct Attachment { name: String, data: String }
 #[serde(default, rename_all = "camelCase")]
 struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<String>, options: Option<RunOptions>, confirm_bypass: bool }
 
+/// One attached file may be 25 MB (what the composer says), one message 50 MB of files in all.
+const ATTACHMENT_MAX_BYTES: usize = library::IMPORT_MAX_BYTES;
+const ATTACHMENTS_MAX_BYTES: usize = 50 * 1024 * 1024;
+/// Attachments travel as base64 inside the JSON body: room for the 50 MB, the third base64 adds, and the message itself.
+const SEND_BODY_LIMIT: usize = ATTACHMENTS_MAX_BYTES / 3 * 4 + 4 * 1024 * 1024;
+
+/// The route for `chat_send`. A body over the limit is answered in the user's language, not in the web framework's words.
+async fn chat_send_route(st: S, id: Path<String>, body: Result<Json<SendBody>, axum::extract::rejection::JsonRejection>) -> Response {
+    match body {
+        Ok(b) => chat_send(st, id, b).await.into_response(),
+        Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => ApiErr(crate::tr::err("chat.files_too_large", &[])).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// The files of one message, named safely, decoded and checked against the size limits — all
+/// before anything is written, so a refused message leaves nothing behind.
+fn decode_attachments(list: &[Attachment], max_file: usize, max_total: usize) -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    let mut out = Vec::with_capacity(list.len());
+    let mut total = 0usize;
+    for a in list {
+        let name = library::sanitize_file_name(&a.name);
+        // Either a data URL (`data:image/png;base64,…`) or the bare base64.
+        let b64 = a.data.rsplit(',').next().unwrap_or("").trim();
+        // Three bytes for every four characters: no need to decode what is too large anyway.
+        if b64.len() / 4 * 3 > max_file + 2 { return Err(crate::tr::err("too_large", &[("name", &name)])); }
+        let bytes = base64::engine::general_purpose::STANDARD.decode(b64).map_err(|_| crate::tr::err("unreadable", &[("name", &name)]))?;
+        if bytes.len() > max_file { return Err(crate::tr::err("too_large", &[("name", &name)])); }
+        total += bytes.len();
+        if total > max_total { return Err(crate::tr::err("chat.files_too_large", &[])); }
+        out.push((name, bytes));
+    }
+    Ok(out)
+}
+
+/// Write one attachment into the chat's folder under a name of its own: a second `image.png`
+/// becomes `image (2).png`, so a file an earlier message (or the same one) points at is never replaced.
+fn save_attachment(dir: &std::path::Path, name: &str, bytes: &[u8]) -> anyhow::Result<std::path::PathBuf> {
+    use std::io::Write;
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.to_string(), String::new()),
+    };
+    for n in 1..10_000 {
+        let p = dir.join(if n == 1 { name.to_string() } else { format!("{stem} ({n}){ext}") });
+        // create_new: fails rather than replaces when the name is taken. Private from creation.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        { use std::os::unix::fs::OpenOptionsExt; opts.mode(0o600); }
+        match opts.open(&p) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) { drop(f); let _ = std::fs::remove_file(&p); return Err(e.into()); }
+                return Ok(p);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    bail!("too many files named {name}")
+}
+
+type RunDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'static, ()> + Send>;
+
+/// What follows a run started from a chat message, besides the usual bookkeeping.
+fn after_chat_run(kind: &str) -> Option<RunDone> {
+    if kind != "customize" { return None; }
+    // Nothing is applied or committed here: the result waits as a pending change.
+    Some(Box::new(|st: Arc<AppState>, _ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move { crate::staging::after_run(&st).await; }) }))
+}
+
+/// A run that was to resume the chat's session just failed. If that was because the CLI no longer
+/// has the session (it clears old ones out, and a session belongs to the folder it ran in), forget
+/// the session, say so in the chat in one quiet line, and send the message once more with the
+/// saved conversation in place of the session. Returns whether that new run was started.
+async fn resend_without_session(st: &Arc<AppState>, again: RunSpec, kind: &str) -> bool {
+    let id = again.chat_id.clone();
+    let lost = st.chats.with(&id, |c| c.messages.last()
+        .filter(|m| m.role == "error" && m.tool.as_ref().map_or(false, |t| t["code"] == claude::SESSION_LOST)).map(|m| m.id.clone())).await.flatten();
+    let Some(lost) = lost else { return false };
+    crate::log::warn(format!("chat {id}: the assistant no longer has its session; continuing from the saved conversation"));
+    let note = crate::tr::text("chat.session_lost", &[]);
+    let mut shown = None;
+    st.chats.update(&id, |c| {
+        c.session_id = None;
+        if let Some(m) = c.messages.iter_mut().find(|m| m.id == lost) {
+            m.role = "system".into();
+            m.text = note;
+            m.tool = None;
+            shown = serde_json::to_value(&*m).ok();
+        }
+    }).await;
+    // Same id as the failure it replaces: the chat view swaps one for the other.
+    if let Some(m) = shown { st.emit(json!({"type": "chat.message", "chatId": id, "message": m})); }
+    // As for any send: nothing else writes into the library while a wrap is changing it.
+    let library = st.settings.read().await.library();
+    let touches_library = library.as_ref().map_or(false, |l| again.cwd == *l || (kind != "customize" && again.add_dirs.contains(l)));
+    let started = if touches_library && st.library_busy() { Err(crate::tr::err("busy", &[])) } else { claude::start_run(st.clone(), again, after_chat_run(kind)).await };
+    match started {
+        Ok(()) => true,
+        Err(e) => {
+            crate::log::error(format!("chat {id}: could not continue from the saved conversation: {e}"));
+            claude::push(st, &id, Msg::new("error", crate::tr::classify(&e).message)).await;
+            false
+        }
+    }
+}
+
 async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>) -> R {
+    // One send per chat at a time. `running` is only set once the assistant has been started; a
+    // second request in that gap would start a second run, and the two would stop each other.
+    let _claim = st.chats.claim_send(&id).ok_or_else(|| crate::tr::err("chat.running", &[]))?;
     let chat = st.chats.get(&id).await.ok_or_else(no_chat)?;
     if chat.running { return Err(crate::tr::err("chat.running", &[]).into()); }
     if let Some(o) = &m.options {
@@ -1465,29 +1576,34 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
             mention_paths.push(abs.to_string_lossy().to_string());
         }
     }
+    let files = decode_attachments(&m.attachments, ATTACHMENT_MAX_BYTES, ATTACHMENTS_MAX_BYTES)?;
     let mut prompt = m.text.clone();
-    let mut saved = vec![];
-    if !m.attachments.is_empty() {
+    let mut saved: Vec<String> = vec![];
+    if !files.is_empty() {
         if !crate::chats::valid_id(&id) { return Err(no_chat().into()); }
         let dir = paths::attachments_dir().join(&id);
         paths::create_private_dir(&dir)?;
-        for a in &m.attachments {
-            let name = library::sanitize_file_name(&a.name);
-            let p = dir.join(&name);
-            paths::write_atomic(&p, &base64::engine::general_purpose::STANDARD.decode(a.data.rsplit(',').next().unwrap_or(""))?, true)?;
-            saved.push(p.to_string_lossy().to_string());
+        for (name, bytes) in &files {
+            match save_attachment(&dir, name, bytes) {
+                Ok(p) => saved.push(p.to_string_lossy().to_string()),
+                // Not half a message: take back the files of this one that were already written.
+                Err(e) => { for p in &saved { let _ = std::fs::remove_file(p); } return Err(e.into()); }
+            }
         }
         prompt.push_str("\n\nAttached files (read them):\n");
         for p in &saved { prompt.push_str(&format!("- {p}\n")); }
     }
+    drop(files);
     if !m.mentions.is_empty() {
         prompt.push_str("\n\nReferenced library files (read them):\n");
         for abs in &mention_paths { prompt.push_str(&format!("- {abs}\n")); }
     }
+    let has_history = chat.messages.iter().any(|x| x.role == "assistant");
+    let with_history = |p: &str| format!("Earlier conversation (continue from it):\n\n{}\n\n---\n\n{p}", chat.transcript(120_000));
+    // What goes instead if the CLI turns out not to have the session any more (see `resend_without_session`).
+    let fallback = chat.session_id.as_ref().map(|_| if has_history { with_history(&prompt) } else { prompt.clone() });
     // Handoff from another provider / a chat without a session: replay history.
-    if chat.session_id.is_none() && chat.messages.iter().any(|x| x.role == "assistant") {
-        prompt = format!("Earlier conversation (continue from it):\n\n{}\n\n---\n\n{prompt}", chat.transcript(120_000));
-    }
+    if chat.session_id.is_none() && has_history { prompt = with_history(&prompt); }
     let first = !chat.messages.iter().any(|x| x.role == "user");
     let mut um = Msg::new("user", &m.text);
     um.attachments = saved;
@@ -1507,13 +1623,22 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         AskUserQuestion dialogs here — ask questions in plain text. Wraps are run by the app's Wrap button; don't wrap unless asked.".to_string());
     let kind = chat.kind.clone();
     let append = if kind == "customize" { Some(crate::staging::system_prompt(&applayer::Dirs::real())) } else { append };
-    let on_done: Option<Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'static, ()> + Send>> = if kind == "customize" {
-        // Nothing is applied or committed here: the result waits as a pending change.
-        Some(Box::new(move |st: Arc<AppState>, _ok| Box::pin(async move { crate::staging::after_run(&st).await; })))
-    } else { None };
     // A customise run may only write inside its staging copy, and may not read the app's own secrets.
     let extra_deny = if kind == "customize" { crate::staging::deny_rules(&applayer::Dirs::real(), library.as_deref()) } else { vec![] };
-    claude::start_run(st.clone(), RunSpec { chat_id: id, prompt, cwd, add_dirs, options: opts, resume: chat.session_id.clone(), append_system: append, extra_deny }, on_done).await?;
+    let spec = |prompt: String, resume: Option<String>| RunSpec { chat_id: id.clone(), prompt, cwd: cwd.clone(), add_dirs: add_dirs.clone(),
+        options: opts.clone(), resume, append_system: append.clone(), extra_deny: extra_deny.clone() };
+    let on_done: Option<RunDone> = match fallback {
+        Some(replay) => {
+            let (again, kind) = (spec(replay, None), kind.clone());
+            Some(Box::new(move |st: Arc<AppState>, ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move {
+                if ok || !resend_without_session(&st, again, &kind).await {
+                    if let Some(next) = after_chat_run(&kind) { next(st, ok).await; }
+                }
+            }) }))
+        }
+        None => after_chat_run(&kind),
+    };
+    claude::start_run(st.clone(), spec(prompt, chat.session_id.clone()), on_done).await?;
     ok()
 }
 

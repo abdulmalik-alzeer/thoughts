@@ -5,6 +5,8 @@
   const pendingFiles = new Map<string, Attachment[]>();
   const lastSent = new Map<string, { text: string; files: Attachment[] }>();
   const DRAFT_MAX = 20000;
+  /** What one message may carry in files, all together (the service refuses more: ATTACHMENTS_MAX_BYTES). */
+  const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
   const draftKey = (id: string) => `thoughts.chatdraft:${id}`;
 </script>
 
@@ -145,7 +147,10 @@
       if (e.chatId !== id && e.chat?.id !== id) return;
       if (!chat) return;
       if (e.type === 'chat.message') {
-        if (!chat.messages.some((m: any) => m.id === e.message.id)) chat.messages.push(e.message);
+        // A message that arrives again under the same id replaces the one shown: a failure the
+        // service recovered from by itself becomes a quiet note.
+        const at = chat.messages.findIndex((m: any) => m.id === e.message.id);
+        if (at >= 0) chat.messages[at] = e.message; else chat.messages.push(e.message);
         if (e.message.role === 'assistant') streaming = '';
         if (e.message.role !== 'user') thinking = '';
         scrollDown(e.message.role === 'user');
@@ -160,29 +165,34 @@
         say(t('chat3.answerDone'));
         load();
       } else if (e.type === 'chat.updated') {
-        chat.running = e.chat.running;
+        // While a send is on its way the chat counts as working, whatever an update in between says.
+        chat.running = e.chat.running || sending;
         chat.title = e.chat.title;
       }
     });
     return () => { off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); };
   });
 
+  let sending = false;   // a message is on its way to the service and its answer has not come back yet
   async function sendBody(body: any, failKey = 'chat3.sendFailed') {
+    if (sending) return false;
     if (body.options?.permissionMode === 'default') body.options = { ...body.options, permissionMode: 'plan' };
     chat.running = true;
+    sending = true;
     stick = true;
     try { await post(`/chats/${id}/send`, body); return true; }
     catch (e: any) {
       // The service refuses files in private folders (or ones that no longer exist) as mentions.
       if (e instanceof ApiError && e.status === 400 && body.mentions?.length) notify(t('layer.mentionRejected'), { kind: 'error', detail: e.message });
       else failed(t(failKey), e);
-      chat.running = false;
+      // "Still working" means a run this view did not know about: ask the service how things stand.
+      if (e instanceof ApiError && e.status === 409 && e.code === 'busy') load(); else chat.running = false;
       return false;
-    }
+    } finally { sending = false; }
   }
 
   async function send() {
-    if (!canSend || chat.running) return;
+    if (!canSend || chat.running || sending) return;
     const keep = { text, files: [...files], mentions: [...mentions] };
     const ready = files.filter((f) => !f.missing);
     // Files may go on their own; the assistant still needs a sentence to answer.
@@ -200,7 +210,7 @@
   const canCompose = $derived(!!chat && !['wrap', 'reorganize', 'setup'].includes(chat.kind));
 
   async function retry() {
-    if (!lastUser || chat.running) return;
+    if (!lastUser || chat.running || sending) return;
     // The files of that message go again too (they are kept in memory for this session).
     const prev = lastSent.get(id);
     const again = prev && prev.text === lastUser.text ? prev.files : [];
@@ -265,9 +275,12 @@
   async function addFiles(list: Iterable<File>) {
     for (const f of list) {
       if (f.size > MAX_FILE_BYTES) { notify(t('chat.tooLarge', { name: f.name, size: fmtSize(f.size) }), { kind: 'error' }); continue; }
+      const name = f.name || t('chat.pastedName');
+      // One message carries 50 MB of files at most. (A file that fills a placeholder is not counted twice.)
+      const waiting = files.reduce((sum, x) => sum + (x.missing ? 0 : x.size), 0);
+      if (waiting + f.size > MAX_TOTAL_BYTES) { notify(t('chata.tooLargeTogether', { name }), { kind: 'error', key: 'attach-total' }); continue; }
       try {
         const data = await readAsDataURL(f);
-        const name = f.name || t('chat.pastedName');
         const att = { name, data, size: f.size, image: f.type.startsWith('image/') || isImageName(name) };
         // Attaching a file again fills the placeholder a restored draft left for it.
         const gap = files.findIndex((x) => x.missing && x.name === name);
@@ -477,7 +490,7 @@
             </div>
           {:else if m.role === 'tool_result'}
             <!-- shown inside its tool call above -->
-          {:else if m.role === 'error'}
+          {:else if m.role === 'error' && m.tool?.code !== 'sessionLost'}
             <div class="msg err" role="alert">
               <div class="errline"><Icon name="warning" size={14} /> <span dir="auto">{m.text}</span></div>
               {#if m.tool?.code === 'signedOut' && m.id === lastAnswerId}

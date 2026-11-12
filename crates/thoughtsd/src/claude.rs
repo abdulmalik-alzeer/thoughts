@@ -981,7 +981,9 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
             }).await;
             state.add_usage(cost).await;
             if is_err {
-                let txt = ev["result"].as_str().map(String::from)
+                // Without a `result` text the CLI lists what went wrong under `errors`.
+                let listed: Vec<&str> = ev["errors"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let txt = ev["result"].as_str().map(String::from).or_else(|| (!listed.is_empty()).then(|| listed.join("\n")))
                     .unwrap_or_else(|| format!("Run ended: {}", ev["subtype"].as_str().unwrap_or("error")));
                 // The CLI often echoes the error as assistant text first; show it once, as an error.
                 state.chats.update(id, |c| {
@@ -995,9 +997,27 @@ async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Option<bool> {
     }
 }
 
+/// `tool.code` of the chat message for a run that could not resume its session.
+pub const SESSION_LOST: &str = "sessionLost";
+
+/// Did a run fail because the CLI no longer has the session it was asked to resume? (It clears
+/// old sessions out, and a session belongs to the folder it ran in.)
+pub fn is_session_lost(text: &str) -> bool { text.contains("No conversation found with session ID") }
+
+#[cfg(test)]
+#[path = "claude_session_tests.rs"]
+mod session_tests;
+
 /// The chat message for a failed run. A missing or expired sign-in is said in plain words and
 /// marked (`tool.code = "signedOut"`) so the chat can offer to sign in; the CLI's text is kept as detail.
 async fn error_msg(state: &AppState, text: &str) -> Msg {
+    // The session a run was to resume is gone. Marked, so that a chat can carry on from its saved
+    // conversation instead of failing on every message (`resend_without_session` in api.rs).
+    if is_session_lost(text) {
+        let mut m = Msg::new("error", crate::tr::text("assistant.session_lost", &[]));
+        m.tool = Some(json!({"code": SESSION_LOST, "detail": text.chars().take(600).collect::<String>()}));
+        return m;
+    }
     match auth_failure(state, text).await {
         Some((plain, code)) => {
             let mut m = Msg::new("error", plain);

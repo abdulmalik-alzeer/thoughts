@@ -230,6 +230,15 @@ pub struct ChatStore {
     /// Where save failures are announced (set once by the app state).
     pub events: std::sync::OnceLock<tokio::sync::broadcast::Sender<Value>>,
     last_error_event: std::sync::Mutex<Option<std::time::Instant>>,
+    /// Chats for which a message is being turned into a run right now (see `claim_send`).
+    sending: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+/// Proof that this request is the only one starting a run for a chat; given back when dropped.
+pub struct SendClaim<'a> { store: &'a ChatStore, id: String }
+
+impl Drop for SendClaim<'_> {
+    fn drop(&mut self) { self.store.sending.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.id); }
 }
 
 impl ChatStore {
@@ -267,7 +276,7 @@ impl ChatStore {
             }
         }
         let store = Self { chats: RwLock::new(map), dir: dir.to_path_buf(), unreadable, disk: Default::default(),
-            events: Default::default(), last_error_event: Default::default() };
+            events: Default::default(), last_error_event: Default::default(), sending: Default::default() };
         if let Ok(m) = store.chats.try_read() {
             for id in &cut_off {
                 if let Some(c) = m.get(id) {
@@ -315,6 +324,14 @@ impl ChatStore {
                 None => { self.disk.lock().unwrap_or_else(|e| e.into_inner()).remove(&id); }
             }
         }
+    }
+
+    /// Reserve the chat for one "send": from accepting a message until its run has started (when
+    /// `running` takes over). `None` means another request holds it — a chat's `running` flag is
+    /// only set once the assistant has been started, and two sends in that gap would start two
+    /// runs that stop each other.
+    pub fn claim_send(&self, id: &str) -> Option<SendClaim<'_>> {
+        self.sending.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string()).then(|| SendClaim { store: self, id: id.to_string() })
     }
 
     pub async fn get(&self, id: &str) -> Option<Chat> {
@@ -525,6 +542,19 @@ mod tests {
         // Nothing was written back under the hostile name, and the files are left for recovery.
         assert!(!d.parent().unwrap().parent().unwrap().join("outside.json").exists());
         assert!(d.join("evil.json").exists() && d.join("empty.json").exists());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_chat_is_claimed_by_one_send_at_a_time() {
+        let d = dir();
+        let s = ChatStore::load_from(&d);
+        let first = s.claim_send("a").expect("free");
+        assert!(s.claim_send("a").is_none(), "a second send got in while the first was starting its run");
+        let other = s.claim_send("b");
+        assert!(other.is_some(), "another chat is not held up");
+        drop(first);
+        assert!(s.claim_send("a").is_some(), "the claim is given back when the send returns, whatever its outcome");
         std::fs::remove_dir_all(d).unwrap();
     }
 

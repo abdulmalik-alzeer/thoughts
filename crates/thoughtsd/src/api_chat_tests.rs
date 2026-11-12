@@ -146,3 +146,244 @@ async fn deleting_a_chat_mid_answer_waits_for_the_assistant_to_stop_writing() {
     assert!(st.chats.get(&chat).await.is_none());
     std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
 }
+
+fn b64(bytes: &[u8]) -> String { base64::engine::general_purpose::STANDARD.encode(bytes) }
+fn att(name: &str, bytes: &[u8]) -> Attachment { Attachment { name: name.into(), data: b64(bytes) } }
+fn say(text: &str) -> Json<SendBody> { Json(SendBody { text: text.into(), ..Default::default() }) }
+
+/// Stand in for the assistant: remember each prompt it is given, and answer with `ok`.
+fn record_prompts(st: &AppState, ok: bool) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let p = prompts.clone();
+    t::assistant(st, move |info| { let p = p.clone(); async move { p.lock().unwrap().push(info.prompt); ok } });
+    prompts
+}
+
+#[test]
+fn attachments_are_checked_before_anything_is_written() {
+    let err = |list: &[Attachment], max_file, max_total| crate::tr::classify_in(false, &decode_attachments(list, max_file, max_total).unwrap_err());
+    // Names are reduced to a safe file name; data URLs and bare base64 both work.
+    let ok = decode_attachments(&[att("a.txt", b"12345"), Attachment { name: "../../b.txt".into(), data: format!("data:text/plain;base64,{}", b64(b"123")) }], 5, 8).unwrap();
+    assert_eq!(ok, [("a.txt".to_string(), b"12345".to_vec()), ("b.txt".to_string(), b"123".to_vec())]);
+    // One file over the limit for a file: named, in plain words.
+    let e = err(&[att("small.txt", b"1"), att("big.bin", b"123456")], 5, 100);
+    assert_eq!((e.status, e.code, e.message.as_str()), (413, "too_large", "big.bin is larger than 25 MB."));
+    // Files that are fine one by one but too much together.
+    let e = err(&[att("a", b"12345"), att("b", b"1234")], 5, 8);
+    assert_eq!((e.status, e.code), (413, "too_large"));
+    assert_eq!(e.message, crate::tr::text_in(false, "chat.files_too_large", &[]));
+    // Something that is not a file's bytes at all.
+    let e = err(&[Attachment { name: "x.png".into(), data: "data:image/png;base64,@@not base64@@".into() }], 100, 100);
+    assert_eq!((e.status, e.message.as_str()), (422, "x.png could not be read."));
+    // The real limits are the ones the composer shows, and the request may be large enough to carry them.
+    assert_eq!((ATTACHMENT_MAX_BYTES, ATTACHMENTS_MAX_BYTES), (25 * 1024 * 1024, 50 * 1024 * 1024));
+    assert!(SEND_BODY_LIMIT > ATTACHMENTS_MAX_BYTES / 3 * 4 + 1024 * 1024);
+}
+
+#[tokio::test]
+async fn attachments_of_several_megabytes_arrive_and_never_replace_each_other() {
+    let (st, lib) = t::library().await;
+    let prompts = record_prompts(&st, true);
+    let chat = t::chat(&st, "compare").await;
+    let port = serve(&st).await;
+    // Two pasted screenshots arrive under one name. The first is 3 MB: more than fits in a request by default.
+    let big: Vec<u8> = (0..3 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let small = b"the second screenshot".to_vec();
+    let body = json!({"text": "compare these", "attachments": [
+        {"name": "image.png", "data": format!("data:image/png;base64,{}", b64(&big))},
+        {"name": "image.png", "data": b64(&small)}]}).to_string();
+    let mut rx = st.events.subscribe();
+    let (status, text) = http(port, "POST", &format!("/api/chats/{chat}/send"), body.as_bytes()).await;
+    assert_eq!(status, 200, "{text}");
+    t::event(&mut rx, &st, "chat.done").await;
+    let dir = paths::attachments_dir().join(&chat);
+    let (one, two) = (dir.join("image.png"), dir.join("image (2).png"));
+    assert_eq!(std::fs::read(&one).unwrap(), big);
+    assert_eq!(std::fs::read(&two).unwrap(), small);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&two).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    let sent = st.chats.get(&chat).await.unwrap().messages.last().cloned().unwrap();
+    assert_eq!(sent.attachments, [one.to_string_lossy().to_string(), two.to_string_lossy().to_string()]);
+    let prompt = prompts.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(prompt.matches(&*one.to_string_lossy()).count(), 1);
+    assert_eq!(prompt.matches(&*two.to_string_lossy()).count(), 1);
+
+    // A later message with the same file name gets a file of its own; the earlier ones are untouched.
+    chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "and this".into(), attachments: vec![att("image.png", b"third")], ..Default::default() })).await.unwrap();
+    t::event(&mut rx, &st, "chat.done").await;
+    assert_eq!(std::fs::read(dir.join("image (3).png")).unwrap(), b"third");
+    assert_eq!(std::fs::read(&one).unwrap(), big);
+    assert_eq!(std::fs::read(&two).unwrap(), small);
+    // A name without an extension, and one that differs only in letter case.
+    for (name, bytes) in [("notes", &b"1"[..]), ("notes", b"2"), ("Image.PNG", b"fourth")] { save_attachment(&dir, name, bytes).unwrap(); }
+    assert_eq!(std::fs::read(dir.join("notes (2)")).unwrap(), b"2");
+    assert_eq!(std::fs::read(&one).unwrap(), big, "a name in other letter case replaced the first file");
+
+    // A message with a file that cannot be accepted leaves nothing behind: no file, no message.
+    let before = (std::fs::read_dir(&dir).unwrap().count(), st.chats.meta(&chat).await.unwrap().message_count);
+    let bad = Json(SendBody { text: "two files".into(), attachments: vec![att("fine.txt", b"ok"), Attachment { name: "broken.png".into(), data: "@@".into() }], ..Default::default() });
+    assert_eq!(shown(chat_send(State(st.clone()), Path(chat.clone()), bad).await).status, 422);
+    assert_eq!((std::fs::read_dir(&dir).unwrap().count(), st.chats.meta(&chat).await.unwrap().message_count), before);
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn a_request_too_large_to_take_is_refused_in_plain_words() {
+    let st = Arc::new(AppState::for_test());
+    let chat = t::chat(&st, "x").await;
+    let port = serve(&st).await;
+    // One byte more than a send may carry, written in pieces.
+    let len = SEND_BODY_LIMIT + 1;
+    let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    let head = format!("POST /api/chats/{chat}/send HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer test-token\r\nContent-Type: application/json\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n");
+    s.write_all(head.as_bytes()).await.unwrap();
+    let piece = vec![b'a'; 1024 * 1024];
+    let mut left = len;
+    while left > 0 {
+        let n = left.min(piece.len());
+        if s.write_all(&piece[..n]).await.is_err() { break; }
+        left -= n;
+    }
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out).await;
+    let out = String::from_utf8_lossy(&out).to_string();
+    assert!(out.starts_with("HTTP/1.1 413"), "{}", out.chars().take(200).collect::<String>());
+    let body: Value = serde_json::from_str(out.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["code"], "too_large");
+    assert_eq!(body["error"], crate::tr::text_in(false, "chat.files_too_large", &[]));
+    // Anything else wrong with the body is still answered as before.
+    let (status, _) = http(port, "POST", &format!("/api/chats/{chat}/send"), b"{not json").await;
+    assert!((400..500).contains(&status) && status != 413, "{status}");
+    assert_eq!(st.chats.meta(&chat).await.unwrap().message_count, 1);
+}
+
+#[tokio::test]
+async fn two_sends_at_once_start_one_run() {
+    let (st, lib) = t::library().await;
+    let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (r, g) = (runs.clone(), gate.clone());
+    t::assistant(&st, move |_| { let (r, g) = (r.clone(), g.clone()); async move {
+        r.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        g.notified().await;
+        true
+    } });
+    let chat = t::chat(&st, "first").await;
+    let mut rx = st.events.subscribe();
+    let (a, b) = tokio::join!(chat_send(State(st.clone()), Path(chat.clone()), say("one")), chat_send(State(st.clone()), Path(chat.clone()), say("two")));
+    assert!(a.is_ok() != b.is_ok(), "exactly one of the two is accepted");
+    let refused = shown(if a.is_err() { a } else { b });
+    assert_eq!((refused.status, refused.code), (409, "busy"));
+    // The refused message was not added, and a third try while the first is answered is refused the same way.
+    assert_eq!(st.chats.meta(&chat).await.unwrap().message_count, 2);
+    assert_eq!(shown(chat_send(State(st.clone()), Path(chat.clone()), say("three")).await).status, 409);
+    for _ in 0..500 { if runs.load(std::sync::atomic::Ordering::SeqCst) > 0 { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+    gate.notify_one();
+    assert_eq!(t::event(&mut rx, &st, "chat.done").await["ok"], true);
+    assert_eq!(runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let c = st.chats.get(&chat).await.unwrap();
+    assert!(!c.messages.iter().any(|m| m.role == "system"), "no run was stopped");
+    // Once it has finished, the chat takes the next message as usual.
+    chat_send(State(st.clone()), Path(chat.clone()), say("four")).await.unwrap();
+    for _ in 0..500 { if runs.load(std::sync::atomic::Ordering::SeqCst) > 1 { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+    gate.notify_one();
+    t::event(&mut rx, &st, "chat.done").await;
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}
+
+const OLD_SESSION: &str = "0b8f1c2e-3a4d-4e5f-8a9b-0c1d2e3f4a5b";
+
+/// A chat with one exchange behind it and a session id, as after an earlier run.
+async fn chat_with_history(st: &AppState) -> String {
+    let chat = t::chat(st, "What should the shop sell?").await;
+    st.chats.update(&chat, |c| { c.messages.push(Msg::new("assistant", "Candles, to start with.")); c.session_id = Some(OLD_SESSION.into()); }).await;
+    chat
+}
+
+/// Collect events until `n` runs of this chat have ended.
+async fn until_done(rx: &mut tokio::sync::broadcast::Receiver<Value>, n: usize) -> Vec<Value> {
+    let mut seen = vec![];
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        while seen.iter().filter(|e: &&Value| e["type"] == "chat.done").count() < n { seen.push(rx.recv().await.unwrap()); }
+    }).await.expect("the runs did not finish");
+    seen
+}
+
+#[tokio::test]
+async fn a_chat_whose_session_is_gone_carries_on_from_the_saved_conversation() {
+    let (st, lib) = t::library().await;
+    let chat = chat_with_history(&st).await;
+    let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (p, weak) = (prompts.clone(), Arc::downgrade(&st));
+    t::assistant(&st, move |info| { let (p, st) = (p.clone(), weak.upgrade().unwrap()); async move {
+        let n = { let mut all = p.lock().unwrap(); all.push(info.prompt.clone()); all.len() };
+        if n == 1 {
+            // Asked to resume a session it no longer has, the CLI ends the run at once with this failure.
+            let mut m = Msg::new("error", "The assistant could no longer open its earlier session for this conversation.");
+            m.tool = Some(json!({"code": claude::SESSION_LOST, "detail": format!("No conversation found with session ID: {OLD_SESSION}")}));
+            claude::push(&st, &info.chat_id, m).await;
+            return false;
+        }
+        claude::push(&st, &info.chat_id, Msg::new("assistant", "Soap as well.")).await;
+        true
+    } });
+    let mut rx = st.events.subscribe();
+    chat_send(State(st.clone()), Path(chat.clone()), say("And what else?")).await.unwrap();
+    let events = until_done(&mut rx, 2).await;
+
+    // Sent once with the session, then once more with the conversation in its place.
+    let sent = prompts.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0], "And what else?");
+    assert!(sent[1].starts_with("Earlier conversation (continue from it):") && sent[1].ends_with("And what else?"), "{}", sent[1]);
+    assert!(sent[1].contains("USER: What should the shop sell?") && sent[1].contains("ASSISTANT: Candles, to start with."));
+    assert_eq!(sent[1].matches("And what else?").count(), 1, "the new message is not also replayed as history");
+    // The chat: the question once, a quiet note in place of the failure, then the answer.
+    let c = st.chats.get(&chat).await.unwrap();
+    let shape: Vec<(&str, &str)> = c.messages.iter().map(|m| (m.role.as_str(), m.text.as_str())).collect();
+    let note = crate::tr::text_in(false, "chat.session_lost", &[]);
+    assert_eq!(shape, [("user", "What should the shop sell?"), ("assistant", "Candles, to start with."), ("user", "And what else?"),
+        ("system", note.as_str()), ("assistant", "Soap as well.")]);
+    assert!(c.session_id.is_none() && !c.running);
+    assert_eq!(c.all_sessions(), [OLD_SESSION], "still known, so deleting the chat can clean up after it");
+    // The view was told to swap the failure for the note: same message id, new role.
+    let messages: Vec<&Value> = events.iter().filter(|e| e["type"] == "chat.message").map(|e| &e["message"]).collect();
+    let failure = messages.iter().find(|m| m["role"] == "error").expect("the failure was announced");
+    assert!(messages.iter().any(|m| m["id"] == failure["id"] && m["role"] == "system" && m["text"] == note.as_str()));
+    let done: Vec<bool> = events.iter().filter(|e| e["type"] == "chat.done").map(|e| e["ok"].as_bool().unwrap()).collect();
+    assert_eq!(done, [false, true]);
+
+    // From here on the chat has no session, so every message carries the conversation — and nothing is resent twice.
+    chat_send(State(st.clone()), Path(chat.clone()), say("Thanks")).await.unwrap();
+    until_done(&mut rx, 1).await;
+    let sent = prompts.lock().unwrap().clone();
+    assert_eq!(sent.len(), 3);
+    assert!(sent[2].starts_with("Earlier conversation") && sent[2].contains("ASSISTANT: Soap as well.") && sent[2].ends_with("Thanks"));
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn any_other_failure_is_shown_and_not_sent_again() {
+    let (st, lib) = t::library().await;
+    let chat = chat_with_history(&st).await;
+    let prompts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let (p, weak) = (prompts.clone(), Arc::downgrade(&st));
+    t::assistant(&st, move |info| { let (p, st) = (p.clone(), weak.upgrade().unwrap()); async move {
+        p.lock().unwrap().push(info.prompt.clone());
+        claude::push(&st, &info.chat_id, Msg::new("error", "Credit balance is too low")).await;
+        false
+    } });
+    let mut rx = st.events.subscribe();
+    chat_send(State(st.clone()), Path(chat.clone()), say("And what else?")).await.unwrap();
+    until_done(&mut rx, 1).await;
+    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+    assert_eq!(prompts.lock().unwrap().len(), 1);
+    let c = st.chats.get(&chat).await.unwrap();
+    assert_eq!((c.messages.last().unwrap().role.as_str(), c.messages.last().unwrap().text.as_str()), ("error", "Credit balance is too low"));
+    assert_eq!(c.session_id.as_deref(), Some(OLD_SESSION), "the session is kept: it was not the problem");
+    assert!(!c.running);
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}
