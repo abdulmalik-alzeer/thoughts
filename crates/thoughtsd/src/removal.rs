@@ -17,6 +17,8 @@ pub const DATA_FILES: &[&str] = &[
     "trusted.json", "runs.json", "usage.json", "usage-events.jsonl", "layer-pending.json", "layer-requests.json",
     "workflows-approved.json", "workflows-state.json", "suggestions.json", "base-manifest.json",
     "update-status.json", "release-check.json", "backup-state.json", "calendar-export.json",
+    // Kept by the desktop app: customisations switched off from its Recovery menu.
+    "safe-mode",
 ];
 /// Folders the app keeps directly in its data folder.
 pub const DATA_DIRS: &[&str] = &[
