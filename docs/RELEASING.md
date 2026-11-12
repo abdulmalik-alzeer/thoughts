@@ -44,8 +44,9 @@ The same workflow can be started by hand as a [rehearsal](#rehearsal): it builds
 exactly as a release would, and publishes nothing.
 
 `.github/workflows/ci.yml` runs on every push to `main` and on every pull request: the daemon
-tests, the UI build and a compile check of the desktop shell on macOS, Windows and Linux, the UI
-type checks, and the tests of the release pipeline's own scripts.
+tests, the UI build and the desktop shell's tests (`cargo test -p thoughts`, which also builds
+it) on macOS, Windows and Linux, the UI type checks, and the tests of the release pipeline's own
+scripts.
 
 ## Pipeline notes
 
@@ -111,7 +112,14 @@ type checks, and the tests of the release pipeline's own scripts.
   `dangerousDisableAssetCspModification` is set for `style-src` only, because Tauri would otherwise
   add a nonce to styles in every HTML asset, which blocks inline styles inside the sandboxed add-on
   frames. Script hashing stays on: the add-on runtime relies on it.
-- **Linux `.deb`** installs update through the package manager; only the AppImage self-updates.
+- **Linux `.deb`** installs are not updated from inside the app; only the AppImage is. This is the
+  app's choice, not a limit of the updater: tauri-plugin-updater 2.x can install a `.deb` (it runs
+  `dpkg -i` through `pkexec`, a graphical `sudo` prompt or `sudo`, and `latest.json` carries a
+  `linux-x86_64-deb` entry), but that asks for an administrator password in the middle of an
+  update. `update_check` and `update_install` (`src-tauri/src/main.rs`) turn it off whenever the
+  app is not running from an AppImage, and Check for Updates then only looks up the newest version
+  and offers its download page. There is no package repository: a `.deb` user installs the new
+  `.deb` by hand.
 
 ## Rehearsal
 
@@ -160,10 +168,13 @@ stops it and starts its own. Any chat that was mid-answer at that moment is cut 
 
 1. Make sure `main` is green in CI.
 2. Set the version: `node scripts/set-version.mjs X.Y.Z`, then `cargo check -p thoughts`.
-   Then bring the starter kit's history up to date: `git fetch --tags`, then
-   `node scripts/kit-history.mjs`. It lists every starter file each earlier release shipped, so a
-   library made by an older version is not asked for trust again because this release reworded
-   one of the kit's routines (`--check` only says whether the file is current).
+   Then, **before tagging**, regenerate `crates/thoughtsd/src/kit_history.rs`: `git fetch --tags`,
+   then `node scripts/kit-history.mjs`. It lists every starter file each earlier release shipped,
+   so a library made by an older version is not asked for trust again because this release
+   reworded one of the kit's routines. (`--check` only says whether the file is current;
+   `--before X.Y.Z` leaves out that release's own tag and anything newer.) The release workflow's
+   preflight runs `node scripts/kit-history.mjs --check --before X.Y.Z` with every tag fetched and
+   stops before building when the file is out of date.
 3. Commit (`Cargo.toml`, `Cargo.lock`, `package.json`, `package-lock.json`,
    `crates/thoughtsd/src/kit_history.rs`) and push to `main`.
 4. Recommended: [rehearse](#rehearsal) with `gh workflow run release.yml --ref main` and wait for
@@ -342,7 +353,8 @@ Things to know:
   people until the repository (or at least its releases) is public.
 - The first version that contains the public key cannot be reached by the updater from older
   versions. People install that one by hand; from then on updates are automatic.
-- On Linux only the AppImage can update itself. `.deb` users reinstall.
+- On Linux only the AppImage updates itself. `.deb` users install the new `.deb` by hand (the
+  updater could install it, but the app leaves that off; see Pipeline notes).
 - An unsigned macOS app can be updated, but macOS will complain again about each new copy.
   Sort out Apple signing before relying on the updater for Mac users.
 

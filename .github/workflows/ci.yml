@@ -60,8 +60,9 @@ jobs:
         run: cargo test -p thoughtsd
       - name: Build the UI
         run: npx vite build
-      - name: Check the desktop shell
-        run: cargo check -p thoughts
+      # Builds the desktop shell and runs its own tests (plain logic: none needs a display).
+      - name: Desktop shell tests
+        run: cargo test -p thoughts
 
   # Type and template checks for the UI, and the tests of the release pipeline's own scripts.
   ui-check:

@@ -3,6 +3,8 @@
 //
 //   node scripts/kit-history.mjs           rewrite crates/thoughtsd/src/kit_history.rs
 //   node scripts/kit-history.mjs --check   only compare; exit 1 when that file is out of date
+//   … --before X.Y.Z                       only the releases older than X.Y.Z (the release being
+//                                          made: its own tag, once pushed, is not in its list)
 //
 // A library made by an earlier release keeps that release's copies of the kit's routines. The
 // trust check (`trust.rs`) treats a library file that is byte for byte one of the versions listed
@@ -21,12 +23,20 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const out = join(root, 'crates/thoughtsd/src/kit_history.rs');
 const check = process.argv.includes('--check');
+const beforeAt = process.argv.indexOf('--before');
+// (A pre-release such as 0.1.0-rc.1 counts as its version: 0.1.0's own tag is left out too.)
+const before = beforeAt > 0 ? (/^(\d+\.\d+\.\d+)(-[0-9A-Za-z.-]+)?$/.exec(process.argv[beforeAt + 1] ?? '')?.[1] ?? '') : null;
+if (before === '') {
+  console.error('--before takes a version number such as 0.0.9.');
+  process.exit(2);
+}
 
 const git = (args) => execFileSync('git', args, { cwd: root, maxBuffer: 256 << 20 });
 
 const version = (tag) => tag.slice(1).split('.').map(Number);
 const older = (a, b) => { const [x, y] = [version(a), version(b)]; for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i]; return 0; };
-const tags = git(['tag', '--list', 'v*']).toString().split('\n').map((t) => t.trim()).filter((t) => /^v\d+\.\d+\.\d+$/.test(t)).sort(older);
+const tags = git(['tag', '--list', 'v*']).toString().split('\n').map((t) => t.trim()).filter((t) => /^v\d+\.\d+\.\d+$/.test(t))
+  .filter((t) => before === null || older(t, 'v' + before) < 0).sort(older);
 if (!tags.length) {
   console.error('No release tags (vX.Y.Z) found. Run `git fetch --tags` first.');
   process.exit(1);

@@ -93,11 +93,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Every release tag, for the starter kit's history below.
+          fetch-depth: 0
       - name: Plan this run
         id: plan
         env:
           PLATFORMS: ${{ inputs.platforms }}
         run: node scripts/release/plan.mjs
+      # crates/thoughtsd/src/kit_history.rs must list what every earlier release's starter kit
+      # shipped (docs/RELEASING.md, checklist step 2); the release's own tag is not in it.
+      - name: The starter kit's history is up to date
+        if: steps.plan.outputs.mode != 'warm'
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: node scripts/kit-history.mjs --check --before "$VERSION"
       - name: A published release is never rebuilt
         if: steps.plan.outputs.mode == 'release'
         env:
