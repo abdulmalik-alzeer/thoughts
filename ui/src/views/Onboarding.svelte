@@ -32,6 +32,10 @@
   let useApi = $state(false);
   let apiToken = $state('');
   let profession = $state('');
+  let professionOther = $state('');
+  // What is at the chosen folder, as the background service sees it (asked again whenever the path changes).
+  let folder = $state<{ path: string; state: string } | null>(null);
+  let probe = $state<'idle' | 'busy' | 'failed'>('idle');
   const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
 
   // Start with the safest choice: nothing leaves this computer until the user asks for a backup.
@@ -64,6 +68,25 @@
   const cloud = cloudFor(() => String(s.libraryPath ?? ''));
   const inCloud = $derived(cloud.current.synced);
   const cloudName = $derived(cloud.current.service || t('hista.cloud.someDrive'));
+  const fullPath = (p: string) => /^(~\/|\/|[A-Za-z]:[\\/])/.test(p);
+  const typedPath = $derived(String(s.libraryPath ?? '').trim());
+  /** missing · empty · starter (a setup that stopped half-way) · library · files · notFolder — '' while not known. */
+  const here = $derived(folder && folder.path === typedPath ? folder.state : '');
+  const whatIsThere = (path: string) => post('/onboarding/folder', { path }).then((r) => String(r?.state ?? ''));
+  let probeSeq = 0;
+  $effect(() => {
+    const p = typedPath;
+    if (step !== 2) return;
+    const seq = ++probeSeq;
+    if (!p || !fullPath(p)) { probe = 'idle'; return; }
+    probe = 'busy';
+    // A short pause, so a path being typed is not looked up letter by letter.
+    const timer = setTimeout(async () => {
+      try { const state = await whatIsThere(p); if (seq === probeSeq) { folder = { path: p, state }; probe = 'idle'; } }
+      catch { if (seq === probeSeq) probe = 'failed'; /* Finish checks the folder again */ }
+    }, 300);
+    return () => clearTimeout(timer);
+  });
   const validUrl = (u: string) => /^https?:\/\/\S+$/.test((u ?? '').trim());
   const validRemote = (u: string) => /^(https?:\/\/|ssh:\/\/|git@)\S+$/.test(u.trim());
 
@@ -113,7 +136,14 @@
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
       const p = await open({ directory: true });
-      if (typeof p === 'string') s.libraryPath = libraryMode === 'new' ? p.replace(/\/+$/, '') + '/Thoughts' : p;
+      if (typeof p !== 'string') return;
+      if (libraryMode !== 'new') { s.libraryPath = p; return; }
+      // A new library goes straight into an empty folder, and into a "Thoughts" folder inside one that
+      // holds other things. A folder that already holds a library is opened, not started over.
+      const picked = p.replace(/[\\/]+$/, '') || p;
+      const state = await whatIsThere(picked).catch(() => '');
+      if (state === 'library') { libraryMode = 'existing'; s.libraryPath = picked; toast(t('sa.folder.pickedLibrary')); }
+      else s.libraryPath = state === 'empty' || state === 'starter' ? picked : picked + '/Thoughts';
     } catch { toast(t('ob.browseFail'), { kind: 'error' }); }
   }
 
@@ -142,7 +172,17 @@
     if (step === 2) {
       const p = String(s.libraryPath ?? '').trim();
       if (!p) return t('ob.needFolder');
-      if (!/^(~\/|\/|[A-Za-z]:[\\/])/.test(p)) return t('ob.needFullPath');
+      if (!fullPath(p)) return t('ob.needFullPath');
+      if (probe === 'busy') return t('sa.folder.checking');
+      if (libraryMode === 'new') {
+        if (here === 'library') return t('sa.folder.needOther');
+        if (here === 'files') return t('sa.folder.files');
+        if (here === 'notFolder') return t('sa.folder.notFolder');
+      } else {
+        if (here === 'missing') return t('sa.folder.missing');
+        if (here === 'starter') return t('sa.folder.needSetUp');
+        if (here === 'files' || here === 'empty' || here === 'notFolder') return t('sa.folder.notLibrary');
+      }
     }
     if (step === 2) {
       // Git is only a must for an online location; without it the app still works, minus the history.
@@ -167,12 +207,15 @@
       const settings = structuredClone($state.snapshot(s));
       if (!useApi) settings.ai.claude.baseUrl = null;
       if (settings.ai?.claude && !['acceptEdits', 'plan'].includes(settings.ai.claude.permissionMode ?? 'acceptEdits')) settings.ai.claude.permissionMode = 'plan';
-      settings.profession = profession || null;
+      // The app keeps the choice itself (its id, or the user's own few words): every screen reads its
+      // wording from that. The name of the choice in the user's language is for the assistant only.
+      const own = profession === 'other' ? professionOther.trim() : '';
+      settings.profession = own || profession || null;
       const r = await post('/onboarding', {
         settings, libraryMode, seeds: seeds.split('\n').map((x) => x.trim()).filter(Boolean),
         remoteUrl: isGit ? remoteUrl.trim() : '', remoteUsername: isGit ? remoteUser : '', remoteToken: isGit ? remoteToken : '',
         apiToken: useApi ? apiToken.trim() : '',
-        profession: profession ? t('layer.prof.' + profession) : '',
+        profession: own || (profession ? t('layer.prof.' + profession) : ''),
       });
       try { app.settings = await api('/settings'); applyTheme(); } catch { /* the app reloads settings on its own */ }
       done(r.setupChatId);
@@ -180,9 +223,20 @@
       failed(t('ob3.finishFailed'), e);
     } finally { busy = false; }
   }
+
+  // Enter in a text box moves on, like the Next button (never from a checkbox, a list or the notes box).
+  function onKey(e: KeyboardEvent) {
+    if (e.key !== 'Enter' || e.isComposing || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    const el = e.target;
+    if (!(el instanceof HTMLInputElement) || !['text', 'password', 'url', 'email', 'search', ''].includes(el.type)) return;
+    if (step >= steps.length - 1 || blocker || busy) return;
+    e.preventDefault();
+    step++;
+  }
 </script>
 
-<div class="ob">
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="ob" onkeydown={onKey}>
   <div class="drag" data-tauri-drag-region></div>
   <p class="prog" role="status">{t('ob3.stepOf', { n: step + 1, total: steps.length })} · <b>{t('ob.step.' + steps[step])}</b></p>
   <ol class="steps" aria-label={t('ob.stepsLabel')}>
@@ -208,6 +262,10 @@
         <option value="">{t('layer.prof.choose')}</option>
         {#each professions as p}<option value={p}>{t('layer.prof.' + p)}</option>{/each}
       </select>
+      {#if profession === 'other'}
+        <label for="ob-prof-other">{t('sa.prof.otherLabel')}</label>
+        <input id="ob-prof-other" dir="auto" bind:value={professionOther} placeholder={t('sa.prof.otherPh')} maxlength="160" autocomplete="off" />
+      {/if}
       <p class="muted sm">{t('layer.prof.hint')}</p>
     {:else if step === 1}
       <h1 tabindex="-1">{t('ob.aiTitle')}</h1>
@@ -262,7 +320,32 @@
         <button type="button" class="opt" class:sel={libraryMode === 'existing'} aria-pressed={libraryMode === 'existing'} onclick={() => (libraryMode = 'existing')}><b>{t('ob.libExisting')}</b><span class="muted">{t('ob.libExistingHint')}</span></button>
       </div>
       <label for="ob-path">{t('ob.folder')}</label>
-      <div class="row"><input id="ob-path" class="grow" dir="ltr" bind:value={s.libraryPath} autocomplete="off" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.browse')}</button></div>
+      <div class="row"><input id="ob-path" class="grow" dir="ltr" bind:value={s.libraryPath} autocomplete="off" aria-describedby="ob-path-says" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.browse')}</button></div>
+      <div id="ob-path-says" role="status">
+        {#if libraryMode === 'new'}
+          {#if here === 'missing'}<p class="muted sm">{t('sa.folder.new')}</p>
+          {:else if here === 'empty'}<p class="muted sm">{t('sa.folder.empty')}</p>
+          {:else if here === 'starter'}<p class="okline"><Icon name="check" size={15} /> <span>{t('sa.folder.starter')}</span></p>
+          {:else if here === 'library'}
+            <div class="card status">
+              <p class="row"><Icon name="info" size={16} /> <b>{t('sa.folder.library')}</b></p>
+              <p class="muted">{t('sa.folder.libraryHint')}</p>
+              <div class="row gap-top"><button type="button" class="btn primary" onclick={() => (libraryMode = 'existing')}>{t('sa.folder.open')}</button></div>
+            </div>
+          {:else if here === 'files'}<p class="warn"><Icon name="warning" size={15} /> <span>{t('sa.folder.files')}</span></p>
+          {:else if here === 'notFolder'}<p class="warn"><Icon name="warning" size={15} /> <span>{t('sa.folder.notFolder')}</span></p>
+          {/if}
+        {:else if here === 'library'}<p class="okline"><Icon name="check" size={15} /> <span>{t('sa.folder.found')}</span></p>
+        {:else if here === 'starter'}
+          <div class="card status">
+            <p class="row"><Icon name="info" size={16} /> <b>{t('sa.folder.unfinished')}</b></p>
+            <p class="muted">{t('sa.folder.unfinishedHint')}</p>
+            <div class="row gap-top"><button type="button" class="btn primary" onclick={() => (libraryMode = 'new')}>{t('sa.folder.setUp')}</button></div>
+          </div>
+        {:else if here === 'missing'}<p class="warn"><Icon name="warning" size={15} /> <span>{t('sa.folder.missing')}</span></p>
+        {:else if here}<p class="warn"><Icon name="warning" size={15} /> <span>{t('sa.folder.notLibrary')}</span></p>
+        {/if}
+      </div>
       {#if libraryMode === 'new'}
         <label for="ob-seeds">{t('ob.seeds')}</label>
         <textarea id="ob-seeds" rows="2" dir="auto" bind:value={seeds} placeholder={t('ob.seedsPh')}></textarea>
