@@ -850,8 +850,9 @@ fn set_dock_icon(app: tauri::AppHandle, png: Vec<u8>) -> Result<(), String> {
 fn nav_allowed(url: &tauri::Url, dev: Option<&tauri::Url>) -> bool {
     let same_server = |a: &tauri::Url| a.scheme() == url.scheme() && a.host_str() == url.host_str() && a.port_or_known_default() == url.port_or_known_default();
     match url.scheme() {
-        // Empty frames, and documents made in the page (a PDF preview is a blob).
-        "about" | "blob" | "data" => true,
+        // Empty frames, and documents made in the page (a PDF preview is a blob). Never `data:`: nothing
+        // of the app uses it, and an add-on frame must not swap its page for one (SEC-41).
+        "about" | "blob" => true,
         // The bundled app…
         "tauri" => url.host_str() == Some("localhost") && url.port().is_none(),
         // …which Windows and Android serve as http(s)://tauri.localhost. Elsewhere that name is just
@@ -1019,7 +1020,9 @@ mod tests {
         }
         // Another web server on this computer is not the app, whatever port it listens on.
         for bad in ["http://localhost:8080/login", "http://localhost/", "http://localhost:1420/", "http://127.0.0.1:3000/", "https://localhost:8443/",
-            "https://example.com/", "file:///etc/passwd", "asset://localhost/etc/passwd", "tauri://evil.example/", "tauri://localhost:99/", "javascript:alert(1)"] {
+            "https://example.com/", "file:///etc/passwd", "asset://localhost/etc/passwd", "tauri://evil.example/", "tauri://localhost:99/", "javascript:alert(1)",
+            // A page an add-on frame could build from text and swap itself for.
+            "data:text/html,<script>parent.postMessage(1,'*')</script>"] {
             assert!(!nav_allowed(&url(bad), None), "{bad}");
         }
         // A development build also loads its own dev server, and only that one.

@@ -9,11 +9,16 @@
 //   and the frame's own content-security policy forbids all network access (`connect-src 'none'`).
 //   The daemon token lives only in a private variable of lib/api.ts and is never sent to a frame.
 // * The frame document is the static page public/plugin-frame.html, which runs public/plugin-frame.js
-//   and carries its own strict content-security policy (see `frameSrc`). The host then posts the plugin's
-//   source to it; the frame imports it from a blob URL and calls `default(pluginApi)`.
+//   and carries its own strict content-security policy (see `frameSrc`; on Windows it is handed over
+//   as `srcdoc`, see `viaSrcdoc`). The host then posts the plugin's source to it; the frame imports
+//   it from a blob URL and calls `default(pluginApi)`.
 // * The frame talks to the host only through postMessage RPC: `{id, method, args}` →
 //   `{id, result | error}`. The host identifies the caller by `event.source`, never by anything the
-//   message says, and checks every data method against the permissions that plugin declared in
+//   message says. With `init` it hands the frame's runtime a one-off key that every later message
+//   must carry; add-on code cannot read it, so a page the frame is later sent to (a reload, a data:
+//   or blob: page) cannot speak for the add-on — and a frame that leaves its page is closed. (An
+//   HTML view's own scripts may post the raw protocol without the key; that path only ever reads.)
+//   The host checks every data method against the permissions that plugin declared in
 //   `manifest.json` (`plugins["<file>.js"].permissions`: library:read, todos:read, todos:write,
 //   ideas:read, chat:start). Undeclared → the call rejects and the user sees one toast naming the
 //   plugin and the missing permission. Private library paths are never listed, read or searched:
@@ -39,25 +44,61 @@
 // * The current theme's CSS variables are copied into every frame (and re-sent when the theme,
 //   mode or language changes) so plugin UI matches the app.
 // * Everything a plugin registered is disposed when the layer reloads; a plugin that throws is
-//   switched off on its own; the crash-loop guard below turns customisations off after a start
-//   that never finished.
-import { api, on, post, put, reloadApp, ApiError } from './api';
+//   switched off on its own; the freeze guard below turns customisations off after a session in
+//   which add-on code never gave control back.
+import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
 import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig } from './store.svelte';
+import { confirmDialog } from './dialog.svelte';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang } from './i18n';
 
 let styleEl: HTMLStyleElement | null = null;
 
-// ---------- crash-loop guard ----------
-// Before running any plugin on start-up we leave a marker; the shell removes it once the app
-// has finished booting. A marker still present on the next start means the last start never
-// got that far, so we come up with customisations off and let the user roll back or retry.
-const BOOT_KEY = 'thoughts.layerBoot';
-const flag = {
-  get: () => { try { return localStorage.getItem(BOOT_KEY); } catch { return null; } },
-  set: () => { try { localStorage.setItem(BOOT_KEY, String(Date.now())); } catch { /* ignore */ } },
-  clear: () => { try { localStorage.removeItem(BOOT_KEY); } catch { /* ignore */ } },
+// ---------- freeze guard ----------
+// Add-on code runs in frames that share the window's thread on macOS and Linux: code there that
+// never gives control back freezes the whole window, and no timer of ours can fire to notice. What
+// does survive is localStorage. So whenever the host hands a frame something that runs add-on code
+// (its start, an event, a command, the answer to a call — see `deliver`) it first writes down whose
+// code that is, and removes the note when that frame answers again. A note still there at the next
+// start names what the app was running when it stopped:
+//   * add-ons of the kept layer → customisations start switched off (safe mode), with the name;
+//   * a staged add-on under test or preview → the kept layer starts as usual, and that staged change
+//     is not test-loaded again: the review says so instead, and Try / Keep ask first.
+// Code an add-on runs on its own (a timer, a click inside its page) is not covered by the note.
+const WATCH_KEY = 'thoughts.layerBoot'; // name from 0.0.8, whose bare timestamp still reads as "never finished"
+const FROZE_KEY = 'thoughts.layerFroze';
+/** `names`: kept add-ons that were running; `tests`: staged ones being test-loaded; `preview`: Try it was on. */
+type Watch = { names: string[]; tests: string[]; preview: boolean; sig: string };
+type Froze = { sig: string; names: string[] };
+const store = {
+  get: (k: string) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k: string, v: string) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+  del: (k: string) => { try { localStorage.removeItem(k); } catch { /* ignore */ } },
 };
+const names = (v: any): string[] => (Array.isArray(v) ? v.filter((x) => typeof x === 'string').slice(0, 20) : []);
+function readJson(k: string): any { try { const v = JSON.parse(store.get(k) || 'null'); return v && typeof v === 'object' ? v : null; } catch { return null; } }
+
+/** What the last session left behind. Read once, before this session writes anything. */
+const leftBehind: Watch | null = (() => {
+  if (!store.get(WATCH_KEY)) return null;
+  const v = readJson(WATCH_KEY);
+  return { names: names(v?.names), tests: names(v?.tests), preview: v?.preview === true, sig: typeof v?.sig === 'string' ? v.sig : '' };
+})();
+const froze = {
+  get(): Froze | null { const v = readJson(FROZE_KEY); return v && typeof v.sig === 'string' && v.sig ? { sig: v.sig, names: names(v.names) } : null; },
+  add(sigOf: string, list: string[]) {
+    if (!sigOf) return;
+    const cur = froze.get();
+    store.set(FROZE_KEY, JSON.stringify({ sig: sigOf, names: [...new Set([...(cur?.sig === sigOf ? cur.names : []), ...list])] }));
+  },
+  clear() { store.del(FROZE_KEY); },
+};
+// A staged change was being tested or previewed: remember it, and do not blame the kept layer.
+const stagedLeft = !!leftBehind && (leftBehind.preview || leftBehind.tests.length > 0);
+if (leftBehind && stagedLeft) froze.add(leftBehind.sig, leftBehind.tests.length ? leftBehind.tests : leftBehind.names);
+/** True while the kept layer is suspected: its add-ons were running when the app last stopped. */
+let crashed = !!leftBehind && !leftBehind.preview && (leftBehind.names.length > 0 || !leftBehind.tests.length);
+if (leftBehind && !crashed) store.del(WATCH_KEY);
 let firstLoad = true;
 
 // The desktop app loads the page with `?recovered=1` after its Recovery menu undid a change or went
@@ -67,19 +108,26 @@ let firstLoad = true;
 try {
   const q = new URLSearchParams(location.search);
   if (q.has('recovered')) {
-    flag.clear();
+    crashed = false;
+    store.del(WATCH_KEY);
     q.delete('recovered');
     const rest = q.toString();
     history.replaceState(null, '', location.pathname + (rest ? '?' + rest : '') + location.hash);
   }
 } catch { /* ignore */ }
 
-/** Called by the shell when the app has finished booting with the layer loaded. */
-export function layerBooted() { if (app.safeReason !== 'crash') flag.clear(); }
+/** Why customisations start switched off after a session that stopped responding, in plain words. */
+export function safeCrashText(): string {
+  const running = crashed ? leftBehind?.names ?? [] : [];
+  if (running.length === 1) return t('lua.safeCrashNamed', { name: shortName(running[0]) });
+  return t(running.length ? 'lua.safeCrash' : 'shell.safe.crash');
+}
 /** Forget a failed start (after a rollback, or when the user chooses to try again). */
-export function clearLayerBootFlag() { flag.clear(); }
+export function clearLayerBootFlag() { crashed = false; store.del(WATCH_KEY); }
 /** Leave safe mode and load customisations again. */
-export function retryLayer() { flag.clear(); reloadApp('', { leaveSafe: true }); }
+export function retryLayer() { clearLayerBootFlag(); reloadApp('', { leaveSafe: true }); }
+/** An add-on's name as people see it: its file name without the ending. */
+const shortName = (file: string) => String(file).replace(/\.(js|html)$/i, '');
 
 // ---------- per-plugin bookkeeping ----------
 type Surface = { kind: 'view' | 'widget' | 'html'; id: string };
@@ -93,9 +141,19 @@ type Plugin = {
   /** Review-time test load: every data call answers with nothing and nothing is registered. */
   dry?: { done: (error: string | null) => void };
 };
-/** A plugin or view of the layer as the user should see it listed (Settings, Review). */
-export type LayerItem = { name: string; kind: 'plugin' | 'view'; permissions: string[]; write: string[]; description: string; apiVersion: number; unsupported: boolean; message: string; error?: string };
-type Frame = { el: HTMLIFrameElement; plugin: Plugin; surface: Surface | null; events: Set<string> };
+/** A plugin or view of the layer as the user should see it listed (Settings, Review). `error`: it did
+ *  not start when test-loaded; `skipped`: why it was not test-loaded at all. */
+export type LayerItem = { name: string; kind: 'plugin' | 'view'; permissions: string[]; write: string[]; description: string; apiVersion: number; unsupported: boolean; message: string; error?: string; skipped?: string };
+type Frame = {
+  el: HTMLIFrameElement; plugin: Plugin; surface: Surface | null; events: Set<string>;
+  /** Handed to the frame's runtime with `init`; every message it sends afterwards must carry it. */
+  key: string;
+  /** The frame's document said it is ready (once: a second time means the frame went elsewhere). */
+  ready: boolean;
+  loads: number; closed: boolean;
+  /** For a page or widget: the mount it belongs to, so the frame can be started again in place. */
+  slot?: { f: Frame };
+};
 
 let plugins: Plugin[] = [];
 const frames = new Set<Frame>();
@@ -126,10 +184,23 @@ const EVENTS: Record<string, string[]> = {
 };
 const VIEWS = ['home', 'chats', 'chat', 'ideas', 'todos', 'docs', 'projects', 'settings', 'help', 'plugin'];
 
+// ---------- limits ----------
+// Kept per add-on NAME for the whole session, so reloading the layer does not reset them.
+const rateLog = new Map<string, number[]>();
+/** The times noted under `key` that are younger than `within` ms (the list is kept: push to it to note one more). */
+function recent(key: string, within: number): number[] {
+  const now = Date.now();
+  const list = (rateLog.get(key) ?? []).filter((x) => now - x < within);
+  rateLog.set(key, list);
+  return list;
+}
+
 function destroyFrame(f: Frame) {
+  f.closed = true;
   frames.delete(f);
   f.plugin.frames.delete(f);
   f.el.remove();
+  landed(f);
 }
 
 function dispose(p: Plugin) {
@@ -190,6 +261,118 @@ function lookMsg(type: 'init' | 'look') {
 
 function postTo(f: Frame, msg: any) { try { f.el.contentWindow?.postMessage(msg, '*'); } catch { /* frame gone */ } }
 
+// ---------- handing control to add-on code (the freeze guard's note) ----------
+/** `want`: the ping sent right after the hand-over (its pong means the add-on gave control back);
+ *  `pinged` / `ponged`: the last ping sent and the highest one answered; `silent`: how long the app
+ *  itself has been awake since the frame last answered a ping. */
+type Flight = { since: number; load: boolean; want: number; pinged: number; ponged: number; silent: number };
+/** Frames that were handed something and have not answered since. */
+const flights = new Map<Frame, Flight>();
+/** A frame in its own process (Chromium may give it one) can hang alone: after this long without
+ *  an answer while the app itself is running, it is switched off. */
+const STALL_MS = 6000;
+let pingSeq = 0;
+let written = '';
+let watchdog: ReturnType<typeof setInterval> | undefined;
+let lastTick = 0;
+/** Add-ons start one at a time, so the note names exactly one of them while it starts. */
+const loadQueue: { f: Frame; msg: any }[] = [];
+let loading: Frame | null = null;
+
+function noteWatch() {
+  if (!flights.size) {
+    // Gone as soon as nothing is out: a note left by an app that was merely quit mid-call would
+    // look like a freeze at the next start.
+    if (written) { written = ''; store.del(WATCH_KEY); }
+    return;
+  }
+  const kept = new Set<string>(), tests = new Set<string>();
+  for (const f of flights.keys()) (f.plugin.dry ? tests : kept).add(f.plugin.name);
+  const staged = app.preview || tests.size > 0;
+  const note: Watch = { names: [...kept].sort(), tests: [...tests].sort(), preview: app.preview, sig: staged ? sig(app.pending) : '' };
+  const body = JSON.stringify(note);
+  if (body === written) return;
+  written = body;
+  store.set(WATCH_KEY, body);
+}
+
+/** Hand a frame something that runs add-on code. `load`: the add-on's start, which is over when the
+ *  frame reports `loaded` / `failed` — or keeps answering although it has not finished. */
+function deliver(f: Frame, msg: any, load = false) {
+  if (f.closed) return;
+  const n = ++pingSeq;
+  const fl = flights.get(f);
+  if (fl) { fl.want = n; fl.pinged = n; fl.load ||= load; } else flights.set(f, { since: Date.now(), load, want: n, pinged: n, ponged: 0, silent: 0 });
+  noteWatch();
+  postTo(f, msg);
+  postTo(f, { type: 'ping', n });
+  if (!watchdog) { lastTick = Date.now(); watchdog = setInterval(watchTick, 500); }
+}
+
+/** The frame answered (or is gone): its code is no longer running on our account. */
+function landed(f: Frame) {
+  if (flights.delete(f)) noteWatch();
+  if (loading === f) { loading = null; nextLoad(); }
+}
+
+function queueLoad(f: Frame, msg: any) { loadQueue.push({ f, msg }); nextLoad(); }
+function nextLoad() {
+  while (!loading) {
+    const job = loadQueue.shift();
+    if (!job) return;
+    if (job.f.closed || job.f.plugin.dead) continue;
+    loading = job.f;
+    deliver(job.f, job.msg, true);
+  }
+}
+
+function watchTick() {
+  const now = Date.now();
+  // A long gap between ticks means the app itself was asleep or in the background: no verdict from that.
+  const awake = Math.min(now - lastTick, 1000) * (now - lastTick > 5000 ? 0 : 1);
+  lastTick = now;
+  for (const [f, fl] of [...flights]) {
+    if (f.closed || f.plugin.dead) { landed(f); continue; }
+    // Answered the ping of the last tick: however slowly the app's timers run (a hidden window is
+    // throttled), the frame is not stuck.
+    const answering = fl.ponged >= fl.pinged;
+    fl.silent = answering ? 0 : fl.silent + awake;
+    // Still starting, but answering: not stuck, so the next add-on may start. (A test load keeps its
+    // note until it is over: it runs the module twice, and the second run must be covered too.)
+    if (fl.load && answering && now - fl.since > 1500 && !f.plugin.dry) { landed(f); continue; }
+    if (fl.silent >= STALL_MS) { stalled(f); continue; }
+    if (answering) { fl.pinged = ++pingSeq; postTo(f, { type: 'ping', n: fl.pinged }); }
+  }
+  if (!flights.size) { clearInterval(watchdog); watchdog = undefined; }
+}
+
+/** The app is running but this frame has stopped answering: its code is stuck. (The app did not
+ *  freeze, so this is an ordinary failure, not a reason to stop testing the change.) */
+function stalled(f: Frame) {
+  const p = f.plugin;
+  destroyFrame(f);
+  if (p.dry) p.dry.done(t('lua.hang'));
+  else fail(p, new Error(t('lua.hang')));
+}
+
+/** The frame's page was replaced: by the add-on (it went to another page, or reloaded itself), or
+ *  because the app moved the frame on screen, which reloads it. Whatever is in the frame now gets
+ *  nothing. A page or widget is started again in a new frame from our own document; anything else,
+ *  or a frame that keeps leaving, switches the add-on off. */
+function left(f: Frame) {
+  if (f.closed) return;
+  const p = f.plugin, into = f.el.parentElement, slot = f.slot;
+  destroyFrame(f);
+  if (p.dry) { p.dry.done(t('lua.left')); return; }
+  if (p.dead) return;
+  const again = recent('left:' + p.name, 10_000);
+  again.push(Date.now());
+  if (f.surface && slot && into && again.length <= 3) {
+    try { slot.f = createFrame(p, f.surface, into); slot.f.slot = slot; return; } catch { /* fall through */ }
+  }
+  fail(p, new Error(t('lua.left')));
+}
+
 let lookTimer: ReturnType<typeof setTimeout> | undefined;
 function relook() {
   clearTimeout(lookTimer);
@@ -198,21 +381,48 @@ function relook() {
 
 // ---------- frames ----------
 // Each frame loads the static page public/plugin-frame.html (which runs public/plugin-frame.js) from
-// the app's own origin. Because it is a real document rather than srcdoc, it carries its own strict
-// content-security policy instead of inheriting the app's, and it works under the desktop app's policy.
+// the app's own origin. It carries its own strict content-security policy.
 const frameSrc = () => new URL('plugin-frame.html', document.baseURI).href.replace(/[?#].*$/, '');
 
+// Windows is different. There the desktop shell puts its command bridge into EVERY frame of the
+// window, sandboxed or not, and accepts a command from any frame whose address is the app's own. A
+// frame loaded from plugin-frame.html has such an address, so an add-on could send the shell
+// commands. On Windows the same document is therefore handed to the frame as `srcdoc`: its address
+// is then `about:srcdoc`, which the shell treats as a foreign page and refuses. (A srcdoc page also
+// has to satisfy the app's own policy: the runtime's hash is in tauri.conf.json for that.) Elsewhere
+// the bridge exists only in the app window itself, and the frame's runtime checks that it does.
+const viaSrcdoc = () => inTauri() && ((window as any).__THOUGHTS_PLATFORM__ === 'windows' || (!(window as any).__THOUGHTS_PLATFORM__ && /Windows/i.test(navigator.userAgent)));
+let frameHtml: string | null = null;
+/** Fetch the frame document once where it is needed as text (see `viaSrcdoc`). */
+async function frameDoc(): Promise<void> {
+  if (frameHtml !== null || !viaSrcdoc()) return;
+  const r = await fetch(frameSrc());
+  if (!r.ok) throw new Error('plugin-frame.html: ' + r.status);
+  frameHtml = await r.text();
+}
+
+function frameKey(): string {
+  const b = new Uint8Array(18);
+  crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+}
+
 function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Frame {
+  if (viaSrcdoc() && frameHtml === null) throw new Error('The add-on frame is not ready yet');
   const el = document.createElement('iframe');
   el.setAttribute('sandbox', 'allow-scripts');
   el.setAttribute('referrerpolicy', 'no-referrer');
-  el.setAttribute('title', p.description || p.name.replace(/\.(js|html)$/, ''));
+  el.setAttribute('title', p.description || shortName(p.name));
   el.style.cssText = surface
     ? `border:0;display:block;width:100%;height:${surface.kind === 'widget' ? '80px' : '100%'};background:transparent;color-scheme:normal`
     : 'border:0;width:0;height:0;position:absolute;visibility:hidden';
   if (!surface) { el.tabIndex = -1; el.setAttribute('aria-hidden', 'true'); }
-  el.src = frameSrc();
-  const f: Frame = { el, plugin: p, surface, events: new Set() };
+  if (frameHtml !== null) el.srcdoc = frameHtml; else el.src = frameSrc();
+  const f: Frame = { el, plugin: p, surface, events: new Set(), key: frameKey(), ready: false, loads: 0, closed: false };
+  // One document per frame: after our runtime said it is ready, its own page finishing is the one
+  // load to expect; another means the frame was sent somewhere else. (A load before `ready`, such as
+  // an engine reporting the frame's first empty page, does not count.)
+  el.addEventListener('load', () => { if (f.ready && ++f.loads > 1) left(f); });
   frames.add(f);
   p.frames.add(f);
   into.appendChild(el);
@@ -222,8 +432,9 @@ function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Fra
 /** Mount one of a plugin's surfaces into a slot. Returns the cleanup that removes it. */
 function mountSurface(p: Plugin, surface: Surface, el: HTMLElement): () => void {
   if (p.dead) throw new Error(t('layer.pluginOff', { name: p.name }));
-  const f = createFrame(p, surface, el);
-  return () => destroyFrame(f);
+  const slot = { f: createFrame(p, surface, el) };
+  slot.f.slot = slot;
+  return () => destroyFrame(slot.f);
 }
 
 function background(): HTMLElement {
@@ -310,7 +521,7 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
   if (perm && !p.perms.has(perm)) throw denied(p, perm);
   if (app.preview && WRITES.has(method)) throw previewOnly();
   const a = Array.isArray(args) ? args : [];
-  const invoke = (cb: any) => (...x: any[]) => { if (!p.dead) postTo(f, { type: 'invoke', cb, args: x.map(plain) }); };
+  const invoke = (cb: any) => (...x: any[]) => { if (!p.dead) deliver(f, { type: 'invoke', cb, args: x.map(plain) }); };
   switch (method) {
     case 'library.list': return ((await api('/library/tree?scope=plugin&exclude=private')) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
     case 'library.read': { const d = await api(`/library/file?scope=plugin&path=${encodeURIComponent(cleanPath(a[0]))}`); return String(d.content ?? ''); }
@@ -432,41 +643,72 @@ async function handle(f: Frame, method: string, args: any[]): Promise<any> {
 function onMessage(e: MessageEvent) {
   let f: Frame | undefined;
   for (const x of frames) if (x.el.contentWindow === e.source) { f = x; break; }
-  if (!f) return;
+  if (!f || f.closed) return;
   const m = e.data;
   if (!m || typeof m !== 'object') return;
-  const p = f.plugin;
-  if (p.dry) {
-    // A review-time test load: hand it the code, then only listen for "it loaded" or "it failed".
-    if (m.type === 'ready') postTo(f, { ...lookMsg('init'), kind: p.kind, name: p.name, code: p.code, surface: null });
-    else if (m.type === 'loaded') p.dry.done(null);
-    else if (m.type === 'failed') p.dry.done(str(m.error, 600) || 'failed');
-    else if (typeof m.method === 'string' && 'id' in m) postTo(f, { id: m.id, result: dryAnswer(m.method) });
+  const p = f.plugin, frame = f;
+  if (m.type === 'ready') {
+    // Our frame document says this once, before it has the key. Again means the frame holds another page.
+    if (f.ready) { left(f); return; }
+    f.ready = true;
+    queueLoad(f, {
+      ...lookMsg('init'), key: f.key, kind: p.kind, name: p.name, code: p.code,
+      surface: !p.dry && f.surface && f.surface.kind !== 'html' ? f.surface : null,
+      // A test load first runs the code in a worker, which can be stopped if it never yields.
+      preflight: !!p.dry,
+    });
     return;
   }
-  if (m.type === 'ready') {
-    postTo(f, { ...lookMsg('init'), kind: p.kind, name: p.name, code: p.code, surface: f.surface && f.surface.kind !== 'html' ? f.surface : null });
-  } else if (m.type === 'failed') {
+  const rpc = typeof m.method === 'string' && 'id' in m;
+  if (m.k !== f.key) {
+    // No key. The scripts of an HTML view may post the raw protocol themselves (it only reads);
+    // anything else was not sent by our runtime and gets nothing.
+    if (!(p.kind === 'view' && f.ready && rpc && m.k === undefined)) {
+      if (rpc && f.ready) postTo(f, { id: m.id, error: 'Use the "thoughts" object the add-on was given.', code: 'key' });
+      return;
+    }
+  } else if (m.type === 'pong') {
+    const fl = flights.get(f);
+    if (fl) { const n = Number(m.n) || 0; if (n > fl.ponged) fl.ponged = n; if (!fl.load && n >= fl.want) landed(f); }
+    return;
+  } else if (m.type === 'bye') {
+    left(f);
+    return;
+  } else if (m.type === 'loaded' || m.type === 'failed') {
+    landed(f);
+  }
+  if (p.dry) {
+    // A review-time test load: only listen for "it loaded" or "it failed"; calls get empty answers.
+    if (m.type === 'loaded') p.dry.done(null);
+    else if (m.type === 'failed') p.dry.done(m.code === 'hang' ? t('lua.hang') : str(m.error, 600) || 'failed');
+    else if (rpc) reply(frame, { id: m.id, result: dryAnswer(m.method) });
+    return;
+  }
+  if (m.type === 'failed') {
     if (m.code === 'permission') return; // the user was already told which permission is missing
-    fail(p, new Error(str(m.error, 2000)));
+    fail(p, new Error(m.code === 'hang' ? t('lua.hang') : str(m.error, 2000)));
   } else if (m.type === 'size') {
     if (f.surface?.kind === 'widget') f.el.style.height = Math.max(24, Math.min(900, Number(m.height) || 0)) + 'px';
-  } else if (typeof m.method === 'string' && 'id' in m) {
-    const frame = f;
+  } else if (rpc) {
     handle(frame, m.method, m.args).then(
-      (result) => postTo(frame, { id: m.id, result }),
-      (err) => postTo(frame, { id: m.id, error: String(err?.message ?? err), code: err?.code }),
+      (result) => reply(frame, { id: m.id, result }),
+      (err) => reply(frame, { id: m.id, error: String(err?.message ?? err), code: err?.code }),
     );
   }
 }
 
+/** Answer a call. The add-on's code carries on from there, so it is noted like any other hand-over. */
+function reply(f: Frame, msg: any) { if (!f.closed) deliver(f, msg); }
+
 if (typeof window !== 'undefined') {
   window.addEventListener('message', onMessage);
+  // Reloading or leaving the window while a note is up is not a freeze: this still ran.
+  window.addEventListener('pagehide', () => { if (written) { written = ''; store.del(WATCH_KEY); } });
   on((e) => {
     const fields = EVENTS[e?.type];
     if (!fields) return;
     const payload = Object.fromEntries(fields.map((k) => [k, e[k]]));
-    for (const f of frames) if (f.events.has(e.type) && !f.plugin.dead) postTo(f, { type: 'event', event: e.type, payload });
+    for (const f of frames) if (f.events.has(e.type) && !f.plugin.dead) deliver(f, { type: 'event', event: e.type, payload });
   });
   new MutationObserver(relook).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-mode', 'dir', 'lang', 'class'] });
 }
@@ -555,13 +797,17 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
   if (app.safeMode) { app.nav = null; app.todosCfg = null; setLayerItems([]); return; }
   const boot = firstLoad;
   firstLoad = false;
-  if (boot && flag.get()) {
+  if (boot && crashed) {
+    // Add-ons of the kept layer were running when the app last stopped responding (see the freeze guard).
     app.safeMode = true;
     app.safeReason = 'crash';
     app.nav = null; app.todosCfg = null;
     return;
   }
   const m = await api(opts.preview ? '/layer?preview=1' : '/layer');
+  // Without the frame document (Windows only) each add-on reports that it could not start; the
+  // rest of the customisations still load.
+  await frameDoc().catch(() => {});
   // Reload: remove everything the previous generation of plugins registered.
   unload();
   app.preview = !!opts.preview;
@@ -585,7 +831,6 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
   const list: any[] = Array.isArray(m.plugins) ? m.plugins : [];
   const items: LayerItem[] = [...list.map((x) => describe(x, 'plugin', manifest)), ...views.map((x) => describe(x, 'view', manifest))];
   setLayerItems(items);
-  if (boot && items.some((x) => !x.unsupported)) flag.set();
   views.forEach((v, i) => {
     const it = items[list.length + i];
     if (it.unsupported) return; // made for a newer app: listed in Settings, never run
@@ -618,6 +863,7 @@ export async function checkPending(open = true): Promise<PendingChange | null> {
   if (!p?.exists) {
     app.pending = null;
     app.showReview = false;
+    froze.clear();
     if (app.preview) await loadLayer().catch(() => {});
     return null;
   }
@@ -628,6 +874,13 @@ export async function checkPending(open = true): Promise<PendingChange | null> {
 
 export function openReview() { dismissed = ''; if (app.pending) app.showReview = true; else checkPending(true); }
 export function closeReview() { dismissed = sig(app.pending); app.showReview = false; }
+
+/** The staged change froze the app when it was last tested or tried: ask before running it again. */
+async function sureDespiteFreeze(what: 'try' | 'keep'): Promise<boolean> {
+  const fz = froze.get();
+  if (!fz || fz.sig !== sig(app.pending)) return true;
+  return confirmDialog({ title: t('lua.frozeTitle'), body: t(what === 'try' ? 'lua.frozeTry' : 'lua.frozeKeep'), confirmLabel: t(what === 'try' ? 'lua.frozeTryAnyway' : 'lua.frozeKeepAnyway'), danger: true });
+}
 
 /** Start a customise run. The assistant works on a staged copy; nothing changes until the review. */
 export async function startCustomise(prompt: string): Promise<string | null> {
@@ -640,10 +893,12 @@ export async function startCustomise(prompt: string): Promise<string | null> {
   return r?.chatId ?? null;
 }
 
-/** "Try it": load the staged layer into the running app. */
-export async function tryPending() {
+/** "Try it": load the staged layer into the running app. False when the person decided not to. */
+export async function tryPending(): Promise<boolean> {
+  if (!(await sureDespiteFreeze('try'))) return false;
   await loadLayer({ preview: true });
   closeReview();
+  return true;
 }
 
 export async function stopPreview() { await loadLayer(); }
@@ -653,6 +908,7 @@ export async function stopPreview() { await loadLayer(); }
  *  reloaded for the user to look at again. */
 export async function keepPending(opts: { approveWorkflows?: boolean } = {}): Promise<void> {
   if (app.pending?.problems?.length) { openReview(); throw new Error(t('layer3.problemsBlock')); }
+  if (!(await sureDespiteFreeze('keep'))) return;
   let r: any;
   try {
     r = await post('/layer/pending/apply', { ...(app.pending?.signature ? { signature: app.pending.signature } : {}), ...(opts.approveWorkflows ? { approveWorkflows: true } : {}) });
@@ -665,6 +921,7 @@ export async function keepPending(opts: { approveWorkflows?: boolean } = {}): Pr
   }
   app.pending = null;
   app.showReview = false;
+  froze.clear();
   await loadLayer().catch((e) => failed(t('shell.layerFailed'), e));
   toast(t('layer.kept'), {
     kind: 'success', key: 'layer',
@@ -677,6 +934,7 @@ export async function discardPending() {
   await post('/layer/pending/discard');
   app.pending = null;
   app.showReview = false;
+  froze.clear();
   if (app.preview) await loadLayer().catch(() => {});
 }
 
@@ -696,24 +954,38 @@ export async function stagedItems(): Promise<LayerItem[]> {
 }
 
 /** Test-load every staged add-on and page in a hidden sandbox frame that is given no data and can
- *  change nothing, and report the ones that fail to start. Unsupported items are not run. */
+ *  change nothing, and report the ones that fail to start. Unsupported items are not run.
+ *
+ *  Nothing is run when customisations are off (safe mode must load nothing, staged or kept), nor when
+ *  this very change froze the app the last time it was tested or tried: such items come back with
+ *  `skipped` (why) and, in the second case, `error`. One item is tested at a time. */
 export async function dryLoadStaged(): Promise<LayerItem[]> {
   let m: any;
   try { m = await api('/layer?preview=1'); } catch { return []; }
   const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
   const sources: [any, 'plugin' | 'view'][] = [...(m.plugins || []).map((x: any) => [x, 'plugin'] as [any, 'plugin']), ...(m.views || []).map((x: any) => [x, 'view'] as [any, 'view'])];
-  return Promise.all(sources.map(async ([src, kind]) => {
-    const it = describe(src, kind, manifest);
-    if (it.unsupported) return it;
+  const items = sources.map(([src, kind]) => describe(src, kind, manifest));
+  if (app.safeMode) return items.map((it) => (it.unsupported ? it : { ...it, skipped: t('lua.notTestedSafe') }));
+  const fz = froze.get();
+  if (fz && fz.sig === sig(app.pending)) {
+    const blame = (it: LayerItem) => !fz.names.length || fz.names.includes(it.name);
+    return items.map((it) => (it.unsupported ? it : { ...it, skipped: t('lua.notTestedFroze'), ...(blame(it) ? { error: t('lua.frozeItem') } : {}) }));
+  }
+  try { await frameDoc(); } catch { return items.map((it) => (it.unsupported ? it : { ...it, skipped: t('lua.notTested') })); }
+  const out: LayerItem[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i], [src, kind] = sources[i];
+    if (it.unsupported) { out.push(it); continue; }
     const error = await new Promise<string | null>((resolve) => {
       let f: Frame | null = null;
-      const timer = setTimeout(() => finish(t('layer3.dryTimeout')), 6000);
+      const timer = setTimeout(() => finish(t('layer3.dryTimeout')), 8000);
       function finish(err: string | null) { clearTimeout(timer); if (f) destroyFrame(f); f = null; resolve(err); }
       const p: Plugin = { name: it.name, kind, code: String(src.code ?? ''), perms: new Set(), write: [], description: '', dead: false, disposers: [], frames: new Set(), warned: new Set(), lastChat: 0, dry: { done: finish } };
       try { f = createFrame(p, null, background()); } catch (e: any) { finish(String(e?.message ?? e)); }
     });
-    return error ? { ...it, error } : it;
-  }));
+    out.push(error ? { ...it, error } : it);
+  }
+  return out;
 }
 
 /** When a workflow runs, in plain words ("Every Friday at 4:00 PM", "After each wrap"). */

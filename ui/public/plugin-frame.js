@@ -1,12 +1,22 @@
 // Runtime that runs INSIDE every sandboxed plugin / HTML-view frame (see the notes at the top of layer.ts).
 // The frame has an opaque origin, no network and no access to the app window; the only way out is the
 // postMessage RPC below: {id, method, args} -> {id, result | error}. Plain classic script on purpose:
-// it is shipped as-is (imported with ?url) and loaded by <script src> from the frame document.
+// it is inlined into the frame document (scripts/gen-plugin-frame.mjs) and allowed there by its hash.
+//
+// The add-on's code later runs in this same page, so the runtime trusts nothing it could have touched:
+// * what it needs from the platform is captured here, before any add-on code exists;
+// * the session key the host hands over with `init` lives only in this closure and goes out only as
+//   a property of an object literal passed straight to the host. Add-on code cannot read it, so a
+//   page the frame is later sent to (a reload, a data: or blob: page) cannot speak for the add-on.
 (function () {
   'use strict';
   if (window.__thoughtsFrame) return; // delivered twice (inline + src), runs once
   window.__thoughtsFrame = true;
   var host = window.parent;
+  if (host === window) return; // only ever inside a frame (its hash is also in the app window's policy)
+  var now = Date.now;
+  var key = null;             // session key from the host's `init`; never stored anywhere else
+  var inited = false;
   var seq = 0, cbSeq = 0;
   var pending = new Map();    // rpc id -> {resolve, reject}
   var callbacks = new Map();  // handle -> function (commands, item actions)
@@ -16,19 +26,26 @@
   var rendered = false;
   var noop = function () {};
 
-  function send(m) { host.postMessage(m, '*'); }
+  // ---- before any add-on code ----
+  // Following a link would replace the add-on's page (and the host would switch it off).
+  window.addEventListener('click', function (e) {
+    var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+    if (a && (a.getAttribute('href') || '').charAt(0) !== '#') e.preventDefault();
+  }, true);
+  // If the page is replaced anyway, tell the host first: it stops answering this frame.
+  window.addEventListener('pagehide', function () { if (key) { try { host.postMessage({ k: key, type: 'bye' }, '*'); } catch (_) { /* gone */ } } }, true);
 
   function call(method, args) {
     return new Promise(function (resolve, reject) {
       var id = 't' + (++seq);
       pending.set(id, { resolve: resolve, reject: reject });
-      send({ id: id, method: method, args: args || [] });
+      host.postMessage({ k: key, id: id, method: method, args: args || [] }, '*');
     });
   }
 
   function crash(e) {
     try { console.error(e); } catch (_) { /* ignore */ }
-    send({ type: 'failed', error: String((e && e.message) || e), code: e && e.code });
+    host.postMessage({ k: key, type: 'failed', error: String((e && e.message) || e), code: e && e.code }, '*');
   }
   function warn(e) { try { console.warn('[thoughts]', (e && e.message) || e); } catch (_) { /* ignore */ } }
 
@@ -175,29 +192,108 @@
     }, Promise.resolve());
   }
 
+  /** The scripts of an HTML view that the page would run, in order: `{text, module}`. */
+  function viewScripts(html) {
+    var doc = new DOMParser().parseFromString(String(html), 'text/html');
+    return Array.prototype.slice.call(doc.querySelectorAll('script')).filter(function (s) {
+      return !s.src && /^(|module|text\/javascript|application\/javascript)$/i.test((s.type || '').trim());
+    }).map(function (s) { return { text: s.textContent || '', module: /^module$/i.test((s.type || '').trim()) }; });
+  }
+
+  /** Test loads only. The add-on's code is first run once in a worker: a plugin module with an API
+   *  that answers every call with nothing, a page's scripts one after the other. A worker has its own
+   *  thread and can be stopped, so code that never gives control back is caught there ('hang')
+   *  instead of freezing the window, which shares its thread with this frame on macOS and Linux.
+   *  Nothing in the worker imitates the page (code that walks a stand-in page could run forever
+   *  where the real one ends), so code that touches the page simply stops there. Anything but a hang
+   *  (it finished, it threw, it is waiting, there is no worker) is not a verdict: the real test load
+   *  in this page decides. `sources`: `[{url, module, main}]`, `main` = call the module's default. */
+  function preflight(sources) {
+    return new Promise(function (resolve) {
+      var w = null, beat = 0, done = false, started = now(), lastPong = started, urls = [];
+      function finish(v) {
+        if (done) return;
+        done = true;
+        clearInterval(beat);
+        try { if (w) w.terminate(); } catch (_) { /* already stopped */ }
+        urls.forEach(function (u) { URL.revokeObjectURL(u); });
+        resolve(v);
+      }
+      try {
+        // Every call of the stand-in API answers on a later turn of the worker's event loop, as a
+        // real call does, so code that merely keeps asking is not mistaken for code that never yields.
+        var src = 'var stub=new Proxy(function(){},{get:function(t,k){return k==="then"?undefined:stub},apply:function(){return new Promise(function(r){setTimeout(function(){r([])},0)})}});' +
+          'self.window=self;self.thoughts=stub;' +
+          'self.onmessage=function(e){if(e.data==="ping")self.postMessage("pong")};' +
+          'var list=' + JSON.stringify(sources) + ';' +
+          '(async function(){for(var i=0;i<list.length;i++){var s=list[i];try{' +
+          'if(s.module){var m=await import(s.url);if(s.main&&typeof m.default==="function"){var r=m.default(stub);if(r&&typeof r.then==="function")await r}}' +
+          'else importScripts(s.url)}catch(e){}}})().then(function(){self.postMessage("done")},function(){self.postMessage("done")});';
+        var wurl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        urls.push(wurl);
+        w = new Worker(wurl);
+        w.onmessage = function (e) { if (e.data === 'done') finish('ok'); else lastPong = now(); };
+        w.onerror = function () { finish('ok'); };
+        beat = setInterval(function () {
+          var t = now();
+          if (t - lastPong > 2500) finish('hang');
+          else if (t - started > 1500 && t - lastPong < 700) finish('ok'); // still starting, but answering
+          else { try { w.postMessage('ping'); } catch (_) { finish('ok'); } }
+        }, 250);
+      } catch (_) { finish('ok'); }
+    });
+  }
+
   function init(m) {
     look(m);
     surface = m.surface || null;
+    // On Windows the desktop shell puts its own bridge into every frame. The host then loads this
+    // page from an address the shell does not accept commands from (about:srcdoc); if the bridge is
+    // here and the address is the app's own, refuse to run anything rather than run beside it.
+    if (typeof window.__TAURI_INTERNALS__ !== 'undefined' && location.protocol !== 'about:') {
+      host.postMessage({ k: key, type: 'failed', code: 'bridge', error: 'The app bridge is reachable from this frame; the add-on was not started.' }, '*');
+      return;
+    }
+    var hung = function () { host.postMessage({ k: key, type: 'failed', code: 'hang', error: 'It never gave control back while starting.' }, '*'); };
     if (m.kind === 'view') {
-      // Read-only subset of the same bridge. The raw protocol works too: parent.postMessage({id, method, args}, '*').
-      window.thoughts = { version: 1, library: data.library, todos: data.todos, ideas: data.ideas, on: on };
-      runHtml(m.code).then(function () { send({ type: 'loaded' }); }, crash);
+      var tried = m.preflight ? viewScripts(m.code).map(function (s) {
+        return { url: URL.createObjectURL(new Blob([s.text], { type: 'text/javascript' })), module: s.module, main: false };
+      }) : [];
+      (tried.length ? preflight(tried) : Promise.resolve('ok')).then(function (verdict) {
+        tried.forEach(function (s) { URL.revokeObjectURL(s.url); });
+        if (verdict === 'hang') return hung();
+        // Read-only subset of the same bridge. The raw protocol works too: parent.postMessage({id, method, args}, '*').
+        window.thoughts = { version: 1, library: data.library, todos: data.todos, ideas: data.ideas, on: on };
+        return runHtml(m.code).then(function () { host.postMessage({ k: key, type: 'loaded' }, '*'); });
+      }).catch(crash);
       return;
     }
     var url = URL.createObjectURL(new Blob([String(m.code)], { type: 'text/javascript' }));
-    import(url).then(function (mod) {
-      return typeof mod.default === 'function' ? mod.default(pluginApi()) : undefined;
-    }).then(function () {
-      if (surface && !rendered) throw new Error('This add-on no longer provides "' + surface.id + '".');
-      send({ type: 'loaded' });
+    (m.preflight ? preflight([{ url: url, module: true, main: true }]) : Promise.resolve('ok')).then(function (verdict) {
+      if (verdict === 'hang') return hung();
+      return import(url).then(function (mod) {
+        return typeof mod.default === 'function' ? mod.default(pluginApi()) : undefined;
+      }).then(function () {
+        if (surface && !rendered) throw new Error('This add-on no longer provides "' + surface.id + '".');
+        host.postMessage({ k: key, type: 'loaded' }, '*');
+      });
     }).catch(crash).finally(function () { URL.revokeObjectURL(url); });
   }
 
   window.addEventListener('message', function (e) {
-    if (e.source !== host) return;
+    // `isTrusted`: add-on code can build a message event that names the host as its source.
+    if (!e.isTrusted || e.source !== host) return;
     var m = e.data;
     if (!m || typeof m !== 'object') return;
-    if (m.type === 'init') return init(m);
+    if (m.type === 'init') {
+      if (inited) return;
+      inited = true;
+      key = typeof m.key === 'string' ? m.key : null;
+      init(m);
+      reportSize();
+      return;
+    }
+    if (m.type === 'ping') { host.postMessage({ k: key, type: 'pong', n: m.n }, '*'); return; }
     if (m.type === 'look') return look(m);
     if (m.type === 'event') {
       var set = listeners.get(m.event);
@@ -216,13 +312,13 @@
   });
 
   // Widgets grow with their content: tell the host how tall the page is.
-  if (typeof ResizeObserver === 'function') {
-    var last = 0;
-    new ResizeObserver(function () {
-      var h = Math.ceil(document.body.getBoundingClientRect().height);
-      if (h !== last) { last = h; send({ type: 'size', height: h }); }
-    }).observe(document.body);
+  var lastHeight = -1;
+  function reportSize() {
+    if (!key) return;
+    var h = Math.ceil(document.body.getBoundingClientRect().height);
+    if (h !== lastHeight) { lastHeight = h; host.postMessage({ k: key, type: 'size', height: h }, '*'); }
   }
+  if (typeof ResizeObserver === 'function') new ResizeObserver(reportSize).observe(document.body);
 
-  send({ type: 'ready' });
+  host.postMessage({ type: 'ready' }, '*');
 })();

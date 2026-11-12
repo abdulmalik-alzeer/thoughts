@@ -52,6 +52,8 @@
   const runnable = $derived((items ?? []).filter((x) => !x.unsupported));
   const unsupported = $derived((items ?? []).filter((x) => x.unsupported));
   const loadErrors = $derived(runnable.filter((x) => x.error));
+  // Why the new parts were not test-run at all (customisations are off, or this change froze the app before).
+  const notTested = $derived(runnable.find((x) => x.skipped)?.skipped ?? '');
   // Anything the user should read before deciding: then Keep is not the pre-focused button.
   const caution = $derived(!!(p?.pluginChanged || p?.workflowChanged || outside.length || outsidePrivate || problems.length || stale || incomplete || packSays || cssFlags.length || css?.kind === 'unreadable'));
   const blocked = $derived(problems.length > 0 || stale || (incomplete && !keepIncomplete));
@@ -62,7 +64,7 @@
     try { await fn(); } catch (e) { failed(t(failKey), e); }
     finally { busy = ''; }
   }
-  const tryIt = () => act('try', async () => { await tryPending(); toast(t('layer.previewOn'), { key: 'layer' }); }, 'layer.tryFailed');
+  const tryIt = () => act('try', async () => { if (await tryPending()) toast(t('layer.previewOn'), { key: 'layer' }); }, 'layer.tryFailed');
   const keep = () => {
     if (blocked) return;
     act('keep', async () => {
@@ -192,7 +194,7 @@
                   </ul>
                 {/if}
               {/each}
-              <p class="muted" role="status">{tested ? (loadErrors.length ? '' : t('layer3.checkedOk')) : t('layer3.checking')}</p>
+              <p class="muted" role="status">{tested ? notTested || (loadErrors.length ? '' : t('layer3.checkedOk')) : t('layer3.checking')}</p>
             {/if}
           </div>
         </div>

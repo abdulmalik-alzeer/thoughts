@@ -94,9 +94,10 @@ The app validates the staged files before the user can keep them. Any of these b
 File names anywhere in the layer may not contain invisible characters either; such a file is
 left out of the change.
 
-The app also test-loads each plugin in a hidden sandbox; a plugin that throws while loading is
-shown to the user as a problem. So: write the exact shapes below, and do not leave half-finished
-files behind.
+The app also test-loads each plugin and page in a hidden sandbox; one that throws while loading,
+or never gives control back (an endless loop), is stopped and shown to the user as a problem. A
+change that once made the app stop responding is not run again until the user chooses to. So:
+write the exact shapes below, never wait in a loop, and do not leave half-finished files behind.
 
 ### plugins/<name>.json — a plugin's declaration
 
@@ -355,6 +356,10 @@ Writing a good plugin:
 - A plugin that throws is switched off and the user is told, so handle empty lists and failed
   calls (`try`/`catch` around `await`).
 - `id`s are lowercase with dashes and unique within the plugin.
+- Links do not open other pages: a plugin page that replaces itself with another page is switched
+  off.
+- Never wait for something in a loop (`while (!ready) {}`): code that does not give control back
+  freezes the app. Use `await` and events.
 
 ### views/*.html
 

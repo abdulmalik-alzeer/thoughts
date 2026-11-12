@@ -1,7 +1,12 @@
 // Generates ui/public/plugin-frame.html: the document every sandboxed plugin / custom-view frame loads.
 // The frame has an opaque origin, where the CSP keyword 'self' matches nothing, so the fixed runtime is
-// inlined and allowed by its exact sha256 hash (the desktop build adds the same hash to its own policy).
-// Plugin modules themselves run from blob: URLs. Nothing in the frame can reach the network.
+// inlined and allowed by its exact sha256 hash. Plugin modules themselves run from blob: URLs. Nothing
+// in the frame can reach the network.
+//
+// The same hash is kept in the app's own policy (src-tauri/tauri.conf.json, `script-src`): on Windows
+// the frame is given this document as `srcdoc` (see `frameDoc` in ui/src/lib/layer.ts), and a srcdoc
+// page also has to satisfy the policy of the page that embeds it. This script rewrites that one token
+// whenever the runtime changes; crates/thoughtsd/tests/plugin_frame.rs fails when the three drift apart.
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -16,8 +21,9 @@ export function genPluginFrame() {
     .replace(/\r\n?/g, '\n')
     .replace(/<\/(script)/gi, '<\\/$1');
   const hash = createHash('sha256').update(runtime, 'utf8').digest('base64');
-  const csp = `default-src 'none'; script-src 'sha256-${hash}' blob:; ` +
-    `style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'`;
+  const csp = `default-src 'none'; script-src 'sha256-${hash}' blob:; worker-src blob:; ` +
+    `style-src 'unsafe-inline'; img-src data: blob:; media-src data: blob:; font-src data:; connect-src 'none'; ` +
+    `frame-src 'none'; object-src 'none'; form-action 'none'; base-uri 'none'`;
   const html = `<!doctype html>
 <html>
 <head>
@@ -32,7 +38,22 @@ export function genPluginFrame() {
 </body>
 </html>
 `;
-  writeFileSync(dir + 'plugin-frame.html', html);
+  const out = dir + 'plugin-frame.html';
+  if (read(out) !== html) writeFileSync(out, html);
+  syncAppPolicy(hash);
+}
+
+const read = (file) => { try { return readFileSync(file, 'utf8'); } catch { return null; } };
+
+/** Keep the runtime's hash in the `script-src` of the app's own policy (it is the only hash there). */
+function syncAppPolicy(hash) {
+  const file = fileURLToPath(new URL('../src-tauri/tauri.conf.json', import.meta.url));
+  const text = read(file);
+  if (text === null) return;
+  const next = text.replace(/("csp":\s*")([^"]*)(")/, (_all, open, csp, close) =>
+    open + csp.replace(/script-src ([^;]*)/, (_d, sources) =>
+      'script-src ' + [...sources.split(/\s+/).filter((x) => x && !/^'sha256-/.test(x)), `'sha256-${hash}'`].join(' ')) + close);
+  if (next !== text) writeFileSync(file, next);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) genPluginFrame();

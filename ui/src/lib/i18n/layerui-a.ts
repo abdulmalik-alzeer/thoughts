@@ -1,0 +1,35 @@
+// Strings for the add-on host (freeze guard, limits on what an add-on may do unasked, the marks that
+// say what comes from an add-on, pack names, the review's Home buttons). Keys start with `lua.`
+// (layerui-a).
+export default {
+  en: {
+    'lua.hang': 'It kept the app busy without ever finishing, so it was stopped.',
+    'lua.left': 'It tried to replace its own page with a different one, which add-ons are not allowed to do.',
+    'lua.frozeItem': 'Thoughts stopped responding the last time this was run, so it was not run again.',
+    'lua.notTestedFroze': 'Not tested again: Thoughts stopped responding the last time this change was run.',
+    'lua.notTestedSafe': 'Not tested: customisations are switched off right now, so nothing new is run.',
+    'lua.notTested': 'The new parts could not be tested.',
+    'lua.frozeTitle': 'This change made Thoughts stop responding',
+    'lua.frozeTry': 'The last time it was run, Thoughts froze and had to be closed. If you try it and that happens again, close Thoughts and open it again: your library and the customisations you already have are not affected.',
+    'lua.frozeKeep': 'The last time it was run, Thoughts froze and had to be closed. If you keep it and that happens again, Thoughts will start with your customisations switched off so that you can undo it. It is safer to discard the change, or to ask the assistant to fix it first.',
+    'lua.frozeTryAnyway': 'Try it anyway',
+    'lua.frozeKeepAnyway': 'Keep it anyway',
+    'lua.safeCrashNamed': 'Thoughts stopped responding last time while the add-on “{name}” was running, so your customisations are switched off for now. Your library is untouched. Restore an earlier version of the app, or try again.',
+    'lua.safeCrash': 'Thoughts stopped responding last time while your add-ons were running, so your customisations are switched off for now. Your library is untouched. Restore an earlier version of the app, or try again.',
+  },
+  ar: {
+    'lua.hang': 'أبقت التطبيق مشغولاً دون أن تنتهي، فأُوقِفت.',
+    'lua.left': 'حاولت استبدال صفحتها بصفحة أخرى، وهذا غير مسموح للإضافات.',
+    'lua.frozeItem': 'توقّف التطبيق عن الاستجابة عند تشغيلها في المرة الماضية، فلم تُشغَّل من جديد.',
+    'lua.notTestedFroze': 'لم يُعَد اختبارها: توقّف التطبيق عن الاستجابة عند تشغيل هذا التغيير في المرة الماضية.',
+    'lua.notTestedSafe': 'لم تُختبر: التخصيصات متوقفة الآن، فلا يُشغَّل أي شيء جديد.',
+    'lua.notTested': 'تعذّر اختبار الأجزاء الجديدة.',
+    'lua.frozeTitle': 'هذا التغيير جعل التطبيق يتوقف عن الاستجابة',
+    'lua.frozeTry': 'في آخر مرة شُغّل فيها هذا التغيير تجمّد التطبيق واضطررت إلى إغلاقه. إن جرّبته وتكرر ذلك فأغلق التطبيق ثم افتحه من جديد: مكتبتك وتخصيصاتك الحالية لن تتأثر.',
+    'lua.frozeKeep': 'في آخر مرة شُغّل فيها هذا التغيير تجمّد التطبيق واضطررت إلى إغلاقه. إن اعتمدته وتكرر ذلك فسيبدأ التطبيق وتخصيصاتك متوقفة لتتمكن من التراجع عنه. الأسلم أن تتجاهل التغيير، أو أن تطلب من المساعد إصلاحه أولاً.',
+    'lua.frozeTryAnyway': 'جرّبه مع ذلك',
+    'lua.frozeKeepAnyway': 'اعتمده مع ذلك',
+    'lua.safeCrashNamed': 'توقّف التطبيق عن الاستجابة في المرة الماضية أثناء عمل الإضافة «{name}»، لذلك أوقفنا تخصيصاتك مؤقتاً. مكتبتك لم تُمَسّ. يمكنك استعادة نسخة سابقة من التطبيق أو المحاولة مجدداً.',
+    'lua.safeCrash': 'توقّف التطبيق عن الاستجابة في المرة الماضية أثناء عمل إضافاتك، لذلك أوقفنا تخصيصاتك مؤقتاً. مكتبتك لم تُمَسّ. يمكنك استعادة نسخة سابقة من التطبيق أو المحاولة مجدداً.',
+  },
+};

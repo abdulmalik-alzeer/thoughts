@@ -3,7 +3,7 @@
   import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
-  import { loadLayer, layerBooted, retryLayer, checkPending, openReview } from './lib/layer';
+  import { loadLayer, retryLayer, checkPending, openReview, safeCrashText } from './lib/layer';
   import { failed } from './lib/errors';
   import { lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
@@ -78,8 +78,6 @@
       applyTheme();
       if (app.settings.onboarded) await afterOnboard();
       app.ready = true;
-      // The app is up: a later start no longer needs to suspect the customisations.
-      setTimeout(layerBooted, 2500);
       statusNotices();
       if (app.settings.onboarded) { checkAppUpdate(false); checkLayerUpdates(); announceWhatsNew(); startupChecks(); } else markWhatsNewSeen(); // a fresh install has nothing new to announce
     } catch (e: any) {
@@ -868,7 +866,7 @@
       {#if app.safeMode}
         <div class="safe no-print" role={app.safeReason === 'crash' ? 'alert' : 'status'}>
           <Icon name="shield" size={16} />
-          <span class="grow">{app.safeReason === 'crash' ? t('shell.safe.crash') : t('shell.safe.manual')}</span>
+          <span class="grow">{app.safeReason === 'crash' ? safeCrashText() : t('shell.safe.manual')}</span>
           {#if app.safeReason === 'crash'}<button class="btn" onclick={() => command('rollback')}><Icon name="rollback" size={14} /> {t('shell.openRollback')}</button>{/if}
           <button class="btn" onclick={retryLayer}><Icon name="retry" size={14} /> {app.safeReason === 'crash' ? t('shell.safe.retry') : t('shell.safe.leave')}</button>
         </div>
