@@ -165,6 +165,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/projects/:id", delete(project_remove))
         // app layer & updates & extensions
         .merge(crate::layer_api::routes())
+        .merge(crate::routines::routes())
         .route("/api/extensions", get(extensions))
         .route("/api/extensions/search/:op", post(search_ext))
         .route("/api/events", get(events))

@@ -27,7 +27,7 @@
     privacy: ['set.privTitle', 'layer.signalsTitle', 'set.cost', 'ui.set.showCost'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
-    appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'layer.appUpdates'],
+    appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'layer.appUpdates'],
   };
   const adv: Record<Cat, string[]> = {
     general: [],

@@ -18,6 +18,7 @@ pub mod modules;
 pub mod packs;
 pub mod paths;
 pub mod proc;
+pub mod routines;
 pub mod runs;
 pub mod secrets;
 pub mod settings;

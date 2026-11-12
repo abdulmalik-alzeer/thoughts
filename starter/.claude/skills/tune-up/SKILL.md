@@ -44,7 +44,7 @@ Then ask which to apply: all, some, or none. If nothing is worth changing, say s
 
 - Convention changes → edit CLAUDE.md (the relevant convention, and `## About this library`).
 - New or changed routine → `routines/<name>.md`.
-- Changed behaviour of a routine such as wrap or meeting notes → edit that skill's file, keeping it short.
+- Changed behaviour of a routine such as wrap or meeting notes → you cannot edit those (the app keeps them, so nothing there changes unseen). Write the change in one or two plain sentences and ask the user to open **Settings → Customisations → Routines**, choose that routine, and paste them into the box that asks the assistant for a draft; they review it and keep it there.
 - Renames or moves of existing folders → list exactly what will move, confirm once more, then move and fix the links and INDEX.md.
 - Declined proposals → record under `## About this library` as "Not wanted: …" so they are not raised again.
 
