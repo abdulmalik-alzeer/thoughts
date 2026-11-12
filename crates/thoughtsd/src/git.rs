@@ -877,10 +877,16 @@ pub async fn save_credential(state: &AppState, host: &str, username: &str, secre
     Ok(())
 }
 
+/// What a sync password for the address `url` is saved under: its host, with the port when the
+/// address names one (`git.example.com:3000`) — exactly the host git asks for, so the keyring
+/// entry, the line of the credentials file and the password prompt helper (`askpass`) all agree.
+/// `None` for an address without `scheme://` (`git@host:path` signs in with a key, not a password).
 pub fn host_of(url: &str) -> Option<String> {
-    let rest = url.split("://").nth(1)?;
-    let rest = rest.rsplit('@').next()?;
-    Some(rest.split(['/', ':']).next()?.to_string())
+    let rest = url.split_once("://")?.1;
+    // Only the part before the path: an `@` or `:` further on is not about the host.
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host).trim_end_matches(':');
+    (!host.is_empty()).then(|| host.to_string())
 }
 
 #[cfg(test)]
@@ -1500,6 +1506,40 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_saved_password_is_keyed_by_host_and_port_the_way_git_looks_it_up() {
+        for (url, host) in [("https://git.example.com:3000/sara/notes.git", Some("git.example.com:3000")), ("https://sara:secret@git.example.com:3000/x.git", Some("git.example.com:3000")),
+                            ("https://github.com/sara/notes.git", Some("github.com")), ("https://gitlab.com/group/@scope/notes.git", Some("gitlab.com")),
+                            ("ssh://git@git.example.com:2222/sara/notes.git", Some("git.example.com:2222")), ("https://git.example.com:/x", Some("git.example.com")),
+                            ("git@github.com:sara/notes.git", None), ("https://", None)] {
+            assert_eq!(host_of(url).as_deref(), host, "{url}");
+        }
+        // git itself finds the line saved for a self-hosted server on its own port — the address's
+        // host and port — and a line saved without the port is not used for it. Only this file is
+        // consulted: no configuration of this computer, no keychain, no prompt.
+        let d = tmp("cred-port");
+        let f = d.join("git-credentials");
+        let url = "https://git.example.com:3000/sara/notes.git";
+        let fill = |url: &str| {
+            let mut c = std::process::Command::new("git");
+            c.env_clear().env("PATH", std::env::var_os("PATH").unwrap_or_default()).env("HOME", &d)
+                .env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_CONFIG_GLOBAL", d.join("none")).env("GIT_TERMINAL_PROMPT", "0")
+                .args(["-c", "credential.helper=", "-c", &format!("credential.helper={}", credential_helper(&f)), "credential", "fill"])
+                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
+            let mut child = c.spawn().unwrap();
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(format!("url={url}\n\n").as_bytes()).unwrap();
+            let o = child.wait_with_output().unwrap();
+            String::from_utf8_lossy(&o.stdout).lines().find_map(|l| l.strip_prefix("password=").map(String::from))
+        };
+        save_credential_file(&f, &host_of(url).unwrap(), "sara", "token-3000").unwrap();
+        assert_eq!(fill(url).as_deref(), Some("token-3000"));
+        std::fs::write(&f, "https://sara:bare@git.example.com\n").unwrap();
+        assert_eq!(fill(url), None, "the port is part of what git matches");
+        assert_eq!(fill("https://git.example.com/sara/notes.git").as_deref(), Some("bare"));
         std::fs::remove_dir_all(d).unwrap();
     }
 }
