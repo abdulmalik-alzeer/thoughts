@@ -1,6 +1,6 @@
 ---
 name: process-inbox
-description: File everything waiting in the inbox — quick notes saved in the app or sent from the phone — into the library: todos with dates, notes and log entries in the right item, new items, meeting notes. Each one is deleted once it is filed. Use when the user says process the inbox, file my inbox, check the inbox, or after captures arrived from the phone.
+description: File everything waiting in the inbox — quick notes saved in the app or sent from the phone — into the library as todos with dates, notes and log entries in the right item, new items or meeting notes. Each one is deleted once it is filed. Use when the user says process the inbox, file my inbox, check the inbox, or after captures arrived from the phone.
 ---
 
 # Process the inbox
