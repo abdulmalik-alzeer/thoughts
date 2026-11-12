@@ -111,8 +111,10 @@ export async function savePack(who: Identity, paths?: string[]): Promise<{ resul
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       return { result: (await invoke('save_pack', { name, contents: text })) ? 'saved' : 'cancelled', fingerprint };
-    } catch {
-      try { await navigator.clipboard.writeText(text); return { result: 'copied', fingerprint }; } catch { /* fall through to a download */ }
+    } catch (e) {
+      try { await navigator.clipboard.writeText(text); return { result: 'copied', fingerprint }; }
+      // The native window cannot download a file either: say it was not saved (and why), never "saved".
+      catch { throw e instanceof Error ? e : new Error(String(e)); }
     }
   }
   const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
