@@ -6,7 +6,7 @@ export type View = { kind: string; id?: string; path?: string };
 
 /** Options for `toast(text, opts)`. All optional — `toast('Saved')` still works. */
 export type ToastOpts = {
-  /** `error` is announced assertively and stays 10s; default `info`. */
+  /** `error` is announced assertively and stays a little longer (6s); default `info`. */
   kind?: 'info' | 'success' | 'error';
   /** One button inside the toast, e.g. `{ label: t('undo'), run: restore }`. The toast closes when it is pressed. */
   action?: { label: string; run: () => void };
@@ -14,14 +14,18 @@ export type ToastOpts = {
   detail?: string;
   /** Technical words behind an error (git's, the assistant's), folded away under "Show details". */
   tech?: string;
-  /** Milliseconds on screen. Default scales with length (min 5s, errors 10s). 0 = stays until dismissed. */
+  /** Milliseconds on screen. Every toast fades away by itself: 4s (5s with a button, 6s for errors).
+   *  A shorter value is honoured; longer ones and 0 are capped, since everything is kept in
+   *  "Recent messages" (with its button) after it fades. */
   duration?: number;
+  /** Only for something still in progress (an update installing): stays until replaced or closed. */
+  stay?: boolean;
   /** Toasts with the same key replace each other instead of stacking. */
   key?: string;
 };
 export type ToastItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; action?: { label: string; run: () => void }; detail?: string; tech?: string; duration: number; key?: string };
 /** A toast as remembered in "Recent messages" after it has left the screen. */
-export type ToastLogItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; detail?: string; at: number; key?: string };
+export type ToastLogItem = { id: number; text: string; kind: 'info' | 'success' | 'error'; detail?: string; at: number; key?: string; action?: { label: string; run: () => void } };
 
 /** `render(el)` mounts the plugin's sandboxed frame into `el` and returns a cleanup function. */
 /** `id` is unique in the app (it carries the add-on's file name); `short` is the id the add-on chose. */
@@ -122,14 +126,14 @@ export function toast(text: string, opts: ToastOpts = {}): number {
     msg = msg.split('\n')[0].slice(0, 140);
   }
   const kind = opts.kind ?? 'info';
-  const min = kind === 'error' ? 10000 : opts.action ? 8000 : 5000;
-  const duration = opts.duration ?? Math.min(30000, Math.max(min, 2500 + msg.length * 70 + (detail ? 6000 : 0)));
+  const max = kind === 'error' ? 6000 : opts.action ? 5000 : 4000;
+  const duration = opts.stay ? 0 : opts.duration && opts.duration > 0 ? Math.min(opts.duration, max) : max;
   const id = ++toastSeq;
   const rest = app.toasts.filter((x) => !(opts.key && x.key === opts.key));
   const tech = opts.tech && opts.tech !== detail && opts.tech !== msg ? opts.tech : undefined;
   app.toasts = [...rest.slice(-4), { id, text: msg, kind, action: opts.action, detail, tech, duration, key: opts.key }];
   // Kept after the toast is gone (or pushed out by newer ones). A keyed toast replaces its older entry.
-  app.toastLog = [{ id, text: msg, kind, detail, at: Date.now(), key: opts.key }, ...app.toastLog.filter((x) => !(opts.key && x.key === opts.key))].slice(0, 20);
+  app.toastLog = [{ id, text: msg, kind, detail, at: Date.now(), key: opts.key, action: opts.action }, ...app.toastLog.filter((x) => !(opts.key && x.key === opts.key))].slice(0, 20);
   if (kind === 'error') app.toastLogUnread = true;
   return id;
 }

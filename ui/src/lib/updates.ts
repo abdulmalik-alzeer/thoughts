@@ -29,7 +29,7 @@ export async function checkAppUpdate(manual = false) {
       note: t('layer.upd.note'), confirmLabel: t('layer.upd.install'), cancelLabel: t('layer.later'),
     });
     if (!ok) return;
-    toast(t('layer.upd.installing'), { key: 'upd', duration: 0 });
+    toast(t('layer.upd.installing'), { key: 'upd', stay: true });
     try {
       const done = await withBusyPrompt((force) => invoke('update_install', { force }), 'update');
       if (!done) toast(t('ui.busy.waiting'), { key: 'upd' });

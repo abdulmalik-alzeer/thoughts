@@ -3,28 +3,63 @@
   import { t } from './i18n';
   import Icon from './Icon.svelte';
 
-  // Time left per toast. A single ticker counts down, and stops while the pointer or
-  // keyboard focus is inside the stack so nothing vanishes while it is being read.
+  // Time left per toast. A single ticker counts down; while the pointer or keyboard focus is
+  // inside the stack nothing counts, and once both have left every toast gets its full time
+  // again, so nothing vanishes while it is being read. A toast whose time is up fades out
+  // (no fade with reduce-motion) and is then removed; × removes it at once.
   const left = new Map<number, number>();
-  let paused = $state(false);
+  let wrap = $state<HTMLElement>();
+  let held = $state(false);
+  let leaving = $state<Set<number>>(new Set());
   let copied = $state<number | null>(null);
+  const FADE = 320;
+  const osReduce = typeof matchMedia === 'function' ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+  const reduced = () => !!osReduce?.matches || document.documentElement.dataset.motion === 'reduce';
 
   $effect(() => {
     const ids = new Set(app.toasts.map((x) => x.id));
     for (const x of app.toasts) if (!left.has(x.id)) left.set(x.id, x.duration);
     for (const id of [...left.keys()]) if (!ids.has(id)) left.delete(id);
+    if ([...leaving].some((id) => !ids.has(id))) leaving = new Set([...leaving].filter((id) => ids.has(id)));
   });
 
+  function fadeOut(id: number) {
+    if (reduced()) { dismissToast(id); return; }
+    leaving = new Set([...leaving, id]);
+    setTimeout(() => { if (leaving.has(id)) dismissToast(id); }, FADE);
+  }
+
+  /** Pointer over or focus inside the stack: hold every timer, and bring back one that was fading. */
+  function hold() {
+    held = true;
+    if (leaving.size) leaving = new Set();
+  }
+  /** Pointer and focus both gone: every toast starts its time again from the beginning. */
+  function release() {
+    queueMicrotask(() => {
+      if (!wrap || wrap.matches(':hover') || wrap.contains(document.activeElement)) return;
+      held = false;
+      for (const x of app.toasts) if (left.has(x.id)) left.set(x.id, x.duration);
+    });
+  }
+
   $effect(() => {
-    if (paused) return;
+    if (held) return;
     const step = 250;
     const h = setInterval(() => {
       for (const [id, ms] of left) {
-        if (ms === 0) continue; // 0 = stays until dismissed
-        if (ms <= step) dismissToast(id); else left.set(id, ms - step);
+        if (ms === 0 || leaving.has(id)) continue; // 0 = still in progress, stays until replaced or closed
+        if (ms <= step) { left.set(id, -1); fadeOut(id); } else left.set(id, ms - step);
       }
     }, step);
     return () => clearInterval(h);
+  });
+
+  // A toast that held focus and was then closed takes the focus with it, and no focusout may
+  // follow: let go of the hold once the stack truly has neither pointer nor focus.
+  $effect(() => {
+    void app.toasts.length;
+    if (held) release();
   });
 
   function act(x: ToastItem) {
@@ -41,11 +76,11 @@
   }
 </script>
 
-<div class="toast-wrap no-print" role="region" aria-label={t('shell.notifications')}
-  onmouseenter={() => (paused = true)} onmouseleave={() => (paused = false)}
-  onfocusin={() => (paused = true)} onfocusout={() => (paused = false)}>
+<div class="toast-wrap no-print" role="region" aria-label={t('shell.notifications')} bind:this={wrap}
+  onmouseover={hold} onmouseleave={release}
+  onfocusin={hold} onfocusout={release}>
   {#each app.toasts as x (x.id)}
-    <div class="toast {x.kind}" role={x.kind === 'error' ? 'alert' : 'status'} aria-live={x.kind === 'error' ? 'assertive' : 'polite'} aria-atomic="true">
+    <div class="toast {x.kind}" class:leaving={leaving.has(x.id)} role={x.kind === 'error' ? 'alert' : 'status'} aria-live={x.kind === 'error' ? 'assertive' : 'polite'} aria-atomic="true">
       <div class="line">
         {#if x.kind === 'error'}<Icon name="warning" size={16} class="k" />{:else if x.kind === 'success'}<Icon name="check" size={16} class="k" />{/if}
         <span class="msg" dir="auto">{x.text}</span>
@@ -75,6 +110,8 @@
 </div>
 
 <style>
+  .toast.leaving { animation: toast-out 320ms var(--ease) both; }
+  @keyframes toast-out { to { opacity: 0; transform: translateY(-6px) scale(.98); } }
   .toast { display: grid; gap: 8px; width: min(400px, calc(100vw - 36px)); padding-block: 10px; padding-inline: 14px 10px; }
   .toast.error { border-color: color-mix(in srgb, var(--danger) 55%, transparent); }
   .toast.error :global(.k) { color: var(--danger); }

@@ -1,6 +1,7 @@
 <script lang="ts">
   // "Recent messages": the last 20 toasts, kept after they leave the screen, so an error that came
-  // and went (or was pushed out by newer messages) can still be read and copied.
+  // and went (or was pushed out by newer messages) can still be read and copied, and a toast's
+  // button ("See what's new", "Fix…", "Undo") can still be pressed after the toast faded.
   import { app } from './store.svelte';
   import { t, ago, fmtDate } from './i18n';
   import { trapFocus } from './focus';
@@ -38,6 +39,9 @@
               <time class="muted sm" datetime={new Date(x.at).toISOString()} title={fmtDate(x.at, { dateStyle: 'medium', timeStyle: 'medium' })}>{ago(x.at)}</time>
             </div>
             <div class="row acts">
+              {#if x.action}
+                <button type="button" class="btn ghost sm act" onclick={() => { close(); try { x.action?.run(); } catch (e) { console.error(e); } }}>{x.action.label}</button>
+              {/if}
               {#if x.detail}
                 <button type="button" class="btn ghost sm" aria-expanded={open === x.id} onclick={() => (open = open === x.id ? null : x.id)}>{t('shell.details')}</button>
               {/if}
@@ -70,6 +74,7 @@
   time { flex: none; white-space: nowrap; }
   .acts { justify-content: flex-end; gap: 4px; }
   .sm { font-size: var(--fs-xs); padding: 2px 8px; }
+  .act { color: var(--accent); font-weight: 600; }
   .detail { margin: 0; max-height: 180px; overflow: auto; font-size: var(--fs-xs); padding: 8px; white-space: pre-wrap; overflow-wrap: anywhere; text-align: start; }
   .x { font: inherit; color: var(--muted); background: none; border: 0; border-radius: 6px; width: 28px; height: 28px; display: grid; place-items: center; cursor: pointer; }
   .x:hover { background: var(--fill-2); color: var(--fg); }
