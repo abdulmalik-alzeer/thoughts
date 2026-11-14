@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 pub mod validate;
 pub mod effects;
 pub mod pages;
+pub mod cycle;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default, rename_all = "camelCase")]
@@ -51,6 +52,9 @@ pub struct Meta {
     pub resolves: String,
     /// The state of the live layer (a commit) this change could not be combined with (see `sync`).
     pub stale_at: String,
+    /// The user tried this version and chose "Continue chatting": it waits for their next message
+    /// in its chat instead of for a decision (see `cycle`).
+    pub continued: bool,
 }
 
 fn meta_file(d: &Dirs) -> PathBuf { d.home.join("layer-pending.json") }
@@ -303,6 +307,7 @@ pub async fn after_run(state: &AppState, ok: bool) {
     record_outside(&mut m, outside, hidden, by_run, hidden_by_run, in_layer);
     m.run = if ok { "done" } else { "interrupted" }.into();
     m.accepted.clear();
+    m.continued = false; // a new version: back to the review (see `cycle`)
     let _ = save_meta(&d, &m);
     state.emit(json!({"type": "layer.pending"}));
 }
@@ -362,8 +367,8 @@ pub fn system_prompt(d: &Dirs) -> String {
          write into the layer files yourself. The layer is text only, so a picture cannot be copied in; say so if the user asks for that.\n\
          8. To change something on one of the app's own pages (a heading, a button's wording, hiding a part, an add-on box on it, or an add-on page in its place) use pages.json as README.md describes, not CSS.\n\
          Nothing you write takes effect until the user previews it and presses Keep, so do not tell them it is already live. \
-         The user cannot answer interactive tool prompts here — ask questions in plain text, and keep the change small.",
-        staging = d.staging.display(), layer = d.layer.display()
+         The user cannot answer interactive tool prompts here — ask questions in plain text, and keep the change small.{note}",
+        staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d)
     )
 }
 
@@ -701,6 +706,7 @@ pub async fn replace_for(g: Git<'_>, d: &Dirs, origin: &str, chat_id: &str) -> a
 /// The run for `chat_id`'s request started (`started`), or never did: then the staging copy made
 /// for it is dropped and the change it set aside is open again.
 pub async fn run_start_result(g: Git<'_>, d: &Dirs, chat_id: &str, started: bool) {
+    if started { cycle::run_started(d, chat_id); }
     let aside = replaced().lock().unwrap_or_else(|e| e.into_inner()).remove(&(d.staging.clone(), chat_id.to_string()));
     let Some(a) = aside else { return };
     // Put back only when the staging copy is still the one made for this request.
@@ -862,6 +868,8 @@ fn describe_staged(d: &Dirs, m: &Meta, files: &[(String, &'static str)], ignored
         "stale": !m.stale_at.is_empty(), "incomplete": incomplete, "incompleteAccepted": incomplete && m.accepted == signature,
         "css": css, "pack": pack, "resolves": m.resolves, "signature": signature,
         "effects": described["effects"], "installed": described["installed"],
+        "phase": match cycle::phase_of(m, running) { cycle::Phase::Running => "running", cycle::Phase::Pending => "pending", cycle::Phase::Continued => "continued" },
+        "continued": !running && m.continued, "canContinue": !running && m.chat_id.as_deref().map_or(false, |c| !c.is_empty()),
     })
 }
 

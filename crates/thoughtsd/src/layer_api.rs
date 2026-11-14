@@ -34,6 +34,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/pending/apply", post(pending_apply))
         .route("/api/layer/pending/accept", post(pending_accept))
         .route("/api/layer/pending/discard", post(pending_discard))
+        .route("/api/layer/pending/continue", post(pending_continue))
+        .route("/api/layer/pending/review-again", post(pending_review_again))
         .route("/api/layer/pending/details", get(pending_details))
         .route("/api/layer/drafts", get(draft_list))
         .route("/api/layer/drafts/open", post(draft_open))
@@ -280,6 +282,36 @@ async fn pending_discard(State(st): S) -> R {
     staging::adopt_held(Git(Some(&st)), &d, arabic(&st).await).await;
     st.emit(json!({"type": "layer.pending"}));
     ok()
+}
+
+/// `POST /api/layer/pending/continue` — "Continue chatting": the user tried the open version and
+/// wants changes. It stays as it is for the chat to build on (see `staging::cycle`); the chat gets a
+/// line saying so. → `{ok, chatId}`
+async fn pending_continue(State(st): S) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let d = Dirs::real();
+    let id = staging::load_meta(&d).and_then(|m| m.chat_id).unwrap_or_default();
+    // Only a customise chat that is still there can take the conversation up again.
+    if st.chats.get(&id).await.map_or(true, |c| c.kind != "customize") { return Err(crate::tr::err("layer.no_chat", &[]).into()); }
+    let chat = staging::cycle::continue_chat(Git(Some(&st)), &d).await?;
+    let last_is_note = st.chats.with(&chat, |c| c.messages.last().map_or(false, |m| m.role == "system" && m.tool.as_ref().map_or(false, |t| t["continued"] == true))).await.unwrap_or(false);
+    if !last_is_note {
+        let mut note = crate::chats::Msg::new("system", &crate::tr::text("layer.continued_note", &[]));
+        note.tool = Some(json!({"continued": true}));
+        crate::claude::push(&st, &chat, note).await;
+    }
+    st.emit(json!({"type": "layer.pending"}));
+    Ok(Json(json!({"ok": true, "chatId": chat})))
+}
+
+/// `POST /api/layer/pending/review-again` — a version set aside for more conversation goes back to
+/// the review. → the review.
+async fn pending_review_again(State(st): S) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let (d, ar) = (Dirs::real(), arabic(&st).await);
+    staging::cycle::review_again(Git(Some(&st)), &d).await?;
+    st.emit(json!({"type": "layer.pending"}));
+    Ok(Json(staging::pending(Git(Some(&st)), &d, ar).await))
 }
 
 /// `GET /api/layer/pending/details` — what each file of the open change changes, line by line
