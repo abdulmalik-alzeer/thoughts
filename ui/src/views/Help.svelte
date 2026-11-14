@@ -82,7 +82,8 @@
       <dt>{t('layer.share')}</dt><dd>{t('layer.help.share')}</dd>
     </dl>
     <div class="row wrap">
-      <button class="btn primary" onclick={() => command('customise')}><Icon name="palette" size={15} /> {t('layer.customise')}</button>
+      <button class="btn primary" onclick={() => command('customise.new')} title={t('r10-cust-start.newTip')}><Icon name="palette" size={15} /> {t('r10-cust-start.new')}</button>
+      <button class="btn" onclick={() => command('customise')}>{t('ldc.set.open')}</button>
       <button class="btn" onclick={() => command('rollback')}><Icon name="rollback" size={15} /> {t('ob3.help.openAppHist')}</button>
     </div>
   </section>

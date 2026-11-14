@@ -3,7 +3,7 @@
   import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
-  import { loadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn } from './lib/layer';
+  import { loadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn, newCustomise } from './lib/layer';
   import { failed } from './lib/errors';
   import { backup, healthWarning, lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
@@ -344,7 +344,7 @@
     try {
       if (app.view.id === id) return;
       const c = app.chats.find((x: any) => x.id === id);
-      if (!c || c.kind !== 'chat' || c.messageCount > 0 || c.pinned || c.running) return;
+      if (!c || (c.kind !== 'chat' && c.kind !== 'customize') || c.messageCount > 0 || c.pinned || c.running) return;
       // Text typed (or files added) but not sent keeps the chat.
       try { if (localStorage.getItem(`thoughts.chatdraft:${id}`)) return; } catch { /* no storage */ }
       const full = await api(`/chats/${id}`);
@@ -423,6 +423,7 @@
     'back': () => goBack(),
     'forward': () => goForward(),
     'customise': () => go({ kind: 'customise' }),
+    'customise.new': () => newCustomise(),
     'review': () => openReview(),
     'updates.check': () => checkAppUpdate(true),
     'settings': () => go({ kind: 'settings' }),
@@ -666,6 +667,7 @@
     add('wrap.start', t('shell.pal.wrap'), g.act, 'wrap', { keywords: 'wrap save حفظ تلخيص' });
     if (syncOn) add('sync', t('shell.pal.sync'), g.act, 'sync', { keywords: 'sync backup مزامنة' });
     add('customise', t('layer.customise'), g.act, 'palette', { keywords: 'customise customize personalise change app add-on plugin theme تخصيص تعديل إضافة' });
+    add('customise.new', t('r10-cust-start.new'), g.act, 'palette', { keywords: 'new customisation customise customize change app chat تخصيص جديد محادثة تغيير' });
     if (app.pending?.exists) add('review', t('layer.reviewTitle'), g.act, 'eye', { keywords: 'review pending change مراجعة' });
     add('history', t('ui.hist.title'), g.go, 'rollback', { keywords: 'history versions undo restore notes السجل استعادة تراجع نسخة' });
     add('rollback', t('ui.pal.appHistory'), g.act, 'rollback', { keywords: 'history rollback undo restore app السجل استعادة تراجع التطبيق' });

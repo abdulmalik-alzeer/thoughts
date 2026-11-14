@@ -1,13 +1,12 @@
 <script lang="ts">
-  // Customise, a page of its own (sidebar): ask for a change, the add-ons one at a time, ready-made
+  // Customise, a page of its own (sidebar): start a new customisation (a chat of its own), the add-ons one at a time, ready-made
   // packs, automatic tasks and routines, sharing, and the app history. Recovery and Rollback are
   // core code: nothing here is part of the customisation layer.
   import Icon from '../lib/Icon.svelte';
   import { onMount } from 'svelte';
   import { app } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
-  import { failed } from '../lib/errors';
-  import { checkPending, openReview, startCustomise } from '../lib/layer';
+  import { checkPending, openReview, newCustomise } from '../lib/layer';
   import AutomaticTasks from './AutomaticTasks.svelte';
   import Routines from './Routines.svelte';
   import WaitingChanges from './WaitingChanges.svelte';
@@ -37,15 +36,9 @@
   $effect(() => { const v = app.view; if (v.kind === 'customise' && known(v.id ?? '')) tab = v.id as Tab; });
   const open = (id: string) => { if (known(id)) tab = id; };
 
-  let text = $state('');
-  let asking = $state(false);
-  async function ask() {
-    if (asking || !text.trim()) return;
-    asking = true;
-    try { if (await startCustomise(text)) text = ''; }
-    catch (e) { failed(t('layer.askFailed'), e); }
-    finally { asking = false; }
-  }
+  // A change is asked for in a customisation chat of its own, opened by New customisation.
+  let starting = $state(false);
+  async function start() { if (starting) return; starting = true; try { await newCustomise(); } finally { starting = false; } }
 
   onMount(() => { checkPending(false); });
 
@@ -63,7 +56,12 @@
 </script>
 
 <div class="page cz">
-  <h1>{t('layer.customise')}</h1>
+  <div class="row head">
+    <h1 class="grow">{t('layer.customise')}</h1>
+    {#if tab !== 'ask'}
+      <button type="button" class="btn primary" onclick={start} disabled={starting} title={t('r10-cust-start.newTip')}><Icon name="palette" size={15} /> {t('r10-cust-start.new')}</button>
+    {/if}
+  </div>
   <p class="muted intro">{t('ldc.intro')}</p>
 
   {#if app.pending?.exists}
@@ -85,12 +83,14 @@
 
   <div id="cz-panel" class="panel" role="tabpanel" aria-labelledby={'cz-tab-' + tab}>
     {#if tab === 'ask'}
-      <div class="card">
-        <p class="muted sm hint">{t('layer.askHint')}</p>
-        <form class="row wrap" onsubmit={(e) => { e.preventDefault(); ask(); }}>
-          <input class="grow" dir="auto" bind:value={text} aria-label={t('layer.customise')} placeholder={t('set.customizePh')} />
-          <button type="submit" class="btn primary" disabled={!text.trim() || asking}>{asking ? t('set.starting') : t('layer.askGo')}</button>
-        </form>
+      <div class="card start">
+        <p class="lead">{t('r10-cust-start.lead')}</p>
+        <ol class="steps muted sm">
+          <li>{t('r10-cust-start.step1')}</li>
+          <li>{t('r10-cust-start.step2')}</li>
+          <li>{t('r10-cust-start.step3')}</li>
+        </ol>
+        <button type="button" class="btn primary go" onclick={start} disabled={starting} title={t('r10-cust-start.newTip')}><Icon name="palette" size={16} /> {starting ? t('set.starting') : t('r10-cust-start.new')}</button>
         <p class="muted sm gap">{t('ldc.ask.historyHint')}</p>
       </div>
       <div class="card row wrap">
@@ -140,7 +140,11 @@
   .wrap { flex-wrap: wrap; }
   .gap { margin: 10px 0 0; }
   .sm { font-size: var(--fs-xs); }
-  .hint { margin: 0 0 8px; }
+  .head { gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .head h1 { margin-bottom: 0; }
+  .lead { margin: 0 0 8px; }
+  .steps { margin: 0 0 14px; padding-inline-start: 20px; display: grid; gap: 4px; }
+  .go { padding-block: 9px; padding-inline: 16px; }
   .pend { margin: 0 0 12px; padding: 8px 10px; border-radius: var(--radius); background: var(--fill); font-size: 13px; gap: 8px; align-items: center; }
   .pend :global(.icon) { flex: none; color: var(--accent-2); }
 </style>

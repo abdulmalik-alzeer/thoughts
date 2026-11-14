@@ -39,6 +39,7 @@
   import ApprovalCard from './ApprovalCard.svelte';
   import ChatAllowed from './ChatAllowed.svelte';
   import LibraryGone from '../lib/LibraryGone.svelte';
+  import CustomiseStart from './CustomiseStart.svelte';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
 
@@ -335,6 +336,12 @@
   }
 
   /** The suggested next message goes into the box (after anything typed), to send or change. */
+  /** An example from a new customisation chat's opening, put in the message box to adjust and send. */
+  function pickExample(s: string) {
+    text = s;
+    tick().then(() => { input?.focus(); input?.setSelectionRange(text.length, text.length); });
+  }
+
   function useSuggestion() {
     const s = String(chat?.suggestion ?? '');
     if (!s) return;
@@ -703,7 +710,7 @@
       <button class="btn ghost" onclick={remove} title={t('chat.deleteChat')} aria-label={t('chat.deleteChat')}><Icon name="trash" /></button>
     </header>
 
-    {#if chat.kind === 'customize'}
+    {#if chat.kind === 'customize' && (chat.messages.length || chat.running)}
       <div class="banner row">
         <span class="grow">{t('layer.chatBanner')}</span>
         {#if app.pending?.exists && !app.pending.running}<button class="btn primary" onclick={openReview}>{t('layer.review')}</button>{/if}
@@ -815,7 +822,7 @@
             <div class="msg sys muted" dir="auto">{m.text}</div>
           {/if}
         {:else}
-          {#if !chat.running}<div class="hint muted"><Icon name="chat" size={22} /><span>{t('chat.emptyHint')}</span></div>{/if}
+          {#if !chat.running}{#if chat.kind === 'customize'}<CustomiseStart onpick={pickExample} />{:else}<div class="hint muted"><Icon name="chat" size={22} /><span>{t('chat.emptyHint')}</span></div>{/if}{/if}
         {/each}
         {#if chat.suggestion && !chat.running && canCompose}
           <div class="suggest"><button type="button" class="sugg" onclick={useSuggestion} title={t('chatc.suggest.tip')} aria-label={t('chatc.suggest.aria', { text: chat.suggestion })}>
@@ -892,7 +899,7 @@
           <QueuedCard q={queued} running={chat.running} onedit={editQueued} oncancel={() => take(id)} onsend={() => sendNowOrAfterStop(id, chat.running)} />
         {/if}
         <textarea bind:this={input} bind:value={text} {oninput} onkeydown={keydown} {onpaste} rows="2" dir="auto"
-          placeholder={chat.running ? t('chatc.queue.placeholder') : t('chatc.placeholder')} aria-label={t('chat.messageLabel')}
+          placeholder={chat.running ? t('chatc.queue.placeholder') : chat.kind === 'customize' && !chat.messages.length ? t('r10-cust-start.placeholder') : t('chatc.placeholder')} aria-label={t('chat.messageLabel')}
           aria-controls={mentionHits.length ? 'mention-list' : undefined} aria-activedescendant={mentionHits.length ? `mention-${mentionIdx}` : undefined}></textarea>
         <div class="row controls">
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>

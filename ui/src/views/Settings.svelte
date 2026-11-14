@@ -4,7 +4,7 @@
   import { askNotify, notifState, notifySettingsUrl, openNotifySettings, testNotify, type NotifState } from '../lib/notifyPerm';
   import { api, del, inTauri, post, put, reloadApp } from '../lib/api';
   import { reportUnsaved } from '../lib/unsaved';
-  import { a11y, app, applyTheme, go, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
+  import { a11y, app, applyTheme, command, go, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
   import { recheckSignIn } from '../lib/auth';
   import { isolatedKeys, tip } from '../lib/shortcuts';
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
@@ -1050,7 +1050,10 @@
     <!-- Customise has a page of its own (sidebar); this category points there. -->
     <div class="card">
       <p class="muted">{t('ldc.set.moved')}</p>
-      <button type="button" class="btn primary" onclick={() => go({ kind: 'customise' })}><Icon name="palette" size={15} /> {t('ldc.set.open')}</button>
+      <div class="row wrap" style="gap: 8px">
+        <button type="button" class="btn primary" onclick={() => command('customise.new')} title={t('r10-cust-start.newTip')}><Icon name="palette" size={15} /> {t('r10-cust-start.new')}</button>
+        <button type="button" class="btn" onclick={() => go({ kind: 'customise' })}>{t('ldc.set.open')}</button>
+      </div>
     </div>
     {#if vis(c, ...adv.appLayer)}
       <details class="card adv" open={!!q || advOpen.appLayer} ontoggle={(e) => { if (!q) advOpen.appLayer = e.currentTarget.open; }}>

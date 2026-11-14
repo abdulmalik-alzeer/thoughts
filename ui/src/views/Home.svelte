@@ -83,7 +83,7 @@
     if (sugBusy) return;
     sugBusy = sg.id;
     try {
-      await startCustomise(sg.prompt);
+      await startCustomise(sg.prompt, sg.title);
       suggestions = suggestions.filter((x) => x.id !== sg.id);
       dismissSuggestion(sg.id).catch(() => {});
     } catch (e) { failed(t('layer.askFailed'), e); }

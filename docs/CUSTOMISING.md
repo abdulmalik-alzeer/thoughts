@@ -18,7 +18,7 @@ These changes are ordinary edits to your library. When history is turned on they
 
 ## 2. The app — how it looks and what it shows
 
-Open **Customise** and describe what you want in your own words.
+Press **New customisation**: on the **Customise** page, in Help or Settings, or from the command palette. A chat opens, just like a new chat, where you describe what you want in your own words and talk it through with the assistant until it is right. Each customisation has a chat of its own, listed with your other chats, so you can come back to it later.
 
 ### What you can ask for
 

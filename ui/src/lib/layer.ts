@@ -1213,11 +1213,27 @@ async function sureDespiteFreeze(what: 'try' | 'keep'): Promise<boolean> {
   return aboveShield(() => confirmDialog({ title: t('lua.frozeTitle'), body: t(what === 'try' ? 'lua.frozeTry' : 'lua.frozeKeep'), confirmLabel: t(what === 'try' ? 'lua.frozeTryAnyway' : 'lua.frozeKeepAnyway'), danger: true }));
 }
 
-/** Start a customise run. The assistant works on a staged copy; nothing changes until the review. */
-export async function startCustomise(prompt: string): Promise<string | null> {
+/** New customisation: open an empty customisation chat (an empty one already there is opened again),
+ *  where the person describes the change. Its first message starts the assistant on a staged copy. */
+let opening = false;
+export async function newCustomise(): Promise<void> {
+  if (opening) return;
+  opening = true;
+  try {
+    const c = await post('/chats', { kind: 'customize', byUser: true });
+    dismissed = '';
+    await refreshChats().catch(() => {});
+    if (c?.id) go({ kind: 'chat', id: c.id });
+  } catch (e) { failed(t('r10-cust-start.failed'), e); }
+  finally { opening = false; }
+}
+
+/** Start a customise run with a request the app prepared (a Home suggestion the person accepted),
+ *  in a customisation chat named `title`. Nothing changes until the review. */
+export async function startCustomise(prompt: string, title = ''): Promise<string | null> {
   const text = prompt.trim();
   if (!text) return null;
-  const r = await post('/layer/customize', { prompt: text });
+  const r = await post('/layer/customize', { prompt: text, ...(title.trim() ? { title: title.trim() } : {}) });
   dismissed = '';
   refreshChats().catch(() => {});
   if (r?.chatId) go({ kind: 'chat', id: r.chatId });
