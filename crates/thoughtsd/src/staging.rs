@@ -1797,7 +1797,8 @@ mod tests {
         for want in [format!("Edit({r})"), format!("Edit({r}/**)"), format!("Bash(*{shell}/chat-files*)")] { assert!(has(&want), "missing {want}"); }
         let protective = crate::claude::protective_deny(&d.staging, &[], &home, "c-1", false);
         let own = crate::run_files::folder(&home, "c-1").unwrap();
-        for c in crate::run_files::closed_for(&home, "c-1") { assert!(protective.contains(&format!("Read({}/**)", crate::claude::rule_path(&c)))); }
+        let cr = crate::claude::rule_path(&crate::run_files::root(&home));
+        for rel in crate::run_files::closed_for("c-1").unwrap() { assert!(protective.contains(&format!("Read({cr}/{rel}/**)"))); }
         for up in own.ancestors().take_while(|a| a.starts_with(crate::run_files::root(&home))) {
             let q = crate::claude::rule_path(up);
             for x in [format!("Read({q})"), format!("Read({q}/**)")] { assert!(!protective.contains(&x) && !has(&x), "its own copies are closed by {x}"); }

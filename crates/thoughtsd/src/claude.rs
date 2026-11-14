@@ -850,15 +850,22 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
             // every place another chat's copies could ever be is named — a fixed list, whatever exists
             // yet. Nothing in there can be edited.
             Some(crate::run_files::DIR) => {
-                let p = rule_path(dir);
-                deny.push(format!("Edit({p})"));
-                deny.push(format!("Edit({p}/**)"));
-                for o in crate::run_files::closed_for(home, chat_id) {
-                    let p = rule_path(&o);
-                    deny.push(format!("Read({p})"));
-                    deny.push(format!("Read({p}/**)"));
-                    deny.push(format!("Bash(*{}*)", o.to_string_lossy().replace('\\', "/")));
+                use crate::run_files::DIR;
+                let base = rule_path(home);
+                // In every letter case: the file system may ignore it, the rules do not (the levels
+                // below are digits, which have none).
+                for name in [DIR.to_string(), DIR.to_uppercase(), any_case(DIR)] {
+                    let p = format!("{base}/{name}");
+                    deny.push(format!("Edit({p})"));
+                    deny.push(format!("Edit({p}/**)"));
+                    match crate::run_files::closed_for(chat_id) {
+                        Some(list) => for rel in list { deny.push(format!("Read({p}/{rel})")); deny.push(format!("Read({p}/{rel}/**)")); },
+                        None => { deny.push(format!("Read({p})")); deny.push(format!("Read({p}/**)")); }
+                    }
                 }
+                // The shell reaches no copies at all, this chat's included: they are for the Read tool.
+                deny.push(format!("Bash(*{}*)", dir.to_string_lossy().replace('\\', "/")));
+                for name in [DIR.to_string(), DIR.to_uppercase()] { deny.push(format!("Bash(*{name}*)")); }
             }
             // The search add-on is a tool the assistant may use, but not rewrite.
             Some("extensions") => {
@@ -2765,8 +2772,18 @@ mod tests {
         let own = crate::run_files::folder(&home, "this-chat").unwrap();
         let theirs = crate::run_files::folder(&home, "a-later-chat").unwrap();
         let closes = |p: &Path| deny.iter().any(|d| p.ancestors().any(|a| *d == format!("Read({}/**)", rule_path(a))));
-        assert!(closes(&theirs.join("x.png")) && !closes(&own.join("x.png")));
+        assert!(closes(&theirs.join("run/x.png")) && !closes(&own.join("run/x.png")));
         assert!(deny.contains(&format!("Edit({h}/chat-files/**)")));
+        // Spelled in capitals (the same folder where the file system ignores case), the other chat's copies stay closed.
+        let rule = deny.iter().find(|d| d.starts_with(&format!("Read({h}/chat-files/")) && theirs.ancestors().any(|a| **d == format!("Read({}/**)", rule_path(a))))
+            .unwrap().clone();
+        for name in ["CHAT-FILES", &any_case("chat-files")] {
+            let other_case = rule.replacen("/chat-files/", &format!("/{name}/"), 1);
+            assert!(deny.contains(&other_case), "missing {other_case}");
+        }
+        assert!(deny.contains(&format!("Edit({h}/{}/**)", any_case("chat-files"))) && deny.contains(&format!("Edit({h}/CHAT-FILES/**)")));
+        // No command reaches any copies, this chat's own included.
+        for want in [format!("Bash(*{shell}/chat-files*)"), "Bash(*chat-files*)".to_string(), "Bash(*CHAT-FILES*)".to_string()] { assert!(deny.contains(&want), "missing {want}"); }
         // Hundreds of rules: more than one command-line argument may carry on Linux (128 KiB) as the
         // home's contents grow — which is why the document is handed over as a file, never as an argument.
         let doc = json!({"permissions": {"deny": deny}}).to_string();

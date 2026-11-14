@@ -2758,11 +2758,11 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let readable = |p: &String| copies.as_ref().and_then(|dir| std::path::Path::new(p).file_name().map(|n| dir.join(n)))
         .filter(|c| c.is_file()).map_or(p.clone(), |c| c.to_string_lossy().to_string());
     if !saved.is_empty() {
-        prompt.push_str("\n\nAttached files (read them):\n");
+        prompt.push_str(if copies.is_some() { "\n\nAttached files (read them, with the Read tool: commands cannot reach them):\n" } else { "\n\nAttached files (read them):\n" });
         for p in &saved { prompt.push_str(&format!("- {}\n", readable(p))); }
     }
     if let Some(dir) = copies.as_ref().filter(|_| chat.messages.iter().any(|x| !x.attachments.is_empty())) {
-        prompt.push_str(&format!("\n\nFiles attached earlier in this chat can be read from copies in {} (their first places are closed to you).\n", dir.display()));
+        prompt.push_str(&format!("\n\nFiles attached earlier in this chat can be read, with the Read tool, from copies in {} (their first places are closed to you).\n", dir.display()));
     }
     drop(files);
     if !m.mentions.is_empty() {

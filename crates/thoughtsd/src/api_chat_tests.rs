@@ -211,8 +211,9 @@ async fn attachments_of_several_megabytes_arrive_and_never_replace_each_other() 
     let prompt = prompts.lock().unwrap().last().cloned().unwrap();
     let copies = crate::run_files::folder(&paths::home(), &chat).unwrap();
     assert!(!prompt.contains(&*one.to_string_lossy()) && !prompt.contains(&*two.to_string_lossy()), "{prompt}");
-    assert_eq!(prompt.matches(&*copies.join("image.png").to_string_lossy()).count(), 1);
-    assert_eq!(prompt.matches(&*copies.join("image (2).png").to_string_lossy()).count(), 1);
+    let names = |prompt: &str, name: &str| prompt.lines().filter(|l| l.starts_with(&format!("- {}", copies.display())) && l.ends_with(&format!("/{name}"))).count();
+    assert_eq!((names(&prompt, "image.png"), names(&prompt, "image (2).png")), (1, 1), "{prompt}");
+    assert!(prompt.contains("Read tool"));
     for _ in 0..200 { if !copies.exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
     assert!(!copies.exists(), "the copies stay after the run");
 
@@ -222,7 +223,7 @@ async fn attachments_of_several_megabytes_arrive_and_never_replace_each_other() 
     assert_eq!(std::fs::read(dir.join("image (3).png")).unwrap(), b"third");
     // The earlier files are copied for this run too, and it is told where.
     let prompt = prompts.lock().unwrap().last().cloned().unwrap();
-    assert!(prompt.contains(&*copies.join("image (3).png").to_string_lossy()) && prompt.contains(&format!("copies in {}", copies.display())), "{prompt}");
+    assert!(names(&prompt, "image (3).png") == 1 && prompt.contains(&format!("copies in {}", copies.display())), "{prompt}");
     assert_eq!(std::fs::read(&one).unwrap(), big);
     assert_eq!(std::fs::read(&two).unwrap(), small);
     // A name without an extension, and one that differs only in letter case.
