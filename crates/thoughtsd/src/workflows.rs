@@ -108,15 +108,19 @@ pub fn load_files(layer: &Path) -> Vec<Loaded> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(layer.join("workflows")).into_iter().flatten().flatten().map(|e| e.path())
         .filter(|p| p.extension().map_or(false, |x| x == "json") && p.is_file()).collect();
     files.sort();
+    load_entries(files.into_iter().take(50).filter_map(|f| Some((f.file_name()?.to_string_lossy().to_string(), std::fs::read(&f).ok()?))).collect())
+}
+
+/// `load_files` from `(file name, content)` pairs already read, in file order (a preview builds
+/// them from the exact bytes it checked).
+pub fn load_entries(entries: Vec<(String, Vec<u8>)>) -> Vec<Loaded> {
     let mut out: Vec<Loaded> = vec![];
-    for f in files.into_iter().take(50) {
-        let Ok(bytes) = std::fs::read(&f) else { continue };
+    for (file, bytes) in entries.into_iter().take(50) {
         let Some(mut v) = serde_json::from_slice::<Value>(&bytes).ok() else { continue };
         if v["name"].as_str().map_or(true, |n| n.trim().is_empty()) {
-            if let Some(o) = v.as_object_mut() { o.insert("name".into(), json!(f.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())); }
+            if let Some(o) = v.as_object_mut() { o.insert("name".into(), json!(Path::new(&file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())); }
         }
         let Ok(w) = serde_json::from_value::<Workflow>(v) else { continue };
-        let Some(file) = f.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
         if valid(&w) { out.push(Loaded { file, hash: content_hash(&bytes), workflow: w, duplicate_name: false }); }
     }
     let names: Vec<String> = out.iter().map(|l| l.workflow.name.clone()).collect();

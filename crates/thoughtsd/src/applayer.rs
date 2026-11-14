@@ -200,12 +200,69 @@ pub enum DeclIn {
     None,
 }
 
-pub fn decl_in_effect(dir: &Path, sub: &str, file: &str, shared: &Value) -> DeclIn {
+/// Where a layer's files are read from: a folder (`Path`), or for a preview the kept layer with
+/// exactly the bytes the user's chosen change consists of laid over it (`Overlay`), all in memory.
+pub trait LayerFiles {
+    /// The content at `rel` (links followed, as for a folder's own files).
+    fn file(&self, rel: &str) -> Option<Vec<u8>>;
+    /// The content at `rel` only when it is a plain file (never a link) of at most `max` bytes.
+    fn plain_file(&self, rel: &str, max: usize) -> Option<Vec<u8>>;
+    fn has_file(&self, rel: &str) -> bool;
+    /// Plain files directly in folder `sub`, by name, hidden ones left out.
+    fn file_names(&self, sub: &str) -> Vec<String>;
+    fn workflows(&self) -> Vec<crate::workflows::Workflow>;
+}
+
+impl LayerFiles for &Path {
+    fn file(&self, rel: &str) -> Option<Vec<u8>> { std::fs::read(self.join(rel)).ok() }
+    fn plain_file(&self, rel: &str, max: usize) -> Option<Vec<u8>> {
+        let p = self.join(rel);
+        std::fs::symlink_metadata(&p).ok().filter(|m| m.is_file() && m.len() as usize <= max).and_then(|_| std::fs::read(&p).ok())
+    }
+    fn has_file(&self, rel: &str) -> bool { self.join(rel).is_file() }
+    fn file_names(&self, sub: &str) -> Vec<String> {
+        std::fs::read_dir(self.join(sub)).into_iter().flatten().flatten()
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.') && e.file_type().map_or(false, |t| t.is_file()))
+            .map(|e| e.file_name().to_string_lossy().to_string()).collect()
+    }
+    fn workflows(&self) -> Vec<crate::workflows::Workflow> { crate::workflows::load(self) }
+}
+
+/// The kept layer at `base` with `files` (layer path -> content, `None` = deleted) laid over it.
+pub struct Overlay<'a> { pub base: &'a Path, pub files: BTreeMap<String, Option<Vec<u8>>> }
+
+impl LayerFiles for Overlay<'_> {
+    fn file(&self, rel: &str) -> Option<Vec<u8>> {
+        match self.files.get(rel) { Some(b) => b.clone(), None => LayerFiles::file(&self.base, rel) }
+    }
+    fn plain_file(&self, rel: &str, max: usize) -> Option<Vec<u8>> {
+        match self.files.get(rel) { Some(b) => b.clone().filter(|b| b.len() <= max), None => LayerFiles::plain_file(&self.base, rel, max) }
+    }
+    fn has_file(&self, rel: &str) -> bool {
+        match self.files.get(rel) { Some(b) => b.is_some(), None => LayerFiles::has_file(&self.base, rel) }
+    }
+    fn file_names(&self, sub: &str) -> Vec<String> {
+        let mut set: BTreeSet<String> = LayerFiles::file_names(&self.base, sub).into_iter().collect();
+        for (path, b) in &self.files {
+            let Some(name) = path.strip_prefix(sub).and_then(|r| r.strip_prefix('/')).filter(|n| !n.contains('/') && !n.starts_with('.')) else { continue };
+            if b.is_some() { set.insert(name.to_string()); } else { set.remove(name); }
+        }
+        set.into_iter().collect()
+    }
+    fn workflows(&self) -> Vec<crate::workflows::Workflow> {
+        let names: Vec<String> = self.file_names("workflows").into_iter().filter(|n| n.ends_with(".json")).collect();
+        let entries = names.into_iter().take(50).filter_map(|n| Some((n.clone(), self.file(&format!("workflows/{n}"))?))).collect();
+        crate::workflows::load_entries(entries).into_iter().map(|l| l.workflow).collect()
+    }
+}
+
+pub fn decl_in_effect(dir: &Path, sub: &str, file: &str, shared: &Value) -> DeclIn { decl_in(&dir, sub, file, shared) }
+
+fn decl_in(dir: &dyn LayerFiles, sub: &str, file: &str, shared: &Value) -> DeclIn {
     let stem = Path::new(file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let rel = format!("{sub}/{stem}.json");
-    let own_path = dir.join(&rel);
-    let own = std::fs::symlink_metadata(&own_path).ok().filter(|m| m.is_file() && m.len() <= 64 * 1024)
-        .and_then(|_| std::fs::read_to_string(&own_path).ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(Value::is_object);
+    let own = dir.plain_file(&rel, 64 * 1024)
+        .and_then(|b| String::from_utf8(b).ok()).and_then(|t| serde_json::from_str::<Value>(&t).ok()).filter(Value::is_object);
     match own {
         Some(o) => DeclIn::Own(rel, o),
         None if shared[sub][file].is_object() => DeclIn::Manifest(shared[sub][file].clone()),
@@ -213,8 +270,10 @@ pub fn decl_in_effect(dir: &Path, sub: &str, file: &str, shared: &Value) -> Decl
     }
 }
 
-pub fn resolve_decl(dir: &Path, sub: &str, file: &str, shared: &Value, arabic: bool) -> Value {
-    let found = decl_in_effect(dir, sub, file, shared);
+pub fn resolve_decl(dir: &Path, sub: &str, file: &str, shared: &Value, arabic: bool) -> Value { resolve_decl_in(&dir, sub, file, shared, arabic) }
+
+fn resolve_decl_in(dir: &dyn LayerFiles, sub: &str, file: &str, shared: &Value, arabic: bool) -> Value {
+    let found = decl_in(dir, sub, file, shared);
     let (decl, version) = match &found {
         DeclIn::Own(_, o) => (o.clone(), o["apiVersion"].as_u64().unwrap_or(API_VERSION)),
         DeclIn::Manifest(m) => (m.clone(), shared["apiVersion"].as_u64().unwrap_or(API_VERSION)),
@@ -249,28 +308,30 @@ pub async fn manifest() -> Value { manifest_of(&Dirs::real().layer) }
 pub fn manifest_of(dir: &Path) -> Value { manifest_lang(dir, false) }
 
 /// Same, with user-facing messages in the UI language.
-pub fn manifest_lang(dir: &Path, arabic: bool) -> Value { manifest_with(dir, arabic, &switched_off(dir)) }
+pub fn manifest_lang(dir: &Path, arabic: bool) -> Value { manifest_with(&dir, arabic, &switched_off(dir)) }
 
 /// The staged layer for "Try it": what the user switched off stays off. The switched-off list is
 /// the live layer's, since only the app writes it and a staged copy of it is never kept.
-pub fn manifest_preview(staging: &Path, layer: &Path, arabic: bool) -> Value { manifest_with(staging, arabic, &switched_off(layer)) }
+pub fn manifest_preview(staging: &Path, layer: &Path, arabic: bool) -> Value { manifest_with(&staging, arabic, &switched_off(layer)) }
 
-fn manifest_with(dir: &Path, arabic: bool, off: &BTreeSet<String>) -> Value {
-    let read = |p: &str| std::fs::read_to_string(dir.join(p)).unwrap_or_default();
-    let parsed = |p: &str| std::fs::read_to_string(dir.join(p)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
+/// `manifest_preview` built from `files` (see `Overlay`) without touching any folder but the kept layer.
+pub fn manifest_preview_files(files: &Overlay<'_>, arabic: bool) -> Value { manifest_with(files, arabic, &switched_off(files.base)) }
+
+fn manifest_with(dir: &dyn LayerFiles, arabic: bool, off: &BTreeSet<String>) -> Value {
+    let text = |p: &str| dir.file(p).and_then(|b| String::from_utf8(b).ok());
+    let read = |p: &str| text(p).unwrap_or_default();
+    let parsed = |p: &str| text(p).and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
     let object = |p: &str| Some(parsed(p)).filter(Value::is_object).unwrap_or(Value::Null);
     let shared = parsed("manifest.json");
     // What the user switched off is not handed to the UI at all: it is listed under `off` only.
     let list = |sub: &str, ext: &str| -> Vec<Value> {
-        let mut v: Vec<Value> = std::fs::read_dir(dir.join(sub)).into_iter().flatten().flatten()
-            .filter(|e| e.path().extension().map_or(false, |x| x == ext) && !e.file_name().to_string_lossy().starts_with('.'))
-            .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
-            .filter(|e| !off.contains(&format!("{sub}/{}", e.file_name().to_string_lossy())))
-            .map(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                let mut item = resolve_decl(dir, sub, &name, &shared, arabic);
+        let mut v: Vec<Value> = dir.file_names(sub).into_iter()
+            .filter(|name| Path::new(name).extension().map_or(false, |x| x == ext))
+            .filter(|name| !off.contains(&format!("{sub}/{name}")))
+            .map(|name| {
+                let mut item = resolve_decl_in(dir, sub, &name, &shared, arabic);
                 // Code made for a newer API is listed but never handed to the UI to run.
-                item["code"] = json!(if item["unsupported"] == true { String::new() } else { std::fs::read_to_string(e.path()).unwrap_or_default() });
+                item["code"] = json!(if item["unsupported"] == true { String::new() } else { read(&format!("{sub}/{name}")) });
                 item["name"] = json!(name);
                 item
             })
@@ -289,8 +350,8 @@ fn manifest_with(dir: &Path, arabic: bool, off: &BTreeSet<String>) -> Value {
         "todos": object("todos.json"),
         "nav": object("nav.json"),
         "pages": object("pages.json"),
-        "workflows": crate::workflows::load(dir),
-        "off": off.iter().filter(|p| dir.join(p).is_file()).collect::<Vec<_>>(),
+        "workflows": dir.workflows(),
+        "off": off.iter().filter(|p| dir.has_file(p)).collect::<Vec<_>>(),
     })
 }
 

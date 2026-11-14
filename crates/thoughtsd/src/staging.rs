@@ -978,39 +978,16 @@ pub async fn preview_manifest(g: Git<'_>, d: &Dirs, arabic: bool, signature: &st
     preview_from(d, &staged, arabic)
 }
 
-/// Build the preview manifest from the kept layer with exactly `staged` laid over it, in a private
-/// folder that is removed afterwards. Only plain files and folders of the kept layer are copied.
+/// Build the preview manifest from the kept layer with exactly `staged` laid over it, in memory:
+/// no folder is written or read back, so nothing can be slipped in between the check and the load.
 fn preview_from(d: &Dirs, staged: &[Staged], arabic: bool) -> anyhow::Result<Value> {
-    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
-        std::fs::create_dir_all(to)?;
-        for e in std::fs::read_dir(from)?.flatten() {
-            let name = e.file_name();
-            if name == ".git" { continue; }
-            let ft = e.file_type()?;
-            if ft.is_dir() { copy(&e.path(), &to.join(&name))?; } else if ft.is_file() { std::fs::copy(e.path(), to.join(&name))?; }
-        }
-        Ok(())
+    let mut files = std::collections::BTreeMap::new();
+    for f in staged {
+        // Paths come from `changes`, which only lets customisation paths through (`check_path`).
+        crate::packs::check_path(&f.path)?;
+        files.insert(f.path.clone(), f.bytes.clone());
     }
-    let tmp = d.home.join(format!(".preview-{}", uuid::Uuid::new_v4()));
-    let built = (|| -> anyhow::Result<Value> {
-        copy(&d.layer, &tmp)?;
-        for f in staged {
-            // Paths come from `changes`, which only lets customisation paths through (`check_path`).
-            crate::packs::check_path(&f.path)?;
-            let dst = tmp.join(&f.path);
-            match &f.bytes {
-                None => { let _ = std::fs::remove_file(&dst); }
-                Some(b) => {
-                    if let Some(dir) = dst.parent() { std::fs::create_dir_all(dir)?; }
-                    let _ = std::fs::remove_file(&dst);
-                    std::fs::write(&dst, b)?;
-                }
-            }
-        }
-        Ok(crate::applayer::manifest_preview(&tmp, &d.layer, arabic))
-    })();
-    let _ = std::fs::remove_dir_all(&tmp);
-    built
+    Ok(crate::applayer::manifest_preview_files(&crate::applayer::Overlay { base: &d.layer, files }, arabic))
 }
 
 /// Can a regular file be written at `rel` inside `layer` without going through anything that is
@@ -1308,7 +1285,27 @@ mod tests {
         let sig = pending(st, &d, false).await["signature"].as_str().unwrap().to_string();
         let m = preview_manifest(st, &d, false, &sig).await.unwrap();
         assert!(!m.to_string().contains("secret"), "{m}");
-        assert!(std::fs::read_dir(&d.home).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".preview-")), "the private copy is removed");
+        assert!(std::fs::read_dir(&d.home).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".preview-")), "no folder is written for a preview");
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_preview_is_built_in_memory_from_the_kept_layer_and_the_change() {
+        let (st, d) = testutil::layer("preview-mem").await;
+        recreate(st, &d, "customize", None).await.unwrap();
+        std::fs::write(d.staging.join("plugins/hello.js"), "export default () => 'hi'\n").unwrap();
+        std::fs::write(d.staging.join("plugins/hello.json"), r#"{"apiVersion":1,"permissions":["storage"]}"#).unwrap();
+        let (files, _) = changes(st, &d).await.unwrap();
+        let staged = read_staged(&d, &files);
+        // The staging folder disappears entirely: the preview needs nothing from it any more.
+        std::fs::remove_dir_all(&d.staging).unwrap();
+        let m = preview_from(&d, &staged, false).unwrap();
+        let hello = m["plugins"].as_array().unwrap().iter().find(|p| p["name"] == "hello.js").expect("the new add-on").clone();
+        assert_eq!(hello["code"], "export default () => 'hi'\n");
+        assert_eq!(hello["permissions"], json!(["storage"]));
+        let kept = crate::applayer::manifest_of(&d.layer);
+        assert_eq!(m["css"], kept["css"], "everything else is the kept layer");
+        assert!(kept["plugins"].as_array().unwrap().iter().all(|p| p["name"] != "hello.js"), "the kept layer is untouched");
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
