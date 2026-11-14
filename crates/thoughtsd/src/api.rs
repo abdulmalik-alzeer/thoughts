@@ -2786,7 +2786,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let kind = chat.kind.clone();
     let append = if kind == "customize" { Some(crate::staging::system_prompt(&applayer::Dirs::real())) } else { append };
     // A customise run may only write inside its staging copy, and may not read the app's own secrets.
-    let extra_deny = if kind == "customize" { crate::staging::deny_rules(&applayer::Dirs::real(), library.as_deref()) } else { vec![] };
+    let extra_deny = if kind == "customize" { crate::staging::deny_rules(&applayer::Dirs::real(), library.as_deref(), &id) } else { vec![] };
     let spec = |prompt: String, resume: Option<String>| RunSpec { chat_id: id.clone(), prompt, cwd: cwd.clone(), add_dirs: add_dirs.clone(),
         options: opts.clone(), resume, append_system: append.clone(), extra_deny: extra_deny.clone() };
     let on_done: Option<RunDone> = match fallback {

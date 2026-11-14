@@ -163,4 +163,5 @@ If you ask for something outside these limits, the assistant should say so inste
 - Ask for one thing at a time. Small changes are easier to judge in a review.
 - Say what you want to see, not how to build it: "I want to see overdue todos in red at the top".
 - If a result is close but not right, say what is off. The assistant adjusts the same change.
+- Show instead of describing: in the customise chat, attach a screenshot of what you want changed, a picture whose colours you like, or a document to work from (the paperclip, pasting, or dragging a file in). The assistant can look at what you attach but not change it, and only this chat's files. Pictures guide the change; they cannot become part of it, because the app cannot load image files.
 - Use Try it before Keep, especially for boards and forms: click the buttons and check, in the messages that appear, that things would land where you expect.

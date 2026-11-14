@@ -136,8 +136,9 @@ fn rule_path(p: &Path) -> String {
 }
 
 /// What a customise run may not do: write to the library or the live layer, plant settings that
-/// would run code, or read the daemon's secrets.
-pub fn deny_rules(d: &Dirs, library: Option<&Path>) -> Vec<String> {
+/// would run code, or read the daemon's secrets. Of the attachment folders it may read only its
+/// own chat's (`chat_id`), the files the user attached to the request; it may write none of them.
+pub fn deny_rules(d: &Dirs, library: Option<&Path>, chat_id: &str) -> Vec<String> {
     let mut deny = vec![];
     for dir in library.into_iter().chain(std::iter::once(d.layer.as_path())) {
         let p = rule_path(dir);
@@ -159,6 +160,19 @@ pub fn deny_rules(d: &Dirs, library: Option<&Path>) -> Vec<String> {
     }
     for dir in &dirs {
         let p = rule_path(dir);
+        if dir.file_name().map_or(false, |n| n == "attachments") && crate::chats::valid_id(chat_id) {
+            // The whole folder stays closed to writing and to the shell; reading is closed folder
+            // by folder (a deny rule cannot make an exception), every chat's but this one's.
+            for rule in [format!("Edit({p})"), format!("Edit({p}/**)")] { deny.push(rule); }
+            deny.push(format!("Bash(*{}*)", dir.to_string_lossy().replace('\\', "/")));
+            let others: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten()
+                .filter(|e| e.file_name().to_string_lossy() != chat_id).map(|e| e.path()).collect();
+            if others.len() <= crate::claude::MAX_CLOSED_FOLDERS {
+                for o in &others { let q = rule_path(o); deny.push(format!("Read({q})")); deny.push(format!("Read({q}/**)")); }
+                continue;
+            }
+            // Too many to name one by one (see `claude::protective_deny`): close it all, this chat's included.
+        }
         for rule in [format!("Read({p})"), format!("Read({p}/**)"), format!("Edit({p})"), format!("Edit({p}/**)")] { deny.push(rule); }
         deny.push(format!("Bash(*{}*)", dir.to_string_lossy().replace('\\', "/")));
     }
@@ -341,6 +355,10 @@ pub fn system_prompt(d: &Dirs) -> String {
          5. When you are done, write SUMMARY.md in that folder: 2–5 plain sentences for a non-developer, in the user's language, \
          saying what will change and how to try it. No file names unless they help, no jargon. Its first line becomes the title of the change.\n\
          6. The app checks your files before the user sees them (README.md lists the rules). A change with problems cannot be kept, so follow the file shapes exactly.\n\
+         7. A message may list files the user attached (a screenshot of what to change, a picture to match, a reference document). \
+         Open each one with the Read tool and look at it: it is how the user shows you what they mean. Attached files are read-only and \
+         are not part of the layer: never point a layer file at one. Whatever you take from one (colours, wording, a list, data) you \
+         write into the layer files yourself. The layer is text only, so a picture cannot be copied in; say so if the user asks for that.\n\
          Nothing you write takes effect until the user previews it and presses Keep, so do not tell them it is already live. \
          The user cannot answer interactive tool prompts here — ask questions in plain text, and keep the change small.",
         staging = d.staging.display(), layer = d.layer.display()
@@ -1622,7 +1640,7 @@ mod tests {
     #[test]
     fn deny_rules_protect_library_layer_and_secrets() {
         let d = Dirs::at(Path::new("/home/u/.thoughts"));
-        let rules = deny_rules(&d, Some(Path::new("/home/u/Library")));
+        let rules = deny_rules(&d, Some(Path::new("/home/u/Library")), "c-1");
         for want in ["Edit(//home/u/Library/**)", "Edit(//home/u/.thoughts/app-layer/**)", "Edit(./.claude/**)", "Read(//home/u/.thoughts/daemon.json)",
                      "Read(//home/u/.thoughts/secrets.json)", "Read(//home/u/.thoughts/git-credentials)", "Read(//home/u/.thoughts/trusted.json)",
                      "Read(//home/u/.thoughts/settings.json*)", "Read(//home/u/.thoughts/chats/**)", "Bash(*/home/u/.thoughts/secrets.json*)",
@@ -1633,5 +1651,36 @@ mod tests {
         assert!(!rules.iter().any(|r| r.contains("app-layer-staging")));
         assert_eq!(subject_of("\n## تغيير الألوان \nالتفاصيل"), "تغيير الألوان");
         assert!(system_prompt(&d).contains("SUMMARY.md"));
+    }
+
+    #[test]
+    fn a_customise_run_reads_its_own_attachments_and_writes_none() {
+        let home = std::env::temp_dir().join(format!("thoughts-cust-att-{}", uuid::Uuid::new_v4()));
+        for sub in ["attachments/c-1", "attachments/c-2", "chats"] { std::fs::create_dir_all(home.join(sub)).unwrap(); }
+        std::fs::write(home.join("attachments/c-1/shot.png"), b"png").unwrap();
+        let d = Dirs::at(&home);
+        let h = rule_path(&home);
+        let shell = home.to_string_lossy().replace('\\', "/");
+        let rules = deny_rules(&d, None, "c-1");
+        let has = |r: &str| rules.iter().any(|x| x == r);
+        // Its own files can be read: no rule closes the folder, the whole of attachments or the file.
+        let reads_own = |rules: &[String]| !rules.iter().any(|r| r == &format!("Read({h}/attachments/**)") || r.starts_with(&format!("Read({h}/attachments/c-1")));
+        assert!(reads_own(&rules), "{rules:?}");
+        // Every other chat's stay closed, and nothing in attachments can be written, from any tool or the shell.
+        for want in [format!("Read({h}/attachments/c-2)"), format!("Read({h}/attachments/c-2/**)"), format!("Edit({h}/attachments)"),
+                     format!("Edit({h}/attachments/**)"), format!("Bash(*{shell}/attachments*)"), format!("Read({h}/chats/**)"), format!("Edit({h}/app-layer/**)")] {
+            assert!(has(&want), "missing {want}");
+        }
+        // A chat id that is not one (it could name a path) opens nothing.
+        let odd = deny_rules(&d, None, "../c-1");
+        assert!(!reads_own(&odd) && odd.iter().any(|r| r == &format!("Read({h}/attachments/**)")));
+        // More chats with files than the rules may name: all of them are closed, this one's included.
+        for i in 0..=crate::claude::MAX_CLOSED_FOLDERS { std::fs::create_dir(home.join(format!("attachments/x{i}"))).unwrap(); }
+        let many = deny_rules(&d, None, "c-1");
+        assert!(many.iter().any(|r| r == &format!("Read({h}/attachments/**)")) && !many.iter().any(|r| r.starts_with(&format!("Read({h}/attachments/x"))));
+        std::fs::remove_dir_all(&home).unwrap();
+        // The run is told how to use what was attached.
+        let p = system_prompt(&d);
+        assert!(p.contains("attached") && p.contains("Read tool") && p.contains("never point a layer file at one"), "{p}");
     }
 }
