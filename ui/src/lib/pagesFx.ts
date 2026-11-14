@@ -3,6 +3,7 @@
 // reorders the sentence around them.
 import { t } from './i18n';
 import type { FxLine } from './effects';
+import { app } from './store.svelte';
 
 const q = (v: unknown) => `⁨${String(v ?? '')}⁩`;
 const PAGE_NAMES = ['home', 'chats', 'ideas', 'todos', 'docs', 'projects'];
@@ -23,6 +24,12 @@ export function pagesFx(e: any, key: string): FxLine | null {
   const k = (s: string) => `r10-cust-pages.fx.${s}`;
   switch (e.op) {
     case 'title': case 'intro': {
+      // Home's title is the greeting: shown as it will read this morning, with the person's name.
+      if (pg === 'home' && e.op === 'title') {
+        const fill = (s: unknown) => (typeof s === 'string' ? s.replaceAll('{greeting}', t('goodMorning')).replaceAll('{name}', app.settings?.userName || t('r10-cust-pages.fx.yourName')) : s);
+        const n = names({ en: fill(e.en), ar: fill(e.ar) });
+        return line('changed', t(k(n.both ? 'greetingBoth' : 'greeting'), { name: n.name, other: n.other }));
+      }
       const n = names(e);
       return line('changed', t(k(e.op + (n.both ? 'Both' : '')), { page: P, name: n.name, other: n.other }));
     }
