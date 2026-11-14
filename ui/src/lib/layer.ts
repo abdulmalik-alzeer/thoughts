@@ -1164,6 +1164,9 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
 // ---------- customise flow: ask → run → review → try / keep / discard ----------
 const sig = (p: PendingChange | null) => (p ? p.signature || JSON.stringify([p.summary, p.files, p.origin]) : '');
 let dismissed = '';
+// The change whose preview was switched off to show its review (`showReview`). Closing the review
+// without choosing puts that preview back, so closing never leaves the change half-shown.
+let resumePreview = '';
 const missing = (e: any) => e instanceof ApiError && (e.status === 404 || e.status === 405);
 
 /** Ask the daemon whether a staged change is waiting. Opens the review panel when `open` (unless the
@@ -1174,6 +1177,7 @@ export async function checkPending(open = true): Promise<PendingChange | null> {
   if (!p?.exists) {
     app.pending = null;
     app.showReview = false;
+    resumePreview = '';
     froze.clear();
     if (app.preview) await loadLayer().catch(() => {});
     return null;
@@ -1186,12 +1190,21 @@ export async function checkPending(open = true): Promise<PendingChange | null> {
 /** Put the review on screen. The staged change is never loaded into the app while it is decided on:
  *  a preview is stopped first, so staged CSS cannot draw over the review or relabel its buttons. */
 async function showReview() {
-  if (app.preview) await loadLayer().catch(() => {});
+  if (app.preview) { resumePreview = sig(app.pending); await loadLayer().catch(() => {}); }
   app.showReview = true;
 }
 
 export function openReview() { dismissed = ''; if (app.pending) showReview(); else checkPending(true); }
-export function closeReview() { dismissed = sig(app.pending); app.showReview = false; }
+/** Close the review without choosing ("Later", ×, Escape, a click outside). The change keeps waiting
+ *  (the shell shows a "waiting for your choice" strip) and, if it was being tried when the review
+ *  opened, its preview comes back on. */
+export function closeReview() {
+  dismissed = sig(app.pending);
+  app.showReview = false;
+  const back = !!resumePreview && resumePreview === sig(app.pending) && !app.pending?.running && !app.safeMode && froze.get()?.sig !== resumePreview;
+  resumePreview = '';
+  if (back && !app.preview) loadLayer({ preview: true }).catch((e) => failed(t('layer.tryFailed'), e));
+}
 
 /** The staged change froze the app when it was last tested or tried: ask before running it again. */
 async function sureDespiteFreeze(what: 'try' | 'keep'): Promise<boolean> {
@@ -1215,6 +1228,7 @@ export async function startCustomise(prompt: string): Promise<string | null> {
 export async function tryPending(): Promise<boolean> {
   if (!(await sureDespiteFreeze('try'))) return false;
   // Close the review before anything staged is loaded (see `showReview`).
+  resumePreview = '';
   closeReview();
   try { await loadLayer({ preview: true }); }
   catch (e) { dismissed = ''; app.showReview = !!app.pending; throw e; }
@@ -1241,6 +1255,7 @@ export async function keepPending(opts: { approveWorkflows?: boolean } = {}): Pr
   }
   app.pending = null;
   app.showReview = false;
+  resumePreview = '';
   froze.clear();
   await loadLayer().catch((e) => failed(t('shell.layerFailed'), e));
   toast(t('layer.kept'), {
@@ -1254,6 +1269,7 @@ export async function discardPending() {
   await post('/layer/pending/discard');
   app.pending = null;
   app.showReview = false;
+  resumePreview = '';
   froze.clear();
   if (app.preview) await loadLayer().catch(() => {});
 }
