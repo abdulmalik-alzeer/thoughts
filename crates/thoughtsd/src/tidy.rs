@@ -38,8 +38,8 @@ pub fn removable(c: &ChatMeta) -> bool {
     !c.pinned && !c.running && !c.interrupted && !c.is_unwrapped() && finished(c)
 }
 
-/// A chat nobody has written in (one made by New chat and left).
-pub fn is_empty_chat(c: &ChatMeta) -> bool { c.kind == "chat" && c.message_count == 0 && !c.pinned && !c.running }
+/// A chat nobody has written in (one made by New chat or New customisation and left).
+pub fn is_empty_chat(c: &ChatMeta) -> bool { matches!(c.kind.as_str(), "chat" | "customize") && c.message_count == 0 && !c.pinned && !c.running }
 
 /// What a clean-up after `days` days would do right now.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -298,8 +298,10 @@ mod tests {
         let pinned = put(&st, p).await;
         let used = put(&st, old(2, said("hello"))).await;
         let sys = put(&st, old(2, Chat { kind: "setup".into(), ..Default::default() })).await;
-        assert_eq!(sweep(&st).await, 1);
-        assert!(!kept(&st, &stale));
+        // A customisation chat opened with New customisation and left goes the same way.
+        let custom = put(&st, old(2, Chat { kind: "customize".into(), ..Default::default() })).await;
+        assert_eq!(sweep(&st).await, 2);
+        assert!(!kept(&st, &stale) && !kept(&st, &custom));
         for k in [&fresh, &pinned, &used, &sys] { assert!(kept(&st, k)); }
     }
 }

@@ -192,6 +192,8 @@ struct Customize {
     /// The older name of the same field. It is a field of its own, not a serde alias: a client that
     /// sends both names in one request would otherwise be refused with "duplicate field `prompt`".
     text: String,
+    /// The chat's name, when the request is not words of the user's own (a Home suggestion).
+    title: String,
 }
 
 impl Customize {
@@ -200,8 +202,9 @@ impl Customize {
 
 async fn customize(State(st): S, Json(c): Json<Customize>) -> R {
     let _g = LAYER_LOCK.lock().await;
+    let title = Some(c.title.trim().to_string()).filter(|t| !t.is_empty());
     let request = c.request();
-    let id = crate::api::start_customize(st.clone(), request.clone(), "customize", None).await?;
+    let id = crate::api::start_customize(st.clone(), request.clone(), "customize", title).await?;
     // The request's words are kept only for the local usage log; with that log off they are not kept at all.
     if st.settings.read().await.usage_signals { staging::set_request(&Dirs::real(), &request); }
     Ok(Json(json!({"chatId": id})))

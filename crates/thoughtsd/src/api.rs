@@ -2354,9 +2354,11 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
     c.options.permission_mode = inherited_mode(c.options.permission_mode.take(), &c.kind, n.by_user);
     // "New chat" while an empty one is already there (a double press, key repeat, a second window)
     // opens that one instead of piling up another.
-    if n.by_user && c.kind == "chat" && c.title == default_title {
+    // The same for New customisation: an empty customisation chat is opened again.
+    if n.by_user && ((c.kind == "chat" && c.title == default_title) || c.kind == "customize") {
         let mine = c.project_id.clone();
-        let free = st.chats.list().await.into_iter().find(|m| crate::tidy::is_empty_chat(m) && m.title_is_default() && m.project_id == mine && m.library == c.library && !m.archived);
+        let free = st.chats.list().await.into_iter().find(|m| crate::tidy::is_empty_chat(m) && m.kind == c.kind
+            && (c.kind == "customize" || m.title_is_default()) && m.project_id == mine && m.library == c.library && !m.archived);
         if let Some(m) = free {
             let (title, options) = (c.title.clone(), c.options.clone());
             // Opened again now: the clean-up of chats nobody wrote in counts from here.
@@ -2374,6 +2376,12 @@ async fn chat_create(State(st): S, Json(n): Json<NewChat>) -> R {
 }
 
 fn customize_title(ar: bool) -> &'static str { if ar { "تخصيص التطبيق" } else { "Customize the app" } }
+
+/// The name a customisation chat still called "Customize the app" takes from its first message.
+fn customisation_named(kind: &str, title: &str, text: &str) -> Option<String> {
+    if kind != "customize" || (title != customize_title(false) && title != customize_title(true)) { return None; }
+    Some(crate::chats::short_title(text)).filter(|t| !t.is_empty())
+}
 
 /// Options a client may set on a chat: allow-listed permission mode, plain model/effort tokens.
 fn check_run_options(o: &RunOptions) -> anyhow::Result<()> {
@@ -2695,6 +2703,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         }
         _ => (lib(&st).await?, vec![]),
     };
+    // The words that started a customisation are shown in its review (kept only with the usage log on).
+    if chat.kind == "customize" && s.usage_signals { crate::staging::note_request(&applayer::Dirs::real(), &m.text); }
     // While a wrap or reorganize is changing the library, no other assistant run may write into
     // it: if the wrap failed, undoing it would erase that work too. (A customise run only reads it.)
     if let Some(l) = &library {
@@ -2766,6 +2776,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         // Talking in an archived chat brings it back. The first message names a chat nobody has named yet.
         c.archived = false;
         if first && c.title_is_auto() { let t = crate::chats::short_title(&m.text); if !t.is_empty() { c.set_auto_title(t); } }
+        // A customisation chat started empty (New customisation) is named after what was asked for.
+        if first { if let Some(t) = customisation_named(&c.kind, &c.title, &m.text) { c.title = t; } }
     }).await.ok_or_else(no_chat)?;
     st.emit(json!({"type": "chat.message", "chatId": id, "message": um}));
     st.emit(json!({"type": "chat.updated", "chat": updated.summary()}));
@@ -5168,6 +5180,27 @@ mod tests {
         assert_eq!(mode(made).as_deref(), Some("bypassPermissions"));
         let made = chat_create(State(st.clone()), Json(NewChat { by_user: true, kind: Some("customize".into()), ..Default::default() })).await.unwrap();
         assert_eq!(mode(made).as_deref(), Some("acceptEdits"));
+    }
+
+    #[tokio::test]
+    async fn new_customisation_opens_the_empty_one_again_and_names_it_after_the_request() {
+        let st = Arc::new(AppState::for_test());
+        let new = |kind: &str| NewChat { by_user: true, kind: Some(kind.into()), ..Default::default() };
+        let id = |v: Json<Value>| v.0["id"].as_str().unwrap().to_string();
+        let first = id(chat_create(State(st.clone()), Json(new("customize"))).await.unwrap());
+        // A double press opens the same empty customisation chat, not a second one.
+        assert_eq!(id(chat_create(State(st.clone()), Json(new("customize"))).await.unwrap()), first);
+        // An ordinary New chat is never that one.
+        assert_ne!(id(chat_create(State(st.clone()), Json(new("chat"))).await.unwrap()), first);
+        // Once written in, a new customisation gets a chat of its own.
+        st.chats.update(&first, |c| { c.messages.push(crate::chats::Msg::new("user", "Warmer colours")); }).await;
+        assert_ne!(id(chat_create(State(st.clone()), Json(new("customize"))).await.unwrap()), first);
+
+        assert_eq!(customisation_named("customize", "Customize the app", "Warmer colours please").as_deref(), Some("Warmer colours please"));
+        assert!(customisation_named("customize", "تخصيص التطبيق", "ألوان أدفأ").is_some());
+        // A chat named on purpose (an app update to merge) and ordinary chats keep their names.
+        assert_eq!(customisation_named("customize", "Merge the update", "anything"), None);
+        assert_eq!(customisation_named("chat", "Customize the app", "anything"), None);
     }
 
     #[test]

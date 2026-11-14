@@ -70,6 +70,12 @@ pub fn set_request(d: &Dirs, text: &str) {
     let _ = save_meta(d, &m);
 }
 
+/// `set_request` for the first message of a customisation chat: the words that started the change.
+/// A later message in the same chat keeps building on that change and leaves them as they are.
+pub fn note_request(d: &Dirs, text: &str) {
+    if load_meta(d).map_or(false, |m| m.request.is_empty()) { set_request(d, text); }
+}
+
 /// Remember what an imported pack calls itself.
 pub fn set_pack(d: &Dirs, name: &str, description: &str) {
     let Some(mut m) = load_meta(d) else { return };
@@ -1146,7 +1152,9 @@ mod tests {
     async fn problems_block_the_apply_until_fixed() {
         let (st, d) = testutil::layer("problems").await;
         recreate(st, &d, "customize", None).await.unwrap();
-        set_request(&d, "  Group my todos\nby due date  ");
+        note_request(&d, "  Group my todos\nby due date  ");
+        // A follow-up in the same chat does not replace the words that started the change.
+        note_request(&d, "and make it blue");
         std::fs::write(d.staging.join("todos.json"), r#"{"groupBy":"deadline"}"#).unwrap();
         std::fs::write(d.staging.join("plugins/hours.js"), "export default () => {}\n").unwrap();
         std::fs::write(d.staging.join("plugins/hours.json"), r#"{"apiVersion":1,"permissions":["storage","library:write"],"write":["../secrets"]}"#).unwrap();
