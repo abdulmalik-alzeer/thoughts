@@ -35,7 +35,7 @@
   const basic: Record<Cat, string[]> = {
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates', 'nativeb.set.title', 'nativeb.set.switch'],
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
-    ai: ['codex.set.which', 'set.account', 'codex.set.title', 'codex.set.limitsTitle', 'set.perm', 'set.wrapNag', 'chatc.set.suggest'],
+    ai: ['codex.set.which', 'set.account', 'codex.set.title', 'codex.set.limitsTitle', 'set.perm', 'set.wrapNag', 'chatc.set.suggest', 'r10-chatview.set.title'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
     privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'wording.reports.title', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
     modules: ['set.modulesIntro'],
@@ -754,6 +754,10 @@
       {#if vis(c, 'chatc.set.suggest')}
         <label class="check"><input type="checkbox" checked={!!s.ai.claude.suggestNext} onchange={(e) => (s.ai.claude.suggestNext = e.currentTarget.checked)} aria-describedby="st-suggest-hint" /> {t('chatc.set.suggest')}</label>
         <p class="muted sm" id="st-suggest-hint">{t('chatc.set.suggestHint')}</p>
+      {/if}
+      {#if vis(c, 'r10-chatview.set.title')}
+        <label class="check"><input type="checkbox" checked={!!s.chatSteps} onchange={(e) => (s.chatSteps = e.currentTarget.checked)} aria-describedby="st-steps-hint" /> {t('r10-chatview.set.title')}</label>
+        <p class="muted sm" id="st-steps-hint">{t('r10-chatview.set.hint')}</p>
       {/if}
     </div>
     {#if vis(c, ...adv.ai)}

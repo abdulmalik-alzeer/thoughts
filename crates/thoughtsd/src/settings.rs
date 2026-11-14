@@ -24,6 +24,9 @@ pub struct Settings {
     pub modules: BTreeMap<String, bool>,
     pub daemon: DaemonSettings,
     pub notifications: bool,
+    /// Show every step the assistant takes in a chat (each command, file read, edit…) as it does
+    /// now in full. Off unless the user switches it on: steps are folded into one quiet row.
+    pub chat_steps: bool,
     /// Minutes without activity before a chat gets its mini-wrap.
     pub idle_minutes: u64,
     /// Popup when this many chats are unwrapped.
@@ -468,6 +471,7 @@ impl Default for Settings {
             modules: BTreeMap::new(),
             daemon: DaemonSettings { run_at_login: false, keep_running: true },
             notifications: true,
+            chat_steps: false,
             idle_minutes: 15,
             wrap_nag_threshold: 5,
             chat_retention_days: 0,
@@ -1328,6 +1332,8 @@ mod tests {
         assert!(!s.assistant_reports, "the assistant's own reports are off unless switched on");
         assert!(serde_json::from_str::<Settings>(r#"{"assistantReports":true}"#).unwrap().assistant_reports);
         assert!(!s.ai.claude.suggest_next, "suggested next messages are off unless switched on");
+        assert!(!s.chat_steps, "chats fold their steps away unless every step is asked for");
+        assert!(serde_json::from_str::<Settings>(r#"{"chatSteps":true}"#).unwrap().chat_steps);
         // A file from a test build that stored the old switch, untouched (false = on), gets off as well.
         let old: Settings = serde_json::from_str(r#"{"ai":{"claude":{"suggestionsOff":false}}}"#).unwrap();
         assert!(!old.ai.claude.suggest_next);

@@ -31,6 +31,8 @@
   import QueuedCard from './chat/QueuedCard.svelte';
   import ExportMenu from './chat/ExportMenu.svelte';
   import RunChanges from './chat/RunChanges.svelte';
+  import StepGroup from './chat/StepGroup.svelte';
+  import { groupSteps, liveLine } from './chat/steps';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, prettyName, readAsDataURL } from '../lib/content/util';
   import { imeKey } from '../lib/ime';
   import SetupCard from './SetupCard.svelte';
@@ -652,6 +654,9 @@
     return map;
   });
   const toolKey = (m: any) => String(m.tool?.id ?? m.id);
+  // Every step shown as it happens (Settings), or runs of steps folded into one row (the default).
+  const allSteps = $derived(!!app.settings?.chatSteps);
+  const stepRuns = $derived(allSteps ? new Map() : groupSteps(chat?.messages ?? []));
 
   /** Translated label when we have one, the raw value otherwise (models, future modes). */
   const label = (prefix: string, v: string) => { const k = `${prefix}.${v}`; const s = t(k); return s === k ? v : s; };
@@ -761,6 +766,8 @@
                 {/if}
               </div>
             </div>
+          {:else if m.role === 'tool' && !allSteps}
+            {#if stepRuns.has(String(m.id))}<StepGroup steps={stepRuns.get(String(m.id))} running={!!chat.running} />{/if}
           {:else if m.role === 'tool'}
             {@const k = toolKey(m)}
             {@const res = resultFor[k]}
@@ -828,11 +835,11 @@
           <div class="suggest"><button type="button" class="sugg" onclick={useSuggestion} title={t('chatc.suggest.tip')} aria-label={t('chatc.suggest.aria', { text: chat.suggestion })}>
             <Icon name="wrap" size={13} /><span dir="auto">{chat.suggestion}</span></button></div>
         {/if}
-        {#if thinking}<div class="msg sys muted ell think"><Icon name="thinking" size={13} /> <span class="ell" dir="auto">{thinking.slice(-160)}</span></div>{/if}
+        {#if thinking && allSteps}<div class="msg sys muted ell think"><Icon name="thinking" size={13} /> <span class="ell" dir="auto">{thinking.slice(-160)}</span></div>{/if}
         {#if streaming}
           <div class="msg ai" aria-busy="true"><StreamText text={streaming} onrender={() => scrollDown()} /></div>
         {/if}
-        {#if chat.running && !streaming}<div class="msg sys muted working" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> {t('chat.working')}</div>{/if}
+        {#if chat.running && !streaming}<div class="msg sys muted working" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> {allSteps ? t('chat.working') : liveLine(chat.messages, !!thinking)}</div>{/if}
       </div>
       <span class="sr" role="status" aria-live="polite">{announce}</span>
       {#if !stick}
