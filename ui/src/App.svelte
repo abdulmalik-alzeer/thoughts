@@ -3,7 +3,7 @@
   import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
-  import { loadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn, newCustomise } from './lib/layer';
+  import { loadLayer, reloadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn, newCustomise } from './lib/layer';
   import { failed } from './lib/errors';
   import { backup, healthWarning, lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
@@ -264,8 +264,8 @@
           if (app.settings?.notifications && !document.hasFocus()) notify(t('appr.notifyTitle'), t('appr.notifyBody', { title: e.title || t('shell.aChat') }));
         }
         if (e.type === 'notify') { toast(`${e.title}: ${e.body}`); if (app.settings?.notifications && !document.hasFocus()) notify(e.title, e.body); }
-        // A change being tried stays on screen (it falls back to what is kept once nothing is waiting).
-        if (e.type === 'layer.changed') (app.preview ? loadLayer({ preview: true }).catch(() => loadLayer()) : loadLayer()).catch(layerError);
+        // A change being tried stays on screen while it is still the one chosen (lib/layer.ts `reloadLayer`).
+        if (e.type === 'layer.changed') reloadLayer().catch(layerError);
         if (e.type === 'layer.pending' || e.type === 'chat.done') checkPending(true);
         if (e.type === 'chat.persistError') toast(t('layer.chat.persistError'), { kind: 'error', key: 'persist:' + e.chatId, detail: e.error ? String(e.error) : undefined });
         if (e.type === 'wrap.failed') { toast(t(e.rolledBack === false ? 'layer.wrap.failedKept' : 'layer.wrap.failedRolledBack'), { kind: 'error', key: 'wrap', action: e.chatId ? { label: t('layer.details'), run: () => go({ kind: 'chat', id: e.chatId }) } : undefined }); refreshWrap().catch(() => {}); }

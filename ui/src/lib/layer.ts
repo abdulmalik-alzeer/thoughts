@@ -1104,8 +1104,10 @@ function todosConfig(v: any): TodosConfig | null {
 
 const strings = (v: any) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
 
-/** Load the kept layer, or with `preview` the staged one ("Try it"). Nothing staged is loaded any other way. */
-export async function loadLayer(opts: { preview?: boolean } = {}) {
+/** Load the kept layer, or with `preview` the staged one ("Try it"). Nothing staged is loaded any other way.
+ *  A preview names the signature of the change the user chose to try (`sig`, else the one being tried
+ *  now); the service refuses (`CHANGED`) when the staged files are no longer exactly that change. */
+export async function loadLayer(opts: { preview?: boolean; sig?: string } = {}) {
   if (app.safeMode) { app.nav = null; app.todosCfg = null; setPages(null); setLayerItems([]); return; }
   const boot = firstLoad;
   firstLoad = false;
@@ -1116,13 +1118,15 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
     app.nav = null; app.todosCfg = null; setPages(null);
     return;
   }
-  const m = await api(opts.preview ? '/layer?preview=1' : '/layer');
+  const want = opts.preview ? (opts.sig ?? tried) : '';
+  const m = await api(opts.preview ? '/layer?preview=1&sig=' + encodeURIComponent(want) : '/layer');
   // Without the frame document (Windows only) each add-on reports that it could not start; the
   // rest of the customisations still load.
   await frameDoc().catch(() => {});
   // Reload: remove everything the previous generation of plugins registered.
   unload();
   app.preview = !!opts.preview;
+  tried = want;
   styleEl ??= document.head.appendChild(document.createElement('style'));
   styleEl.textContent = m.css || '';
   varNames = null;
@@ -1169,6 +1173,25 @@ let dismissed = '';
 // The change whose preview was switched off to show its review (`showReview`). Closing the review
 // without choosing puts that preview back, so closing never leaves the change half-shown.
 let resumePreview = '';
+// The signature of the change being tried, sent with every preview load (see `loadLayer`).
+let tried = '';
+const pendingSig = () => app.pending?.signature ?? '';
+
+/** Load the preview of the change with `signature`; when the service refuses (the change was edited,
+ *  replaced or is being written again) the kept customisations load instead and the waiting change is
+ *  read again, so the choice is offered for what is staged now. */
+async function previewOr(signature: string) {
+  try { await loadLayer({ preview: true, sig: signature }); }
+  catch (e) { await loadLayer().catch(() => {}); await checkPending(false); throw e; }
+}
+
+/** Reload after the customisations changed (`layer.changed`): a change being tried stays on screen
+ *  only while it is still exactly what the user chose to try. */
+export async function reloadLayer() {
+  if (!app.preview) return loadLayer();
+  try { await previewOr(tried); }
+  catch (e) { if (errCode(e) !== 'CHANGED') failed(t('layer.tryFailed'), e); }
+}
 const missing = (e: any) => e instanceof ApiError && (e.status === 404 || e.status === 405);
 
 /** Ask the daemon whether a staged change is waiting. Opens the review panel when `open` (unless the
@@ -1193,7 +1216,7 @@ export async function checkPending(open = true): Promise<PendingChange | null> {
 /** Put the review on screen. The staged change is never loaded into the app while it is decided on:
  *  a preview is stopped first, so staged CSS cannot draw over the review or relabel its buttons. */
 async function showReview() {
-  if (app.preview) { resumePreview = sig(app.pending); await loadLayer().catch(() => {}); }
+  if (app.preview) { resumePreview = pendingSig(); await loadLayer().catch(() => {}); }
   app.showReview = true;
 }
 
@@ -1209,9 +1232,9 @@ export function openReview() {
 export function closeReview() {
   dismissed = sig(app.pending);
   app.showReview = false;
-  const back = !!resumePreview && resumePreview === sig(app.pending) && !app.pending?.running && !app.safeMode && froze.get()?.sig !== resumePreview;
+  const back = resumePreview && resumePreview === pendingSig() && !app.pending?.running && !app.safeMode && froze.get()?.sig !== sig(app.pending) ? resumePreview : '';
   resumePreview = '';
-  if (back && !app.preview) loadLayer({ preview: true }).catch((e) => failed(t('layer.tryFailed'), e));
+  if (back && !app.preview) previewOr(back).catch((e) => { if (errCode(e) !== 'CHANGED') failed(t('layer.tryFailed'), e); });
 }
 
 /** The staged change froze the app when it was last tested or tried: ask before running it again. */
@@ -1254,8 +1277,8 @@ export async function tryPending(): Promise<boolean> {
   // Close the review before anything staged is loaded (see `showReview`).
   resumePreview = '';
   closeReview();
-  try { await loadLayer({ preview: true }); }
-  catch (e) { dismissed = ''; app.showReview = !!app.pending; throw e; }
+  try { await loadLayer({ preview: true, sig: pendingSig() }); }
+  catch (e) { dismissed = ''; if (errCode(e) === 'CHANGED') await checkPending(false); app.showReview = !!app.pending; throw e; }
   return true;
 }
 
@@ -1326,7 +1349,7 @@ export async function revertChange(hash: string) {
 /** What the staged layer's add-ons and pages are allowed to do — read as data, nothing is run in the app. */
 export async function stagedItems(): Promise<LayerItem[]> {
   try {
-    const m = await api('/layer?preview=1');
+    const m = await api('/layer?preview=1&sig=' + encodeURIComponent(pendingSig()));
     const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
     return [...(m.plugins || []).map((x: any) => describe(x, 'plugin', manifest)), ...(m.views || []).map((x: any) => describe(x, 'view', manifest))];
   } catch { return []; }
@@ -1340,7 +1363,7 @@ export async function stagedItems(): Promise<LayerItem[]> {
  *  `skipped` (why) and, in the second case, `error`. One item is tested at a time. */
 export async function dryLoadStaged(): Promise<LayerItem[]> {
   let m: any;
-  try { m = await api('/layer?preview=1'); } catch { return []; }
+  try { m = await api('/layer?preview=1&sig=' + encodeURIComponent(pendingSig())); } catch { return []; }
   const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
   const sources: [any, 'plugin' | 'view'][] = [...(m.plugins || []).map((x: any) => [x, 'plugin'] as [any, 'plugin']), ...(m.views || []).map((x: any) => [x, 'view'] as [any, 'view'])];
   const items = sources.map(([src, kind]) => describe(src, kind, manifest));

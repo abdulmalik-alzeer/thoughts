@@ -957,6 +957,22 @@ pub async fn accept_incomplete(g: Git<'_>, d: &Dirs, arabic: bool, signature: &s
     save_meta(d, &m)
 }
 
+/// The staged layer for the app to load while the user tries a change (`GET /api/layer?preview=1`).
+/// Only ever the exact change the user chose to try: `signature` is the one `pending` gave for it,
+/// and anything else (no change, a different or edited one, one an assistant is still writing) is
+/// refused, so code nobody reviewed is never loaded into the app. The files are checked again after
+/// they were read, in case they were written meanwhile.
+pub async fn preview_manifest(g: Git<'_>, d: &Dirs, arabic: bool, signature: &str) -> anyhow::Result<Value> {
+    let p = pending(g, d, arabic).await;
+    if p["running"] == true { return Err(still_preparing()); }
+    if p["exists"] != true { return Err(crate::tr::err("layer.no_pending", &[])); }
+    if signature.is_empty() || p["signature"] != signature { anyhow::bail!("{}", changed_error(arabic)); }
+    let m = crate::applayer::manifest_preview(&d.staging, &d.layer, arabic);
+    let (files, _) = changes(g, d).await?;
+    if signature_of(&read_staged(d, &files)) != signature { anyhow::bail!("{}", changed_error(arabic)); }
+    Ok(m)
+}
+
 /// Can a regular file be written at `rel` inside `layer` without going through anything that is
 /// not a plain folder, and without replacing something that is not a plain file?
 fn writable(layer: &Path, rel: &str) -> bool {
@@ -1208,6 +1224,26 @@ mod tests {
         let m = crate::applayer::manifest_of(&d.layer);
         assert_eq!(m["todos"]["groupBy"], "due");
         assert_eq!(m["plugins"][0]["permissions"], json!(["storage"]));
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_preview_loads_only_the_change_the_user_chose_to_try() {
+        let (st, d) = testutil::layer("preview-sig").await;
+        assert!(preview_manifest(st, &d, false, "x").await.is_err(), "nothing waiting, nothing to preview");
+        recreate(st, &d, "customize", None).await.unwrap();
+        std::fs::write(d.staging.join("custom.css"), "body { color: red; }\n").unwrap();
+        let sig = pending(st, &d, false).await["signature"].as_str().unwrap().to_string();
+        let e = preview_manifest(st, &d, false, "").await.unwrap_err().to_string();
+        assert!(e.starts_with("CHANGED::"), "no signature: refused ({e})");
+        assert!(preview_manifest(st, &d, false, "not-it").await.unwrap_err().to_string().starts_with("CHANGED::"));
+        let m = preview_manifest(st, &d, false, &sig).await.unwrap();
+        assert!(m["css"].as_str().unwrap().contains("color: red"), "the tried change is what loads");
+        // Edited after the user chose to try it: the old choice no longer loads anything.
+        std::fs::write(d.staging.join("custom.css"), "body { color: blue; }\n").unwrap();
+        assert!(preview_manifest(st, &d, true, &sig).await.unwrap_err().to_string().starts_with("CHANGED::"));
+        let fresh = pending(st, &d, false).await["signature"].as_str().unwrap().to_string();
+        assert!(preview_manifest(st, &d, false, &fresh).await.is_ok());
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 

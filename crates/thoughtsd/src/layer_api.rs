@@ -117,7 +117,8 @@ fn recall_request(home: &std::path::Path, hash: &str) -> Option<String> {
         .and_then(|e| e["request"].as_str().map(String::from))
 }
 
-/// `GET /api/layer` — the live layer; `?preview=1` — the staged one, in the same shape.
+/// `GET /api/layer` — the live layer; `?preview=1&sig=` — the staged one, in the same shape, only while
+/// it is exactly the change with that signature (see `staging::preview_manifest`).
 async fn layer(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let _g = LAYER_LOCK.lock().await;
     let d = Dirs::real();
@@ -127,9 +128,9 @@ async fn layer(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     // first and offered for review like any other change.
     if staging::guard(Git(Some(&st)), &d, ar).await { st.emit(json!({"type": "layer.pending"})); }
     if preview {
-        if !d.staging.join(".git").exists() { return Err(crate::tr::err("layer.no_pending", &[]).into()); }
-        staging::sync(Git(Some(&st)), &d).await;
-        return Ok(Json(applayer::manifest_preview(&d.staging, &d.layer, ar)));
+        // `sig`: the signature of the change the user chose to try; nothing else is handed out.
+        let sig = q.get("sig").map_or("", |s| s.as_str());
+        return Ok(Json(staging::preview_manifest(Git(Some(&st)), &d, ar, sig).await?));
     }
     Ok(Json(applayer::manifest_lang(&d.layer, ar)))
 }
