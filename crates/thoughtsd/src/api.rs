@@ -2626,13 +2626,12 @@ type RunDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture
 
 /// What follows a run started from a chat message, besides the usual bookkeeping.
 fn after_chat_run(kind: &str, id: &str) -> Option<RunDone> {
-    if kind != "customize" { return None; }
-    let id = id.to_string();
-    // Nothing is applied or committed here: the result waits as a pending change. The copies of
-    // the chat's attachments made for the run go.
+    let (customize, id) = (kind == "customize", id.to_string());
+    // A customisation: nothing is applied or committed here, the result waits as a pending change.
+    // For every chat, the copies of its attachments made for the run go.
     Some(Box::new(move |st: Arc<AppState>, ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move {
-        crate::staging::after_run(&st, ok).await;
-        crate::staging::clear_reading(&applayer::Dirs::real(), Some(&id));
+        if customize { crate::staging::after_run(&st, ok).await; }
+        crate::run_files::clear(&paths::home(), Some(&id));
     }) }))
 }
 
@@ -2750,13 +2749,11 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
             }
         }
     }
-    // A customise run may not open the attachments folder at all: it reads copies of this chat's
-    // files, made for it now (`staging::copy_attachments`). Without them it reads none.
-    let copies = if chat.kind != "customize" { None } else {
-        match crate::staging::copy_attachments(&applayer::Dirs::real(), &id) {
-            Ok(dir) => Some(dir),
-            Err(e) => { crate::log::error(format!("customise: the attached files could not be copied for the run: {e}")); None }
-        }
+    // No run may open the attachments folder: it reads copies of this chat's files, made for it
+    // now (`run_files`). Without them it reads none.
+    let copies = match crate::run_files::copy(&paths::home(), &id) {
+        Ok(dir) => Some(dir),
+        Err(e) => { crate::log::error(format!("chat {id}: the attached files could not be copied for the assistant: {e}")); None }
     };
     let readable = |p: &String| copies.as_ref().and_then(|dir| std::path::Path::new(p).file_name().map(|n| dir.join(n)))
         .filter(|c| c.is_file()).map_or(p.clone(), |c| c.to_string_lossy().to_string());
@@ -2825,7 +2822,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let started = claude::start_run(st.clone(), spec(prompt, chat.session_id.clone()), on_done).await;
     // A customise run that never started must not cost the user the change it was about to replace.
     if kind == "customize" { crate::staging::run_start_result(applayer::Git(Some(&st)), &applayer::Dirs::real(), &id, started.is_ok()).await; }
-    if started.is_err() { take_back_message(&st, &id, &um, before).await; }
+    if started.is_err() { take_back_message(&st, &id, &um, before).await; crate::run_files::clear(&paths::home(), Some(&id)); }
     started?;
     ok()
 }

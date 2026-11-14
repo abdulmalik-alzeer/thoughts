@@ -810,8 +810,8 @@ fn glob_wild(name: &str) -> String {
 ///   live in `.claude/skills`). `allow_claude_edit` lifts the `.claude/` part for the one run that
 ///   sets a brand-new library up;
 /// - no reading or editing of the app's own data folder (`home`): sign-in details, settings, other
-///   chats and their attachments. This chat's own attachments stay readable, and so do the
-///   customisation layer and the search add-on.
+///   chats and their attachments (this chat's too: its run reads copies of them, see `run_files`).
+///   The customisation layer and the search add-on stay readable.
 pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &str, allow_claude_edit: bool) -> Vec<String> {
     let mut deny: Vec<String> = vec![];
     let mut names = vec![".mcp.json", ".git"];
@@ -845,28 +845,19 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
         // The folder the run itself works in (the reorganize working copy) is of course open to it.
         if working_in(dir) { continue; }
         match dir.file_name().and_then(|n| n.to_str()) {
-            // Files the user attached to *this* chat must stay readable; everyone else's are closed.
-            // A deny rule cannot make an exception, so every other chat's folder is named — with as
-            // few rules as it takes: nothing in the whole folder can be edited (the two rules below),
-            // which leaves reading and the shell to close per folder.
-            Some("attachments") => {
+            // Copies of the files attached to *this* chat (`run_files`) stay readable (the attachments
+            // folder itself is closed whole, like the rest). A deny rule cannot make an exception, so
+            // every place another chat's copies could ever be is named — a fixed list, whatever exists
+            // yet. Nothing in there can be edited.
+            Some(crate::run_files::DIR) => {
                 let p = rule_path(dir);
                 deny.push(format!("Edit({p})"));
                 deny.push(format!("Edit({p}/**)"));
-                let others: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten()
-                    .filter(|e| e.file_name().to_string_lossy() != chat_id).map(|e| e.path()).collect();
-                if others.len() > MAX_CLOSED_FOLDERS {
-                    // More folders than the rules file may name (Claude Code ignores a settings file
-                    // over 2 MB — and with it every rule): close the whole folder, this chat's included.
-                    crate::log::warn(format!("{} chats have attachments: more than can be closed one by one, so no chat's attachments can be read by the assistant", others.len()));
-                    closed(dir, &mut deny);
-                } else {
-                    for o in &others {
-                        let p = rule_path(o);
-                        deny.push(format!("Read({p})"));
-                        deny.push(format!("Read({p}/**)"));
-                        deny.push(format!("Bash(*{}*)", o.to_string_lossy().replace('\\', "/")));
-                    }
+                for o in crate::run_files::closed_for(home, chat_id) {
+                    let p = rule_path(&o);
+                    deny.push(format!("Read({p})"));
+                    deny.push(format!("Read({p}/**)"));
+                    deny.push(format!("Bash(*{}*)", o.to_string_lossy().replace('\\', "/")));
                 }
             }
             // The search add-on is a tool the assistant may use, but not rewrite.
@@ -889,9 +880,6 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
     deny
 }
 
-/// The most other chats' attachment folders a run's rules name one by one (about 270 bytes each,
-/// far below the 2 MB a settings file may have).
-pub const MAX_CLOSED_FOLDERS: usize = 3000;
 /// The largest rules document a run is started with. Claude Code does not read a settings file
 /// over 2 MB, and a run without its rules must never start.
 pub const MAX_RULES_BYTES: usize = 1_500_000;
@@ -1605,9 +1593,7 @@ pub async fn start_run(
         deny = merge_deny(deny, private_deny_settings(Some(&spec.cwd), &spec.cwd, &private_paths)?);
     }
     // Only the run that sets up a brand-new library may write its `.claude` folder (it installs the presets).
-    let mut protective = protective_deny(&spec.cwd, &spec.add_dirs, &crate::paths::home(), &spec.chat_id, kind == "setup");
-    // A customise run reads its chat's attachments from copies made for it (`staging::copy_attachments`).
-    if kind == "customize" { crate::staging::open_reading(&mut protective, &crate::applayer::Dirs::real()); }
+    let protective = protective_deny(&spec.cwd, &spec.add_dirs, &crate::paths::home(), &spec.chat_id, kind == "setup");
     deny = merge_deny(deny, Some(json!({"permissions": {"deny": protective}}).to_string()));
     if !spec.extra_deny.is_empty() {
         deny = merge_deny(deny, Some(json!({"permissions": {"deny": spec.extra_deny}}).to_string()));
@@ -2478,11 +2464,12 @@ mod tests {
         // The app's own data: secrets, settings, other chats — including a file this version has never heard of.
         for want in [format!("Read({h}/daemon.json)"), format!("Edit({h}/settings.json)"), format!("Read({h}/git-credentials)"),
                      format!("Read({h}/secrets.json)"), format!("Read({h}/chats/**)"), format!("Read({h}/something-new.json)"),
-                     format!("Read({h}/attachments/other-chat/**)"), format!("Edit({h}/attachments/**)"), format!("Edit({h}/extensions/**)")] {
+                     format!("Read({h}/attachments/**)"), format!("Edit({h}/attachments/**)"), format!("Edit({h}/extensions/**)")] {
             assert!(has(&want), "missing {want}");
         }
-        // This chat's own attachments, the search add-on and the customisation layer stay readable.
-        for open in [format!("Read({h}/attachments/this-chat/**)"), format!("Read({h}/attachments/**)"), format!("Read({h}/extensions/**)"), format!("Read({h}/app-layer/**)")] {
+        // The copies of this chat's attachments, the search add-on and the customisation layer stay readable.
+        let own = rule_path(&crate::run_files::folder(&home, "this-chat").unwrap());
+        for open in [format!("Read({own}/**)"), format!("Read({h}/chat-files/**)"), format!("Read({h}/extensions/**)"), format!("Read({h}/app-layer/**)")] {
             assert!(!has(&open), "{open} must not be denied");
         }
         // The reorganize run works inside the app's folder: its own working copy is open to it.
@@ -2765,15 +2752,23 @@ mod tests {
         let lib = Path::new("/home/u/Library");
         let deny = protective_deny(lib, &[], &home, "this-chat", false);
         let h = rule_path(&home);
-        // Every other chat's folder is closed for reading and for the shell; editing is closed for all of them at once.
-        let other = format!("{h}/attachments/3f0c1c5e-6b1a-4c1e-9d3e-000000000007");
-        assert!(deny.contains(&format!("Read({other})")) && deny.contains(&format!("Read({other}/**)")));
-        assert!(deny.iter().any(|d| d.starts_with("Bash(*") && d.contains("3f0c1c5e-6b1a-4c1e-9d3e-000000000007")));
-        assert!(deny.contains(&format!("Edit({h}/attachments/**)")) && !deny.contains(&format!("Edit({other}/**)")));
-        assert!(!deny.iter().any(|d| d.contains("this-chat")), "this chat's own files stay readable");
-        assert_eq!(deny.iter().filter(|d| d.contains("3f0c1c5e-6b1a-4c1e-9d3e-000000000007")).count(), 3);
-        // 400 chats with attachments: far more than one command-line argument may carry on Linux
-        // (128 KiB) — which is why the document is handed over as a file, never as an argument.
+        let shell = home.to_string_lossy().replace('\\', "/");
+        // Every chat's attachments are closed whole, this chat's included: to reading, editing and the shell.
+        for want in [format!("Read({h}/attachments)"), format!("Read({h}/attachments/**)"), format!("Edit({h}/attachments/**)"), format!("Bash(*{shell}/attachments*)")] {
+            assert!(deny.contains(&want), "missing {want}");
+        }
+        assert!(!deny.iter().any(|d| d.contains("/attachments/3f0c") || d.contains("this-chat")), "no chat's folder is named one by one");
+        // So a chat that gets its first file after the rules were made is closed as well: the rules do not depend on it.
+        std::fs::create_dir_all(att.join("a-later-chat")).unwrap();
+        assert_eq!(protective_deny(lib, &[], &home, "this-chat", false), deny);
+        // The copies: every other chat's closed (also of chats that have none yet), this chat's open, none writable.
+        let own = crate::run_files::folder(&home, "this-chat").unwrap();
+        let theirs = crate::run_files::folder(&home, "a-later-chat").unwrap();
+        let closes = |p: &Path| deny.iter().any(|d| p.ancestors().any(|a| *d == format!("Read({}/**)", rule_path(a))));
+        assert!(closes(&theirs.join("x.png")) && !closes(&own.join("x.png")));
+        assert!(deny.contains(&format!("Edit({h}/chat-files/**)")));
+        // Hundreds of rules: more than one command-line argument may carry on Linux (128 KiB) as the
+        // home's contents grow — which is why the document is handed over as a file, never as an argument.
         let doc = json!({"permissions": {"deny": deny}}).to_string();
         assert!(doc.len() < MAX_RULES_BYTES);
         let tmp = home.join("run-tmp");
@@ -2797,8 +2792,6 @@ mod tests {
         std::fs::write(tmp.join("left-settings.json"), "{}").unwrap();
         assert_eq!(clear_run_tmp(&tmp), 1);
         assert_eq!(clear_run_tmp(&home.join("no-such-folder")), 0);
-        // Past what a rules file can name one by one, the whole folder is closed instead of none of it.
-        assert!(MAX_CLOSED_FOLDERS * 300 < MAX_RULES_BYTES);
         std::fs::remove_dir_all(home).unwrap();
     }
 

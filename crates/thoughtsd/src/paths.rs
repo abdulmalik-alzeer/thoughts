@@ -69,7 +69,7 @@ pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         "chat-approvals.json", "tokens.json", "port", "calendar-export.json", "release-check.json", "models-seen.json",
         "codex-seen.json", "context-windows.json", "workflows-library.json", "safe-mode", "meter.jsonl", "plan-usage.json"];
     const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "wrap-copies", "run-tmp", "plugin-data", "history", "app-layer-held",
-        "chats-set-aside", "customise-files"];
+        "chats-set-aside", "chat-files"];
     const OPEN: &[&str] = &["app-layer-staging", "app-layer"];
     let mut files: Vec<PathBuf> = FILES.iter().map(|f| home.join(f)).collect();
     let mut dirs: Vec<PathBuf> = DIRS.iter().map(|d| home.join(d)).collect();

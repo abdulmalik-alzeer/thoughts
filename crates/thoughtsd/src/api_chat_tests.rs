@@ -207,14 +207,22 @@ async fn attachments_of_several_megabytes_arrive_and_never_replace_each_other() 
     }
     let sent = st.chats.get(&chat).await.unwrap().messages.last().cloned().unwrap();
     assert_eq!(sent.attachments, [one.to_string_lossy().to_string(), two.to_string_lossy().to_string()]);
+    // The run is pointed at copies made for it (the attachments folder is closed to every run), gone once it is over.
     let prompt = prompts.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(prompt.matches(&*one.to_string_lossy()).count(), 1);
-    assert_eq!(prompt.matches(&*two.to_string_lossy()).count(), 1);
+    let copies = crate::run_files::folder(&paths::home(), &chat).unwrap();
+    assert!(!prompt.contains(&*one.to_string_lossy()) && !prompt.contains(&*two.to_string_lossy()), "{prompt}");
+    assert_eq!(prompt.matches(&*copies.join("image.png").to_string_lossy()).count(), 1);
+    assert_eq!(prompt.matches(&*copies.join("image (2).png").to_string_lossy()).count(), 1);
+    for _ in 0..200 { if !copies.exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+    assert!(!copies.exists(), "the copies stay after the run");
 
     // A later message with the same file name gets a file of its own; the earlier ones are untouched.
     chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "and this".into(), attachments: vec![att("image.png", b"third")], ..Default::default() })).await.unwrap();
     t::event(&mut rx, &st, "chat.done").await;
     assert_eq!(std::fs::read(dir.join("image (3).png")).unwrap(), b"third");
+    // The earlier files are copied for this run too, and it is told where.
+    let prompt = prompts.lock().unwrap().last().cloned().unwrap();
+    assert!(prompt.contains(&*copies.join("image (3).png").to_string_lossy()) && prompt.contains(&format!("copies in {}", copies.display())), "{prompt}");
     assert_eq!(std::fs::read(&one).unwrap(), big);
     assert_eq!(std::fs::read(&two).unwrap(), small);
     // A name without an extension, and one that differs only in letter case.
