@@ -17,7 +17,7 @@
   }
 </script>
 
-<div class="no-print" use:shield={{ box: 'position:sticky;top:30px;z-index:6' }}>
+<div class="no-print" use:shield={{ box: 'position:sticky;top:4px;z-index:6' }}>
   <div class="banner" role="status">
     <Icon name="eye" size={16} />
     <span class="grow">{t('layer.previewBanner')} {t('layer3.previewReadOnly')}</span>

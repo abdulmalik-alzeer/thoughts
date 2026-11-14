@@ -60,6 +60,8 @@
   import { findOnOpen, findWords, markTerms, openFind, searchAll } from './lib/search';
   import { prettyName } from './lib/content/util';
   import { watchDeepLinks } from './lib/deeplink';
+  import { contentScroller, pageChanging, returningNext } from './lib/mainScroll';
+  import { sidebarSlide, railFade } from './lib/sidebarMotion';
 
   let projects = $state<any[]>([]);
   let showTour = $state(false);
@@ -420,8 +422,8 @@
     'sync': () => sync(),
     'rollback': () => (app.showRollback = true),
     'history': () => go({ kind: 'history' }),
-    'back': () => goBack(),
-    'forward': () => goForward(),
+    'back': () => { returningNext(); goBack(); },
+    'forward': () => { returningNext(); goForward(); },
     'customise': () => go({ kind: 'customise' }),
     'customise.new': () => newCustomise(),
     'review': () => openReview(),
@@ -629,6 +631,8 @@
   let viewEl = $state<HTMLElement | null>(null);
   const viewKey = $derived(`${app.view.kind}:${app.view.id ?? ''}:${app.view.path ?? ''}`);
   let firstView = true;
+  // Before the new page is drawn: remember where the old one was, open the new one at its top.
+  $effect.pre(() => { pageChanging(viewKey); });
   $effect(() => {
     viewKey;
     linkTip = '';
@@ -726,7 +730,7 @@
     <!-- macOS, sidebar collapsed: a title-bar strip gives the window buttons a proper home above the rail (CSS shows it only there). -->
     {#if railed}<div class="titlebar no-print" data-tauri-drag-region aria-hidden="true"></div>{/if}
     {#if !railed}
-    <aside class="sidebar no-print" aria-label={t('shell.sidebar')}>
+    <aside class="sidebar no-print" aria-label={t('shell.sidebar')} transition:sidebarSlide>
       <div class="drag" data-tauri-drag-region></div>
       <div class="brand row"><Logo size={24} /><span class="grow">Thoughts</span>
         {#if app.safeMode}<span class="pill accent" title={t('shell.safe.pillTip')}>{t('shell.safe.pill')}</span>{/if}
@@ -845,7 +849,7 @@
     </aside>
     {:else}
     <!-- Collapsed: a narrow rail keeps every destination one click away. -->
-    <aside class="rail no-print" aria-label={t('shell.sidebar')}>
+    <aside class="rail no-print" aria-label={t('shell.sidebar')} in:railFade={{ into: true }} out:railFade>
       <div class="drag" data-tauri-drag-region></div>
       <button class="iconbtn" aria-label={t('shell.sidebarShow')} title={tip(t('shell.sidebarShow'), 'sidebar.toggle')} onclick={() => command('sidebar.toggle')}><Icon name="sidebar" class="flip-rtl" /></button>
       <nav aria-label={t('shell.mainNav')}>
@@ -875,6 +879,7 @@
 
     <main class="main">
       <div class="drag top no-print" data-tauri-drag-region></div>
+      <div class="mainscroll scroll" use:contentScroller>
       <div class="sr-only" role="status" aria-live="polite">{announce}</div>
       {#if stale}
         <div class="safe no-print" role="status">
@@ -956,6 +961,7 @@
       {/snippet}
       </svelte:boundary>
       </div>{/key}
+      </div>
     </main>
   </div>
 {/if}
@@ -978,11 +984,19 @@
   .boot { display: grid; gap: 12px; justify-items: center; }
   .pulse { animation: breathe 1.6s ease-in-out infinite alternate; margin-bottom: 6px; }
   @keyframes breathe { to { opacity: .55; transform: scale(.96); } }
-  .shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; height: 100vh; }
+  /* The sidebar's column narrows to the rail and back (sidebarMotion.ts keeps the same length and
+     curve). Its background and edge are drawn by the column itself, so they move with it while the
+     sidebar and the rail cross-fade in the same cell. */
+  .shell { display: grid; grid-template-columns: var(--sidebar-w) 1fr; grid-template-rows: minmax(0, 1fr); height: 100vh;
+    transition: grid-template-columns 220ms cubic-bezier(.33, 1, .68, 1); }
   .shell.collapsed { grid-template-columns: 50px 1fr; }
-  .rail { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 0 0 10px; min-height: 0; background: var(--sidebar-glass); border-inline-end: 1px solid var(--hairline); }
-  :global(html.native.os-macos) .rail { background: color-mix(in srgb, var(--sidebar) 40%, transparent); }
-  :global(html.native:not(.os-macos)) .rail { background: var(--sidebar); }
+  .shell::before { content: ''; grid-area: 1 / 1; min-width: 0; background: var(--sidebar-glass); border-inline-end: 1px solid var(--hairline);
+    -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%); }
+  :global(html.native.os-macos) .shell::before { background: color-mix(in srgb, var(--sidebar) 40%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  :global(html.native:not(.os-macos)) .shell::before { background: var(--sidebar); -webkit-backdrop-filter: none; backdrop-filter: none; }
+  .shell > .sidebar, .shell > .rail { grid-area: 1 / 1; justify-self: start; }
+  .shell > .main { grid-area: 1 / 2; }
+  .rail { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 0 0 10px; min-height: 0; width: 50px; border-inline-end: 1px solid transparent; }
   .rail nav { margin: 8px 0; align-items: center; gap: 2px; overflow: auto; min-height: 0; }
   .rail .rb { position: relative; width: 34px; height: 32px; }
   .rail .wrapb:not(:disabled) { color: var(--accent); }
@@ -999,16 +1013,15 @@
   .badge { flex: none; font-size: var(--fs-xxs); font-weight: 600; min-width: 18px; text-align: center; padding: 0 5px; border-radius: 99px; background: var(--accent); color: var(--accent-fg); }
   :global([data-theme="contrast"]) .nav.active .badge { background: var(--accent-fg); color: var(--accent); }
   .sidebar {
-    background: var(--sidebar-glass); -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%);
-    border-inline-end: 1px solid var(--hairline); display: flex; flex-direction: column; min-height: 0; padding: 0 10px 10px;
+    width: var(--sidebar-w); border-inline-end: 1px solid transparent; display: flex; flex-direction: column; min-height: 0; padding: 0 10px 10px;
   }
   .drag { height: 30px; flex: none; }
   /* `main` is a size container so views can adapt to the room they really have (sidebar open or not). */
-  .main { position: relative; overflow: auto; min-width: 0; background: var(--aura), var(--bg); background-repeat: no-repeat; container: main / inline-size; }
+  /* Only the page scrolls, below the window's top bar: its scroll bar never runs over the sidebar or the bar. */
+  .main { position: relative; overflow: hidden; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--aura), var(--bg); background-repeat: no-repeat; container: main / inline-size; }
+  .mainscroll { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
   .view:focus { outline: none; }
-  :global(html.native.os-macos) .sidebar { background: color-mix(in srgb, var(--sidebar) 40%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
-  :global(html.native:not(.os-macos)) .sidebar { background: var(--sidebar); -webkit-backdrop-filter: none; backdrop-filter: none; }
-  .main .drag.top { position: sticky; top: 0; height: 26px; z-index: 5; }
+  .main .drag.top { flex: none; height: 26px; z-index: 5; }
   /* macOS with the sidebar collapsed: the window buttons sit in a title-bar strip that runs across the
      window and joins the rail in one L of sidebar material; the page tucks in below it with a hairline
      edge and a rounded inner corner. Elsewhere the strip stays hidden (Windows and Linux have a system
@@ -1022,6 +1035,15 @@
     :global(html.native.os-macos) .shell.collapsed .rail .drag { display: none; }
     :global(html.native.os-macos) .shell.collapsed .main { grid-row: 2; grid-column: 2; min-height: 0; border-top: 1px solid var(--hairline); border-inline-start: 1px solid var(--hairline); border-start-start-radius: 10px; }
     :global(html.native.os-macos) .shell.collapsed .main .drag.top { display: none; }
+    /* The strip grows in as the sidebar slides shut, and away as it opens (same length and curve):
+       an empty first row while the sidebar is open, the page always in the second row. */
+    :global(html.native.os-macos) .shell { grid-template-rows: 0px minmax(0, 1fr);
+      transition: grid-template-columns 220ms cubic-bezier(.33, 1, .68, 1), grid-template-rows 220ms cubic-bezier(.33, 1, .68, 1); }
+    :global(html.native.os-macos) .shell::before, :global(html.native.os-macos) .shell > .sidebar { grid-row: 1 / -1; }
+    :global(html.native.os-macos) .shell > .rail, :global(html.native.os-macos) .shell > .main { grid-row: 2; }
+    :global(html.native.os-macos) .shell.collapsed::before { display: none; }
+    :global(html.native.os-macos) .main .drag.top { transition: height 220ms cubic-bezier(.33, 1, .68, 1); }
+    :global(html.native.os-macos) .shell.collapsed .main .drag.top { display: block; height: 0; }
   }
   .brand { font-weight: 700; font-size: 15px; padding: 2px 6px 12px; letter-spacing: -.01em; gap: 8px; }
   .brand .iconbtn { margin-inline-end: -4px; }
@@ -1093,7 +1115,7 @@
   .sm { font-size: var(--fs-xs); }
 
   .banner {
-    position: sticky; top: 30px; z-index: 6; width: fit-content; margin: 0 auto; display: flex; align-items: center; gap: 8px;
+    position: sticky; top: 4px; z-index: 6; width: fit-content; margin: 0 auto; display: flex; align-items: center; gap: 8px;
     font-size: 13px; padding: 5px 14px; border-radius: 99px; background: var(--panel); color: var(--fg);
     border: var(--border-w) solid var(--hairline); box-shadow: var(--shadow);
   }
