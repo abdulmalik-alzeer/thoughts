@@ -151,7 +151,7 @@ pub fn compute(i: &Input) -> Vec<Value> {
             ("Monthly app tune-up", "Let the assistant look at a short summary of how you used the app this month (pages opened, buttons used, changes you kept or discarded — no note contents) and propose one improvement. You review it before anything changes."),
             ("ضبط شهري للتطبيق", "دع المساعد يطّلع على ملخص قصير لطريقة استخدامك للتطبيق هذا الشهر (الصفحات التي فتحتها، والأزرار التي استخدمتها، والتغييرات التي أبقيتها أو تجاهلتها، دون محتوى ملاحظاتك) ليقترح تحسيناً واحداً. ستراجعه قبل أن يتغيّر أي شيء."),
             format!("This is my monthly app tune-up. Below is a summary of how I used the Thoughts app in the last 30 days; it was gathered on my computer.\n\n{summary}\n\n\
-                Propose and prepare exactly ONE small customisation that would make the app fit how I actually work: for example a Home button for something I type often, hiding a page I never open (nav.json), a different todo grouping (todos.json), a Home widget, or a workflow. \
+                Propose and prepare exactly ONE small customisation that would make the app fit how I actually work: for example a Home button for something I type often, hiding a page I never open (nav.json), a different todo grouping (todos.json), hiding a part of a page I never use (pages.json), a Home widget, or a workflow. \
                 Learn from what I kept and what I discarded or undid: do not repeat a discarded idea. If nothing is clearly worth changing, change nothing and say so in plain words. \
                 In the summary, say which part of my usage led you to this change.")));
     }

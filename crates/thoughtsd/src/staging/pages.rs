@@ -309,6 +309,19 @@ mod tests {
     }
 
     #[test]
+    fn the_customising_assistant_is_taught_the_file() {
+        let contract = crate::applayer::CONTRACT;
+        assert!(contract.contains("### pages.json") && contract.contains("| `pages.json` |"));
+        // Every name the app accepts is in the contract, so the assistant never has to guess.
+        for p in PAGES {
+            assert!(contract.contains(&format!("| `{}` |", p.id)), "{}", p.id);
+            for name in p.parts.iter().chain(p.labels) { assert!(contract.contains(&format!("`{name}`")), "{}.{name}", p.id); }
+        }
+        let d = crate::applayer::Dirs::at(&std::env::temp_dir().join("thoughts-pages-prompt"));
+        assert!(super::super::system_prompt(&d).contains("pages.json"));
+    }
+
+    #[test]
     fn problems_come_in_both_languages() {
         let dir = std::env::temp_dir();
         let p = problems(&json!({"todos": {"hidden": ["nope"]}}), &dir);

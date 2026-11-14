@@ -30,6 +30,7 @@ Press **New customisation**: on the **Customise** page, in Help or Settings, or 
 - **How todos are grouped.** By list, by due date or by tag; sorted by due date; showing only what is due soon or overdue; with or without finished items.
 - **The sidebar.** Hide items you do not use, change their order, rename them ("call Ideas 'Matters'"). Home, Settings and Help always stay.
 - **Home.** Hide or reorder its sections, and place widgets where you want them: "put the hours tracker above my todos".
+- **Details of the app's own pages.** On Home, Chats, Ideas, Todos, Docs and Folders you can change the heading and add a line under it, reword buttons and hints, hide parts you never use, and put an add-on's box at the top or bottom: "call the Todos page Tasks", "hide the calendar buttons", "change the greeting on Home to 'Welcome back, team'", "put my hours this month at the top of Todos". You can even have one of your own pages shown in place of Chats, Ideas, Todos or Folders; the usual page then stays one press away, and comes back by itself if yours cannot be shown. The app's own questions, warnings and error messages always stay as they are.
 - **Shortcuts.** A button on Home that starts a chat you often start, or an extra action on a todo or an idea.
 - **Automatic tasks.** Something the assistant does on a schedule: every day, every week, on weekdays only, or monthly on a day you choose or on the last day of the month ("on the last day of each month, draft my month-end checklist"). Also after each Wrap or when the app starts.
 
@@ -150,7 +151,7 @@ Whichever you choose can be undone from History.
 
 ### What is not possible yet
 
-- **Changing the built-in screens beyond the options above.** Chats, Docs, Todos and Settings can be arranged through the documented options (todo grouping, the sidebar, Home), and you can add your own views beside them, but you cannot redesign the screens themselves.
+- **Changing the built-in screens beyond the options above.** The app's pages can be changed through the documented options (headings, wording, hidden parts, boxes, todo grouping, the sidebar, Home), and you can add your own pages beside them or in place of some, but the parts of a page cannot be rearranged inside it, and Settings, Help and Docs cannot be replaced.
 - **Fonts and logos.** The app's typefaces and its icon are fixed. Colours and spacing can change.
 - **Anything outside the customisation layer.** A customisation cannot reach the internet, connect to other apps or services, read files outside your library, change how the assistant itself works, or change sync and privacy settings.
 - **Automatic tasks while the app is closed.** They run when Thoughts is open (its background service is running), one at a time.

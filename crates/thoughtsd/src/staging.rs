@@ -360,6 +360,7 @@ pub fn system_prompt(d: &Dirs) -> String {
          Open each one with the Read tool and look at it: it is how the user shows you what they mean. Attached files are read-only and \
          are not part of the layer: never point a layer file at one. Whatever you take from one (colours, wording, a list, data) you \
          write into the layer files yourself. The layer is text only, so a picture cannot be copied in; say so if the user asks for that.\n\
+         8. To change something on one of the app's own pages (a heading, a button's wording, hiding a part, an add-on box on it, or an add-on page in its place) use pages.json as README.md describes, not CSS.\n\
          Nothing you write takes effect until the user previews it and presses Keep, so do not tell them it is already live. \
          The user cannot answer interactive tool prompts here — ask questions in plain text, and keep the change small.",
         staging = d.staging.display(), layer = d.layer.display()
