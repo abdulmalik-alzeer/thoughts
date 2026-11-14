@@ -2,15 +2,30 @@
   import Icon from '../lib/Icon.svelte';
   import { app, applyTheme, saveSettings, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
+  import { themeSwatches } from '../lib/themeSwatches';
 
   let { theme = $bindable(), mode = $bindable() }: { theme: string; mode: string } = $props();
 
-  const themes = $derived([
-    { id: 'saudi', name: t('saudi'), sw: ['#006c35', '#faf7f0', '#d4af37'] },
-    { id: 'contrast', name: t('contrast'), sw: ['#000000', '#ffffff', '#ffd400'] },
-    { id: 'tech', name: t('tech'), sw: ['#ff2bd6', '#07040f', '#00f0ff'] },
-    ...app.customThemes.map((c) => ({ id: c.id, name: c.name, sw: [] as string[] })),
-  ]);
+  // Every card shows its theme's three highlight colours, read from the theme's own tokens for the
+  // Day / Night being chosen, so themes added through Customise show theirs like the built-in ones.
+  const dark = matchMedia('(prefers-color-scheme: dark)');
+  let sysDark = $state(dark.matches);
+  $effect(() => {
+    const on = () => (sysDark = dark.matches);
+    dark.addEventListener('change', on);
+    return () => dark.removeEventListener('change', on);
+  });
+  const shown = $derived(mode === 'dark' || (mode === 'system' && sysDark) ? 'dark' : 'light');
+  const themes = $derived.by(() => {
+    const list = [
+      { id: 'saudi', name: t('saudi') },
+      { id: 'contrast', name: t('contrast') },
+      { id: 'tech', name: t('tech') },
+      ...app.customThemes.map((c) => ({ id: c.id, name: c.name })),
+    ];
+    const sw = themeSwatches(list.map((th) => th.id), shown);
+    return list.map((th) => ({ ...th, sw: sw[th.id] ?? [] }));
+  });
 
   // Choosing a look takes effect — and is saved — straight away, so what you see is never an
   // unsaved preview. (During first-run setup nothing is saved yet; setup saves it at the end.)
