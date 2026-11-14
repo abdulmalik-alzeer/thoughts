@@ -960,17 +960,57 @@ pub async fn accept_incomplete(g: Git<'_>, d: &Dirs, arabic: bool, signature: &s
 /// The staged layer for the app to load while the user tries a change (`GET /api/layer?preview=1`).
 /// Only ever the exact change the user chose to try: `signature` is the one `pending` gave for it,
 /// and anything else (no change, a different or edited one, one an assistant is still writing) is
-/// refused, so code nobody reviewed is never loaded into the app. The files are checked again after
-/// they were read, in case they were written meanwhile.
+/// refused, so code nobody reviewed is never loaded into the app.
+///
+/// The staged files are read once; those very bytes are fingerprinted and are what the preview is
+/// built from (`preview_from`), on top of the kept layer. Nothing else in the staging folder (files
+/// the review never covers, links, oversized files) reaches the app.
 pub async fn preview_manifest(g: Git<'_>, d: &Dirs, arabic: bool, signature: &str) -> anyhow::Result<Value> {
     let p = pending(g, d, arabic).await;
     if p["running"] == true { return Err(still_preparing()); }
     if p["exists"] != true { return Err(crate::tr::err("layer.no_pending", &[])); }
     if signature.is_empty() || p["signature"] != signature { anyhow::bail!("{}", changed_error(arabic)); }
-    let m = crate::applayer::manifest_preview(&d.staging, &d.layer, arabic);
     let (files, _) = changes(g, d).await?;
-    if signature_of(&read_staged(d, &files)) != signature { anyhow::bail!("{}", changed_error(arabic)); }
-    Ok(m)
+    // More files than are ever read cannot all be covered by the fingerprint.
+    if files.len() > crate::packs::MAX_FILES * 2 { anyhow::bail!("{}", changed_error(arabic)); }
+    let staged = read_staged(d, &files);
+    if signature_of(&staged) != signature { anyhow::bail!("{}", changed_error(arabic)); }
+    preview_from(d, &staged, arabic)
+}
+
+/// Build the preview manifest from the kept layer with exactly `staged` laid over it, in a private
+/// folder that is removed afterwards. Only plain files and folders of the kept layer are copied.
+fn preview_from(d: &Dirs, staged: &[Staged], arabic: bool) -> anyhow::Result<Value> {
+    fn copy(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for e in std::fs::read_dir(from)?.flatten() {
+            let name = e.file_name();
+            if name == ".git" { continue; }
+            let ft = e.file_type()?;
+            if ft.is_dir() { copy(&e.path(), &to.join(&name))?; } else if ft.is_file() { std::fs::copy(e.path(), to.join(&name))?; }
+        }
+        Ok(())
+    }
+    let tmp = d.home.join(format!(".preview-{}", uuid::Uuid::new_v4()));
+    let built = (|| -> anyhow::Result<Value> {
+        copy(&d.layer, &tmp)?;
+        for f in staged {
+            // Paths come from `changes`, which only lets customisation paths through (`check_path`).
+            crate::packs::check_path(&f.path)?;
+            let dst = tmp.join(&f.path);
+            match &f.bytes {
+                None => { let _ = std::fs::remove_file(&dst); }
+                Some(b) => {
+                    if let Some(dir) = dst.parent() { std::fs::create_dir_all(dir)?; }
+                    let _ = std::fs::remove_file(&dst);
+                    std::fs::write(&dst, b)?;
+                }
+            }
+        }
+        Ok(crate::applayer::manifest_preview(&tmp, &d.layer, arabic))
+    })();
+    let _ = std::fs::remove_dir_all(&tmp);
+    built
 }
 
 /// Can a regular file be written at `rel` inside `layer` without going through anything that is
@@ -1244,6 +1284,48 @@ mod tests {
         assert!(preview_manifest(st, &d, true, &sig).await.unwrap_err().to_string().starts_with("CHANGED::"));
         let fresh = pending(st, &d, false).await["signature"].as_str().unwrap().to_string();
         assert!(preview_manifest(st, &d, false, &fresh).await.is_ok());
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn nothing_outside_the_fingerprint_reaches_a_preview() {
+        let (st, d) = testutil::layer("preview-cover").await;
+        recreate(st, &d, "customize", None).await.unwrap();
+        std::fs::write(d.staging.join("custom.css"), "body { color: red; }\n").unwrap();
+        // Hidden from the review: a git ignore rule keeps this add-on out of the list of changes.
+        std::fs::write(d.staging.join(".gitignore"), "plugins/evil.*\n").unwrap();
+        std::fs::write(d.staging.join("plugins/evil.js"), "export default () => { steal() }\n").unwrap();
+        std::fs::write(d.staging.join("plugins/evil.json"), r#"{"apiVersion":1,"permissions":[]}"#).unwrap();
+        let sig = pending(st, &d, false).await["signature"].as_str().unwrap().to_string();
+        let m = preview_manifest(st, &d, false, &sig).await.unwrap();
+        assert!(m["css"].as_str().unwrap().contains("color: red"));
+        assert!(!m.to_string().contains("steal"), "an uncovered add-on never loads: {m}");
+        // A link counts as empty in the fingerprint, so what it points at is never served either.
+        let outside = d.home.join("secret.css");
+        std::fs::write(&outside, "body { secret: 1 }").unwrap();
+        std::fs::remove_file(d.staging.join("custom.css")).unwrap();
+        std::os::unix::fs::symlink(&outside, d.staging.join("custom.css")).unwrap();
+        let sig = pending(st, &d, false).await["signature"].as_str().unwrap().to_string();
+        let m = preview_manifest(st, &d, false, &sig).await.unwrap();
+        assert!(!m.to_string().contains("secret"), "{m}");
+        assert!(std::fs::read_dir(&d.home).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".preview-")), "the private copy is removed");
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_preview_is_built_from_the_bytes_that_were_checked() {
+        let (st, d) = testutil::layer("preview-once").await;
+        recreate(st, &d, "customize", None).await.unwrap();
+        std::fs::write(d.staging.join("custom.css"), "body { color: red; }\n").unwrap();
+        let (files, _) = changes(st, &d).await.unwrap();
+        let staged = read_staged(&d, &files);
+        // Swapped after it was read and fingerprinted, before the preview is built.
+        std::fs::write(d.staging.join("custom.css"), "body { color: swapped; }\n").unwrap();
+        let m = preview_from(&d, &staged, false).unwrap();
+        assert_eq!(m["css"], "body { color: red; }\n", "what was checked is what loads");
+        // And the swapped content no longer matches the signature the user chose.
+        let sig = signature_of(&staged);
+        assert!(preview_manifest(st, &d, false, &sig).await.unwrap_err().to_string().starts_with("CHANGED::"));
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
