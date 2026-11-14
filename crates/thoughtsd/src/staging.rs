@@ -141,9 +141,10 @@ fn rule_path(p: &Path) -> String {
 }
 
 /// What a customise run may not do: write to the library or the live layer, plant settings that
-/// would run code, or read the daemon's secrets. Of the attachment folders it may read only its
-/// own chat's (`chat_id`), the files the user attached to the request; it may write none of them.
-pub fn deny_rules(d: &Dirs, library: Option<&Path>, chat_id: &str) -> Vec<String> {
+/// would run code, or read the daemon's secrets. Every chat's attachments stay closed, this chat's
+/// too: the run reads the files of its own chat from copies made for it (`copy_attachments`), in a
+/// folder it may read but not write.
+pub fn deny_rules(d: &Dirs, library: Option<&Path>) -> Vec<String> {
     let mut deny = vec![];
     for dir in library.into_iter().chain(std::iter::once(d.layer.as_path())) {
         let p = rule_path(dir);
@@ -165,23 +166,95 @@ pub fn deny_rules(d: &Dirs, library: Option<&Path>, chat_id: &str) -> Vec<String
     }
     for dir in &dirs {
         let p = rule_path(dir);
-        if dir.file_name().map_or(false, |n| n == "attachments") && crate::chats::valid_id(chat_id) {
-            // The whole folder stays closed to writing and to the shell; reading is closed folder
-            // by folder (a deny rule cannot make an exception), every chat's but this one's.
-            for rule in [format!("Edit({p})"), format!("Edit({p}/**)")] { deny.push(rule); }
-            deny.push(format!("Bash(*{}*)", dir.to_string_lossy().replace('\\', "/")));
-            let others: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten()
-                .filter(|e| e.file_name().to_string_lossy() != chat_id).map(|e| e.path()).collect();
-            if others.len() <= crate::claude::MAX_CLOSED_FOLDERS {
-                for o in &others { let q = rule_path(o); deny.push(format!("Read({q})")); deny.push(format!("Read({q}/**)")); }
-                continue;
-            }
-            // Too many to name one by one (see `claude::protective_deny`): close it all, this chat's included.
-        }
-        for rule in [format!("Read({p})"), format!("Read({p}/**)"), format!("Edit({p})"), format!("Edit({p}/**)")] { deny.push(rule); }
+        // The copies of this chat's attachments: readable, never writable, not for the shell.
+        if *dir != reading_dir(d) { deny.push(format!("Read({p})")); deny.push(format!("Read({p}/**)")); }
+        for rule in [format!("Edit({p})"), format!("Edit({p}/**)")] { deny.push(rule); }
         deny.push(format!("Bash(*{}*)", dir.to_string_lossy().replace('\\', "/")));
     }
     deny
+}
+
+/// The folder (in the app's home, closed to every other run like the rest of it) where a customise
+/// run finds copies of its own chat's attachments: `<home>/customise-files/<chat id>/`. Only one
+/// customise run works at a time (the staging copy is its), and it is the only one that may read here.
+pub fn reading_dir(d: &Dirs) -> PathBuf { d.home.join(READING) }
+const READING: &str = "customise-files";
+
+/// `protective_deny` closes the whole home to every run; for a customise run, take out the two
+/// rules that close its reading folder (`reading_dir`) to the Read tool. Writing and the shell stay closed.
+pub fn open_reading(rules: &mut Vec<String>, d: &Dirs) {
+    let p = crate::claude::rule_path(&reading_dir(d));
+    let (a, b) = (format!("Read({p})"), format!("Read({p}/**)"));
+    rules.retain(|r| *r != a && *r != b);
+}
+
+/// Copy the files attached to customise chat `chat_id` into its reading folder, after emptying the
+/// whole reading folder (whatever another chat's run left there). Only plain files directly in the
+/// chat's own attachment folder are copied: a link, a sub-folder, a file whose real place is
+/// elsewhere or one with other names (a hard link) is left out. Returns the folder of the copies,
+/// each under the name of the file it copies.
+pub fn copy_attachments(d: &Dirs, chat_id: &str) -> std::io::Result<PathBuf> {
+    if !crate::chats::valid_id(chat_id) { return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a chat id")); }
+    clear_reading(d, None);
+    let dest = reading_dir(d).join(chat_id);
+    crate::paths::create_private_dir(&dest)?;
+    let att = d.home.join("attachments");
+    let src = att.join(chat_id);
+    let plain_dir = |p: &Path| std::fs::symlink_metadata(p).map_or(false, |m| m.is_dir());
+    if !plain_dir(&att) || !plain_dir(&src) { return Ok(dest); }
+    let real = crate::paths::canonical(&src)?;
+    for e in std::fs::read_dir(&src)?.flatten() {
+        let path = e.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if !meta.file_type().is_file() { continue; }
+        if crate::paths::canonical(&path).ok().and_then(|r| r.parent().map(|p| p == real)) != Some(true) { continue; }
+        if let Err(err) = copy_one(&path, &meta, &dest.join(e.file_name())) {
+            crate::log::warn(format!("customise: an attached file could not be copied for the run: {err}"));
+        }
+    }
+    Ok(dest)
+}
+
+/// Copy one attached file, only if what is opened is the very file looked at (`meta`): not a link
+/// put in its place since, and not a file with a second name somewhere else. The copy is read-only.
+fn copy_one(from: &Path, meta: &std::fs::Metadata, to: &Path) -> std::io::Result<()> {
+    let mut f = std::fs::File::open(from)?;
+    let opened = f.metadata()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) || opened.nlink() != 1 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not the attached file"));
+        }
+    }
+    if !opened.is_file() || opened.len() != meta.len() { return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not the attached file")); }
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; o.mode(0o600); }
+    let mut out = o.open(to)?;
+    if let Err(e) = std::io::copy(&mut f, &mut out) { drop(out); let _ = std::fs::remove_file(to); return Err(e); }
+    drop(out);
+    // (Read-only on disk only where that does not keep the folder from being removed afterwards.)
+    #[cfg(unix)]
+    { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o400))?; }
+    Ok(())
+}
+
+/// Remove the copies made for `chat_id`'s run (when it ends or never started), or with `None` the
+/// whole reading folder (when the daemon starts, and before new copies are made).
+pub fn clear_reading(d: &Dirs, chat_id: Option<&str>) {
+    let root = reading_dir(d);
+    let target = match chat_id {
+        Some(id) if crate::chats::valid_id(id) => root.join(id),
+        Some(_) => return,
+        None => root,
+    };
+    match std::fs::symlink_metadata(&target) {
+        Ok(m) if m.is_dir() => { let _ = std::fs::remove_dir_all(&target); }
+        Ok(_) => { let _ = std::fs::remove_file(&target); }
+        Err(_) => {}
+    }
 }
 
 /// Remove whatever Claude settings sit in the staging copy, so nothing in it can run code or
@@ -706,7 +779,7 @@ pub async fn replace_for(g: Git<'_>, d: &Dirs, origin: &str, chat_id: &str) -> a
 /// The run for `chat_id`'s request started (`started`), or never did: then the staging copy made
 /// for it is dropped and the change it set aside is open again.
 pub async fn run_start_result(g: Git<'_>, d: &Dirs, chat_id: &str, started: bool) {
-    if started { cycle::run_started(d, chat_id); }
+    if started { cycle::run_started(d, chat_id); } else { clear_reading(d, Some(chat_id)); }
     let aside = replaced().lock().unwrap_or_else(|e| e.into_inner()).remove(&(d.staging.clone(), chat_id.to_string()));
     let Some(a) = aside else { return };
     // Put back only when the staging copy is still the one made for this request.
@@ -1765,7 +1838,7 @@ mod tests {
     #[test]
     fn deny_rules_protect_library_layer_and_secrets() {
         let d = Dirs::at(Path::new("/home/u/.thoughts"));
-        let rules = deny_rules(&d, Some(Path::new("/home/u/Library")), "c-1");
+        let rules = deny_rules(&d, Some(Path::new("/home/u/Library")));
         for want in ["Edit(//home/u/Library/**)", "Edit(//home/u/.thoughts/app-layer/**)", "Edit(./.claude/**)", "Read(//home/u/.thoughts/daemon.json)",
                      "Read(//home/u/.thoughts/secrets.json)", "Read(//home/u/.thoughts/git-credentials)", "Read(//home/u/.thoughts/trusted.json)",
                      "Read(//home/u/.thoughts/settings.json*)", "Read(//home/u/.thoughts/chats/**)", "Bash(*/home/u/.thoughts/secrets.json*)",
@@ -1781,28 +1854,81 @@ mod tests {
     #[test]
     fn a_customise_run_reads_its_own_attachments_and_writes_none() {
         let home = std::env::temp_dir().join(format!("thoughts-cust-att-{}", uuid::Uuid::new_v4()));
-        for sub in ["attachments/c-1", "attachments/c-2", "chats"] { std::fs::create_dir_all(home.join(sub)).unwrap(); }
+        for sub in ["attachments/c-1/sub", "attachments/c-2", "chats"] { std::fs::create_dir_all(home.join(sub)).unwrap(); }
         std::fs::write(home.join("attachments/c-1/shot.png"), b"png").unwrap();
+        std::fs::write(home.join("attachments/c-1/notes.txt"), b"blue").unwrap();
+        std::fs::write(home.join("attachments/c-1/sub/inner.txt"), b"x").unwrap();
+        std::fs::write(home.join("attachments/c-2/theirs.png"), b"theirs").unwrap();
+        std::fs::write(home.join("secrets.json"), b"{}").unwrap();
         let d = Dirs::at(&home);
         let h = rule_path(&home);
         let shell = home.to_string_lossy().replace('\\', "/");
-        let rules = deny_rules(&d, None, "c-1");
+        let rules = deny_rules(&d, None);
         let has = |r: &str| rules.iter().any(|x| x == r);
-        // Its own files can be read: no rule closes the folder, the whole of attachments or the file.
-        let reads_own = |rules: &[String]| !rules.iter().any(|r| r == &format!("Read({h}/attachments/**)") || r.starts_with(&format!("Read({h}/attachments/c-1")));
-        assert!(reads_own(&rules), "{rules:?}");
-        // Every other chat's stay closed, and nothing in attachments can be written, from any tool or the shell.
-        for want in [format!("Read({h}/attachments/c-2)"), format!("Read({h}/attachments/c-2/**)"), format!("Edit({h}/attachments)"),
+        // The whole attachments folder is closed, this chat's own folder included, to reading, writing and the shell.
+        for want in [format!("Read({h}/attachments)"), format!("Read({h}/attachments/**)"), format!("Edit({h}/attachments)"),
                      format!("Edit({h}/attachments/**)"), format!("Bash(*{shell}/attachments*)"), format!("Read({h}/chats/**)"), format!("Edit({h}/app-layer/**)")] {
             assert!(has(&want), "missing {want}");
         }
-        // A chat id that is not one (it could name a path) opens nothing.
-        let odd = deny_rules(&d, None, "../c-1");
-        assert!(!reads_own(&odd) && odd.iter().any(|r| r == &format!("Read({h}/attachments/**)")));
-        // More chats with files than the rules may name: all of them are closed, this one's included.
-        for i in 0..=crate::claude::MAX_CLOSED_FOLDERS { std::fs::create_dir(home.join(format!("attachments/x{i}"))).unwrap(); }
-        let many = deny_rules(&d, None, "c-1");
-        assert!(many.iter().any(|r| r == &format!("Read({h}/attachments/**)")) && !many.iter().any(|r| r.starts_with(&format!("Read({h}/attachments/x"))));
+        // So is a chat folder that only appears once the rules are made: nothing is listed folder by folder.
+        assert!(!rules.iter().any(|r| r.contains("/attachments/c-")), "{rules:?}");
+        std::fs::create_dir_all(home.join("attachments/c-3")).unwrap();
+        assert_eq!(deny_rules(&d, None), rules, "the rules depend on which chats have files");
+        // The copies are readable, never writable, and not for the shell.
+        let r = rule_path(&reading_dir(&d));
+        assert!(!has(&format!("Read({r})")) && !has(&format!("Read({r}/**)")), "{rules:?}");
+        for want in [format!("Edit({r})"), format!("Edit({r}/**)"), format!("Bash(*{shell}/customise-files*)")] { assert!(has(&want), "missing {want}"); }
+        // Every other run finds the copies closed; a customise run has only the two reading rules taken out.
+        let mut protective = crate::claude::protective_deny(&home.join("app-layer-staging"), &[], &home, "c-1", false);
+        let cr = crate::claude::rule_path(&reading_dir(&d));
+        for want in [format!("Read({cr})"), format!("Read({cr}/**)"), format!("Edit({cr}/**)")] { assert!(protective.contains(&want), "missing {want}"); }
+        open_reading(&mut protective, &d);
+        assert!(!protective.contains(&format!("Read({cr})")) && !protective.contains(&format!("Read({cr}/**)")) && protective.contains(&format!("Edit({cr}/**)")));
+
+        // A leftover from another chat's run, and links that must not be followed.
+        std::fs::create_dir_all(reading_dir(&d).join("c-2")).unwrap();
+        std::fs::write(reading_dir(&d).join("c-2/old.png"), b"old").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(home.join("secrets.json"), home.join("attachments/c-1/link.json")).unwrap();
+            std::os::unix::fs::symlink(home.join("attachments/c-2/theirs.png"), home.join("attachments/c-1/theirs.png")).unwrap();
+            std::fs::hard_link(home.join("secrets.json"), home.join("attachments/c-1/hard.json")).unwrap();
+        }
+        let dir = copy_attachments(&d, "c-1").unwrap();
+        assert_eq!(dir, reading_dir(&d).join("c-1"));
+        assert!(!dir.starts_with(home.join("attachments")) && !dir.starts_with(&d.layer) && !dir.starts_with(&d.staging));
+        let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        names.sort();
+        // Only this chat's own plain files: no link, no hard link, no sub-folder, nothing of another chat.
+        assert_eq!(names, vec!["notes.txt".to_string(), "shot.png".to_string()]);
+        assert_eq!(std::fs::read(dir.join("notes.txt")).unwrap(), b"blue");
+        #[cfg(unix)]
+        assert!(std::fs::metadata(dir.join("notes.txt")).unwrap().permissions().readonly());
+        assert!(!reading_dir(&d).join("c-2").exists(), "another chat's leftover copies stay");
+        // An id that is not one (it could name a path) copies nothing.
+        assert!(copy_attachments(&d, "../c-2").is_err());
+        assert!(dir.is_dir());
+        // A chat without attachments gets an empty folder.
+        let none = copy_attachments(&d, "c-9").unwrap();
+        assert_eq!(std::fs::read_dir(&none).unwrap().count(), 0);
+        // A whole attachments folder of this chat that is a link is not followed either.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(home.join("attachments/c-2"), home.join("attachments/c-4")).unwrap();
+            let linked = copy_attachments(&d, "c-4").unwrap();
+            assert_eq!(std::fs::read_dir(&linked).unwrap().count(), 0);
+        }
+        // Clean-up: when the run ends only its own copies go; when the daemon starts, everything.
+        copy_attachments(&d, "c-1").unwrap();
+        std::fs::create_dir_all(reading_dir(&d).join("c-2")).unwrap();
+        clear_reading(&d, Some("c-1"));
+        assert!(!reading_dir(&d).join("c-1").exists() && reading_dir(&d).join("c-2").exists());
+        clear_reading(&d, Some(".."));
+        assert!(reading_dir(&d).exists());
+        clear_reading(&d, None);
+        assert!(!reading_dir(&d).exists() && home.join("attachments/c-1/shot.png").exists() && home.join("secrets.json").exists());
+        // The originals are untouched throughout.
+        assert_eq!(std::fs::read(home.join("attachments/c-2/theirs.png")).unwrap(), b"theirs");
         std::fs::remove_dir_all(&home).unwrap();
         // The run is told how to use what was attached.
         let p = system_prompt(&d);

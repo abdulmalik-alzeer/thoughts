@@ -2625,10 +2625,15 @@ fn save_attachment(dir: &std::path::Path, name: &str, bytes: &[u8]) -> anyhow::R
 type RunDone = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'static, ()> + Send>;
 
 /// What follows a run started from a chat message, besides the usual bookkeeping.
-fn after_chat_run(kind: &str) -> Option<RunDone> {
+fn after_chat_run(kind: &str, id: &str) -> Option<RunDone> {
     if kind != "customize" { return None; }
-    // Nothing is applied or committed here: the result waits as a pending change.
-    Some(Box::new(|st: Arc<AppState>, ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move { crate::staging::after_run(&st, ok).await; }) }))
+    let id = id.to_string();
+    // Nothing is applied or committed here: the result waits as a pending change. The copies of
+    // the chat's attachments made for the run go.
+    Some(Box::new(move |st: Arc<AppState>, ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move {
+        crate::staging::after_run(&st, ok).await;
+        crate::staging::clear_reading(&applayer::Dirs::real(), Some(&id));
+    }) }))
 }
 
 /// A run that was to resume the chat's session just failed. If that was because the CLI no longer
@@ -2657,7 +2662,7 @@ async fn resend_without_session(st: &Arc<AppState>, again: RunSpec, kind: &str) 
     // As for any send: nothing else writes into the library while a wrap is changing it.
     let library = st.settings.read().await.library();
     let touches_library = library.as_ref().map_or(false, |l| again.cwd == *l || (kind != "customize" && again.add_dirs.contains(l)));
-    let started = if touches_library && st.library_busy() { Err(crate::tr::err("busy", &[])) } else { claude::start_run(st.clone(), again, after_chat_run(kind)).await };
+    let started = if touches_library && st.library_busy() { Err(crate::tr::err("busy", &[])) } else { claude::start_run(st.clone(), again, after_chat_run(kind, &id)).await };
     match started {
         Ok(()) => true,
         Err(e) => {
@@ -2744,8 +2749,23 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
                 Err(e) => { for p in &saved { let _ = std::fs::remove_file(p); } return Err(e.into()); }
             }
         }
+    }
+    // A customise run may not open the attachments folder at all: it reads copies of this chat's
+    // files, made for it now (`staging::copy_attachments`). Without them it reads none.
+    let copies = if chat.kind != "customize" { None } else {
+        match crate::staging::copy_attachments(&applayer::Dirs::real(), &id) {
+            Ok(dir) => Some(dir),
+            Err(e) => { crate::log::error(format!("customise: the attached files could not be copied for the run: {e}")); None }
+        }
+    };
+    let readable = |p: &String| copies.as_ref().and_then(|dir| std::path::Path::new(p).file_name().map(|n| dir.join(n)))
+        .filter(|c| c.is_file()).map_or(p.clone(), |c| c.to_string_lossy().to_string());
+    if !saved.is_empty() {
         prompt.push_str("\n\nAttached files (read them):\n");
-        for p in &saved { prompt.push_str(&format!("- {p}\n")); }
+        for p in &saved { prompt.push_str(&format!("- {}\n", readable(p))); }
+    }
+    if let Some(dir) = copies.as_ref().filter(|_| chat.messages.iter().any(|x| !x.attachments.is_empty())) {
+        prompt.push_str(&format!("\n\nFiles attached earlier in this chat can be read from copies in {} (their first places are closed to you).\n", dir.display()));
     }
     drop(files);
     if !m.mentions.is_empty() {
@@ -2788,19 +2808,19 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let kind = chat.kind.clone();
     let append = if kind == "customize" { Some(crate::staging::system_prompt(&applayer::Dirs::real())) } else { append };
     // A customise run may only write inside its staging copy, and may not read the app's own secrets.
-    let extra_deny = if kind == "customize" { crate::staging::deny_rules(&applayer::Dirs::real(), library.as_deref(), &id) } else { vec![] };
+    let extra_deny = if kind == "customize" { crate::staging::deny_rules(&applayer::Dirs::real(), library.as_deref()) } else { vec![] };
     let spec = |prompt: String, resume: Option<String>| RunSpec { chat_id: id.clone(), prompt, cwd: cwd.clone(), add_dirs: add_dirs.clone(),
         options: opts.clone(), resume, append_system: append.clone(), extra_deny: extra_deny.clone() };
     let on_done: Option<RunDone> = match fallback {
         Some(replay) => {
-            let (again, kind) = (spec(replay, None), kind.clone());
+            let (again, kind, id) = (spec(replay, None), kind.clone(), id.clone());
             Some(Box::new(move |st: Arc<AppState>, ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move {
                 if ok || !resend_without_session(&st, again, &kind).await {
-                    if let Some(next) = after_chat_run(&kind) { next(st, ok).await; }
+                    if let Some(next) = after_chat_run(&kind, &id) { next(st, ok).await; }
                 }
             }) }))
         }
-        None => after_chat_run(&kind),
+        None => after_chat_run(&kind, &id),
     };
     let started = claude::start_run(st.clone(), spec(prompt, chat.session_id.clone()), on_done).await;
     // A customise run that never started must not cost the user the change it was about to replace.

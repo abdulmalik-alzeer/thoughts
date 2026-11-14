@@ -112,6 +112,8 @@ pub async fn run() -> anyhow::Result<()> {
     if reaped > 0 { log::warn(format!("ended {reaped} assistant process(es) left over from a previous run")); }
     // …and so are the private files that daemon had handed to its runs.
     claude::clear_run_tmp(&paths::run_tmp_dir());
+    // …and the copies of attachments made for a customise run.
+    staging::clear_reading(&applayer::Dirs::real(), None);
     // Asking the user's shell for its PATH can take a few seconds: do it now, off to the side,
     // rather than inside the first request that needs it.
     tokio::task::spawn_blocking(|| { claude::shell_path(); });

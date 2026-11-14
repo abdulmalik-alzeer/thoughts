@@ -1605,7 +1605,9 @@ pub async fn start_run(
         deny = merge_deny(deny, private_deny_settings(Some(&spec.cwd), &spec.cwd, &private_paths)?);
     }
     // Only the run that sets up a brand-new library may write its `.claude` folder (it installs the presets).
-    let protective = protective_deny(&spec.cwd, &spec.add_dirs, &crate::paths::home(), &spec.chat_id, kind == "setup");
+    let mut protective = protective_deny(&spec.cwd, &spec.add_dirs, &crate::paths::home(), &spec.chat_id, kind == "setup");
+    // A customise run reads its chat's attachments from copies made for it (`staging::copy_attachments`).
+    if kind == "customize" { crate::staging::open_reading(&mut protective, &crate::applayer::Dirs::real()); }
     deny = merge_deny(deny, Some(json!({"permissions": {"deny": protective}}).to_string()));
     if !spec.extra_deny.is_empty() {
         deny = merge_deny(deny, Some(json!({"permissions": {"deny": spec.extra_deny}}).to_string()));
