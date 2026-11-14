@@ -151,10 +151,13 @@ pub const LIBRARY_NAME_MAX: usize = 60;
 pub struct SpendingSettings {
     pub monthly_limit_usd: Option<f64>,
     pub warn_percent: u8,
+    /// What the usage page's API-price figures cover: only the runs the app starts (false), or also
+    /// every Claude Code and Codex session on this computer, read from their folders (`meter.rs`).
+    pub whole_computer: bool,
 }
 
 impl Default for SpendingSettings {
-    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80 } }
+    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false } }
 }
 
 impl SpendingSettings {

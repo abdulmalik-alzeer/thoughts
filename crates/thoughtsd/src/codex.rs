@@ -1086,11 +1086,16 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     let limits = crate::claude::run_limits(&l.kind);
     let stopped = if l.language == "ar" { "تم الإيقاف." } else { "Stopped." };
     let (kind, record, touches_library, on_done, resumed) = (l.kind, l.record, l.touches_library, l.on_done, resume.is_some());
+    let chosen_model = l.spec.options.model.clone();
     tokio::spawn(async move {
         let _files = files;
         let track = Arc::new(tokio::sync::Mutex::new(Track::default()));
         let (st, cid, tr) = (state.clone(), id.clone(), track.clone());
+        // What the run used, for the usage page (`meter.rs`).
+        let meter = Arc::new(std::sync::Mutex::new(crate::meter::CodexRun::default()));
+        let mt = meter.clone();
         let f = crate::claude::follow(&mut child, &mut kill_rx, limits, move |line| {
+            mt.lock().unwrap_or_else(|e| e.into_inner()).feed(&line);
             let (st, cid, tr) = (st.clone(), cid.clone(), tr.clone());
             async move {
                 let mut t = tr.lock().await;
@@ -1113,6 +1118,9 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
             }
         }
         if t.tokens > 0 { state.chats.update(&id, |c| c.usage_tokens += t.tokens).await; }
+        let run = std::mem::take(&mut *meter.lock().unwrap_or_else(|e| e.into_inner()));
+        let sid = state.chats.with(&id, |c| c.session_id.clone()).await.flatten();
+        crate::meter::record_codex(&state, Some(&id), sid, run, t.model.clone().or(chosen_model)).await;
         let exited_ok = f.exit.as_ref().map_or(false, |s| s.success());
         let ok = match &f.ended {
             Ended::Result(r) => *r && t.error.is_none() && !t.aborted,
@@ -1212,7 +1220,13 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>, che
     // What Codex kept of this answer goes: it was never a conversation of the user's.
     let home = codex_home();
     let m2 = mark.clone();
-    let _ = tokio::task::spawn_blocking(move || { if let Some((_, f)) = find_session(&home, since, &m2) { let _ = std::fs::remove_file(f); } }).await;
+    let seen = tokio::task::spawn_blocking(move || {
+        let (_, f) = find_session(&home, since, &m2)?;
+        // What it used and the plan's limits (newer versions report them only there), for the usage page.
+        let used = crate::meter::read_rollout(&f);
+        let _ = std::fs::remove_file(f);
+        Some(used)
+    }).await.ok().flatten();
     let out = match out {
         Ok(r) => r?,
         Err(_) => {
@@ -1221,6 +1235,7 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>, che
             anyhow::bail!("the assistant timed out (no answer within {} seconds)", crate::claude::COMPLETE_TIMEOUT.as_secs())
         }
     };
+    crate::meter::record_codex_one_shot(state, &String::from_utf8_lossy(&out.stdout), model, seen);
     one_shot_outcome(state, &String::from_utf8_lossy(&out.stdout), &String::from_utf8_lossy(&out.stderr))
 }
 

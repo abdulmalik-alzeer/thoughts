@@ -259,6 +259,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::care_api::routes())
         // bringing in notes the user already has
         .merge(crate::import::routes())
+        // usage: plan limits, tokens and what they would cost
+        .merge(crate::meter::routes())
         // several libraries: the switcher
         .merge(crate::libraries::routes())
         .route("/api/extensions", get(extensions))

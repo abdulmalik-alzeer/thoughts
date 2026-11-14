@@ -2109,6 +2109,7 @@ pub(crate) async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Opti
         "rate_limit_event" => {
             if provider_of(&state.settings.read().await.ai.claude) == Provider::Account {
                 if let Some(l) = crate::spend::limit_from_event(ev) { crate::spend::set_plan_limit(state, l); }
+                crate::meter::note_claude_limit(state, ev);
             }
             None
         }
@@ -2180,6 +2181,7 @@ pub(crate) async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Opti
                 if sid.is_some() { c.session_id = sid; }
             }).await;
             state.add_usage(cost).await;
+            crate::meter::record_claude(state, Some(id), ev);
             if let Some(used) = ev["modelUsage"].as_object() { note_models(state, used.keys().cloned()).await; crate::handoff::note_claude(used); }
             // What the assistant was not allowed to do goes under its answer — and before an error,
             // which must stay the last message of a run that failed.
@@ -2377,6 +2379,7 @@ async fn complete_with(state: &AppState, prompt: &str, model: Option<String>, en
 /// cost counts towards the month either way: summaries, titles and drafts cost money like any run.
 async fn one_shot_outcome(state: &AppState, v: &Value) -> anyhow::Result<String> {
     state.add_usage(v["total_cost_usd"].as_f64().unwrap_or(0.0)).await;
+    crate::meter::record_claude(state, None, v);
     if v["is_error"].as_bool().unwrap_or(false) {
         let text = v["result"].as_str().unwrap_or("error");
         if let Some(plain) = note_plan_limit(state, text).await { anyhow::bail!("{plain}"); }
