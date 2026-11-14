@@ -5,7 +5,10 @@
   import { app } from '../lib/store.svelte';
   import { findView, SURFACE_DRAWN } from '../lib/layer';
   import { t } from '../lib/i18n';
-  let { id }: { id: string } = $props();
+  import type { Snippet } from 'svelte';
+  // `onfail`: called when the page cannot be shown (an add-on page standing in for one of the app's
+  // own then gives way to it); `children`: more in the strip saying whose page this is.
+  let { id, onfail, children }: { id: string; onfail?: () => void; children?: Snippet } = $props();
   let el = $state<HTMLElement>();
   let problem = $state('');
   // The page as it is registered right now. Reloading the customisations (Try it, Keep, Stop preview,
@@ -40,6 +43,7 @@
     const timer = setTimeout(() => (gone = true), 1500);
     return () => clearTimeout(timer);
   });
+  $effect(() => { if ((gone || problem) && onfail) onfail(); });
   const from = $derived(view?.plugin ? String(view.plugin).replace(/\.(js|html)$/i, '') : '');
 </script>
 
@@ -52,7 +56,7 @@
   </div>
 {:else if view}
   <!-- Whose page this is: drawn by the app, outside the add-on's frame, so the add-on cannot remove it. -->
-  <p class="from no-print"><Icon name="plugin" size={13} /> <span>{t('lua.pageFrom')} <bdi>{from}</bdi></span></p>
+  <p class="from no-print"><Icon name="plugin" size={13} /> <span>{t('lua.pageFrom')} <bdi>{from}</bdi></span>{@render children?.()}</p>
 {/if}
 <div class="pv" class:hide={gone || !!problem} class:wait={!drawn} class:in={drawn} bind:this={el}></div>
 <style>

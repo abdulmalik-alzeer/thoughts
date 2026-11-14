@@ -12,6 +12,8 @@
   import { clock } from '../lib/clock.svelte';
   import { loadLibraryWeek, nextWeekDay, showHijri } from '../lib/weekPrefs.svelte';
   import { compose, doneGroupOf, inSentence, REPEATS } from '../lib/todoline';
+  import PageExtras from './PageExtras.svelte';
+  import { pageText, pageTitle, shows } from '../lib/pages.svelte';
 
   type Filter = 'all' | 'soon' | 'overdue';
   type GroupBy = 'list' | 'due' | 'tag' | 'none';
@@ -377,15 +379,20 @@
 
 <div class="page">
   <div class="row top">
-    <h1 class="grow">{t('todos')} <span class="pill count" aria-label={t('todo.openCount', { n: fmtNum(open) })}>{fmtNum(open)}</span></h1>
+    <h1 class="grow">{pageTitle('todos')}{#if shows('todos', 'count')} <span class="pill count" aria-label={t('todo.openCount', { n: fmtNum(open) })}>{fmtNum(open)}</span>{/if}</h1>
     {#if lists.length}
+      {#if shows('todos', 'views')}
       <div class="seg" role="group" aria-label={t('ui.cal.viewLabel')}>
         <button class="segb" aria-pressed={mode === 'list'} onclick={() => setMode('list')}><Icon name="todos" size={14} /> {t('ui.cal.list')}</button>
         <button class="segb" aria-pressed={mode === 'calendar'} onclick={() => setMode('calendar')}><Icon name="calendar" size={14} /> {t('ui.cal.title')}</button>
       </div>
+      {/if}
+      {#if shows('todos', 'calendarExport')}
       <button class="btn" onclick={downloadCalendar} title={`${t('ui.cal.addHint')}. ${t('cln.cal.private')}`}><Icon name="download" size={14} /> {t('ui.cal.add')}</button>
+      {/if}
     {/if}
   </div>
+  <PageExtras page="todos" />
 
   {#if loading}
     <div class="card list" aria-busy="true"><div class="skel"></div><div class="skel w70"></div><div class="skel w50"></div></div>
@@ -407,6 +414,7 @@
     <TodoCalendar {lists} add={(text, due) => addTo(GENERAL, text, due)} toggle={(l, it, box) => toggle(l, it, box)} setDue={(l, it, due) => setDue(l, it, due)} />
   {:else}
     <div class="row tools">
+      {#if shows('todos', 'filters')}
       <div class="seg" role="group" aria-label={t('todo.filterLabel')}>
         {#each FILTERS as f}
           <button class="segb" aria-pressed={filter === f} onclick={() => { filter = f; remember(); }}>
@@ -417,18 +425,23 @@
           </button>
         {/each}
       </div>
+      {/if}
       <span class="grow"></span>
+      {#if shows('todos', 'grouping')}
       <label class="row inl" for="todo-group">{t('ui.todo.groupLabel')}</label>
       <select id="todo-group" bind:value={groupBy} onchange={remember}>
         {#each GROUPS as g}<option value={g}>{t('ui.todo.groupBy.' + g)}</option>{/each}
       </select>
+      {/if}
+      {#if shows('todos', 'sorting')}
       <label class="row inl" for="todo-sort">{t('todo.sortLabel')}</label>
       <select id="todo-sort" bind:value={sort} onchange={remember}>
         <option value="list">{t('todo.sort.list')}</option>
         <option value="due">{t('todo.sort.due')}</option>
       </select>
-      <label class="row inl"><input type="checkbox" bind:checked={showDone} onchange={remember} /> {t('todo.showDone')}</label>
-      <label class="row inl" title={t('todob.moveDoneHint')}><input type="checkbox" bind:checked={moveDone} onchange={remember} /> {t('todob.moveDone')}</label>
+      {/if}
+      {#if shows('todos', 'showDone')}<label class="row inl"><input type="checkbox" bind:checked={showDone} onchange={remember} /> {t('todo.showDone')}</label>{/if}
+      {#if shows('todos', 'moveDone')}<label class="row inl" title={t('todob.moveDoneHint')}><input type="checkbox" bind:checked={moveDone} onchange={remember} /> {t('todob.moveDone')}</label>{/if}
       {#if app.todosCfg && hasOwn()}<button class="btn ghost sm" onclick={resetView} title={t('ui.todo.resetViewHint')}>{t('ui.todo.resetView')}</button>{/if}
     </div>
 
@@ -440,8 +453,9 @@
       </div>
     {/if}
 
+    {#if shows('todos', 'quickAdd')}
     <form class="row add quick" onsubmit={(e) => { e.preventDefault(); addTop(); }}>
-      <input class="grow" placeholder={t('todob.addPlaceholder')} aria-label={t('addTodo')} bind:value={drafts[GENERAL]} dir="auto" />
+      <input class="grow" placeholder={pageText('todos', 'quickAddPlaceholder', t('todob.addPlaceholder'))} aria-label={t('addTodo')} bind:value={drafts[GENERAL]} dir="auto" />
       <label class="inl" for="todo-target">{t('todob.addIn')}</label>
       <select id="todo-target" class="sel" bind:value={target}>
         <option value="">{t('todo.general')}</option>
@@ -451,8 +465,9 @@
           </optgroup>
         {/each}
       </select>
-      <button class="btn primary sm" disabled={!drafts[GENERAL]?.trim()}>{t('todo.add')}</button>
+      <button class="btn primary sm" disabled={!drafts[GENERAL]?.trim()}>{pageText('todos', 'add', t('todo.add'))}</button>
     </form>
+    {/if}
 
     {#each sections as sec (sec.id)}
       {@const l = sec.list}
@@ -471,14 +486,15 @@
           {/each}
           {#if l}
             <form class="row add" onsubmit={(e) => { e.preventDefault(); add(l.file); }}>
-              <input class="grow" placeholder={t('addTodo')} aria-label={t('todo.addTo', { list: listName(l) })} bind:value={drafts[l.file]} dir="auto" />
-              {#if drafts[l.file]?.trim()}<button class="btn primary sm">{t('todo.add')}</button>{/if}
+              <input class="grow" placeholder={pageText('todos', 'listPlaceholder', t('addTodo'))} aria-label={t('todo.addTo', { list: listName(l) })} bind:value={drafts[l.file]} dir="auto" />
+              {#if drafts[l.file]?.trim()}<button class="btn primary sm">{pageText('todos', 'add', t('todo.add'))}</button>{/if}
             </form>
           {/if}
         </section>
       {/if}
     {/each}
   {/if}
+  <PageExtras page="todos" place="bottom" />
 </div>
 
 <style>

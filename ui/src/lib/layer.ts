@@ -64,6 +64,7 @@ import { confirmDialog, promptDialog, dialogs } from './dialog.svelte';
 import { saveFile as offerFile } from './download';
 import { matchShortcut } from './shortcuts';
 import { aboveShield } from './layer/shield';
+import { setPages } from './pages.svelte';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang } from './i18n';
 
@@ -1105,14 +1106,14 @@ const strings = (v: any) => (Array.isArray(v) ? v.filter((x) => typeof x === 'st
 
 /** Load the kept layer, or with `preview` the staged one ("Try it"). Nothing staged is loaded any other way. */
 export async function loadLayer(opts: { preview?: boolean } = {}) {
-  if (app.safeMode) { app.nav = null; app.todosCfg = null; setLayerItems([]); return; }
+  if (app.safeMode) { app.nav = null; app.todosCfg = null; setPages(null); setLayerItems([]); return; }
   const boot = firstLoad;
   firstLoad = false;
   if (boot && crashed) {
     // Add-ons of the kept layer were running when the app last stopped responding (see the freeze guard).
     app.safeMode = true;
     app.safeReason = 'crash';
-    app.nav = null; app.todosCfg = null;
+    app.nav = null; app.todosCfg = null; setPages(null);
     return;
   }
   const m = await api(opts.preview ? '/layer?preview=1' : '/layer');
@@ -1135,6 +1136,7 @@ export async function loadLayer(opts: { preview?: boolean } = {}) {
   // `order` may also name `widget:<id>` and `suggestions`; Home places them.
   app.nav = navConfig(m.nav);
   app.todosCfg = todosConfig(m.todos);
+  setPages(m.pages);
   const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
   const mk = (it: LayerItem, code: string): Plugin =>
     ({ name: it.name, kind: it.kind, code: String(code ?? ''), perms: new Set(it.permissions), write: it.write, read: it.read, description: it.description, dead: false, disposers: [], frames: new Set(), warned: new Set() });
@@ -1434,6 +1436,7 @@ export async function packChoices(): Promise<{ path: string; kind: 'plugin' | 'v
   if (m.home) out.push({ path: 'home.json', kind: 'layout', label: 'home.json' });
   if (m.nav) out.push({ path: 'nav.json', kind: 'layout', label: 'nav.json' });
   if (m.todos) out.push({ path: 'todos.json', kind: 'layout', label: 'todos.json' });
+  if (m.pages) out.push({ path: 'pages.json', kind: 'layout', label: 'pages.json' });
   return out;
 }
 

@@ -9,6 +9,8 @@
   import { areaKey, areaLabel, areaWord, newItemTrigger, term } from '../lib/terms';
   import { fold } from '../lib/CommandPalette.svelte';
   import { openItem } from '../lib/item';
+  import PageExtras from './PageExtras.svelte';
+  import { pageText, pageTitle, shows } from '../lib/pages.svelte';
 
   let ideas = $state<any[]>([]);
   let loading = $state(true);
@@ -87,11 +89,14 @@
 </script>
 
 <div class="page">
-  <h1>{term('nav')}</h1>
+  <h1>{pageTitle('ideas')}</h1>
+  <PageExtras page="ideas" />
+  {#if shows('ideas', 'capture')}
   <form class="row" onsubmit={(e) => { e.preventDefault(); capture(); }}>
-    <input class="grow" placeholder={term('newPlaceholder')} aria-label={term('newPlaceholder')} bind:value={newIdea} dir="auto" />
-    <button class="btn primary" disabled={!newIdea.trim() || busy}><Icon name="ideas" size={14} /> {term('capture')}</button>
+    <input class="grow" placeholder={pageText('ideas', 'capturePlaceholder', term('newPlaceholder'))} aria-label={pageText('ideas', 'capturePlaceholder', term('newPlaceholder'))} bind:value={newIdea} dir="auto" />
+    <button class="btn primary" disabled={!newIdea.trim() || busy}><Icon name="ideas" size={14} /> {pageText('ideas', 'capture', term('capture'))}</button>
   </form>
+  {/if}
 
   {#if loading}
     <div class="grid sk" aria-busy="true"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
@@ -101,26 +106,30 @@
   {:else if !ideas.length}
     <div class="state"><Icon name="ideas" size={28} /><h2>{term('emptyTitle')}</h2><p class="muted">{term('emptyBody')}</p><p class="muted sm">{t('ui.idea.emptyTip')}</p></div>
   {:else}
-    {#if allAreas.length > 1}
+    {#if allAreas.length > 1 && shows('ideas', 'areas')}
       <div class="row tabs" role="group" aria-label={t('todoa.work.areas')}>
         <button class="tab" aria-pressed={!area} onclick={() => (area = '')}>{t('idea.all')}</button>
         {#each allAreas as a (a)}<button class="tab" aria-pressed={area === a} onclick={() => (area = a)} dir="auto">{areaLabel(a)}</button>{/each}
       </div>
     {/if}
     <div class="row filters">
-      <input type="search" placeholder={t(isWork ? 'todoa.work.search' : 'idea.searchPlaceholder')} aria-label={t(isWork ? 'todoa.work.search' : 'idea.searchPlaceholder')} bind:value={q} class="q" dir="auto" />
+      {#if shows('ideas', 'search')}<input type="search" placeholder={pageText('ideas', 'search', t(isWork ? 'todoa.work.search' : 'idea.searchPlaceholder'))} aria-label={pageText('ideas', 'search', t(isWork ? 'todoa.work.search' : 'idea.searchPlaceholder'))} bind:value={q} class="q" dir="auto" />{/if}
+      {#if shows('ideas', 'statusFilter')}
       <div class="row pills" role="group" aria-label={t('idea.statusFilter')}>
         <button class="pill" class:accent={!status} aria-pressed={!status} onclick={() => (status = '')}>{t('idea.all')}</button>
         {#each statuses as s}<button class="pill" class:accent={status === s} aria-pressed={status === s} onclick={() => (status = s)}>{statusLabel(s)}</button>{/each}
       </div>
+      {/if}
       <span class="grow"></span>
+      {#if shows('ideas', 'sort')}
       <label class="muted sm" for="idea-sort">{t('todob.idea.sort')}</label>
       <select id="idea-sort" class="sortsel" bind:value={sort}>
         <option value="updated">{t('todob.idea.sort.updated')}</option>
         <option value="name">{t('todob.idea.sort.name')}</option>
         <option value="status">{t('todob.idea.sort.status')}</option>
       </select>
-      <span class="muted sm" role="status">{tn(isWork ? 'todoa.work.count' : 'idea.count', shown.length)}</span>
+      {/if}
+      {#if shows('ideas', 'count')}<span class="muted sm" role="status">{tn(isWork ? 'todoa.work.count' : 'idea.count', shown.length)}</span>{/if}
     </div>
     {#if !shown.length}
       <div class="state">
@@ -155,6 +164,7 @@
       </div>
     {/each}
   {/if}
+  <PageExtras page="ideas" place="bottom" />
 </div>
 
 <style>

@@ -5,6 +5,8 @@
   import { app, go, toast } from '../lib/store.svelte';
   import { confirmDialog } from '../lib/dialog.svelte';
   import { t } from '../lib/i18n';
+  import PageExtras from './PageExtras.svelte';
+  import { pageIntro, pageText, pageTitle, shows } from '../lib/pages.svelte';
 
   let { projects, reload, newChat }: { projects: any[]; reload: () => Promise<void>; newChat: (pid: string) => void } = $props();
 
@@ -47,10 +49,12 @@
 </script>
 
 <div class="page">
-  <h1>{t('projects')}</h1>
-  <p class="muted">{t('proj.intro')}</p>
+  <h1>{pageTitle('projects')}</h1>
+  {#if shows('projects', 'intro')}<p class="muted" dir="auto">{pageIntro('projects') || t('proj.intro')}</p>{/if}
+  <PageExtras page="projects" intro={false} />
   <p class="note"><Icon name="warning" size={15} /> <span>{t('proj.access')}</span></p>
 
+  {#if shows('projects', 'linkForm')}
   <form class="card" onsubmit={(e) => { e.preventDefault(); add(); }}>
     <label for="pj-name">{t('proj.name')}</label>
     <input id="pj-name" dir="auto" bind:value={name} placeholder={t('proj.namePh')} autocomplete="off" />
@@ -60,17 +64,18 @@
       <div class="row"><input id="pj-path" class="grow" dir="ltr" bind:value={path} placeholder="~/Documents/Clients/Annual report" autocomplete="off" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('proj.browse')}</button></div>
     {/if}
     <div class="row actions">
-      <button type="submit" class="btn primary" disabled={!canAdd || adding} aria-busy={adding}>{adding ? t('proj.linking') : t('proj.link')}</button>
+      <button type="submit" class="btn primary" disabled={!canAdd || adding} aria-busy={adding}>{adding ? t('proj.linking') : pageText('projects', 'link', t('proj.link'))}</button>
       {#if !canAdd}<span class="muted sm">{t(inside ? 'proj.needName' : 'proj.needFolder')}</span>{/if}
     </div>
   </form>
+  {/if}
 
   <div class="list">
     {#each projects as p (p.id)}
       {@const chats = app.chats.filter((c) => c.projectId === p.id)}
       <div class="card">
         <div class="row"><b class="grow" dir="auto">{p.name}</b>
-          <button type="button" class="btn primary" onclick={() => newChat(p.id)}><Icon name="plus" size={15} /> {t('newChat')}</button>
+          <button type="button" class="btn primary" onclick={() => newChat(p.id)}><Icon name="plus" size={15} /> {pageText('projects', 'newChat', t('newChat'))}</button>
           <button type="button" class="btn ghost" disabled={removing[p.id]} onclick={() => remove(p)}>{t('proj.unlink')}</button></div>
         <code class="muted sm path"><bdi>{p.path}</bdi></code>
         {#each chats.slice(0, 5) as c (c.id)}<button type="button" class="chat" onclick={() => go({ kind: 'chat', id: c.id })}><Icon name="chat" size={13} /> <span dir="auto">{c.title}</span></button>{/each}
@@ -79,6 +84,7 @@
       <div class="empty"><Icon name="projects" size={22} /><b>{t('proj.emptyTitle')}</b><span class="muted">{t('proj.emptyBody')}</span></div>
     {/each}
   </div>
+  <PageExtras page="projects" place="bottom" />
 </div>
 
 <style>

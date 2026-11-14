@@ -5,6 +5,7 @@
 // what the assistant or a pack says about the change.
 import { t } from './i18n';
 import { permText } from './layer';
+import { pagesFx } from './pagesFx';
 
 export type Effect = { area: string; op: string; [k: string]: any };
 /** One line of the description: a tag (new / changed / removed), the sentence, details under it,
@@ -129,6 +130,7 @@ export function fxLine(e: Effect, i = 0): FxLine | null {
     case 'task':
       if (['added', 'changed', 'removed'].includes(e.op)) return line(e.op as FxLine['tag'], t(`ldb.fx.task.${e.op}`, { name: q(e.name) }));
       break;
+    case 'pages': { const l = pagesFx(e, key); if (l) return l; break; }
     case 'guide': return line('changed', t('ldb.fx.guide'));
     case 'file':
       if (['added', 'changed', 'removed'].includes(e.op)) return line(e.op as FxLine['tag'], t(`ldb.fx.file.${e.op}`, { path: q(e.path) }));
@@ -138,7 +140,7 @@ export function fxLine(e: Effect, i = 0): FxLine | null {
 }
 
 /** The order the review groups them in: what can act on its own first, how things look last. */
-const ORDER = ['addon', 'page', 'task', 'home', 'nav', 'todos', 'themes', 'style', 'guide', 'file'];
+const ORDER = ['addon', 'page', 'task', 'home', 'nav', 'todos', 'pages', 'themes', 'style', 'guide', 'file'];
 
 /** Every entry in words, grouped by area: `[{area, lines}]`. */
 export function fxGroups(effects: unknown): { area: string; lines: FxLine[] }[] {

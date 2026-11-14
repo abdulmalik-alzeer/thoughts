@@ -22,6 +22,8 @@
   import DocxPreview from './docs/DocxPreview.svelte';
   import { docDir, toDocx } from '../lib/content/docx';
   import ImportNotes from './ImportNotes.svelte';
+  import PageExtras from './PageExtras.svelte';
+  import { pageText, shows } from '../lib/pages.svelte';
 
   let { path }: { path?: string } = $props();
 
@@ -944,7 +946,7 @@
     onkeydown={(e) => { if (e.key === 'Escape' && treeOpen) { e.stopPropagation(); hideTree(); } }}>
     <div class="treehead">
       <div class="row">
-        <input class="grow" placeholder={t('docs.filter')} aria-label={t('docs.filter')} bind:value={filter} dir="auto" />
+        {#if shows('docs', 'filter')}<input class="grow" placeholder={pageText('docs', 'filter', t('docs.filter'))} aria-label={pageText('docs', 'filter', t('docs.filter'))} bind:value={filter} dir="auto" />{:else}<span class="grow"></span>{/if}
         <button class="btn ghost ic closetree" onclick={hideTree} aria-label={t('docs3.closeFiles')} title={t('docs3.closeFiles')}><Icon name="close" size={15} /></button>
       </div>
       <div class="row">
@@ -976,6 +978,7 @@
     <div class="narrowbar no-print">
       <button class="btn" bind:this={treeBtn} onclick={showTree} aria-expanded={treeOpen}><Icon name="folder" size={14} /> {t('docs3.files')}</button>
     </div>
+    <div class="no-print"><PageExtras page="docs" intro={false} /></div>
     {#if loading}
       <div class="pad" role="status" aria-busy="true"><div class="skel h"></div><div class="skel"></div><div class="skel w70"></div><div class="skel w50"></div></div>
     {:else if treeError}
@@ -1090,6 +1093,7 @@
     {:else if docLoading}
       <div class="pad" role="status" aria-busy="true"><div class="skel h"></div><div class="skel"></div><div class="skel w70"></div><div class="skel w50"></div></div>
     {/if}
+    <div class="no-print"><PageExtras page="docs" place="bottom" /></div>
   </section>
 
   {#if dragging}<div class="dropzone" aria-hidden="true"><Icon name="upload" size={28} /><span>{t('docs.dropHere')}</span></div>{/if}

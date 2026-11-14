@@ -36,6 +36,8 @@
   import WrapWaiting from './views/WrapWaiting.svelte';
   import UsageBanner from './views/UsageBanner.svelte';
   import PluginView from './views/PluginView.svelte';
+  import PageSwap from './views/PageSwap.svelte';
+  import { pageSwap } from './lib/pages.svelte';
   import Reorganize from './views/Reorganize.svelte';
   import Tour from './views/Tour.svelte';
   import Home from './views/Home.svelte';
@@ -927,6 +929,7 @@
             </div>
           </div>
         </div>
+      {:else if pageSwap(app.view.kind)}<PageSwap page={app.view.kind} />
       {:else if app.view.kind === 'home'}<Home {projects} {newChat} {startWrap} />
       {:else if app.view.kind === 'chat' && app.view.id}
         {#key app.view.id}<Chat id={app.view.id} {projects} />{/key}

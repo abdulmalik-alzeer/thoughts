@@ -10,6 +10,8 @@
   import { t, tn, ago, fmtDate, fmtNum } from '../lib/i18n';
   import { fold } from '../lib/CommandPalette.svelte';
   import Icon from '../lib/Icon.svelte';
+  import PageExtras from './PageExtras.svelte';
+  import { pageText, pageTitle, shows } from '../lib/pages.svelte';
 
   let { projects, newChat }: { projects: any[]; newChat: (pid?: string | null) => void } = $props();
 
@@ -123,27 +125,36 @@
 </script>
 
 <div class="page">
-  <h1>{t('chats')}</h1>
+  <h1>{pageTitle('chats')}</h1>
+  <PageExtras page="chats" />
+  {#if shows('chats', 'newChat') || (shows('chats', 'folderChats') && projects.length)}
   <div class="row" style="flex-wrap:wrap">
-    <button class="btn primary" title={tip(t('newChat'), 'chat.new')} onclick={() => newChat()}><Icon name="plus" size={15} />{t('newChat')}</button>
-    {#each projects as p (p.id)}<button class="btn" title={t('shell.newChatIn', { name: p.name })} onclick={() => newChat(p.id)}><Icon name="folder" size={15} /><span dir="auto">{p.name}</span></button>{/each}
+    {#if shows('chats', 'newChat')}<button class="btn primary" title={tip(pageText('chats', 'newChat', t('newChat')), 'chat.new')} onclick={() => newChat()}><Icon name="plus" size={15} />{pageText('chats', 'newChat', t('newChat'))}</button>{/if}
+    {#each shows('chats', 'folderChats') ? projects : [] as p (p.id)}<button class="btn" title={t('shell.newChatIn', { name: p.name })} onclick={() => newChat(p.id)}><Icon name="folder" size={15} /><span dir="auto">{p.name}</span></button>{/each}
   </div>
+  {/if}
 
   {#if !app.chats.length}
-    <p class="muted">{t('noChats')}</p>
+    <p class="muted">{pageText('chats', 'empty', t('noChats'))}</p>
   {:else}
+    {#if shows('chats', 'search') || shows('chats', 'select')}
     <div class="bar row">
+      {#if shows('chats', 'search')}
       <div class="find grow">
         <Icon name="search" size={15} />
-        <input type="search" bind:value={q} placeholder={t('chatb.search')} aria-label={t('chatb.search')} dir="auto" />
+        <input type="search" bind:value={q} placeholder={pageText('chats', 'search', t('chatb.search'))} aria-label={pageText('chats', 'search', t('chatb.search'))} dir="auto" />
       </div>
-      <button class="btn" aria-pressed={selecting} onclick={toggleSelect}>{selecting ? t('chatb.selectDone') : t('chatb.select')}</button>
+      {:else}<span class="grow"></span>{/if}
+      {#if shows('chats', 'select')}<button class="btn" aria-pressed={selecting} onclick={toggleSelect}>{selecting ? t('chatb.selectDone') : t('chatb.select')}</button>{/if}
     </div>
+    {/if}
+    {#if shows('chats', 'filters')}
     <div class="seg" role="group" aria-label={t('chatb.filters')}>
       {#each [['all', 'chatb.filter.all'], ['mine', 'chatb.filter.mine'], ['system', 'chatb.filter.system'], ['archived', 'chatb.filter.archived']] as [id, label]}
         <button class="segb" aria-pressed={filter === id} onclick={() => (filter = id as Filter)}>{t(label)}{#if id === 'archived' && archived.length && !needle} <span class="n">{fmtNum(archived.length)}</span>{/if}</button>
       {/each}
     </div>
+    {/if}
 
     {#if selecting}
       <div class="selbar row" role="region" aria-label={t('chatb.select')}>
@@ -181,10 +192,10 @@
     {/snippet}
 
     {#if !shown.length}
-      <p class="muted">{needle ? t('chatb.noMatch', { q: q.trim() }) : filter === 'archived' ? t('chatb.noneArchived') : filter === 'system' ? t('chatb.noneSystem') : t('noChats')}</p>
+      <p class="muted">{needle ? t('chatb.noMatch', { q: q.trim() }) : filter === 'archived' ? t('chatb.noneArchived') : filter === 'system' ? t('chatb.noneSystem') : pageText('chats', 'empty', t('noChats'))}</p>
     {:else if filter === 'all'}
       <div class="list">{#each mine as c (c.id)}{@render card(c)}{/each}</div>
-      {#if system.length}
+      {#if system.length && shows('chats', 'systemChats')}
         <h2 class="head">{t('chatb.systemHead')}</h2>
         <div class="list">{#each systemRows as c (c.id)}{@render card(c)}{/each}</div>
         {#if system.length > SYSTEM_SHOWN}
@@ -195,6 +206,7 @@
       <div class="list">{#each shown as c (c.id)}{@render card(c)}{/each}</div>
     {/if}
 
+    {#if shows('chats', 'keep')}
     <section class="keep card" aria-labelledby="chatb-keep">
       <h2 id="chatb-keep" class="head first">{t('chatb.keep.title')}</h2>
       <p class="muted sm">{t('chatb.keep.body')}</p>
@@ -212,7 +224,9 @@
         {#if preview.length}<p class="sm" aria-live="polite">{preview.join(' ')}</p>{/if}
       {/if}
     </section>
+    {/if}
   {/if}
+  <PageExtras page="chats" place="bottom" />
 </div>
 
 <style>

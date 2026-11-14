@@ -16,6 +16,7 @@
   import Emblem from '../lib/Emblem.svelte';
   import { imeKey } from '../lib/ime';
   import { inbox } from '../lib/inbox.svelte';
+  import { ownTitle, pageIntro, pageText, pageTitle, placedElsewhere, shows } from '../lib/pages.svelte';
 
   let { projects, newChat, startWrap }: { projects: any[]; newChat: (pid?: string | null) => void; startWrap: () => void } = $props();
 
@@ -97,7 +98,9 @@
   const widgetKey = (w: { id: string }) => 'widget:' + w.id;
   const layout = $derived.by(() => {
     const hidden = new Set(app.home.hidden);
-    const widgets = app.homeWidgets.map(widgetKey);
+    // A box placed on another page (pages.json) shows on Home only when home.json places it here too.
+    const elsewhere = placedElsewhere();
+    const widgets = app.homeWidgets.map(widgetKey).filter((k) => !elsewhere.has(k) || app.home.order.includes(k));
     const known = (k: string) => SECTIONS.includes(k) || k === 'suggestions' || widgets.includes(k);
     const asked = app.home.order.filter(known);
     const order = [...new Set([...(asked.includes('suggestions') ? [] : ['suggestions']), ...asked, ...SECTIONS, ...widgets])].filter((k) => !hidden.has(k));
@@ -281,7 +284,7 @@
 {#snippet ideasS()}
   <section class="block">
     <div class="bh">
-      <div><h2>{t('continueWhere')}</h2><p class="muted">{term('continueSub')}</p></div>
+      <div><h2>{pageText('home', 'ideasTitle', t('continueWhere'))}</h2><p class="muted">{pageText('home', 'ideasIntro', term('continueSub'))}</p></div>
       <button class="more" onclick={() => go({ kind: 'ideas' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button>
     </div>
     <div class="ideas">
@@ -307,7 +310,7 @@
   {#if upcoming.length}
     <section class="block up">
       <div class="surface panel">
-        <div class="ph"><div class="phl"><div class="eyebrow">{t('home.upcomingEyebrow')}</div><h2>{t('home.upcoming')}</h2></div>
+        <div class="ph"><div class="phl"><div class="eyebrow">{t('home.upcomingEyebrow')}</div><h2>{pageText('home', 'upcomingTitle', t('home.upcoming'))}</h2></div>
           <button class="more" onclick={() => go({ kind: 'todos' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
         {#each upcoming as it (it.file + it.line)}
           {@const s = dueState(it.due!)}
@@ -326,7 +329,7 @@
 {#snippet panel(k: string)}
   {#if k === 'todos'}
     <div class="surface panel">
-      <div class="ph"><h2>{t('todos')}</h2><button class="more" onclick={() => go({ kind: 'todos' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
+      <div class="ph"><h2>{pageText('home', 'todosTitle', t('todos'))}</h2><button class="more" onclick={() => go({ kind: 'todos' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
       {#each openTodos.slice(0, 7) as it (it.file + it.line)}
         <label class="todo">
           <input type="checkbox" onchange={(e) => toggle(it, e.currentTarget)} />
@@ -340,7 +343,7 @@
     </div>
   {:else}
     <div class="surface panel">
-      <div class="ph"><h2>{t('recentChats')}</h2><button class="more" onclick={() => newChat()}><Icon name="plus" size={14} /> {t('newChat')}</button></div>
+      <div class="ph"><h2>{pageText('home', 'chatsTitle', t('recentChats'))}</h2><button class="more" onclick={() => newChat()}><Icon name="plus" size={14} /> {t('newChat')}</button></div>
       {#each recentChats as c (c.id)}
         <button class="rowbtn" onclick={() => go({ kind: 'chat', id: c.id })}>
           <Icon name="chat" size={15} />
@@ -388,7 +391,7 @@
   {#if app.settings?.modules?.builds !== false}
     <section class="block">
       <div class="bh">
-        <div><h2>{t('projects')}</h2><p class="muted">{t('noProjects')}</p></div>
+        <div><h2>{pageText('home', 'projectsTitle', t('projects'))}</h2><p class="muted">{t('noProjects')}</p></div>
         <button class="more" onclick={() => go({ kind: 'projects' })}>{t('manage')} <Icon name="right" size={14} class="flip-rtl" /></button>
       </div>
       <div class="projects">
@@ -411,15 +414,15 @@
 <div class="home">
   <section class="hero">
     <div class="lead">
-      <div class="eyebrow">{today}</div>
-      <h1 class="display">{app.settings?.userName ? t('coord.greetName', { greeting, name: app.settings.userName }) : t('coord.greet', { greeting })}</h1>
-      <p class="sub">{t('heroSub')}</p>
+      {#if shows('home', 'date')}<div class="eyebrow">{today}</div>{/if}
+      {#if shows('home', 'greeting')}<h1 class="display" dir="auto">{ownTitle('home') ? pageTitle('home').replaceAll('{greeting}', greeting).replaceAll('{name}', app.settings?.userName ?? '') : app.settings?.userName ? t('coord.greetName', { greeting, name: app.settings.userName }) : t('coord.greet', { greeting })}</h1>{/if}
+      {#if shows('home', 'intro')}<p class="sub" dir="auto">{pageIntro('home') || t('heroSub')}</p>{/if}
       <div class="ask surface">
-        <textarea bind:this={askEl} bind:value={ask} onkeydown={keydown} rows="2" placeholder={t('askPlaceholder')} aria-label={t('askPlaceholder')} dir="auto"></textarea>
+        <textarea bind:this={askEl} bind:value={ask} onkeydown={keydown} rows="2" placeholder={pageText('home', 'askPlaceholder', t('askPlaceholder'))} aria-label={pageText('home', 'askPlaceholder', t('askPlaceholder'))} dir="auto"></textarea>
         <div class="row chips">
-          <button class="chip" disabled={sending} onclick={() => capture('todo')} title={t('todob.home.todoHint')}><Icon name="todos" size={14} />{t('addTodoChip')}</button>
-          <button class="chip" disabled={sending} onclick={() => capture('note')} title={t('todob.home.noteHint')}><Icon name="inbox" size={14} />{t('todob.home.note')}</button>
-          {#if app.settings?.modules?.checkin}<button class="chip" disabled={sending} onclick={() => { if (sending) return; track('home.chip:check-in'); submit('check-in'); }}><Icon name="calendar" size={14} />{t('checkIn')}</button>{/if}
+          {#if shows('home', 'todoChip')}<button class="chip" disabled={sending} onclick={() => capture('todo')} title={t('todob.home.todoHint')}><Icon name="todos" size={14} />{pageText('home', 'todoChip', t('addTodoChip'))}</button>{/if}
+          {#if shows('home', 'noteChip')}<button class="chip" disabled={sending} onclick={() => capture('note')} title={t('todob.home.noteHint')}><Icon name="inbox" size={14} />{pageText('home', 'noteChip', t('todob.home.note'))}</button>{/if}
+          {#if app.settings?.modules?.checkin && shows('home', 'checkInChip')}<button class="chip" disabled={sending} onclick={() => { if (sending) return; track('home.chip:check-in'); submit('check-in'); }}><Icon name="calendar" size={14} />{t('checkIn')}</button>{/if}
           {#each [...app.home.chips, ...app.homeChips] as c, i (i + ':' + c.label)}
             <button class="chip" dir="auto" disabled={sending} title={c.prompt.slice(0, 300)} onclick={() => useChip(c)}>{c.label}</button>
           {/each}
@@ -428,7 +431,7 @@
         </div>
       </div>
     </div>
-    <div class="art"><Emblem size={250} /></div>
+    {#if shows('home', 'emblem')}<div class="art"><Emblem size={250} /></div>{/if}
   </section>
 
   {#each layout as row (row.join('+'))}
