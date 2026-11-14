@@ -1,5 +1,31 @@
 # What's new in Thoughts
 
+## 0.0.10
+
+Twelve changes asked for after using 0.0.9: a calmer chat, usage and cost at a glance, and customising that feels like a conversation.
+
+### Chats
+- **Calmer chats:** the assistant's commands and file reads fold into one line you can open, like the Claude desktop app. To see every step as before, turn on Settings › Assistant › "Show every step in chats".
+- **Usage and cost:** see how much of your Claude and Codex plans you've used — a usage ring in every chat, a Usage tile on Home, Settings › Usage, and a new Usage page with tokens and what they would cost at API prices, by day, chat and model. Choose whether costs cover only chats in Thoughts (the default) or everything on this computer.
+
+### Customising
+- Customising now starts with a **New customisation** button that opens a chat of its own, where you describe the change and talk it through.
+- Customisation chats can look at what you attach — a screenshot of what to change, a picture to match, a document to work from.
+- Customisations can change details of the app's own pages: headings, button wording, hiding parts you never use, add-on boxes on any page, even your own page in place of Todos, Ideas, Chats or Folders (the usual page is always one press away).
+- Trying a customisation that is nearly right? Choose **Continue chatting**: the app goes back to how it was, and you tell the assistant what to change — it builds on what it made.
+- Closing a customisation's review no longer hides the change you were trying, and a waiting customisation always shows a "Choose" strip so you can come back to it.
+- Themes you add show their three colours in the theme picker, like the built-in ones.
+- Pages and boxes you add open with the same smooth motion as the app's own.
+
+### The window
+- Notifications fade away by themselves after a few seconds; hover over one to keep it. Missed one? Its button is still in Recent messages.
+- Only the page scrolls — the sidebar and top bar stay put — and the sidebar slides smoothly when you hide or show it. Back and Forward return you to where you were on a page.
+- With the sidebar collapsed, the window buttons sit in a proper title bar on macOS.
+
+### Known limits
+- macOS only for now; Windows and Linux installers follow later. The app is unsigned: right-click › Open the first time.
+- Plan-limit figures arrive with each run, so they show "as of" the last chat. Codex costs are estimates.
+
 ## 0.0.9
 
 A large release: every finding of the 0.0.8 review is fixed or built, plus Codex, several libraries and voice.
