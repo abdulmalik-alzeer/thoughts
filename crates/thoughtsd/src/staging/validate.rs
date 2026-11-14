@@ -6,7 +6,7 @@ use crate::packs::{MAX_FILES, MAX_FILE_BYTES, MAX_TOTAL_BYTES};
 use serde_json::{json, Map, Value};
 use std::path::Path;
 
-const HOME_SECTIONS: &[&str] = &["stats", "ideas", "todos", "chats", "projects", "upcoming"];
+const HOME_SECTIONS: &[&str] = &["stats", "ideas", "todos", "chats", "projects", "upcoming", "usage"];
 /// Pages that must always stay reachable.
 const NAV_ALWAYS: &[&str] = &["home", "settings", "help"];
 

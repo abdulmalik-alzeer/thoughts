@@ -34,7 +34,7 @@ export type PluginCommand = { id: string; short?: string; title: string; icon?: 
 export type HomeWidget = { id: string; title: string; plugin: string; render: (el: HTMLElement) => any };
 export type HomeChip = { id: string; label: string; prompt: string; plugin?: string };
 export type ItemAction = { target: 'todo' | 'idea'; id: string; label: string; plugin: string; run: (item: any) => void };
-export type HomeSection = 'stats' | 'ideas' | 'upcoming' | 'todos' | 'chats' | 'projects';
+export type HomeSection = 'stats' | 'usage' | 'ideas' | 'upcoming' | 'todos' | 'chats' | 'projects';
 export type HomeConfig = { chips: { label: string; prompt: string }[]; hidden: string[]; order: string[] };
 /** A staged change to the customisation layer waiting for the user's review (`GET /api/layer/pending`). */
 export type PendingChange = {

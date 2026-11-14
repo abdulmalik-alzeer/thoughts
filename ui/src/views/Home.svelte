@@ -17,6 +17,7 @@
   import { imeKey } from '../lib/ime';
   import { inbox } from '../lib/inbox.svelte';
   import { ownTitle, pageIntro, pageText, pageTitle, placedElsewhere, shows } from '../lib/pages.svelte';
+  import UsageTile from './usage/UsageTile.svelte';
 
   let { projects, newChat, startWrap }: { projects: any[]; newChat: (pid?: string | null) => void; startWrap: () => void } = $props();
 
@@ -94,7 +95,7 @@
   // ----- layout from home.json: hidden sections and their order -----
   // `order` may also place `suggestions` and single plugin widgets (`widget:<id>`); anything not mentioned keeps
   // its usual place (suggestions first, widgets last).
-  const SECTIONS = ['stats', 'ideas', 'upcoming', 'todos', 'chats', 'projects'];
+  const SECTIONS = ['stats', 'usage', 'ideas', 'upcoming', 'todos', 'chats', 'projects'];
   const widgetKey = (w: { id: string }) => 'widget:' + w.id;
   const layout = $derived.by(() => {
     const hidden = new Set(app.home.hidden);
@@ -440,6 +441,7 @@
     {:else if row[0] === 'todos' || row[0] === 'chats'}
       <section class="cols one">{@render panel(row[0])}</section>
     {:else if row[0] === 'stats'}{@render statsS()}
+    {:else if row[0] === 'usage'}<UsageTile />
     {:else if row[0] === 'ideas'}{@render ideasS()}
     {:else if row[0] === 'upcoming'}{@render upcomingS()}
     {:else if row[0] === 'projects'}{@render projectsS()}

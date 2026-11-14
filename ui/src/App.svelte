@@ -41,6 +41,7 @@
   import Reorganize from './views/Reorganize.svelte';
   import Tour from './views/Tour.svelte';
   import Home from './views/Home.svelte';
+  import Usage from './views/usage/Usage.svelte';
   import Help from './views/Help.svelte';
   import History from './views/History.svelte';
   import Customise from './views/Customise.svelte';
@@ -610,6 +611,7 @@
     const add = (id: string, on = true) => { if (on) items.push({ id, label: navLabel(id), icon: id, active: isActive(id), run: () => { go({ kind: id }); } }); };
     add('home'); add('chats'); add('ideas'); add('todos', m.todos !== false); add('docs', m.docs !== false); add('projects', m.builds !== false);
     if (inbox.count > 0 || app.view.kind === 'inbox') items.push({ id: 'inbox', label: navLabel('inbox', t('inbox.nav')), icon: 'inbox', active: app.view.kind === 'inbox', run: () => { go({ kind: 'inbox' }); } });
+    items.push({ id: 'usage', label: navLabel('usage', t('r10-usage.nav')), icon: 'usage', active: app.view.kind === 'usage', run: () => { go({ kind: 'usage' }); } });
     if (m.me) items.push({ id: 'me', label: navLabel('me'), icon: 'me', active: meOpen, run: () => { go({ kind: 'docs', path: 'me/README.md' }); } });
     // An add-on's page is keyed by an id that carries the add-on's name, so two add-ons (or an add-on and
     // the app) can use the same short id; `nav.json` may name it by either.
@@ -940,6 +942,7 @@
       {:else if app.view.kind === 'todos'}<Todos mode={app.view.id === 'calendar' ? 'calendar' : 'list'} />
       {:else if app.view.kind === 'inbox'}<Inbox />
       {:else if app.view.kind === 'history'}<History />
+      {:else if app.view.kind === 'usage'}<Usage />
       {:else if app.view.kind === 'customise'}<Customise />
       {:else if app.view.kind === 'projects'}<Projects {projects} reload={loadProjects} {newChat} />
       {:else if app.view.kind === 'settings'}<Settings reload={loadProjects} />

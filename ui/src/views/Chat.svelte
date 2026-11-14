@@ -33,6 +33,7 @@
   import RunChanges from './chat/RunChanges.svelte';
   import StepGroup from './chat/StepGroup.svelte';
   import { groupSteps, liveLine } from './chat/steps';
+  import UsageRing from './usage/UsageRing.svelte';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, prettyName, readAsDataURL } from '../lib/content/util';
   import { imeKey } from '../lib/ime';
   import SetupCard from './SetupCard.svelte';
@@ -936,6 +937,7 @@
           {/if}
           <span class="grow"></span>
           <span class="esc muted" role="status" aria-live="polite">{#if escHint}{t('chat3.escHint')}{/if}</span>
+          <UsageRing chatId={id} provider={chat.provider} running={chat.running} />
           {#if chat.running}
             {#if canSend}<button class="btn" onclick={queueMsg} title={t('chatc.queue.tip')}><Icon name="clock" size={13} /> {t('chatc.queue.add')}</button>{/if}
             <button class="btn danger" onclick={stop} title={t('chat.stopTip')}><Icon name="stop" size={13} /> {t('stop')}</button>

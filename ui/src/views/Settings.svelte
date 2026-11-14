@@ -24,18 +24,20 @@
   import Maintenance from './Maintenance.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
   import AccessKeys from './AccessKeys.svelte';
+  import UsageSettings from './usage/UsageSettings.svelte';
   import { checkAppUpdate } from '../lib/updates';
 
   let { reload }: { reload: () => Promise<void> } = $props();
 
-  const cats = ['general', 'accessibility', 'ai', 'git', 'privacy', 'modules', 'daemon', 'appLayer', 'maintenance'] as const;
+  const cats = ['general', 'accessibility', 'ai', 'usage', 'git', 'privacy', 'modules', 'daemon', 'appLayer', 'maintenance'] as const;
   type Cat = (typeof cats)[number];
-  const catIcon: Record<Cat, string> = { general: 'settings', accessibility: 'accessibility', ai: 'ai', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette', maintenance: 'tool' };
+  const catIcon: Record<Cat, string> = { general: 'settings', accessibility: 'accessibility', ai: 'ai', usage: 'usage', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette', maintenance: 'tool' };
   // Row labels per category (i18n keys) — used by the search box. `adv` rows live behind the Advanced disclosure.
   const basic: Record<Cat, string[]> = {
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates', 'nativeb.set.title', 'nativeb.set.switch'],
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['codex.set.which', 'set.account', 'codex.set.title', 'codex.set.limitsTitle', 'set.perm', 'set.wrapNag', 'chatc.set.suggest', 'r10-chatview.set.title'],
+    usage: ['r10-usage.set.glance', 'r10-usage.set.scopeTitle'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
     privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'wording.reports.title', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
     modules: ['set.modulesIntro'],
@@ -46,6 +48,7 @@
   const adv: Record<Cat, string[]> = {
     general: [],
     accessibility: [],
+    usage: [],
     ai: ['set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle', 'set.provider', 'set.baseUrl', 'set.apiKey', 'codex.set.model', 'codex.set.effort', 'codex.set.mini', 'codex.set.binary'],
     git: [],
     privacy: [],
@@ -809,6 +812,8 @@
         <CodexSettings bind:ai={s.ai} part="advanced" vis={(...k) => vis(c, ...k)} {readOnly} />
       </details>
     {/if}
+  {:else if c === 'usage'}
+    <UsageSettings bind:value={s.spending} disabled={readOnly} vis={(...k) => vis(c, ...k)} />
   {:else if c === 'git'}
     <div class="card">
       {#if vis(c, 'set.libraryPath')}

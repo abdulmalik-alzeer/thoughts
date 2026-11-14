@@ -734,7 +734,7 @@ async fn meter_get(State(st): S, Query(q): Query<Days>) -> R {
     out["scope"] = json!(if everything { "computer" } else { "thoughts" });
     out["scan"] = scan_info;
     out["plans"] = plans_json(now.timestamp());
-    out["firstRecord"] = json!(records.first().map(|r| r.t));
+    out["firstRecord"] = json!(records.iter().map(|r| r.t).min());
     Ok(Json(out))
 }
 
