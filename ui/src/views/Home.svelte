@@ -18,6 +18,7 @@
   import { inbox } from '../lib/inbox.svelte';
   import { ownTitle, pageIntro, pageText, pageTitle, placedElsewhere, shows } from '../lib/pages.svelte';
   import UsageTile from './usage/UsageTile.svelte';
+  import { surfaceIn } from '../lib/surfaceIn';
 
   let { projects, newChat, startWrap }: { projects: any[]; newChat: (pid?: string | null) => void; startWrap: () => void } = $props();
 
@@ -380,7 +381,7 @@
 {/snippet}
 
 {#snippet widgetS(w: any)}
-  <section class="block widget">
+  <section class="block widget" use:surfaceIn>
     <div class="surface panel">
       <div class="ph"><h2 dir="auto">{w.title}</h2></div>
       <div class="wslot" use:plug={w}></div>
@@ -503,6 +504,12 @@
   .sgi { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--tint); color: var(--on-tint); flex: none; }
   .sga { gap: 6px; }
   .widget { margin-top: 28px; }
+  /* An add-on box rises like the sections around it, once its add-on has drawn it (lib/surfaceIn.ts). */
+  .widget:global([data-drawn='no']) { opacity: 0; animation: none; }
+  .widget:global([data-drawn='yes']) { animation: rise .5s var(--ease) both; }
+  @media (prefers-reduced-motion: reduce) { .widget:global([data-drawn='no']) { opacity: 1; } }
+  :global(html[data-motion='reduce']) .widget:global([data-drawn='no']) { opacity: 1; }
+  @media print { .widget:global([data-drawn='no']) { opacity: 1; } }
   .wslot { position: relative; padding: 4px 10px 10px; }
   .panel { padding: 6px; min-width: 0; overflow: hidden; }
   .ph { position: relative; display: flex; align-items: center; padding: 10px 10px 8px; }

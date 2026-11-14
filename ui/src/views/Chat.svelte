@@ -710,7 +710,8 @@
       {#if chat.usageTokens > 0 && !(chat.costUsd > 0)}
         <span class="pill cost" title={t('codex.chat.tokensTip')}><bdi>{t('codex.chat.tokens', { n: fmtNum(chat.usageTokens) })}</bdi></span>
       {/if}
-      {#if chat.costUsd > 0 && costVisible()}
+      <!-- Where the usage ring beside Send is shown, its panel has this chat's cost: no second figure here. -->
+      {#if chat.costUsd > 0 && costVisible() && !canCompose}
         <button class="pill cost" type="button" title={t('chat.costTip')} aria-label="{t('chat.costLabel', { cost: usd(chat.costUsd) })}. {t('chat.costTip')}"
           onclick={() => notify(t('chat.costTip'), { kind: 'info' })}><bdi>{usd(chat.costUsd)}</bdi> <Icon name="info" size={12} /></button>
       {/if}

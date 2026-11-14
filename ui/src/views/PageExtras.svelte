@@ -7,6 +7,7 @@
   import Icon from '../lib/Icon.svelte';
   import { t } from '../lib/i18n';
   import { addonTag } from '../lib/layer';
+  import { surfaceIn } from '../lib/surfaceIn';
   import { pageBoxes, pageIntro, showingOriginal, swapFor, useSwap } from '../lib/pages.svelte';
 
   let { page, place = 'top', intro = true }: { page: string; place?: 'top' | 'bottom'; intro?: boolean } = $props();
@@ -33,7 +34,7 @@
 {#if boxes.length}
   <div class="boxes {place}">
     {#each boxes as w (w.plugin + ':' + w.id)}
-      <section class="surface box" aria-label={w.title}>
+      <section class="surface box" aria-label={w.title} use:surfaceIn>
         <div class="bh"><h2 dir="auto">{w.title}</h2><span class="from muted">{addonTag(w.plugin)}</span></div>
         <div class="slot" use:plug={w}></div>
       </section>
@@ -47,6 +48,12 @@
   .boxes.top { margin-bottom: 18px; }
   .boxes.bottom { margin-top: 24px; }
   .box { padding: 6px; min-width: 0; overflow: hidden; }
+  /* A box rises like the page's own sections, once its add-on has drawn it (lib/surfaceIn.ts). */
+  .box:global([data-drawn='no']) { opacity: 0; }
+  .box:global([data-drawn='yes']) { animation: rise .5s var(--ease) both; }
+  @media (prefers-reduced-motion: reduce) { .box:global([data-drawn='no']) { opacity: 1; } }
+  :global(html[data-motion='reduce']) .box:global([data-drawn='no']) { opacity: 1; }
+  @media print { .box:global([data-drawn='no']) { opacity: 1; } }
   .bh { display: flex; align-items: baseline; gap: 10px; padding: 8px 10px 6px; }
   .bh h2 { margin: 0; font-size: 15px; flex: 1; min-width: 0; }
   .from { font-size: var(--fs-xs); flex: none; }

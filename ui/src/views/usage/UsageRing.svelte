@@ -69,6 +69,8 @@
             <dt>{t('r10-usage.ring.apiCost')}</dt><dd><bdi>{costText(use)}</bdi></dd>
           </dl>
           {#if use.estimated}<p class="muted xs">{t('r10-usage.estimateNote')}</p>{/if}
+          <!-- A chat begun before tokens were counted: its whole cost too (the chat header no longer shows it). -->
+          {#if data?.chatCostUsd > use.costUsd + 0.005}<p class="xs">{t('r10-polish.ring.total', { cost: fmtMoney(data.chatCostUsd) })}</p>{/if}
         {:else if data?.chatCostUsd > 0}
           <p class="xs">{t('r10-usage.ring.earlier', { cost: fmtMoney(data.chatCostUsd) })}</p>
         {:else}
