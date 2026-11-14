@@ -22,7 +22,7 @@
   import { checkLayerUpdates } from '../lib/updates';
   import { fxGroups, mayDo, type FxLine } from '../lib/effects';
   import { drafts, draftTitle, openDraft, refreshDrafts } from '../lib/drafts.svelte';
-  import { closeReview, discardPending, dryLoadStaged, keepPending, stagedItems, tryPending, whenText, type LayerItem } from '../lib/layer';
+  import { closeReview, continueChatting, discardPending, dryLoadStaged, keepPending, stagedItems, tryPending, whenText, type LayerItem } from '../lib/layer';
 
   const p = $derived(app.pending);
   const files = $derived(p?.files ?? []);
@@ -403,6 +403,7 @@
         <button class="btn ghost" disabled={!!busy} onclick={closeReview}>{t('layer.later')}</button>
         <span class="grow"></span>
         <button class="btn danger" disabled={!!busy} onclick={discard}>{t('layer.discard')}</button>
+        {#if p.canContinue}<button class="btn" disabled={!!busy} aria-busy={busy === 'continue'} title={t('r10-cust-continue.hint')} onclick={() => act('continue', continueChatting, 'r10-cust-continue.failed')}><Icon name="chat" size={15} /> {t('r10-cust-continue.button')}</button>{/if}
         <button class="btn" disabled={!!busy || app.safeMode} aria-busy={busy === 'try'} onclick={tryIt}><Icon name="eye" size={15} /> {t('layer.try')}</button>
         <button class="btn primary" data-autofocus={caution ? undefined : ''} disabled={!!busy || blocked} aria-describedby={blocked ? 'rv-blocked' : undefined} aria-busy={busy === 'keep'} onclick={keep}><Icon name="check" size={15} /> {t('layer.keep')}</button>
       </div>

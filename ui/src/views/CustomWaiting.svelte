@@ -11,7 +11,8 @@
   const p = $derived(app.pending);
   const chatId = $derived(p?.chatId ?? '');
   const inChat = $derived(!!chatId && app.view.kind === 'chat' && app.view.id === chatId);
-  const show = $derived(!!p?.exists && !p.running && !app.showReview && !app.preview && app.view.kind !== 'customise' && !inChat);
+  // (Not for a version the user went back to its chat about: that waits for their message, not a choice.)
+  const show = $derived(!!p?.exists && !p.running && !p.continued && !app.showReview && !app.preview && app.view.kind !== 'customise' && !inChat);
 </script>
 
 {#if show}

@@ -44,6 +44,12 @@
   import CustomiseStart from './CustomiseStart.svelte';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
+  // "Continue chatting" (lib/layer.ts) lands here: the cursor goes into the message box.
+  $effect(() => {
+    const compose = (e: Event) => { if ((e as CustomEvent).detail === id) tick().then(() => input?.focus({ preventScroll: true })); };
+    window.addEventListener('thoughts:compose', compose);
+    return () => window.removeEventListener('thoughts:compose', compose);
+  });
 
 
   let chat = $state<any>(null);
@@ -717,8 +723,13 @@
 
     {#if chat.kind === 'customize' && (chat.messages.length || chat.running)}
       <div class="banner row">
+        {#if app.pending?.continued && app.pending.chatId === id}
+          <span class="grow">{t('r10-cust-continue.banner')}</span>
+          <button class="btn" onclick={openReview}>{t('r10-cust-continue.reviewAgain')}</button>
+        {:else}
         <span class="grow">{t('layer.chatBanner')}</span>
         {#if app.pending?.exists && !app.pending.running}<button class="btn primary" onclick={openReview}>{t('layer.review')}</button>{/if}
+        {/if}
       </div>
     {/if}
     {#if chat.interrupted}

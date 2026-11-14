@@ -6,7 +6,8 @@
   import { t } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { shield } from '../lib/layer/shield';
-  import { discardPending, openReview, stopPreview } from '../lib/layer';
+  import { continueChatting, discardPending, openReview, stopPreview } from '../lib/layer';
+  import { app } from '../lib/store.svelte';
 
   let busy = $state(false);
   async function act(fn: () => Promise<unknown>, failKey: string) {
@@ -26,6 +27,7 @@
          does to this page, it is not loaded when the person presses Keep. -->
     <button class="btn primary" disabled={busy} onclick={openReview}>{t('lua.reviewKeep')}</button>
     <button class="btn" disabled={busy} onclick={() => act(discardPending, 'layer.discardFailed')}>{t('layer.discard')}</button>
+    {#if app.pending?.canContinue}<button class="btn" disabled={busy} title={t('r10-cust-continue.hint')} onclick={() => act(continueChatting, 'r10-cust-continue.failed')}>{t('r10-cust-continue.button')}</button>{/if}
     <button class="btn" disabled={busy} onclick={() => act(stopPreview, 'shell.layerFailed')}>{t('layer.stopPreview')}</button>
   </div>
 </div>

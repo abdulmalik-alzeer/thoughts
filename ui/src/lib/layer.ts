@@ -1185,7 +1185,8 @@ export async function checkPending(open = true): Promise<PendingChange | null> {
     return null;
   }
   app.pending = p;
-  if (open && !p.running && sig(p) !== dismissed) await showReview();
+  // A version the user went back to the chat about waits for their next message, not for a decision.
+  if (open && !p.running && !p.continued && sig(p) !== dismissed) await showReview();
   return p;
 }
 
@@ -1196,7 +1197,12 @@ async function showReview() {
   app.showReview = true;
 }
 
-export function openReview() { dismissed = ''; if (app.pending) showReview(); else checkPending(true); }
+export function openReview() {
+  dismissed = '';
+  // "Review it again" on a version set aside for more conversation: back to the review as it is.
+  if (app.pending?.continued) { post('/layer/pending/review-again').then(() => checkPending(true), (e) => failed(t('shell.layerFailed'), e)); return; }
+  if (app.pending) showReview(); else checkPending(true);
+}
 /** Close the review without choosing ("Later", ×, Escape, a click outside). The change keeps waiting
  *  (the shell shows a "waiting for your choice" strip) and, if it was being tried when the review
  *  opened, its preview comes back on. */
@@ -1280,6 +1286,25 @@ export async function keepPending(opts: { approveWorkflows?: boolean } = {}): Pr
     kind: 'success', key: 'layer',
     action: r?.hash ? { label: t('undo'), run: () => { revertChange(r.hash).then(() => toast(t('layer.undone'), { kind: 'success', key: 'layer' }), (e) => failed(t('layer.undoFailed'), e)); } } : undefined,
   });
+}
+
+/** "Continue chatting": the person tried this version and wants changes. Like Discard, the app is back
+ *  to how it was at once (the preview ends first); unlike it, the version stays for the assistant to
+ *  build on, and the person lands in its chat with the cursor in the message box. */
+export async function continueChatting() {
+  resumePreview = '';
+  if (app.preview) await loadLayer().catch(() => {});
+  app.showReview = false;
+  let r: any;
+  // Refused (the chat was deleted, the assistant is still writing): the review comes back, unchanged.
+  try { r = await post('/layer/pending/continue'); } catch (e) { dismissed = ''; await checkPending(true); throw e; }
+  await checkPending(false);
+  const id = r?.chatId;
+  if (!id) return;
+  go({ kind: 'chat', id });
+  toast(t('r10-cust-continue.toast'), { key: 'layer' });
+  // An open chat view is told to put the cursor in its box; one that opens now does that by itself.
+  setTimeout(() => window.dispatchEvent(new CustomEvent('thoughts:compose', { detail: id })), 0);
 }
 
 /** "Discard": throw the staged change away. */
