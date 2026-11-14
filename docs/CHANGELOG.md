@@ -1,5 +1,13 @@
 # What's new in Thoughts
 
+## 0.0.11
+
+A privacy fix.
+
+- An assistant run can no longer read files attached to another chat. Before, a chat that got its first attachment while another chat's assistant was working could be read by that run. Now every run is closed to all attachments and reads only copies of its own chat's files, which are removed when the run ends. This covers ordinary chats and customisation chats, with Claude and Codex.
+- The assistant's file tools now respect blocked folders whatever letter case a path is typed in (macOS treats `Chats` and `chats` as the same folder).
+- Shell commands that name the app's own folder are refused in every mode. This is an extra guard, not a wall: commands that only read files still run without asking, as in Claude Code itself. To turn the shell off, use Settings › Privacy › Strict private folders.
+
 ## 0.0.10
 
 Twelve changes asked for after using 0.0.9: a calmer chat, usage and cost at a glance, and customising that feels like a conversation.
