@@ -420,7 +420,7 @@ async fn only_ordinary_chats_get_the_prompt_tool_strict_mode_closes_commands_and
     assert!(r.prompt_token.is_none() && r.ask.is_empty() && !r.profile.strict && !has(&r.deny, "Bash"));
     // (Other tests add and remove files in the test home they share meanwhile: rules naming it are left out too.)
     let home = crate::paths::home().file_name().unwrap().to_string_lossy().to_string();
-    let rules_of = |i: &RunInfo| i.deny.iter().filter(|d| !d.contains("clients/") && !d.contains("[Cc][Ll][Ii]") && !d.contains(&home)).cloned().collect::<std::collections::BTreeSet<_>>();
+    let rules_of = |i: &RunInfo| i.deny.iter().filter(|d| !d.contains("clients/") && !d.contains("[Cc][Ll][Ii]") && !d.contains(&home) && !d.contains(&crate::claude::fold_case(&home))).cloned().collect::<std::collections::BTreeSet<_>>();
     assert_eq!(rules_of(&r), rules_of(&bypass_before), "only the private folder's own rules were added");
     assert_eq!((r.allow.clone(), r.profile), (bypass_before.allow.clone(), bypass_before.profile));
     std::fs::remove_dir_all(base).unwrap();

@@ -850,22 +850,17 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
             // every place another chat's copies could ever be is named — a fixed list, whatever exists
             // yet. Nothing in there can be edited.
             Some(crate::run_files::DIR) => {
-                use crate::run_files::DIR;
-                let base = rule_path(home);
-                // In every letter case: the file system may ignore it, the rules do not (the levels
-                // below are digits, which have none).
-                for name in [DIR.to_string(), DIR.to_uppercase(), any_case(DIR)] {
-                    let p = format!("{base}/{name}");
-                    deny.push(format!("Edit({p})"));
-                    deny.push(format!("Edit({p}/**)"));
-                    match crate::run_files::closed_for(chat_id) {
-                        Some(list) => for rel in list { deny.push(format!("Read({p}/{rel})")); deny.push(format!("Read({p}/{rel}/**)")); },
-                        None => { deny.push(format!("Read({p})")); deny.push(format!("Read({p}/**)")); }
-                    }
+                // (Every letter case is added below, `every_case`; the levels under it are digits, which have none.)
+                let p = rule_path(dir);
+                deny.push(format!("Edit({p})"));
+                deny.push(format!("Edit({p}/**)"));
+                match crate::run_files::closed_for(chat_id) {
+                    Some(list) => for rel in list { deny.push(format!("Read({p}/{rel})")); deny.push(format!("Read({p}/{rel}/**)")); },
+                    None => { deny.push(format!("Read({p})")); deny.push(format!("Read({p}/**)")); }
                 }
                 // The shell reaches no copies at all, this chat's included: they are for the Read tool.
                 deny.push(format!("Bash(*{}*)", dir.to_string_lossy().replace('\\', "/")));
-                for name in [DIR.to_string(), DIR.to_uppercase()] { deny.push(format!("Bash(*{name}*)")); }
+                deny.push(format!("Bash(*{}*)", crate::run_files::DIR));
             }
             // The search add-on is a tool the assistant may use, but not rewrite.
             Some("extensions") => {
@@ -882,9 +877,43 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
         let (p, shell) = (rule_path(&dir), dir.to_string_lossy().replace('\\', "/"));
         for rule in [format!("Edit({p})"), format!("Edit({p}/**)"), format!("Bash(*{shell}/*)"), format!("Bash(*{shell} *)"), format!("Bash(*{shell})")] { deny.push(rule); }
     }
-    let mut seen = std::collections::HashSet::new();
-    deny.retain(|r| seen.insert(r.clone()));
+    every_case(&mut deny);
     deny
+}
+
+/// `pat`, a rule's path pattern, in every letter case: each ASCII letter outside a character class
+/// or an escape becomes a class of its two cases (`/Users/a` → `/[Uu][Ss][Ee][Rr][Ss]/[Aa]`).
+pub fn fold_case(pat: &str) -> String {
+    let (mut out, mut it, mut class) = (String::with_capacity(pat.len() * 4), pat.chars(), false);
+    while let Some(c) = it.next() {
+        if class { out.push(c); if c == ']' { class = false; } continue; }
+        match c {
+            '\\' => { out.push(c); if let Some(n) = it.next() { out.push(n); } }
+            '[' => { class = true; out.push(c); }
+            c if c.is_ascii_alphabetic() => { out.push('['); out.push(c.to_ascii_uppercase()); out.push(c.to_ascii_lowercase()); out.push(']'); }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// macOS and Windows volumes ignore letter case, permission rules do not: `…/.thoughts/attachments`
+/// is also `…/.Thoughts/ATTACHMENTS`. Every Read and Edit rule naming a path gets a second form in
+/// every letter case (`fold_case`), the plain one kept for a reader without classes. (Shell rules
+/// match plain text only; commands are checked in any case by `shell_guard`.) Then every rule is
+/// kept once, in order.
+pub fn every_case(rules: &mut Vec<String>) {
+    let mut more = vec![];
+    for r in rules.iter() {
+        let Some((tool, arg)) = r.strip_suffix(')').and_then(|x| x.split_once('(')) else { continue };
+        match tool {
+            "Read" | "Edit" if arg.starts_with('/') || arg.starts_with("./") => more.push(format!("{tool}({})", fold_case(arg))),
+            _ => {}
+        }
+    }
+    rules.extend(more);
+    let mut seen = std::collections::HashSet::new();
+    rules.retain(|r| seen.insert(r.clone()));
 }
 
 /// The largest rules document a run is started with. Claude Code does not read a settings file
@@ -1143,8 +1172,7 @@ pub fn private_deny_settings(library: Option<&Path>, cwd: &Path, private: &[Stri
         }
     }
     if deny.is_empty() { return Ok(None); }
-    let mut seen = std::collections::HashSet::new();
-    deny.retain(|r| seen.insert(r.clone()));
+    every_case(&mut deny);
     Ok(Some(json!({"permissions": {"deny": deny}}).to_string()))
 }
 
@@ -1622,6 +1650,12 @@ pub async fn start_run(
     if !prof_deny.is_empty() { deny = merge_deny(deny, Some(json!({"permissions": {"deny": prof_deny}}).to_string())); }
     let deny = with_allow(deny, &prof_allow);
     let deny = if strict && prof.shell { with_ask(deny, &SHELL_TOOLS) } else { deny };
+    // Every command is checked before it runs, in every mode (`shell_guard`). Without the app's
+    // own program to check them, a run that may use the shell does not start.
+    let deny = if prof.shell && !on_codex {
+        let exe = crate::paths::app_exe().map_err(|e| anyhow::anyhow!("the assistant was not started: its command check is missing ({e})"))?;
+        crate::shell_guard::with_hooks(deny, &exe, &crate::paths::home())
+    } else { deny };
     // A Wrap or an automatic task may not change the standing files. Should one do so anyway, what
     // was there before is put back when it ends.
     let standing = if prof.restores_standing() {
@@ -2386,7 +2420,7 @@ async fn one_shot_outcome(state: &AppState, v: &Value) -> anyhow::Result<String>
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     const HELP: &str = "Options:\n  --effort <level>                      Effort level for the current session\n                                        (low, medium, high, xhigh, max)\n  --environment <id>   x\n  --model <model>                       Model. Provide\n                                        an alias (e.g.\n                                        'fable', 'opus', or 'sonnet') or full.\n  --permission-mode <mode>              Permission mode\n                                        (choices: \"acceptEdits\", \"auto\",\n                                        \"plan\")\n  --other x\n";
     #[test]
@@ -2750,6 +2784,42 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// Does a rule of `tool` close `path`? Patterns as Claude Code reads them: `//` absolute,
+    /// `*` within a name, `**` across folders, `?`, `[..]` classes and `\\` escapes.
+    pub(crate) fn denies(rules: &[String], tool: &str, path: &Path) -> bool {
+        fn m(p: &[char], s: &[char]) -> bool {
+            match p.first() {
+                None => s.is_empty(),
+                Some('*') if p.get(1) == Some(&'*') => (0..=s.len()).any(|i| m(&p[2..], &s[i..])),
+                Some('*') => (0..=s.len()).take_while(|i| *i == 0 || s[i - 1] != '/').any(|i| m(&p[1..], &s[i..])),
+                Some('?') => !s.is_empty() && s[0] != '/' && m(&p[1..], &s[1..]),
+                Some('[') => {
+                    let Some(end) = p.iter().position(|c| *c == ']') else { return false };
+                    !s.is_empty() && p[1..end].contains(&s[0]) && m(&p[end + 1..], &s[1..])
+                }
+                Some('\\') => p.len() > 1 && s.first() == Some(&p[1]) && m(&p[2..], &s[1..]),
+                Some(c) => s.first() == Some(c) && m(&p[1..], &s[1..]),
+            }
+        }
+        let s: Vec<char> = path.to_string_lossy().replace('\\', "/").chars().collect();
+        rules.iter().filter_map(|r| r.strip_prefix(&format!("{tool}(")).and_then(|x| x.strip_suffix(')'))).filter_map(|a| a.strip_prefix('/'))
+            .any(|a| { let p: Vec<char> = a.chars().collect(); m(&p, &s) || (a.ends_with("/**") && m(&p[..p.len() - 3], &s)) })
+    }
+
+    #[test]
+    fn rules_hold_in_every_letter_case() {
+        assert_eq!(fold_case("//Users/a/.thoughts/x-1/**"), "//[Uu][Ss][Ee][Rr][Ss]/[Aa]/.[Tt][Hh][Oo][Uu][Gg][Hh][Tt][Ss]/[Xx]-1/**");
+        assert_eq!(fold_case(r"//a/\[b\]/[Cc]d"), r"//[Aa]/\[[Bb]\]/[Cc][Dd]", "escapes and classes stay as they are");
+        let mut r = vec!["Read(//a/B)".to_string(), "Bash(*/a/B*)".to_string(), "WebFetch".to_string(), "Read(//a/B)".to_string()];
+        every_case(&mut r);
+        assert_eq!(r, ["Read(//a/B)", "Bash(*/a/B*)", "WebFetch", "Read(//[Aa]/[Bb])"]);
+        // Private folders of the library, also with the library's own path in capitals.
+        let lib = Path::new("/Users/u/Library");
+        let v: Value = serde_json::from_str(&private_deny_settings(Some(lib), Path::new("/x"), &["me/finances".into()]).unwrap().unwrap()).unwrap();
+        let deny: Vec<String> = v["permissions"]["deny"].as_array().unwrap().iter().filter_map(|x| x.as_str().map(String::from)).collect();
+        assert!(denies(&deny, "Read", Path::new("/USERS/U/LIBRARY/ME/FINANCES/pay.txt")) && !denies(&deny, "Read", Path::new("/Users/u/Library/me/notes.md")));
+    }
+
     #[test]
     fn the_rules_travel_in_a_private_file_that_goes_when_the_run_is_over() {
         let home = std::env::temp_dir().join(format!("thoughts-rules-{}", uuid::Uuid::new_v4()));
@@ -2774,16 +2844,24 @@ mod tests {
         let closes = |p: &Path| deny.iter().any(|d| p.ancestors().any(|a| *d == format!("Read({}/**)", rule_path(a))));
         assert!(closes(&theirs.join("run/x.png")) && !closes(&own.join("run/x.png")));
         assert!(deny.contains(&format!("Edit({h}/chat-files/**)")));
-        // Spelled in capitals (the same folder where the file system ignores case), the other chat's copies stay closed.
-        let rule = deny.iter().find(|d| d.starts_with(&format!("Read({h}/chat-files/")) && theirs.ancestors().any(|a| **d == format!("Read({}/**)", rule_path(a))))
-            .unwrap().clone();
-        for name in ["CHAT-FILES", &any_case("chat-files")] {
-            let other_case = rule.replacen("/chat-files/", &format!("/{name}/"), 1);
-            assert!(deny.contains(&other_case), "missing {other_case}");
+        // Spelled in other letter cases (the same files where the file system ignores case), all of it stays closed.
+        let up = |p: &Path| PathBuf::from(p.to_string_lossy().to_uppercase());
+        let mixed = |p: &Path| PathBuf::from(p.to_string_lossy().chars().enumerate().map(|(i, c)| if i % 2 == 0 { c.to_ascii_uppercase() } else { c }).collect::<String>());
+        for p in [att.join("this-chat/shot.png"), att.join("a-later-chat/x.png"), home.join("chats/c.json"), home.join("secrets.json"), home.join("settings.json"), theirs.join("run/x.png")] {
+            for shape in [up(&p), mixed(&p), p.clone()] {
+                assert!(denies(&deny, "Read", &shape), "{} can be read", shape.display());
+                assert!(denies(&deny, "Edit", &shape), "{} can be edited", shape.display());
+            }
         }
-        assert!(deny.contains(&format!("Edit({h}/{}/**)", any_case("chat-files"))) && deny.contains(&format!("Edit({h}/CHAT-FILES/**)")));
-        // No command reaches any copies, this chat's own included.
-        for want in [format!("Bash(*{shell}/chat-files*)"), "Bash(*chat-files*)".to_string(), "Bash(*CHAT-FILES*)".to_string()] { assert!(deny.contains(&want), "missing {want}"); }
+        assert!(!denies(&deny, "Read", &up(&own.join("run/x.png"))) && !denies(&deny, "Read", &own.join("run/x.png")), "its own copies are closed");
+        assert!(denies(&deny, "Edit", &up(&own.join("run/x.png"))));
+        // No command reaches any copies, this chat's own included, nor the attachments, as written or in capitals.
+        for want in [format!("Bash(*{shell}/chat-files*)"), "Bash(*chat-files*)".to_string(), format!("Bash(*{shell}/attachments*)")] {
+            assert!(deny.contains(&want), "missing {want}");
+        }
+        // Even so, the rules stay far below what a rules file may hold.
+        let doc = json!({"permissions": {"deny": deny}}).to_string();
+        assert!(doc.len() < MAX_RULES_BYTES / 4, "{} bytes", doc.len());
         // Hundreds of rules: more than one command-line argument may carry on Linux (128 KiB) as the
         // home's contents grow — which is why the document is handed over as a file, never as an argument.
         let doc = json!({"permissions": {"deny": deny}}).to_string();

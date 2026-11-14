@@ -49,6 +49,7 @@ pub mod settings;
 pub mod spend;
 pub mod meter;
 pub mod prices;
+pub mod shell_guard;
 pub mod sshhost;
 pub mod staging;
 pub mod state;

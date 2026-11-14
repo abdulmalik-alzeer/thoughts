@@ -171,6 +171,8 @@ pub fn deny_rules(d: &Dirs, library: Option<&Path>) -> Vec<String> {
         for rule in [format!("Edit({p})"), format!("Edit({p}/**)")] { deny.push(rule); }
         deny.push(format!("Bash(*{}*)", dir.to_string_lossy().replace('\\', "/")));
     }
+    // In every letter case, as the file system reads them.
+    crate::claude::every_case(&mut deny);
     deny
 }
 
@@ -1786,6 +1788,12 @@ mod tests {
         for want in [format!("Read({h}/attachments)"), format!("Read({h}/attachments/**)"), format!("Edit({h}/attachments)"),
                      format!("Edit({h}/attachments/**)"), format!("Bash(*{shell}/attachments*)"), format!("Read({h}/chats/**)"), format!("Edit({h}/app-layer/**)")] {
             assert!(has(&want), "missing {want}");
+        }
+        // In every letter case, as macOS reads the same files.
+        for p in [home.join("attachments/c-1/shot.png"), home.join("chats/x.json"), home.join("secrets.json"), home.join("app-layer/plugins/a.js")] {
+            let up = PathBuf::from(p.to_string_lossy().to_uppercase());
+            assert!(crate::claude::tests::denies(&rules, "Edit", &up), "{} can be edited", up.display());
+            if !p.starts_with(home.join("app-layer")) { assert!(crate::claude::tests::denies(&rules, "Read", &up), "{} can be read", up.display()); }
         }
         // So is a chat folder that only appears once the rules are made: nothing is listed folder by folder.
         assert!(!rules.iter().any(|r| r.contains("/attachments/c-")), "{rules:?}");
