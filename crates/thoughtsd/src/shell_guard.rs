@@ -2,9 +2,11 @@
 //! (bypass included): Claude Code runs this same executable as a `PreToolUse` hook, and a command
 //! that names the app's own data folder or the attachment copies is refused (exit code 2).
 //!
-//! It reads the command text, so it is a second lock, not a wall: a command can still reach a
-//! folder without naming it (a pattern like `~/.th*`, a variable, a script). Permission deny rules
-//! work the same way for the shell. What it does stop is the plain ways in, in any letter case.
+//! BEST-EFFORT ONLY, not the boundary: it reads the command text, so a command can still reach the
+//! folder without naming it (a pattern like `~/.th*`, a variable, a script, `cd` and a relative
+//! path). Commands that only read run without asking in every mode (see docs/PRIVACY.md); Strict
+//! private folders is what turns the shell off. What this stops is the plain ways in, in any letter
+//! case. Further bypasses are not chased here.
 
 use std::path::Path;
 
@@ -38,7 +40,8 @@ pub fn blocked(command: &str, cwd: &str, home: &Path) -> bool {
     let cwd_s = cwd_s.trim_end_matches('/');
     // A run that works inside the app's folder (Reorganize's copy, a customisation's staging copy) may name its own folder.
     if !home_s.is_empty() && cwd_s.len() > home_s.len() && cwd_s.starts_with(&format!("{home_s}/")) {
-        if cmd.contains(&format!("{cwd_s}/..")) { return true; }
+        // Out of that folder by any spelling (`/./..`, `//..`, a relative `..`): refused whole.
+        if cmd.contains("..") { return true; }
         cmd = cmd.replace(cwd_s, "");
     }
     if cmd.contains(crate::run_files::DIR) { return true; }
@@ -87,7 +90,11 @@ mod tests {
         // A run working inside the app's folder may name that folder, and nothing else of it.
         let wt = "/Users/u/.thoughts/reorganize-worktree";
         assert!(!blocked("ls /Users/u/.thoughts/reorganize-worktree/notes", wt, home));
-        assert!(blocked("cat /Users/u/.thoughts/reorganize-worktree/../secrets.json", wt, home));
+        for out in ["cat /Users/u/.thoughts/reorganize-worktree/../secrets.json", "cat /Users/u/.thoughts/reorganize-worktree/./../secrets.json",
+                    "cat /Users/u/.thoughts/reorganize-worktree//../secrets.json", "cat ../secrets.json", "cd .. && cat secrets.json"] {
+            assert!(blocked(out, wt, home), "{out}");
+        }
+        assert!(!blocked("cd .. && ls", "/Users/u/Library/notes", home), "outside the app's folder `..` is an ordinary path");
         assert!(blocked("cat /Users/u/.thoughts/secrets.json", wt, home));
         // The hook entry: this executable, in this mode, for both shells.
         let h = hooks(Path::new("/Apps/Thoughts's.app/x"), home);
