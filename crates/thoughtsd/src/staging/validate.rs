@@ -164,6 +164,7 @@ pub fn problems(staging: &Path, files: &[(String, &str)], arabic: bool) -> Vec<V
             ["home.json"] => home(&mut out, path, &v),
             ["nav.json"] => nav(&mut out, path, &v),
             ["todos.json"] => todos(&mut out, path, &v),
+            ["pages.json"] => for (en, ar) in super::pages::problems(&v, staging) { out.add(path, en, ar) },
             ["themes.json"] => themes(&mut out, path, &v),
             ["workflows", _] => workflow(&mut out, path, &v),
             [sub @ ("plugins" | "views"), file] => {

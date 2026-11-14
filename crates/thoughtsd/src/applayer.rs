@@ -288,6 +288,7 @@ fn manifest_with(dir: &Path, arabic: bool, off: &BTreeSet<String>) -> Value {
         "home": parsed("home.json"),
         "todos": object("todos.json"),
         "nav": object("nav.json"),
+        "pages": object("pages.json"),
         "workflows": crate::workflows::load(dir),
         "off": off.iter().filter(|p| dir.join(p).is_file()).collect::<Vec<_>>(),
     })

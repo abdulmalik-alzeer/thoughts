@@ -178,6 +178,7 @@ pub fn file_effects(path: &str, before: Option<&str>, after: Option<&str>) -> Op
         "home.json" => home(&b, &a),
         "nav.json" => nav(&b, &a),
         "todos.json" => todos(&b, &a),
+        "pages.json" => super::pages::effects(&b, &a),
         "themes.json" => themes(&b, &a),
         "manifest.json" => manifest(&b, &a),
         _ => return None,

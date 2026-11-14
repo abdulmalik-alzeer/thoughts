@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 pub mod validate;
 pub mod effects;
+pub mod pages;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default, rename_all = "camelCase")]
