@@ -937,6 +937,9 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
   throw new Error(`Unknown method "${method}"`);
 }
 
+/** Raised on a surface frame's element (it bubbles to its slot) once the add-on's page has drawn or failed. */
+export const SURFACE_DRAWN = 'thoughts-surface-drawn';
+
 function onMessage(e: MessageEvent) {
   let f: Frame | undefined;
   for (const x of frames) if (x.el.contentWindow === e.source) { f = x; break; }
@@ -977,6 +980,8 @@ function onMessage(e: MessageEvent) {
     return;
   } else if (m.type === 'loaded' || m.type === 'failed') {
     landed(f);
+    // A page or Home box has drawn (or given up): its slot shows it now, with the app's own entrance.
+    if (f.surface) f.el.dispatchEvent(new Event(SURFACE_DRAWN, { bubbles: true }));
   }
   if (p.dry) {
     // A review-time test load: only listen for "it loaded" or "it failed"; calls get empty answers.

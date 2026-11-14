@@ -26,7 +26,7 @@ Open **Customise** and describe what you want in your own words.
 - **Forms that save notes into a folder.** "A new-client intake form that saves each entry as a note in my clients folder."
 - **Boards you can drag.** "A board of my engagements with columns for each status; dragging a card changes its status."
 - **Trackers that remember data.** "A tracker for billable hours per client", "a reading log". The tracker keeps its own data between sessions.
-- **Views built from your library.** "Todos due this week grouped by client", "all open questions across my matters".
+- **Views built from your library.** "Todos due this week grouped by client", "all open questions across my matters". A page you add gets its own place in the sidebar and opens with the same motion as the app's own pages (or none, when Settings › Accessibility asks for less motion).
 - **How todos are grouped.** By list, by due date or by tag; sorted by due date; showing only what is due soon or overdue; with or without finished items.
 - **The sidebar.** Hide items you do not use, change their order, rename them ("call Ideas 'Matters'"). Home, Settings and Help always stay.
 - **Home.** Hide or reorder its sections, and place widgets where you want them: "put the hours tracker above my todos".
