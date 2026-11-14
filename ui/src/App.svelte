@@ -721,6 +721,8 @@
   <Onboarding done={onboarded} />
 {:else}
   <div class="shell" class:collapsed={railed}>
+    <!-- macOS, sidebar collapsed: a title-bar strip gives the window buttons a proper home above the rail (CSS shows it only there). -->
+    {#if railed}<div class="titlebar no-print" data-tauri-drag-region aria-hidden="true"></div>{/if}
     {#if !railed}
     <aside class="sidebar no-print" aria-label={t('shell.sidebar')}>
       <div class="drag" data-tauri-drag-region></div>
@@ -1005,6 +1007,20 @@
   :global(html.native.os-macos) .sidebar { background: color-mix(in srgb, var(--sidebar) 40%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
   :global(html.native:not(.os-macos)) .sidebar { background: var(--sidebar); -webkit-backdrop-filter: none; backdrop-filter: none; }
   .main .drag.top { position: sticky; top: 0; height: 26px; z-index: 5; }
+  /* macOS with the sidebar collapsed: the window buttons sit in a title-bar strip that runs across the
+     window and joins the rail in one L of sidebar material; the page tucks in below it with a hairline
+     edge and a rounded inner corner. Elsewhere the strip stays hidden (Windows and Linux have a system
+     title bar; the expanded sidebar already holds the buttons). The strip matches the system title bar
+     height, so the buttons sit centred in it. */
+  .titlebar { display: none; }
+  @media screen {
+    :global(html.native.os-macos) .shell.collapsed { grid-template-rows: 28px minmax(0, 1fr); background: color-mix(in srgb, var(--sidebar) 40%, transparent); }
+    :global(html.native.os-macos) .shell.collapsed .titlebar { display: block; grid-row: 1; grid-column: 1 / -1; }
+    :global(html.native.os-macos) .shell.collapsed .rail { grid-row: 2; grid-column: 1; background: transparent; border-inline-end: 0; padding-top: 4px; }
+    :global(html.native.os-macos) .shell.collapsed .rail .drag { display: none; }
+    :global(html.native.os-macos) .shell.collapsed .main { grid-row: 2; grid-column: 2; min-height: 0; border-top: 1px solid var(--hairline); border-inline-start: 1px solid var(--hairline); border-start-start-radius: 10px; }
+    :global(html.native.os-macos) .shell.collapsed .main .drag.top { display: none; }
+  }
   .brand { font-weight: 700; font-size: 15px; padding: 2px 6px 12px; letter-spacing: -.01em; gap: 8px; }
   .brand .iconbtn { margin-inline-end: -4px; }
 
