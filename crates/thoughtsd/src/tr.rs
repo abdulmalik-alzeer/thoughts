@@ -882,7 +882,7 @@ const TABLE: &[Entry] = &[
     e("layer.no_chat", "not_found", 409, "",
         "This change was not made in a chat, so there is no conversation to continue. Keep it, discard it, or ask for something new.",
         "لم يُعدّ هذا التغيير في محادثة، فلا توجد محادثة تتابعها. أبقِه أو تجاهله، أو اطلب شيئاً جديداً."),
-    e("layer.continued_note", "info", 200, "",
+    e("layer.continued_note", "continued", 409, "",
         "You tried this version and chose to keep talking. Say what to change; the assistant builds on what it made.",
         "جرّبت هذه النسخة واخترت متابعة الحديث. قل ما تريد تغييره، وسيبني المساعد على ما صنعه."),
     e("pack.not_pack", "validation", 422, "",
