@@ -4,9 +4,12 @@
 //   * GUI (default)        — Tauri window; connects to (or spawns) the daemon
 //   * `--daemon`           — runs thoughtsd, detached, so sessions outlive the UI
 //   * THOUGHTS_ASKPASS=1   — git credential helper backed by the OS keychain
+// and one terminal command, `updates gh on|off|status`: the switch of the GitHub fallback for
+// updates (ghfeed.rs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
+mod ghfeed;
 mod links;
 mod quit;
 mod recovery;
@@ -515,10 +518,79 @@ async fn restart_daemon(force: Option<bool>) -> Result<Value, String> {
     daemon_info().await
 }
 
-/// Is there an update? `{configured, available, reason?, version?, notes?}`.
+/// Where an update that can be offered was found.
+enum Found {
+    /// At the public address: the updater library downloads it itself.
+    Public(tauri_plugin_updater::Update),
+    /// Through the GitHub fallback (`ghfeed`): its file is fetched there, as the signed-in person.
+    Fallback(tauri_plugin_updater::Update, ghfeed::Offer),
+}
+
+impl Found {
+    fn update(&self) -> &tauri_plugin_updater::Update {
+        match self { Found::Public(u) | Found::Fallback(u, _) => u }
+    }
+}
+
+/// A check that could not tell whether a newer version exists. `code` is what the window has a
+/// sentence for (`offline`, `failed`, and the codes of `ghfeed::Problem`); `detail` what happened.
+struct NoAnswer { code: &'static str, detail: String }
+
+impl From<ghfeed::Problem> for NoAnswer {
+    fn from(p: ghfeed::Problem) -> Self { NoAnswer { code: p.code(), detail: p.detail() } }
+}
+
+/// The address the updater asks first: the first one this build was given.
+fn public_endpoint(app: &tauri::AppHandle) -> Option<String> {
+    app.config().plugins.0.get("updater")?["endpoints"].as_array()?.first()?.as_str().map(str::to_string)
+}
+
+/// Look for a newer version. The public address is asked first, with no sign-in. Only when it
+/// answers a clear "not found" (the repository is not public, or has no release) is the GitHub
+/// fallback tried, and that asks nothing unless the person switched it on from a terminal
+/// (`ghfeed`). No connection or any other error ends the check with its own reason: it never
+/// leads to the fallback. `Ok(None)`: this copy is up to date.
+async fn find_update(app: &tauri::AppHandle) -> Result<Option<Found>, NoAnswer> {
+    let failed = |e: &dyn std::fmt::Display| NoAnswer { code: "failed", detail: e.to_string() };
+    let updater = app.updater_builder().timeout(Duration::from_secs(10)).build().map_err(|e| failed(&e))?;
+    match updater.check().await {
+        Ok(Some(u)) => return Ok(Some(Found::Public(u))),
+        Ok(None) => return Ok(None),
+        // Every address answered, none with a release: ask plainly what the answer was.
+        Err(tauri_plugin_updater::Error::ReleaseNotFound) => {}
+        Err(tauri_plugin_updater::Error::Reqwest(e)) => return Err(NoAnswer { code: "offline", detail: e.to_string() }),
+        Err(e) => return Err(failed(&e)),
+    }
+    let Some(url) = public_endpoint(app) else { return Err(failed(&"this build has no update address")) };
+    let looked = tauri::async_runtime::spawn_blocking(move || match ghfeed::probe_public(&url) {
+        ghfeed::Public::NotFound => ghfeed::look(&ghfeed::api(), ghfeed::REPO, ghfeed::is_on(), VERSION, ghfeed::sign_in).map_err(NoAnswer::from),
+        ghfeed::Public::Unreachable(detail) => Err(NoAnswer { code: "offline", detail }),
+        ghfeed::Public::Other(detail) => Err(NoAnswer { code: "failed", detail }),
+    })
+    .await
+    .map_err(|e| failed(&e))?;
+    let Some(offer) = looked? else { return Ok(None) };
+    // The library picks the entry for this computer from the manifest, and checks the signature
+    // of whatever it is later given to install: the sign-in decided who may download, never what
+    // may be installed.
+    match updater.restore_update(offer.manifest.clone()) {
+        Ok(Some(u)) => Ok(Some(Found::Fallback(u, offer))),
+        Ok(None) => Ok(None),
+        Err(e) => Err(failed(&e)),
+    }
+}
+
+/// How a command reports a check that could not tell: `PROBLEM::<code>::<detail>`.
+fn problem_error(code: &str, detail: &str) -> String {
+    format!("PROBLEM::{code}::{detail}")
+}
+
+/// Is there an update? `{configured, available, reason?, version?, notes?, notesAr?, via?, problem?, detail?}`.
 /// `configured: false` is not an error; `reason` says why: `"build"` (this build has no updater
 /// key/endpoint) or `"deb"` (Linux, not running from an AppImage: a package-manager install
-/// cannot replace itself — update through the package instead).
+/// cannot replace itself — update through the package instead). `via` is `"public"` or
+/// `"github"` (the fallback). A check that could not tell is not an error either: `problem` is a
+/// code the window has a sentence for (see `NoAnswer`), `detail` what happened.
 #[tauri::command]
 async fn update_check(app: tauri::AppHandle) -> Result<Value, String> {
     if !app.state::<UpdaterConfigured>().0 {
@@ -528,10 +600,14 @@ async fn update_check(app: tauri::AppHandle) -> Result<Value, String> {
     if std::env::var_os("APPIMAGE").is_none() {
         return Ok(json!({"configured": false, "available": false, "reason": "deb"}));
     }
-    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
-    Ok(match update {
-        Some(u) => json!({"configured": true, "available": true, "version": u.version, "notes": u.body}),
-        None => json!({"configured": true, "available": false}),
+    Ok(match find_update(&app).await {
+        Ok(Some(found)) => {
+            let u = found.update();
+            let via = if matches!(found, Found::Public(_)) { "public" } else { "github" };
+            json!({"configured": true, "available": true, "version": u.version, "notes": u.body, "notesAr": u.raw_json["notes_ar"], "via": via})
+        }
+        Ok(None) => json!({"configured": true, "available": false}),
+        Err(n) => json!({"configured": true, "available": false, "problem": n.code, "detail": n.detail}),
     })
 }
 
@@ -558,20 +634,42 @@ async fn update_install(app: tauri::AppHandle, force: Option<bool>) -> Result<()
             return Err(busy_error(&work));
         }
     }
-    let update = app.updater().map_err(|e| e.to_string())?.check().await.map_err(|e| e.to_string())?;
-    let Some(update) = update else { return Err("Thoughts is already up to date".into()) };
-    let mut downloaded = 0usize;
+    let found = match find_update(&app).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return Err("Thoughts is already up to date".into()),
+        Err(n) => return Err(problem_error(n.code, &n.detail)),
+    };
     let progress = app.clone();
-    let bytes = update
-        .download(
-            move |chunk, total| {
-                downloaded += chunk;
-                let _ = progress.emit("update-progress", json!({"downloaded": downloaded, "total": total}));
-            },
-            || {},
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+    let (update, bytes) = match found {
+        Found::Public(update) => {
+            let mut downloaded = 0usize;
+            let bytes = update
+                .download(
+                    move |chunk, total| {
+                        downloaded += chunk;
+                        let _ = progress.emit("update-progress", json!({"downloaded": downloaded, "total": total}));
+                    },
+                    || {},
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            (update, bytes)
+        }
+        // The file is fetched through GitHub's API as the signed-in person; `install` below
+        // checks its signature exactly as it does for a download of the library's own.
+        Found::Fallback(update, offer) => {
+            let named = update.download_url.to_string();
+            let bytes = tauri::async_runtime::spawn_blocking(move || {
+                offer.download(&ghfeed::api(), &named, |downloaded, total| {
+                    let _ = progress.emit("update-progress", json!({"downloaded": downloaded, "total": total}));
+                })
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|p| problem_error(p.code(), &p.detail()))?;
+            (update, bytes)
+        }
+    };
     // The daemon is this same executable: it must not be running while it is replaced
     // (Windows cannot overwrite a running .exe). The new version starts a fresh one.
     tauri::async_runtime::spawn_blocking(move || stop_daemon_checked(force)).await.map_err(|e| e.to_string())??;
@@ -1005,6 +1103,11 @@ fn main() {
     }
     if std::env::args().nth(1).as_deref() == Some(thoughtsd::shell_guard::FLAG) {
         std::process::exit(thoughtsd::shell_guard::main());
+    }
+    // `thoughts updates gh on|off|status`: answered in the terminal, no window opens.
+    if std::env::args().nth(1).as_deref() == Some("updates") {
+        let rest: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(ghfeed::cli(&rest));
     }
     if std::env::args().any(|a| a == "--daemon") {
         let rt = tokio::runtime::Runtime::new().expect("tokio");

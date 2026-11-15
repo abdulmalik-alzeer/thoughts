@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "Thoughts — a second-brain workstation"
 
+[features]
+# Only for `scripts/release/rehearse-update.mjs`: lets a throwaway copy be pointed at a pretend
+# GitHub on this computer and update itself without anyone clicking. No release is built with it.
+rehearsal = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
