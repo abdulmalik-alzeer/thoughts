@@ -9,7 +9,7 @@
   import { navLabel } from './lib/terms';
   import { startReminders } from './lib/reminders';
   import { fold } from './lib/CommandPalette.svelte';
-  import { checkAppUpdate, checkLayerUpdates } from './lib/updates';
+  import { checkAppUpdate, checkLayerUpdates, startAutoUpdateChecks } from './lib/updates';
   import { announceWhatsNew, markWhatsNewSeen } from './lib/whatsnew';
   import { startupChecks } from './lib/maintenance';
   import { t, tn, ago, fmtDate, fmtNum } from './lib/i18n';
@@ -94,7 +94,9 @@
       if (app.settings.onboarded) await afterOnboard();
       app.ready = true;
       statusNotices();
-      if (app.settings.onboarded) { checkAppUpdate(false); checkLayerUpdates(); announceWhatsNew(); startupChecks(); } else markWhatsNewSeen(); // a fresh install has nothing new to announce
+      // No check for a new version here: the app asks by itself only while the setting for that is on (startAutoUpdateChecks).
+      if (app.settings.onboarded) { checkLayerUpdates(); announceWhatsNew(); startupChecks(); } else markWhatsNewSeen(); // a fresh install has nothing new to announce
+      startAutoUpdateChecks();
     } catch (e: any) {
       // Settings never loaded, so fall back to the language and theme used last time.
       if (!app.settings) { const look = cachedLook(); if (look?.language) app.settings = { ...look, onboarded: false }; }

@@ -1,8 +1,8 @@
 // App updates (the native updater in the shell) and updates to the shipped customisation defaults.
 import { api, inTauri, on, post } from './api';
-import { go, toast } from './store.svelte';
+import { app, go, toast } from './store.svelte';
 import { confirmDialog } from './dialog.svelte';
-import { t, tn } from './i18n';
+import { lang, t, tn } from './i18n';
 import { checkPending } from './layer';
 import { withBusyPrompt } from './shell';
 import { offerDownload } from './maintenance';
@@ -22,19 +22,69 @@ export async function checkAppUpdate(manual = false) {
     try { r = await invoke('update_check'); }
     catch (e: any) { if (manual) toast(t('layer.upd.checkFailed'), { kind: 'error', detail: String(e?.message ?? e) }); return; }
     if (!r?.configured) { if (manual) await checkRelease(r?.reason === 'deb' ? 'ui.upd.deb' : r?.reason === 'build' ? 'ui.upd.build' : 'layer.upd.notConfigured'); return; }
+    // A check that could not tell (no connection, a release that is not public, the GitHub
+    // fallback not ready): said only when the person asked.
+    if (r.problem) { if (manual) sayProblem(String(r.problem), typeof r.detail === 'string' ? r.detail : ''); return; }
     if (!r.available) { if (manual) toast(t('layer.upd.none'), { kind: 'success', key: 'upd' }); return; }
+    const text = (v: unknown) => (typeof v === 'string' && v.trim()) || '';
     const ok = await confirmDialog({
       title: t('layer.upd.available', { version: r.version ?? '' }),
-      body: (typeof r.notes === 'string' && r.notes.trim()) || t('layer.upd.body'),
+      body: (lang() === 'ar' && text(r.notesAr)) || text(r.notes) || t('layer.upd.body'),
       note: t('layer.upd.note'), confirmLabel: t('layer.upd.install'), cancelLabel: t('layer.later'),
     });
     if (!ok) return;
     toast(t('layer.upd.installing'), { key: 'upd', stay: true });
+    const stopProgress = await showProgress();
     try {
       const done = await withBusyPrompt((force) => invoke('update_install', { force }), 'update');
       if (!done) toast(t('ui.busy.waiting'), { key: 'upd' });
-    } catch (e: any) { toast(t('layer.upd.installFailed'), { kind: 'error', key: 'upd', detail: String(e?.message ?? e) }); }
+    } catch (e: any) {
+      const said = String(e?.message ?? e);
+      const problem = /^PROBLEM::([a-z-]+)::([\s\S]*)$/.exec(said);
+      if (problem) sayProblem(problem[1], problem[2]);
+      else toast(t('layer.upd.installFailed'), { kind: 'error', key: 'upd', detail: said });
+    } finally { stopProgress(); }
   } finally { checking = false; }
+}
+
+/** One plain sentence for a check or an install that could not tell or could not finish. The
+ *  codes are the shell's (`find_update` in main.rs and `ghfeed::Problem`). */
+function sayProblem(code: string, detail = '') {
+  const key = `care.upd.p.${code}`;
+  const sentence = t(key);
+  // Nothing published, or nothing published yet: news, not a failure.
+  const calm = code === 'unpublished' || code === 'gh-no-release';
+  toast(sentence === key ? t('layer.upd.checkFailed') : sentence, { key: 'upd', kind: calm ? undefined : 'error', detail: detail || undefined });
+}
+
+/** While an update downloads, say how far it is (the shell reports each piece as it arrives).
+ *  Returns what stops the reports. */
+async function showProgress(): Promise<() => void> {
+  try {
+    const { listen } = await import('@tauri-apps/api/event');
+    let shown = -1;
+    const mb = (n: number) => (n / 1048576).toFixed(n >= 10 * 1048576 ? 0 : 1);
+    return await listen<{ downloaded?: number; total?: number | null }>('update-progress', (e) => {
+      const got = Number(e.payload?.downloaded ?? 0), total = Number(e.payload?.total ?? 0);
+      if (!got || !total) return;
+      const step = Math.floor((got / total) * 20); // a new line every 5%, not for every piece
+      if (step === shown) return;
+      shown = step;
+      toast(t('care.upd.progress', { done: mb(got), total: mb(total) }), { key: 'upd', stay: true });
+    });
+  } catch { return () => {}; }
+}
+
+let auto: ReturnType<typeof setInterval> | null = null;
+/** Checks nobody asked for happen only while "Check for new versions automatically" is on
+ *  (Settings › Maintenance, off unless switched on): one a couple of minutes after the app
+ *  opened, then once a day. With it off the app never asks about updates by itself. The setting
+ *  is read each time, so switching it takes effect without a restart. */
+export function startAutoUpdateChecks() {
+  if (auto) return;
+  const look = () => { if (app.settings?.releaseCheck) checkAppUpdate(false); };
+  setTimeout(look, 2 * 60_000);
+  auto = setInterval(look, 24 * 3600_000);
 }
 
 /** Ask the background service for the latest published version (one request to GitHub, see
