@@ -564,6 +564,7 @@ pub fn instructions(n: &Notes) -> String {
     if !n.writable.is_empty() {
         parts.push(format!("Besides this folder you may also change files in: {}.", n.writable.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")));
     }
+    parts.push(crate::claude::estimates_note().to_string());
     parts.push(crate::claude::language_note(n.language).to_string());
     parts.push(format!("(Thoughts run {})", n.mark));
     format!("<thoughts_app_instructions>\n{}\n</thoughts_app_instructions>\n\n", parts.join("\n\n"))

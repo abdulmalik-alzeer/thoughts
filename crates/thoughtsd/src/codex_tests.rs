@@ -247,6 +247,9 @@ fn runs_are_told_what_codex_cannot_close_for_them() {
     assert!(chat.contains("- clients/acme") && chat.contains("Codex cannot close them for you"));
     assert!(chat.contains("undone when this run ends") && chat.contains(".mcp.json"));
     assert!(chat.contains("Arabic") && chat.contains("(Thoughts run m4rk)"));
+    for kind in ["chat", "customize", "wrap", "workflow", "module", "setup"] {
+        assert!(note(kind, "acceptEdits", false, "workspace-write").contains(crate::claude::estimates_note()), "{kind} is told not to guess how long its work takes");
+    }
     assert!(!chat.contains("closed to this run"), "an ordinary chat may change CLAUDE.md");
     let wrap = note("wrap", "acceptEdits", false, "workspace-write");
     assert!(wrap.contains("closed to this run") && wrap.contains("Never run git"));

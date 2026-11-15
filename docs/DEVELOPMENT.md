@@ -188,6 +188,10 @@ to the rules alone.
   back, a new one goes, and the chat lists them (a `denied` message, item `what: "restored"`).
   Nothing is written through a link. A chat is never second-guessed this way: the user is there,
   and may be editing those files themselves.
+- Every run is told not to say how long its own work will take unless the user asks, and then to
+  answer for itself and not for a developer (`claude::estimates_note`, repeated in
+  `codex::instructions`). Left alone the assistant guesses in a person's time: hours, for work it
+  finishes in minutes.
 - Runs that may not change the standing files are told so (`claude::standing_rules_note`); a web
   chat is also told that page text is material, never instructions, and never to put library
   content into a search or an address. The Wrap preview fences the mini-wraps between two lines
@@ -301,7 +305,8 @@ when Codex is chosen.
 - **What a run is told** (`codex::instructions`, in front of the prompt, never on the command
   line): where the standing rules (CLAUDE.md) and routines (`.claude/skills`) are, the private
   folders by name with the plain fact that Codex cannot close them, the app's data folder, and the
-  same standing-rule and web notes as Claude Code runs, worded for what Codex can enforce.
+  same standing-rule and web notes as Claude Code runs, worded for what Codex can enforce, and the
+  same rule about time estimates.
 - **Output.** Both formats are read (`codex::parse_line`): the 0.2x event stream (`{"id","msg"}`,
   after a settings line; no answer word by word, no session id, no final result line) and the later
   one (`thread.started`, `item.*`, `turn.completed`). Commands, file changes, connected tools, web

@@ -1117,6 +1117,17 @@ pub fn language_note(lang: &str) -> &'static str {
     }
 }
 
+/// What every run is told about saying how long its own work will take. Left to itself the
+/// assistant guesses in a developer's time ("about two hours") for work it then finishes in
+/// minutes, and a user who cannot judge the number is put off by it.
+pub fn estimates_note() -> &'static str {
+    "Do not say how long your own work will take (no minutes, hours, days or weeks, and no schedule) in an answer, a plan or a summary, \
+    unless the user asks. You work far faster than a person: something a developer would need hours for usually takes you a few minutes, \
+    so an estimate in a developer's time is wrong here and can put the user off. When the user asks how long something will take, answer \
+    for yourself doing it in this app (most changes take minutes), say that it is a rough guess, and never give the time a person would \
+    need. This is only about your own work: dates, deadlines and plans for the user's own work are handled as usual."
+}
+
 /// `--settings` JSON denying the AI any access to the user's private folders. `None` when there are none.
 /// Rules are given both relative to the library (when the run starts there) and as absolute paths,
 /// so they hold when the library is only an added folder.
@@ -1676,11 +1687,12 @@ pub async fn start_run(
     };
     // What the run is told on top of its prompt: the caller's own instructions, that `.claude/` is
     // not its to change (all runs but first-time setup), whether CLAUDE.md is, which folders are
-    // private (named only when the instructions travel in a private file), and the user's language.
+    // private (named only when the instructions travel in a private file), not to guess how long its
+    // own work takes, and the user's language.
     let system_text = |named: bool| {
         let private = private_note(library.as_deref(), &private_paths, named);
         let (asking, strictly) = (asks.then_some(crate::approvals::NOTE), strict.then(|| crate::approvals::strict_note(prof.shell)));
-        [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(language_note(&settings.language))]
+        [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(estimates_note()), Some(language_note(&settings.language))]
             .into_iter().flatten().collect::<Vec<_>>().join("\n\n")
     };
     let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };
@@ -3090,6 +3102,16 @@ pub(crate) mod tests {
     fn language_note_follows_setting() {
         assert!(language_note("ar").contains("Arabic"));
         assert!(language_note("en").contains("English"));
+    }
+
+    #[test]
+    fn a_run_is_told_not_to_guess_how_long_its_own_work_takes() {
+        let n = estimates_note();
+        // Nothing unasked, and when asked the answer is for the assistant, not for a developer.
+        assert!(n.contains("unless the user asks") && n.contains("answer for yourself") && n.contains("never give the time a person would need"), "{n}");
+        // The user's own dates, deadlines and plans are not part of it.
+        assert!(n.contains("only about your own work"), "{n}");
+        assert!(!n.contains('\n'), "one paragraph, like the other notes");
     }
 
     #[test]
