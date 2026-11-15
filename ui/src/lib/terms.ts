@@ -3,7 +3,8 @@
 //
 // Each profession has a word for its work items, matching the starter presets: accountants have
 // clients, lawyers matters, consultants engagements, teachers classes, researchers and founders
-// projects. With a work word the page is "Work", one tab per area of the library; without one it
+// projects. People in software and technical work have projects too (the kit has no preset for
+// them yet). With a work word the page is "Work", one tab per area of the library; without one it
 // stays "Ideas".
 import { app } from './store.svelte';
 import { lang, t, tn } from './i18n';
@@ -13,7 +14,7 @@ import prof from './i18n/layer';
 export type AreaWord = 'ideas' | 'clients' | 'matters' | 'engagements' | 'classes' | 'projects';
 const BY_ID: Record<string, AreaWord> = {
   finance: 'clients', accounting: 'clients', legal: 'matters', consulting: 'engagements',
-  teaching: 'classes', research: 'projects', founder: 'projects',
+  teaching: 'classes', research: 'projects', founder: 'projects', technical: 'projects',
 };
 // What the setup screen offers is stored either as its id or, by older versions, as its label (in
 // either language); a profession typed by hand is matched on its words.
@@ -23,6 +24,7 @@ const BY_WORDS: [RegExp, AreaWord][] = [
   [/consult|advis|استشار|مستشار/i, 'engagements'],
   [/teach|lectur|tutor|trainer|instruct|تدريس|معلّ?م|مدرّ?س|محاضر|مدرّ?ب/i, 'classes'],
   [/research|study|student|academ|thesis|founder|product|startup|بحث|باحث|دراس|طالب|أكاديم|تأسيس|منتج|ريادة/i, 'projects'],
+  [/develop|engineer|software|programm|technical|devops|برمج|مهندس|تقني|مطوّ?ر/i, 'projects'],
 ];
 
 function professionId(raw: string): string {

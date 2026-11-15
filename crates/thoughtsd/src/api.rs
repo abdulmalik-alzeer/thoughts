@@ -1325,6 +1325,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
 }
 
 /// The kit's preset for a line of work offered on the setup screen (the ids kept in `settings.profession`).
+/// `technical`, `personal` and `other` have none: the assistant shapes the library from the description.
 fn preset_for(profession: &str) -> Option<&'static str> {
     match profession {
         "finance" => Some("accounting-finance"), "legal" => Some("legal"), "consulting" => Some("consulting"),
@@ -3490,7 +3491,7 @@ mod tests {
                 assert!(library::STARTER.get_file(&file).is_some(), "{file} is not in the starter kit");
             }
         }
-        for own in ["personal", "other", "", "Tax advisor", "Legal work"] { assert_eq!(preset_for(own), None, "{own}"); }
+        for own in ["technical", "personal", "other", "", "Tax advisor", "Legal work"] { assert_eq!(preset_for(own), None, "{own}"); }
     }
 
     fn setup_answers(folder: &std::path::Path, mode: &str) -> Onboarding {

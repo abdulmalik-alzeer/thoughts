@@ -63,7 +63,7 @@
   const perms = ['acceptEdits', 'plan', BYPASS] as const;
   /** The mode a stored value stands for. Nothing stored is accept-edits, exactly as the service reads it. */
   const realPerm = (m: unknown) => (m == null || m === '' ? 'acceptEdits' : m === 'default' ? 'plan' : String(m));
-  const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
+  const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'technical', 'personal', 'other'];
 
   const fresh = () => {
     const x = structuredClone($state.snapshot(app.settings));

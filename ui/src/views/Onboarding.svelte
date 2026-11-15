@@ -46,7 +46,7 @@
   // What is at the chosen folder, as the background service sees it (asked again whenever the path changes).
   let folder = $state<{ path: string; state: string } | null>(null);
   let probe = $state<'idle' | 'busy' | 'failed'>('idle');
-  const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'personal', 'other'];
+  const professions = ['finance', 'legal', 'consulting', 'teaching', 'research', 'founder', 'technical', 'personal', 'other'];
   // The assistant can be connected later (FEAT-08): the library is made now, its setup waits.
   let later = $state(false);
   // Adding a library to an app whose assistant is not connected: its setup waits, as on first use.
