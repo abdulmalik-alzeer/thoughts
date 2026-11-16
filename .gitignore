@@ -4,3 +4,6 @@ target/
 src-tauri/gen/
 .DS_Store
 src-tauri/release.conf.json
+# What scripts/release/local.mjs builds (the installers and the update list of a release)
+release-out/
+release-meta/
