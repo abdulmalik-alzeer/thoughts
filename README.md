@@ -65,11 +65,27 @@ Nothing is signed yet, so macOS and Windows ask you to confirm the first launch.
 
 ## Updates
 
-Your library is never touched by an update. Thoughts does not install new versions by itself yet:
-that needs a signed build. Switch on **Check once a week for a newer version** under
-Settings › Maintenance (off unless you switch it on), or choose **Check for Updates…** in the
-menu: when a newer version is out, Thoughts opens its download page and you install it over this
-one. While the repository is private, the check cannot see new versions and says it cannot tell.
+Your library is never touched by an update. Choose **Check for Updates…** in the menu, or switch
+on **Check for new versions automatically** under Settings › Maintenance (off unless you switch
+it on). When a newer version is out, Thoughts says what changed and, when you agree, downloads
+it, checks that it is genuine and restarts as the new version. It never installs anything by
+itself. Version 0.0.11 and older cannot do this: install the next version by hand once, the way
+you installed this one.
+
+**For testers, while the repository is private.** The address Thoughts asks for updates only
+answers once the project is public. Until then a copy can look for updates as you, through the
+GitHub command-line tool. In a terminal, once:
+
+```bash
+brew install gh        # if you do not have it
+gh auth login
+/Applications/Thoughts.app/Contents/MacOS/thoughts updates gh on
+```
+
+The last command switches this on and says which account it found and whether that account can
+see the releases. `… updates gh off` switches it off again, and `… updates gh status` only
+reports. It is off in every copy until that command is run, and while it is off Thoughts never
+starts `gh`.
 
 If you've customised the app, the new version compares what you changed with the original and
 only asks where both you and the new version changed the same thing: keep mine, use new, or let

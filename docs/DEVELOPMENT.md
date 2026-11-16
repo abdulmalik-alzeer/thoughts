@@ -416,10 +416,19 @@ when Codex is chosen.
   the user has approved each one. Schedules: day, week, weekdays, month (day 1–28 or last).
 - **Learning** is local only: usage events and keep/discard/undo outcomes in
   `~/.thoughts/usage-events.jsonl`, used for suggestions and the monthly tune-up.
-- **Updates** replace the app itself and never touch the library. With an updater key the app
-  checks for a new version and installs it only when the user agrees; without one (every build
-  so far) "Check for Updates…" and the opt-in weekly check only point to the download page. It
-  never installs silently. Each release ships a hash manifest;
+- **Updates** replace the app itself and never touch the library. A build that carries the
+  updater's public key (`src-tauri/updater.pub`, see RELEASING.md) looks for a new version when
+  the user asks, or by itself while "Check for new versions automatically" is on
+  (`startAutoUpdateChecks` in `ui/src/lib/updates.ts`; off unless switched on), and installs it
+  only when the user agrees. It never installs silently. `find_update`
+  (`src-tauri/src/main.rs`) asks the public address first, with no sign-in. Only a clear "not
+  found" from it leads to the GitHub fallback (`src-tauri/src/ghfeed.rs`), and that asks
+  nothing unless the person switched it on from a terminal (`thoughts updates gh on`: a file
+  of its own in the app's folder, which nothing else writes and no setting reaches). The
+  fallback fetches the release through GitHub's API with the `gh` sign-in and hands the files
+  to the updater library, which checks their signature as it does for any update. The sign-in
+  is sent to the API host only, never stored, and never given to the window or a chat. A build
+  without the key only points to the download page (`release.rs`). Each release ships a hash manifest;
   customised files are compared three ways (original, yours, new). Only files changed on both
   sides ask the user: keep mine, use new, or let the assistant merge (previewed like any change).
   Defaults removed or renamed upstream are reported and left in place, an unresolved conflict is

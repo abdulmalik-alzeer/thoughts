@@ -131,12 +131,11 @@ Only import packs from people you trust: a pack can change how the app behaves.
 
 An update never touches your library.
 
-Thoughts does not install new versions by itself yet: that needs a signed build, and this one is
-not. To hear about a new version, switch on **Check once a week for a newer version** under
-**Settings › Maintenance**, or choose **Check for Updates…** in the menu. Thoughts then tells you
-when a newer version is out and opens its download page, and you install it the way you installed
-this one. While the project's repository is private, the check cannot see new versions and says
-it cannot tell.
+To get a new version, choose **Check for Updates…** in the menu, or switch on **Check for new
+versions automatically** under **Settings › Maintenance** to be told when one is out. Thoughts
+says what changed and, when you agree, downloads the new version, checks that it is genuine and
+restarts as it. It never installs anything by itself. While the project's repository is private,
+testers need one step in a terminal first: see "Updates" in the README.
 
 For your customisations, Thoughts compares three things: the original, your version, and the new version.
 

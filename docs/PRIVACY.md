@@ -84,11 +84,13 @@ Thoughts does not collect usage statistics, crash reports or any other informati
 Checking for a newer version is the one time Thoughts contacts the internet on its own behalf, and only in these cases:
 
 - **When you choose "Check for Updates…"** (in the menu, under Customise › App updates, or under Settings › Maintenance).
-- **Once a week, if you switch on "Check once a week for a newer version"** under Settings › Maintenance. It is off unless you switch it on.
+- **At most once a day, if you switch on "Check for new versions automatically"** under Settings › Maintenance. It is off unless you switch it on. (A copy that cannot update itself, such as one installed from a `.deb` package, checks once a week instead.)
 
-Either way it asks GitHub, where Thoughts is published (`api.github.com`), for the number of the latest version. The request carries nothing about you, your library or your settings: no account, no cookie, no identifier, only the address it asks for and the name "Thoughts" as the program asking. Like any connection, it lets GitHub see your internet address. A copy with the built-in updater switched on asks the download page in the same way when you check.
+Either way it asks GitHub, where Thoughts is published (`github.com`, or `api.github.com` for a copy that cannot update itself), whether a newer version exists. The request carries nothing about you, your library or your settings: no account, no cookie, no identifier, only the address it asks for and the name of the program asking. Like any connection, it lets GitHub see your internet address.
 
-Thoughts never downloads or installs anything by itself: when a newer version exists it shows you a link to its download page.
+Thoughts never downloads or installs anything by itself. When a newer version exists it tells you what changed. Only when you choose to install it does it download the new version from GitHub, check that it was signed by the makers of Thoughts, and restart as that version. A copy that cannot update itself shows you a link to the download page instead.
+
+**The GitHub fallback, for testers.** While a release is not public, the address above answers "not found". A tester can let Thoughts look for updates as them instead, by running `thoughts updates gh on` in a terminal. From then on, and only when the public address answers "not found", a check asks the GitHub command-line tool (`gh`) on your computer for its sign-in and asks GitHub with it, so GitHub knows which account asked. The sign-in is used for that check or that download and nothing else: it is not stored, not shown, not given to the assistant, and sent to GitHub's own address for programs (`api.github.com`) only. This is off unless you run that command, there is no switch for it in the app, and `thoughts updates gh off` turns it off again.
 
 To suggest improvements (for example the monthly tune-up described in [Making Thoughts your own](CUSTOMISING.md)), the app keeps a small record on your computer of which screens you open and which customisations you kept or discarded. That record never leaves your computer on its own. If you accept a tune-up suggestion, a short summary of it is included in the request to the assistant, like anything else you send in a chat.
 

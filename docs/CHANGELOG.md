@@ -1,5 +1,22 @@
 # What's new in Thoughts
 
+## 0.0.12
+
+Thoughts can now update itself, and tells you what changed before it does.
+
+### Updates
+- **Updates from inside the app:** choose Check for Updates… in the menu. When a newer version is out, Thoughts shows what changed and, when you agree, downloads it, checks that it is genuine and restarts as the new version. Your library, chats and customisations are not touched. This version still has to be installed by hand; the ones after it arrive this way.
+- **You decide when it looks:** Thoughts asks about new versions by itself only if you switch on Settings › Maintenance › "Check for new versions automatically" (at most once a day). It never installs anything by itself.
+- **For testers while the project is private:** one command in a terminal lets Thoughts look for updates with your GitHub sign-in. The README has it under "Updates".
+- On a Mac, macOS may ask again for permission to use the keychain after an update, because this version is not signed with an Apple certificate.
+- A copy opened straight from its disk image is told to move to the Applications folder first.
+
+### The assistant
+- **No more guessed times:** the assistant no longer says how long its own work will take unless you ask. When you do ask, it answers for itself, usually minutes, not the hours a person would need.
+
+### Setting up
+- **A choice for technical work:** "What do you mainly use this for?" now offers Software & technical work, in setup and in Settings › General.
+
 ## 0.0.11
 
 A privacy fix.
