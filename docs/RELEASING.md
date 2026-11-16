@@ -724,6 +724,28 @@ update: bump both sides in one commit, then run a [rehearsal](#rehearsal).
 These are settings on GitHub, not files in the repository; only the owner can change them.
 None is required for the workflow to run.
 
+**Where they stand (2026-11-16).** Switched on: release immutability, Dependabot alerts and
+security updates, and the rule that actions are pinned to a full commit. Already as they should
+be: a workflow's own token can only read, workflows cannot approve pull requests, and no secret
+or variable is stored on GitHub. **Not possible on the current plan:** rules for `main` and for
+the release tags (below).
+
+- **Rules for `main` and for the release tags.** GitHub offers branch protection and rulesets
+  for a private repository only with GitHub Pro (or once the repository is public). Without
+  them, everyone who can see this repository can also push to `main`, move or create a `v*`
+  tag, and create or delete a release: on a repository owned by a personal account a
+  collaborator always has write access, and read-only access cannot be given. What still holds:
+  an installed copy only installs what the updater key signed, and that key is on the owner's
+  Mac and nowhere on GitHub; a published release can no longer be changed (immutability,
+  below). What does not hold: nothing stops a collaborator's commit from reaching `main`, so
+  read what is new on `main` before building a release from it. With Pro (or a public
+  repository), add two rulesets, each with the repository admin as the only one who may bypass:
+  for the branch `main`, restrict updates and deletions and block force pushes; for tags
+  matching `v*`, restrict creations, updates and deletions.
+- **Keep the updater key off GitHub while anyone else can push.** A workflow on any branch can
+  read the repository's secrets, and anyone with write access can push such a workflow. The
+  protected environment described at the end of this list is what makes it safe to store.
+
 - **Release immutability** (Settings → General → Releases). GitHub itself then refuses to
   change the files or the tag of a published release, whoever asks. The workflow already
   refuses; this closes the remaining door (a person, or another tool, replacing a file by
