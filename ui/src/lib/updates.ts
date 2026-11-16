@@ -75,16 +75,33 @@ async function showProgress(): Promise<() => void> {
   } catch { return () => {}; }
 }
 
+const DAY = 24 * 3600_000;
+const lastAuto = {
+  get: () => { try { return Number(localStorage.getItem('thoughts.updAutoAt')) || 0; } catch { return 0; } },
+  set: (at: number) => { try { localStorage.setItem('thoughts.updAutoAt', String(at)); } catch { /* ignore */ } },
+};
+
+/** Is an automatic check due? At most one a day, however often the app is opened; a clock that
+ *  went back does not stop them for good. */
+export function autoCheckDue(last: number, now: number): boolean {
+  return !last || now - last >= DAY || last > now;
+}
+
 let auto: ReturnType<typeof setInterval> | null = null;
 /** Checks nobody asked for happen only while "Check for new versions automatically" is on
- *  (Settings › Maintenance, off unless switched on): one a couple of minutes after the app
- *  opened, then once a day. With it off the app never asks about updates by itself. The setting
- *  is read each time, so switching it takes effect without a restart. */
+ *  (Settings › Maintenance, off unless switched on), and then at most once a day: the first a
+ *  couple of minutes after the app opened, if a day has passed since the last one. With the
+ *  setting off the app never asks about updates by itself. The setting is read each time, so
+ *  switching it takes effect without a restart. */
 export function startAutoUpdateChecks() {
   if (auto) return;
-  const look = () => { if (app.settings?.releaseCheck) checkAppUpdate(false); };
+  const look = () => {
+    if (!app.settings?.releaseCheck || !autoCheckDue(lastAuto.get(), Date.now())) return;
+    lastAuto.set(Date.now());
+    checkAppUpdate(false);
+  };
   setTimeout(look, 2 * 60_000);
-  auto = setInterval(look, 24 * 3600_000);
+  auto = setInterval(look, 3600_000);
 }
 
 /** Ask the background service for the latest published version (one request to GitHub, see

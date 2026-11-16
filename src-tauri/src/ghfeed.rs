@@ -119,6 +119,11 @@ pub struct SignIn(String);
 
 /// Ask the GitHub command-line tool for its sign-in. Only ever called with the switch on.
 pub fn sign_in() -> Result<SignIn, Problem> {
+    // A rehearsal build asks a stand-in, so the person's real sign-in never goes to a pretend GitHub.
+    #[cfg(feature = "rehearsal")]
+    if let Some(stand_in) = std::env::var_os("THOUGHTS_REHEARSAL_GH") {
+        return sign_in_with(Path::new(&stand_in));
+    }
     let Some(gh) = thoughtsd::claude::find_binary(&None, "gh") else { return Err(Problem::NoGh) };
     sign_in_with(&gh)
 }
@@ -159,8 +164,10 @@ pub struct Release {
 }
 
 /// Redirects are never followed for us: every request made with the sign-in ends at the API.
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().redirects(0).timeout_connect(Duration::from_secs(10)).timeout_read(Duration::from_secs(60)).user_agent("Thoughts").build()
+/// `quiet` is how long the other side may say nothing before the request is given up: short for
+/// a question to the API, longer while a file is coming in.
+fn agent(quiet: u64) -> ureq::Agent {
+    ureq::AgentBuilder::new().redirects(0).timeout_connect(Duration::from_secs(10)).timeout_read(Duration::from_secs(quiet)).user_agent("Thoughts").build()
 }
 
 /// One request to the API, with the sign-in. `url` must be an address of the API itself.
@@ -168,7 +175,7 @@ fn api_get(api: &str, url: &str, who: &SignIn, accept: &str) -> Result<ureq::Res
     if !url.starts_with(&format!("{api}/")) {
         return Err(Problem::Unexpected("an address outside GitHub's API was refused".into()));
     }
-    match agent().get(url).set("Authorization", &format!("Bearer {}", who.0)).set("Accept", accept).set("X-GitHub-Api-Version", "2022-11-28").call() {
+    match agent(20).get(url).set("Authorization", &format!("Bearer {}", who.0)).set("Accept", accept).set("X-GitHub-Api-Version", "2022-11-28").call() {
         Ok(r) => Ok(r),
         Err(ureq::Error::Status(401, _)) => Err(Problem::Refused),
         Err(ureq::Error::Status(404, _)) => Err(Problem::NoAccess),
@@ -258,7 +265,7 @@ pub fn fetch(api: &str, who: &SignIn, asset: &Asset, limit: u64, progress: impl 
                 if !forward_allowed(api, &to) {
                     return Err(Problem::Unexpected("GitHub forwarded the download to an address that is not https".into()));
                 }
-                r = match agent().get(&to).set("Accept", "application/octet-stream").call() {
+                r = match agent(60).get(&to).set("Accept", "application/octet-stream").call() {
                     Ok(next) => next,
                     Err(ureq::Error::Status(code, _)) => return Err(Problem::Unexpected(format!("the file host answered {code}"))),
                     Err(ureq::Error::Transport(t)) => return Err(Problem::Offline(t.to_string())),

@@ -285,6 +285,9 @@ if (isMain(import.meta.url)) {
     if (built) {
       console.log(`Using the files this command built for ${f.tag} (${f.head.slice(0, 7)}) earlier.`);
     } else {
+      // As the pipeline's preflight does: the list of what earlier releases shipped in the
+      // starter kit must be current, or libraries made by older versions are asked for trust again.
+      sh(process.execPath, [join(ROOT, 'scripts', 'kit-history.mjs'), '--check', '--before', f.version]);
       if (!args.has('--skip-tests')) {
         sh('cargo', ['test', '-p', 'thoughtsd']);
         sh('cargo', ['test', '-p', 'thoughts']);

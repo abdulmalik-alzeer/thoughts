@@ -580,6 +580,33 @@ async fn find_update(app: &tauri::AppHandle) -> Result<Option<Found>, NoAnswer> 
     }
 }
 
+/// Is this copy somewhere it can never be replaced? An app opened straight from its disk image,
+/// or from the hidden read-only place macOS runs a just-downloaded app from, cannot update
+/// itself: it has to be moved to the Applications folder first. (A folder that merely needs an
+/// administrator's password is not this: the updater asks for it.)
+#[cfg(target_os = "macos")]
+fn cannot_be_replaced() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let Some(bundle) = exe.ancestors().find(|p| p.extension().is_some_and(|e| e == "app")) else { return false };
+    if bundle.components().any(|c| c.as_os_str() == "AppTranslocation") {
+        return true;
+    }
+    let Some(folder) = bundle.parent() else { return false };
+    let probe = folder.join(format!(".thoughts-update-check-{}", std::process::id()));
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            false
+        }
+        Err(e) => e.kind() == std::io::ErrorKind::ReadOnlyFilesystem,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cannot_be_replaced() -> bool {
+    false
+}
+
 /// How a command reports a check that could not tell: `PROBLEM::<code>::<detail>`.
 fn problem_error(code: &str, detail: &str) -> String {
     format!("PROBLEM::{code}::{detail}")
@@ -601,6 +628,8 @@ async fn update_check(app: tauri::AppHandle) -> Result<Value, String> {
         return Ok(json!({"configured": false, "available": false, "reason": "deb"}));
     }
     Ok(match find_update(&app).await {
+        // A newer version exists, but this copy sits where nothing can replace it.
+        Ok(Some(found)) if cannot_be_replaced() => json!({"configured": true, "available": false, "problem": "move-first", "version": found.update().version}),
         Ok(Some(found)) => {
             let u = found.update();
             let via = if matches!(found, Found::Public(_)) { "public" } else { "github" };
@@ -618,7 +647,12 @@ async fn update_check(app: tauri::AppHandle) -> Result<Value, String> {
 /// download and again just before installing); nothing is stopped or installed in that case.
 #[tauri::command]
 async fn update_install(app: tauri::AppHandle, force: Option<bool>) -> Result<(), String> {
-    let force = force.unwrap_or(false);
+    install_update(app, force.unwrap_or(false)).await
+}
+
+/// What `update_install` does. When it works it does not return: the app restarts as the new
+/// version.
+async fn install_update(app: tauri::AppHandle, force: bool) -> Result<(), String> {
     if !app.state::<UpdaterConfigured>().0 {
         return Err("Updates are not configured in this build".into());
     }
@@ -633,6 +667,9 @@ async fn update_install(app: tauri::AppHandle, force: Option<bool>) -> Result<()
         if let Some(work) = work {
             return Err(busy_error(&work));
         }
+    }
+    if cannot_be_replaced() {
+        return Err(problem_error("move-first", ""));
     }
     let found = match find_update(&app).await {
         Ok(Some(found)) => found,
@@ -675,6 +712,76 @@ async fn update_install(app: tauri::AppHandle, force: Option<bool>) -> Result<()
     tauri::async_runtime::spawn_blocking(move || stop_daemon_checked(force)).await.map_err(|e| e.to_string())??;
     update.install(bytes).map_err(|e| e.to_string())?;
     app.restart()
+}
+
+/// A rehearsal build updates itself with nobody clicking and writes down what happened, one JSON
+/// line per step, for `scripts/release/rehearse-update.mjs` to read. No release contains this:
+/// the `rehearsal` feature is switched on by that script alone, for a throwaway copy with its
+/// own name, its own folder and a throwaway key.
+#[cfg(feature = "rehearsal")]
+mod rehearsal {
+    use super::*;
+    use std::io::Write;
+
+    /// The keychain entry a rehearsal saves and reads back, apart from anything the real app keeps.
+    const SERVICE: &str = "thoughts-rehearsal";
+
+    fn note(file: &std::path::Path, v: Value) {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
+            let _ = writeln!(f, "{v}");
+        }
+    }
+
+    /// Read the saved entry the way the app reads its own secrets, but stop waiting after a few
+    /// seconds: a read that does not come back means macOS is asking the person about it.
+    fn read_saved() -> Value {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let _ = tx.send(thoughtsd::secrets::get(SERVICE, "check"));
+        });
+        match rx.recv_timeout(Duration::from_secs(8)) {
+            Ok(value) => json!({"value": value, "ms": started.elapsed().as_millis() as u64}),
+            Err(_) => json!({"asked": true}),
+        }
+    }
+
+    /// Started from `setup` when THOUGHTS_REHEARSAL names the file to write to.
+    pub fn start(app: &tauri::AppHandle) {
+        let Some(file) = std::env::var_os("THOUGHTS_REHEARSAL").map(std::path::PathBuf::from) else { return };
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(4));
+            note(&file, json!({"step": "started", "version": VERSION, "exe": std::env::current_exe().ok()}));
+            // The keychain, only in the scenario that asks for it (THOUGHTS_REHEARSAL_SAVE names the
+            // version that saves): the old version saves an entry, the new one only reads it. The
+            // new one must not save as well: macOS would hold that call until the person answered.
+            if let Ok(saver) = std::env::var("THOUGHTS_REHEARSAL_SAVE") {
+                note(&file, json!({"step": "keychain-read", "version": VERSION, "result": read_saved()}));
+                if saver == VERSION {
+                    let ok = thoughtsd::secrets::set(SERVICE, "check", &format!("saved by {VERSION}")).is_ok();
+                    note(&file, json!({"step": "keychain-save", "version": VERSION, "ok": ok, "inAFile": thoughtsd::paths::secrets_file().exists()}));
+                }
+            }
+            tauri::async_runtime::block_on(async {
+                match find_update(&app).await {
+                    Ok(Some(found)) => {
+                        let via = if matches!(found, Found::Public(_)) { "public" } else { "github" };
+                        note(&file, json!({"step": "check", "version": VERSION, "offered": found.update().version, "via": via, "notes": found.update().body, "notesAr": found.update().raw_json["notes_ar"]}));
+                        drop(found);
+                        // When this works it does not come back: the app restarts as the new version.
+                        let failed = install_update(app.clone(), false).await.err();
+                        note(&file, json!({"step": "install", "version": VERSION, "error": failed}));
+                    }
+                    Ok(None) => note(&file, json!({"step": "check", "version": VERSION, "offered": null})),
+                    Err(n) => note(&file, json!({"step": "check", "version": VERSION, "problem": n.code, "detail": n.detail})),
+                }
+            });
+            note(&file, json!({"step": "done", "version": VERSION}));
+            QUIT_ALL.store(true, Ordering::SeqCst);
+            app.exit(0);
+        });
+    }
 }
 
 /// Quit completely (after "Remove Thoughts from this computer": the settings are gone, so
@@ -1202,6 +1309,8 @@ fn main() {
                 h.plugin(tauri_plugin_updater::Builder::new().build())?;
             }
             app.manage(UpdaterConfigured(configured));
+            #[cfg(feature = "rehearsal")]
+            rehearsal::start(h);
 
             // Tray icon: the only visible handle on the app once its window is closed
             // while the background service keeps running.
