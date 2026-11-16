@@ -12,10 +12,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { assemble, updaterManifest } from './assemble.mjs';
+import { releaseConfig } from '../release-config.mjs';
+import { assemble, changelogSection, notesFor, updaterManifest } from './assemble.mjs';
 import { decide, verdict } from './ci-status.mjs';
 import { collect } from './collect.mjs';
 import { GitHub, PLATFORMS, Stop } from './lib.mjs';
+import { findKey, preflightProblems, publicEndpoint, repoFromRemote, workflowsToSwitch } from './local.mjs';
+import { checkSignature } from './minisign.mjs';
 import { plan } from './plan.mjs';
 import { publish, refusePublished } from './publish.mjs';
 
@@ -448,4 +451,152 @@ test('publish: a rehearsal file list can never be published', async () => {
   assemble(assembleArgs(assetsDir, { metaDir, mode: 'rehearsal' }));
   await assert.rejects(publish(publishArgs(hub, { assetsDir, metaDir })), stops(/not for a release/));
   assert.equal(hub.releases.length, 0);
+});
+
+// ------------------------------------------- notes, the updater key and the release made on a Mac
+
+const CHANGELOG = `# What's new in Thoughts
+
+## 1.2.3
+
+A small release.
+
+### Chats
+- **Calmer chats:** the assistant's \`commands\` fold into [one line](https://example.com/x).
+- Second thing.
+
+## 1.2.2
+
+Older.
+`;
+
+test('notes: the changelog entry of a version becomes the text of the update dialog', () => {
+  assert.equal(changelogSection('1.2.2', CHANGELOG), 'Older.');
+  assert.equal(changelogSection('9.9.9', CHANGELOG), null);
+  assert.equal(changelogSection('1.2', CHANGELOG), null, 'only the exact version');
+  assert.equal(notesFor('1.2.3', CHANGELOG), "A small release.\n\nChats\n• Calmer chats: the assistant's commands fold into one line.\n• Second thing.");
+  assert.equal(notesFor('9.9.9', CHANGELOG), null);
+  const cut = notesFor('1.2.3', CHANGELOG, { max: 40 });
+  assert.equal(cut, 'A small release.\n\nChats\n…', 'cut at the end of a line, never in the middle of one');
+});
+
+test('assemble: latest.json carries the notes in both languages; without an entry, the plain sentence', () => {
+  const metaDir = tmp();
+  assemble(assembleArgs(collected({ updater: true }), { metaDir, notes: 'What changed.', notesAr: 'ما الذي تغيّر.' }));
+  const latest = JSON.parse(readFileSync(join(metaDir, 'latest.json'), 'utf8'));
+  assert.equal(latest.notes, 'What changed.');
+  assert.equal(latest.notes_ar, 'ما الذي تغيّر.');
+  const plain = tmp();
+  assemble(assembleArgs(collected({ updater: true }), { metaDir: plain }));
+  const bare = JSON.parse(readFileSync(join(plain, 'latest.json'), 'utf8'));
+  assert.match(bare.notes, /See the assets below/);
+  assert.ok(!('notes_ar' in bare));
+});
+
+test('assemble: a release of one platform is only made when asked for (the release made on a Mac)', () => {
+  const mac = collected({ platforms: ['macos'], updater: true });
+  assert.throws(() => assemble(assembleArgs(mac, { platforms: ['macos'] })), stops(/needs every platform/));
+  const metaDir = tmp();
+  const release = assemble(assembleArgs(mac, { metaDir, platforms: ['macos'], partial: true }));
+  assert.equal(release.mode, 'release');
+  assert.deepEqual(release.files.map((f) => f.name), [
+    'Thoughts_1.2.3_universal.app.tar.gz',
+    'Thoughts_1.2.3_universal.app.tar.gz.sig',
+    'Thoughts_1.2.3_universal.dmg',
+    'latest.json',
+  ]);
+  const latest = JSON.parse(readFileSync(join(metaDir, 'latest.json'), 'utf8'));
+  assert.deepEqual(Object.keys(latest.platforms).sort(), ['darwin-aarch64', 'darwin-aarch64-app', 'darwin-universal', 'darwin-universal-app', 'darwin-x86_64', 'darwin-x86_64-app']);
+  // The addresses are the public ones, so the same file serves the day the repository opens.
+  assert.equal(latest.platforms['darwin-aarch64'].url, `https://github.com/${REPO}/releases/download/v1.2.3/Thoughts_1.2.3_universal.app.tar.gz`);
+});
+
+test('release config: the public key comes from the committed file, and two different keys stop the build', () => {
+  const on = releaseConfig({ env: { UPDATER_ENDPOINT: 'https://a.example/latest.json, https://b.example/latest.json' }, committedKey: 'KEY\n' });
+  assert.deepEqual(on, {
+    bundle: { createUpdaterArtifacts: true },
+    plugins: { updater: { pubkey: 'KEY', endpoints: ['https://a.example/latest.json', 'https://b.example/latest.json'], requireSignedVersion: true } },
+  });
+  const env = { UPDATER_PUBKEY: 'KEY', UPDATER_ENDPOINT: 'https://a.example/x' };
+  assert.equal(releaseConfig({ env }).plugins.updater.pubkey, 'KEY', 'the variable alone still works');
+  assert.equal(releaseConfig({ env, committedKey: 'KEY' }).plugins.updater.pubkey, 'KEY', 'the same key in both places is fine');
+  assert.throws(() => releaseConfig({ env: { ...env, UPDATER_PUBKEY: 'OTHER' }, committedKey: 'KEY' }), /different keys/);
+  // No key, or no address: a build like a local one, with the updater off.
+  assert.deepEqual(releaseConfig({ env: { UPDATER_ENDPOINT: 'https://a.example/x' } }), {});
+  assert.deepEqual(releaseConfig({ env: {}, committedKey: 'KEY' }), {});
+  // The second call adds Windows signing to what the first wrote.
+  const win = releaseConfig({ env: { WINDOWS_CERTIFICATE_THUMBPRINT: 'ABC' }, existing: structuredClone(on), addWindowsSigning: true });
+  assert.equal(win.plugins.updater.pubkey, 'KEY');
+  assert.equal(win.bundle.createUpdaterArtifacts, true);
+  assert.equal(win.bundle.windows.certificateThumbprint, 'ABC');
+  assert.throws(() => releaseConfig({ env: {}, addWindowsSigning: true }), /does not exist yet/);
+});
+
+// A throwaway key made for these tests, and the signature it gave a file holding "hello update"
+// for version 1.2.3 (`tauri signer sign --app-version 1.2.3`).
+const TEST_PUB = 'dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwQ0E3RjQwNkZFNjBFNTAKUldSUUR1WnZRSC9LTUF1WnhiMkNhRjhqYmgrN0tDSUtxOWN1VU9wc0J1bDdJREE1azM3a29zVmIK';
+const TEST_SIG = 'dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSUUR1WnZRSC9LTU12UHJhenV2UzUrbWExN0pzWTdjOS9jZWd1UjVobkJJc1NWN0hmVURyNE9hZm9QVEFhQWZTL05IL3BXV2xla2owUW5tQ05SM25TRUM4UzJCUjZvVFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NzY3ODA3CWZpbGU6YXBwLnRhci5negl2ZXJzaW9uOjEuMi4zCmtqanNrVFNGRGQ2b21FWVQ0WTk0VW0xU2pDK3llT1k0YjQyYUN3WFR6ZHl4UnVVTVJ4NXA5R1dPcW5kdC82enpUZUVnakpJMlJURVBWcmt2ZWRtYkN3PT0K';
+
+test('signatures: an update file is accepted only as signed, by this key, and says its version', () => {
+  const data = Buffer.from('hello update');
+  assert.deepEqual(checkSignature({ publicKeyFile: TEST_PUB, signatureFile: TEST_SIG, data }), { ok: true, version: '1.2.3', file: 'app.tar.gz' });
+  assert.match(checkSignature({ publicKeyFile: TEST_PUB, signatureFile: TEST_SIG, data: Buffer.from('hello updatE') }).why, /does not match the file/);
+  // The version sits in a comment that is itself signed: rewriting it is noticed.
+  const lines = Buffer.from(TEST_SIG, 'base64').toString('utf8').split('\n');
+  lines[2] = lines[2].replace('version:1.2.3', 'version:9.9.9');
+  const rewritten = Buffer.from(lines.join('\n')).toString('base64');
+  assert.match(checkSignature({ publicKeyFile: TEST_PUB, signatureFile: rewritten, data }).why, /comment was changed/);
+  // Another key: the same bytes with the key's last byte changed.
+  const key = Buffer.from(TEST_PUB, 'base64').toString('utf8').split('\n');
+  const raw = Buffer.from(key[1], 'base64');
+  raw[raw.length - 1] ^= 1;
+  key[1] = raw.toString('base64');
+  assert.equal(checkSignature({ publicKeyFile: Buffer.from(key.join('\n')).toString('base64'), signatureFile: TEST_SIG, data }).ok, false);
+  assert.equal(checkSignature({ publicKeyFile: 'garbage', signatureFile: TEST_SIG, data }).ok, false);
+  assert.equal(checkSignature({ publicKeyFile: TEST_PUB, signatureFile: 'garbage', data }).ok, false);
+});
+
+test('local release: what must hold before anything is built', () => {
+  const ready = { branch: 'main', dirty: false, version: '1.2.3', head: SHA, tagAt: null, key: 'KEY', password: 'pw', publicKey: 'PUB', keysMatch: true, changelog: 'entry', changelogAr: 'مدخل' };
+  assert.deepEqual(preflightProblems(ready), []);
+  assert.deepEqual(preflightProblems({ ...ready, tagAt: SHA, password: '' }), [], 'a tag on this very commit and an empty password are fine');
+  const one = (change, pattern) => {
+    const found = preflightProblems({ ...ready, ...change });
+    assert.equal(found.length, 1, JSON.stringify(found));
+    assert.match(found[0], pattern);
+  };
+  one({ branch: 'r12-updates' }, /made from main/);
+  one({ dirty: true }, /not committed/);
+  one({ version: '1.2' }, /not a version/);
+  one({ tagAt: 'b'.repeat(40) }, /already exists on another commit/);
+  one({ key: null }, /private key was not found/);
+  one({ password: null }, /password was not found/);
+  one({ publicKey: '' }, /updater\.pub is missing/);
+  one({ keysMatch: false }, /does not match/);
+  one({ changelog: null }, /docs\/CHANGELOG\.md has no entry "## 1\.2\.3"/);
+  one({ changelogAr: null }, /docs\/ar\/CHANGELOG\.md has no entry/);
+});
+
+test('local release: the repository, the key and the workflows are found where they are', () => {
+  assert.equal(repoFromRemote('https://github.com/someone/thoughts.git\n'), 'someone/thoughts');
+  assert.equal(repoFromRemote('git@github.com:someone/thoughts.git'), 'someone/thoughts');
+  assert.equal(repoFromRemote('https://github.com/someone/thoughts'), 'someone/thoughts');
+  assert.equal(repoFromRemote('https://example.com/someone/thoughts.git'), null);
+  assert.equal(publicEndpoint('someone/thoughts'), 'https://github.com/someone/thoughts/releases/latest/download/latest.json');
+
+  const files = { '/keys/updater.key': 'FROM-FILE\n', '/usual/place.key': 'USUAL\n' };
+  const fs = { exists: (p) => p in files, read: (p) => files[p], fallback: '/usual/place.key' };
+  assert.equal(findKey({ TAURI_SIGNING_PRIVATE_KEY: '/keys/updater.key' }, fs), 'FROM-FILE', 'a path is read');
+  assert.equal(findKey({ TAURI_SIGNING_PRIVATE_KEY: 'THE-KEY-ITSELF' }, fs), 'THE-KEY-ITSELF');
+  assert.equal(findKey({}, fs), 'USUAL');
+  assert.equal(findKey({}, { ...fs, fallback: '/nowhere' }), null);
+
+  const listed = [
+    { name: 'CI', state: 'active', id: 1 },
+    { name: 'Release', state: 'disabled_manually', id: 2 },
+    { name: 'Advisories', state: 'active', id: 3 },
+    { name: 'Dependabot Updates', state: 'active', id: 4 },
+  ];
+  assert.deepEqual(workflowsToSwitch(listed), [{ id: '1', name: 'CI' }, { id: '3', name: 'Advisories' }], 'only those a push starts, and only those that are on');
+  assert.deepEqual(workflowsToSwitch(null), []);
 });

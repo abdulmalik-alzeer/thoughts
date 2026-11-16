@@ -19,8 +19,8 @@
 //   TAG, GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_SHA
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { RELEASE_NOTES } from './assemble.mjs';
-import { GitHub, isMain, megabytes, run, SAFE_NAME, sha256, sleep, Stop, stop, summary } from './lib.mjs';
+import { changelogSection, RELEASE_NOTES } from './assemble.mjs';
+import { GitHub, isMain, megabytes, ROOT, run, SAFE_NAME, sha256, sleep, Stop, stop, summary } from './lib.mjs';
 
 const published = (tag) =>
   `Release ${tag} is already published, and a published release is never changed. ` +
@@ -57,7 +57,8 @@ export function verifiedFiles({ assetsDir, metaDir, tag, commit }) {
   });
 }
 
-export async function publish({ gh, tag, commit, assetsDir, metaDir, log = console.log, pauseMs = 3000 }) {
+/** `notes`: what the release page says (the changelog's entry for this version, as written). */
+export async function publish({ gh, tag, commit, assetsDir, metaDir, notes = null, log = console.log, pauseMs = 3000 }) {
   const files = verifiedFiles({ assetsDir, metaDir, tag, commit });
 
   // Every release that carries this tag, drafts included (this token may see drafts).
@@ -76,7 +77,7 @@ export async function publish({ gh, tag, commit, assetsDir, metaDir, log = conso
     }
   } else {
     ({ data: release } = await gh.request('POST', `/repos/${gh.repo}/releases`, {
-      body: { tag_name: tag, target_commitish: commit || undefined, name: `Thoughts ${tag}`, body: RELEASE_NOTES, draft: true },
+      body: { tag_name: tag, target_commitish: commit || undefined, name: `Thoughts ${tag}`, body: notes || RELEASE_NOTES, draft: true },
     }));
     if (!release?.id || release.draft !== true) stop(`Could not create a draft release for ${tag}`);
     log(`Created the draft release for ${tag} (id ${release.id}).`);
@@ -139,7 +140,9 @@ if (isMain(import.meta.url)) {
     const [assetsDir, metaDir] = process.argv.slice(2);
     if (!assetsDir || !metaDir) stop('usage: publish.mjs <folder with the installers> <folder from the assemble job>');
     if (!gh.token) stop('GITHUB_TOKEN is not set');
-    const result = await publish({ gh, tag, commit: process.env.GITHUB_SHA || '', assetsDir: resolve(assetsDir), metaDir: resolve(metaDir) });
+    const changelog = join(ROOT, 'docs', 'CHANGELOG.md');
+    const notes = existsSync(changelog) ? changelogSection(tag.replace(/^v/, ''), readFileSync(changelog, 'utf8')) : null;
+    const result = await publish({ gh, tag, commit: process.env.GITHUB_SHA || '', assetsDir: resolve(assetsDir), metaDir: resolve(metaDir), notes });
     const text = [
       `## Draft release ${tag} is ready`,
       '',

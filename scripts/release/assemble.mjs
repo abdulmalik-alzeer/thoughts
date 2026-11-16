@@ -18,16 +18,53 @@
 //   MODE, VERSION, TAG, PLATFORMS (comma separated), GITHUB_REPOSITORY, GITHUB_SHA
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { isMain, megabytes, PLATFORMS, run, SAFE_NAME, sha256, stop, summary } from './lib.mjs';
+import { isMain, megabytes, PLATFORMS, ROOT, run, SAFE_NAME, sha256, stop, summary } from './lib.mjs';
 
 const UPDATER_OS = { macos: 'darwin', windows: 'windows', linux: 'linux' };
 // What an installed copy is updated with when it does not say how it was installed. A .deb is
 // only ever offered to a copy that was installed from a .deb.
 const DEFAULT_FOR_PLATFORM = { app: true, nsis: true, appimage: true, deb: false };
+/** Said when the changelog has no entry for the version being released. */
 export const RELEASE_NOTES = 'See the assets below to download and install this version.';
 
-/** The updater manifest (Tauri's static JSON format) for these builds. */
-export function updaterManifest({ infos, version, tag, repo, signatureOf, server = 'https://github.com', date = new Date() }) {
+/** The entry for `version` in a changelog written the way docs/CHANGELOG.md is: a `## <version>`
+ *  heading, then the entry, up to the next `## `. Null when there is none. */
+export function changelogSection(version, changelog) {
+  const lines = String(changelog ?? '').split(/\r?\n/);
+  const start = lines.findIndex((l) => l.trim() === `## ${version}`);
+  if (start < 0) return null;
+  let end = lines.findIndex((l, i) => i > start && /^## /.test(l));
+  if (end < 0) end = lines.length;
+  return lines.slice(start + 1, end).join('\n').trim() || null;
+}
+
+/** The same entry as the update dialog shows it. The dialog shows text as it is, so heading and
+ *  emphasis marks go, bullets become "•", links keep their words, and it is cut where a dialog
+ *  stops being readable. Null when the changelog has no entry for `version`. */
+export function notesFor(version, changelog, { max = 1200 } = {}) {
+  const section = changelogSection(version, changelog);
+  if (!section) return null;
+  const out = [];
+  for (const raw of section.split('\n')) {
+    let line = raw.trimEnd();
+    if (/^#{3,}\s+/.test(line)) line = line.replace(/^#{3,}\s+/, '');
+    else if (/^\s*[-*]\s+/.test(line)) line = `• ${line.replace(/^\s*[-*]\s+/, '')}`;
+    line = line.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`([^`]*)`/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1');
+    if (!line.trim() && !(out.at(-1) ?? '').trim()) continue; // never two empty lines in a row
+    out.push(line);
+  }
+  let text = out.join('\n').trim();
+  if (text.length > max) {
+    const cut = text.lastIndexOf('\n', max);
+    text = `${text.slice(0, cut > 0 ? cut : max).trimEnd()}\n…`;
+  }
+  return text || null;
+}
+
+/** The updater manifest (Tauri's static JSON format) for these builds. `notes` is what the
+ *  update dialog of an installed copy shows; `notesAr` the same for a copy set to Arabic (an
+ *  extra field the updater library ignores and the app reads). */
+export function updaterManifest({ infos, version, tag, repo, signatureOf, server = 'https://github.com', date = new Date(), notes = null, notesAr = null }) {
   const platforms = {};
   for (const info of infos) {
     const os = UPDATER_OS[info.platform];
@@ -48,16 +85,18 @@ export function updaterManifest({ infos, version, tag, repo, signatureOf, server
       }
     }
   }
-  return { version, notes: RELEASE_NOTES, pub_date: date.toISOString(), platforms };
+  return { version, notes: notes || RELEASE_NOTES, ...(notesAr ? { notes_ar: notesAr } : {}), pub_date: date.toISOString(), platforms };
 }
 
-export function assemble({ assetsDir, metaDir, mode, version, tag, platforms, repo, commit, date, server }) {
+/** `partial`: a release of fewer than all platforms, which only the local release command asks
+ *  for (scripts/release/local.mjs builds macOS alone). The pipeline never does. */
+export function assemble({ assetsDir, metaDir, mode, version, tag, platforms, repo, commit, date, server, partial = false, notes = null, notesAr = null }) {
   if (!['release', 'rehearsal'].includes(mode)) stop(`assemble does not run in "${mode}" mode`);
   if (!existsSync(assetsDir)) stop(`${assetsDir} does not exist: no installers were downloaded`);
   const expected = [...platforms].sort();
   const all = PLATFORMS.map((p) => p.id).sort();
   if (!expected.length || !expected.every((id) => all.includes(id))) stop(`Unknown platform list "${platforms.join(',')}"`);
-  if (mode === 'release' && expected.join() !== all.join()) {
+  if (mode === 'release' && !partial && expected.join() !== all.join()) {
     stop(`A release needs every platform (${all.join(', ')}), but this run built ${expected.join(', ')}`);
   }
 
@@ -111,6 +150,8 @@ export function assemble({ assetsDir, metaDir, mode, version, tag, platforms, re
       repo,
       date,
       server,
+      notes,
+      notesAr,
       signatureOf: (name) => readFileSync(join(assetsDir, name), 'utf8').trim(),
     });
     for (const info of infos) {
@@ -158,10 +199,14 @@ if (isMain(import.meta.url)) {
   await run(async () => {
     const [assetsDir, metaDir] = process.argv.slice(2);
     if (!assetsDir || !metaDir) stop('usage: assemble.mjs <folder with the installers> <output folder>');
+    const changelog = (file) => (existsSync(join(ROOT, file)) ? readFileSync(join(ROOT, file), 'utf8') : '');
     const release = assemble({
       assetsDir: resolve(assetsDir),
       metaDir: resolve(metaDir),
       mode: process.env.MODE,
+      partial: process.env.PARTIAL === 'true',
+      notes: notesFor(process.env.VERSION, changelog('docs/CHANGELOG.md')),
+      notesAr: notesFor(process.env.VERSION, changelog('docs/ar/CHANGELOG.md')),
       version: process.env.VERSION,
       tag: process.env.TAG,
       platforms: (process.env.PLATFORMS || '').split(',').filter(Boolean),
