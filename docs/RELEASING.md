@@ -173,6 +173,15 @@ another commit; the updater's private key and its password; `src-tauri/updater.p
 the private key really belongs to it (it signs a few bytes and checks them); both changelog
 entries; the kit history; the tests (`--skip-tests` leaves them out, and the summary says so).
 
+**Whose commits go into it.** Everyone who can see this repository can also push to `main`
+(see [Repository settings](#repository-settings-worth-switching-on)), so before it builds the
+command lists every commit since the last release that you did not make (the author and the
+committer must both be this Mac's git identity; `RELEASE_OWN_EMAILS` names more addresses of
+yours), and refuses to build until you have read them and run it again with
+`--include-others`. It also refuses while GitHub's `main` has commits this Mac does not have:
+someone pushed, and you have not looked yet. The summary of a build says which it was: every
+commit yours, or how many were not.
+
 **What it builds:** the universal `.dmg`, the `.app.tar.gz` with its `.sig`, and `latest.json`,
 into `release-out/` and `release-meta/`. The private key is handed to the packing step only,
 never to the compile step. Before anything counts as built, every update file is checked the
@@ -737,8 +746,10 @@ the release tags (below).
   collaborator always has write access, and read-only access cannot be given. What still holds:
   an installed copy only installs what the updater key signed, and that key is on the owner's
   Mac and nowhere on GitHub; a published release can no longer be changed (immutability,
-  below). What does not hold: nothing stops a collaborator's commit from reaching `main`, so
-  read what is new on `main` before building a release from it. With Pro (or a public
+  below). What does not hold: nothing stops a collaborator's commit from reaching `main`. The
+  release command stands in for that at the one moment it matters: it lists every commit since
+  the last release that the person releasing did not make, and waits until they have been
+  read (see [A release made on this Mac](#a-release-made-on-this-mac)). With Pro (or a public
   repository), add two rulesets, each with the repository admin as the only one who may bypass:
   for the branch `main`, restrict updates and deletions and block force pushes; for tags
   matching `v*`, restrict creations, updates and deletions.

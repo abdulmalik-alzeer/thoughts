@@ -10,7 +10,14 @@
 //   node scripts/release/local.mjs --publish   make that draft public. This is the moment the
 //                                              update reaches every installed copy.
 //
-//   --skip-tests   do not run the tests first (the summary says so)
+//   --skip-tests       do not run the tests first (the summary says so)
+//   --include-others   build although commits since the last release were made by someone else:
+//                      you have read them
+//
+// Anyone who can see this repository can push to `main` (a collaborator on a personal repository
+// always can, and branch rules need a paid plan or a public repository). So before it builds,
+// this command lists every commit since the last release that you did not make, and every commit
+// on GitHub's `main` that this Mac does not have, and waits until you have read them.
 //
 // Before it: set the version (scripts/set-version.mjs), write the entry in docs/CHANGELOG.md and
 // docs/ar/CHANGELOG.md (it becomes the update dialog's text and the release page), commit.
@@ -60,9 +67,34 @@ export function findKey(env, { exists = existsSync, read = (p) => readFileSync(p
   return exists(fallback) ? read(fallback).trim() : null;
 }
 
-/** Everything that must hold before a release is built. Returns the reasons it does not. */
-export function preflightProblems({ branch, dirty, version, head, tagAt, key, password, publicKey, keysMatch, changelog, changelogAr }) {
+/** The commits in `log` that the person releasing did not make: the author or the committer is
+ *  not one of `own` (addresses, in any letter case). `log` is one commit a line, as
+ *  `git log --format=%h%x1f%an%x1f%ae%x1f%ce%x1f%s` prints it. */
+export function commitsByOthers(log, own) {
+  const mine = new Set([...own].map((e) => String(e).trim().toLowerCase()).filter(Boolean));
+  const is = (address) => mine.has(String(address ?? '').toLowerCase());
+  return String(log ?? '')
+    .split('\n')
+    .filter(Boolean)
+    .map((line) => {
+      const [id, name, author, committer, ...subject] = line.split('\x1f');
+      return { id, name, author, committer, subject: subject.join(' ') };
+    })
+    .filter((c) => !is(c.author) || !is(c.committer));
+}
+
+/** Everything that must hold before a release is built. Returns the reasons it does not.
+ *  `others`: the commits since the release `since` that someone else made (`commitsByOthers`);
+ *  `behind`: how many commits GitHub's `main` has that this computer does not. */
+export function preflightProblems({ branch, dirty, version, head, tagAt, key, password, publicKey, keysMatch, changelog, changelogAr, others = [], since = null, includeOthers = false, behind = 0 }) {
   const problems = [];
+  if (behind > 0) problems.push(`GitHub's main has ${behind} commit${behind === 1 ? '' : 's'} this Mac does not have: someone else pushed. Read ${behind === 1 ? 'it' : 'them'} before releasing (git log HEAD..origin/main), then bring ${behind === 1 ? 'it' : 'them'} in or leave ${behind === 1 ? 'it' : 'them'} out.`);
+  if (others.length && !includeOthers) {
+    const one = others.length === 1;
+    const shown = others.slice(0, 20).map((c) => `    ${c.id}  ${c.name} <${c.author}>  ${c.subject}`).join('\n');
+    const more = others.length > 20 ? `\n    … and ${others.length - 20} more` : '';
+    problems.push(`${others.length} commit${one ? '' : 's'} since ${since ?? 'the first commit'} ${one ? 'was' : 'were'} not made by you:\n${shown}${more}\n  Read ${one ? 'it' : 'them'} (git show <id>), then run this again with --include-others.`);
+  }
   if (branch !== 'main') problems.push(`Releases are made from main; this is "${branch}".`);
   if (dirty) problems.push('There are changes that are not committed. A release is built from a commit.');
   if (!/^\d+\.\d+\.\d+$/.test(version || '')) problems.push(`"${version}" is not a version like 1.2.3.`);
@@ -124,7 +156,16 @@ function facts() {
   const password = key ? findPassword(process.env) : null;
   const publicKey = existsSync(PUBLIC_KEY) ? readFileSync(PUBLIC_KEY, 'utf8').trim() : '';
   const tag = git('rev-parse', '-q', '--verify', `refs/tags/v${version}^{commit}`);
+  // Whose commits go into this release: everything since the release before it.
+  const own = [git('config', 'user.email').out, ...(process.env.RELEASE_OWN_EMAILS || '').split(',')];
+  const since = git('tag', '--merged', 'HEAD', '--sort=-v:refname', '--list', 'v*').out.split('\n').find((t) => t && t !== `v${version}`) ?? null;
+  const log = git('log', '--format=%h%x1f%an%x1f%ae%x1f%ce%x1f%s', since ? `${since}..HEAD` : 'HEAD').out;
+  // What GitHub has that this Mac does not. Best effort: with no connection the last known state counts.
+  git('fetch', '--quiet', 'origin', 'main');
   return {
+    since,
+    others: commitsByOthers(log, own),
+    behind: Number(git('rev-list', '--count', 'HEAD..origin/main').out) || 0,
     version,
     tag: `v${version}`,
     branch: git('branch', '--show-current').out,
@@ -262,8 +303,8 @@ async function makePublic(f) {
 if (isMain(import.meta.url)) {
   await run(async () => {
     const args = new Set(process.argv.slice(2));
-    const unknown = [...args].filter((a) => !['--draft', '--publish', '--skip-tests'].includes(a));
-    if (unknown.length || (args.has('--draft') && args.has('--publish'))) stop('usage: local.mjs [--draft | --publish] [--skip-tests]');
+    const unknown = [...args].filter((a) => !['--draft', '--publish', '--skip-tests', '--include-others'].includes(a));
+    if (unknown.length || (args.has('--draft') && args.has('--publish'))) stop('usage: local.mjs [--draft | --publish] [--skip-tests] [--include-others]');
     if (process.platform !== 'darwin') stop('This command builds the macOS release, so it runs on a Mac.');
 
     const f = facts();
@@ -275,7 +316,7 @@ if (isMain(import.meta.url)) {
       return;
     }
 
-    const problems = preflightProblems(f);
+    const problems = preflightProblems({ ...f, includeOthers: args.has('--include-others') });
     if (problems.length) {
       console.error(`Not ready to release ${f.tag}:\n- ${problems.join('\n- ')}\n`);
       stop(`${problems.length === 1 ? 'One thing' : `${problems.length} things`} to put right before ${f.tag} can be released (listed above)`);
@@ -299,6 +340,9 @@ if (isMain(import.meta.url)) {
     console.log(`\nBuilt and checked ${f.tag} (${f.head.slice(0, 7)})${args.has('--skip-tests') ? ' — THE TESTS WERE SKIPPED' : ''}:`);
     for (const file of built.release.files) console.log(`  ${file.name}  ${megabytes(file.bytes)}`);
     console.log('  Every signed file verifies against src-tauri/updater.pub, for this version.');
+    console.log(f.others.length
+      ? `  It includes ${f.others.length} commit${f.others.length === 1 ? '' : 's'} since ${f.since ?? 'the first commit'} not made by you, which you said you have read (--include-others).`
+      : `  Every commit since ${f.since ?? 'the first commit'} is yours.`);
 
     if (!args.has('--draft')) {
       console.log(`\nNothing was sent anywhere. The files are in release-out/ and release-meta/.\nNext: node scripts/release/local.mjs --draft`);

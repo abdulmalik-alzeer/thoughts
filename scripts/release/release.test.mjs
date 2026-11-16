@@ -17,7 +17,7 @@ import { assemble, changelogSection, notesFor, updaterManifest } from './assembl
 import { decide, verdict } from './ci-status.mjs';
 import { collect } from './collect.mjs';
 import { GitHub, PLATFORMS, Stop } from './lib.mjs';
-import { findKey, preflightProblems, publicEndpoint, repoFromRemote, workflowsToSwitch } from './local.mjs';
+import { commitsByOthers, findKey, preflightProblems, publicEndpoint, repoFromRemote, workflowsToSwitch } from './local.mjs';
 import { checkSignature } from './minisign.mjs';
 import { plan } from './plan.mjs';
 import { publish, refusePublished } from './publish.mjs';
@@ -599,4 +599,33 @@ test('local release: the repository, the key and the workflows are found where t
   ];
   assert.deepEqual(workflowsToSwitch(listed), [{ id: '1', name: 'CI' }, { id: '3', name: 'Advisories' }], 'only those a push starts, and only those that are on');
   assert.deepEqual(workflowsToSwitch(null), []);
+});
+
+test('local release: commits someone else made are listed, and the build waits until they are read', () => {
+  const line = (...fields) => fields.join('\x1f');
+  const log = [
+    line('aaa1111', 'Me', 'me@example.com', 'me@example.com', 'my own change'),
+    line('bbb2222', 'Friend', 'friend@example.com', 'friend@example.com', "a friend's change"),
+    line('ccc3333', 'Me', 'me@example.com', 'noreply@github.com', 'made on the website'),
+    line('ddd4444', 'Friend', 'friend@example.com', 'ME@example.com', "a friend's change that I applied"),
+  ].join('\n');
+  const others = commitsByOthers(log, ['Me@Example.com']);
+  assert.deepEqual(others.map((c) => c.id), ['bbb2222', 'ccc3333', 'ddd4444'], 'the author and the committer must both be the person releasing');
+  assert.deepEqual(commitsByOthers(log, ['me@example.com', 'noreply@github.com', 'friend@example.com']), []);
+  assert.deepEqual(commitsByOthers('', ['me@example.com']), []);
+
+  const ready = { branch: 'main', dirty: false, version: '1.2.3', head: SHA, tagAt: null, key: 'KEY', password: 'pw', publicKey: 'PUB', keysMatch: true, changelog: 'entry', changelogAr: 'مدخل' };
+  assert.deepEqual(preflightProblems({ ...ready, others: [], behind: 0 }), []);
+  const waiting = preflightProblems({ ...ready, others, since: 'v1.2.2' });
+  assert.equal(waiting.length, 1);
+  assert.match(waiting[0], /^3 commits since v1\.2\.2 were not made by you:/);
+  assert.match(waiting[0], /bbb2222 {2}Friend <friend@example\.com> {2}a friend's change/);
+  assert.match(waiting[0], /--include-others/);
+  assert.deepEqual(preflightProblems({ ...ready, others, since: 'v1.2.2', includeOthers: true }), [], 'said to be read: the build goes on');
+  assert.match(preflightProblems({ ...ready, others: others.slice(0, 1), since: 'v1.2.2' })[0], /^1 commit since v1\.2\.2 was not made by you:/);
+
+  // Someone pushed to GitHub's main and this computer has not seen it yet.
+  const behind = preflightProblems({ ...ready, behind: 2 });
+  assert.equal(behind.length, 1);
+  assert.match(behind[0], /GitHub's main has 2 commits this Mac does not have/);
 });
