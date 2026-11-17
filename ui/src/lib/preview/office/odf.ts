@@ -105,7 +105,14 @@ export function plainText(el: Element): string {
   return out.join('').replace(/\n+$/, '').replace(/^\n+/, '');
 }
 
-export type OdtView = { node: DocumentFragment; urls: string[]; skipped: boolean };
+/** `cut`: the page hit PAGE_BUDGET (or tables nested deeper than MAX_TABLE_DEPTH) and stops there. */
+export type OdtView = { node: DocumentFragment; urls: string[]; skipped: boolean; cut: boolean };
+
+/** Most elements one page is built from. Repeated rows and columns (`number-rows-repeated`…) are
+ *  copies that each count, so a tiny file can't ask for an enormous page. */
+export const PAGE_BUDGET = 100_000;
+/** Tables inside tables deeper than this are left out. */
+export const MAX_TABLE_DEPTH = 6;
 
 const SAFE_LINK = /^(https?:|mailto:)/i;
 
@@ -127,20 +134,30 @@ export async function odtToDom(bytes: Uint8Array): Promise<OdtView> {
   let skipped = false;
   try {
     const frag = document.createDocumentFragment();
-    const ctx: OdfCtx = { styles, pics, skip: () => { skipped = true; } };
+    const ctx: OdfCtx = { styles, pics, skip: () => { skipped = true; }, budget: { left: PAGE_BUDGET, cut: false }, tableDepth: 0 };
     await odfBlocks(body, frag, ctx, { list: '', depth: 0 });
-    return { node: frag, urls: pics.urls, skipped };
+    return { node: frag, urls: pics.urls, skipped, cut: ctx.budget.cut };
   } catch (e) {
     for (const u of pics.urls) URL.revokeObjectURL(u);
     throw e;
   }
 }
 
-export type OdfCtx = { styles: OdfStyles; pics: Pictures; skip: () => void };
+export type OdfCtx = { styles: OdfStyles; pics: Pictures; skip: () => void; budget: { left: number; cut: boolean }; tableDepth: number };
+
+/** Take `n` from the page's budget; false (and the page marked cut) once it is spent. */
+function spend(ctx: OdfCtx, n = 1): boolean {
+  if (ctx.budget.cut) return false;
+  ctx.budget.left -= n;
+  if (ctx.budget.left < 0) { ctx.budget.cut = true; return false; }
+  return true;
+}
+const size = (el: Element) => el.getElementsByTagName('*').length + 1;
 
 /** Text runs of a paragraph-like element into `out`. */
 export async function odfInline(el: Element, out: Node, ctx: OdfCtx, fmt: Fmt = {}): Promise<void> {
   for (const c of Array.from(el.childNodes)) {
+    if (!spend(ctx)) return;
     if (c.nodeType === 3) { out.appendChild(wrapFmt(document.createTextNode(c.textContent ?? ''), fmt)); continue; }
     if (c.nodeType !== 1) continue;
     const e = c as Element;
@@ -204,6 +221,7 @@ type BlockCtx = { list: string; depth: number };
 /** Block content (paragraphs, headings, lists, tables, sections) of `parent` into `out`. */
 export async function odfBlocks(parent: Element, out: Node, ctx: OdfCtx, b: BlockCtx): Promise<void> {
   for (const e of kids(parent)) {
+    if (!spend(ctx)) return;
     if (e.namespaceURI === NS.text) {
       switch (e.localName) {
         case 'h': {
@@ -258,34 +276,40 @@ async function para(e: Element, out: Node, ctx: OdfCtx, tag: string) {
 }
 
 async function odfTable(t: Element, out: Node, ctx: OdfCtx) {
+  if (ctx.tableDepth >= MAX_TABLE_DEPTH) { ctx.budget.cut = true; return; }
   const tbl = document.createElement('table');
   const thead = document.createElement('thead');
   const tbody = document.createElement('tbody');
   const rowsOf = async (parent: Element, into: HTMLElement, head: boolean) => {
     for (const r of kids(parent)) {
+      if (ctx.budget.cut) return;
       if (is(r, NS.table, 'table-header-rows')) { await rowsOf(r, thead, true); continue; }
       if (is(r, NS.table, 'table-rows') || is(r, NS.table, 'table-row-group')) { await rowsOf(r, into, head); continue; }
       if (!is(r, NS.table, 'table-row')) continue;
-      const repeat = Math.min(50, Math.max(1, Number(at(r, NS.table, 'number-rows-repeated') || 1)));
-      for (let k = 0; k < repeat; k++) {
-        const tr = document.createElement('tr');
-        for (const c of kids(r)) {
-          if (!is(c, NS.table, 'table-cell')) continue; // covered cells belong to a merged cell
-          const cell = document.createElement(head ? 'th' : 'td');
-          if (head) cell.setAttribute('scope', 'col');
-          const cs = Number(at(c, NS.table, 'number-columns-spanned') || 1), rs = Number(at(c, NS.table, 'number-rows-spanned') || 1);
-          if (cs > 1) cell.colSpan = Math.min(cs, 50);
-          if (rs > 1) cell.rowSpan = Math.min(rs, 500);
-          await odfBlocks(c, cell, ctx, { list: '', depth: 0 });
-          const rep = Math.min(50, Math.max(1, Number(at(c, NS.table, 'number-columns-repeated') || 1)));
-          tr.appendChild(cell);
-          for (let j = 1; j < rep; j++) tr.appendChild(cell.cloneNode(true));
-        }
-        into.appendChild(tr);
+      // Each source row is built once; its repeats are copies, and every copy is paid for.
+      const tr = document.createElement('tr');
+      for (const c of kids(r)) {
+        if (!is(c, NS.table, 'table-cell')) continue; // covered cells belong to a merged cell
+        if (!spend(ctx)) break;
+        const cell = document.createElement(head ? 'th' : 'td');
+        if (head) cell.setAttribute('scope', 'col');
+        const cs = Number(at(c, NS.table, 'number-columns-spanned') || 1), rs = Number(at(c, NS.table, 'number-rows-spanned') || 1);
+        if (cs > 1) cell.colSpan = Math.min(cs, 50);
+        if (rs > 1) cell.rowSpan = Math.min(rs, 500);
+        await odfBlocks(c, cell, ctx, { list: '', depth: 0 });
+        tr.appendChild(cell);
+        const rep = Math.min(50, Math.max(1, Number(at(c, NS.table, 'number-columns-repeated') || 1)));
+        const cost = size(cell);
+        for (let j = 1; j < rep && spend(ctx, cost); j++) tr.appendChild(cell.cloneNode(true));
       }
+      into.appendChild(tr);
+      const repeat = Math.min(50, Math.max(1, Number(at(r, NS.table, 'number-rows-repeated') || 1)));
+      const cost = size(tr);
+      for (let k = 1; k < repeat && spend(ctx, cost); k++) into.appendChild(tr.cloneNode(true));
     }
   };
-  await rowsOf(t, tbody, false);
+  ctx.tableDepth++;
+  try { await rowsOf(t, tbody, false); } finally { ctx.tableDepth--; }
   if (thead.childElementCount) tbl.appendChild(thead);
   tbl.appendChild(tbody);
   out.appendChild(tbl);

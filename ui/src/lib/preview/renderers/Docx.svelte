@@ -21,6 +21,7 @@
   let host = $state<HTMLElement>();
   let phase = $state<'loading' | 'ready' | 'empty'>('loading');
   let skipped = $state(false);
+  let cut = $state(false);
   let word = $state(true);
   let urls: string[] = [];
   let seq = 0;
@@ -39,7 +40,7 @@
 
   async function render(blob: Blob) {
     const n = ++seq;
-    phase = 'loading'; skipped = false;
+    phase = 'loading'; skipped = false; cut = false;
     drop();
     try {
       const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -51,6 +52,7 @@
       if (n !== seq) { for (const u of view.urls) URL.revokeObjectURL(u); return; }
       urls = view.urls;
       skipped = view.skipped;
+      cut = view.cut;
       const empty = !(view.node.textContent ?? '').trim() && !view.node.querySelector('img');
       phase = empty ? 'empty' : 'ready';
       await Promise.resolve();
@@ -68,6 +70,9 @@
   <div class="pad" role="status" aria-busy="true"><span class="sr-only">{t(kind === 'docx' ? 'docsb.docxLoading' : 'libf-preview-office.doc.loading')}</span><div class="skel h"></div><div class="skel"></div><div class="skel w70"></div></div>
 {:else if phase === 'empty'}
   <p class="muted msg">{t(word ? 'docsb.docxEmpty' : 'libf-preview-office.doc.empty')}</p>
+{/if}
+{#if cut && phase === 'ready'}
+  <p class="muted sm note" role="note"><Icon name="info" size={14} /> {t('libf-preview-office.doc.cut')}</p>
 {/if}
 {#if skipped && phase === 'ready'}
   <p class="muted sm note"><Icon name="info" size={14} /> {t(word ? 'docsb.docxSkipped' : 'libf-preview-office.doc.skipped')}</p>

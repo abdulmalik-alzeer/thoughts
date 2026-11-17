@@ -3,9 +3,9 @@ import { zip, type ZipEntry } from '../../content/zip';
 import { decodeCsv, guessSeparator, parseDelimited } from './csv';
 import { decodeXml, scanXml } from './xmlscan';
 import { CAPS, OfficeError, OfficeZip, resolvePart } from './safezip';
-import { cellRef, colIndex, colName, formatNumber, isDateFormat, openBook, readCellFormats, readCsv, readOdsContent, readSharedStrings, readWorksheet, serialDate } from './sheet';
+import { capMerges, cellRef, colIndex, colName, formatNumber, isDateFormat, openBook, readCellFormats, readCsv, readOdsContent, readSharedStrings, readWorksheet, serialDate } from './sheet';
 import { readOdp, readPptx } from './slides';
-import { odtToDom } from './odf';
+import { MAX_TABLE_DEPTH, PAGE_BUDGET, odtToDom } from './odf';
 import { parseRtf, rtfToDom } from './rtf';
 import { docxToDom } from '../../content/docxview';
 
@@ -378,6 +378,70 @@ describe('docx', () => {
   });
   it('a password-protected Word file says so', async () => {
     await expect(docxToDom(new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0, 0, 0, 0]))).rejects.toMatchObject({ problem: 'protected' });
+  });
+});
+
+describe('budgets against files built to blow up', () => {
+  it('odt: repeated rows and columns inside nested tables stop at the page budget', async () => {
+    // Each level: one row repeated 50 times holding one cell repeated 50 times, nested 4 deep:
+    // 2,500^4 cells if expanded in full.
+    let inner = '<text:p>x</text:p>';
+    for (let d = 0; d < 4; d++) inner = `<table:table><table:table-row table:number-rows-repeated="50"><table:table-cell table:number-columns-repeated="50">${inner}</table:table-cell></table:table-row></table:table>`;
+    const content = `<office:document-content ${ONS}><office:body><office:text>${inner}<text:p>after</text:p></office:text></office:body></office:document-content>`;
+    const v = await odtToDom(await bytesOf([{ name: 'content.xml', data: content }]));
+    const div = document.createElement('div');
+    div.appendChild(v.node);
+    expect(v.cut).toBe(true);
+    expect(div.getElementsByTagName('*').length).toBeLessThan(PAGE_BUDGET * 1.1);
+  });
+  it('odt: tables nested deeper than the limit are left out', async () => {
+    let inner = '<text:p>deep</text:p>';
+    for (let d = 0; d < 12; d++) inner = `<table:table><table:table-row><table:table-cell>${inner}</table:table-cell></table:table-row></table:table>`;
+    const v = await odtToDom(await bytesOf([{ name: 'content.xml', data: `<office:document-content ${ONS}><office:body><office:text>${inner}</office:text></office:body></office:document-content>` }]));
+    const div = document.createElement('div');
+    div.appendChild(v.node);
+    expect(div.querySelectorAll('table').length).toBe(MAX_TABLE_DEPTH);
+    expect(v.cut).toBe(true);
+  });
+  it('odt: a repeated row is built once and copied', async () => {
+    const content = `<office:document-content ${ONS}><office:body><office:text><table:table><table:table-row table:number-rows-repeated="3"><table:table-cell table:number-columns-repeated="2"><text:p>v</text:p></table:table-cell></table:table-row></table:table></office:text></office:body></office:document-content>`;
+    const v = await odtToDom(await bytesOf([{ name: 'content.xml', data: content }]));
+    const div = document.createElement('div');
+    div.appendChild(v.node);
+    expect(Array.from(div.querySelectorAll('tr')).map((tr) => tr.textContent)).toEqual(['vv', 'vv', 'vv']);
+    expect(v.cut).toBe(false);
+  });
+  it('xlsx: a cell naming row 1,048,576 is skipped, not grown into a million rows', () => {
+    const xml = '<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1048576"><v>2</v></c></row><row r="2"><c r="A2"><v>3</v></c></row></sheetData></worksheet>';
+    const s = readWorksheet(xml, 'S', { strings: [], formats: [], date1904: false });
+    expect(s.rows.length).toBe(2);
+    expect(s.rows[1][0]?.v).toBe('3');
+    expect(s.totalRows).toBe(1048576);
+    const huge = readWorksheet('<worksheet><sheetData><row r="99999999999"><c><v>1</v></c></row></sheetData></worksheet>', 'S', { strings: [], formats: [], date1904: false });
+    expect(huge.rows.length).toBe(0);
+    expect(huge.totalRows).toBeLessThanOrEqual(1048576);
+  });
+  it('cell references past Excel’s grid are not cells', () => {
+    expect(cellRef('A1048576')).toEqual({ r: 1048575, c: 0 });
+    expect(cellRef('A1048577')).toBeNull();
+    expect(cellRef('XFE1')).toBeNull();
+    expect(cellRef('A0')).toBeNull();
+  });
+  it('merged areas are kept only while they fit the shown grid', () => {
+    const many = Array.from({ length: 10000 }, () => ({ r: 0, c: 0, rs: 1000, cs: 60 }));
+    expect(capMerges(many, 60000).length).toBe(1);
+    const xml = `<worksheet><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><mergeCells>${'<mergeCell ref="A1:BH1000"/>'.repeat(500)}</mergeCells></worksheet>`;
+    expect(readWorksheet(xml, 'S', { strings: [], formats: [], date1904: false }).merges.length).toBe(1);
+  });
+  it('docx: tables nested deeper than the limit are left out', async () => {
+    const WNS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    let inner = '<w:p><w:r><w:t>deep</w:t></w:r></w:p>';
+    for (let d = 0; d < 12; d++) inner = `<w:tbl><w:tr><w:tc>${inner}</w:tc></w:tr></w:tbl>`;
+    const v = await docxToDom(await bytesOf([{ name: 'word/document.xml', data: `<w:document ${WNS}><w:body>${inner}</w:body></w:document>` }]));
+    const div = document.createElement('div');
+    div.appendChild(v.node);
+    expect(div.querySelectorAll('table').length).toBe(6);
+    expect(v.cut).toBe(true);
   });
 });
 

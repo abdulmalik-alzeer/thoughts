@@ -10,7 +10,10 @@ const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
 const A = 'http://schemas.openxmlformats.org/drawingml/2006/main';
 const VML = 'urn:schemas-microsoft-com:vml';
 
-export type DocxView = { node: DocumentFragment; urls: string[]; skipped: boolean };
+/** `cut`: tables nested deeper than MAX_TABLE_DEPTH were left out. */
+export type DocxView = { node: DocumentFragment; urls: string[]; skipped: boolean; cut: boolean };
+
+const MAX_TABLE_DEPTH = 6;
 
 const kids = (el: Element) => Array.from(el.children);
 const wAttr = (el: Element | null | undefined, name: string) => el?.getAttributeNS(W, name) ?? el?.getAttribute(`w:${name}`) ?? null;
@@ -100,6 +103,8 @@ export async function docxToDom(bytes: Uint8Array): Promise<DocxView> {
   const urls: string[] = [];
   const pictures = new Map<string, string>();
   let skipped = false;
+  let cut = false;
+  let tableDepth = 0;
   async function picture(rid: string, alt: string): Promise<Node> {
     const rel = rels.get(rid);
     const ext = rel?.target.split('.').pop()?.toLowerCase() ?? '';
@@ -248,6 +253,11 @@ export async function docxToDom(bytes: Uint8Array): Promise<DocxView> {
   }
 
   async function table(t: Element, out: Node) {
+    if (tableDepth >= MAX_TABLE_DEPTH) { cut = true; return; }
+    tableDepth++;
+    try { await tableAt(t, out); } finally { tableDepth--; }
+  }
+  async function tableAt(t: Element, out: Node) {
     const tbl = document.createElement('table');
     const pr = first(t, 'tblPr');
     if (pr && on(first(pr, 'bidiVisual'))) tbl.setAttribute('dir', 'rtl');
@@ -296,5 +306,5 @@ export async function docxToDom(bytes: Uint8Array): Promise<DocxView> {
   catch (e) { for (const u of urls) URL.revokeObjectURL(u); throw e; }
   if (z.has('word/footnotes.xml') && doc.getElementsByTagNameNS(W, 'footnoteReference').length) skipped = true;
   if (doc.getElementsByTagNameNS(W, 'txbxContent').length) skipped = true;
-  return { node: frag, urls, skipped };
+  return { node: frag, urls, skipped, cut };
 }

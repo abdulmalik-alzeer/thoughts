@@ -175,7 +175,7 @@ export function parseRtf(bytes: Uint8Array): { paras: RtfPara[]; skipped: boolea
 }
 
 /** An RTF file as a page (built with DOM calls and text nodes only). */
-export function rtfToDom(bytes: Uint8Array): { node: DocumentFragment; urls: string[]; skipped: boolean } {
+export function rtfToDom(bytes: Uint8Array): { node: DocumentFragment; urls: string[]; skipped: boolean; cut: boolean } {
   const { paras, skipped } = parseRtf(bytes);
   const frag = document.createDocumentFragment();
   for (const p of paras) {
@@ -194,5 +194,5 @@ export function rtfToDom(bytes: Uint8Array): { node: DocumentFragment; urls: str
     if (!el.textContent?.trim()) el.appendChild(document.createElement('br'));
     frag.appendChild(el);
   }
-  return { node: frag, urls: [], skipped };
+  return { node: frag, urls: [], skipped, cut: false };
 }

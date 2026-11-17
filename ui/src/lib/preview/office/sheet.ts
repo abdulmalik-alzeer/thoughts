@@ -48,9 +48,29 @@ export function colName(i: number): string {
   return s;
 }
 /** `B3` → { r: 2, c: 1 } (also `$B$3`). */
+/** Excel's own limits: a reference past them is not a real cell. */
+export const EXCEL_ROWS = 1_048_576;
+export const EXCEL_COLS = 16_384;
+
 export function cellRef(ref: string): { r: number; c: number } | null {
-  const m = /^\$?([A-Za-z]{1,3})\$?(\d+)$/.exec(ref.trim());
-  return m ? { r: +m[2] - 1, c: colIndex(m[1]) } : null;
+  const m = /^\$?([A-Za-z]{1,3})\$?(\d{1,7})$/.exec(ref.trim());
+  if (!m) return null;
+  const r = +m[2] - 1, c = colIndex(m[1]);
+  return r >= 0 && r < EXCEL_ROWS && c >= 0 && c < EXCEL_COLS ? { r, c } : null;
+}
+
+/** Merged areas kept while their cells together fit in `limit` (the shown grid): many large
+ *  overlapping merges can't make the table drawing loop over millions of cells. */
+export function capMerges(merges: Merge[], limit: number): Merge[] {
+  const out: Merge[] = [];
+  let used = 0;
+  for (const m of merges) {
+    if (m.rs < 1 || m.cs < 1) continue;
+    used += m.rs * m.cs;
+    if (used > limit) break;
+    out.push(m);
+  }
+  return out;
 }
 
 // ── Number formats (the common ones) ───────────────────────────────────────────────────────────
@@ -213,6 +233,7 @@ export function readWorksheet(xml: string, name: string, ctx: XlsxCtx, maxRows =
     },
   });
   const put = (rr: number, cc: number, v: Cell) => {
+    if (rr < 0 || rr >= maxRows) return;
     if (cc >= maxCols) { if (cc + 1 > totalCols) totalCols = cc + 1; return; }
     while (rows.length <= rr) rows.push([]);
     rows[rr][cc] = v;
@@ -224,13 +245,15 @@ export function readWorksheet(xml: string, name: string, ctx: XlsxCtx, maxRows =
     open(n, a, self) {
       if (n === 'row') {
         const rn = attr(a, 'r');
-        r = rn ? +rn - 1 : r + 1;
+        r = rn && Number.isFinite(+rn) && +rn >= 1 ? Math.min(+rn, EXCEL_ROWS) - 1 : r + 1;
         c = -1;
         if (r >= maxRows) { cutAt = r; return false; }
       } else if (n === 'c') {
         const ref = cellRef(attr(a, 'r') ?? '');
         c = ref ? ref.c : c + 1;
         if (ref) r = ref.r;
+        // A cell may name any row: one past the cap is skipped and the sheet marked as cut.
+        if (r >= maxRows) { if (r > cutAt) cutAt = r; cell = null; return; }
         cell = { t: attr(a, 't') ?? 'n', s: +(attr(a, 's') ?? 0), c };
         val = '';
         if (self) cell = null;
@@ -259,7 +282,7 @@ export function readWorksheet(xml: string, name: string, ctx: XlsxCtx, maxRows =
     const endSd = xml.indexOf('</sheetData>');
     const lastRow = xml.lastIndexOf('<row ', endSd < 0 ? xml.length : endSd);
     const m = lastRow >= 0 ? /\sr="(\d+)"/.exec(xml.slice(lastRow, lastRow + 300)) : null;
-    totalRows = Math.max(cutAt + 1, declared, m ? +m[1] : 0);
+    totalRows = Math.min(EXCEL_ROWS, Math.max(cutAt + 1, declared, m ? +m[1] : 0));
   }
   // Merged cells sit after the cells.
   const merges: Merge[] = [];
@@ -273,6 +296,7 @@ export function readWorksheet(xml: string, name: string, ctx: XlsxCtx, maxRows =
     },
     close(n) { if (n === 'mergeCells') return false; },
   }, mi);
+  merges.splice(0, merges.length, ...capMerges(merges, maxRows * maxCols));
   for (const m of merges) { if (m.r + m.rs - 1 > maxR) maxR = m.r + m.rs - 1; if (m.c + m.cs - 1 > maxC) maxC = m.c + m.cs - 1; }
   while (rows.length < maxR + 1) rows.push([]);
   const cols = maxC + 1;
@@ -385,7 +409,7 @@ export function readOdsContent(xml: string, maxRows = MAX_ROWS, maxCols = MAX_CO
         s.cols = cols;
         s.totalCols = Math.max(totalCols, cols);
         s.totalRows = Math.max(s.totalRows, s.rows.length);
-        s.merges = s.merges.filter((m) => m.r <= maxR);
+        s.merges = capMerges(s.merges.filter((m) => m.r <= maxR), maxRows * maxCols);
         out.push(s);
         sheet = null;
       }

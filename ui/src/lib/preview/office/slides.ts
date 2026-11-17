@@ -22,6 +22,8 @@ export type Deck = { slides: Slide[]; urls: string[] };
 
 /** Slides beyond this many are not read (a deck that long is not meant to be read here). */
 export const MAX_SLIDES = 500;
+/** Shapes grouped inside groups deeper than this are left out. */
+const MAX_DEPTH = 16;
 
 const SAFE_LINK = /^(https?:|mailto:)/i;
 const child = (el: Element | null | undefined, ns: string, name: string) => (el ? kids(el).find((c) => is(c, ns, name)) ?? null : null);
@@ -95,15 +97,17 @@ async function pptxSlide(z: OfficeZip, part: string, doc: Document, pics: Pictur
   const links = await relsOf(z, part);
   const slide: Slide = { title: '', blocks: [], notes: '', hidden: doc.documentElement.getAttribute('show') === '0', skipped: false };
   const titles: Block[] = [];
-  const walk = async (parent: Element) => {
+  const walk = async (parent: Element, depth = 0) => {
+    // Groups inside groups: past MAX_DEPTH the rest is left out (and the slide says so).
+    if (depth > MAX_DEPTH) { slide.skipped = true; return; }
     for (const el of kids(parent)) {
       if (is(el, MC, 'AlternateContent')) {
         const choice = child(el, MC, 'Choice') ?? child(el, MC, 'Fallback');
-        if (choice) await walk(choice);
+        if (choice) await walk(choice, depth + 1);
         continue;
       }
       if (el.namespaceURI !== P) continue;
-      if (el.localName === 'grpSp') { await walk(el); continue; }
+      if (el.localName === 'grpSp') { await walk(el, depth + 1); continue; }
       if (el.localName === 'sp') {
         const ph = child(child(child(el, P, 'nvSpPr'), P, 'nvPr'), P, 'ph');
         const type = ph ? ph.getAttribute('type') || 'body' : '';
@@ -224,7 +228,8 @@ export async function readOdp(bytes: Uint8Array): Promise<Deck> {
     for (const page of kids(presentation).filter((c) => is(c, ODF.draw, 'page')).slice(0, MAX_SLIDES)) {
       const slide: Slide = { title: '', blocks: [], notes: '', hidden: false, skipped: false };
       const titles: Block[] = [];
-      const walk = async (parent: Element) => {
+      const walk = async (parent: Element, depth = 0) => {
+        if (depth > MAX_DEPTH) { slide.skipped = true; return; }
         for (const el of kids(parent)) {
           if (is(el, ODF.pres, 'notes')) {
             const frame = Array.from(el.getElementsByTagNameNS(ODF.draw, 'frame')).find((f) => at(f, ODF.pres, 'class') === 'notes');
@@ -232,7 +237,7 @@ export async function readOdp(bytes: Uint8Array): Promise<Deck> {
             continue;
           }
           if (el.namespaceURI !== ODF.draw) continue;
-          if (el.localName === 'g') { await walk(el); continue; }
+          if (el.localName === 'g') { await walk(el, depth + 1); continue; }
           const cls = at(el, ODF.pres, 'class') || '';
           if (/^(page-number|date-time|footer|header)$/.test(cls)) continue;
           if (el.localName === 'frame') {
