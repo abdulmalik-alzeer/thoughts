@@ -1,5 +1,5 @@
 //! Git via the system `git` binary. Credentials are served through GIT_ASKPASS
-//! (this same executable in askpass mode, reading the OS keychain) or a
+//! (this same executable in askpass mode, asking the daemon, which reads the OS keychain) or a
 //! `git-credentials` file outside the library.
 //!
 //! Every library has a history. A library that is a repository itself (it has its own `.git`,
@@ -277,8 +277,14 @@ async fn run_with(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
     if store == "file" || file_fallback {
         c.args(["-c", &format!("credential.helper={}", credential_helper(&crate::paths::git_credentials_file()))]);
     }
+    // The prompt helper is answered only while this command runs, and only with this command's
+    // code (see `askpass`); the code is forgotten when `ticket` goes, however the command ends.
+    let ticket = crate::askpass::Ticket::new();
     if store != "file" {
-        if let Ok(exe) = crate::paths::app_exe() { c.env("GIT_ASKPASS", exe).env("THOUGHTS_ASKPASS", "1"); }
+        if let Ok(exe) = crate::paths::app_exe() {
+            c.env("GIT_ASKPASS", exe).env(crate::askpass::CODE_VAR, ticket.code())
+                .env(crate::askpass::PORT_VAR, crate::approvals::port().to_string());
+        }
     }
     // A comparison is always made by git itself, never handed to a program named in some
     // configuration. (Blanking `diff.external` instead does not work: git then tries to start a
@@ -298,6 +304,7 @@ async fn run_with(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(crate::tr::err("git.missing", &[])),
         Err(e) => return Err(e.into()),
     };
+    drop(ticket);
     Ok(out)
 }
 

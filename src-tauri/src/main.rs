@@ -3,7 +3,7 @@
 // One executable, three modes:
 //   * GUI (default)        — Tauri window; connects to (or spawns) the daemon
 //   * `--daemon`           — runs thoughtsd, detached, so sessions outlive the UI
-//   * THOUGHTS_ASKPASS=1   — git credential helper backed by the OS keychain
+//   * THOUGHTS_ASKPASS=<code> — git's password prompt, answered by the daemon for a git it runs
 // and one terminal command, `updates gh on|off|status`: the switch of the GitHub fallback for
 // updates (ghfeed.rs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

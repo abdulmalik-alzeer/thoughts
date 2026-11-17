@@ -283,7 +283,8 @@ pub fn router(state: Arc<AppState>) -> Router {
     // Added after the layers, so it is the one route that needs no token: a client uses it to check
     // who is answering on this port before it sends the token anywhere (see `hello.rs`).
     // The approvals endpoint the assistant program calls checks a token of its own, made for one run.
-    api.merge(crate::hello::routes()).merge(crate::approvals::mcp_routes()).with_state(state)
+    // git's password prompt helper shows the code of a git command the daemon is running (`askpass.rs`).
+    api.merge(crate::hello::routes()).merge(crate::approvals::mcp_routes()).merge(crate::askpass::routes()).with_state(state)
 }
 
 /// How long a webview may remember the answer to a CORS preflight.
