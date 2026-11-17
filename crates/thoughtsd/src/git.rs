@@ -784,6 +784,30 @@ async fn may_replay(state: &AppState, dir: &Path, theirs: &str) -> bool {
     matches!((all, merges, sent_nowhere), (Some(a), Some(0), Some(u)) if a == u)
 }
 
+/// Do this library's history and `theirs` share a beginning? Not when the library folder was copied
+/// here without its history (the one the app keeps stays on the other computer) and then given the
+/// location that computer sends to: each side then began on its own.
+async fn shares_start(state: &AppState, dir: &Path, theirs: &str) -> bool {
+    git(state, dir, &["merge-base", "HEAD", theirs]).await.is_ok()
+}
+
+/// Sync stops before anything is changed: the location `name` holds a library this one did not come from.
+fn unrelated_location(name: &str) -> anyhow::Error {
+    crate::log::warn(format!("sync: {name} holds a history that shares nothing with this library's; asking how to join them"));
+    crate::tr::err("sync.unrelated", &[("name", name)])
+}
+
+/// Does what the location `name` holds share a beginning with this library? `None` when that cannot
+/// be told: the location cannot be reached, it holds nothing yet, or nothing is recorded here yet.
+/// Talks to the network.
+pub async fn location_related(state: &AppState, dir: &Path, name: &str) -> Option<bool> {
+    let branch = current_branch(state, dir).await.ok()?;
+    head(state, dir).await?;
+    let _g = state.git_lock.lock().await;
+    let tip = fetch_tip(state, dir, name, &branch).await.ok()??;
+    Some(shares_start(state, dir, &tip).await)
+}
+
 /// Commit local changes, take in what the main location has (fetch, then rebase onto it — or merge
 /// it, when a rebase would rewrite changes a location already took or a clash already settled, see
 /// `may_replay`), send to all. A pull that conflicts is undone and reported as `CONFLICT::<file;file;…>` (see `resolve`).
@@ -829,6 +853,8 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
                     let _g = state.git_lock.lock().await;
                     // What was saved while the fetch ran is recorded first, like everything before it.
                     committed |= commit_all(state, dir, &subject::edit("your changes")).await?;
+                    // A library this one did not come from is never mixed in: the person chooses how (`join_unrelated`).
+                    if !shares_start(state, dir, &theirs).await { return Err(unrelated_location(primary)); }
                     // Changes recorded here are replayed on top of what arrived when nothing else has
                     // them yet; otherwise the two are combined, and what was recorded stays as it is.
                     let replay = may_replay(state, dir, &theirs).await;
@@ -967,6 +993,7 @@ pub async fn resolve_each(state: &AppState, dir: &Path, default: Option<&str>, c
             let _files = state.sync_files.write().await;
             let _g = state.git_lock.lock().await;
             committed |= commit_all(state, dir, &subject::edit("your changes")).await?;
+            if !shares_start(state, dir, &theirs).await { return Err(unrelated_location(&primary)); }
             if is_ancestor(state, dir, &theirs, "HEAD").await {
                 log.push(format!("{primary}: nothing new"));
             } else {
@@ -1026,6 +1053,112 @@ pub async fn resolve_each(state: &AppState, dir: &Path, default: Option<&str>, c
     crate::log::info(format!("sync: {}", log.join(", ")));
     let locations = sync_outcome(dir, &sent)?;
     Ok(json!({"committed": committed, "backup": backup, "strategy": default, "settled": settled, "log": log, "locations": locations, "lastBackup": last_backup(dir)}))
+}
+
+/// How a library can be joined, once, with a main location holding one it did not come from (see
+/// `join_unrelated`).
+pub const JOINS: &[&str] = &["combine", "theirs"];
+
+/// Join this library, once, with what its main location holds when the two did not come from one
+/// another — typically the library folder was copied to this computer without its history and then
+/// given the location the other computer sends to. `sync` never mixes the two (`unrelated`); the
+/// person chooses `how`, and this computer's state is first kept as a `backup/<stamp>` branch:
+/// - `combine` (the safe default): every document here stays, the location's are added; a document
+///   both have with different contents keeps this computer's version in place and the location's
+///   beside it (`other_copy_name`). Both histories are kept.
+/// - `theirs`: the location's history becomes the library's; the folder's documents are recorded on
+///   top of it as the person's changes (where they differ, the location's version stays in the
+///   history), and documents only the location has are put in the folder. Nothing is removed.
+///
+/// Then the result is sent to every location. When the two turn out to share a beginning after all,
+/// or the location holds nothing yet, this is an ordinary `sync`.
+pub async fn join_unrelated(state: &AppState, dir: &Path, how: &str) -> anyhow::Result<Value> {
+    if !JOINS.contains(&how) { return Err(crate::tr::err("git.strategy", &[])); }
+    let (branch, mut committed, rs, primary) = {
+        let _files = state.sync_files.write().await;
+        let _g = state.git_lock.lock().await;
+        crate::trust::require_git(dir)?;
+        let branch = syncable_branch(state, dir).await?;
+        let committed = commit_all(state, dir, &subject::edit("your changes")).await?;
+        let rs = remotes(state, dir).await;
+        let primary = main_of(&rs).ok_or_else(|| crate::tr::err("git.no_remote", &[]))?;
+        if head(state, dir).await.is_none() { return Err(crate::tr::err("history.empty", &[])); }
+        (branch, committed, rs, primary)
+    };
+    let (url, kind) = location_of(&rs, &primary);
+    if kind == "folder" && !folder_present(url).await {
+        return Err(not_received(dir, &primary, kind, anyhow::anyhow!("not a git repository: the drive is not connected")));
+    }
+    let fetched = { let _g = state.git_lock.lock().await; fetch_tip(state, dir, &primary, &branch).await };
+    let theirs = match fetched {
+        Ok(Some(t)) => t,
+        Ok(None) => return sync(state, dir).await,
+        Err(e) => return Err(not_received(dir, &primary, kind, e)),
+    };
+    let mut log = vec![];
+    let mut copies: Vec<String> = vec![];
+    let backup = {
+        let _files = state.sync_files.write().await;
+        let _g = state.git_lock.lock().await;
+        committed |= commit_all(state, dir, &subject::edit("your changes")).await?;
+        if shares_start(state, dir, &theirs).await { None } else {
+            let b = make_backup(state, dir).await?;
+            crate::log::info(format!("sync: joining an unrelated history from {primary} ({how}); local state kept as {b}"));
+            log.push(format!("backup {b}"));
+            let joined = if how == "combine" { join_both(state, dir, &theirs, &mut copies).await } else { start_from(state, dir, &theirs, &b).await };
+            if let Err(e) = joined {
+                crate::log::warn(format!("sync: joining {primary} failed: {e:#}"));
+                return Err(crate::tr::err_detail("history.combine_failed", &[], format!("{e:#}")));
+            }
+            log.push(format!("joined {primary} ({how})"));
+            Some(b)
+        }
+    };
+    // Already one library: nothing to join, an ordinary sync (with nothing held here).
+    let Some(backup) = backup else { return sync(state, dir).await };
+    let sent = { let _g = state.git_lock.lock().await; push_all(state, dir, &rs, &branch, &mut log).await };
+    crate::log::info(format!("sync: {}", log.join(", ")));
+    let locations = sync_outcome(dir, &sent)?;
+    Ok(json!({"committed": committed, "received": true, "backup": backup, "how": how, "copies": copies, "log": log, "locations": locations, "lastBackup": last_backup(dir)}))
+}
+
+/// `join_unrelated`'s `combine`: the two histories merged; every document both have with different
+/// contents is kept twice (`settle` with `both`). Anything that fails is undone.
+async fn join_both(state: &AppState, dir: &Path, theirs: &str, copies: &mut Vec<String>) -> anyhow::Result<()> {
+    let msg = subject::combined();
+    let Err(e) = git_ident(state, dir, &["merge", "--allow-unrelated-histories", "--no-edit", "-m", &msg, theirs]).await else { return Ok(()) };
+    let files = unmerged(state, dir).await;
+    let done = async {
+        if files.is_empty() { return Err(e); }
+        for f in &files {
+            if let Some(copy) = settle(state, dir, f, "both").await? { copies.push(copy); }
+        }
+        git(state, dir, &["add", "-A"]).await?;
+        git_ident(state, dir, &["commit", "-q", "-m", &msg]).await.map(|_| ())
+    }.await;
+    if done.is_err() { let _ = git(state, dir, &["merge", "--abort"]).await; }
+    done
+}
+
+/// `join_unrelated`'s `theirs`: the library's history becomes `theirs`, the folder is left as it is
+/// apart from the documents only `theirs` has, which are put in it, and what differs is recorded as
+/// the person's changes. On failure the history goes back to `backup` (the folder keeps whatever
+/// documents were already put in: nothing is ever taken out).
+async fn start_from(state: &AppState, dir: &Path, theirs: &str, backup: &str) -> anyhow::Result<()> {
+    let done = async {
+        // The history and its index move to theirs; no file in the folder is touched.
+        git(state, dir, &["reset", "-q", theirs]).await?;
+        let missing = git(state, dir, &["ls-files", "-z", "--deleted"]).await?;
+        let specs: Vec<String> = missing.split('\0').filter(|f| !f.is_empty()).map(|f| format!(":(top,literal){f}")).collect();
+        for chunk in specs.chunks(200) {
+            let mut args = vec!["checkout", "-q", "--"];
+            args.extend(chunk.iter().map(String::as_str));
+            git(state, dir, &args).await?;
+        }
+        commit_all(state, dir, &subject::edit("your changes")).await.map(|_| ())
+    }.await;
+    if done.is_err() { let _ = git(state, dir, &["reset", "-q", backup]).await; }
+    done
 }
 
 /// The blob of each side of clashing document `f` in a stopped merge: `[base, mine, theirs]`, None
@@ -2464,6 +2597,95 @@ mod tests {
         write(&lib, "notes.md", "third\n");
         sync(&st, &lib).await.unwrap();
         assert_eq!(sh(&other, &["rev-parse", "main"]), sh(&lib, &["rev-parse", "HEAD"]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The library folder was copied to this computer without its history (the history the app
+    /// keeps stays behind), and given the online location the other computer already sends to:
+    /// `(root, lib, remote, laptop)`. Both have notes.md (different), same.md (the same), and a
+    /// document of their own.
+    fn unrelated() -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let root = tmp("unrelated");
+        let (remote, laptop, lib) = (root.join("remote.git"), root.join("laptop"), root.join("Notes"));
+        std::fs::create_dir_all(&remote).unwrap();
+        sh(&remote, &["init", "-q", "--bare", "-b", "main"]);
+        sh(&root, &["clone", "-q", remote.to_str().unwrap(), "laptop"]);
+        write(&laptop, "notes.md", "from the laptop\n");
+        write(&laptop, "same.md", "same\n");
+        write(&laptop, "only-there.md", "laptop only\n");
+        sh(&laptop, &["add", "-A"]);
+        sh(&laptop, &["commit", "-q", "-m", "laptop"]);
+        sh(&laptop, &["push", "-q", "origin", "HEAD:main"]);
+        std::fs::create_dir_all(&lib).unwrap();
+        sh(&lib, &["init", "-q", "-b", "main"]);
+        for (k, v) in [("user.name", "Tester"), ("user.email", "tester@example.com")] { sh(&lib, &["config", k, v]); }
+        write(&lib, "notes.md", "edited here\n");
+        write(&lib, "same.md", "same\n");
+        write(&lib, "only-here.md", "here only\n");
+        sh(&lib, &["add", "-A"]);
+        sh(&lib, &["commit", "-q", "-m", "start"]);
+        sh(&lib, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        (root, lib, remote, laptop)
+    }
+
+    #[tokio::test]
+    async fn a_location_holding_a_library_this_one_did_not_come_from_is_never_mixed_in_without_asking() {
+        let (root, lib, remote, laptop) = unrelated();
+        let st = AppState::for_test();
+        let (here, there) = (sh(&lib, &["rev-parse", "HEAD"]), sh(&remote, &["rev-parse", "main"]));
+        assert_eq!(location_related(&st, &lib, "origin").await, Some(false));
+        // Sync and settling a clash both ask first, and nothing is changed anywhere.
+        for e in [sync(&st, &lib).await.unwrap_err(), resolve(&st, &lib, "mine").await.unwrap_err()] {
+            let shown = crate::tr::classify_in(false, &e);
+            assert_eq!(shown.code, "unrelated", "{}", shown.message);
+            assert!(shown.message.contains("\"origin\""), "{}", shown.message);
+        }
+        assert_eq!((sh(&lib, &["rev-parse", "HEAD"]), sh(&remote, &["rev-parse", "main"])), (here.clone(), there.clone()));
+        assert_eq!((read(&lib, "notes.md").as_str(), sh(&lib, &["status", "--porcelain"]).as_str()), ("edited here\n", ""));
+        assert!(!lib.join("only-there.md").exists());
+        assert!(join_unrelated(&st, &lib, "everything").await.is_err());
+        // The safe choice: every document from both, this computer's kept first.
+        let v = join_unrelated(&st, &lib, "combine").await.unwrap();
+        assert_eq!(sh(&lib, &["rev-parse", v["backup"].as_str().unwrap()]), here);
+        assert_eq!(read(&lib, "notes.md"), "edited here\n");
+        assert_eq!(read(&lib, "notes (other device).md"), "from the laptop\n");
+        assert_eq!(v["copies"], json!(["notes (other device).md"]));
+        assert_eq!((read(&lib, "same.md").as_str(), read(&lib, "only-here.md").as_str(), read(&lib, "only-there.md").as_str()), ("same\n", "here only\n", "laptop only\n"));
+        assert!(!lib.join("same (other device).md").exists(), "a document that is the same on both is kept once");
+        sh(&lib, &["merge-base", "--is-ancestor", &here, "HEAD"]);
+        sh(&lib, &["merge-base", "--is-ancestor", &there, "HEAD"]);
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&lib, &["rev-parse", "HEAD"]));
+        assert_eq!(sh(&lib, &["status", "--porcelain"]), "");
+        assert_eq!(location_related(&st, &lib, "origin").await, Some(true));
+        // From now on both computers sync as usual.
+        sh(&laptop, &["pull", "-q", "--ff-only", "origin", "main"]);
+        assert_eq!(read(&laptop, "only-here.md"), "here only\n");
+        write(&lib, "same.md", "changed here later\n");
+        sync(&st, &lib).await.unwrap();
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&lib, &["rev-parse", "HEAD"]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_library_can_start_from_its_online_copy_and_keep_every_document_here() {
+        let (root, lib, remote, laptop) = unrelated();
+        let st = AppState::for_test();
+        let (here, there) = (sh(&lib, &["rev-parse", "HEAD"]), sh(&remote, &["rev-parse", "main"]));
+        let v = join_unrelated(&st, &lib, "theirs").await.unwrap();
+        // This computer's state is kept; the online copy's history is the library's from now on.
+        assert_eq!(sh(&lib, &["rev-parse", v["backup"].as_str().unwrap()]), here);
+        assert_eq!(sh(&lib, &["rev-parse", "HEAD~1"]), there);
+        assert_eq!(sh(&lib, &["log", "-1", "--format=%s"]), "edit: your changes");
+        // Where they differ this computer's version is kept (the other stays in the history), and
+        // nothing is removed: the documents only the online copy had are put in the folder.
+        assert_eq!((read(&lib, "notes.md").as_str(), read(&lib, "only-here.md").as_str(), read(&lib, "only-there.md").as_str()), ("edited here\n", "here only\n", "laptop only\n"));
+        assert_eq!(sh(&lib, &["show", &format!("{there}:notes.md")]), "from the laptop");
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&lib, &["rev-parse", "HEAD"]));
+        assert_eq!(sh(&lib, &["status", "--porcelain"]), "");
+        sh(&laptop, &["pull", "-q", "--ff-only", "origin", "main"]);
+        assert_eq!(read(&laptop, "notes.md"), "edited here\n");
+        // Asked again once they are one library: an ordinary sync.
+        assert!(join_unrelated(&st, &lib, "combine").await.unwrap()["backup"].is_null());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -240,6 +240,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/git", get(git_status))
         .route("/api/git/sync", post(git_sync))
         .route("/api/git/resolve", post(git_resolve))
+        .route("/api/git/join", post(git_join))
         .route("/api/git/conflict", get(git_conflict))
         .route("/api/git/remotes", post(remote_add))
         .route("/api/git/remotes/:name", delete(remote_remove))
@@ -3101,7 +3102,24 @@ async fn remote_add(State(st): S, Json(r): Json<Remote>) -> R {
     if !r.token.is_empty() {
         if let Some(h) = host { git::save_credential(&st, &h, &r.username, &r.token).await?; }
     }
-    ok()
+    // A main location that already holds a library this one did not come from: the window asks how
+    // to join them (`POST /api/git/join`) before anything is synced. Not known when it cannot be reached.
+    let main = git::remotes(&st, &l).await.iter().any(|x| x["name"] == name.as_str() && x["main"] == true);
+    let unrelated = main && git::location_related(&st, &l, &name).await == Some(false);
+    Ok(Json(json!({"ok": true, "unrelated": unrelated})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct Join { how: String }
+/// `POST /api/git/join {how: combine|theirs}`: join the library, once, with a main location that holds
+/// one it did not come from (a sync answers `unrelated` for it), then send it everywhere
+/// (`git::join_unrelated`) → as a sync, plus `{backup, how, copies}`.
+async fn git_join(State(st): S, Json(r): Json<Join>) -> R {
+    let (l, _busy) = sync_guard(&st).await?;
+    let v = git::join_unrelated(&st, &l, &r.how).await;
+    st.emit(json!({"type": "library.changed"}));
+    Ok(Json(v?))
 }
 
 /// The hosts the online locations of the library in `dir` sign in to, other than `except`.
@@ -4972,7 +4990,7 @@ mod tests {
         assert_eq!(t::sh(&vault, &["status", "--porcelain"]).lines().count(), 2, "the vault has no commits and nothing staged");
         assert!(t::sh(&vault, &["status", "--porcelain"]).lines().all(|l| l.starts_with("??")));
         // An online location added later goes to that same history.
-        remote_add(State(st.clone()), Json(Remote { name: String::new(), url: "https://example.com/me/notes.git".into(), ..Default::default() })).await.unwrap();
+        remote_add(State(st.clone()), Json(Remote { name: String::new(), url: "https://127.0.0.1:9/me/notes.git".into(), ..Default::default() })).await.unwrap();
         assert_eq!(git::remotes(&st, &lib).await[0]["name"], "origin");
         assert!(!lib.join(".git").exists());
         forget(&lib);

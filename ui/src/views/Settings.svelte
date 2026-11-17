@@ -12,6 +12,7 @@
   import { ago, fmtMoney, fmtNum, lang, t, tn } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { backup, driveName, lastBackupText, refreshBackup } from '../lib/backup.svelte';
+  import { settleJoin } from '../lib/join.svelte';
   import { cloudFor } from '../lib/cloud.svelte';
   import ProviderPresets from './ProviderPresets.svelte';
   import CodexSettings from './CodexSettings.svelte';
@@ -552,12 +553,17 @@
     if (!validRemote) return;
     const ok = await confirmDialog({ title: t('set.uploadTitle'), body: t('set.uploadBody'), list: [remote.url.trim()], confirmLabel: t('set.addRemote') });
     if (!ok) return;
+    let unrelated = '';
     await run('remote', async () => {
-      await post('/git/remotes', { ...remote, name: remote.name.trim() || freeName(), url: remote.url.trim() });
+      const name = remote.name.trim() || freeName();
+      const added = await post('/git/remotes', { ...remote, name, url: remote.url.trim() });
+      if (added?.unrelated) unrelated = name;
       remote = { name: '', url: '', username: '', token: '' };
       await loadGit();
       await refreshBackup();
     });
+    // It already holds a copy of the library this one was not made from: choose how to join them now.
+    if (unrelated) { toast(t('data-sync.join.added'), { key: 'sync' }); await settleJoin(unrelated); await loadGit(); }
   }
 
   /** A short name for a location the user did not name: "origin" for the first, then "backup", "backup-2"… */

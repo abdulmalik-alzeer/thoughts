@@ -53,6 +53,8 @@
   import Dialogs from './lib/Dialogs.svelte';
   import SyncConflict from './lib/SyncConflict.svelte';
   import { settleClash } from './lib/conflict.svelte';
+  import SyncJoin from './lib/SyncJoin.svelte';
+  import { settleJoin } from './lib/join.svelte';
   import Toasts from './lib/Toasts.svelte';
   import VoiceBar from './lib/voice/VoiceBar.svelte';
   import RecentMessages from './lib/RecentMessages.svelte';
@@ -394,6 +396,8 @@
     } catch (e: any) {
       const m = /CONFLICT::(.*)/s.exec(e.message || '');
       if (m) await resolveConflict(m[1].split(';').map((f) => f.trim()).filter(Boolean));
+      // The backup location holds a copy this one was not made from: the person chooses how to join them.
+      else if (e?.code === 'unrelated') await settleJoin();
       else syncFailed(e, t('shell.syncFailed'));
     } finally { syncing = false; }
   }
@@ -709,6 +713,7 @@
   onmouseover={tipFor} onfocusin={tipFor} onfocusout={() => (linkTip = '')} />
 <Dialogs />
 <SyncConflict />
+<SyncJoin />
 
 {#if app.error}
   <div class="center">

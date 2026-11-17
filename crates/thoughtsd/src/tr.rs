@@ -321,6 +321,10 @@ const TABLE: &[Entry] = &[
     e("sync.no_location", "no_location", 409, "",
         "Nothing was backed up: no backup location has been added for this library yet. Add an online location or a drive in Settings.",
         "لم يُنسخ شيء احتياطياً: لم يُضف بعدُ أي موقع للنسخ الاحتياطي لهذه المكتبة. أضف موقعاً على الإنترنت أو قرصاً من الإعدادات."),
+    // A main location holding a library this one did not come from (see `git::join_unrelated`).
+    e("sync.unrelated", "unrelated", 409, "",
+        "\"{name}\" already holds a copy of your library that the copy on this computer was not made from (for example, the library folder was copied here from another computer). The two need to be put together once before they can sync. Nothing has been changed. Choose Sync to decide how.",
+        "يحتوي «{name}» على نسخة من مكتبتك لم تُنسخ منها النسخة التي على هذا الجهاز (كأن يكون مجلد المكتبة قد نُسخ إلى هنا من جهاز آخر). يلزم جمع النسختين مرة واحدة قبل أن تتمكّنا من المزامنة. لم يتغيّر شيء. اضغط «مزامنة» لتختار طريقة الجمع."),
     // The pieces of a sync that did not reach every location (see `git::sync_outcome`).
     e("sync.sent_to", "sync_failed", 409, "",
         "Your library was sent to {names}.",
