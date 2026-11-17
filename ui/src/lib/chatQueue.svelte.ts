@@ -6,7 +6,9 @@
 // The files' bytes live only in memory. What else was waiting is also kept in the browser's
 // storage, so that a message that never went (the app was closed first) is put back into that
 // chat's message box the next time the app starts, rather than lost.
-import { ApiError, on, post } from './api';
+import { ApiError, api, on, post } from './api';
+import type { Chat } from './types';
+import { readyForQueued } from '../views/chat/merge';
 import { failed } from './errors';
 import { t } from './i18n';
 
@@ -87,10 +89,23 @@ async function dispatch(id: string) {
 }
 
 on((e) => {
+  // Back after the connection dropped: an answer may have ended unseen (its chat.done was missed).
+  if (e?.type === 'resync') { afterReconnect(); return; }
   if (e?.type !== 'chat.done' || typeof e.chatId !== 'string' || !waiting[e.chatId]) return;
   // A finished answer sends what waits; one that was stopped or failed only when that was asked for.
   if (e.ok || sendNow.has(e.chatId)) dispatch(e.chatId);
 });
+
+/** Ask the service how each chat with a waiting message stands, and send it where the answer has
+ *  finished meanwhile (by the same rule as a live end). */
+function afterReconnect() {
+  for (const id of Object.keys(waiting)) {
+    if (sending.has(id)) continue;
+    api<Chat>(`/chats/${id}`).then((c) => {
+      if (waiting[id] && readyForQueued(c, sendNow.has(id))) dispatch(id);
+    }).catch(() => { /* gone or unreachable: it keeps waiting, and the chat offers to send it */ });
+  }
+}
 
 // At start-up: a message left waiting when the app was closed goes back into its chat's message box.
 try {
