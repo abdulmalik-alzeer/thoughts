@@ -36,6 +36,7 @@ A long-lived library of ideas, work and notes, kept as plain text files and deve
 ├── meetings/            ← meeting notes that belong to no single item
 ├── inbox/               ← quick notes saved in the app, waiting to be filed
 ├── me/                  ← personal profile, if the user chose it
+├── people/              ← the people the user writes to, if they keep a People list
 └── <area>/              ← broad groups (ideas/, clients/, matters/, classes/…), created when first needed
     └── <item>/
         ├── README.md    ← front page: status, summary, current state, file list
@@ -138,6 +139,8 @@ INDEX is rebuilt from READMEs; when they disagree, trust the READMEs and reindex
 **Links.** Plain relative links (`[fees](notes/fees.md)`; across items `[x](../../area/item/README.md)`).
 
 **Personal profile (`me/`).** Not an item and not in INDEX — general facts about the user so sessions never ask twice. `me/README.md` is the front page with a file list. Add new lasting personal facts at wrap, or at once when asked. Client or student information never goes here.
+
+**People list (`people/`).** Not an item and not in INDEX — the people the user writes to, so drafts to them come out right. `people/README.md` is the front page, one line per person: `- [Name](slug.md) · role, organisation · email`. Each person has `people/<slug>.md` (lowercase Latin letters, digits and dashes) with the details `name, email, role, organisation, relationship, language, tone, updated, summary` and the user's notes under a `# Name` heading. The app edits these files too: keep the format exact, change a person's file in place, never rename one, and add someone only when the user agrees.
 
 **Spin-offs.** Something that deserves its own exploration becomes a separate item beside the original (own folder, own INDEX line), linked in both `## Related` sections. Never put one item's folder inside another's.
 
