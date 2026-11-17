@@ -1299,6 +1299,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
         }
         setup_note = crate::import::setup_note_adopted(files);
     }
+    let history_began = began.is_ok();
     if !s.sync_enabled() { crate::log::ok_or_warn("onboarding: the history of changes could not be started", began); } else {
         began?;
         if !remote_url.is_empty() {
@@ -1349,6 +1350,12 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     let id = chat.id.clone();
     st.chats.insert(chat).await;
     if waiting {
+        // The library is used before any assistant run records it: its starting point is recorded
+        // now, so the user's first own change is an entry of its own (and can be undone) instead of
+        // being folded into the starting point.
+        if s.history_enabled() && history_began {
+            crate::log::ok_or_warn("onboarding: could not record the new library", git::start_history(&st, &path).await);
+        }
         crate::log::info("onboarding: the library is ready; its setup waits until an assistant is connected");
         return Ok(Json(json!({"ok": true, "setupChatId": id, "waiting": true})));
     }
@@ -3923,6 +3930,12 @@ mod tests {
         // The app is set up and the library usable; nothing has been asked of an assistant yet.
         assert!(st.settings.read().await.onboarded && lib.join("CLAUDE.md").is_file() && lib.join("INDEX.md").is_file());
         assert!(library::awaits_setup(&lib) && prompts.lock().unwrap().is_empty());
+        // Its starting point is already in the history, so the user's first own change is an entry
+        // of its own instead of being folded into the start.
+        let start = git::head(&st, &lib).await.expect("the starting point is recorded at once");
+        t::write(&lib, "Garden.md", "# Garden\n");
+        crate::claude::record_library(&st, &lib, &git::subject::edit("your changes"), true).await;
+        assert_ne!(git::head(&st, &lib).await.unwrap(), start, "the first own change is an entry of its own");
         assert_eq!(t::phase(&st, &chat).await, "waiting");
         let meta = st.chats.meta(&chat).await.unwrap();
         assert_eq!(meta.summary()["phase"], "waiting");
