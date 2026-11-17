@@ -66,11 +66,13 @@
   const OP_FAIL: Record<string, string> = { add: 'ui.todo.addFailed', toggle: 'ui.todo.toggleFailed', edit: 'ui.todo.editFailed', delete: 'ui.todo.deleteFailed',
     restore: 'ui.todo.undoFailed', move: 'todob.moveFailed', reorder: 'todob.moveFailed', archive: 'todob.moveFailed' };
   /** One change to the list → the service's answer, or null when it failed (already reported). */
-  async function op(name: string, body: any, kept?: string): Promise<any | null> {
-    let res: any = null;
+  /** `retry` runs after the reload when it failed for another reason than the todo having changed. */
+  async function op(name: string, body: any, kept?: string, retry?: () => void): Promise<any | null> {
+    let res: any = null, again = false;
     try { res = (await post(`/todos/${name}`, { file: list.file, ...body })) ?? { ok: true }; }
-    catch (e) { todoFailed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e, kept); }
+    catch (e) { again = !todoFailed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e, kept); }
     await reload();
+    if (again) retry?.();
     return res;
   }
   const ref = (it: any) => ({ line: it.line, text: it.text });
@@ -120,7 +122,14 @@
     const title = editText.trim();
     editing = null;
     if (!open || !title || title === it.title) return;
-    await op('edit', { line: open.line, text: open.text, new_text: compose(title, it.every, it.due) }, title);
+    await op('edit', { line: open.line, text: open.text, new_text: compose(title, it.every, it.due) }, title, async () => {
+      // Not saved: the box opens again on the same todo with what was typed, to try again.
+      const back = reanchor(open, [{ file: list.file, items }]);
+      if (!back) { editLost(title); return; }
+      editing = back; editText = title; editFrom = it.title;
+      await tick();
+      document.getElementById('itd-edit')?.focus();
+    });
   }
   async function setDue(it: any, due: string | null) {
     const r = held(dueFor, it);

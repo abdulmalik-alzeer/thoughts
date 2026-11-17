@@ -117,11 +117,14 @@
 
   const OP_FAIL: Record<string, string> = { add: 'ui.todo.addFailed', toggle: 'ui.todo.toggleFailed', edit: 'ui.todo.editFailed', delete: 'ui.todo.deleteFailed',
     restore: 'ui.todo.undoFailed', move: 'todob.moveFailed', reorder: 'todob.moveFailed', archive: 'todob.moveFailed' };
-  /** Run one change on a list → the service's answer, or null when it failed (already reported). */
-  async function op(name: string, body: any, kept?: string): Promise<any | null> {
-    let res: any = null;
-    try { res = (await post(`/todos/${name}`, body)) ?? { ok: true }; } catch (e) { todoFailed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e, kept); }
+  /** Run one change on a list → the service's answer, or null when it failed (already reported).
+   *  `retry` runs after the reload when it failed for another reason than the todo having changed
+   *  (the service busy or out of reach), so an edit's box can open again with the typed text. */
+  async function op(name: string, body: any, kept?: string, retry?: () => void): Promise<any | null> {
+    let res: any = null, again = false;
+    try { res = (await post(`/todos/${name}`, body)) ?? { ok: true }; } catch (e) { again = !todoFailed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e, kept); }
     await load();
+    if (again) retry?.();
     return res;
   }
 
@@ -206,7 +209,14 @@
     const title = editText.trim();
     editing = null;
     if (!at || !title || title === it.title) return;
-    await op('edit', { ...at, new_text: compose(title, it.every, it.due) }, title);
+    await op('edit', { ...at, new_text: compose(title, it.every, it.due) }, title, async () => {
+      // Not saved: the box opens again on the same todo with what was typed, to try again.
+      const back = reanchor(at, lists);
+      if (!back) { editLost(title); return; }
+      editing = back; editText = title; editFrom = it.title;
+      await tick();
+      document.getElementById('todo-edit')?.focus();
+    });
   }
   async function setDue(l: any, it: any, due: string | null) {
     const at = held(dueFor, l, it);

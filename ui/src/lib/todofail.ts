@@ -8,12 +8,14 @@ import { t } from './i18n';
 /** The service's "this todo changed in the meantime" refusal (`stale.todo`). */
 export const isStaleTodo = (e: unknown) => errCode(e).toLowerCase() === 'stale';
 
-export function todoFailed(headline: string, e: unknown, kept?: string): void {
+/** Report it; true when it was the "changed meanwhile" refusal (the typed text is then in the toast). */
+export function todoFailed(headline: string, e: unknown, kept?: string): boolean {
   if (isStaleTodo(e)) {
     toast(t(kept ? 'ui-todos.staleKept' : 'ui-todos.stale'), { kind: 'error', key: 'todo-stale', detail: kept || undefined });
-    return;
+    return true;
   }
   failed(headline, e);
+  return false;
 }
 
 /** An open edit box closed because its todo changed or disappeared elsewhere: keep the typed text visible. */
