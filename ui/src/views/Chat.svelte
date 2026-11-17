@@ -45,6 +45,8 @@
   import LibraryGone from '../lib/LibraryGone.svelte';
   import CustomiseStart from './CustomiseStart.svelte';
   import { confirmDeleteChat } from './chat/deleteChat';
+  import { Fetches, applyEvent, applyPartial, type Effects, type Stream } from './chat/merge';
+  import type { Chat, DaemonEvent } from '../lib/types';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
   // "Continue chatting" (lib/layer.ts) lands here: the cursor goes into the message box.
@@ -126,25 +128,31 @@
   }
 
   // ---- the answer being written ----
-  // The service numbers every piece of text within a run and keeps the pieces of the message in
-  // progress, so this view can join in the middle of an answer: `load` brings what there is so
-  // far, and events that arrive while it is fetching are kept and gone through again afterwards.
+  // How events and fetched copies are merged: chat/merge.ts. `load` brings what there is so far,
+  // and events that arrive while it is fetching are kept and gone through again afterwards.
   let streamSeq = 0;          // number of the last piece in `streaming`
-  let loads = 0;              // fetches of this chat on their way
-  let heldEvents: any[] = []; // what arrived meanwhile
+  let thinkSeq = 0;           // number of the last piece in `thinking`
+  const fetches = new Fetches();
+  let shownOnce = false;      // a fetched copy has been on screen
 
-  function applyPartial(p: any) {
-    if (!chat.running) { streaming = ''; thinking = ''; streamSeq = 0; return; }
-    if (!p) return; // an older service does not send it: keep what is on screen
-    streaming = String(p.text ?? ''); streamSeq = Number(p.seq) || 0; thinking = String(p.thinking ?? '');
+  /** Run a merge rule on the answer being written, then show its result. */
+  function withStream(f: (s: Stream) => void) {
+    const s: Stream = { text: streaming, seq: streamSeq, thinking, thinkSeq };
+    f(s);
+    streaming = s.text; streamSeq = s.seq; thinking = s.thinking; thinkSeq = s.thinkSeq;
   }
 
   async function load(initial = false) {
     if (initial) loadState = 'loading';
-    loads++;
+    const ticket = fetches.begin();
     try {
-      const c = await api(`/chats/${id}`);
-      c.options ??= {};
+      const c = await api<Chat>(`/chats/${id}`);
+      // A copy older than the one on screen (fetches overlap; replies come back in any order).
+      if (!fetches.accept(ticket)) return;
+      // The first copy shown counts as the opening one, even when a later fetch overtook the first.
+      const first = initial || !shownOnce;
+      shownOnce = true;
+      c.options ??= {} as Chat['options'];
       // "Ask before changes" no longer exists: an older chat that stored it is read-only.
       if (c.options.permissionMode === 'default') c.options.permissionMode = 'plan';
       // A chat from before every chat stored its mode: it runs with accept-edits, so show that.
@@ -154,18 +162,16 @@
       if (pendingPerm !== undefined) c.options.permissionMode = pendingPerm;
       chat = c;
       loadOpts(c.provider);
-      applyPartial(c.partial);
+      withStream((s) => applyPartial(c, s, c.partial));
       // Files named in sent messages are shown by their titles.
-      if (c.messages.some((m: any) => m.tool?.mentions?.length)) loadMentionables();
+      if (c.messages.some((m) => m.tool?.mentions?.length)) loadMentionables();
       // What arrived while this copy was on its way: anything it does not have yet is added.
-      const again = heldEvents;
-      heldEvents = [];
-      for (const e of again) onEvent(e, true);
+      for (const e of fetches.replay()) onEvent(e, true);
       loadState = 'ok';
       // Seen: the "cut off" marker stays on screen for this visit but no longer follows the chat around.
-      if (c.interrupted && initial) post(`/chats/${id}/ack-interrupted`).catch(() => {});
-      await scrollDown(initial);
-      if (initial) {
+      if (c.interrupted && first) post(`/chats/${id}/ack-interrupted`).catch(() => {});
+      await scrollDown(first);
+      if (first) {
         const missing = files.filter((f) => f.missing).length;
         if (missing) notify(tn('chat3.reattachNote', missing), { kind: 'info', key: 'reattach:' + id });
         // A message that was waiting to be sent when the app closed is back in the box, unsent.
@@ -180,60 +186,24 @@
         }
       }
     } catch (e: any) {
+      if (ticket < fetches.newest) return; // a newer fetch is on its way, or its copy is on screen
       if (chat && !initial) return failed(t('chat3.refreshFailed'), e); // keep what is on screen; a refresh failed
       loadError = e?.message ?? String(e);
       loadState = e instanceof ApiError && e.status === 404 ? 'missing' : 'error';
     } finally {
-      loads--;
-      if (!loads) heldEvents = [];
+      fetches.end();
     }
   }
 
   /** One event about this chat. `again`: it arrived while the chat was being fetched and is gone
    *  through a second time, now that the fetched copy is on screen. */
-  function onEvent(e: any, again = false) {
-    if (e.type === 'chat.message') {
-      // A message that arrives again under the same id replaces the one shown: a failure the
-      // service recovered from by itself becomes a quiet note.
-      const at = chat.messages.findIndex((m: any) => m.id === e.message.id);
-      // The fetched copy already had it. (It is only ever replaced by the note that follows a recovered failure, never the reverse.)
-      if (at >= 0 && again) { if (e.message.tool?.code !== 'sessionLost') chat.messages[at] = e.message; return; }
-      if (at >= 0) chat.messages[at] = e.message; else chat.messages.push(e.message);
-      if (e.message.role === 'assistant') streaming = '';
-      if (e.message.role !== 'user') thinking = '';
-      if (e.message.role === 'user') chat.suggestion = null;
-      scrollDown(e.message.role === 'user');
-    } else if (e.type === 'chat.suggestion') {
-      // What the user might say next, from the assistant program; offered under the answer.
-      if (!again) chat.suggestion = e.text;
-    } else if (e.type === 'chat.message.changed') {
-      // A message that only changed state (an answer's changes undone or put back): replaced where it is.
-      const at = chat.messages.findIndex((m: any) => m.id === e.message.id);
-      if (at >= 0) chat.messages[at] = e.message;
-    } else if (e.type === 'chat.message.removed') {
-      // A message whose answer could not be started is taken back: its words are in the box again.
-      chat.messages = chat.messages.filter((m: any) => m.id !== e.messageId);
-    } else if (e.type === 'chat.delta') {
-      const seq = typeof e.seq === 'number' ? e.seq : streamSeq + 1;
-      if (seq === streamSeq + 1) { streaming += e.text; streamSeq = seq; }
-      // Pieces in between never arrived: take the service's copy rather than show a text with holes.
-      else if (seq > streamSeq + 1 && !again && !loads) load();
-    } else if (e.type === 'chat.thinking') {
-      if (!again) thinking += e.text;
-    } else if (e.type === 'chat.done') {
-      if (again && !chat.running) return; // the fetched copy is from after the end
-      streaming = ''; thinking = ''; streamSeq = 0;
-      escHint = false;
-      if (!again) say(t('chat3.answerDone'));
-      load();
-    } else if (e.type === 'chat.updated') {
-      if (again) return;
-      // While a send is on its way the chat counts as working, whatever an update in between says.
-      chat.running = e.chat.running || sending;
-      chat.title = e.chat.title;
-      // A wrap or reorganize says where it stands (preview, saving, ready to review).
-      if (e.chat.phase && chat.meta && typeof chat.meta === 'object') chat.meta.phase = e.chat.phase;
-    }
+  function onEvent(e: DaemonEvent, again = false) {
+    let fx: Effects = {};
+    withStream((s) => { fx = applyEvent(chat, s, e, { again, loading: fetches.loading, sending }); });
+    if (e.type === 'chat.done' && fx.reload) escHint = false;
+    if (fx.ended) say(t('chat3.answerDone'));
+    if (fx.scroll) scrollDown(fx.scroll === 'force');
+    if (fx.reload) load();
   }
 
   async function scrollDown(force = false) {
@@ -275,7 +245,7 @@
       if (e.type === 'resync') { load(); return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
       // While the chat is being fetched, events are kept: the copy on its way may or may not include them.
-      if (loads) heldEvents.push(e);
+      fetches.hold(e);
       if (chat) onEvent(e);
     });
     return () => { off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); };

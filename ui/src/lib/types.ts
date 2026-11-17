@@ -36,8 +36,9 @@ export type RunOptions = {
 export type ChatKind = 'chat' | 'wrap' | 'customize' | 'setup' | 'module' | 'reorganize' | (string & {});
 
 /** What the assistant has written so far in a running answer (`chats::Partial`, sent by `chat_get`
- *  only while the chat is running). `seq` counts the `chat.delta` pieces this run produced. */
-export type ChatPartial = { text: string; seq: number; thinking: string };
+ *  only while the chat is running). `seq` counts the `chat.delta` pieces this run produced,
+ *  `thinkingSeq` the `chat.thinking` ones. */
+export type ChatPartial = { text: string; seq: number; thinking: string; thinkingSeq?: number };
 
 /** One chat in full: `GET /api/chats/:id` (`chats::Chat`). */
 export type Chat = {
@@ -285,7 +286,7 @@ export type SaveFileResult = { ok: true; hash: string };
 
 export type DaemonEvent =
   | { type: 'chat.delta'; chatId: string; text: string; seq: number }
-  | { type: 'chat.thinking'; chatId: string; text: string }
+  | { type: 'chat.thinking'; chatId: string; text: string; seq?: number }
   | { type: 'chat.message'; chatId: string; message: ChatMessage }
   | { type: 'chat.message.changed'; chatId: string; message: ChatMessage }
   | { type: 'chat.message.removed'; chatId: string; messageId: string }
