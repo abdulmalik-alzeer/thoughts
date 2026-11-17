@@ -373,7 +373,8 @@
     }
     if (lib.moved) query.set('library', 'moved');
     const qs = query.toString();
-    await saveSettings(payload(), qs ? `?${qs}` : '');
+    // Built when its turn comes (after any other save of the settings), over what those saved.
+    await saveSettings(() => payload(), qs ? `?${qs}` : '');
     bypassOk = false;
     // A change typed while this was being saved stays in the draft and goes with the next save.
     if (norm(s) === sent) s = fresh();

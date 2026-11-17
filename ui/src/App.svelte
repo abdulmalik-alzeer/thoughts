@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
-  import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
+  import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, reloadSettings, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
   import { loadLayer, reloadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn, newCustomise } from './lib/layer';
   import { failed } from './lib/errors';
@@ -257,8 +257,9 @@
         if (e.type === 'daemon.stale') { stale = !!e.stale; return; }
         if (!app.ready) return;
         if (e.type === 'chat.updated' || e.type === 'chat.done' || e.type === 'chat.removed') {
-          await refreshChats();
-          await refreshWrap();
+          // Not awaited: one of them failing must not skip the notification and the review check below.
+          refreshChats().catch(() => {});
+          refreshWrap().catch(() => {});
         }
         // The month's figure and the limits follow what the assistant reports, without a reload.
         if (e.type === 'usage.changed' && app.status && e.usage) app.status = { ...app.status, usage: e.usage };
@@ -280,7 +281,7 @@
         // First-run setup ended while the user was looking at something else.
         if (e.type === 'setup.finished' && e.chatId && !(app.view.kind === 'chat' && app.view.id === e.chatId)) toast(t(e.ok ? 'sa.toast.ready' : 'sa.toast.failed'), { kind: e.ok ? 'success' : 'error', key: 'setup', action: { label: t(e.ok ? 'sa.toast.open' : 'sa.toast.see'), run: () => go({ kind: 'chat', id: e.chatId }) } });
         if (e.type === 'reorganize.ready' && e.chatId && app.view.id !== e.chatId) toast(t(e.ok === false ? 'layer.reorg.failed' : 'layer.reorg.ready'), { kind: e.ok === false ? 'error' : 'info', action: { label: t('layer.details'), run: () => go(e.ok === false ? { kind: 'chat', id: e.chatId } : { kind: 'reorganize', id: e.chatId }) } });
-        if (e.type === 'settings.changed') { app.settings = await api('/settings'); applyTheme(); loadProjects(); refreshStatus(); refreshChats().catch(() => {}); refreshWrap().catch(() => {}); }
+        if (e.type === 'settings.changed') { await reloadSettings(); loadProjects(); refreshStatus(); refreshChats().catch(() => {}); refreshWrap().catch(() => {}); }
         if (e.type === 'auth.changed') authChanged();
         if (e.type === 'library.changed') ideas = [];
         if (e.type === 'resync') { refreshChats().catch(() => {}); refreshWrap().catch(() => {}); refreshStatus(); }

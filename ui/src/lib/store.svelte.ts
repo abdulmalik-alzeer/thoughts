@@ -1,6 +1,7 @@
 // Global reactive app state (Svelte 5 runes).
 import { api, inTauri, post, put } from './api';
 import { syncDockIcon } from './logo';
+import { newestOnly, oneAtATime } from './serial';
 
 export type View = { kind: string; id?: string; path?: string };
 
@@ -168,14 +169,21 @@ export function keepShowCostChoice() {
   if (app.settings && app.settings.showCost == null && app.showCost && !app.status?.settingsNewer) setShowCost(true).catch(() => {});
 }
 
+// Events come in bursts (`chat.updated` then `chat.done`) and each starts a refresh: an older answer
+// that arrives last must not bring back a finished chat's "running" dot or an old Wrap count.
+const chatsOrder = newestOnly();
+const wrapOrder = newestOnly();
+
 export async function refreshChats() {
-  app.chats = await api('/chats');
+  await chatsOrder(() => api('/chats'), (v) => { app.chats = v; });
 }
 
 export async function refreshWrap() {
-  const prev = app.wrap.count;
-  app.wrap = await api('/wrap');
-  if (app.wrap.count > app.wrap.threshold && prev <= app.wrap.threshold && prev !== 0) remindToWrap();
+  await wrapOrder(() => api('/wrap'), (v) => {
+    const prev = app.wrap.count;
+    app.wrap = v;
+    if (app.wrap.count > app.wrap.threshold && prev <= app.wrap.threshold && prev !== 0) remindToWrap();
+  });
 }
 
 /** Show the Wrap reminder — but never under someone's fingers. The count crosses the threshold at
@@ -197,10 +205,30 @@ function remindToWrap() {
   again();
 }
 
-/** Save settings. `query` carries a one-off confirmation (`?confirm=bypassPermissions`). */
-export async function saveSettings(patch: Record<string, any> = {}, query = '') {
-  app.settings = await put('/settings' + query, { ...app.settings, ...patch });
-  applyTheme();
+/** Every settings save, one at a time. The service takes the whole settings object, so two saves
+ *  running together (a theme pick while Settings saves a switch) would each send what the other
+ *  had not seen yet, and the last to land would undo the other's change. */
+const settingsSaves = oneAtATime();
+
+/** Save settings. `patch` is laid over the settings as they are when this save's turn comes (after
+ *  any save still running), or is a function that builds the whole object from them. `query`
+ *  carries a one-off confirmation (`?confirm=bypassPermissions`). */
+export function saveSettings(patch: Record<string, any> | ((now: any) => Record<string, any>) = {}, query = ''): Promise<void> {
+  return settingsSaves(async () => {
+    const body = typeof patch === 'function' ? patch(app.settings) : { ...app.settings, ...patch };
+    app.settings = await put('/settings' + query, body);
+    applyTheme();
+  });
+}
+
+/** Read the settings again (`settings.changed`: every save, ours included, announces one). In the
+ *  same line as the saves, so an answer read before a save landed never replaces that save's result
+ *  and becomes the base the next save is built on. */
+export function reloadSettings(): Promise<void> {
+  return settingsSaves(async () => {
+    app.settings = await api('/settings');
+    applyTheme();
+  });
 }
 
 // ---------- accessibility (Settings › Accessibility) ----------
@@ -213,6 +241,11 @@ const withDefaults = (a?: Partial<A11y> | null): A11y => ({ ...A11Y_DEFAULTS, ..
 export const a11y = (): A11y => withDefaults(app.settings?.accessibility);
 
 let zoomNow = 1;
+/** The accessibility preferences on screen right now: ahead of `app.settings` while a change is
+ *  still being saved, so quick changes in a row (Cmd+= pressed three times) build on each other. */
+let painted: A11y | null = null;
+/** Accessibility changes still being saved: until they are, the screen keeps showing `painted`. */
+let a11ySaving = 0;
 /** Size the whole window: the webview's own zoom inside the app (the page reflows, like a browser's
  *  zoom), CSS zoom when running in a plain browser or when the shell refuses. */
 async function applyZoom(percent: number) {
@@ -230,6 +263,7 @@ async function applyZoom(percent: number) {
 }
 
 function paintA11y(a: A11y) {
+  painted = a;
   const d = document.documentElement.dataset;
   const flag = (k: string, on: boolean, v: string) => { if (on) d[k] = v; else delete d[k]; };
   flag('motion', a.reduceMotion, 'reduce');
@@ -241,15 +275,21 @@ function paintA11y(a: A11y) {
 
 /** Change accessibility preferences: applied at once and saved straight away, like the theme. */
 export async function setA11y(patch: Partial<A11y>) {
-  const next = { ...a11y(), ...patch };
-  paintA11y(next);
-  try { await saveSettings({ accessibility: next }); }
-  catch (e) { applyTheme(); throw e; }
+  paintA11y({ ...(painted ?? a11y()), ...patch });
+  a11ySaving++;
+  let saved = false;
+  // Only what changed here goes over the saved preferences, when this save's turn comes.
+  try { await saveSettings((now) => ({ ...now, accessibility: { ...withDefaults(now?.accessibility), ...patch } })); saved = true; }
+  finally {
+    a11ySaving--;
+    // Once nothing else is on its way the screen shows what is saved (a refused change goes back).
+    if (!saved || !a11ySaving) applyTheme();
+  }
 }
 
 /** Zoom one step in (1) or out (-1), or back to actual size (0). Resolves the new percentage. */
 export async function zoomStep(dir: -1 | 0 | 1): Promise<number> {
-  const cur = a11y().zoom;
+  const cur = (painted ?? a11y()).zoom;
   const next = dir === 0 ? 100 : dir > 0 ? ZOOM_STEPS.find((z) => z > cur) ?? cur : [...ZOOM_STEPS].reverse().find((z) => z < cur) ?? cur;
   if (next !== cur) await setA11y({ zoom: next });
   return next;
@@ -285,7 +325,9 @@ let menuLang: string | undefined;
 export function applyTheme() {
   const s = app.settings;
   if (!s) return;
-  paint(s);
+  // An earlier save that lands while later accessibility changes are on their way must not flash
+  // the window back a step (zoom 110 → 125 → 150 would show 110 again for a moment).
+  paint(a11ySaving && painted ? { ...s, accessibility: painted } : s);
   // The native menus are built in the shell: ask it to rebuild them when the language changes.
   if (menuLang !== undefined && menuLang !== s.language && inTauri()) {
     import('@tauri-apps/api/core').then(({ invoke }) => invoke('refresh_menu')).catch(() => {});
