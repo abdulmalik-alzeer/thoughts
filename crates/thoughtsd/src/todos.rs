@@ -209,7 +209,7 @@ fn rewrite_held<T, F: FnOnce(&mut Vec<String>) -> anyhow::Result<T>>(root: &Path
 /// The edited `lines` of list `text` joined again, each line that is still there with its own line
 /// ending (a file written on Windows, or partly, stays as it was). A new or changed line takes the
 /// ending of the line it sits in front of in the file, or the file's usual one.
-fn with_endings(text: &str, lines: &[String]) -> String {
+pub(crate) fn with_endings(text: &str, lines: &[String]) -> String {
     let usual = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let trailing = text.ends_with('\n') || text.is_empty();
     let old: Vec<(&str, &str)> = text.split_inclusive('\n').map(|l| {

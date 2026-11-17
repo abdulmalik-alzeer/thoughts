@@ -169,7 +169,8 @@ fn files_line(title: &str, name: &str, date: &str, arabic: bool) -> String {
 /// before `## Related` when it has that section, else at the end. The note details, every other line
 /// and the file's line endings stay as they were. `arabic`: the words of a list made here.
 fn add_to_files(readme: &str, line: &str, arabic: bool) -> String {
-    let nl = if readme.contains("\r\n") { "\r\n" } else { "\n" };
+    // A byte-order mark (Notepad) stays in front, and the details behind it are still found.
+    let (bom, readme) = match readme.strip_prefix('\u{feff}') { Some(rest) => ("\u{feff}", rest), None => ("", readme) };
     let mut lines: Vec<String> = readme.lines().map(str::to_string).collect();
     let mut fence = false;
     let body = crate::library::frontmatter(readme).1;
@@ -207,20 +208,17 @@ fn add_to_files(readme: &str, line: &str, arabic: bool) -> String {
             }
         }
     }
-    let mut out = lines.join(nl);
-    if readme.ends_with('\n') || readme.is_empty() { out.push_str(nl); }
-    out
+    // Every line keeps its own ending (a page partly edited on Windows stays as it was).
+    format!("{bom}{}", crate::todos::with_endings(readme, &lines))
 }
 
 /// `readme` without the line `line` (as it was added), or `None` when it is not there any more.
 fn remove_from_files(readme: &str, line: &str) -> Option<String> {
-    let nl = if readme.contains("\r\n") { "\r\n" } else { "\n" };
-    let mut lines: Vec<&str> = readme.lines().collect();
+    let (bom, readme) = match readme.strip_prefix('\u{feff}') { Some(rest) => ("\u{feff}", rest), None => ("", readme) };
+    let mut lines: Vec<String> = readme.lines().map(str::to_string).collect();
     let at = lines.iter().position(|l| l.trim_end() == line)?;
     lines.remove(at);
-    let mut out = lines.join(nl);
-    if readme.ends_with('\n') { out.push_str(nl); }
-    Some(out)
+    Some(format!("{bom}{}", crate::todos::with_endings(readme, &lines)))
 }
 
 /// Move capture `capture` (`inbox/…`) into the notes of item `item` and list it in the item's
@@ -529,6 +527,20 @@ mod tests {
         let bare = "---\ntitle: X\n---\n# X\n\n## Related\n- y\n";
         assert_eq!(add_to_files(bare, "- [a](notes/a.md)", false), "---\ntitle: X\n---\n# X\n\n## Files\n\n- [a](notes/a.md)\n\n## Related\n- y\n");
         assert_eq!(add_to_files("# X\nText.", "- [a](notes/a.md)", true), "# X\nText.\n\n## الملفات\n\n- [a](notes/a.md)");
+
+    }
+
+    #[test]
+    fn each_line_of_the_page_keeps_its_own_ending_and_a_byte_order_mark_stays() {
+        // Partly edited on Windows: only some lines end in CR LF. Nothing but the new line changes.
+        let mixed = "\u{feff}---\r\ntitle: A\n---\n# A\r\n\n## Files\n- [x](notes/x.md)\r\n\n## Related\n- y\r\n";
+        let line = "- [b](notes/b.md)";
+        let out = add_to_files(mixed, line, false);
+        assert_eq!(out, mixed.replace("- [x](notes/x.md)\r\n", "- [x](notes/x.md)\r\n- [b](notes/b.md)\n"));
+        assert_eq!(remove_from_files(&out, line).as_deref(), Some(mixed), "taking it out again gives the page back byte for byte");
+        // The mark does not hide the details: a list in front of them is never made.
+        let bom = "\u{feff}---\ntitle: A\n---\n# A\n";
+        assert_eq!(add_to_files(bom, line, false), "\u{feff}---\ntitle: A\n---\n# A\n\n## Files\n\n- [b](notes/b.md)\n");
     }
 
     #[tokio::test]
