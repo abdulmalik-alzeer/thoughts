@@ -230,6 +230,7 @@ pub fn safe_options(o: RunOptions) -> RunOptions {
         max_budget_usd: None,
         // Decided when a message is sent (Settings), never carried over.
         prompt_suggestions: false,
+        fork_session: false,
     }
 }
 

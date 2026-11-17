@@ -138,8 +138,11 @@ pub async fn prefix(state: &AppState, chat: &Chat) -> Option<String> {
     let from = h["from"].as_str().and_then(Program::from_name).map_or("another assistant", |p| p.label());
     let text = whole(chat);
     let budget = budget_bytes(window(to, chat.options.model.as_deref()));
+    // A branch, or a chat whose last message was edited (`branch.rs`): the same program, a new session.
+    let moved = if h["branch"] == true { "This conversation continues an earlier one, in a new session.".to_string() }
+        else { format!("This conversation was moved to you from {from}.") };
     if h["how"] == "replay" {
-        return Some(format!("This conversation was moved to you from {from}. Here it is so far; carry on from it.\n\n{}\n\n---\n\n", tail(&text, budget)));
+        return Some(format!("{moved} Here it is so far; carry on from it.\n\n{}\n\n---\n\n", tail(&text, budget)));
     }
     let made = match h["summary"].as_str() {
         Some(s) => Ok(s.to_string()),
@@ -154,13 +157,13 @@ pub async fn prefix(state: &AppState, chat: &Chat) -> Option<String> {
         Ok(summary) => {
             let kept = summary.clone();
             state.chats.update(&chat.id, |c| { if c.meta["handoff"].is_object() { c.meta["handoff"]["summary"] = json!(kept); } }).await;
-            Some(format!("This conversation was moved to you from {from}. It was too long to pass on whole: here is a summary of it, then its last \
+            Some(format!("{moved} It was too long to pass on whole: here is a summary of it, then its last \
                 messages word for word. Carry on from them.\n\nSUMMARY:\n{}\n\nLAST MESSAGES:\n{}\n\n---\n\n", summary.trim(), tail(&text, TAIL_BYTES)))
         }
         Err(e) => {
             crate::log::warn(format!("chat {}: the summary for {} could not be made ({e}); passing on the end of the conversation", chat.id, to.label()));
             crate::claude::push(state, &chat.id, Msg::new("system", crate::tr::text("handoff.summary_failed", &[]))).await;
-            Some(format!("This conversation was moved to you from {from}. Only its most recent part could be passed on:\n\n{}\n\n---\n\n", tail(&text, budget)))
+            Some(format!("{moved} Only its most recent part could be passed on:\n\n{}\n\n---\n\n", tail(&text, budget)))
         }
     }
 }

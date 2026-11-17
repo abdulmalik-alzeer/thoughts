@@ -83,6 +83,8 @@ rather than word-for-word translations of the English.
 | English | Arabic | What it is |
 |---|---|---|
 | Chat | محادثة | |
+| Branch (of a chat) · Branch from here | فرع · تفريع من هنا | A new chat that carries a chat's conversation up to one message and goes on apart from it. |
+| Edit and send again | تعديل وإرسال من جديد | Changing a message already sent; an earlier one is changed in a branch. |
 | Model · Effort · Permission mode | النموذج · الجهد · وضع الأذونات | Values keep Claude Code's own names. |
 | Approval | موافقة | The assistant asks before it does something. |
 | Automatic summaries | الملخصات التلقائية | Short summaries made in the background for Wrap. |

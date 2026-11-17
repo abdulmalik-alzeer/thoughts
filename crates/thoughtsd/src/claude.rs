@@ -819,6 +819,9 @@ pub struct RunInfo {
     pub system: String,
     /// The program that would have done the work.
     pub program: crate::assistant::Program,
+    /// The session it would have continued, and whether from a copy of it of its own (a branch).
+    pub resume: Option<String>,
+    pub fork: bool,
 }
 
 /// Stands in for the assistant program: does the "work" of a run and says whether it succeeded.
@@ -1612,7 +1615,11 @@ pub fn watch_login(state: Arc<AppState>, mut child: tokio::process::Child, limit
 fn run_args(opts: &RunOptions, mode: &str, budget: Option<&str>, resume: Option<&str>, add_dirs: &[PathBuf], rules: Option<&Path>, system: Passed) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"].iter().map(Into::into).collect();
     if let Some(f) = rules { a.push("--settings".into()); a.push(f.into()); }
-    if let Some(r) = resume { a.push("--resume".into()); a.push(r.into()); }
+    if let Some(r) = resume {
+        a.push("--resume".into()); a.push(r.into());
+        // A branch: the session it starts from stays as it was (checked against the help in `start_run`).
+        if opts.fork_session { a.push("--fork-session".into()); }
+    }
     if let Some(m) = opts.model.as_ref().filter(|s| !s.is_empty()) { a.push("--model".into()); a.push(m.into()); }
     if let Some(e) = opts.effort.as_ref().filter(|s| !s.is_empty()) { a.push("--effort".into()); a.push(e.into()); }
     a.push("--permission-mode".into());
@@ -1947,7 +1954,7 @@ pub async fn start_run(
             .iter().filter_map(|r| r.as_str().map(String::from)).collect() };
         let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: Some(mode.clone()),
             deny: rules("deny"), allow: rules("allow"), ask: rules("ask"), prompt_token: ticket.as_ref().map(|t| t.token().to_string()),
-            profile: prof, system: system_text(true), program };
+            profile: prof, system: system_text(true), program, resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some() };
         let mut kill_rx = take_switch(&state, &id).await?;
         state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
         state.ack_interrupted(&id).await;
@@ -2006,6 +2013,11 @@ pub async fn start_run(
     // Suggested next messages only where the user can take them up, and only if this version has them.
     let mut options = spec.options.clone();
     options.prompt_suggestions = options.prompt_suggestions && kind == "chat" && supports(&help, "--prompt-suggestions");
+    // Resuming without the copy would carry on in the other chat's own session: never.
+    if options.fork_session && spec.resume.is_some() && !supports(&help, "--fork-session") {
+        crate::log::error(format!("run {}: not started — this version of the assistant cannot branch a session", spec.chat_id));
+        return Err(crate::tr::err("branch.no_fork", &[]));
+    }
     c.current_dir(&spec.cwd).args(run_args(&options, &mode, budget.as_deref(), spec.resume.as_deref(), &spec.add_dirs, rules_file.as_deref(), system));
     // A run that asks loads the daemon's approvals endpoint from a private file (the run's token is in it).
     match &ticket {

@@ -218,6 +218,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/chats/:id", get(chat_get).delete(chat_delete).patch(chat_patch))
         .route("/api/chats/:id/send", post(chat_send_route).layer(DefaultBodyLimit::max(SEND_BODY_LIMIT)))
         .route("/api/chats/:id/stop", post(chat_stop))
+        .route("/api/chats/:id/edit", post(chat_edit))
+        .route("/api/chats/:id/branch", post(chat_branch))
         .route("/api/chats/:id/ack-interrupted", post(chat_ack_interrupted))
         .route("/api/chats/:id/attachments/:name", get(chat_attachment))
         .route("/api/chats/:id/changes/:msg", get(run_changes))
@@ -2623,7 +2625,13 @@ async fn move_chat(st: &Arc<AppState>, id: &str, to: &str) -> anyhow::Result<Opt
 struct Attachment { name: String, data: String }
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<String>, options: Option<RunOptions>, confirm_bypass: bool, approval: Option<String> }
+struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<String>, options: Option<RunOptions>, confirm_bypass: bool, approval: Option<String>,
+    /// Edit and resend (`chat_edit`): the last message of the user's this one takes the place of. Set by the app only.
+    #[serde(skip)]
+    replace: Option<String>,
+    /// Files already in this chat's own folder that go with the message (an edited message's). Set by the app only.
+    #[serde(skip)]
+    keep: Vec<String> }
 
 /// One attached file may be 25 MB (what the composer says), one message 50 MB of files in all.
 const ATTACHMENT_MAX_BYTES: usize = library::IMPORT_MAX_BYTES;
@@ -2749,6 +2757,10 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let _claim = st.chats.claim_send(&id).ok_or_else(|| crate::tr::err("chat.running", &[]))?;
     let chat = st.chats.get(&id).await.ok_or_else(no_chat)?;
     if chat.running { return Err(crate::tr::err("chat.running", &[]).into()); }
+    // Edit and resend: only the last message of the user's is replaced (`branch.rs`).
+    let edit_at = match m.replace.as_deref() { Some(mid) => Some(crate::branch::edit_at(&chat, mid)?), None => None };
+    let files_dir = crate::branch::files_dir(&id);
+    let kept: Vec<String> = m.keep.iter().filter(|p| std::path::Path::new(p).parent() == Some(files_dir.as_path())).cloned().collect();
     // A move to the other program is over once that program has a session of its own.
     if crate::handoff::settled(&chat) { st.chats.update(&id, |c| { if let Some(o) = c.meta.as_object_mut() { o.remove("handoff"); } }).await; }
     if let Some(o) = &m.options {
@@ -2820,6 +2832,23 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
             }
         }
     }
+    // Only the files written for this message are taken back should it not be sent.
+    let fresh = saved.clone();
+    saved.extend(kept);
+    // Edit and resend: the message and its answer leave the chat now, with the session that holds
+    // them (put back below should the new message not start).
+    let mut chat = chat;
+    let mut taken: Option<crate::branch::Cut> = None;
+    if let (Some(i), Some(mid)) = (edit_at, m.replace.as_deref()) {
+        crate::branch::cut(&mut chat, i);
+        st.chats.update(&id, |c| { if let Some(j) = c.messages.iter().position(|x| x.id == mid) { taken = Some(crate::branch::cut(c, j)); } }).await;
+        for x in taken.iter().flat_map(|k| k.removed.iter()) { st.emit(json!({"type": "chat.message.removed", "chatId": id, "messageId": x.id})); }
+    }
+    // A branch's first message continues a copy of the original's session where that is exact.
+    let fork = if chat.session_id.is_none() && chat.meta["branch"]["forkSession"].is_string() {
+        let orig = match chat.meta["branch"]["from"].as_str() { Some(o) => st.chats.get(o).await, None => None };
+        crate::branch::fork_from(orig.as_ref(), &chat, &crate::branch::help(&st).await)
+    } else { None };
     // No run may open the attachments folder: it reads copies of this chat's files, made for it
     // now (`run_files`). Without them it reads none.
     // (Copying is file work: off the runtime. Only new or changed files are copied.)
@@ -2846,10 +2875,12 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let has_history = chat.messages.iter().any(|x| x.role == "assistant");
     let with_history = |p: &str| format!("Earlier conversation (continue from it):\n\n{}\n\n---\n\n{p}", chat.transcript(120_000));
     // What goes instead if the CLI turns out not to have the session any more (see `resend_without_session`).
-    let fallback = chat.session_id.as_ref().map(|_| if has_history { with_history(&prompt) } else { prompt.clone() });
+    let fallback = chat.session_id.as_ref().or(fork.as_ref()).map(|_| if has_history { with_history(&prompt) } else { prompt.clone() });
     // A chat moved to the other program passes its conversation on, whole or summarised
-    // (`handoff.rs`); any other chat without a session replays its history.
-    if let Some(pre) = crate::handoff::prefix(&st, &chat).await { prompt = format!("{pre}{prompt}"); }
+    // (`handoff.rs`); any other chat without a session replays its history. (A branch's copy of
+    // the session already holds it.)
+    if fork.is_some() {}
+    else if let Some(pre) = crate::handoff::prefix(&st, &chat).await { prompt = format!("{pre}{prompt}"); }
     else if chat.session_id.is_none() && has_history { prompt = with_history(&prompt); }
     let first = !chat.messages.iter().any(|x| x.role == "user");
     let mut um = Msg::new("user", &m.text);
@@ -2857,6 +2888,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     um.tool = (!m.mentions.is_empty()).then(|| json!({"mentions": m.mentions}));
     let mut opts = normalized(m.options.unwrap_or(chat.options.clone()), chat.options.permission_mode.as_deref());
     opts.prompt_suggestions = chat.kind == "chat" && s.ai.claude.suggest_next;
+    opts.fork_session = fork.is_some();
     // How the chat stood before this message, for when the assistant cannot be started (see below).
     let before = (chat.title.clone(), chat.dirty, chat.mini_wrap.clone(), chat.updated, chat.suggestion.clone());
     let updated = st.chats.update(&id, |c| {
@@ -2871,6 +2903,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         if first && c.title_is_auto() { let t = crate::chats::short_title(&m.text); if !t.is_empty() { c.set_auto_title(t); } }
         // A customisation chat started empty (New customisation) is named after what was asked for.
         if first { if let Some(t) = customisation_named(&c.kind, &c.title, &m.text) { c.title = t; } }
+        // A branch whose original moved on before this first message: it is passed on as text after all.
+        if fork.is_none() && c.meta["branch"]["how"] == "fork" { c.meta["branch"]["how"] = c.meta["handoff"]["how"].clone(); }
     }).await.ok_or_else(no_chat)?;
     st.emit(json!({"type": "chat.message", "chatId": id, "message": um}));
     st.emit(json!({"type": "chat.updated", "chat": updated.summary()}));
@@ -2893,12 +2927,95 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         }
         None => after_chat_run(&kind, &id),
     };
-    let started = claude::start_run(st.clone(), spec(prompt, chat.session_id.clone()), on_done).await;
+    let started = claude::start_run(st.clone(), spec(prompt, fork.clone().or(chat.session_id.clone())), on_done).await;
     // A customise run that never started must not cost the user the change it was about to replace.
     if kind == "customize" { crate::staging::run_start_result(applayer::Git(Some(&st)), &applayer::Dirs::real(), &id, started.is_ok()).await; }
-    if started.is_err() { take_back_message(&st, &id, &um, before).await; }
+    if started.is_err() {
+        take_back_message(&st, &id, &Msg { attachments: fresh, ..um.clone() }, before).await;
+        // An edit that could not be sent: the message it was to replace, and its answer, come back.
+        if let Some(k) = taken {
+            let back = k.removed.clone();
+            st.chats.update(&id, |c| crate::branch::restore(c, k)).await;
+            for x in back { st.emit(json!({"type": "chat.message", "chatId": id, "message": x})); }
+        }
+    }
     started?;
     ok()
+}
+
+/// Stop the chat's answer, if one is being written, and wait for it to end.
+async fn stop_and_wait(st: &AppState, id: &str) -> anyhow::Result<()> {
+    if let Some(k) = st.runs.lock().await.remove(id) { let _ = k.send(()); }
+    for _ in 0..200 {
+        if st.chats.with(id, |c| c.running).await != Some(true) && !st.runs.lock().await.contains_key(id) { return Ok(()); }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    Err(crate::tr::err("branch.still_running", &[]))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct EditBody { message_id: String, text: String, keep_attachments: Vec<String>, mentions: Vec<String>, options: Option<RunOptions>, confirm_bypass: bool, approval: Option<String> }
+
+/// `POST /api/chats/:id/edit {messageId, text, keepAttachments, mentions, options}`: change the last
+/// message of the user's and send it again. An answer being written is stopped first; the message
+/// and its answer leave the chat, the files it had that are named in `keepAttachments` go again,
+/// and the conversation before it is passed on with it (`branch.rs`). An earlier message is edited
+/// in a branch (`chat_branch`).
+async fn chat_edit(State(st): S, Path(id): Path<String>, Json(b): Json<EditBody>) -> R {
+    if b.text.trim().is_empty() { return Err(crate::tr::err("branch.empty", &[]).into()); }
+    let kept = st.chats.with(&id, |c| crate::branch::edit_at(c, &b.message_id).map(|i| crate::branch::kept_files(&id, &c.messages[i], &b.keep_attachments))).await.ok_or_else(no_chat)??;
+    stop_and_wait(&st, &id).await?;
+    chat_send(State(st), Path(id), Json(SendBody { text: b.text, attachments: vec![], mentions: b.mentions, options: b.options, confirm_bypass: b.confirm_bypass,
+        approval: b.approval, replace: Some(b.message_id), keep: kept })).await
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct BranchBody { message_id: String,
+    /// Editing an earlier message: the branch ends just before it, and these words are sent there.
+    text: Option<String>, keep_attachments: Vec<String>, mentions: Vec<String>, options: Option<RunOptions> }
+
+/// `POST /api/chats/:id/branch {messageId}` → `{id, how, chat}`: a new chat with the conversation up
+/// to and including that message, going on apart from this one (which is not changed). With `text`:
+/// editing an earlier message — the branch ends just before it and the new words are sent there; if
+/// they cannot be sent, no branch is left behind. `how`: "fork" (its first message continues a copy
+/// of this chat's own session), "replay" or "summary" (the conversation is passed on as text), "none".
+async fn chat_branch(State(st): S, Path(id): Path<String>, Json(b): Json<BranchBody>) -> R {
+    if b.text.as_deref().map_or(false, |t| t.trim().is_empty()) { return Err(crate::tr::err("branch.empty", &[]).into()); }
+    let orig = st.chats.get(&id).await.ok_or_else(no_chat)?;
+    let edit = b.text.is_some();
+    let help = if crate::assistant::of_chat(&orig.provider) == crate::assistant::Program::Claude && !edit { crate::branch::help(&st).await } else { String::new() };
+    let mut br = crate::branch::make(&orig, &b.message_id, edit, &help, crate::tr::arabic())?;
+    let edited = orig.messages.iter().find(|m| m.id == b.message_id && edit && m.role == "user");
+    let kept_here = edited.map(|m| crate::branch::kept_files(&id, m, &b.keep_attachments)).unwrap_or_default();
+    let mut files: Vec<String> = br.messages.iter().flat_map(|m| m.attachments.iter().cloned()).collect();
+    files.extend(kept_here.iter().cloned());
+    let (from, bid) = (id.clone(), br.id.clone());
+    let copied = tokio::task::spawn_blocking(move || crate::branch::copy_files(&from, &bid, &files)).await.map_err(|e| anyhow::anyhow!("{e}"))??;
+    crate::branch::repoint(&mut br, &copied);
+    let kept: Vec<String> = kept_here.iter().filter_map(|p| copied.iter().find(|(o, _)| o == p).map(|(_, n)| n.clone())).collect();
+    let bid = br.id.clone();
+    let mode = br.options.permission_mode.clone();
+    st.chats.insert(br.clone()).await;
+    if let Some(c) = st.chats.update(&id, |c| crate::branch::note_branch(c, &br)).await { st.emit(json!({"type": "chat.updated", "chat": c.summary()})); }
+    st.emit(json!({"type": "chat.updated", "chat": br.summary()}));
+    crate::log::info(format!("chat {id}: branched into {bid} ({})", br.meta["branch"]["how"].as_str().unwrap_or("")));
+    if let Some(text) = b.text {
+        // "Bypass permissions" was confirmed for the original chat, not this one.
+        let options = b.options.map(|mut o| { if o.permission_mode.as_deref() == Some(crate::settings::BYPASS) { o.permission_mode = mode.clone(); } o });
+        let sent = chat_send(State(st.clone()), Path(bid.clone()), Json(SendBody { text, mentions: b.mentions, options, keep: kept, ..Default::default() })).await;
+        if let Err(e) = sent {
+            remove_chat(&st, &bid).await;
+            if let Some(c) = st.chats.update(&id, |c| { if let Some(l) = c.meta["branches"].as_array_mut() { l.retain(|x| x["id"] != bid.as_str()); } }).await {
+                st.emit(json!({"type": "chat.updated", "chat": c.summary()}));
+            }
+            st.emit(json!({"type": "chat.removed", "chatIds": [bid]}));
+            return Err(e);
+        }
+    }
+    let now = st.chats.get(&bid).await.ok_or_else(no_chat)?;
+    Ok(Json(json!({"id": bid, "how": now.meta["branch"]["how"], "chat": now.summary()})))
 }
 
 /// The assistant could not be started for this message: it is taken out of the chat again (with
@@ -2973,6 +3090,10 @@ mod changesets_tests;
 #[allow(unused_must_use)]
 #[path = "api_chat_tests.rs"]
 mod chat_tests;
+#[cfg(test)]
+#[allow(unused_must_use)]
+#[path = "api_branch_tests.rs"]
+mod branch_tests;
 #[cfg(test)]
 #[allow(unused_must_use)]
 #[path = "api_chatc_tests.rs"]

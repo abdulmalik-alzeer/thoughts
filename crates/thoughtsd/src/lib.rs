@@ -23,6 +23,7 @@ pub mod diffs;
 pub mod gallery;
 pub mod codex;
 pub mod git;
+pub mod branch;
 pub mod handoff;
 pub mod hello;
 pub mod inbox;

@@ -47,6 +47,10 @@ pub struct RunOptions {
     /// unless switched off in Settings). Set by the app only, like the spending ceiling.
     #[serde(skip)]
     pub prompt_suggestions: bool,
+    /// Start a session of its own from the one being resumed (`--fork-session`), leaving that one
+    /// as it was: a branch's first message (`branch.rs`). Set by the app only.
+    #[serde(skip)]
+    pub fork_session: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

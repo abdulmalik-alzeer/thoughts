@@ -116,3 +116,17 @@ async fn pieces_of_an_answer_are_numbered_and_kept_until_the_message_is_complete
     assert_eq!((p.text.as_str(), p.seq, p.thinking.as_str()), ("", 2, ""));
     assert_eq!(state.chats.get(&id).await.unwrap().messages.last().unwrap().text, "The shop should sell candles.");
 }
+
+#[test]
+fn a_branch_resumes_a_copy_of_the_session_never_the_session_itself() {
+    let args = |fork: bool, resume: Option<&str>| -> Vec<String> {
+        let o = RunOptions { fork_session: fork, ..Default::default() };
+        run_args(&o, "acceptEdits", None, resume, &[], None, Passed::Inline("note")).iter().map(|a| a.to_string_lossy().to_string()).collect()
+    };
+    let a = args(true, Some("s-1"));
+    let at = a.iter().position(|x| x == "--resume").unwrap();
+    assert_eq!((a[at + 1].as_str(), a[at + 2].as_str()), ("s-1", "--fork-session"));
+    assert!(!args(false, Some("s-1")).contains(&"--fork-session".to_string()));
+    // Nothing to resume (the session was lost, the conversation goes as text): nothing to copy.
+    assert!(!args(true, None).iter().any(|x| x == "--fork-session" || x == "--resume"));
+}
