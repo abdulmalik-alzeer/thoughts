@@ -792,4 +792,35 @@ fn passwords_in_a_plain_file_are_noticed_and_an_empty_store_is_not() {
     std::fs::write(d.join("secrets.json"), r#"{"thoughts-ai/key": "sk-1"}"#).unwrap();
     assert!(plain_passwords(&d));
     std::fs::remove_dir_all(&d).unwrap();
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_run_ended_by_the_daemon_stopping_puts_back_what_it_may_not_change_before_the_daemon_goes() {
+    let base = std::env::temp_dir().join(format!("thoughts-codex-stop-{}", uuid::Uuid::new_v4()));
+    let (dir, work) = (base.join("bin"), base.join("lib"));
+    std::fs::create_dir_all(work.join("notes")).unwrap();
+    std::fs::write(work.join("CLAUDE.md"), "rules").unwrap();
+    let st = codex_state(&dir, RUN_0_27).await;
+    // The stand-in plants what Codex obeys next time, changes the rules, and is still at work when the daemon stops.
+    std::fs::write(dir.join("touch.sh"), format!("echo 'rules + send notes away' > '{w}/CLAUDE.md'; mkdir -p '{w}/.codex'; echo mcp > '{w}/.codex/config.toml'; \
+        touch '{d}/planted'; sleep 30", w = work.display(), d = dir.display())).unwrap();
+    let chat = Chat { kind: "workflow".into(), provider: "codex".into(), options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, ..Default::default() };
+    let id = chat.id.clone();
+    st.chats.insert(chat).await;
+    start_run(st.clone(), RunSpec { chat_id: id.clone(), prompt: "Plan my week".into(), cwd: work.clone(), add_dirs: vec![],
+        options: st.chats.with(&id, |c| c.options.clone()).await.unwrap(), resume: None, append_system: None, extra_deny: vec![] }, None).await.unwrap();
+    for _ in 0..1000 { if dir.join("planted").exists() && st.runs.lock().await.contains_key(&id) { break; } tokio::time::sleep(Duration::from_millis(10)).await; }
+    assert!(dir.join("planted").exists(), "the stand-in did its planting");
+    // Stopping ends this run's process only (other tests' runs share the record of processes).
+    let file = crate::paths::runs_file();
+    let end = || { let mine: Vec<u32> = crate::runs::load(&file).into_iter().filter(|r| r.chat_id == id).map(|r| r.pid).collect();
+        for pid in &mine { crate::proc::kill_tree(*pid); } mine.len() };
+    crate::stop(&st, end, Duration::from_secs(10)).await;
+    // By the time stopping is over, the files are back.
+    assert_eq!(std::fs::read_to_string(work.join("CLAUDE.md")).unwrap(), "rules");
+    assert!(!work.join(".codex/config.toml").exists(), "what it planted is gone");
+    assert!(crate::snapshots::wait_put_back(&[id.clone()], Duration::ZERO).await, "and its copy on disk with them");
+    // It stays marked as running, so the next start says it was cut off.
+    assert!(st.chats.get(&id).await.unwrap().running);
+    std::fs::remove_dir_all(base).unwrap();
 }

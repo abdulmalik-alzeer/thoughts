@@ -1085,11 +1085,19 @@ pub fn is_agents_file(rel: &str) -> bool {
 }
 fn guarded(rel: &str) -> bool { rel.eq_ignore_ascii_case(".mcp.json") || has_dir(rel, ".claude") || has_dir(rel, ".codex") }
 fn guarded_setup(rel: &str) -> bool { rel.eq_ignore_ascii_case(".mcp.json") || has_dir(rel, ".codex") }
-fn guarded_and_standing(rel: &str) -> bool { guarded(rel) || crate::claude::is_standing(rel) || is_agents_file(rel) }
+pub(crate) fn guarded_and_standing(rel: &str) -> bool { guarded(rel) || crate::claude::is_standing(rel) || is_agents_file(rel) }
 
 /// What a Codex run of this kind and profile keeps to put back. First-time set-up installs `.claude/`.
 pub fn keep_for(kind: &str, profile: &Profile) -> fn(&str) -> bool {
     if kind == "setup" { guarded_setup } else if profile.standing_rules { guarded } else { guarded_and_standing }
+}
+
+/// `keep_for`'s choice by name, for the snapshot's copy on disk (`snapshots`), and back.
+pub(crate) fn keep_name(kind: &str, profile: &Profile) -> &'static str {
+    if kind == "setup" { "codexSetup" } else if profile.standing_rules { "codex" } else { "codexStanding" }
+}
+pub(crate) fn keep_named(name: &str) -> Option<fn(&str) -> bool> {
+    match name { "codexSetup" => Some(guarded_setup), "codex" => Some(guarded), "codexStanding" => Some(guarded_and_standing), _ => None }
 }
 
 /// What `claude::start_run` hands over once everything about a run is decided.
@@ -1173,12 +1181,14 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     drop(l.standing);
     let mut snapshots: Vec<StandingSnapshot> = vec![];
     if sandbox != "read-only" {
-        let keep = keep_for(&l.kind, &l.profile);
+        let (keep, scope) = (keep_for(&l.kind, &l.profile), keep_name(&l.kind, &l.profile));
         let mut roots: Vec<PathBuf> = writable.clone();
         roots.insert(0, l.spec.cwd.clone());
         for r in roots {
             // A link is never wanted under any of these names, also where the run may edit the file.
-            snapshots.push(tokio::task::spawn_blocking(move || StandingSnapshot::take_guarded(&r, keep, guarded_and_standing)).await?);
+            // (Kept on disk too before Codex starts, for a daemon that stops or dies mid-run: `snapshots`.)
+            let chat = id.clone();
+            snapshots.push(tokio::task::spawn_blocking(move || crate::snapshots::kept(StandingSnapshot::take_guarded(&r, keep, guarded_and_standing), &chat, scope)).await?);
         }
     }
     let args = exec_args(&Plan { help: &help, sandbox, model: l.spec.options.model.as_deref(), effort: effort.as_deref(), web: sw.web,

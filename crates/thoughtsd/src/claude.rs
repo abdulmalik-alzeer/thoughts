@@ -1773,8 +1773,9 @@ pub async fn start_run(
     // A Wrap or an automatic task may not change the standing files. Should one do so anyway, what
     // was there before is put back when it ends.
     let standing = if prof.restores_standing() {
-        let root = spec.cwd.clone();
-        Some(tokio::task::spawn_blocking(move || StandingSnapshot::take(&root)).await?)
+        let (root, chat) = (spec.cwd.clone(), spec.chat_id.clone());
+        // Kept on disk too before anything starts, for a daemon that stops or dies mid-run (`snapshots`).
+        Some(tokio::task::spawn_blocking(move || crate::snapshots::kept(StandingSnapshot::take(&root), &chat, crate::snapshots::BACKSTOP)).await?)
     } else { None };
     // A chat or workflow working in the library: the user's own pending edits are recorded first, so
     // the history shows what the assistant changed separately (and each can be undone on its own).
@@ -2046,14 +2047,14 @@ pub fn is_standing(rel: &str) -> bool {
 
 /// Is library-relative `rel` a file the backstop keeps (`StandingSnapshot`): a standing file, or
 /// anything under `.claude/` (routines, settings) or `.mcp.json` — what a later session obeys or runs.
-fn kept_by_backstop(rel: &str) -> bool {
+pub(crate) fn kept_by_backstop(rel: &str) -> bool {
     let low = rel.to_lowercase();
     is_standing(rel) || low == ".mcp.json" || low.starts_with(".claude/")
 }
 
 /// One kept file as it was before the run.
 #[derive(Clone, Debug, PartialEq)]
-enum Kept {
+pub(crate) enum Kept {
     Bytes(Vec<u8>),
     /// A link under a kept name (a file name, or the name of a kept folder), or to a folder, by where
     /// it points. It is never followed; a new or changed one goes when the run is over, and one the run
@@ -2071,7 +2072,14 @@ const KEPT_MAX: u64 = 1024 * 1024;
 /// through anyway (a spelling no rule names, a program that reads the rules differently), `restore`
 /// puts everything back when the run is over: changed files get their old contents, removed ones
 /// come back, new ones go.
-pub struct StandingSnapshot { root: PathBuf, files: std::collections::BTreeMap<String, Kept>, keep: fn(&str) -> bool, links: fn(&str) -> bool }
+pub struct StandingSnapshot {
+    pub(crate) root: PathBuf,
+    pub(crate) files: std::collections::BTreeMap<String, Kept>,
+    pub(crate) keep: fn(&str) -> bool,
+    pub(crate) links: fn(&str) -> bool,
+    /// Its copy on disk while the run goes (`snapshots`), so a daemon that stops or dies first still puts the files back.
+    pub(crate) saved: Option<crate::snapshots::Saved>,
+}
 
 impl StandingSnapshot {
     pub fn take(root: &Path) -> Self { Self::take_with(root, kept_by_backstop) }
@@ -2083,7 +2091,7 @@ impl StandingSnapshot {
     /// Like `take_with`, with links kept under the names `links` covers (more than `keep` where a
     /// run may edit a file but never put a link in its place: a link can point anywhere).
     pub fn take_guarded(root: &Path, keep: fn(&str) -> bool, links: fn(&str) -> bool) -> Self {
-        Self { root: root.to_path_buf(), files: Self::scan(root, keep, links), keep, links }
+        Self { root: root.to_path_buf(), files: Self::scan(root, keep, links), keep, links, saved: None }
     }
 
     /// Every kept file under `root`, by library-relative path, and the links a later session could
@@ -2093,7 +2101,7 @@ impl StandingSnapshot {
     /// is looked at) and `.git` is not entered. The whole tree is looked through, however large: a
     /// cut-off would let a run hide a kept name behind enough other files. Only kept files are held
     /// in memory.
-    fn scan(root: &Path, keep: fn(&str) -> bool, links: fn(&str) -> bool) -> std::collections::BTreeMap<String, Kept> {
+    pub(crate) fn scan(root: &Path, keep: fn(&str) -> bool, links: fn(&str) -> bool) -> std::collections::BTreeMap<String, Kept> {
         let mut out = std::collections::BTreeMap::new();
         let mut stack = vec![(root.to_path_buf(), String::new())];
         while let Some((dir, rel)) = stack.pop() {
@@ -2168,7 +2176,8 @@ impl StandingSnapshot {
 
 /// After a run nobody watched: put back the standing files it changed, and say so in its chat.
 pub(crate) async fn put_back_standing(state: &AppState, id: &str, snap: StandingSnapshot) {
-    let changed = tokio::task::spawn_blocking(move || snap.restore()).await.unwrap_or_default();
+    // Its copy on disk goes once it is put back (`snapshots`).
+    let changed = tokio::task::spawn_blocking(move || { let back = snap.restore(); crate::snapshots::finish(snap); back }).await.unwrap_or_default();
     if changed.is_empty() { return; }
     crate::log::warn(format!("run {id}: changed {} standing file(s) it may not change; put back: {}", changed.len(), changed.join(", ")));
     let items: Vec<Value> = changed.iter().map(|r| json!({"tool": "", "what": "restored", "target": r, "why": "standingRules"})).collect();

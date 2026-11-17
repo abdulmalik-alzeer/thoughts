@@ -52,6 +52,7 @@ pub mod spend;
 pub mod meter;
 pub mod prices;
 pub mod shell_guard;
+pub mod snapshots;
 pub mod sshhost;
 pub mod staging;
 pub mod state;
@@ -116,6 +117,9 @@ pub async fn run() -> anyhow::Result<()> {
     // Assistant processes that outlived a crashed daemon are ended before anything new starts.
     let reaped = runs::reap_stale(&paths::runs_file());
     if reaped > 0 { log::warn(format!("ended {reaped} assistant process(es) left over from a previous run")); }
+    // …and the standing files those runs may not change are put back as they were before them.
+    let restored = snapshots::restore_pending();
+    if restored > 0 { log::warn(format!("put back the standing files of {restored} run(s) the previous daemon left unfinished")); }
     // …and so are the private files that daemon had handed to its runs.
     claude::clear_run_tmp(&paths::run_tmp_dir());
     // …and the copies of chat attachments made for its runs (`run_files`).
@@ -225,10 +229,21 @@ async fn stop_signal() -> &'static str {
 /// together with everything it started, the chats are written out, and the files that say "a
 /// daemon is running" are removed. Runs ended here stay marked as running in their chats, so the
 /// next start reports them as cut off (and recovers a wrap that was in progress).
-async fn shut_down(state: &Arc<AppState>) {
+async fn shut_down(state: &Arc<AppState>) { stop(state, || runs::end_all(&paths::runs_file()), SNAPSHOT_WAIT).await }
+
+/// How long stopping waits for the runs it ended to put back their standing files (`snapshots`).
+const SNAPSHOT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// `shut_down`, with `end` ending the assistant processes (and saying how many there were).
+pub(crate) async fn stop(state: &Arc<AppState>, end: impl FnOnce() -> usize, wait: std::time::Duration) {
     state.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
-    let ended = runs::end_all(&paths::runs_file());
+    // A run dropped from here on, before it put its standing files back, leaves that to the next start.
+    let going: Vec<String> = state.runs.lock().await.keys().cloned().collect();
+    snapshots::hold(&going);
+    let ended = end();
     if ended > 0 { log::warn(format!("ended {ended} assistant run(s) that were still going")); }
+    // The runs just ended put back what they may not change: a short wait lets them.
+    if !snapshots::wait_put_back(&going, wait).await { log::warn("some runs had not put back their standing files yet; the next start does it"); }
     state.chats.flush(true).await;
     paths::clear_daemon_info();
 }
