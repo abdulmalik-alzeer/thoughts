@@ -527,27 +527,29 @@
   }
 
   // The permission mode as the service has it. "Bypass permissions" is only switched on after the
-  // user agreed to the warning (the service refuses it otherwise).
+  // user agreed to the warning, which the desktop app shows itself (`approval`; the service refuses
+  // the switch otherwise).
   const BYPASS = 'bypassPermissions';
   let savedPerm = $state<string | null>(null);
   let pendingPerm: string | null | undefined; // picked, with its warning still on screen
   async function permChanged() {
+    let yes: string | undefined; // the desktop app's approval of the switch
     const want: string | null = chat.options.permissionMode ?? null;
     const turnsOn = want === BYPASS && savedPerm !== BYPASS;
     if (turnsOn) {
       pendingPerm = want;
-      const yes = await confirmDialog({
-        title: t('perm.bypass.title'), body: `${t(onCodex ? 'codex.bypass.body' : 'perm.bypass.body')}\n\n${t('perm.bypass.chat')}`,
-        note: t(onCodex ? 'codex.bypass.note' : 'perm.bypass.note'), confirmLabel: t(onCodex ? 'codex.perm.bypassPermissions' : 'perm.bypass.confirm'), danger: true,
-      });
+      let ok: string | null | undefined;
+      try { ok = await approval('chat-bypass', id); }
+      catch (e) { pendingPerm = undefined; chat.options.permissionMode = savedPerm; failed(t('chat3.optionsFailed'), e); return; }
       pendingPerm = undefined;
-      if (!yes) { chat.options.permissionMode = savedPerm; return; }
+      if (ok === null) { chat.options.permissionMode = savedPerm; return; }
+      yes = ok;
       // The chat may have been fetched afresh while the warning was up (an answer finished):
       // what gets saved is the mode that was confirmed, not whatever the fresh copy holds.
       chat.options.permissionMode = want;
     }
     try {
-      const saved = await patch(`/chats/${id}`, { options: chat.options, confirmBypass: turnsOn, approval: turnsOn ? await approval('chat-bypass', id) : undefined });
+      const saved = await patch(`/chats/${id}`, { options: chat.options, confirmBypass: turnsOn, approval: turnsOn ? yes : undefined });
       savedPerm = saved?.options?.permissionMode ?? want;
     } catch (e) { failed(t('chat3.optionsFailed'), e); }
     // Whatever happened, the picker shows the mode the service has.

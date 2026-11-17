@@ -174,7 +174,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/codex/login", post(codex_login))
         .route("/api/ai/codex/recheck", post(codex_recheck))
         .route("/api/git/install", post(git_install))
-        .route("/api/library/trust", post(trust_library))
+        .route("/api/library/trust", get(trust_question).post(trust_library))
         .route("/api/library/access", get(library_access).post(library_keep_to_owner))
         .route("/api/library/private-index", get(private_index).post(private_index_remove))
         // library
@@ -662,6 +662,13 @@ async fn trust_library(Json(t): Json<TrustReq>) -> R {
     if !crate::consent::verify(t.approval.as_deref(), crate::consent::Action::Trust, &t.id) { return Err(crate::tr::err("consent.missing", &[]).into()); }
     crate::trust::accept(&t.id)?;
     ok()
+}
+
+/// `GET /api/library/trust?id=` → `{path}`: the folder an open trust question is about. The desktop
+/// shell names the folder from here in its own confirmation (`approve_action`), not from the window.
+async fn trust_question(Query(q): Query<HashMap<String, String>>) -> R {
+    let path = q.get("id").and_then(|id| crate::trust::asked_about(id)).ok_or_else(|| crate::tr::err("trust.expired", &[]))?;
+    Ok(Json(json!({"path": path})))
 }
 
 /// `GET /api/library/access` → `{openToOthers}`: can other accounts on this computer get into the

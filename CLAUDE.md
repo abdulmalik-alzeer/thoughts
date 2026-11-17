@@ -6,11 +6,15 @@
 - The UI talks to the daemon API for everything about the library, chats and settings. Tauri commands
   exist only for what needs the desktop itself (save and open dialogs, opening a file in its app,
   updates, menus and the Dock, quick capture, voice, quitting and restarting the service) and hold
-  no library logic; the list is the `generate_handler!` in `src-tauri/src/main.rs`.
+  no library logic; the list is the `generate_handler!` in `src-tauri/src/main.rs`. Each command there is
+  also named once in `COMMANDS` in `src-tauri/build.rs` (the app manifest) and granted as `allow-<command>`
+  only to the windows that call it (`capabilities/default.json` for the app window, `capture.json` for
+  quick capture; add-on frames get none). The build fails, naming the command, if the three disagree.
+  Commands that matter check the caller too (`main_only` / `is_main_label`).
 - Never hard-code model, effort or permission lists: they come from `claude --help` (`claude.rs`).
   Effort levels and permission modes are shown under Claude Code's own names.
 - `bypassPermissions` is only for ordinary chats (`kind == "chat"`) and is only switched on after the
-  user confirmed the warning dialog; the daemon refuses the switch without that confirmation
+  user confirmed the warning, which the shell shows as a native dialog (`approve_action`); the daemon refuses the switch without that confirmation
   (`check_bypass` in `api.rs`, `?confirm=` on `PUT /api/settings`). That confirmation, like a folder trust
   answer, carries an approval from the desktop shell made with a key the window never sees
   (`consent.rs` in the daemon and in `src-tauri`): the app token alone is not a yes. Runs the app starts itself never use it,

@@ -38,14 +38,17 @@ export function trustIntro(info: TrustInfo): string {
 }
 
 /** Ask the user. Resolves true once the service has recorded their yes; false when they declined.
- *  `answer` posts the yes for one question id and resolves a newer question when the folder changed
- *  while the dialog was open (the service then refuses the old answer), or null when it is settled. */
-export async function askTrust(info: TrustInfo, answer: (id: string) => Promise<TrustInfo | null>): Promise<boolean> {
+ *  This dialog shows what was found; its button opens the desktop app's own confirmation, which is
+ *  the yes (`answer`). `answer` resolves a newer question when the folder changed while the dialogs
+ *  were open (the service then refuses the old answer), null when it is settled, false on a no. */
+export async function askTrust(info: TrustInfo, answer: (id: string) => Promise<TrustInfo | null | false>): Promise<boolean> {
   let current: TrustInfo | null = info;
   while (current) {
-    const yes = await confirmDialog({ title: t('seca.trust.title'), trust: current, confirmLabel: t('seca.trust.confirm'), cancelLabel: t('seca.trust.cancel'), danger: true });
-    if (!yes) return false;
-    current = await answer(current.id);
+    const next = await confirmDialog({ title: t('seca.trust.title'), trust: current, confirmLabel: t('sec-shell-ipc.trust.next'), cancelLabel: t('seca.trust.cancel'), danger: true });
+    if (!next) return false;
+    const answered = await answer(current.id);
+    if (answered === false) return false;
+    current = answered;
   }
   return true;
 }

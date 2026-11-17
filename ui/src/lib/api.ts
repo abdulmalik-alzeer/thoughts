@@ -205,12 +205,15 @@ export class ApiError extends Error {
 
 const trustAsked = new Map<string, Promise<boolean>>();
 
-/** The user's yes to trust question `id`. Resolves a newer question when the folder changed while
- *  the dialog was open (the daemon then refuses the old answer and asks again), null once recorded. */
+/** The user's yes to trust question `id`, confirmed in the desktop app's own dialog. Resolves a newer
+ *  question when the folder changed while the dialog was open (the daemon then refuses the old answer
+ *  and asks again), null once recorded, false when the user said no in the desktop app's dialog. */
 async function answerTrust(id: string) {
   const { isTrustInfo } = await import('./trust');
   const { approval } = await import('./consent');
-  try { await api('/library/trust', { method: 'POST', body: { id, approval: await approval('trust', id) } }); return null; }
+  const yes = await approval('trust', id);
+  if (yes === null) return false;
+  try { await api('/library/trust', { method: 'POST', body: { id, approval: yes } }); return null; }
   catch (e) {
     if (e instanceof ApiError && e.status === 403 && e.data?.code === 'untrusted' && isTrustInfo(e.data?.trust)) return e.data.trust;
     throw e;

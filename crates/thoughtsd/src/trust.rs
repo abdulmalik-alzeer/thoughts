@@ -1063,6 +1063,13 @@ pub fn require(path: &Path) -> anyhow::Result<()> { Ok(check(path, Scope::Whole)
 /// must not run against settings nobody looked at.
 pub fn require_git(path: &Path) -> anyhow::Result<()> { Ok(check(path, Scope::Git)?) }
 
+/// The folder open question `id` is about, while it is open. The desktop app names the folder from
+/// here in its own confirmation, never from what the window says.
+pub fn asked_about(id: &str) -> Option<PathBuf> {
+    let p = pending().lock().unwrap_or_else(|e| e.into_inner());
+    p.iter().find(|q| q.id == id && q.at.elapsed() < PENDING_FOR).map(|q| q.path.clone())
+}
+
 /// The user's yes to question `id`: trust that folder as it was listed. Fails with a fresh
 /// [`Untrusted`] when the folder is no longer what the question showed (a sync or another program
 /// changed it while the dialog was open), so the app asks again with what is there now.
@@ -1196,6 +1203,19 @@ mod tests {
     fn question(r: anyhow::Result<()>) -> Untrusted {
         r.unwrap_err().downcast::<Untrusted>().expect("a folder that needs trust fails with the typed error")
     }
+    #[test]
+    fn an_open_question_names_its_folder_until_it_is_answered() {
+        let d = tmp("asked-about");
+        let id = ask(&d, "some state");
+        assert_eq!(asked_about(&id), Some(d.clone()));
+        assert_eq!(asked_about("no-such-question"), None);
+        assert_eq!(asked_about(""), None);
+        // Answering takes the question away (whatever the answer's outcome).
+        let _ = accept(&id);
+        assert_eq!(asked_about(&id), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// `file kind` for every finding, in order.
     fn kinds(d: &Path) -> Vec<String> { findings(d).iter().map(|f| format!("{} {}", f.file, f.kind).trim().to_string()).collect() }
     fn risks(text: &str) -> Vec<&'static str> { markdown_risks(text).iter().map(|r| r.kind).collect() }

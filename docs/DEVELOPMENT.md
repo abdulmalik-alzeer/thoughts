@@ -99,6 +99,10 @@ Thoughts.app
   and are shown as data. `POST /api/library/trust {id, approval}` answers that one question, and only while
   the folder is still what it listed; there is no call that trusts a path. `approval` comes from the
   desktop shell (`approve_action`, see `consent.rs` in both crates): the app token alone trusts nothing.
+  The trust dialog shows what was found; its button opens the shell's own native confirmation,
+  which names the folder as the daemon has it (`GET /api/library/trust?id=`) and is the yes. Bypass
+  switches have no in-page dialog: the shell's native warning is the confirmation. Script in the
+  page cannot answer, word or skip that dialog, and only one is open at a time.
 - Trust is stored daemon-side in `~/.thoughts/trusted.json`, per folder, in two parts so that a
   change in one is never reported as a change in the other: the *assistant* part (its findings
   plus the bytes of every file under a `.claude` folder that the starter kit did not put there,

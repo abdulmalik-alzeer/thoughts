@@ -316,11 +316,18 @@
   // ----- bypass permissions: never switched on without the warning -----
   /** True once the user agreed to the warning for the draft that is being edited. */
   let bypassOk = false;
+  /** The desktop app's approval that came with that yes, until a save sends it. */
+  let bypassYes: string | undefined;
   const turnsBypassOn = () => s.ai.claude.permissionMode === BYPASS && app.settings?.ai?.claude?.permissionMode !== BYPASS;
-  const askBypass = () => confirmDialog({
-    title: t('perm.bypass.title'), body: `${t('perm.bypass.body')}\n\n${t('perm.bypass.bodyDefault')}`,
-    note: t('perm.bypass.note'), confirmLabel: t('perm.bypass.confirm'), danger: true,
-  });
+  /** The warning, shown by the desktop app itself (its dialog is the confirmation). */
+  async function askBypass(): Promise<boolean> {
+    let a: string | null | undefined;
+    try { a = await approval('settings-bypass'); }
+    catch (e) { failed(t('ui.set.saveFailed'), e); return false; }
+    if (a === null) return false;
+    bypassYes = a;
+    return true;
+  }
   /** A click on a permission radio. Choosing bypass waits for the dialog; the radio only moves on a yes. */
   async function pickPerm(p: string, e: MouseEvent) {
     if (p !== BYPASS || permValue === BYPASS) { s.ai.claude.permissionMode = p; return; }
@@ -355,7 +362,15 @@
     const confirm = turnsBypassOn();
     const sent = norm(s);
     const query = new URLSearchParams();
-    if (confirm) { query.set('confirm', BYPASS); const a = await approval('settings-bypass'); if (a) query.set('approval', a); }
+    if (confirm) {
+      // A save tried again after a failure asks again: an approval is good once.
+      let a: string | null | undefined = bypassYes;
+      bypassYes = undefined;
+      if (!a) a = await approval('settings-bypass');
+      if (a === null) { s.ai.claude.permissionMode = app.settings?.ai?.claude?.permissionMode ?? s.ai.claude.permissionMode; bypassOk = false; return; }
+      query.set('confirm', BYPASS);
+      if (a) query.set('approval', a);
+    }
     if (lib.moved) query.set('library', 'moved');
     const qs = query.toString();
     await saveSettings(payload(), qs ? `?${qs}` : '');
@@ -385,7 +400,7 @@
   /** Save the draft (after any save still running). Bubbled `change` events land here. */
   function autoSave(): Promise<void> { queue = queue.then(saveNow, saveNow); return queue; }
 
-  function discard() { s = structuredClone($state.snapshot(base)); bypassOk = false; saveFailed = false; applyTheme(); }
+  function discard() { s = structuredClone($state.snapshot(base)); bypassOk = false; bypassYes = undefined; saveFailed = false; applyTheme(); }
 
   /** Text typed into a field that only acts on its own button (a key, a backup address): not a setting, so not saved by itself. */
   const unsent = () => [
