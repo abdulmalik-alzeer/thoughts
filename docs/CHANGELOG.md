@@ -1,5 +1,59 @@
 # What's new in Thoughts
 
+## 0.1.0
+
+A big one: pictures and files open inside the app, chats can be edited and branched, a Graph of your notes, suggestions for automating your work, and a long list of fixes and safety improvements. Help has a new guide, "Working with notes, chats and files", that explains the new tools.
+
+### New
+- **Pictures open large.** Click any picture, in a chat, a note, a Word document or an answer, to see it large. Zoom with the scroll wheel, a pinch or + and −, drag to move, and press Esc or X to close.
+- **Files preview inside the app.** Docs and chat attachments now show pictures, PDFs, Word, Excel, PowerPoint, CSV, OpenDocument and Rich Text files, text and code with colours, web pages (safely, without their scripts), sound, video and the contents of a ZIP. Spreadsheets show their sheets as tables and presentations go slide by slide with their notes. Files in the older Word, Excel and PowerPoint formats (doc, xls, ppt) are not shown, and the preview says so.
+- **Print or save as PDF.** Any note, an item's front page or its log can be printed or saved as a PDF, in a clean light layout with Arabic laid out correctly. On a Mac, "Save as PDF…" asks where to save and writes the file straight there; on Windows and Linux the print window opens.
+- **A note beside the chat.** Click a note an answer changed, a link to a note or an @-mention to read it in a pane beside the chat. It follows the note as the assistant changes it. ⌘-click (Ctrl-click) still opens Docs.
+- **Edit and send again, and branches.** Edit a message you sent and send it again. Editing an earlier message, or **Branch** on any message, starts a new chat from that point and leaves the original as it was.
+- **A second window.** "Open in new window" puts a note or a chat in a window of its own, to keep two notes, or a chat and a note, side by side.
+- **Graph.** A new page shows your notes as a map joined by their links, with search, filters and a list view. **Links** on an item's page shows what is around it.
+- **Changes waiting.** Switch on "Check for changes from your other computers" in Settings › Library & backup (it is off until you do) and Thoughts shows "3 changes waiting" beside Sync. It only looks: nothing changes until you press Sync.
+- **Changed outside Thoughts.** Edits made in another program, on your phone or by iCloud now refresh what you see and appear in History as their own entry, "Changed outside Thoughts".
+- **Suggest automations** (Customise › Automate). When you ask, your assistant looks at a short summary of how you use Thoughts and suggests routines, helpers, connections or new pages. You see exactly what is sent first, and review everything before it is kept. It includes a ready-made "Email writing" routine whose drafts end with an "Open in Mail" link (Thoughts never sends email itself).
+- **Helpers:** specialists your assistant can hand part of a chat's work to. You review every helper before it is kept, and a helper never gets more permissions than the chat itself (Claude Code only).
+- **A People list:** the people you write to, who they are and how to write to them, kept as ordinary notes in your library, so the email routine writes in each person's language and tone. You can add, change and remove people in the app.
+
+### Better
+- **You notice when the assistant needs you.** A chat waiting for your OK is marked in the sidebar, the Dock shows a count while Thoughts is in the background, and the reminder stays on screen until you answer. Clicking a Thoughts notification opens the chat it is about.
+- **First-run setup** lets you choose Codex instead of Claude, keeps backup in a closed optional section, explains Apple's Git installer on a Mac, and shows how to get an access token for an online backup.
+- **Deleting a chat that was never wrapped** warns you and offers to wrap it first.
+- Settings › Maintenance has an **"Updates for testers"** card that walks you through getting updates while Thoughts is not public, with each line ready to copy.
+- The cost setting now says what it does, **"Show cost on Wrap, Reorganize and setup chats"**, and moves with you to another computer.
+- **Codex's estimated cost** now counts toward the month's total and the spending limit, so automatic tasks on Codex stop at the limit too. The cost guide shows where to see your usage.
+- **Bringing a large folder** into a library with a backup asks first, and can bring in only the notes. Undo right after bringing notes in takes them back out completely while they have not been sent.
+- **Faster:** sending a message in a chat with many attached files, saving long chats with many file edits (their files also stay smaller), refreshing long chats, and the Ideas page in large libraries. Opening a document no longer reloads the whole Docs page.
+- The update window now speaks only in the app's own words. To see what a new version changes, open its release page on GitHub, or Help › What's new once it is installed.
+- Undo arrows point the right way in Arabic, Home's "See all" buttons tell screen readers which list they open, and many Arabic spellings were corrected.
+- The README explains how to open Thoughts the first time on current macOS (Privacy & Security › Open Anyway) and what setup will ask. While Thoughts is not signed by Apple, see [Opening Thoughts the first time](../README.md#opening-thoughts-the-first-time) before installing by hand.
+
+### Fixed
+- **Todos:** a todo you are editing, dating or moving now stays with that todo when the list refreshes. Before, a refresh could make the change land on a different todo.
+- **Chats:** a finished answer no longer looks stuck as "running" when the connection blips, thinking text is no longer lost, and a message waiting to be sent goes out after a reconnect. A message that fails to send after you leave the chat is kept as its draft. Links written as references work while the answer is still being written.
+- Stopping a chat right after it answered no longer marks the answer as stopped; a chat can no longer start two runs that stop each other; and programs a finished run left running in the background are now ended.
+- Permission requests from before a restart no longer look as if they can still be answered.
+- The app no longer waits forever when its background service stops answering, and quick changes to zoom or theme no longer undo each other.
+- **Sync:** if a backup location already holds a copy of your library that this computer's copy did not come from, Sync now asks how to put the two together, and nothing is deleted. A backup location no longer starts refusing changes for good, and a clash you settled is not asked about again. Libraries that keep files with Git LFS are no longer sent with stand-ins in place of those files: Sync says why and sends nothing.
+- **Your text stays exactly as it was:** moving a file no longer undoes edits made to linking notes while the move ran, and status changes, inbox filing and todo edits keep byte-order marks, line endings and unusual text intact.
+- Undoing an answer's changes, or rolling back a Wrap, now either finishes completely or changes nothing. Keeping a Wrap's changes just before the app stops no longer wraps the same chats twice, and a Wrap no longer clears changes you staged by hand in your own repository.
+- Saving and ticking todos keep working in the library you switched to while a Wrap finishes in the one you left, and a Wrap, undo or repair now waits for a change you just made instead of risking it.
+- If the app quits or crashes while a Wrap, an automatic task or a Codex chat is running, the files those runs may not change are put back, right away or the next time the app starts.
+- The customisation review no longer lets you keep a change that could not be tested; it asks you to try again. Opening another library in a second window no longer throws away unsaved Settings changes without warning.
+
+### Safer
+- **Confirmed by the system.** Switching a chat to bypass permissions, making that the default, and trusting a folder are now confirmed once, in a dialog that the Thoughts app shows itself. It names the chat or the folder, and nothing running inside the window, nor another program that gets hold of the app's access file, can answer it.
+- **Files that can carry macros**, old Word, Excel and PowerPoint files, Rich Text and OpenDocument files, are no longer opened in another program with one click; Thoughts offers "Show in Finder" instead. Opening a file from a private folder in another program asks first.
+- Your saved sync password can only be used by the app's own sync. Other programs on your computer can no longer get it by starting Thoughts in a special way.
+- A library whose sync settings are read from a file inside the library is no longer trusted, because anything synced in could change them.
+- Chats and automatic tasks can no longer read the app's release signing key or keychain passwords. Codex no longer runs while your sign-in details are kept in a plain file, and on a Mac its no-sandbox mode is kept out of the app's own data.
+- The assistant never starts without its safety settings, and a task with a spending limit never runs without that limit.
+- An "always allow" you take back in a chat stays taken back after the app restarts.
+- Each part of the app can now use only the app features it needs.
+
 ## 0.0.14
 
 A calmer update.

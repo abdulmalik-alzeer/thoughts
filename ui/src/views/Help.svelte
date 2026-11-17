@@ -5,9 +5,11 @@
   import { shortcuts, keys } from '../lib/shortcuts';
   import HelpGuide from './HelpGuide.svelte';
   import HelpReport from './HelpReport.svelte';
-  import { guideNames, guideTitle, guideSource, changelogSource } from '../lib/guides';
+  import { guideNames, guideTitle, guideSource, changelogSource, hasGuide } from '../lib/guides';
 
   const terms = ['library', 'chat', 'wrap', 'sync', 'rollback'];
+  // "Working with notes and chats": i18n stems in final-docs.ts (`final-docs.<k>T` and `final-docs.<k>`).
+  const work = ['pic', 'preview', 'pdf', 'pane', 'edit', 'window', 'graph', 'need', 'sync'];
   const rows = $derived(shortcuts.filter((s) => !s.hidden).map((s) => ({
     keys: s.id === 'nav.1' ? `${keys(s)} … ${keys(shortcuts.find((x) => x.id === 'nav.6')!)}` : keys(s),
     label: t(s.label),
@@ -61,6 +63,17 @@
     <button class="btn" onclick={() => command('tour')}><Icon name="book" size={15} /> {t('ob3.help.takeTour')}</button>
   </section>
 
+  <section aria-labelledby="h-work">
+    <h2 id="h-work" class="row"><Icon name="docs" size={18} /> {t('final-docs.title')}</h2>
+    <p class="muted">{t('final-docs.lead')}</p>
+    <dl>
+      {#each work as k}
+        <dt>{t(`final-docs.${k}T`)}</dt><dd>{t(`final-docs.${k}`)}</dd>
+      {/each}
+    </dl>
+    {#if hasGuide('USING')}<button class="btn" onclick={() => openGuide('USING')}><Icon name="book" size={15} /> {t('final-docs.open')}</button>{/if}
+  </section>
+
   <section aria-labelledby="h-hist">
     <h2 id="h-hist" class="row"><Icon name="rollback" size={18} /> {t('ob3.help.history')}</h2>
     <dl>
@@ -80,10 +93,12 @@
       <dt>{t('layer.help.reviewT')}</dt><dd>{t('layer.help.review')}</dd>
       <dt>{t('layer.history')}</dt><dd>{t('layer.help.history')}</dd>
       <dt>{t('layer.share')}</dt><dd>{t('layer.help.share')}</dd>
+      <dt>{t('final-docs.autoT')}</dt><dd>{t('final-docs.auto')}</dd>
     </dl>
     <div class="row wrap">
       <button class="btn primary" onclick={() => command('customise.new')} title={t('r10-cust-start.newTip')}><Icon name="palette" size={15} /> {t('r10-cust-start.new')}</button>
       <button class="btn" onclick={() => command('customise')}>{t('ldc.set.open')}</button>
+      {#if hasGuide('CUSTOMISING')}<button class="btn" onclick={() => openGuide('CUSTOMISING', t('auto-ui.suggest'))}><Icon name="book" size={15} /> {t('final-docs.autoOpen')}</button>{/if}
       <button class="btn" onclick={() => command('rollback')}><Icon name="rollback" size={15} /> {t('ob3.help.openAppHist')}</button>
     </div>
   </section>

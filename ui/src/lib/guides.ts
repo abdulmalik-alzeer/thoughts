@@ -4,7 +4,7 @@
 import { lang } from './i18n';
 
 const NOT_GUIDES = /^(DEVELOPMENT|RELEASING|REVIEW[-\w.]*|CHANGELOG|GLOSSARY)$/i;
-const ORDER = ['PRIVACY', 'COST', 'HISTORY', 'CUSTOMISING'];
+const ORDER = ['USING', 'PRIVACY', 'COST', 'HISTORY', 'CUSTOMISING'];
 
 const en = import.meta.glob('../../../docs/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const ar = import.meta.glob('../../../docs/ar/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;

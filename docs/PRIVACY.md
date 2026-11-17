@@ -79,11 +79,13 @@ To take them to another computer, use **Settings › Maintenance › Move to ano
 
 If you keep your library inside a folder that another service backs up (iCloud Drive, Dropbox and the like), that service copies it too. That is between you and that service.
 
+**Checking for changes waiting.** If you switch on **Check for changes from your other computers** (Settings › Library & backup; off until you switch it on), Thoughts also contacts your main backup location every 15 minutes while it is open, to see whether changes are waiting there. That is the location you entered yourself, and the check uses the sign-in you saved for it, only after a Sync of that library has worked since Thoughts started. It downloads what is waiting into the app's own copy of the history but changes nothing in your notes until you press Sync, and it sends nothing.
+
 ## No analytics
 
 Thoughts does not collect usage statistics, crash reports or any other information about you, and has no account of its own.
 
-Checking for a newer version is the one time Thoughts contacts the internet on its own behalf, and only in these cases:
+Checking for a newer version is the one time Thoughts contacts the internet on its own behalf (apart from your own backup location, when you switch on the check described above), and only in these cases:
 
 - **When you choose "Check for Updates…"** (in the menu, under Customise › App updates, or under Settings › Maintenance).
 - **At most once a day, if you switch on "Check for new versions automatically"** under Settings › Maintenance. It is off unless you switch it on. (A copy that cannot update itself, such as one installed from a `.deb` package, checks once a week instead.)
@@ -199,7 +201,7 @@ If you cannot answer these for the plan you are on, treat client material as not
 
 ## The trust question when opening a library
 
-A library is a folder of text, but a folder can also carry settings and instructions that make the assistant or the sync tool run programs. When you open a library that Thoughts did not create itself — one you downloaded, or received from someone — Thoughts first lists anything in it that could run a program on your computer, or that changes the assistant's standing instructions from the ones Thoughts ships (in this version or an earlier one, so an update alone never asks), and asks whether you trust the folder. Nothing in the folder is run until you say yes. If those settings or instructions change later, you are asked again.
+A library is a folder of text, but a folder can also carry settings and instructions that make the assistant or the sync tool run programs. When you open a library that Thoughts did not create itself — one you downloaded, or received from someone — Thoughts first lists anything in it that could run a program on your computer, or that changes the assistant's standing instructions from the ones Thoughts ships (in this version or an earlier one, so an update alone never asks), and asks whether you trust the folder. Nothing in the folder is run until you say yes. Your yes is given in a confirmation that the Thoughts app shows itself, naming the folder and its full location: **Trust…** opens it, and nothing running inside the app's window can answer it for you. If those settings or instructions change later, you are asked again.
 
 Libraries created by Thoughts contain one such setting. It fetches the latest synced copy when you start the assistant in the library yourself, outside the app; inside Thoughts it does nothing, because the app does the syncing. Only trust a library from someone you would let run software on your computer.
 

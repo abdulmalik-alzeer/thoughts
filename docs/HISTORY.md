@@ -24,6 +24,7 @@ The history of changes is its own switch. It is on from the start, whichever bac
 - **Assistant**: changes the assistant made during a chat or an automatic task.
 - **Edit**: changes you made yourself in the app.
 - **Sync**: changes that arrived from your backup location, for example from another computer. Edits you made here and had not saved to the history yet are recorded as your own edits before anything arrives.
+- **Outside Thoughts**: a note changed outside the app, in another program, on your phone or through iCloud. The entry is called **Changed outside Thoughts**. Changes made while the assistant is working are part of its own entry instead.
 - **Combined**: changes from another computer combined with yours after a clash (see below). This entry cannot be undone in one step; restore the documents you need one by one instead.
 - **Start**: the library as it was when its history began. It is the oldest entry and cannot be undone, because nothing exists before it.
 
@@ -83,6 +84,8 @@ Sometimes the history is left in a state where nothing can be saved or synced: a
 ## Backup locations
 
 With **Online location** or **Drive or folder** as the backup (Settings › Library & backup), Thoughts sends your library, with its history, to every location in the list: when you press **Sync**, or after every Wrap if you chose that. You can mix both kinds. Changes from your other computers are received from the location marked **main**.
+
+**Knowing when changes are waiting.** Switch on **Check for changes from your other computers** (in the same place, off until you switch it on) and, every 15 minutes while Thoughts is open, the app looks at the main location and shows **N changes waiting** beside **Sync**. It only looks: nothing in your notes changes until you press Sync. See [Working with notes, chats and files](USING.md#changes-from-your-other-computers-and-other-apps).
 
 **A drive or folder.** Choose **Drive or folder**, then **Choose a drive or folder…** and pick a folder on an external drive, a USB stick or a network folder. Thoughts keeps the backup there in one folder named after your library (for example `Notes.git`). It is not a copy you open and read: it is the library and its history in the form Thoughts can bring back.
 
