@@ -94,8 +94,8 @@
   }
 
   // ----- layout from home.json: hidden sections and their order -----
-  // `order` may also place `suggestions` and single plugin widgets (`widget:<id>`); anything not mentioned keeps
-  // its usual place (suggestions first, widgets last).
+  // `order` may also place `suggestions`, `automate` (the quiet Suggest automations link) and single plugin
+  // widgets (`widget:<id>`); anything not mentioned keeps its usual place (suggestions first, widgets, then automate last).
   const SECTIONS = ['stats', 'usage', 'ideas', 'upcoming', 'todos', 'chats', 'projects'];
   const widgetKey = (w: { id: string }) => 'widget:' + w.id;
   const layout = $derived.by(() => {
@@ -103,9 +103,9 @@
     // A box placed on another page (pages.json) shows on Home only when home.json places it here too.
     const elsewhere = placedElsewhere();
     const widgets = app.homeWidgets.map(widgetKey).filter((k) => !elsewhere.has(k) || app.home.order.includes(k));
-    const known = (k: string) => SECTIONS.includes(k) || k === 'suggestions' || widgets.includes(k);
+    const known = (k: string) => SECTIONS.includes(k) || k === 'suggestions' || k === 'automate' || widgets.includes(k);
     const asked = app.home.order.filter(known);
-    const order = [...new Set([...(asked.includes('suggestions') ? [] : ['suggestions']), ...asked, ...SECTIONS, ...widgets])].filter((k) => !hidden.has(k));
+    const order = [...new Set([...(asked.includes('suggestions') ? [] : ['suggestions']), ...asked, ...SECTIONS, ...widgets, 'automate'])].filter((k) => !hidden.has(k));
     // Todos and chats share a row when they are neighbours.
     const rows: string[][] = [];
     for (let i = 0; i < order.length; i++) {
@@ -447,6 +447,8 @@
     {:else if row[0] === 'upcoming'}{@render upcomingS()}
     {:else if row[0] === 'projects'}{@render projectsS()}
     {:else if row[0] === 'suggestions'}{@render suggestionsS()}
+    {:else if row[0] === 'automate'}
+      <section class="autoq"><button type="button" class="more" onclick={() => go({ kind: 'customise', id: 'automate' })} title={t('auto-ui.homeTip')}><Icon name="ai" size={14} /> {t('auto-ui.suggest')}</button></section>
     {:else if row[0].startsWith('widget:')}
       {#each app.homeWidgets.filter((w) => widgetKey(w) === row[0]) as w (w.plugin + ':' + w.id)}{@render widgetS(w)}{/each}
     {/if}
@@ -504,6 +506,7 @@
   .sgi { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; background: var(--tint); color: var(--on-tint); flex: none; }
   .sga { gap: 6px; }
   .widget { margin-top: 28px; }
+  .autoq { margin-top: 24px; display: flex; justify-content: center; }
   /* An add-on box rises like the sections around it, once its add-on has drawn it (lib/surfaceIn.ts). */
   .widget:global([data-drawn='no']) { opacity: 0; animation: none; }
   .widget:global([data-drawn='yes']) { animation: rise .5s var(--ease) both; }

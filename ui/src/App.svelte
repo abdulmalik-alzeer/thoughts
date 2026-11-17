@@ -694,6 +694,7 @@
     if (syncOn) add('sync', t('shell.pal.sync'), g.act, 'sync', { keywords: 'sync backup مزامنة' });
     add('customise', t('layer.customise'), g.act, 'palette', { keywords: 'customise customize personalise change app add-on plugin theme تخصيص تعديل إضافة' });
     add('customise.new', t('r10-cust-start.new'), g.act, 'palette', { keywords: 'new customisation customise customize change app chat تخصيص جديد محادثة تغيير' });
+    add('customise.automate', t('auto-ui.suggest'), g.act, 'ai', { keywords: 'suggest automation automate routine helper connection page email اقترح أتمتة روتين مساعد ربط صفحة بريد', run: () => { go({ kind: 'customise', id: 'automate' }); } });
     if (app.pending?.exists) add('review', t('layer.reviewTitle'), g.act, 'eye', { keywords: 'review pending change مراجعة' });
     add('history', t('ui.hist.title'), g.go, 'rollback', { keywords: 'history versions undo restore notes السجل استعادة تراجع نسخة' });
     add('rollback', t('ui.pal.appHistory'), g.act, 'rollback', { keywords: 'history rollback undo restore app السجل استعادة تراجع التطبيق' });
