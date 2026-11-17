@@ -1,0 +1,36 @@
+// Bringing in a large folder of notes into a library that is sent to a backup location: the choice
+// asked first (nothing is copied without it), and taking back a copy that has not been sent yet.
+export default {
+  en: {
+    'data-import.title': 'This folder is large',
+    'data-import.why': 'It holds {size}. Your library is sent to its backup at every Sync, and what is sent stays there for good, even if you undo it later. A very large library can stop syncing. Choose what to bring in.',
+    'data-import.legend': 'What to bring in',
+    'data-import.none': 'Don’t bring it in',
+    'data-import.noneHint': 'Nothing is copied. You can bring in its folders one at a time instead.',
+    'data-import.notes': 'Bring in only the notes',
+    'data-import.notesHint': '{n} notes, {size}. Pictures, PDFs and other files stay where they are.',
+    'data-import.notesNone': 'There are no notes in this folder, only other files.',
+    'data-import.notesTooBig': 'Even the notes alone are too much to send to your backup.',
+    'data-import.all': 'Bring in everything',
+    'data-import.allHint': '{size}, all of it sent to your backup and kept there.',
+    'data-import.allTooBig': 'Too much to send to your backup (more than 1 GB).',
+    'data-import.taken': 'The notes brought in were taken back out. They are not kept in History or sent to your backup.',
+    'data-import.undone': 'The notes brought in were taken out again. They had been sent to your backup already, so History keeps them.',
+  },
+  ar: {
+    'data-import.title': 'هذا المجلد كبير',
+    'data-import.why': 'حجمه {size}. تُرسل مكتبتك إلى نسختها الاحتياطية مع كل مزامنة، وما يُرسل يبقى هناك دائماً حتى لو تراجعت عنه لاحقاً. وقد تتوقف المزامنة إذا كبرت المكتبة كثيراً. اختر ما تنقله.',
+    'data-import.legend': 'ما الذي تنقله',
+    'data-import.none': 'لا تنقله',
+    'data-import.noneHint': 'لن يُنسخ شيء. يمكنك بدلاً من ذلك نقل مجلداته واحداً تلو الآخر.',
+    'data-import.notes': 'انقل الملاحظات وحدها',
+    'data-import.notesHint': '{n} ملاحظة، {size}. تبقى الصور وملفات PDF وسائر الملفات في مكانها.',
+    'data-import.notesNone': 'لا توجد ملاحظات في هذا المجلد، بل ملفات أخرى فقط.',
+    'data-import.notesTooBig': 'حتى الملاحظات وحدها أكبر من أن تُرسل إلى نسختك الاحتياطية.',
+    'data-import.all': 'انقل كل شيء',
+    'data-import.allHint': '{size}، يُرسل كله إلى نسختك الاحتياطية ويبقى فيها.',
+    'data-import.allTooBig': 'أكبر من أن يُرسل إلى نسختك الاحتياطية (أكثر من 1 غيغابايت).',
+    'data-import.taken': 'سُحبت الملاحظات المنقولة. لن تبقى في السجل ولن تُرسل إلى نسختك الاحتياطية.',
+    'data-import.undone': 'أُزيلت الملاحظات المنقولة. كانت قد أُرسلت إلى نسختك الاحتياطية من قبل، فيحتفظ بها السجل.',
+  },
+};

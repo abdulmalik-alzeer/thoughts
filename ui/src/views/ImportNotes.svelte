@@ -10,6 +10,7 @@
   import { failed } from '../lib/errors';
   import { trapFocus } from '../lib/focus';
   import { fmtSize } from '../lib/content/util';
+  import LargeImportChoice from './LargeImportChoice.svelte';
 
   let { close, done }: { close: () => void; done?: (into: string) => void } = $props();
 
@@ -20,6 +21,8 @@
   let looking = $state(false);
   let lookErr = $state('');
   let busy = $state(false);
+  // A large folder for a library sent to a backup: what the user chose ('none' until they choose).
+  let keep = $state<'none' | 'notes' | 'all'>('none');
 
   const fullPath = (p: string) => /^(~\/|\/|[A-Za-z]:[\\/])/.test(p);
   let seq = 0;
@@ -34,6 +37,7 @@
       const v = await post('/library/import-folder/preview', { path: p });
       if (n !== seq) return;
       preview = v;
+      keep = 'none';
       if (!intoTouched) into = String(v?.into ?? '');
     } catch (e: any) {
       if (n === seq) { preview = null; lookErr = e?.message || t('sb.imp.previewFailed'); }
@@ -52,13 +56,13 @@
   }
 
   const leftLines = $derived(Object.entries(preview?.leftBy ?? {}).filter(([, n]) => Number(n) > 0).map(([w, n]) => t('sb.imp.left.' + w, { n: fmtNum(Number(n)) })));
-  const canGo = $derived(!!preview && !preview.tooBig && Number(preview.files) > 0 && !!into.trim() && !looking && !busy);
+  const canGo = $derived(!!preview && !preview.tooBig && Number(preview.files) > 0 && !!into.trim() && !looking && !busy && (!preview.ask || keep !== 'none'));
 
   async function go() {
     if (!canGo) return;
     busy = true;
     try {
-      const r = await post('/library/import-folder', { path: path.trim(), into: into.trim() });
+      const r = await post('/library/import-folder', { path: path.trim(), into: into.trim(), keep: preview?.ask ? keep : '' });
       const where = String(r?.into ?? into);
       const hash = r?.hash ? String(r.hash) : '';
       toast(t('sb.imp.done', { into: where }), {
@@ -69,6 +73,8 @@
       close();
     } catch (e) {
       failed(t('sb.imp.failed'), e);
+      // A backup location was added since the folder was looked at: ask now.
+      if ((e as any)?.code === 'import_choose') look();
     } finally { busy = false; }
   }
 
@@ -79,7 +85,8 @@
   }
 
   async function undo(hash: string, where: string) {
-    try { await post('/library/undo', { hash }); toast(t('sb.imp.undone'), { kind: 'success' }); done?.(where); }
+    // Taken back out of the history too while it has not been sent anywhere; otherwise undone.
+    try { const r = await post('/library/import-folder/take-back', { hash, into: where }); toast(t(r?.how === 'dropped' ? 'data-import.taken' : 'data-import.undone'), { kind: 'success' }); done?.(where); }
     catch (e) { failed(t('sb.imp.undoFailed'), e); }
   }
 </script>
@@ -114,6 +121,8 @@
         {/if}
       {/if}
     </div>
+
+    {#if preview?.ask && !preview.tooBig && preview.files}<LargeImportChoice {preview} bind:keep />{/if}
 
     {#if preview && !preview.tooBig && preview.files}
       <label for="imp-into">{t('sb.imp.into')}</label>
