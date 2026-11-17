@@ -132,10 +132,15 @@ pub fn next_occurrence(due: Option<chrono::NaiveDate>, every: &str, today: chron
     None
 }
 
+/// A list's text without a leading byte-order mark (Notepad writes one): `(mark, the rest)`.
+fn split_bom(text: &str) -> (&str, &str) {
+    match text.strip_prefix('\u{feff}') { Some(rest) => ("\u{feff}", rest), None => ("", text) }
+}
+
 pub fn parse(text: &str) -> Vec<Value> {
     let mut group = String::new();
     let mut items = vec![];
-    for (i, l) in text.lines().enumerate() {
+    for (i, l) in split_bom(text).1.lines().enumerate() {
         if let Some(h) = l.strip_prefix("## ") { group = h.trim().to_string(); continue; }
         let (done, rest) = if let Some(r) = l.strip_prefix("- [ ] ") { (false, r) }
             else if let Some(r) = l.strip_prefix("- [x] ").or_else(|| l.strip_prefix("- [X] ")) { (true, r) }
@@ -149,7 +154,7 @@ pub fn parse(text: &str) -> Vec<Value> {
 /// The `##` groups of a list, in file order.
 pub fn groups(text: &str) -> Vec<String> {
     let mut out: Vec<String> = vec![];
-    for l in text.lines() {
+    for l in split_bom(text).1.lines() {
         if let Some(h) = l.strip_prefix("## ") {
             let h = h.trim().to_string();
             if !h.is_empty() && !out.contains(&h) { out.push(h); }
@@ -192,16 +197,40 @@ fn rewrite<T, F: FnOnce(&mut Vec<String>) -> anyhow::Result<T>>(root: &Path, fil
 fn rewrite_held<T, F: FnOnce(&mut Vec<String>) -> anyhow::Result<T>>(root: &Path, file: &str, f: F) -> anyhow::Result<T> {
     let p = resolve(root, file)?;
     let text = load(&p, file)?;
-    let trailing = text.ends_with('\n') || text.is_empty();
-    // A file written on Windows keeps its line endings.
-    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let (bom, text) = split_bom(&text);
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     let out_value = f(&mut lines)?;
-    let mut out = lines.join(eol);
-    if trailing { out.push_str(eol); }
+    let out = format!("{bom}{}", with_endings(text, &lines));
     if let Some(parent) = p.parent() { std::fs::create_dir_all(parent)?; }
     crate::paths::write_atomic(&p, out.as_bytes(), false)?;
     Ok(out_value)
+}
+
+/// The edited `lines` of list `text` joined again, each line that is still there with its own line
+/// ending (a file written on Windows, or partly, stays as it was). A new or changed line takes the
+/// ending of the line it sits in front of in the file, or the file's usual one.
+fn with_endings(text: &str, lines: &[String]) -> String {
+    let usual = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let trailing = text.ends_with('\n') || text.is_empty();
+    let old: Vec<(&str, &str)> = text.split_inclusive('\n').map(|l| {
+        let body = l.strip_suffix('\n').map_or(l, |b| b.strip_suffix('\r').unwrap_or(b));
+        (body, &l[body.len()..])
+    }).collect();
+    let ending = |e: &str| if e.is_empty() { usual } else { e }.to_string();
+    let mut out = String::with_capacity(text.len() + 64);
+    let (mut at, mut last) = (0, 0);
+    for l in lines {
+        let e = match old[at..].iter().position(|(b, _)| b == l) {
+            Some(k) => { let e = ending(old[at + k].1); at += k + 1; e }
+            None => old.get(at).map_or(usual.to_string(), |o| ending(o.1)),
+        };
+        out.push_str(l);
+        out.push_str(&e);
+        last = e.len();
+    }
+    // A file that did not end with a line break still does not.
+    if !trailing { out.truncate(out.len() - last); }
+    out
 }
 
 fn is_task(l: &str) -> bool {
@@ -350,7 +379,7 @@ pub fn move_to(root: &Path, file: &str, line: usize, text: &str, to_file: &str, 
     if to_file == file {
         return rewrite_held(root, file, |lines| { check_line(lines, line, text)?; Ok(move_block_within(lines, line, group)) });
     }
-    let src: Vec<String> = load(&resolve(root, file)?, file)?.lines().map(String::from).collect();
+    let src: Vec<String> = split_bom(&load(&resolve(root, file)?, file)?).1.lines().map(String::from).collect();
     check_line(&src, line, text)?;
     let block = src[line..end_of_task(&src, line)].to_vec();
     let at = rewrite_held(root, to_file, |lines| {
@@ -723,6 +752,32 @@ mod tests {
         assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# Todo\r\n\r\n## Now\r\n- [x] a\r\n- [ ] c\r\n");
         delete(&d, "TODO.md", 4, "c").unwrap();
         assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# Todo\r\n\r\n## Now\r\n- [x] a\r\n");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn each_line_keeps_its_own_ending_and_a_byte_order_mark_is_kept() {
+        let d = std::env::temp_dir().join(format!("todo-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        // Partly edited on Windows: only the heading has a Windows line ending.
+        std::fs::write(d.join("TODO.md"), "# Todo\r\n- [ ] a\n- [ ] b\n").unwrap();
+        toggle(&d, "TODO.md", 1, "a").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# Todo\r\n- [x] a\n- [ ] b\n");
+        delete(&d, "TODO.md", 1, "a").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "# Todo\r\n- [ ] b\n");
+        // No line break at the end stays so.
+        std::fs::write(d.join("TODO.md"), "- [ ] a\r\n- [ ] b").unwrap();
+        toggle(&d, "TODO.md", 1, "b").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "- [ ] a\r\n- [x] b");
+        // Saved by Notepad: a byte-order mark before the first task, which is seen and kept.
+        std::fs::write(d.join("TODO.md"), "\u{feff}- [ ] first\n- [ ] second\n").unwrap();
+        let items = parse(&std::fs::read_to_string(d.join("TODO.md")).unwrap());
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["text"], "first");
+        toggle(&d, "TODO.md", 0, "first").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("TODO.md")).unwrap(), "\u{feff}- [x] first\n- [ ] second\n");
+        std::fs::write(d.join("TODO.md"), "\u{feff}## Now\n- [ ] a\n").unwrap();
+        assert_eq!(groups(&std::fs::read_to_string(d.join("TODO.md")).unwrap()), vec!["Now".to_string()]);
         std::fs::remove_dir_all(d).unwrap();
     }
 
