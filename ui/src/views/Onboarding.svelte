@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import { api, post } from '../lib/api';
   import { app, applyTheme, toast } from '../lib/store.svelte';
@@ -296,6 +296,10 @@
     }
     if (p && p.trim()) driveFolder = p.trim();
   }
+  // Backup and history wait in a closed section; coming back to the step with a choice already made
+  // there (and maybe something still to finish, like the online location's confirmation) shows it open.
+  let backupOpen = $state(false);
+  $effect(() => { if (step === 2) untrack(() => { if (s.sync.mode !== 'none' || s.keepHistory === false) backupOpen = true; }); });
   // An online location is sent the history itself, so there the history is always kept.
   const historyOn = $derived(isGit || s.keepHistory !== false);
 
@@ -497,7 +501,7 @@
           <ul class="plain">
             <li>{t('ux-onboarding.codex.planPaid')}</li>
             <li>{t('ux-onboarding.codex.planData')}</li>
-            <li>{t('ux-onboarding.codex.customise')}</li>
+            {#if !codex.installed}<li>{t('ux-onboarding.codex.customise')}</li>{/if}
           </ul>
         </div>
         <CodexSettings bind:ai={s.ai} part="codex" vis={() => true} />
@@ -647,7 +651,7 @@
       {/if}
 
       <!-- Backup and the history start with safe choices (no backup, history on): they wait, closed, until wanted. -->
-      <details class="adv backup">
+      <details class="adv backup" bind:open={backupOpen}>
         <summary><span>{t('ux-onboarding.backup.section')}</span> <span class="muted cur">{syncLabel} · {t('hista.historyTitle')}: {t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</span></summary>
         <h3 id="ob-history">{t('hista.historyTitle')}</h3>
         <label class="check"><input type="checkbox" checked={historyOn} disabled={isGit} onchange={(e) => (s.keepHistory = e.currentTarget.checked)} /> {t('hista.keep')}</label>
@@ -760,9 +764,9 @@
       <div class="card status">
         <p class="row"><Icon name="shield" size={16} /> <b>{t('ob.privTitle')}</b></p>
         <ul class="plain">
-          <li>{t('ob3.privSent')}</li>
+          <li>{t(onCodex ? 'ux-onboarding.privSentCodex' : 'ob3.privSent')}</li>
           <li>{t('ob3.privStays')}</li>
-          <li>{t('ob3.privFolders')}</li>
+          <li>{t(onCodex ? 'ux-onboarding.privFoldersCodex' : 'ob3.privFolders')}</li>
         </ul>
       </div>
       <dl class="sum">
