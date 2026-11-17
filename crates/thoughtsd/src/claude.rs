@@ -937,7 +937,23 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
         let (p, shell) = (rule_path(&dir), dir.to_string_lossy().replace('\\', "/"));
         for rule in [format!("Edit({p})"), format!("Edit({p}/**)"), format!("Bash(*{shell}/*)"), format!("Bash(*{shell} *)"), format!("Bash(*{shell})")] { deny.push(rule); }
     }
+    deny.extend(release_key_deny(dirs::home_dir().as_deref()));
     every_case(&mut deny);
+    deny
+}
+
+/// The release signing key (`~/.tauri`, where the updater key lives on the Mac that publishes the
+/// app) and its password in the keychain (the `thoughts-updater` item): no run reads or changes
+/// them, by the Read/Edit tools or (best-effort, like the data folder) by a command naming them.
+/// The shell guard (`shell_guard::names_release_key`) catches the same commands in any letter case.
+pub fn release_key_deny(user_home: Option<&Path>) -> Vec<String> {
+    let mut deny: Vec<String> = vec![];
+    let mut dirs = vec!["~/.tauri".to_string()];
+    if let Some(h) = user_home { dirs.insert(0, rule_path(&h.join(".tauri"))); }
+    for p in dirs { for rule in [format!("Read({p})"), format!("Read({p}/**)"), format!("Edit({p})"), format!("Edit({p}/**)")] { deny.push(rule); } }
+    for pat in ["*/.tauri*", "*.tauri/*", "*thoughts-updater*", "*find-generic-password*", "*find-internet-password*", "*dump-keychain*"] {
+        deny.push(format!("Bash({pat})"));
+    }
     deny
 }
 
@@ -2580,6 +2596,25 @@ pub(crate) mod tests {
         let rules: Vec<Value> = serde_json::from_str::<Value>(&v).unwrap()["permissions"]["deny"].as_array().unwrap().clone();
         assert_eq!(rules.iter().collect::<std::collections::HashSet<_>>().len(), rules.len(), "no rule twice");
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn every_run_is_kept_away_from_the_release_signing_key_and_its_password() {
+        let rules = release_key_deny(Some(Path::new("/Users/u")));
+        for want in ["Read(//Users/u/.tauri)", "Read(//Users/u/.tauri/**)", "Edit(//Users/u/.tauri/**)", "Read(~/.tauri/**)", "Edit(~/.tauri/**)",
+                     "Bash(*/.tauri*)", "Bash(*.tauri/*)", "Bash(*thoughts-updater*)", "Bash(*find-generic-password*)"] {
+            assert!(rules.iter().any(|r| r == want), "missing {want}: {rules:?}");
+        }
+        assert!(release_key_deny(None).iter().any(|r| r == "Read(~/.tauri/**)"), "without a known home the ~ spelling still holds");
+        // Every run gets them, in every letter case, beside the data folder's rules.
+        let home = std::env::temp_dir().join(format!("thoughts-protect-key-{}", uuid::Uuid::new_v4()));
+        let deny = protective_deny(Path::new("/home/u/Library"), &[], &home, "c", false);
+        if let Some(h) = dirs::home_dir() {
+            let p = rule_path(&h.join(".tauri"));
+            assert!(deny.iter().any(|d| *d == format!("Read({p}/**)")), "{deny:?}");
+            assert!(deny.iter().any(|d| *d == format!("Read({}/**)", fold_case(&p))), "{deny:?}");
+        }
+        for want in ["Read(~/.tauri/**)", "Bash(*thoughts-updater*)", "Bash(*find-generic-password*)"] { assert!(deny.iter().any(|d| d == want), "missing {want}"); }
     }
 
     #[test]

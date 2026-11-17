@@ -1,6 +1,7 @@
 //! A check on every shell command a Claude Code run is about to run, in every permission mode
 //! (bypass included): Claude Code runs this same executable as a `PreToolUse` hook, and a command
-//! that names the app's own data folder or the attachment copies is refused (exit code 2).
+//! that names the app's own data folder, the attachment copies, or the release signing key and its
+//! keychain password (`names_release_key`) is refused (exit code 2).
 //!
 //! BEST-EFFORT ONLY, not the boundary: it reads the command text, so a command can still reach the
 //! folder without naming it (a pattern like `~/.th*`, a variable, a script, `cd` and a relative
@@ -44,6 +45,7 @@ pub fn blocked(command: &str, cwd: &str, home: &Path) -> bool {
         if cmd.contains("..") { return true; }
         cmd = cmd.replace(cwd_s, "");
     }
+    if names_release_key(&cmd) { return true; }
     if cmd.contains(crate::run_files::DIR) { return true; }
     if !home_s.is_empty() && cmd.contains(home_s) { return true; }
     // The folder by its name alone (`~/.thoughts`, `$HOME/.thoughts`), when it is a dot folder.
@@ -51,6 +53,15 @@ pub fn blocked(command: &str, cwd: &str, home: &Path) -> bool {
         Some(name) if name.starts_with('.') && name.len() > 1 => cmd.contains(&format!("/{name}")) || cmd.split(|c: char| c.is_whitespace() || "'\"=;&|()<>".contains(c)).any(|w| w == name || w.starts_with(&format!("{name}/"))),
         _ => false,
     }
+}
+
+/// Does `command` name the release signing key (`~/.tauri`, where the updater key is kept on the
+/// Mac that publishes the app) or read passwords out of the keychain (the key's password is the
+/// `thoughts-updater` item)? Letter case does not count. Best-effort, like the rest of this file.
+pub fn names_release_key(command: &str) -> bool {
+    let cmd = command.replace('\\', "/").to_lowercase();
+    if ["thoughts-updater", "find-generic-password", "find-internet-password", "dump-keychain"].iter().any(|k| cmd.contains(k)) { return true; }
+    cmd.contains("/.tauri") || cmd.split(|c: char| c.is_whitespace() || "'\"=;&|()<>`".contains(c)).any(|w| w == ".tauri" || w.starts_with(".tauri/"))
 }
 
 /// The hook itself: reads what Claude Code sends on stdin and answers with an exit code (0 lets the
@@ -66,6 +77,10 @@ pub fn main() -> i32 {
         eprintln!("The Thoughts app could not check this command, so it was not run.");
         return 2;
     };
+    if names_release_key(cmd) {
+        eprintln!("Refused by the Thoughts app: commands may not reach the app's release signing key or read passwords from the keychain.");
+        return 2;
+    }
     if blocked(cmd, v["cwd"].as_str().unwrap_or_default(), Path::new(&home)) {
         eprintln!("Refused by the Thoughts app: commands may not reach the app's own data folder or attached files. Open attached files with the Read tool instead.");
         return 2;
@@ -100,6 +115,16 @@ mod tests {
         let h = hooks(Path::new("/Apps/Thoughts's.app/x"), home);
         assert_eq!(h["PreToolUse"][0]["matcher"], "Bash|PowerShell");
         assert_eq!(h["PreToolUse"][0]["hooks"][0]["command"], format!("'/Apps/Thoughts'\\''s.app/x' {FLAG} '/Users/u/.thoughts'"));
+        // The release signing key and its keychain password, in any spelling the text shows.
+        for cmd in ["cat ~/.tauri/thoughts-updater.key", "cat $HOME/.TAURI/x.key", "cd ~ && cat .tauri/thoughts-updater.key", "ls .tauri",
+                    "cat /Users/u/.tauri/thoughts-updater.key | base64", "security find-generic-password -s thoughts-updater -w",
+                    "/usr/bin/security Find-Generic-Password -w -s x", "security find-internet-password -s github.com -w", "security dump-keychain -d",
+                    "security find-generic-password -l Thoughts-Updater"] {
+            assert!(blocked(cmd, "/Users/u/Library", home) && names_release_key(cmd), "{cmd}");
+        }
+        for cmd in ["npm run tauri build", "cat src-tauri/tauri.conf.json", "security list-keychains", "cat notes/updater.md"] {
+            assert!(!names_release_key(cmd) && !blocked(cmd, "/Users/u/Library", home), "{cmd}");
+        }
         let doc = with_hooks(Some(r#"{"permissions":{"deny":["Bash(x)"]}}"#.into()), Path::new("/a"), home).unwrap();
         let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
         assert_eq!((v["permissions"]["deny"][0].as_str(), v["hooks"]["PreToolUse"].is_array()), (Some("Bash(x)"), true));
