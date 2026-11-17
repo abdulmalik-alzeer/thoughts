@@ -55,7 +55,9 @@ export function syncDone(r: any, headline: string): void {
   if (r?.lastBackup) backup.last = r.lastBackup;
   refreshBackup();
   const lines = [r?.received ? t('hista.sync.received') : '', names(r) ? t('hista.sync.sent', { names: names(r) }) : ''].filter(Boolean);
-  toast(headline, { kind: 'success', key: 'sync', detail: lines.join('\n') || undefined });
+  // Plain sentences in the toast itself: the monospaced box with Copy is for an error's detail.
+  const text = lines.length ? (/[.!?…؟]$/.test(headline.trim()) ? headline.trim() : headline.trim() + '.') + ' ' + lines.join(' ') : headline;
+  toast(text, { kind: 'success', key: 'sync' });
 }
 
 /** A Sync that did not finish: nowhere to send the library, or a location that did not take it. */

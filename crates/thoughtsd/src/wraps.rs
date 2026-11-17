@@ -371,7 +371,7 @@ pub async fn status(state: &AppState) -> Value {
     let reviewing = reviewing_wrap(state, &scope).await;
     let s = state.settings.read().await;
     json!({"count": chats.len(), "chats": chats, "summariesFailing": failing && s.auto_summaries, "threshold": s.wrap_nag_threshold, "lastWrap": s.last_wrap,
-           "busy": state.library_busy(), "miniWrapsPaused": state.mini_wraps_blocked.load(Ordering::Relaxed),
+           "busy": state.library_busy(), "miniWrapsPaused": state.mini_wraps_blocked.load(Ordering::Relaxed) && s.auto_summaries,
            "interrupted": interrupted, "interruptedCanUndo": can_undo, "reviewing": reviewing})
 }
 
@@ -2221,6 +2221,17 @@ mod tests {
         assert!(ar.starts_with('\u{2066}') && ar.ends_with('\u{2069}') && ar.contains("2026-11-11 21:09"));
     }
     use super::testutil as t;
+
+    /// "Automatic summaries are paused" is not said once the person has switched them off.
+    #[tokio::test]
+    async fn paused_summaries_are_not_reported_once_switched_off() {
+        let (st, lib) = t::library().await;
+        st.mini_wraps_blocked.store(true, Ordering::Relaxed);
+        assert_eq!(status(&st).await["miniWrapsPaused"], true);
+        st.settings.write().await.auto_summaries = false;
+        assert_eq!(status(&st).await["miniWrapsPaused"], false);
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
 
     /// Wraps whose `save` stops (as if the app stopped) right after their changes reached the library.
     pub(super) static STOP_AFTER_MERGE: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());

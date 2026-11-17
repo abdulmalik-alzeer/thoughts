@@ -56,6 +56,8 @@
     return on((e) => {
       if (e?.type === 'automations.changed' || e?.type === 'resync') load();
       if (e?.type === 'library.switched') { again = false; previewOpen = false; previewState = 'idle'; load(); }
+      // A person added, changed or removed (or any library edit) changes what would be sent.
+      if (e?.type === 'library.changed' && previewOpen && previewState === 'ok') loadPreview(true);
     });
   });
 
@@ -74,10 +76,15 @@
 
   async function togglePreview() {
     previewOpen = !previewOpen;
-    if (!previewOpen) return;
-    previewState = 'loading'; previewError = '';
-    try { const r = await api('/automations/preview'); previewText = String(r?.text ?? ''); previewState = 'ok'; }
-    catch (e: any) { previewError = String(e?.message ?? e ?? ''); previewState = 'error'; }
+    if (previewOpen) await loadPreview();
+  }
+  /** `quiet`: a refresh while it is open; the text on screen stays until the new one is in. */
+  let previewSeq = 0;
+  async function loadPreview(quiet = false) {
+    const n = ++previewSeq;
+    if (!quiet) { previewState = 'loading'; previewError = ''; }
+    try { const r = await api('/automations/preview'); if (n === previewSeq && previewOpen) { previewText = String(r?.text ?? ''); previewState = 'ok'; } }
+    catch (e: any) { if (n === previewSeq && !quiet) { previewError = String(e?.message ?? e ?? ''); previewState = 'error'; } }
   }
 
   function gone(e: unknown, s: Suggestion) {

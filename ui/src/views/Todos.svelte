@@ -392,16 +392,19 @@
     {#if isAt(moveFor, l.file, it)}
       {@const sib = siblings(l, it)}
       {@const pos = sib.findIndex((x: any) => x.line === it.line)}
+      {@const targets = places.map((p) => ({ label: p.label, options: p.options.filter((o) => !(o.file === l.file && o.group === (it.group ?? ''))) })).filter((p) => p.options.length)}
       <div class="row duebar">
-        <label class="inl" for="mv-{k}">{t('todob.moveTo')}</label>
-        <select id="mv-{k}" class="sel" onchange={(e) => moveTask(l, it, e.currentTarget.value)}>
-          <option value="" selected disabled>{t('todob.choose')}</option>
-          {#each places as p (p.label)}
-            <optgroup label={p.label}>
-              {#each p.options as o (o.value)}<option value={o.value} disabled={o.file === l.file && o.group === (it.group ?? '')}>{o.label}</option>{/each}
-            </optgroup>
-          {/each}
-        </select>
+        {#if targets.length}
+          <label class="inl" for="mv-{k}">{t('todob.moveTo')}</label>
+          <select id="mv-{k}" class="sel" onchange={(e) => moveTask(l, it, e.currentTarget.value)}>
+            <option value="" selected disabled>{t('todob.choose')}</option>
+            {#each targets as p (p.label)}
+              <optgroup label={p.label}>
+                {#each p.options as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+              </optgroup>
+            {/each}
+          </select>
+        {/if}
         {#if sort === 'list'}
           <button id="mv-up" class="btn sm" disabled={pos <= 0} onclick={() => shiftTask(l, it, 'up')}><Icon name="send" size={12} /> {t('todob.up')}</button>
           <button id="mv-down" class="btn sm" disabled={pos < 0 || pos >= sib.length - 1} onclick={() => shiftTask(l, it, 'down')}><Icon name="arrowDown" size={12} /> {t('todob.down')}</button>

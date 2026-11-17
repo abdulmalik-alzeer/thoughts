@@ -6,7 +6,7 @@ export default {
 
     'care.upd.title': 'Newer versions',
     'care.upd.toggle': 'Check for new versions automatically',
-    'care.upd.hint': 'When this is on, Thoughts asks GitHub, where it is published, at most once a day whether a newer version exists, and tells you when one does. It installs nothing by itself. Nothing about you, your library or your settings is sent. (If you switched on the GitHub fallback from a terminal, the check is made with your GitHub sign-in.) Off unless you switch it on.',
+    'care.upd.hint': 'When this is on, Thoughts asks GitHub, where it is published, at most once a day whether a newer version exists, and tells you when one does. It installs nothing by itself. Nothing about you, your library or your settings is sent. (If you set up Updates for testers, the check is made with your GitHub account.) Off unless you switch it on.',
     'care.upd.progress': 'Downloading the update: {done} of {total} MB. The app restarts when it is ready.',
     'care.upd.p.unpublished': 'No published version was found. If you are testing a private build, the README has the terminal command that lets Thoughts look for updates with your GitHub sign-in.',
     'care.upd.p.gh-missing': 'The GitHub command-line tool (gh) is not installed, so Thoughts cannot look for updates as you. Install it, run “gh auth login” in a terminal, then check again.',
@@ -159,7 +159,7 @@ export default {
 
     'care.upd.title': 'الإصدارات الأحدث',
     'care.upd.toggle': 'التحقق تلقائياً من وجود إصدارات جديدة',
-    'care.upd.hint': 'عند تفعيل هذا الخيار يسأل Thoughts موقع GitHub، حيث يُنشر، مرة واحدة في اليوم على الأكثر عمّا إذا كان هناك إصدار أحدث، ويخبرك عند وجوده. لا يثبّت شيئاً من تلقاء نفسه، ولا يُرسل شيء عنك ولا عن مكتبتك ولا عن إعداداتك. (إذا فعّلت بديل GitHub من الطرفية، فالتحقق يتم بتسجيل دخولك إلى GitHub.) الخيار معطّل ما لم تفعّله بنفسك.',
+    'care.upd.hint': 'عند تفعيل هذا الخيار يسأل Thoughts موقع GitHub، حيث يُنشر، مرة واحدة في اليوم على الأكثر عمّا إذا كان هناك إصدار أحدث، ويخبرك عند وجوده. لا يثبّت شيئاً من تلقاء نفسه، ولا يُرسل شيء عنك ولا عن مكتبتك ولا عن إعداداتك. (إذا أعددت «التحديثات للمجرّبين»، فالتحقق يتم بحسابك على GitHub.) الخيار معطّل ما لم تفعّله بنفسك.',
     'care.upd.progress': 'جارٍ تنزيل التحديث: {done} من {total} ميغابايت. سيُعاد تشغيل التطبيق عند اكتماله.',
     'care.upd.p.unpublished': 'لم يُعثر على إصدار منشور. إن كنت تجرّب نسخة خاصة، ففي ملف README أمر الطرفية الذي يسمح لـ Thoughts بالبحث عن التحديثات بتسجيل دخولك إلى GitHub.',
     'care.upd.p.gh-missing': 'أداة سطر الأوامر من GitHub (‏gh) غير مثبّتة، فلا يستطيع Thoughts البحث عن التحديثات باسمك. ثبّتها، ثم نفّذ «gh auth login» في الطرفية وتحقق مجدداً.',

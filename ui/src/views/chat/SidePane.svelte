@@ -14,6 +14,7 @@
   import { errDetail } from '../../lib/errors';
   import { prettyName, rawBlobUrl } from '../../lib/content/util';
   import { go } from '../../lib/store.svelte';
+  import { titleOf } from '../../lib/printPdf';
   import { fmtNum, t } from '../../lib/i18n';
   import { clampWidth, dragWidth, isNote, isOverlay, keyWidth, loadWidth, looksLikeFolder, maxWidth, minWidth, saveWidth } from './sidePane';
 
@@ -43,7 +44,8 @@
   /** Read out when the file changed while open. */
   let said = $state('');
 
-  const name = $derived(prettyName(shown || path));
+  // A note goes by its title (frontmatter, else first heading), as in Docs; the path is shown below it.
+  const name = $derived(phase === 'note' ? titleOf(content, prettyName(shown || path)) : prettyName(shown || path));
   const hidden = $derived(phase === 'note' && hasHiddenText(content));
   const empty = $derived(phase === 'note' && !content.replace(/^﻿/, '').replace(/^---\n[\s\S]*?\n---\n?/, '').trim());
   const headId = `pane-h-${Math.random().toString(36).slice(2, 8)}`;

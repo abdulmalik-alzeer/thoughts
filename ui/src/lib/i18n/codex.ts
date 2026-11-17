@@ -45,7 +45,7 @@ export default {
     'codex.effort.minimal': 'Minimal', 'codex.effort.low': 'Low', 'codex.effort.medium': 'Medium', 'codex.effort.high': 'High',
     // The banner when the program in use is signed out
     'codex.auth.banner': 'Codex is not signed in, so chats that use it will not get an answer.',
-    'codex.auth.bannerExpired': 'Your Codex sign-in has expired or was refused. Sign in again to keep chatting.',
+    'codex.auth.bannerExpired': 'Codex has no working sign-in on this computer: you have not signed in yet, or the sign-in expired or was refused. Sign in to keep chatting.',
     'codex.auth.signedIn': 'Signed in to Codex',
     // A chat that uses Codex
     'codex.perm.acceptEdits': 'Edit in this folder',
@@ -115,7 +115,7 @@ export default {
     'codex.set.needsInstall': 'ثبّت Codex أولاً لتتمكن من اختياره.',
     'codex.effort.minimal': 'أدنى', 'codex.effort.low': 'منخفض', 'codex.effort.medium': 'متوسط', 'codex.effort.high': 'مرتفع',
     'codex.auth.banner': 'Codex غير مسجّل الدخول، ولن تحصل المحادثات التي تستخدمه على رد.',
-    'codex.auth.bannerExpired': 'انتهت صلاحية تسجيل دخولك إلى Codex أو رُفض. سجّل الدخول مجدداً لمتابعة المحادثة.',
+    'codex.auth.bannerExpired': 'لا يوجد تسجيل دخول صالح إلى Codex على هذا الجهاز: إما أنك لم تسجّل الدخول بعد، وإما أن تسجيل الدخول انتهت صلاحيته أو رُفض. سجّل الدخول لمتابعة المحادثة.',
     'codex.auth.signedIn': 'تم تسجيل الدخول إلى Codex',
     'codex.perm.acceptEdits': 'التعديل في هذا المجلد',
     'codex.perm.acceptEdits.hint': 'يستطيع Codex تعديل الملفات في مجلد هذه المحادثة داخل بيئته المعزولة، ولا تصل أوامره إلى الإنترنت.',

@@ -28,7 +28,7 @@ export default {
     'auto-ui.blocked.noLibrary': 'Set up your library first.',
     'auto-ui.blocked.spend': 'This month’s spending limit is reached. You can raise it in Settings › Privacy & cost.',
     'auto-ui.blocked.planLimit': 'Your plan’s limit is reached for now. Try again when it resets.',
-    'auto-ui.blocked.signedOut': 'Your assistant is signed out. Sign in again in Settings › Assistant.',
+    'auto-ui.blocked.signedOut': 'Your assistant is not signed in. Sign in from Settings › Assistant.',
     'auto-ui.blocked.unknown': 'Suggestions can’t be made right now.',
 
     'auto-ui.run.title': 'Your assistant is looking at the summary…',
@@ -180,7 +180,7 @@ export default {
     'auto-ui.blocked.noLibrary': 'جهّز مكتبتك أولاً.',
     'auto-ui.blocked.spend': 'بلغتَ حدّ الإنفاق لهذا الشهر. يمكنك رفعه من الإعدادات › الخصوصية والتكلفة.',
     'auto-ui.blocked.planLimit': 'بلغتَ حدّ خطتك حالياً. حاول مجدداً حين يتجدّد.',
-    'auto-ui.blocked.signedOut': 'مساعدك غير مسجَّل الدخول. سجّل الدخول من جديد في الإعدادات › المساعد.',
+    'auto-ui.blocked.signedOut': 'مساعدك غير مسجَّل الدخول. سجّل الدخول من الإعدادات › المساعد.',
     'auto-ui.blocked.unknown': 'لا يمكن إعداد الاقتراحات الآن.',
 
     'auto-ui.run.title': 'يطّلع مساعدك على الملخص…',
