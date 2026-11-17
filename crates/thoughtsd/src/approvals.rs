@@ -576,24 +576,23 @@ pub async fn ask(state: &Arc<AppState>, token: &str, req: Request, wait: Duratio
         if g.waiting.values().filter(|w| w.token == token).count() >= MAX_WAITING { return Verdict::Deny(TOO_MANY.into()); }
         let Some(run) = g.runs.get_mut(token) else { return Verdict::Deny(ENDED.into()) };
         if let Some(t) = &req.tool_use_id { run.carded.insert(t.clone()); }
-    }
-    // The card is in the chat before anyone can answer it.
-    crate::claude::push(state, &ctx.chat_id, m).await;
-    let open = {
-        let mut g = state.approvals.lock();
-        let open = g.runs.contains_key(token);
+        // Answerable as soon as the card can be seen: saving the card lets other work run before
+        // `push` returns, and nobody can answer it before then (its id is only known from the card).
         let key = if c.hidden { None } else { always_key(&req, &ctx) };
-        if open { g.waiting.insert(id.clone(), Waiting { chat_id: ctx.chat_id.clone(), token: token.to_string(), card: c.clone(), key, tx }); }
-        open
-    };
-    if !open {
-        settle(state, &ctx.chat_id, &id, "ended").await;
-        return Verdict::Deny(ENDED.into());
+        g.waiting.insert(id.clone(), Waiting { chat_id: ctx.chat_id.clone(), token: token.to_string(), card: c.clone(), key, tx });
     }
     // From here on, a program that gives up on the call (it was stopped, or went away) leaves a card
     // that says so: this future is dropped, and with it the guard. Answered, timed out or ended, the
     // request is no longer waiting by the time this returns, so then the guard finds nothing to do.
     let _gone = Gone { state: state.clone(), chat: ctx.chat_id.clone(), id: id.clone() };
+    crate::claude::push(state, &ctx.chat_id, m).await;
+    // The run ended while the card was being put in the chat: it may have settled the card before
+    // the card was there, so settle it now that it is.
+    if !state.approvals.lock().runs.contains_key(token) {
+        state.approvals.lock().waiting.remove(&id);
+        settle(state, &ctx.chat_id, &id, "ended").await;
+        return Verdict::Deny(ENDED.into());
+    }
     let title = state.chats.with(&ctx.chat_id, |ch| ch.title.clone()).await.unwrap_or_default();
     state.emit(json!({"type": "approval.asked", "chatId": ctx.chat_id, "id": id, "title": title}));
     crate::log::info(format!("chat {}: asking the user about {} ({}){}", ctx.chat_id, c.tool, c.why, if c.hidden { ", with characters that do not show" } else { "" }));
