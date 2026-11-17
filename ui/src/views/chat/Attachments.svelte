@@ -83,7 +83,9 @@
   {/each}
   <!-- Inside the list, so no stray line appears in the message bubble around it. -->
   {#if viewing}
-    <div class="viewer-back" role="presentation" onclick={(e) => { if (e.target === e.currentTarget) viewing = null; }}>
+    <!-- Like the picture viewer, it closes only with Esc or the close button: a text selection or a
+         scroll that ends beside the page would otherwise close it. -->
+    <div class="viewer-back" role="presentation">
       <div class="viewer" role="dialog" aria-modal="true" aria-label={viewing.name} use:trapFocus={{ onEscape: () => (viewing = null) }}>
         <div class="vhead">
           <bdi class="ell vname">{viewing.name}</bdi>
