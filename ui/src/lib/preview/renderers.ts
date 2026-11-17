@@ -46,12 +46,12 @@ export const renderers: Record<PreviewKind, Loader | null> = {
   video: () => import('./renderers/Media.svelte'),
   zip: () => import('./renderers/Zip.svelte'),
   docx: () => import('./renderers/Docx.svelte'),
-  xlsx: null, // → renderers/Sheet.svelte (Office renderers)
-  csv: null, // → renderers/Sheet.svelte
-  pptx: null, // → renderers/Slides.svelte
-  odt: null, // → renderers/Odf.svelte
-  ods: null, // → renderers/Odf.svelte
-  odp: null, // → renderers/Odf.svelte
-  legacy: null,
+  xlsx: () => import('./renderers/Sheet.svelte'),
+  csv: () => import('./renderers/Sheet.svelte'),
+  pptx: () => import('./renderers/Slides.svelte'),
+  odt: () => import('./renderers/Docx.svelte'),
+  ods: () => import('./renderers/Sheet.svelte'),
+  odp: () => import('./renderers/Slides.svelte'),
+  legacy: () => import('./renderers/Docx.svelte'), // RTF; old binary Office files say they can't be shown
   none: null,
 };

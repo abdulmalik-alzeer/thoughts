@@ -1,8 +1,9 @@
 // A Word document (.docx) shown inside the library: its text with headings, bold/italic/underline,
-// lists, tables, links to web pages, pictures, alignment and right-to-left paragraphs. The page is
+// lists, tables (with merged cells), links to web pages, pictures, alignment and right-to-left
+// paragraphs (set on the paragraph or by its style). The page is
 // built with DOM calls only (never from the file's markup), so nothing in the file can run or style
 // the app. Not shown: headers and footers, footnotes, comments, text boxes, charts and page layout.
-import { ZipReader } from './zip';
+import { OfficeError, OfficeZip, resolvePart } from '../preview/office/safezip';
 
 const W = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main';
 const R = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships';
@@ -19,27 +20,49 @@ const on = (el: Element | null) => !!el && !/^(0|false|off|none)$/i.test(wAttr(e
 
 function parse(text: string): Document {
   const d = new DOMParser().parseFromString(text, 'application/xml');
-  if (d.getElementsByTagName('parsererror').length) throw new Error('unreadable');
+  if (d.getElementsByTagName('parsererror').length) throw new OfficeError('damaged', 'unreadable');
   return d;
 }
 
 const IMG_TYPE: Record<string, string> = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', bmp: 'image/bmp', webp: 'image/webp', tif: 'image/tiff', tiff: 'image/tiff' };
 
 export async function docxToDom(bytes: Uint8Array): Promise<DocxView> {
-  const z = new ZipReader(bytes);
+  // Parts are unpacked within limits, so a file built to unpack to gigabytes is refused.
+  const z = new OfficeZip(bytes);
   const docText = await z.text('word/document.xml');
-  if (!docText) throw new Error('not a word document');
+  if (!docText) throw new OfficeError('wrongKind', 'not a word document');
   const doc = parse(docText);
   const rels = new Map<string, { target: string; external: boolean }>();
   const relText = await z.text('word/_rels/document.xml.rels');
   if (relText) for (const r of Array.from(parse(relText).getElementsByTagName('Relationship'))) {
-    rels.set(r.getAttribute('Id') || '', { target: r.getAttribute('Target') || '', external: r.getAttribute('TargetMode') === 'External' });
+    const external = r.getAttribute('TargetMode') === 'External';
+    const target = r.getAttribute('Target') || '';
+    rels.set(r.getAttribute('Id') || '', { target: external ? target : resolvePart('word/document.xml', target), external });
   }
   // Paragraph styles: which are headings, the title, quotes, lists.
   const styleKind = new Map<string, string>();
+  // Paragraph styles (and the document's defaults) that set right-to-left: an Arabic document often
+  // says it once there rather than on every paragraph.
+  const styleRtl = new Map<string, boolean>();
+  const styleBase = new Map<string, string>();
+  let defaultRtl = false;
+  let defaultStyle = '';
   const stylesText = await z.text('word/styles.xml');
-  if (stylesText) for (const s of Array.from(parse(stylesText).getElementsByTagNameNS(W, 'style'))) {
+  const stylesDoc = stylesText ? parse(stylesText) : null;
+  if (stylesDoc) {
+    const dpp = stylesDoc.getElementsByTagNameNS(W, 'pPrDefault')[0];
+    const bidi = dpp?.getElementsByTagNameNS(W, 'bidi')[0];
+    if (bidi && on(bidi)) defaultRtl = true;
+  }
+  if (stylesDoc) for (const s of Array.from(stylesDoc.getElementsByTagNameNS(W, 'style'))) {
     const id = wAttr(s, 'styleId') || '';
+    if (wAttr(s, 'type') === 'paragraph') {
+      const b = first(first(s, 'pPr') ?? s, 'bidi');
+      if (b) styleRtl.set(id, on(b));
+      const based = wAttr(first(s, 'basedOn'), 'val');
+      if (based) styleBase.set(id, based);
+      if (/^(1|true)$/.test(wAttr(s, 'default') ?? '')) defaultStyle = id;
+    }
     const name = (wAttr(first(s, 'name'), 'val') || id).toLowerCase();
     const lvl = wAttr(first(first(s, 'pPr') ?? s, 'outlineLvl'), 'val');
     const m = /^heading\s*(\d)/.exec(name) || /^heading(\d)$/i.exec(id);
@@ -50,6 +73,14 @@ export async function docxToDom(bytes: Uint8Array): Promise<DocxView> {
     else if (/code|preformatted|source/.test(name)) styleKind.set(id, 'code');
     else if (lvl !== null && +lvl < 6) styleKind.set(id, `h${+lvl + 1}`);
   }
+  /** Does a paragraph style (or one it is based on) say right to left? */
+  const rtlOfStyle = (id: string): boolean => {
+    for (let k = 0, cur = id || defaultStyle; cur && k < 20; k++, cur = styleBase.get(cur) ?? '') {
+      const v = styleRtl.get(cur);
+      if (v !== undefined) return v;
+    }
+    return defaultRtl;
+  };
   // Numbering: which lists are numbered and which are bullets.
   const numFmt = new Map<string, (lvl: number) => string>();
   const numText = await z.text('word/numbering.xml');
@@ -75,8 +106,7 @@ export async function docxToDom(bytes: Uint8Array): Promise<DocxView> {
     if (rel && !rel.external && IMG_TYPE[ext]) {
       let url = pictures.get(rid);
       if (!url) {
-        const path = rel.target.startsWith('/') ? rel.target.slice(1) : `word/${rel.target}`.replace(/[^/]+\/\.\.\//g, '');
-        const data = await z.bytes(path).catch(() => null);
+        const data = await z.bytes(rel.target).catch((e) => { if (e instanceof OfficeError && e.problem === 'bomb') throw e; return null; });
         if (data) { url = URL.createObjectURL(new Blob([data as BlobPart], { type: IMG_TYPE[ext] })); urls.push(url); pictures.set(rid, url); }
       }
       if (url) { const img = document.createElement('img'); img.src = url; img.alt = alt; return img; }
@@ -165,7 +195,8 @@ export async function docxToDom(bytes: Uint8Array): Promise<DocxView> {
     const numPr = pr && first(pr, 'numPr');
     const numId = wAttr(numPr && first(numPr, 'numId'), 'val');
     const lvl = Math.min(8, Number(wAttr(numPr && first(numPr, 'ilvl'), 'val') || 0));
-    const rtl = !!pr && on(first(pr, 'bidi'));
+    const bidi = pr && first(pr, 'bidi');
+    const rtl = bidi ? on(bidi) : rtlOfStyle(style);
     const jc = wAttr(pr && first(pr, 'jc'), 'val') || '';
     let el: HTMLElement;
     if (numId && numId !== '0' && !kind.startsWith('h')) {
@@ -220,29 +251,49 @@ export async function docxToDom(bytes: Uint8Array): Promise<DocxView> {
     const tbl = document.createElement('table');
     const pr = first(t, 'tblPr');
     if (pr && on(first(pr, 'bidiVisual'))) tbl.setAttribute('dir', 'rtl');
+    const thead = document.createElement('thead');
     const tb = document.createElement('tbody');
-    tbl.appendChild(tb);
+    // Cells merged downwards: the first one gets a row span, the rest are left out. `above` holds,
+    // per grid column, the cell that a "continue" cell below extends.
+    const above = new Map<number, HTMLTableCellElement>();
+    let bodyStarted = false;
     for (const tr of kids(t).filter((x) => x.localName === 'tr' && x.namespaceURI === W)) {
       const row = document.createElement('tr');
-      const head = !!first(first(tr, 'trPr') ?? tr, 'tblHeader');
+      // Header rows (repeated on each page in Word) come first; one after body rows is just a row.
+      const head = !bodyStarted && !!first(first(tr, 'trPr') ?? tr, 'tblHeader');
+      if (!head) bodyStarted = true;
+      const trPr = first(tr, 'trPr');
+      let col = Number(wAttr(trPr && first(trPr, 'gridBefore'), 'val') || 0);
       for (const tc of kids(tr).filter((x) => x.localName === 'tc' && x.namespaceURI === W)) {
         const tcPr = first(tc, 'tcPr');
+        const span = Math.max(1, Math.min(50, Number(wAttr(tcPr && first(tcPr, 'gridSpan'), 'val') || 1)));
         const merge = tcPr && first(tcPr, 'vMerge');
-        if (merge && wAttr(merge, 'val') !== 'restart') continue; // continuation of a merged cell above
+        if (merge && wAttr(merge, 'val') !== 'restart') {
+          const top = above.get(col);
+          if (top) top.rowSpan = (top.rowSpan || 1) + 1;
+          col += span;
+          continue; // continuation of a merged cell above
+        }
         const cell = document.createElement(head ? 'th' : 'td');
-        const span = Number(wAttr(tcPr && first(tcPr, 'gridSpan'), 'val') || 1);
-        if (span > 1) cell.colSpan = Math.min(span, 50);
+        if (head) cell.setAttribute('scope', 'col');
+        if (span > 1) cell.colSpan = span;
         await body(tc, cell);
         row.appendChild(cell);
+        for (let k = 0; k < span; k++) above.delete(col + k);
+        if (merge) above.set(col, cell);
+        col += span;
       }
-      tb.appendChild(row);
+      (head ? thead : tb).appendChild(row);
     }
+    if (thead.childElementCount) tbl.appendChild(thead);
+    tbl.appendChild(tb);
     out.appendChild(tbl);
   }
 
   const b = doc.getElementsByTagNameNS(W, 'body')[0];
-  if (!b) throw new Error('not a word document');
-  await body(b, frag);
+  if (!b) throw new OfficeError('wrongKind', 'not a word document');
+  try { await body(b, frag); }
+  catch (e) { for (const u of urls) URL.revokeObjectURL(u); throw e; }
   if (z.has('word/footnotes.xml') && doc.getElementsByTagNameNS(W, 'footnoteReference').length) skipped = true;
   if (doc.getElementsByTagNameNS(W, 'txbxContent').length) skipped = true;
   return { node: frag, urls, skipped };
