@@ -254,6 +254,7 @@ pub fn merged_settings(cur: &Settings, from: &Settings) -> Settings {
     n.release_check = from.release_check;
     n.assistant_reports = from.assistant_reports;
     n.auto_summaries = from.auto_summaries;
+    if from.show_cost.is_some() { n.show_cost = from.show_cost; }
     n.calendar = from.calendar.clone();
     n.daemon.keep_running = from.daemon.keep_running;
     let (c, f) = (&mut n.ai.claude, &from.ai.claude);
@@ -530,7 +531,11 @@ mod tests {
         from.private_paths = vec!["clients/acme".into(), "me/finances".into()];
         from.daemon.run_at_login = false;
         from.sync.mode = "none".into();
+        cur.show_cost = Some(false);
+        assert_eq!(merged_settings(&cur, &from).show_cost, Some(false), "a file that never had the cost choice leaves this one's");
+        from.show_cost = Some(true);
         let n = merged_settings(&cur, &from);
+        assert_eq!(n.show_cost, Some(true), "the cost choice travels");
         assert_eq!((n.language.as_str(), n.user_name.as_str()), ("ar", "Sara"));
         assert_eq!(n.library_path.as_deref(), Some("/here/library"));
         assert_eq!(n.ai.claude.binary.as_deref(), Some("/here/claude"));

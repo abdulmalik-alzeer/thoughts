@@ -93,7 +93,8 @@ export const app = $state({
   /** False while the background service is unreachable mid-session. */
   online: true,
   sidebarCollapsed: ls.get('thoughts.sidebar') === 'collapsed',
-  /** "Show estimated cost" (a per-device preference; see `costVisible`). */
+  /** "Show cost on Wrap, reorganise and setup chats" as an older window kept it on this device;
+   *  the saved setting (`settings.showCost`) wins once there is one (see `costVisible`). */
   showCost: ls.get('thoughts.showCost') === '1',
   /** Open todos due today or overdue (kept fresh by lib/reminders.ts); shown on the Todos nav item. */
   dueToday: 0,
@@ -153,12 +154,19 @@ export function setSidebarCollapsed(v: boolean) {
   ls.set('thoughts.sidebar', v ? 'collapsed' : 'open');
 }
 
-export function setShowCost(v: boolean) {
+/** The cost choice is a setting (it travels with "move to another computer"). */
+export async function setShowCost(v: boolean) {
+  await saveSettings({ showCost: v });
   app.showCost = v;
   ls.set('thoughts.showCost', v ? '1' : '0');
 }
-/** Dollar estimates are hidden for people on a Claude plan (they don't pay per message) unless they ask to see them. */
-export const costVisible = () => app.showCost || !!app.settings?.ai?.claude?.hasApiToken;
+/** The cost shown at the top of Wrap, reorganise and setup chats (ordinary chats always have it in
+ *  their usage ring): hidden on a Claude plan (they don't pay per message) unless asked for. */
+export const costVisible = () => (app.settings?.showCost ?? app.showCost) || !!app.settings?.ai?.claude?.hasApiToken;
+/** A choice an older window kept only on this device becomes the setting, once. */
+export function keepShowCostChoice() {
+  if (app.settings && app.settings.showCost == null && app.showCost && !app.status?.settingsNewer) setShowCost(true).catch(() => {});
+}
 
 export async function refreshChats() {
   app.chats = await api('/chats');

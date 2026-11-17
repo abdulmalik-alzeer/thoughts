@@ -4,7 +4,7 @@
   import { askNotify, notifState, notifySettingsUrl, openNotifySettings, testNotify, type NotifState } from '../lib/notifyPerm';
   import { api, del, inTauri, post, put, reloadApp } from '../lib/api';
   import { reportUnsaved } from '../lib/unsaved';
-  import { a11y, app, applyTheme, command, go, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
+  import { a11y, app, applyTheme, command, go, keepShowCostChoice, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
   import { recheckSignIn } from '../lib/auth';
   import { isolatedKeys, tip } from '../lib/shortcuts';
   import { choiceDialog, confirmDialog, promptDialog } from '../lib/dialog.svelte';
@@ -268,6 +268,7 @@
     loadGit(); loadModules();
     libraryOpenToOthers().then((v) => (openToOthers = v));
     app.leaveGuard = leaveGuard;
+    keepShowCostChoice();
   });
 
   // Plain headline per action; whatever the background service said goes in the detail.
@@ -1013,7 +1014,7 @@
         <p class="muted sm">{t('set.costHint')}</p>
         {#if vis(c, 'runc.spend.title')}<SpendingGuard bind:value={s.spending} disabled={readOnly} error={errors.spending ?? ''} />{/if}
         {#if vis(c, 'ui.set.showCost')}
-          <label class="check"><input type="checkbox" checked={app.showCost} onchange={(e) => setShowCost(e.currentTarget.checked)} aria-describedby="st-cost-hint" /> {t('ui.set.showCost')}</label>
+          <label class="check"><input type="checkbox" checked={app.settings?.showCost ?? app.showCost} disabled={readOnly} onchange={(e) => { const el = e.currentTarget; setShowCost(el.checked).catch((err) => { el.checked = !el.checked; failed(t('ui.set.saveFailed'), err); }); }} aria-describedby="st-cost-hint" /> {t('ui.set.showCost')}</label>
           <p class="muted sm" id="st-cost-hint">{t('ui.set.showCostHint')}</p>
         {/if}
       </div>

@@ -42,7 +42,7 @@ export default {
     'ob3.help.secretsBoth': 'The assistant’s key and your sync passwords and access tokens are kept in your system’s password store.',
     'ob3.help.secretsFile': 'The assistant’s key is kept in your system’s password store. Your sync passwords and access tokens are in a file on this computer that only your user account can read, because you chose that under Settings › Library & backup.',
     'ob3.help.sub': 'If you signed in with a Claude plan, you are not billed per message: chats use your plan’s allowance, and Thoughts adds no charge of its own.',
-    'ob3.help.api': 'With an API key you pay Anthropic for what you use, and the estimated cost is shown beside each chat. On a plan the estimate is hidden unless you turn on “Show estimated cost” in Settings › Privacy & cost; it is only a guide to how heavy a chat was — not a bill.',
+    'ob3.help.api': 'With an API key you pay Anthropic for what you use. Every chat shows its estimated cost in the usage circle beside Send, on a plan too; it is only a guide to how heavy a chat was — not a bill. Wrap, Reorganize and setup chats show it at the top when you use an API key, or when you turn on “Show cost on Wrap, Reorganize and setup chats” in Settings › Privacy & cost.',
     'ob3.help.costMonth': 'So far this month: about {amount} at pay-per-use prices.',
   },
   ar: {
@@ -87,7 +87,7 @@ export default {
     'ob3.help.secretsBoth': 'مفتاح المساعد وكلمات مرور المزامنة ورموز الوصول تُحفظ في خزنة كلمات المرور في نظامك.',
     'ob3.help.secretsFile': 'مفتاح المساعد محفوظ في خزنة كلمات المرور في نظامك. أما كلمات مرور المزامنة ورموز الوصول ففي ملف على هذا الجهاز لا يقرؤه إلا حسابك، لأنك اخترت ذلك من الإعدادات › المكتبة والنسخ الاحتياطي.',
     'ob3.help.sub': 'إن سجّلت الدخول باشتراك Claude فلن تُحاسَب على كل رسالة: المحادثات تُحتسب من حصة اشتراكك، ولا يضيف Thoughts أي رسوم من عنده.',
-    'ob3.help.api': 'مع مفتاح API تدفع لـAnthropic بحسب استخدامك، وتظهر التكلفة التقديرية بجانب كل محادثة. أما مع الاشتراك فالتقدير مخفي ما لم تفعّل «إظهار التكلفة التقديرية» من الإعدادات › الخصوصية والتكلفة، وهو مجرد مؤشر على حجم المحادثة، وليس فاتورة.',
+    'ob3.help.api': 'مع مفتاح API تدفع لـAnthropic بحسب استخدامك. وتعرض كل محادثة تكلفتها التقديرية في دائرة الاستخدام بجانب زر الإرسال، حتى مع الاشتراك، وهي مجرد مؤشر على حجم المحادثة، وليست فاتورة. أما محادثات التلخيص والحفظ وإعادة التنظيم والإعداد فتظهر تكلفتها في أعلاها إن كنت تستخدم مفتاح API، أو إن فعّلت «إظهار التكلفة في محادثات التلخيص والحفظ وإعادة التنظيم والإعداد» من الإعدادات › الخصوصية والتكلفة.',
     'ob3.help.costMonth': 'منذ بداية الشهر: نحو {amount} بأسعار الدفع حسب الاستخدام.',
   },
 };

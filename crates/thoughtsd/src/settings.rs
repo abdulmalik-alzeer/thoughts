@@ -27,6 +27,12 @@ pub struct Settings {
     /// Show every step the assistant takes in a chat (each command, file read, edit…) as it does
     /// now in full. Off unless the user switches it on: steps are folded into one quiet row.
     pub chat_steps: bool,
+    /// Show the estimated cost at the top of Wrap, reorganise and setup chats on a Claude plan
+    /// (ordinary chats always have it in their usage ring; with an API key it is always shown).
+    /// `None` until the window first saves it: an older window kept the choice on its own
+    /// (`thoughts.showCost`), and a save that does not name it keeps it as it is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_cost: Option<bool>,
     /// Minutes without activity before a chat gets its mini-wrap.
     pub idle_minutes: u64,
     /// Popup when this many chats are unwrapped.
@@ -475,6 +481,7 @@ impl Default for Settings {
             daemon: DaemonSettings { run_at_login: false, keep_running: true },
             notifications: true,
             chat_steps: false,
+            show_cost: None,
             idle_minutes: 15,
             wrap_nag_threshold: 5,
             chat_retention_days: 0,
@@ -761,6 +768,7 @@ impl Settings {
         self.private_paths = private;
         // A client that does not know the switch (an older window, a partial object) never turns it off.
         if self.strict_private.is_none() { self.strict_private = old.strict_private; }
+        if self.show_cost.is_none() { self.show_cost = old.show_cost; }
 
         // One line of plain text, or nothing.
         self.profession = self.profession.take().map(|p| p.chars().filter(|c| !c.is_control()).take(200).collect::<String>().trim().to_string()).filter(|p| !p.is_empty());
@@ -1337,6 +1345,18 @@ mod tests {
         assert!(!s.ai.claude.suggest_next, "suggested next messages are off unless switched on");
         assert!(!s.chat_steps, "chats fold their steps away unless every step is asked for");
         assert!(serde_json::from_str::<Settings>(r#"{"chatSteps":true}"#).unwrap().chat_steps);
+        assert_eq!(s.show_cost, None, "unset until the window first saves it");
+        assert!(!serde_json::to_string(&s).unwrap().contains("showCost"), "an unset choice is not written");
+        assert_eq!(serde_json::from_str::<Settings>(r#"{"showCost":true}"#).unwrap().show_cost, Some(true));
+        // A save that does not name it (an older window) keeps it; naming it changes it.
+        let mut old = Settings::default();
+        old.show_cost = Some(true);
+        let mut quiet: Settings = serde_json::from_str(r#"{"language":"en"}"#).unwrap();
+        quiet.sanitize_update(&old).unwrap();
+        assert_eq!(quiet.show_cost, Some(true));
+        let mut off: Settings = serde_json::from_str(r#"{"showCost":false}"#).unwrap();
+        off.sanitize_update(&old).unwrap();
+        assert_eq!(off.show_cost, Some(false));
         // A file from a test build that stored the old switch, untouched (false = on), gets off as well.
         let old: Settings = serde_json::from_str(r#"{"ai":{"claude":{"suggestionsOff":false}}}"#).unwrap();
         assert!(!old.ai.claude.suggest_next);
