@@ -249,9 +249,10 @@ each defining at least the thirteen colour tokens above. Keep existing entries.
   (above anything already typed); it is never sent until the user presses Send. End it with a space
   when the user is meant to finish the sentence.
 - `hidden` — Home sections not to show. Sections: `stats`, `ideas`, `todos`, `chats`, `projects`,
-  `upcoming`, `usage` (the plans' limits and the month's use).
+  `upcoming`, `usage` (the plans' limits and the month's use), and also `suggestions` and
+  `automate` (the small "Suggest automations" link at the bottom).
 - `order` — the order of things on Home. Besides the seven sections it may name `suggestions` (the
-  box of proposals the app makes) and **`widget:<id>`** — a widget a plugin added with
+  box of proposals the app makes), `automate` (the "Suggest automations" link, last by default) and **`widget:<id>`** — a widget a plugin added with
   `ui.addHomeWidget({ id })`. That is how you place a widget above or between the built-in
   sections. Anything you leave out keeps its usual place after the listed ones.
 

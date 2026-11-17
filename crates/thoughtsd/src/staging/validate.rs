@@ -319,7 +319,7 @@ fn home(out: &mut Out, path: &str, v: &Value) {
         match strings(hidden) {
             None => out.add(path, "`hidden` must be a list of section names.", "يجب أن يكون `hidden` قائمة بأسماء الأقسام."),
             Some(list) => for s in list {
-                if !HOME_SECTIONS.contains(&s) && s != "suggestions" && !s.strip_prefix("widget:").map_or(false, id_like) {
+                if !HOME_SECTIONS.contains(&s) && s != "suggestions" && s != "automate" && !s.strip_prefix("widget:").map_or(false, id_like) {
                     out.add(path, format!("`{s}` in `hidden` is not a Home section. Sections: {}.", HOME_SECTIONS.join(", ")),
                         format!("`{s}` في `hidden` ليس قسماً من أقسام الصفحة الرئيسية. الأقسام: {}.", HOME_SECTIONS.join("، ")));
                 }
@@ -330,9 +330,9 @@ fn home(out: &mut Out, path: &str, v: &Value) {
         match strings(order) {
             None => out.add(path, "`order` must be a list of section names.", "يجب أن يكون `order` قائمة بأسماء الأقسام."),
             Some(list) => for s in list {
-                if !HOME_SECTIONS.contains(&s) && s != "suggestions" && !s.strip_prefix("widget:").map_or(false, id_like) {
-                    out.add(path, format!("`{s}` in `order` is not something Home can place. Use a section ({}), `suggestions`, or `widget:<id>`.", HOME_SECTIONS.join(", ")),
-                        format!("`{s}` في `order` ليس عنصراً يمكن ترتيبه في الصفحة الرئيسية. استخدم قسماً ({})، أو `suggestions`، أو `widget:<id>`.", HOME_SECTIONS.join("، ")));
+                if !HOME_SECTIONS.contains(&s) && s != "suggestions" && s != "automate" && !s.strip_prefix("widget:").map_or(false, id_like) {
+                    out.add(path, format!("`{s}` in `order` is not something Home can place. Use a section ({}), `suggestions`, `automate`, or `widget:<id>`.", HOME_SECTIONS.join(", ")),
+                        format!("`{s}` في `order` ليس عنصراً يمكن ترتيبه في الصفحة الرئيسية. استخدم قسماً ({})، أو `suggestions`، أو `automate`، أو `widget:<id>`.", HOME_SECTIONS.join("، ")));
                 }
             },
         }
@@ -589,7 +589,7 @@ mod tests {
             ("plugins/intake.json", r#"{"apiVersion":1,"permissions":["library:write","storage"],"write":["clients/","notes/intake"],"description":"Client intake form"}"#),
             ("views/cal.html", "<p></p>"),
             ("views/cal.json", r#"{"apiVersion":1,"permissions":["todos:read"]}"#),
-            ("home.json", r#"{"chips":[{"label":"Plan","prompt":"Plan my week: "}],"hidden":["stats"],"order":["widget:hours-month","suggestions","todos"]}"#),
+            ("home.json", r#"{"chips":[{"label":"Plan","prompt":"Plan my week: "}],"hidden":["stats","automate"],"order":["widget:hours-month","suggestions","todos","automate"]}"#),
             ("nav.json", r#"{"hidden":["projects"],"order":["home","todos","client-intake"],"labels":{"ideas":{"en":"Clients","ar":"العملاء"}}}"#),
             ("todos.json", r#"{"groupBy":"due","sort":"due","filter":"all","showDone":false}"#),
             ("themes.json", r#"[{"id":"sand","name":"Sand"}]"#),
