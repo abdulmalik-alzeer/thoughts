@@ -1071,7 +1071,9 @@
     -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%); }
   :global(html.native.os-macos) .shell::before { background: color-mix(in srgb, var(--sidebar) 40%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
   :global(html.native:not(.os-macos)) .shell::before { background: var(--sidebar); -webkit-backdrop-filter: none; backdrop-filter: none; }
-  .shell > .sidebar, .shell > .rail { grid-area: 1 / 1; justify-self: start; }
+  /* Positioned, so they paint above the glass: its backdrop filter makes it a stacking context,
+     which is drawn over the sidebar's unpositioned contents and blurs them away in a browser. */
+  .shell > .sidebar, .shell > .rail { grid-area: 1 / 1; justify-self: start; position: relative; }
   .shell > .main { grid-area: 1 / 2; }
   .rail { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 0 0 10px; min-height: 0; width: 50px; border-inline-end: 1px solid transparent; }
   .rail nav { margin: 8px 0; align-items: center; gap: 2px; overflow: auto; min-height: 0; }
