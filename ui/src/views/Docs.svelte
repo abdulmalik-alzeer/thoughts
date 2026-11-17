@@ -31,6 +31,7 @@
   import { printNote, saveNotePdf, titleOf as noteTitle, type PrintSource } from '../lib/printPdf';
   import { canOpenWindows } from '../lib/windows';
   import { openWindow } from '../lib/openWindow';
+  import { presence } from './docs/editLock';
 
   let { path }: { path?: string } = $props();
 
@@ -129,12 +130,26 @@
     try { sessionStorage.removeItem(oldKey(p)); } catch { /* ignore */ }
   }
   $effect(() => {
-    if (!current || !editing) return;
+    if (!current || !editing || elsewhere) return; // the draft belongs to the window editing it
     const d = draft, isDirty = dirty, base = doc?.hash;
     try {
       if (isDirty) localStorage.setItem(stashKey(current), JSON.stringify({ text: d, base, at: Date.now() } satisfies Stash));
       else stashDrop(current);
     } catch { /* storage full or unavailable */ }
+  });
+  // One window edits a note at a time (docs/editLock.ts): the draft above is shared by every window.
+  const locks = presence();
+  /** Bumped when another window's marks may have changed. */
+  let lockTick = $state(0);
+  /** Another window is editing the open note (also when it took the note over from this one). */
+  const elsewhere = $derived.by(() => {
+    void lockTick; void editing;
+    return !!current && !!doc && !doc.binary && EDIT_EXT.test(current) && locks.elsewhere(libKey(), current);
+  });
+  $effect(() => {
+    if (!editing || !current) return;
+    const lib = libKey(), p = current;
+    return untrack(() => locks.hold(lib, p, () => lockTick++));
   });
   /** Drafts of this library waiting in other files (older than 60 days are dropped). */
   function waitingDrafts(except: string): string[] {
@@ -148,7 +163,7 @@
         if (!s || typeof s.text !== 'string' || Date.now() - (s.at || 0) > 60 * DAY) { localStorage.removeItem(k); continue; }
         if (!k.startsWith(prefix)) continue;
         const p = k.slice(prefix.length);
-        if (p !== except && files.some((f) => f.path === p)) out.push(p);
+        if (p !== except && files.some((f) => f.path === p) && !locks.elsewhere(libKey(), p)) out.push(p);
       }
     } catch { /* storage unavailable */ }
     return out.sort();
@@ -198,6 +213,7 @@
   function onDocClick(e: MouseEvent) { if (menu && !(e.target as HTMLElement)?.closest?.('.menuwrap')) menu = false; }
 
   let off: (() => void) | undefined;
+  let offLocks: (() => void) | undefined;
   let ready = $state(false);
   let searched = '';
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -207,6 +223,7 @@
     window.addEventListener('thoughts:command', onCommand);
     window.addEventListener('click', onDocClick);
     app.leaveGuard = leaveOk;
+    offLocks = locks.subscribe(() => lockTick++);
     off = on((e) => {
       if (e.type !== 'library.changed' && e.type !== 'resync') return;
       // Bursts (a wrap writes many files) settle into one refresh.
@@ -266,6 +283,7 @@
     window.removeEventListener('click', onDocClick);
     document.documentElement.classList.remove('print-doc');
     off?.();
+    offLocks?.();
     clearTimeout(refreshTimer);
     dropInline();
     if (app.leaveGuard === leaveOk) app.leaveGuard = null;
@@ -307,20 +325,31 @@
       const d = await api(`/library/file?path=${encodeURIComponent(p)}`);
       if (current !== p) return;
       doc = asDoc(p, d);
-      const kept = EDIT_EXT.test(p) ? stashGet(p) : null;
-      if (kept && kept.text !== d.content) {
-        draft = kept.text; editing = true;
-        // The file moved on since the draft began: keep the draft's starting point, so Save compares.
-        const moved = !!kept.base && !!d.hash && kept.base !== d.hash;
-        if (moved) { doc = { ...doc, hash: kept.base }; theirs = asDoc(p, d); }
-        notify(t(moved ? 'docsa.draftRestoredChanged' : 'docs.draftRestored'), { kind: 'info', key: 'docs-draft-restored' });
-      } else if (kept) stashDrop(p);
+      // A draft another window is editing is that window's: neither shown nor dropped here.
+      const kept = EDIT_EXT.test(p) && !locks.elsewhere(libKey(), p) ? stashGet(p) : null;
+      if (kept && kept.text !== d.content) restoreKept(p, d, kept);
+      else if (kept) stashDrop(p);
     } catch (e: any) {
       if (current === p) { doc = null; docError = errDetail(e) || String(e); }
     } finally { if (current === p) docLoading = false; }
   }
 
-  function startEdit() { draft = doc.content; editing = true; theirs = null; }
+  /** Back to the unsaved draft `kept` of `p`, loaded from disk as `d`. */
+  function restoreKept(p: string, d: any, kept: Stash) {
+    draft = kept.text; editing = true;
+    // The file moved on since the draft began: keep the draft's starting point, so Save compares.
+    const moved = !!kept.base && !!d.hash && kept.base !== d.hash;
+    if (moved) { doc = { ...asDoc(p, d), hash: kept.base }; theirs = asDoc(p, d); }
+    notify(t(moved ? 'docsa.draftRestoredChanged' : 'docs.draftRestored'), { kind: 'info', key: 'docs-draft-restored' });
+  }
+
+  function startEdit() {
+    if (locks.elsewhere(libKey(), current)) { notify(t('final-twowin.waitEdit'), { kind: 'info', key: 'docs-edited-elsewhere' }); return; }
+    // A draft left by a window that closed or stopped while editing this note picks up where it was.
+    const kept = EDIT_EXT.test(current) ? stashGet(current) : null;
+    if (kept && kept.text !== doc.content) { restoreKept(current, doc, kept); return; }
+    draft = doc.content; editing = true; theirs = null;
+  }
 
   /** Done: leave the editor (asking first about unsaved text), showing what is on disk now. */
   async function cancelEdit() {
@@ -342,6 +371,7 @@
     editing = false; theirs = null;
     notify(t('docsa.usedTheirs'), { kind: 'info', duration: 20000, action: { label: t('docsa.bringBack'), run: () => {
       if (current !== p || editing) return;
+      if (locks.elsewhere(libKey(), p)) { notify(t('final-twowin.waitEdit'), { kind: 'info', key: 'docs-edited-elsewhere' }); return; }
       // Picks up from the version now shown, so saving replaces it on purpose.
       draft = mine; editing = true;
     } } });
@@ -1011,10 +1041,15 @@
             {/if}
           </div>
           <button class="btn" onclick={discuss} title={t('docs.discussTip')}><Icon name="chat" size={15} /> {t('docs.discuss')}</button>
-          {#if !doc.binary && EDIT_EXT.test(current)}<button class="btn" onclick={startEdit}><Icon name="edit" size={14} /> {t('edit')}</button>{/if}
+          {#if !doc.binary && EDIT_EXT.test(current)}<button class="btn" onclick={startEdit} disabled={elsewhere} title={elsewhere ? t('final-twowin.editTip') : undefined}><Icon name="edit" size={14} /> {t('edit')}</button>{/if}
         {/if}
       </div>
 
+      {#if elsewhere && !editing}
+        <div class="banner info no-print" role="status">
+          <Icon name="window" size={16} /><span class="grow">{t('final-twowin.editedThere')}</span>
+        </div>
+      {/if}
       {#if doc.binary}
         <div class="filecard surface">
           <div class="row">
@@ -1034,6 +1069,11 @@
         <!-- The card above already offers Show in Finder when the file can't be opened in its app. -->
         <FilePreview name={current} load={previewLoad} size={info?.size} onReveal={desktop && canOpenExternal && canOpenInApp(current) ? reveal : undefined} />
       {:else if editing}
+        {#if elsewhere}
+          <div class="banner no-print" role="status">
+            <Icon name="window" size={16} /><span class="grow">{t('final-twowin.alsoThere')}</span>
+          </div>
+        {/if}
         {#if theirs}
           <div class="banner no-print" role="status">
             <Icon name="warning" size={16} /><span class="grow">{t(theirs.gone ? 'docsa.goneBanner' : 'docsa.changedBanner')}</span>
