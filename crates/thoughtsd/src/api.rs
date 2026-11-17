@@ -1807,10 +1807,10 @@ async fn idea_status(State(st): S, Query(q): Query<HashMap<String, String>>, Jso
         if !scope.may_read(&root, &rel) { return Err(crate::tr::err("plugin.not_readable", &[("path", &rel)]).into()); }
     }
     let today = chrono::Local::now().date_naive();
-    library::set_idea_status(&root, &rel, &i.status, today)?;
+    let was = library::set_idea_status(&root, &rel, &i.status, today)?;
     // The idea's line in the index shows its status too.
     if let Ok(p) = library::resolve(&root, "INDEX.md") {
-        if let Some(text) = std::fs::read_to_string(&p).ok().and_then(|t| links::index_with_status(&t, &rel, i.status.trim(), &today.to_string())) {
+        if let Some(text) = std::fs::read_to_string(&p).ok().and_then(|t| links::index_with_status(&t, &rel, i.status.trim(), was.as_deref(), &today.to_string())) {
             if let Err(e) = paths::write_atomic(&p, text.as_bytes(), false) { crate::log::warn(format!("index: could not update the status line ({e})")); }
         }
     }

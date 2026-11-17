@@ -130,30 +130,46 @@ pub fn remove_all(root: &Path, rel: &str) -> anyhow::Result<()> {
 
 /// Set `status:` (and today's date as `updated:`) in the note details at the top of an idea's
 /// README, leaving every other line — and the file's line endings — exactly as they were.
-pub fn set_idea_status(root: &Path, rel: &str, status: &str, today: chrono::NaiveDate) -> anyhow::Result<()> {
+/// Returns the status it had before, if any.
+pub fn set_idea_status(root: &Path, rel: &str, status: &str, today: chrono::NaiveDate) -> anyhow::Result<Option<String>> {
     let status = status.trim();
     let ok = (1..=30).contains(&status.chars().count()) && status.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == ' ');
     if !ok { anyhow::bail!("{}", if crate::tr::arabic() { "هذه ليست حالة صالحة." } else { "That is not a valid status." }); }
     let p = resolve(root, rel)?;
     let text = std::fs::read_to_string(&p)?;
-    let mut lines: Vec<String> = text.split_inclusive('\n').map(String::from).collect();
+    // A byte-order mark (Notepad, some sync tools) is kept as it is, in front of the details.
+    let (bom, body) = match text.strip_prefix('\u{feff}') { Some(b) => ("\u{feff}", b), None => ("", text.as_str()) };
+    let mut lines: Vec<String> = body.split_inclusive('\n').map(String::from).collect();
     let end_of = |l: &str| if l.ends_with("\r\n") { "\r\n" } else { "\n" };
     let is_fence = |l: &str| l.trim_end_matches(['\r', '\n']) == "---";
     let close = if lines.first().map_or(false, |l| is_fence(l)) { lines.iter().skip(1).position(|l| is_fence(l)).map(|i| i + 1) } else { None };
-    let Some(close) = close else { return Err(crate::tr::err("not_found.file", &[])) };
+    let Some(close) = close else { return Err(crate::tr::err("idea.no_details", &[])) };
+    let old = lines[1..close].iter().find_map(|l| l.strip_prefix("status:"))
+        .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).filter(|v| !v.is_empty());
     let eol = end_of(&lines[0]).to_string();
     let set = |lines: &mut Vec<String>, close: &mut usize, key: &str, value: &str, add: bool| {
         match lines[1..*close].iter().position(|l| l.starts_with(&format!("{key}:"))) {
-            Some(i) => lines[i + 1] = format!("{key}: {value}{eol}"),
+            // The line keeps its own ending.
+            Some(i) => { let own = end_of(&lines[i + 1]).to_string(); lines[i + 1] = format!("{key}: {value}{own}"); }
             None if add => { lines.insert(*close, format!("{key}: {value}{eol}")); *close += 1; }
             None => {}
         }
     };
     let mut close = close;
-    set(&mut lines, &mut close, "status", status, true);
+    set(&mut lines, &mut close, "status", &yaml_plain(status), true);
     set(&mut lines, &mut close, "updated", &today.format("%Y-%m-%d").to_string(), false);
-    crate::paths::write_atomic(&p, lines.concat().as_bytes(), false)?;
-    Ok(())
+    crate::paths::write_atomic(&p, format!("{bom}{}", lines.concat()).as_bytes(), false)?;
+    Ok(old)
+}
+
+/// `value` as YAML reads it back as that same text: quoted when it would otherwise be read as
+/// something else — a yes/no, an empty value, a number or a date (`no`, `null`, `2026`, `1e5`).
+/// Only for the characters a status may hold (letters, digits, spaces, `-` and `_`).
+fn yaml_plain(value: &str) -> String {
+    const SPECIAL: &[&str] = &["y", "n", "yes", "no", "true", "false", "on", "off", "null", "nan", "inf"];
+    let first = value.chars().next().unwrap_or(' ');
+    let quote = !first.is_alphabetic() || SPECIAL.contains(&value.to_lowercase().as_str());
+    if quote { format!("\"{value}\"") } else { value.to_string() }
 }
 
 /// File types an add-on may write.
@@ -1606,6 +1622,40 @@ mod tests {
         for bad in ["", "a\nb: c", "x: y", &"z".repeat(40)] { assert!(set_idea_status(&d, "apps/x/README.md", bad, day).is_err(), "{bad:?}"); }
         assert!(set_idea_status(&d, ".claude/x/README.md", "active", day).is_err());
         assert_eq!(std::fs::read_to_string(d.join("notes.md")).unwrap(), "plain\n");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn status_change_keeps_a_byte_order_mark_and_each_lines_ending() {
+        let d = tmp();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        // Saved by Notepad: a byte-order mark, Windows line endings, but one plain line in the details.
+        write(&d, "apps/x/README.md", "\u{feff}---\r\ntitle: X\r\nstatus: seed\nupdated: 2026-01-01\r\n---\r\nBody\r\n").unwrap();
+        assert_eq!(set_idea_status(&d, "apps/x/README.md", "active", day).unwrap().as_deref(), Some("seed"));
+        assert_eq!(std::fs::read_to_string(d.join("apps/x/README.md")).unwrap(),
+            "\u{feff}---\r\ntitle: X\r\nstatus: active\nupdated: 2026-11-10\r\n---\r\nBody\r\n");
+        // A page without details: a plain message, not "file not found"; nothing changes.
+        write(&d, "apps/y/README.md", "\u{feff}# Y\n").unwrap();
+        let e = set_idea_status(&d, "apps/y/README.md", "active", day).unwrap_err();
+        assert!(e.to_string().contains("no details"), "{e}");
+        assert_eq!(std::fs::read_to_string(d.join("apps/y/README.md")).unwrap(), "\u{feff}# Y\n");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_status_yaml_would_read_as_something_else_is_quoted() {
+        let d = tmp();
+        let day = chrono::NaiveDate::from_ymd_opt(2026, 11, 10).unwrap();
+        for (status, written) in [("no", "\"no\""), ("Yes", "\"Yes\""), ("2026", "\"2026\""), ("1e5", "\"1e5\""), ("null", "\"null\""),
+            ("-x", "\"-x\""), ("on hold", "on hold"), ("قيد العمل", "قيد العمل"), ("active", "active")] {
+            write(&d, "apps/x/README.md", "---\ntitle: X\nstatus: seed\n---\n").unwrap();
+            set_idea_status(&d, "apps/x/README.md", status, day).unwrap();
+            let text = std::fs::read_to_string(d.join("apps/x/README.md")).unwrap();
+            assert_eq!(text, format!("---\ntitle: X\nstatus: {written}\n---\n"));
+            assert_eq!(frontmatter(&text).0["status"].as_str(), Some(status), "read back as the same text");
+            // Read back the same way next time, without the quotes.
+            assert_eq!(set_idea_status(&d, "apps/x/README.md", "seed", day).unwrap().as_deref(), Some(status));
+        }
         std::fs::remove_dir_all(d).unwrap();
     }
 

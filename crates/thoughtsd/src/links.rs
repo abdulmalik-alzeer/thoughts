@@ -451,8 +451,9 @@ pub fn relink_moved(text: &str, was: &str, now: &str, exists: &dyn Fn(&str) -> b
 // ---------- the index line of an idea ----------
 
 /// After an idea's status changed: the INDEX.md line that links to `readme` gets the new status
-/// (and date, when the line ends with one). Everything else in the file stays byte for byte.
-pub fn index_with_status(index: &str, readme: &str, status: &str, date: &str) -> Option<String> {
+/// (and date, when the line ends with one). Everything else in the file stays byte for byte. The
+/// status part is found as one of the usual statuses, or as `was`, the status the README had before.
+pub fn index_with_status(index: &str, readme: &str, status: &str, was: Option<&str>, date: &str) -> Option<String> {
     const STATUSES: &[&str] = &["seed", "active", "parked", "done", "dropped"];
     let mut out = String::with_capacity(index.len());
     let mut changed = false;
@@ -468,7 +469,8 @@ pub fn index_with_status(index: &str, readme: &str, status: &str, date: &str) ->
         let eol = &raw[raw.trim_end_matches(['\r', '\n']).len()..];
         let line = &raw[..raw.len() - eol.len()];
         let mut parts: Vec<String> = line.split(" · ").map(str::to_string).collect();
-        if parts.len() >= 3 && STATUSES.contains(&parts[1].trim()) {
+        let known = |p: &str| STATUSES.contains(&p) || was.map_or(false, |w| !w.is_empty() && w == p);
+        if parts.len() >= 3 && known(parts[1].trim()) {
             parts[1] = status.to_string();
             let last = parts.len() - 1;
             let l = parts[last].trim();
@@ -705,9 +707,14 @@ mod tests {
     #[test]
     fn the_index_line_follows_a_status_change() {
         let idx = "# Index\r\n\r\n## apps\r\n- [One](apps/one/README.md) · seed · pitch · with · dots · 2026-01-01\r\n- [Two](apps/two/README.md) · seed · p · 2026-01-01\r\n";
-        let out = index_with_status(idx, "apps/one/README.md", "active", "2026-11-12").unwrap();
+        let out = index_with_status(idx, "apps/one/README.md", "active", None, "2026-11-12").unwrap();
         assert_eq!(out, "# Index\r\n\r\n## apps\r\n- [One](apps/one/README.md) · active · pitch · with · dots · 2026-11-12\r\n- [Two](apps/two/README.md) · seed · p · 2026-01-01\r\n");
-        assert_eq!(index_with_status(idx, "apps/three/README.md", "done", "2026-11-12"), None);
+        assert_eq!(index_with_status(idx, "apps/three/README.md", "done", None, "2026-11-12"), None);
+        // After a status of the user's own, the line still follows the next change.
+        let idx = "- [One](apps/one/README.md) · قيد المراجعة · pitch · 2026-01-01\n";
+        assert_eq!(index_with_status(idx, "apps/one/README.md", "done", None, "2026-11-12"), None);
+        assert_eq!(index_with_status(idx, "apps/one/README.md", "done", Some("قيد المراجعة"), "2026-11-12").as_deref(),
+            Some("- [One](apps/one/README.md) · done · pitch · 2026-11-12\n"));
     }
 
     #[test]
