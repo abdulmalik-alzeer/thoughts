@@ -75,6 +75,8 @@ pub mod voice;
 pub mod watch;
 pub mod workflows;
 pub mod wraps;
+#[cfg(test)]
+mod upgrade_tests;
 
 pub use state::AppState;
 
