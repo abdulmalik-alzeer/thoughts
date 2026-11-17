@@ -1411,8 +1411,8 @@ fn forget_credential_file(f: &Path, host: &str) -> anyhow::Result<()> {
 }
 
 /// Forget the sign-in saved for `host`, wherever it is kept: the system keychain, the private
-/// password file and the entry an older version saved under the bare host (without the port) —
-/// unless one of the hosts in `keep` still signs in with that one.
+/// password file and, for the usual port 443, the entry saved under the bare host — unless one of
+/// the hosts in `keep` still signs in with that one.
 pub fn forget_sign_in(host: &str, keep: &[String]) -> anyhow::Result<()> {
     let needed: std::collections::BTreeSet<String> = keep.iter().filter(|h| *h != host).flat_map(|h| crate::askpass::keys_for(h)).collect();
     for k in crate::askpass::keys_for(host) {

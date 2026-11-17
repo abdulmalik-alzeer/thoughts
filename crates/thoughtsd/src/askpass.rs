@@ -26,11 +26,12 @@ pub(crate) fn host_asked(prompt: &str) -> Option<String> {
 }
 
 /// The saved entries that can answer for `host` (`host_of` of the address git asks about), best
-/// first: the host with its port, then — for a password saved by a version that left the port
-/// out — the bare host.
+/// first: the host with its port, then — for an address that names the usual port 443, which is
+/// the same place as the bare host — the bare host. A password saved for `host` is never offered
+/// to that host on another port: a different port can be a different service, run by someone else.
 pub(crate) fn keys_for(host: &str) -> Vec<String> {
     let mut keys = vec![host.to_string()];
-    if let Some((bare, port)) = host.rsplit_once(':') { if !bare.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) { keys.push(bare.to_string()); } }
+    if let Some((bare, "443")) = host.rsplit_once(':') { if !bare.is_empty() { keys.push(bare.to_string()); } }
     keys
 }
 
@@ -39,8 +40,19 @@ mod tests {
     #[test]
     fn a_password_is_looked_up_under_the_host_and_port_git_asks_for() {
         let host = |prompt: &str| super::host_asked(prompt).unwrap_or_default();
-        assert_eq!(super::keys_for(&host("Password for 'https://sara@git.example.com:3000': ")), ["git.example.com:3000", "git.example.com"]);
+        assert_eq!(super::keys_for(&host("Password for 'https://sara@git.example.com:3000': ")), ["git.example.com:3000"]);
         assert_eq!(super::keys_for(&host("Username for 'https://github.com': ")), ["github.com"]);
+    }
+
+    #[test]
+    fn a_password_saved_for_the_bare_host_is_only_offered_on_the_usual_port() {
+        // 443 is where the bare host already is: the same place, so its password answers.
+        assert_eq!(super::keys_for("github.example.com:443"), ["github.example.com:443", "github.example.com"]);
+        // Any other port may be someone else's service on the same machine.
+        for host in ["github.example.com:9999", "github.example.com:8443", "github.example.com:4430", "github.example.com:44"] {
+            assert_eq!(super::keys_for(host), [host], "{host}");
+        }
+        assert_eq!(super::keys_for(":443"), [":443"]);
     }
 
     #[test]

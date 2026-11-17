@@ -5278,7 +5278,7 @@ mod tests {
         remote_add(State(st.clone()), remote("lab", "https://localhost:9/lab.git", "", "token-lab")).await.unwrap();
         remote_add(State(st.clone()), remote("keyed", "git@localhost:sara/notes.git", "", "")).await.unwrap();
         t::sh(&lib, &["remote", "add", "plain", "http://localhost:9/plain.git"]);
-        // A password saved by an older version under the bare host, without the port.
+        // A password saved for the bare host: that is the usual port, never port 9 (see `askpass::keys_for`).
         crate::secrets::set("thoughts-git", "127.0.0.1", r#"{"username":"old","secret":"older"}"#).unwrap();
 
         let list = sign_ins(State(st.clone())).await.unwrap().0;
@@ -5303,12 +5303,12 @@ mod tests {
         assert_eq!(shown(save_cred(State(st.clone()), upd("gone", "x")).await).status, 404);
 
         // Removing one of two locations on a site keeps the sign-in; removing the last forgets it,
-        // and the older bare-host entry with it.
+        // and leaves the bare host's own entry alone: that one is not port 9's.
         remote_remove(State(st.clone()), Path("origin".into())).await.unwrap();
         assert!(git::saved_sign_in("127.0.0.1:9").is_some());
         remote_remove(State(st.clone()), Path("second".into())).await.unwrap();
         assert_eq!(git::saved_sign_in("127.0.0.1:9"), None);
-        assert_eq!(crate::secrets::get("thoughts-git", "127.0.0.1"), None);
+        assert!(crate::secrets::get("thoughts-git", "127.0.0.1").is_some());
         assert!(git::saved_sign_in("localhost:9").is_some(), "another site's sign-in is left alone");
         // "Forget sign-in".
         forget_cred(State(st.clone()), q(&[("host", "localhost:9")])).await.unwrap();
