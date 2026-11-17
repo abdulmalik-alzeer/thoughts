@@ -792,6 +792,7 @@ fn passwords_in_a_plain_file_are_noticed_and_an_empty_store_is_not() {
     std::fs::write(d.join("secrets.json"), r#"{"thoughts-ai/key": "sk-1"}"#).unwrap();
     assert!(plain_passwords(&d));
     std::fs::remove_dir_all(&d).unwrap();
+}
 
 #[cfg(unix)]
 #[tokio::test]
