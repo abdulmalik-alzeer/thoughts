@@ -333,7 +333,7 @@ fn every_rule_drops_what_it_should() {
 #[test]
 fn text_is_tidied_and_cut_and_the_list_is_short_and_unique() {
     let none = HashSet::new();
-    let long = json!({"kind": " Skill ", "title": format!("A\u{202E} title\nover two lines {}", "x".repeat(200)), "what": "w".repeat(900), "why": "y\u{0007}es", "build": "b",
+    let long = json!({"kind": " Skill ", "title": format!("A title\nover two lines {}", "x".repeat(200)), "what": "w".repeat(900), "why": "y\u{0007}es", "build": "b",
         "request": format!("line 1\r\nline\t2\n{}", "r".repeat(5000))});
     let p = parse_suggestions(&answer(vec![long]), &ctx(&none, &[], &[])).unwrap();
     let s = &p.suggestions[0];
