@@ -7,6 +7,7 @@
   import { untrack } from 'svelte';
   import { marked } from 'marked';
   import { md, mdClick } from '../../lib/md';
+  import { linkDefs, type LinkMap } from './linkDefs';
 
   let { text, onrender }: { text: string; onrender?: () => void } = $props();
 
@@ -23,16 +24,24 @@
 
   // Rendered blocks by their source, kept only while they are still part of the answer.
   let done = new Map<string, string>();
+  /** Blocks that can hold a link. */
+  const LINKY = new Set(['paragraph', 'heading', 'list', 'blockquote', 'table']);
   const blocks = $derived.by(() => {
-    let tokens: { raw: string }[];
-    try { tokens = marked.lexer(shown) as unknown as { raw: string }[]; } catch { return [md(shown)]; }
+    let tokens: { raw: string; type: string }[];
+    try { tokens = marked.lexer(shown) as unknown as { raw: string; type: string }[]; } catch { return [md(shown)]; }
+    // A reference link ("[text][1]") finds its address in a definition ("[1]: https://…") usually
+    // written further down: each block is rendered with the definitions seen so far, so the link
+    // works as soon as its definition has arrived (definitions themselves show nothing).
+    const defs = linkDefs((tokens as { links?: LinkMap }).links);
     const next = new Map<string, string>();
     const out: string[] = [];
     for (const tok of tokens) {
       const raw = tok.raw ?? '';
       if (!raw.trim()) continue;
-      const html = next.get(raw) ?? done.get(raw) ?? md(raw);
-      next.set(raw, html);
+      // (Not after code or raw HTML: a block still open there would show the lines as its own.)
+      const src = defs && LINKY.has(tok.type) ? raw + '\n\n' + defs : raw;
+      const html = next.get(src) ?? done.get(src) ?? md(src);
+      next.set(src, html);
       out.push(html);
     }
     done = next;
