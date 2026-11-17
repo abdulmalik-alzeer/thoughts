@@ -8,6 +8,10 @@
   /** What one message may carry in files, all together (the service refuses more: ATTACHMENTS_MAX_BYTES). */
   const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
   const draftKey = (id: string) => `thoughts.chatdraft:${id}`;
+  /** Chats whose message is on its way, with the draft saved for it meanwhile: until the service has
+   *  taken it, what was sent stays saved, so leaving the chat neither loses it (should sending fail)
+   *  nor lets the chat, still empty, be tidied away. */
+  const unsent = new Map<string, string>();
 </script>
 
 <script lang="ts">
@@ -45,6 +49,7 @@
   import LibraryGone from '../lib/LibraryGone.svelte';
   import CustomiseStart from './CustomiseStart.svelte';
   import { confirmDeleteChat } from './chat/deleteChat';
+  import { joinDraft, type SavedDraft } from './chat/draft';
   import { Fetches, applyEvent, applyPartial, type Effects, type Stream } from './chat/merge';
   import type { Chat, DaemonEvent } from '../lib/types';
 
@@ -79,9 +84,10 @@
   let escTimer: ReturnType<typeof setTimeout> | undefined;
   let announce = $state('');     // one polite line for screen readers when an answer completes
   let announceTimer: ReturnType<typeof setTimeout> | undefined;
+  let gone = false;              // the view has been closed (a send may still be on its way)
 
   // ---- draft: what was typed (and which files were waiting) survives chat switches and restarts ----
-  {
+  function readDraft() {
     let d: any = null;
     try { d = JSON.parse(localStorage.getItem(draftKey(id)) || 'null'); } catch { /* no draft */ }
     if (d && typeof d === 'object') {
@@ -95,12 +101,21 @@
       files = meta.map((m) => mem.find((f) => f.name === m.name && f.size === m.size) ?? { name: String(m.name ?? ''), size: Number(m.size) || 0, image: !!m.image, data: '', missing: true });
     }
   }
+  // (Not the message still on its way from an earlier visit: it comes back only if sending fails.)
+  if (!unsent.has(id)) readDraft();
+  $effect(() => {
+    const back = (e: Event) => { if ((e as CustomEvent).detail === id) readDraft(); };
+    window.addEventListener('thoughts:unsent', back);
+    return () => window.removeEventListener('thoughts:unsent', back);
+  });
   $effect(() => {
     const draft = { text: text.slice(0, DRAFT_MAX), mentions: [...mentions], files: files.map((f) => ({ name: f.name, size: f.size, image: f.image })) };
     const live = files.filter((f) => !f.missing).map((f) => ({ ...f }));
+    const empty = !draft.text && !draft.mentions.length && !draft.files.length;
+    if (empty && unsent.has(id)) return; // the message on its way is what stays saved
     if (live.length) pendingFiles.set(id, live); else pendingFiles.delete(id);
     try {
-      if (draft.text || draft.mentions.length || draft.files.length) localStorage.setItem(draftKey(id), JSON.stringify(draft));
+      if (!empty) localStorage.setItem(draftKey(id), JSON.stringify(draft));
       else localStorage.removeItem(draftKey(id));
     } catch { /* storage full or unavailable: the draft just isn't kept */ }
   });
@@ -248,7 +263,7 @@
       fetches.hold(e);
       if (chat) onEvent(e);
     });
-    return () => { off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); };
+    return () => { gone = true; off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); };
   });
 
   // ---- which assistant program answers this chat (Claude Code or Codex), and its own choices ----
@@ -310,10 +325,37 @@
     const first = !chat.messages.some((m: any) => m.role === 'user');
     const words = text.trim() ? (first ? normalizeCapture(text) : text) : tn('chat3.seeAttached', ready.length);
     const body = { text: words, attachments: ready.map(({ name, data }) => ({ name, data })), mentions: mentions.map((m) => m.path), options: chat.options };
+    // Saved as the draft until the service has it (see `unsent`), even if the chat is left meanwhile.
+    const saved: SavedDraft = { text: keep.text.slice(0, DRAFT_MAX), mentions: keep.mentions, files: keep.files.map((f) => ({ name: f.name, size: f.size, image: f.image })) };
+    const held = JSON.stringify(saved);
+    const heldFiles = ready.map((f) => ({ ...f }));
+    unsent.set(id, held);
+    try { localStorage.setItem(draftKey(id), held); } catch { /* storage unavailable */ }
+    if (heldFiles.length) pendingFiles.set(id, heldFiles);
     text = ''; files = []; mentions = []; mentionQ = null;
-    // Nothing the user typed is lost when sending fails.
-    if (!(await sendBody(body))) { text = keep.text; files = keep.files; mentions = keep.mentions; }
-    else lastSent.set(id, { text: words, files: ready.map((f) => ({ ...f })) });
+    const ok = await sendBody(body);
+    unsent.delete(id);
+    let stored: string | null = null;
+    try { stored = localStorage.getItem(draftKey(id)); } catch { /* storage unavailable */ }
+    if (ok) {
+      lastSent.set(id, { text: words, files: heldFiles });
+      // The saved copy goes, unless something new was written since.
+      if (stored === held) { try { localStorage.removeItem(draftKey(id)); } catch { /* storage unavailable */ } }
+      if (pendingFiles.get(id) === heldFiles) pendingFiles.delete(id);
+      return;
+    }
+    // Nothing the user typed is lost when sending fails: back in the box, ahead of anything written since.
+    if (!gone) {
+      text = [keep.text, text].filter((x) => x.trim()).join('\n\n');
+      files = [...keep.files, ...files];
+      mentions = [...keep.mentions, ...mentions.filter((m) => !keep.mentions.some((x) => x.path === m.path))];
+    } else if (stored !== held) {
+      // The chat was left (and perhaps opened again and written in): its saved draft gets the message back.
+      try { localStorage.setItem(draftKey(id), JSON.stringify(joinDraft(saved, stored, DRAFT_MAX))); } catch { /* storage unavailable */ }
+      if (heldFiles.length) pendingFiles.set(id, [...heldFiles, ...(pendingFiles.get(id) ?? []).filter((f) => !heldFiles.includes(f))]);
+    }
+    // The chat open again in the meantime shows it in its box.
+    if (gone) window.dispatchEvent(new CustomEvent('thoughts:unsent', { detail: id }));
   }
 
   /** The suggested next message goes into the box (after anything typed), to send or change. */
