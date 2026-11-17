@@ -542,12 +542,15 @@ struct Scan {
     /// There was a real git to look at `.git` with (`git::usable`, decided once for the whole scan).
     /// Without one git's part was not looked at, so nothing that runs git may rely on this scan.
     git: bool,
+    /// Git's settings read more settings from a file inside the folder (`git_include_inside`): what
+    /// a sync brings in could change them, so this folder can never be trusted as it is.
+    git_inside: bool,
 }
 
 impl Scan {
     fn of(path: &Path) -> Scan {
         let git = crate::git::usable();
-        let mut s = Scan { findings: vec![], own: false, files: BTreeMap::new(), trustable: true, git_marks: vec![], git };
+        let mut s = Scan { findings: vec![], own: false, files: BTreeMap::new(), trustable: true, git_marks: vec![], git, git_inside: false };
         s.assistant(path);
         if git { s.git(path); }
         s.findings.sort();
@@ -689,6 +692,42 @@ impl Scan {
                     },
                     _ => self.add(G, "git_unreadable", &place(&cfg), "", "", Some(format!("git {name} that could not be read"))),
                 }
+                self.includes_inside(&cfg, &root, &dirs, &place);
+            }
+        }
+    }
+
+    /// Every `include.path` / `includeIf.<condition>.path` in git config file `cfg`, and in the files
+    /// it includes in turn, that names a file inside the folder (outside its `.git`). Whatever a
+    /// sync brings in lands there, so the next git command would read settings — a filter, a merge
+    /// program — that nobody looked at: such a folder is never trustable (`git_inside`). Checked
+    /// whether or not that file exists yet, and whatever an `includeIf` condition says.
+    fn includes_inside(&mut self, cfg: &Path, root: &Path, git_dirs: &[PathBuf], place: &dyn Fn(&Path) -> String) {
+        let list = |f: &Path, extra: &[&str]| {
+            let mut args: Vec<&std::ffi::OsStr> = vec!["config".as_ref(), "--file".as_ref(), f.as_os_str()];
+            args.extend(extra.iter().map(|a| std::ffi::OsStr::new(*a)));
+            args.extend([std::ffi::OsStr::new("--list"), std::ffi::OsStr::new("--null")]);
+            git_out(None, &args).filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        };
+        // The file itself and every file git reads through it (the ones an `includeIf` leaves out
+        // here are still checked below, through the path it names).
+        let mut files = vec![cfg.to_path_buf()];
+        for rec in list(cfg, &["--includes", "--show-origin"]).unwrap_or_default().split('\0') {
+            if let Some(f) = rec.strip_prefix("file:") { let f = PathBuf::from(f); if !files.contains(&f) { files.push(f); } }
+        }
+        let git_dirs: Vec<PathBuf> = git_dirs.iter().map(|d| dunce::canonicalize(d).unwrap_or_else(|_| d.clone())).collect();
+        for f in files.iter().take(64) {
+            let Some(text) = list(f, &[]) else { continue };
+            for rec in text.split('\0').filter(|r| !r.is_empty()) {
+                let (key, value) = rec.split_once('\n').unwrap_or((rec, ""));
+                let lower = key.to_lowercase();
+                if !(lower == "include.path" || (lower.starts_with("includeif.") && lower.ends_with(".path"))) { continue; }
+                let target = include_target(f, value);
+                if target.starts_with(root) && !git_dirs.iter().any(|d| target.starts_with(d)) {
+                    self.add(Part::Git, "git_include_inside", &place(f), key, value, None);
+                    self.trustable = false;
+                    self.git_inside = true;
+                }
             }
         }
     }
@@ -742,6 +781,26 @@ impl Scan {
         out.sort(); out.dedup();
         Some(out)
     }
+}
+
+/// The real location of the file an include in git config file `cfg` names with `value`, the way
+/// git resolves it: `~/` is the home folder, a relative path is relative to the folder `cfg` is in.
+/// `..` is taken out by hand, so a file that does not exist yet is placed correctly too.
+fn include_target(cfg: &Path, value: &str) -> PathBuf {
+    let joined = match value.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir().unwrap_or_default().join(rest),
+        None if Path::new(value).is_absolute() => PathBuf::from(value),
+        None => cfg.parent().unwrap_or(Path::new("")).join(value),
+    };
+    let mut out = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::ParentDir => { out.pop(); }
+            std::path::Component::CurDir => {}
+            c => out.push(c),
+        }
+    }
+    crate::paths::canonical_lenient(&out)
 }
 
 /// Everything in `path` that could execute code. Empty means nothing found.
@@ -1015,13 +1074,15 @@ pub fn accept(id: &str) -> anyhow::Result<()> {
     };
     let Some(q) = q else { return Err(crate::tr::err("trust.expired", &[])) };
     // The look that matches the folder against the question and the write happen under one lock.
-    let mut too_large = false;
+    let (mut too_large, mut inside) = (false, false);
     let recorded = record_if(&canon(&q.path), |_| {
         let scan = Scan::of(&q.path);
         too_large = !scan.trustable;
+        inside = scan.git_inside;
         (scan.trustable && scan.state() == q.state).then(|| scan.entry())
     })?;
     if recorded { return Ok(()); }
+    if inside { return Err(crate::tr::err("trust.git_include_inside", &[])); }
     if too_large { return Err(crate::tr::err("trust.too_large", &[])); }
     // Not what was shown. If it still needs asking, that is a new question; if it no longer
     // does (the risky file is gone again), there is nothing to record.
@@ -1610,6 +1671,61 @@ mod tests {
         put(&d, ".git/hooks/pre-commit", "#!/bin/sh\nevil\n");
         assert!(require_git(&d).is_err());
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// Git settings that read more settings from a file in the folder itself: a sync could bring in
+    /// a new version of that file (a filter, a merge program) and the next git command would run it
+    /// unasked. Such a folder is shown with the reason and can never be trusted as it is.
+    #[test]
+    fn git_settings_read_from_inside_the_folder_are_never_trusted() {
+        let refused = |d: &Path| {
+            let q = question(require_git(d));
+            assert!(q.items.iter().any(|(f, _)| f.kind == "git_include_inside"), "{q:?}");
+            assert_eq!(accept(&q.id).unwrap_err().to_string(), crate::tr::text("trust.git_include_inside", &[]));
+            // Not even the daemon's own silent record makes it pass.
+            trust(d).unwrap();
+            assert!(require_git(d).is_err());
+        };
+        // Relative to `.git`, as git reads it; the file need not exist yet.
+        let d = tmp("incl-rel");
+        git(&d, &["init", "-q"]);
+        git(&d, &["config", "include.path", "../notes/x.cfg"]);
+        refused(&d);
+        // It exists, and reads as harmless today.
+        put(&d, "notes/x.cfg", "[user]\n\tname = Sara\n");
+        refused(&d);
+        // An `includeIf` whatever its condition, an absolute path, `.` and `..` along the way.
+        let d2 = tmp("incl-if");
+        git(&d2, &["init", "-q"]);
+        let abs = canon(&d2) + "/sub/../other/./y.cfg";
+        git(&d2, &["config", "includeIf.gitdir:/nowhere/.path", &abs]);
+        refused(&d2);
+        // Through a file outside the folder that includes one inside it.
+        let d3 = tmp("incl-chain");
+        let outside = tmp("incl-outside");
+        git(&d3, &["init", "-q"]);
+        put(&outside, "mid.cfg", &format!("[include]\n\tpath = {}/notes/z.cfg\n", canon(&d3)));
+        git(&d3, &["config", "include.path", &(canon(&outside) + "/mid.cfg")]);
+        refused(&d3);
+        // Outside the folder, or in its own `.git` (which nothing syncs into): asked about once, as before.
+        let d4 = tmp("incl-ok");
+        git(&d4, &["init", "-q"]);
+        put(&d4, ".git/extra.cfg", "[user]\n\tname = Sara\n");
+        git(&d4, &["config", "include.path", "extra.cfg"]);
+        git(&d4, &["config", "--add", "include.path", &(canon(&outside) + "/elsewhere.cfg")]);
+        let q = question(require_git(&d4));
+        assert!(!q.items.iter().any(|(f, _)| f.kind == "git_include_inside"), "{q:?}");
+        accept(&q.id).unwrap();
+        assert!(require_git(&d4).is_ok());
+        for x in [d, d2, d3, d4, outside] { std::fs::remove_dir_all(x).unwrap(); }
+    }
+
+    #[test]
+    fn an_include_is_placed_the_way_git_reads_it() {
+        let home = dirs::home_dir().unwrap();
+        assert_eq!(include_target(Path::new("/nowhere/repo/.git/config"), "../notes/x.cfg"), PathBuf::from("/nowhere/repo/notes/x.cfg"));
+        assert_eq!(include_target(Path::new("/nowhere/repo/.git/config"), "/nowhere/a/../b/./c.cfg"), PathBuf::from("/nowhere/b/c.cfg"));
+        assert_eq!(include_target(Path::new("/nowhere/repo/.git/config"), "~/thoughts-no-such.cfg"), crate::paths::canonical_lenient(&home.join("thoughts-no-such.cfg")));
     }
 
     /// SEC-15: `pushurl` makes `git push` upload somewhere other than the address the app shows.
