@@ -171,3 +171,18 @@ describe('resolveLink', () => {
     expect(resolveLink(from, href)).toBe(want);
   });
 });
+
+describe('md: kept renders', () => {
+  it('the same text is parsed once, and still renders the same', async () => {
+    const { marked } = await import('marked');
+    const parse = vi.spyOn(marked, 'parse');
+    const src = 'A **kept** answer\n\n```\ncode\n```\n';
+    const a = md(src);
+    const b = md(src);
+    expect(b).toBe(a);
+    expect(parse).toHaveBeenCalledTimes(1);
+    md(src + ' changed');
+    expect(parse).toHaveBeenCalledTimes(2);
+    parse.mockRestore();
+  });
+});

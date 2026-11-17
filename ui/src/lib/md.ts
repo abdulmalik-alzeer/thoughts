@@ -47,6 +47,35 @@ const PURIFY = { ALLOWED_TAGS, ALLOWED_ATTR, ALLOW_DATA_ATTR: false, ALLOW_ARIA_
  *  Code blocks get a copy button and tables a horizontally scrollable wrapper, added on the sanitised
  *  DOM tree. */
 export function md(src: string): string {
+  // The same text renders the same: a chat shown again after a refresh, or an answer's finished
+  // blocks, are not parsed and sanitised again. Keyed by the language too (copy buttons and task
+  // markers carry words of it).
+  const key = t('md.copyCode') + '\u0000' + src;
+  const hit = memo.get(key);
+  if (hit !== undefined) { memo.delete(key); memo.set(key, hit); return hit; }
+  const html = render(src);
+  if (src.length <= MEMO_MAX_CHARS) {
+    memo.set(key, html);
+    memoChars += key.length + html.length;
+    while (memo.size > MEMO_SIZE || memoChars > MEMO_BUDGET) {
+      const [k, v] = memo.entries().next().value!;
+      memo.delete(k);
+      memoChars -= k.length + v.length;
+    }
+  }
+  return html;
+}
+
+/** Recently rendered texts, oldest first. */
+const memo = new Map<string, string>();
+let memoChars = 0;
+const MEMO_SIZE = 400;
+/** What all kept texts may come to together, in characters (a few megabytes). */
+const MEMO_BUDGET = 2_000_000;
+/** A long note is rendered each time rather than kept (it is rarely shown twice in a row). */
+const MEMO_MAX_CHARS = 100_000;
+
+function render(src: string): string {
   const body = src.replace(/^---\n[\s\S]*?\n---\n?/, '');
   taskMark = secret();
   // Sanitise to a DOM fragment, then add the wrappers with DOM APIs (never by editing the HTML string).
