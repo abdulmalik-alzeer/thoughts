@@ -10,6 +10,7 @@
   import { zoomImages } from '../../lib/zoomImages';
   import { go } from '../../lib/store.svelte';
   import { t, fmtDate } from '../../lib/i18n';
+  import { appSubject } from '../../lib/historySubject';
 
   let { path, close, restored }: { path: string; close: () => void; restored: () => void } = $props();
 
@@ -36,7 +37,7 @@
 
   const kindLabel = (k?: string) => (k === 'start' ? t('hista.hist.kindStart') : k === 'outside' ? t('libf-sync.hist.kind') : t('docs3.kind.' + (['wrap', 'sync', 'edit', 'assistant'].includes(k ?? '') ? k : 'other')));
   /** What a version's entry says it did. The entry a history starts with is described in the reader's language. */
-  const subjectOf = (v: Ver) => (v.kind === 'start' ? t('hista.hist.startSubject') : (v.subject ?? '').replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
+  const subjectOf = (v: Ver) => (v.kind === 'start' ? t('hista.hist.startSubject') : appSubject(v.subject) ?? (v.subject ?? '').replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
   const when = (d: string) => { try { return fmtDate(d, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return d; } };
   /** The name a version was saved under, when that is not the file's name now. */
   const earlier = (v: Ver) => (v.path && v.path !== path ? v.path : '');
