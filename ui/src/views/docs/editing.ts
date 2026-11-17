@@ -1,7 +1,7 @@
 // The text changes behind the note editor's writing aids: bold, italic, headings, links, lists,
 // checklists, indenting, list continuation, pictures, and keeping a file's own line endings.
 //
-// Pure functions of (text, selection): no DOM, no app state, so `scripts/check-editor.mjs` can run
+// Pure functions of (text, selection): no DOM, no app state, so `editing.test.ts` can run
 // them under Node. Each returns the whole new text with the new selection, or null for "nothing to
 // do here, let the text box behave as usual". The editor turns a result into ONE native edit (so
 // one action is one undo step) and never touches text outside the lines an action is about.
