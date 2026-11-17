@@ -126,8 +126,9 @@ scripts.
   and retries. A dead package mirror now fails the job within about ten minutes instead of
   stalling it for an hour; re-run the job when that happens.
 - **Clippy** runs but is advisory for now (it reports existing warnings).
-- **Content-security policy:** `connect-src` and `img-src` keep `http://127.0.0.1:*` because the
+- **Content-security policy:** `connect-src` keeps `http://127.0.0.1:*` and `ws://127.0.0.1:*` because the
   background service picks a random port; the token-protected service is the real boundary.
+  `img-src` is only `'self' data: blob:`: library pictures are fetched with the token and shown from `blob:` URLs.
   `dangerousDisableAssetCspModification` is set for `style-src` only, because Tauri would otherwise
   add a nonce to styles in every HTML asset, which blocks inline styles inside the sandboxed add-on
   frames. Script hashing stays on: the add-on runtime relies on it.
