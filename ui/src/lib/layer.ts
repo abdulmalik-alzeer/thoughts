@@ -1355,15 +1355,23 @@ export async function stagedItems(): Promise<LayerItem[]> {
   } catch { return []; }
 }
 
+/** The staged add-ons and pages could not be read for their test load (the service is restarting,
+ *  busy, or unreachable): nothing was tested, so the review must not treat the change as passed. */
+export class DryLoadFailed extends Error {
+  constructor(readonly cause?: unknown) { super('dry load: the staged change could not be read'); this.name = 'DryLoadFailed'; }
+}
+
 /** Test-load every staged add-on and page in a hidden sandbox frame that is given no data and can
  *  change nothing, and report the ones that fail to start. Unsupported items are not run.
  *
  *  Nothing is run when customisations are off (safe mode must load nothing, staged or kept), nor when
  *  this very change froze the app the last time it was tested or tried: such items come back with
- *  `skipped` (why) and, in the second case, `error`. One item is tested at a time. */
+ *  `skipped` (why) and, in the second case, `error`. One item is tested at a time.
+ *  Throws `DryLoadFailed` when the staged change cannot be read at all. */
 export async function dryLoadStaged(): Promise<LayerItem[]> {
   let m: any;
-  try { m = await api('/layer?preview=1&sig=' + encodeURIComponent(pendingSig())); } catch { return []; }
+  // Not an empty list: that would read as "nothing failed", and the change could be kept untested.
+  try { m = await api('/layer?preview=1&sig=' + encodeURIComponent(pendingSig())); } catch (e) { throw new DryLoadFailed(e); }
   const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
   const sources: [any, 'plugin' | 'view'][] = [...(m.plugins || []).map((x: any) => [x, 'plugin'] as [any, 'plugin']), ...(m.views || []).map((x: any) => [x, 'view'] as [any, 'view'])];
   const items = sources.map(([src, kind]) => describe(src, kind, manifest));

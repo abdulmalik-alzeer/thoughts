@@ -12,6 +12,7 @@
   // the staged CSS under review can never restyle, hide or relabel it. Classes used here are defined
   // in shield.ts, or in the style element below that is moved into the shadow root with the panel
   // (page styles never reach it).
+  import { untrack } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import { app, go, toast } from '../lib/store.svelte';
   import { t, tn } from '../lib/i18n';
@@ -65,14 +66,22 @@
   // stop this change from being kept; the others were already in use.
   let items = $state<LayerItem[] | null>(null);
   let tested = $state(false);
+  // The test load could not run (the service did not answer): Keep stays blocked until a retry works.
+  let testFailed = $state(false);
   let run = 0;
+  function test() {
+    const mine = ++run;
+    items = null; tested = false; testFailed = false;
+    stagedItems().then((x) => { if (mine === run && !tested) items = x; });
+    dryLoadStaged().then(
+      (x) => { if (mine === run) { items = x; tested = true; } },
+      () => { if (mine === run) testFailed = true; },
+    );
+  }
   $effect(() => {
     void p?.signature; void p?.summary;
     if (!p || p.running) return;
-    const mine = ++run;
-    items = null; tested = false;
-    stagedItems().then((x) => { if (mine === run && !tested) items = x; });
-    dryLoadStaged().then((x) => { if (mine === run) { items = x; tested = true; } });
+    untrack(test);
   });
   const itemKey = (x: LayerItem) => `${x.kind === 'view' ? 'page' : 'addon'}:${x.name}`;
   const mine = $derived((items ?? []).filter((x) => changedItems.has(itemKey(x))));
@@ -86,7 +95,7 @@
   // Anything the user should read before deciding: then Keep is not the pre-focused button.
   const caution = $derived(!!(p?.pluginChanged || p?.workflowChanged || outside.length || outsidePrivate || problems.length || stale || incomplete || packSays || cssFlags.length || css?.kind === 'unreadable' || loadErrors.length));
   const blocked = $derived(problems.length > 0 || stale || (incomplete && !keepIncomplete) || testing || (loadErrors.length > 0 && !keepBroken));
-  const blockedText = $derived(stale ? t('lda.staleKeep') : problems.length ? t('layer3.keepBlocked') : incomplete && !keepIncomplete ? t('lda.incompleteKeep') : testing ? t('ldb.testingKeep') : t('ldb.loadErrKeep'));
+  const blockedText = $derived(stale ? t('lda.staleKeep') : problems.length ? t('layer3.keepBlocked') : incomplete && !keepIncomplete ? t('lda.incompleteKeep') : testing ? t(testFailed ? 'ui-guards.testFailed' : 'ldb.testingKeep') : t('ldb.loadErrKeep'));
 
   // The other changes in progress (each reviewed and kept on its own).
   const others = $derived(drafts.list);
@@ -234,7 +243,9 @@
             {/each}
           </ul>
         {/each}
-        {#if addsCode}<p class="muted" role="status">{tested ? notTested || (loadErrors.length ? '' : t('layer3.checkedOk')) : t('layer3.checking')}</p>{/if}
+        {#if addsCode && testFailed}
+          <div class="row" role="alert"><p class="err grow">{t('ui-guards.testFailed')}</p><button class="btn" disabled={!!busy} onclick={test}><Icon name="retry" size={15} /> {t('ui-guards.testRetry')}</button></div>
+        {:else if addsCode}<p class="muted" role="status">{tested ? notTested || (loadErrors.length ? '' : t('layer3.checkedOk')) : t('layer3.checking')}</p>{/if}
       {:else}
         <p class="muted">{t('ldb.whatNothing')}</p>
       {/if}
