@@ -4,6 +4,8 @@
 // localStorage / sessionStorage / `window.*` / the DOM, and in browser-preview mode `?token=` is
 // removed from the address bar as soon as it has been read. Nothing in this module returns it.
 
+import { BLOB_TIMEOUT_MS, deadline, timeoutFor } from './timeouts';
+
 type Info = { port: number; token: string };
 let info: Info | null = null;
 const listeners = new Set<(e: any) => void>();
@@ -97,33 +99,46 @@ export function codeOf(msg: string): string {
   return /(?:^|\s)([A-Z][A-Z_]{2,})::/.exec(msg)?.[1] ?? '';
 }
 
-async function authed(path: string): Promise<Response> {
+async function authed(path: string, signal?: AbortSignal): Promise<Response> {
   if (!info) await connect();
-  return fetch(`http://127.0.0.1:${info!.port}/api${path}`, { headers: { Authorization: `Bearer ${info!.token}` } });
+  return fetch(`http://127.0.0.1:${info!.port}/api${path}`, { headers: { Authorization: `Bearer ${info!.token}` }, signal });
+}
+
+/** The service took the request but never answered in time (`timeouts.ts`): status 0 like
+ *  "unreachable", so every place that handles that handles this too, with its own code and words. */
+async function timedOut(): Promise<ApiError> {
+  const { t } = await import('./i18n');
+  return new ApiError(t('uicore.timeout'), 0, 'TIMEOUT');
 }
 
 /** Fetch any daemon path as a blob (PDF previews, the calendar file). Throws an ApiError when it fails. */
 export async function apiBlob(path: string): Promise<Blob> {
-  let r: Response;
-  try { r = await authed(path); }
-  catch { const { t } = await import('./i18n'); throw new ApiError(t('shell.unreachable'), 0); }
-  if (!r.ok) {
-    let msg = '';
-    let data: any;
-    try { data = JSON.parse(await r.text()); msg = data?.error || ''; } catch { /* not the service's own JSON */ }
-    if (!msg) { const { t } = await import('./i18n'); msg = t('wording.err.generic'); }
-    throw new ApiError(await friendly(msg), r.status, codeOf(msg) || String(data?.code ?? ''), data);
-  }
-  return r.blob();
+  const dl = deadline(BLOB_TIMEOUT_MS);
+  try {
+    let r: Response;
+    try { r = await authed(path, dl.signal); }
+    catch { if (dl.timedOut()) throw await timedOut(); const { t } = await import('./i18n'); throw new ApiError(t('shell.unreachable'), 0); }
+    if (!r.ok) {
+      let msg = '';
+      let data: any;
+      try { data = JSON.parse(await r.text()); msg = data?.error || ''; } catch { /* not the service's own JSON */ }
+      if (!msg) { const { t } = await import('./i18n'); msg = t('wording.err.generic'); }
+      throw new ApiError(await friendly(msg), r.status, codeOf(msg) || String(data?.code ?? ''), data);
+    }
+    try { return await r.blob(); }
+    catch (e) { if (dl.timedOut()) throw await timedOut(); throw e; }
+  } finally { dl.clear(); }
 }
 
 /** Fetch a library file's bytes (`GET /api/library/raw?path=`). Null when missing or unsupported. */
 export async function libraryBlob(path: string): Promise<Blob | null> {
+  const dl = deadline(BLOB_TIMEOUT_MS);
   try {
     if (!info) await connect();
-    const r = await fetch(`http://127.0.0.1:${info!.port}/api/library/raw?path=${encodeURIComponent(path)}`, { headers: { Authorization: `Bearer ${info!.token}` } });
+    const r = await fetch(`http://127.0.0.1:${info!.port}/api/library/raw?path=${encodeURIComponent(path)}`, { headers: { Authorization: `Bearer ${info!.token}` }, signal: dl.signal });
     return r.ok ? await r.blob() : null;
   } catch { return null; }
+  finally { dl.clear(); }
 }
 
 let online = true;
@@ -202,22 +217,29 @@ async function answerTrust(id: string) {
   }
 }
 
-export async function api<T = any>(path: string, opts: { method?: string; body?: any } = {}): Promise<T> {
+/** `timeout`: milliseconds before the request counts as unanswered (`ApiError` status 0, code
+ *  `TIMEOUT`); 0 = no limit. Left out, `timeoutFor` decides: 30 seconds, none for long work. */
+export async function api<T = any>(path: string, opts: { method?: string; body?: any; timeout?: number } = {}): Promise<T> {
   if (!info) await connect();
+  const method = opts.method || (opts.body !== undefined ? 'POST' : 'GET');
+  const dl = deadline(timeoutFor(method, path, opts.timeout));
   let r: Response;
+  let text: string;
   try {
     r = await fetch(`http://127.0.0.1:${info!.port}/api${path}`, {
-      method: opts.method || (opts.body !== undefined ? 'POST' : 'GET'),
+      method,
       headers: { Authorization: `Bearer ${info!.token}`, 'Content-Type': 'application/json', ...(libraryId ? { 'X-Thoughts-Library': libraryId } : {}) },
       body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: dl.signal,
     });
+    text = await r.text();
   } catch {
+    if (dl.timedOut()) throw await timedOut();
     // The request never reached the background service (it stopped or is restarting).
     if (ws && ws.readyState !== WebSocket.OPEN && ws.readyState !== WebSocket.CONNECTING) setOnline(false);
     const { t } = await import('./i18n');
     throw new ApiError(t('shell.unreachable'), 0);
-  }
-  const text = await r.text();
+  } finally { dl.clear(); }
   let data: any = null;
   // A refusal that is not the service's own JSON (a request it could not read): a plain sentence,
   // whatever it said kept for "Show details".
