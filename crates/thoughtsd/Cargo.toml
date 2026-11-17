@@ -26,6 +26,8 @@ futures = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 dunce = "1"
 base64 = "0.22"
+# Noticing changes other programs make to the library (watch.rs): FSEvents, inotify, ReadDirectoryChanges. CC0-1.0.
+notify = "8"
 
 # Linux: the kernel keyring alone forgets everything at reboot, so secrets also go to the desktop's
 # Secret Service (GNOME Keyring / KWallet). libdbus is built in, so no system package is needed.

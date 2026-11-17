@@ -97,10 +97,10 @@
   }
 
   const KINDS = ['wrap', 'sync', 'edit', 'assistant'];
-  const kindLabel = (k: string, merge = false) => (merge ? t('histc.hist.kindMerge') : k === 'start' ? t('hista.hist.kindStart') : t('ui.hist.kind.' + (KINDS.includes(k) ? k : 'other')));
-  const kindIcon = (k: string) => ({ wrap: 'wrap', sync: 'sync', edit: 'edit', assistant: 'ai' } as Record<string, string>)[k] ?? 'clock';
+  const kindLabel = (k: string, merge = false) => (merge ? t('histc.hist.kindMerge') : k === 'start' ? t('hista.hist.kindStart') : k === 'outside' ? t('libf-sync.hist.kind') : t('ui.hist.kind.' + (KINDS.includes(k) ? k : 'other')));
+  const kindIcon = (k: string) => ({ wrap: 'wrap', sync: 'sync', edit: 'edit', assistant: 'ai', outside: 'folder' } as Record<string, string>)[k] ?? 'clock';
   /** What an entry says it did. The entry a history starts with is described in the reader's language. */
-  const subjectOf = (e: Entry) => (e.merge ? t('histc.hist.mergeSubject') : e.kind === 'start' ? t('hista.hist.startSubject') : e.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
+  const subjectOf = (e: Entry) => (e.merge ? t('histc.hist.mergeSubject') : e.kind === 'start' ? t('hista.hist.startSubject') : e.kind === 'outside' ? t('libf-sync.hist.subject') : e.subject.replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
 
   // Grouped by calendar day, newest first (the list already arrives newest first).
   const days = $derived.by(() => {

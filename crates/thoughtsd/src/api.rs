@@ -274,6 +274,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/extensions", get(extensions))
         .route("/api/extensions/search/:op", post(search_ext))
         .route("/api/events", get(events))
+        // changes waiting at the main location (a look only, `incoming.rs`)
+        .merge(crate::incoming::routes())
         .layer(middleware::from_fn(plugin_gate))
         .layer(middleware::from_fn_with_state(state.clone(), crate::libraries::gate))
         .layer(middleware::from_fn(note_errors))
@@ -3212,6 +3214,8 @@ async fn git_sync(State(st): S) -> R {
     let v = git::sync(&st, &l).await;
     // Whatever was received is in the library by now, even when sending it on failed.
     st.emit(json!({"type": "library.changed"}));
+    // What was waiting has come in; a check that kept failing starts afresh.
+    crate::incoming::synced(&st, &l).await;
     Ok(Json(v?))
 }
 
@@ -3525,6 +3529,8 @@ async fn events(State(st): S, ws: WebSocketUpgrade) -> Response {
 
 async fn pump(st: Arc<AppState>, mut socket: WebSocket) {
     let mut rx = st.events.subscribe();
+    // While a window is connected, the check for changes from other computers may run.
+    let _open = crate::incoming::WindowOpen::new();
     loop {
         tokio::select! {
             ev = rx.recv() => match ev {

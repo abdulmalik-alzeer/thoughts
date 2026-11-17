@@ -25,6 +25,7 @@
   import QuickCapturePrefs from '../lib/QuickCapturePrefs.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
   import Maintenance from './Maintenance.svelte';
+  import IncomingStatus from '../lib/IncomingStatus.svelte';
   import TesterUpdates from './TesterUpdates.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
   import AccessKeys from './AccessKeys.svelte';
@@ -43,7 +44,7 @@
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['codex.set.which', 'set.account', 'codex.set.title', 'codex.set.limitsTitle', 'set.perm', 'set.wrapNag', 'chatc.set.suggest', 'r10-chatview.set.title'],
     usage: ['r10-usage.set.glance', 'r10-usage.set.scopeTitle'],
-    git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
+    git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'libf-sync.set.check', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
     privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'wording.reports.title', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
@@ -885,7 +886,7 @@
           <label class="check"><input type="checkbox" bind:checked={s.sync.allowCloud} /> {t('hista.cloud.anyway')}</label>
         {/if}
       {/if}
-      {#if isGit && vis(c, 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update')}
+      {#if isGit && vis(c, 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'libf-sync.set.check', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update')}
         {#if syncKind === 'git'}<p class="muted sm">{t('hista.online.body')}</p>{/if}
         {#if vis(c, 'hista.backup.online', 'histb.backup.drive', 'hista.online.when')}
           <label for="st-gitmode">{t('hista.online.when')}</label>
@@ -893,6 +894,11 @@
             <option value="git-manual">{t('hista.online.manual')}</option>
             <option value="git-auto">{t('hista.online.auto')}</option>
           </select>
+        {/if}
+        {#if vis(c, 'hista.backup.online', 'histb.backup.drive', 'libf-sync.set.check')}
+          <label class="check"><input type="checkbox" bind:checked={s.sync.checkRemote} aria-describedby="st-check-remote-hint" /> {t('libf-sync.set.check')}</label>
+          <p class="muted sm" id="st-check-remote-hint">{t('libf-sync.set.checkHint')}</p>
+          {#if base.sync?.checkRemote && s.sync.checkRemote}<IncomingStatus />{/if}
         {/if}
         {#if (syncKind === 'git' || signIns.length) && vis(c, 'hista.backup.online', 'set.credStore')}
           <label for="st-cred">{t('set.credStore')}</label>

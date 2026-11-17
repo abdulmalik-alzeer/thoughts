@@ -235,6 +235,27 @@ pub async fn git_output(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::
 }
 
 async fn run_with(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index: Option<&Path>) -> anyhow::Result<std::process::Output> {
+    run_opts(state, dir, repo, args, index, false).await
+}
+
+/// Longest a background check (`git_quiet`) may run.
+pub const QUIET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// `git` for work nobody asked for right now (the background check for changes from other
+/// computers, `incoming.rs`): it can never ask anything. No password prompt helper is given (so the
+/// system's password store is never asked either, which could show a dialog of its own), SSH runs in
+/// batch mode (no passphrase or host question), and it gives up sooner. A sign-in that is needed
+/// simply makes it fail. A password kept in the private file is still used: reading a file shows nothing.
+pub async fn git_quiet(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+    if !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &dir.display().to_string())])); }
+    let out = run_opts(state, dir, repo_of(dir), args, None, true).await?;
+    if !out.status.success() {
+        anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+async fn run_opts(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index: Option<&Path>, quiet: bool) -> anyhow::Result<std::process::Output> {
     if !usable() { return Err(crate::tr::err("git.missing", &[])); }
     let store = state.settings.read().await.sync.credential_store.clone();
     let mut c = crate::proc::command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
@@ -264,6 +285,12 @@ async fn run_with(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
                "http.lowSpeedLimit=1000", "http.lowSpeedTime=30"] {
         c.args(["-c", kv]);
     }
+    if quiet {
+        // Later `-c` values win: SSH never stops to ask for a passphrase or about a new server.
+        c.args(["-c", "core.sshCommand=ssh -o BatchMode=yes -o ConnectTimeout=20"]);
+        for var in ["GIT_ASKPASS", "SSH_ASKPASS"] { c.env_remove(var); }
+        c.env("SSH_ASKPASS_REQUIRE", "never").env("GCM_INTERACTIVE", "never");
+    }
     #[cfg(test)]
     if TEST_NO_IDENTITY.with(|c| c.get()) {
         c.env("GIT_CONFIG_GLOBAL", no_hooks).args(["-c", "user.useConfigOnly=true"]);
@@ -280,7 +307,7 @@ async fn run_with(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
     // The prompt helper is answered only while this command runs, and only with this command's
     // code (see `askpass`); the code is forgotten when `ticket` goes, however the command ends.
     let ticket = crate::askpass::Ticket::new();
-    if store != "file" {
+    if store != "file" && !quiet {
         if let Ok(exe) = crate::paths::app_exe() {
             c.env("GIT_ASKPASS", exe).env(crate::askpass::CODE_VAR, ticket.code())
                 .env(crate::askpass::PORT_VAR, crate::approvals::port().to_string());
@@ -294,9 +321,13 @@ async fn run_with(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
         None => { c.args(args); }
     }
     c.stdin(std::process::Stdio::null());
-    let limit = timeout_for(args);
+    let limit = if quiet { QUIET_TIMEOUT } else { timeout_for(args) };
     let out = match crate::proc::output_timeout(&mut c, limit).await {
         Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::TimedOut && quiet => {
+            crate::log::warn(format!("git {} (a background check) did not finish within {}s and was stopped", subcommand(args), limit.as_secs()));
+            return Err(crate::tr::err("git.timeout", &[]));
+        }
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
             crate::log::error(format!("git {} did not finish within {}s and was stopped", subcommand(args), limit.as_secs()));
             return Err(crate::tr::err("git.timeout", &[]));
@@ -1307,14 +1338,18 @@ pub mod subject {
     pub fn undo(of: &str) -> String { format!("undo: {of}") }
     /// The first entry of a history the app starts for a library that already has content.
     pub fn start() -> String { "start: the library as it was when its history began".into() }
+    /// Files changed by another program (another editor, a phone, a cloud drive), recorded as they
+    /// were found (`watch.rs`). History shows it as "Changed outside Thoughts".
+    pub fn outside() -> String { "outside: changed outside Thoughts".into() }
 }
 
 /// What kind of change a commit is, from the subject line the daemon gave it:
-/// `wrap` | `sync` | `edit` | `assistant` | `start` | `other`.
+/// `wrap` | `sync` | `edit` | `assistant` | `start` | `outside` | `other`.
 pub fn commit_kind(subject: &str) -> &'static str {
     let s = subject.trim();
     let starts = |prefixes: &[&str]| prefixes.iter().any(|p| s.starts_with(p));
     if starts(&["wrap: "]) { "wrap" }
+    else if starts(&["outside: "]) { "outside" }
     else if starts(&["start: "]) { "start" }
     else if starts(&["sync: ", "Merge ", "sync:"]) { "sync" }
     else if starts(&["assistant: ", "module: ", "init: ", "reorganize: "]) { "assistant" }

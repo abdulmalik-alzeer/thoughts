@@ -29,6 +29,7 @@ pub mod hello;
 pub mod inbox;
 pub mod history;
 pub mod import;
+pub mod incoming;
 pub mod kit_history;
 pub mod health;
 pub mod layer_api;
@@ -71,6 +72,7 @@ pub mod trust;
 pub mod updates;
 pub mod usage;
 pub mod voice;
+pub mod watch;
 pub mod workflows;
 pub mod wraps;
 
@@ -166,6 +168,10 @@ pub async fn run() -> anyhow::Result<()> {
     layer_api::start(state.clone());
     // Every library has a history of changes: one that has none yet (from before 0.0.9) gets it now.
     history::start(state.clone());
+    // Changes made to the library by other programs are noticed, and recorded on their own.
+    watch::start(state.clone());
+    // "N changes waiting" from the user's other computers, for libraries where it is switched on.
+    incoming::start(state.clone());
     // The weekly "is there a newer version?" check, for users who switched it on.
     tokio::spawn(release::weekly(state.clone()));
     // Old and never-used chats are removed in the background (the old-chat part only when the person asked for it).

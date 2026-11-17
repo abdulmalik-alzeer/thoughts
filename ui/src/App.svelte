@@ -54,6 +54,7 @@
   import Logo from './lib/Logo.svelte';
   import Dialogs from './lib/Dialogs.svelte';
   import SyncConflict from './lib/SyncConflict.svelte';
+  import SyncWaiting from './lib/SyncWaiting.svelte';
   import { settleClash } from './lib/conflict.svelte';
   import SyncJoin from './lib/SyncJoin.svelte';
   import { settleJoin } from './lib/join.svelte';
@@ -903,6 +904,7 @@
           <Icon name="wrap" size={15} /> {wrapRunning ? t('ui.wrapRunningShort') : t('wrap')}
           {#if app.wrap.count}<span class="pill" aria-hidden="true">{fmtNum(app.wrap.count)}</span><span class="sr-only">— {tn('shell.chatsToWrap', app.wrap.count)}</span>{/if}
         </button>
+        {#if syncOn}<SyncWaiting onsync={() => command('sync')} disabled={syncing || wrapRunning} />{/if}
         <div class="row tools">
           {#if syncOn}<button class="iconbtn" class:busy={syncing} class:warned={!!syncWarn} disabled={syncing || wrapRunning} aria-busy={syncing} onclick={() => command('sync')} aria-label={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : syncTitle} title={syncing ? t('shell.syncing') : wrapRunning ? t('ui.syncWaitsForWrap') : syncTitle}><Icon name="sync" />{#if syncWarn && !syncing}<span class="rdot" class:bad={backup.health?.state === 'failed'} aria-hidden="true"></span>{/if}</button>{/if}
           <button class="iconbtn" class:on={app.view.kind === 'history'} onclick={() => command('history')} aria-label={t('ui.hist.title')} title={t('shell.rollbackTip')} aria-current={app.view.kind === 'history' ? 'page' : undefined}><Icon name="rollback" /></button>

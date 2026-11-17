@@ -34,7 +34,7 @@
   let more = $state(false);
   let loadingMore = $state(false);
 
-  const kindLabel = (k?: string) => (k === 'start' ? t('hista.hist.kindStart') : t('docs3.kind.' + (['wrap', 'sync', 'edit', 'assistant'].includes(k ?? '') ? k : 'other')));
+  const kindLabel = (k?: string) => (k === 'start' ? t('hista.hist.kindStart') : k === 'outside' ? t('libf-sync.hist.kind') : t('docs3.kind.' + (['wrap', 'sync', 'edit', 'assistant'].includes(k ?? '') ? k : 'other')));
   /** What a version's entry says it did. The entry a history starts with is described in the reader's language. */
   const subjectOf = (v: Ver) => (v.kind === 'start' ? t('hista.hist.startSubject') : (v.subject ?? '').replace(/^(edit|wrap|sync|assistant|restore|undo|module|init|reorganize|start):\s*/i, ''));
   const when = (d: string) => { try { return fmtDate(d, { dateStyle: 'medium', timeStyle: 'short' }); } catch { return d; } };

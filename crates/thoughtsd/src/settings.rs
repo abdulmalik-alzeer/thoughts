@@ -437,6 +437,11 @@ pub struct SyncSettings {
     /// "drive" ("Drive or folder"). Both are the "git-…" modes; this only decides how Settings
     /// shows the choice and what it offers to add. Every location, of either kind, is sent to.
     pub target: String,
+    /// Look every so often whether the main location has changes this library does not have yet,
+    /// and say how many are waiting ("Check for changes from your other computers"). Only looks:
+    /// nothing is taken in until the user syncs (`incoming.rs`). Off unless switched on, like every
+    /// other automatic use of the network.
+    pub check_remote: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -512,7 +517,7 @@ impl Default for AiSettings {
 
 impl Default for SyncSettings {
     fn default() -> Self {
-        Self { mode: "git-manual".into(), credential_store: "keychain".into(), main_location: None, allow_cloud: false, target: "online".into() }
+        Self { mode: "git-manual".into(), credential_store: "keychain".into(), main_location: None, allow_cloud: false, target: "online".into(), check_remote: false }
     }
 }
 

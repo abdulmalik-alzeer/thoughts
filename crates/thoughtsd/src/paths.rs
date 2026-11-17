@@ -216,6 +216,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> std::io::Result
         std::fs::rename(&tmp, &target)
     })();
     if res.is_err() { let _ = std::fs::remove_file(&tmp); }
+    // A library file the app wrote is the app's, not a change made elsewhere (`watch.rs`).
+    if res.is_ok() && !private { crate::watch::note_write(&target); }
     res
 }
 
