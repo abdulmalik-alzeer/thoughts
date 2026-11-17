@@ -3215,7 +3215,7 @@ async fn git_sync(State(st): S) -> R {
     // Whatever was received is in the library by now, even when sending it on failed.
     st.emit(json!({"type": "library.changed"}));
     // What was waiting has come in; a check that kept failing starts afresh.
-    crate::incoming::synced(&st, &l).await;
+    crate::incoming::synced(&st, &l, v.is_ok()).await;
     Ok(Json(v?))
 }
 

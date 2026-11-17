@@ -8,9 +8,11 @@
 //! - **Off by default**, per library (`sync.checkRemote`, "Check for changes from your other
 //!   computers"), like every other automatic use of the network. Only while a window of the app is
 //!   open, and only for the open library when it is sent to a location.
-//! - **Never asks anything** (`git::git_quiet`): no password prompt helper, SSH in batch mode. A
-//!   location that wants a sign-in, or a computer that is offline, only leaves a quiet "couldn't check"
-//!   in Settings, and the next look is put off longer each time (`delay_after`), back to every 15
+//! - **Never asks anything** (`git::git_quiet`): SSH in batch mode, no prompt of SSH's or of a
+//!   credential manager. The sign-in the app saved for an online location is given the way a Sync gives
+//!   it, but only once a Sync that used it has worked in this run of the daemon
+//!   (`may_use_saved_sign_in`), so reading it cannot make the system ask. A location that wants a
+//!   sign-in, or a computer that is offline, only leaves a quiet "couldn't check" in Settings, and the next look is put off longer each time (`delay_after`), back to every 15
 //!   minutes after one that works or after a Sync.
 //! - **Never in the way.** A round is skipped while the library is held (a wrap, a sync, an undo). The
 //!   fetch itself holds no lock: it writes no `FETCH_HEAD` and only its own reference, which nothing
@@ -122,7 +124,7 @@ pub async fn look(state: &AppState, dir: &Path) -> Round {
     let refspec = format!("+refs/heads/{branch}:{reference}");
     let args = ["-c", "maintenance.auto=false", "-c", "gc.auto=0", "-c", "fetch.writeCommitGraph=false",
                 "fetch", "-q", "--no-write-fetch-head", "--no-tags", "--no-recurse-submodules", "--", name, &refspec];
-    match crate::git::git_quiet(state, dir, &args).await {
+    match crate::git::git_quiet(state, dir, &args, may_use_saved_sign_in(dir, url)).await {
         Ok(_) => {}
         // The location does not have this branch yet: nothing is waiting there.
         Err(e) if e.to_string().contains("couldn't find remote ref") => return Round::Checked { location: name.into(), waiting: 0 },
@@ -135,6 +137,32 @@ pub async fn look(state: &AppState, dir: &Path) -> Round {
         Some(n) => Round::Checked { location: name.into(), waiting: n },
         None => Round::Failed("other"),
     }
+}
+
+/// Libraries (real folders) a Sync reached their main location from in this run of the daemon,
+/// with the sign-in the app saved for it: that sign-in was read without the system asking anything.
+fn warm() -> std::sync::MutexGuard<'static, Vec<PathBuf>> {
+    static W: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    W.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// May the look at `url` give git the app's saved sign-in (through the same prompt helper a Sync
+/// uses, which answers only from what is saved and never shows anything)? Only once a Sync of this
+/// library that used that saved sign-in has worked in this run of the daemon. Before that, reading
+/// the system's password store could make macOS ask "allow access?" (an app just updated or
+/// re-signed): the look then fails quietly and Settings says to sync once.
+pub fn may_use_saved_sign_in(dir: &Path, url: &str) -> bool {
+    crate::git::host_of(url).is_some() && warm().contains(&key(dir))
+}
+
+/// A Sync of the library at `lib` worked: when the app's saved sign-in for its main location `url`
+/// was given to git in this run, the look may use it from now on.
+fn note_sync_worked(lib: &Path, url: &str) {
+    let Some(host) = crate::git::host_of(url) else { return };
+    if !crate::askpass::answered(&host) { return; }
+    let k = key(lib);
+    let mut w = warm();
+    if !w.contains(&k) { w.push(k); }
 }
 
 /// Why a look failed, in the few kinds Settings tells apart.
@@ -234,9 +262,13 @@ async fn recount_now(state: &AppState, lib: &Path) {
     if let Some(v) = shown { tell(state, lib, &v); }
 }
 
-/// The user synced the library at `lib`: what was waiting has come in, and a look that kept failing
-/// starts again from every 15 minutes.
-pub async fn synced(state: &AppState, lib: &Path) {
+/// The user synced the library at `lib` (`ok`: it worked): what was waiting has come in, and a look
+/// that kept failing starts again from every 15 minutes.
+pub async fn synced(state: &AppState, lib: &Path, ok: bool) {
+    if ok {
+        let rs = crate::git::remotes(state, lib).await;
+        if let Some(url) = rs.iter().find(|r| r["main"] == true).or(rs.first()).and_then(|r| r["url"].as_str()) { note_sync_worked(lib, url); }
+    }
     {
         let mut m = seen();
         let Some(s) = m.get_mut(&key(lib)) else { return };
@@ -315,6 +347,26 @@ mod tests {
         assert_eq!(delay_after(4), m(240));
         assert_eq!(delay_after(5), m(240));
         assert_eq!(delay_after(u32::MAX), MAX_DELAY);
+    }
+
+    #[test]
+    fn the_saved_sign_in_is_used_only_after_a_sync_that_used_it_worked() {
+        let lib = std::env::temp_dir().join(format!("thoughts-warm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&lib).unwrap();
+        let url = "https://warm-test.example.com/me/notes.git";
+        assert!(!may_use_saved_sign_in(&lib, url), "not before any sync");
+        // A sync that worked without the saved sign-in being read (none was asked for) does not open it.
+        note_sync_worked(&lib, url);
+        assert!(!may_use_saved_sign_in(&lib, url));
+        // The prompt helper gave git the saved sign-in for that host, and the sync worked.
+        crate::askpass::note_answered("warm-test.example.com");
+        note_sync_worked(&lib, url);
+        assert!(may_use_saved_sign_in(&lib, url));
+        // Another library, or an address that signs in with a key, is not opened by it.
+        let other = lib.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(!may_use_saved_sign_in(&other, url));
+        assert!(!may_use_saved_sign_in(&lib, "git@warm-test.example.com:me/notes.git"));
     }
 
     #[test]

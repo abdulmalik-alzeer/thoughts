@@ -235,27 +235,43 @@ pub async fn git_output(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::
 }
 
 async fn run_with(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index: Option<&Path>) -> anyhow::Result<std::process::Output> {
-    run_opts(state, dir, repo, args, index, false).await
+    run_opts(state, dir, repo, args, index, false, true).await
 }
 
 /// Longest a background check (`git_quiet`) may run.
 pub const QUIET_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// `git` for work nobody asked for right now (the background check for changes from other
-/// computers, `incoming.rs`): it can never ask anything. No password prompt helper is given (so the
-/// system's password store is never asked either, which could show a dialog of its own), SSH runs in
-/// batch mode (no passphrase or host question), and it gives up sooner. A sign-in that is needed
+/// computers, `incoming.rs`): it can never ask anything. SSH runs in batch mode (no passphrase or host
+/// question), no other program's prompt is used, and it gives up sooner. By default no password prompt
+/// helper is given (so the system's password store is not read, which could show a dialog of its own). A sign-in that is needed
 /// simply makes it fail. A password kept in the private file is still used: reading a file shows nothing.
-pub async fn git_quiet(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<String> {
+/// With `saved_sign_in`, the app's own saved answer is given through the prompt helper as a Sync gives
+/// it (`askpass`, which only ever answers from what is saved and shows nothing) — for a caller that
+/// knows reading it cannot make the system ask either (see `incoming::may_use_saved_sign_in`).
+pub async fn git_quiet(state: &AppState, dir: &Path, args: &[&str], saved_sign_in: bool) -> anyhow::Result<String> {
     if !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &dir.display().to_string())])); }
-    let out = run_opts(state, dir, repo_of(dir), args, None, true).await?;
+    let out = run_opts(state, dir, repo_of(dir), args, None, true, saved_sign_in).await?;
     if !out.status.success() {
         anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
-async fn run_opts(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index: Option<&Path>, quiet: bool) -> anyhow::Result<std::process::Output> {
+/// Make `c` a command that never stops to ask: SSH in batch mode (later `-c` values win), no prompt
+/// helper of SSH's, no interactive credential manager. (`GIT_ASKPASS` is taken away too; `run_opts`
+/// gives the app's own back only when `askpass_given` says so.)
+fn make_quiet(c: &mut tokio::process::Command) {
+    c.args(["-c", "core.sshCommand=ssh -o BatchMode=yes -o ConnectTimeout=20"]);
+    for var in ["GIT_ASKPASS", "SSH_ASKPASS"] { c.env_remove(var); }
+    c.env("SSH_ASKPASS_REQUIRE", "never").env("GCM_INTERACTIVE", "never");
+}
+
+/// Is the app's prompt helper given to this command? Not with the private password file (git reads
+/// it itself), and for a quiet command only when the caller allows the saved sign-in.
+pub fn askpass_given(store: &str, quiet: bool, saved_sign_in: bool) -> bool { store != "file" && (!quiet || saved_sign_in) }
+
+async fn run_opts(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index: Option<&Path>, quiet: bool, saved_sign_in: bool) -> anyhow::Result<std::process::Output> {
     if !usable() { return Err(crate::tr::err("git.missing", &[])); }
     let store = state.settings.read().await.sync.credential_store.clone();
     let mut c = crate::proc::command(crate::claude::find_binary(&None, "git").unwrap_or_else(|| "git".into()));
@@ -285,12 +301,7 @@ async fn run_opts(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
                "http.lowSpeedLimit=1000", "http.lowSpeedTime=30"] {
         c.args(["-c", kv]);
     }
-    if quiet {
-        // Later `-c` values win: SSH never stops to ask for a passphrase or about a new server.
-        c.args(["-c", "core.sshCommand=ssh -o BatchMode=yes -o ConnectTimeout=20"]);
-        for var in ["GIT_ASKPASS", "SSH_ASKPASS"] { c.env_remove(var); }
-        c.env("SSH_ASKPASS_REQUIRE", "never").env("GCM_INTERACTIVE", "never");
-    }
+    if quiet { make_quiet(&mut c); }
     #[cfg(test)]
     if TEST_NO_IDENTITY.with(|c| c.get()) {
         c.env("GIT_CONFIG_GLOBAL", no_hooks).args(["-c", "user.useConfigOnly=true"]);
@@ -307,7 +318,7 @@ async fn run_opts(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
     // The prompt helper is answered only while this command runs, and only with this command's
     // code (see `askpass`); the code is forgotten when `ticket` goes, however the command ends.
     let ticket = crate::askpass::Ticket::new();
-    if store != "file" && !quiet {
+    if askpass_given(&store, quiet, saved_sign_in) {
         if let Ok(exe) = crate::paths::app_exe() {
             c.env("GIT_ASKPASS", exe).env(crate::askpass::CODE_VAR, ticket.code())
                 .env(crate::askpass::PORT_VAR, crate::approvals::port().to_string());
@@ -1748,6 +1759,26 @@ mod tests {
         std::fs::write(p, text).unwrap();
     }
     fn read(dir: &Path, rel: &str) -> String { std::fs::read_to_string(dir.join(rel)).unwrap() }
+
+    #[test]
+    fn a_quiet_command_can_never_ask_anything() {
+        let mut c = crate::proc::command("git");
+        c.env("SSH_ASKPASS", "/some/helper").env("GIT_ASKPASS", "/other/helper");
+        make_quiet(&mut c);
+        let envs: std::collections::HashMap<String, Option<String>> = c.as_std().get_envs()
+            .map(|(k, v)| (k.to_string_lossy().to_string(), v.map(|v| v.to_string_lossy().to_string()))).collect();
+        assert_eq!(envs.get("SSH_ASKPASS"), Some(&None), "SSH's prompt helper is taken away");
+        assert_eq!(envs.get("GIT_ASKPASS"), Some(&None));
+        assert_eq!(envs.get("SSH_ASKPASS_REQUIRE"), Some(&Some("never".into())));
+        assert_eq!(envs.get("GCM_INTERACTIVE"), Some(&Some("never".into())));
+        let args: Vec<String> = c.as_std().get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        assert!(args.iter().any(|a| a.starts_with("core.sshCommand=") && a.contains("BatchMode=yes")), "{args:?}");
+        // The app's own prompt helper: always for a Sync, for a quiet command only when allowed, never with the file.
+        assert!(askpass_given("keychain", false, false));
+        assert!(!askpass_given("keychain", true, false));
+        assert!(askpass_given("keychain", true, true));
+        assert!(!askpass_given("file", false, true) && !askpass_given("file", true, true));
+    }
 
     /// A bare "cloud" repository and two clones of it: `mine` (the library) and `other` (another device).
     /// Both have changed notes.md differently; `other` has already pushed, and also added b.md.

@@ -125,10 +125,26 @@ async fn answer(headers: HeaderMap, body: axum::body::Bytes) -> Response {
     let (Some(code), Some(prompt)) = (v["code"].as_str(), v["prompt"].as_str()) else { return (StatusCode::BAD_REQUEST, "bad request").into_response() };
     if !is_live(code) { return (StatusCode::UNAUTHORIZED, "unauthorized").into_response(); }
     let prompt = prompt.to_string();
+    let host = host_asked(&prompt);
     match tokio::task::spawn_blocking(move || lookup(&prompt)).await.ok().flatten() {
-        Some(s) => Json(json!({"answer": s})).into_response(),
+        Some(s) => { if let Some(h) = host { note_answered(&h); } Json(json!({"answer": s})).into_response() }
         None => (StatusCode::NOT_FOUND, "nothing saved").into_response(),
     }
+}
+
+/// Hosts whose saved sign-in was read and given to git during this run of the daemon: this program
+/// can read them without the system asking the user anything (`incoming.rs` relies on it).
+static ANSWERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn note_answered(host: &str) {
+    let mut a = ANSWERED.lock().unwrap_or_else(|e| e.into_inner());
+    if !a.iter().any(|h| h == host) { a.push(host.to_string()); }
+}
+
+/// Was the saved sign-in for `host` (see `git::host_of`) given to git during this run?
+pub fn answered(host: &str) -> bool {
+    let a = ANSWERED.lock().unwrap_or_else(|e| e.into_inner());
+    keys_for(host).iter().any(|k| a.iter().any(|h| h == k)) || a.iter().any(|h| keys_for(h).iter().any(|k| k == host))
 }
 
 /// The host (with its port) a prompt asks about — only when git asks for an `https://` address.
