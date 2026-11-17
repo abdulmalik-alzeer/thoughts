@@ -27,6 +27,7 @@
     "allow-quit-app",
     "allow-set-safe-mode",
     "allow-set-unsaved",
+    "allow-open-window",
     "allow-take-deep-link",
     "allow-open-capture",
     "allow-capture-shortcut",

@@ -7,11 +7,14 @@
 //! The page is never asked at that moment. It tells the shell about unsaved work as it happens
 //! (`set_unsaved`), and the shell keeps the last thing it was told. A page that is frozen or gone
 //! can therefore never hold a quit back: at worst the question mentions work that page had
-//! reported, and "Quit anyway" goes through.
+//! reported, and "Quit anyway" goes through. Each app window reports for itself (the main one and
+//! every second window, `windows.rs`); a quit asks about all of them, closing a second window only
+//! about that one.
 
 use crate::recovery::{arabic, choose, fill, one_line, tx, work_lines};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -21,15 +24,16 @@ use tauri_plugin_dialog::MessageDialogKind;
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct Unsaved {
     /// What it is, in the user's words and language: a note's name, "Settings"…
-    what: String,
+    pub(crate) what: String,
     /// True when the page keeps it as a draft that it offers again next time, so quitting loses
     /// nothing. False when it is simply gone once the window closes.
     #[serde(default)]
-    kept: bool,
+    pub(crate) kept: bool,
 }
 
-/// What the page last reported. Emptied whenever a page starts loading: a new page starts clean.
-static UNSAVED: Mutex<Vec<Unsaved>> = Mutex::new(Vec::new());
+/// What each app window's page last reported, by window label. Emptied for a window whenever its
+/// page starts loading (a new page starts clean) and when the window goes.
+static UNSAVED: Mutex<BTreeMap<String, Vec<Unsaved>>> = Mutex::new(BTreeMap::new());
 /// A quit question is on screen.
 static ASKING: AtomicBool = AtomicBool::new(false);
 /// "Quit when finished" was chosen and the work is not finished yet.
@@ -43,8 +47,24 @@ pub(crate) fn cut_short() -> bool {
     CUT_SHORT.load(Ordering::SeqCst)
 }
 
+/// Everything unsaved in every app window: what a quit would lose.
 fn unsaved() -> Vec<Unsaved> {
-    UNSAVED.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    UNSAVED.lock().unwrap_or_else(|e| e.into_inner()).values().flatten().cloned().collect()
+}
+
+/// What the window `label` reported unsaved.
+pub(crate) fn unsaved_in(label: &str) -> Vec<Unsaved> {
+    UNSAVED.lock().unwrap_or_else(|e| e.into_inner()).get(label).cloned().unwrap_or_default()
+}
+
+/// What the main window reported unsaved (Recovery reloads only that one).
+fn unsaved_in_main() -> Vec<Unsaved> {
+    UNSAVED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(l, _)| crate::is_main_label(l)).flat_map(|(_, v)| v.clone()).collect()
+}
+
+/// The window `label` is gone: so is what it held.
+pub(crate) fn forget(label: &str) {
+    UNSAVED.lock().unwrap_or_else(|e| e.into_inner()).remove(label);
 }
 
 /// What the page may report: a few short, plain descriptions.
@@ -53,24 +73,32 @@ fn tidy(items: Vec<Unsaved>) -> Vec<Unsaved> {
 }
 
 /// The page's one way to say "there is unsaved work here": the full list each time, empty when
-/// there is none. `set_unsaved {items: [{what, kept?}]}`.
+/// there is none, for the window it is in. `set_unsaved {items: [{what, kept?}]}`. App windows only.
 #[tauri::command]
-pub(crate) fn set_unsaved(items: Vec<Unsaved>) {
-    *UNSAVED.lock().unwrap_or_else(|e| e.into_inner()) = tidy(items);
+pub(crate) fn set_unsaved(window: tauri::Window, items: Vec<Unsaved>) -> Result<(), String> {
+    crate::windows::app_window_only(&window)?;
+    report(window.label(), items);
+    Ok(())
 }
 
-/// A page is loading: whatever the last one held is gone already.
-pub(crate) fn page_started() {
-    UNSAVED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+fn report(label: &str, items: Vec<Unsaved>) {
+    let items = tidy(items);
+    let mut all = UNSAVED.lock().unwrap_or_else(|e| e.into_inner());
+    if items.is_empty() { all.remove(label); } else { all.insert(label.to_string(), items); }
 }
 
-fn lines_for(ar: bool, items: &[Unsaved]) -> Vec<String> {
+/// The page of window `label` is loading: whatever the last one held is gone already.
+pub(crate) fn page_started(label: &str) {
+    forget(label);
+}
+
+pub(crate) fn lines_for(ar: bool, items: &[Unsaved]) -> Vec<String> {
     items.iter().map(|u| fill(ar, if u.kept { "unsaved.kept" } else { "unsaved.lost" }, &[("what", &u.what)])).collect()
 }
 
-/// One sentence per unsaved thing the page reported (none: an empty list).
+/// One sentence per unsaved thing the main window's page reported (none: an empty list).
 pub(crate) fn unsaved_lines(ar: bool) -> Vec<String> {
-    lines_for(ar, &unsaved())
+    lines_for(ar, &unsaved_in_main())
 }
 
 /// How a quit has to be asked about.
@@ -246,6 +274,26 @@ mod tests {
         assert_eq!(body(true, None, &[item("الإعدادات", false)]), "ستُفقد التغييرات غير المحفوظة في الإعدادات.");
         assert_eq!(body(false, None, &[]), "");
         assert_eq!(body(false, Some(&json!({"saving": false, "chats": []})), &[]), "");
+    }
+
+    #[test]
+    fn each_window_reports_for_itself_and_a_quit_hears_them_all() {
+        // Labels of this test only, so other tests running at the same time are not disturbed.
+        let (main, second, other) = ("main-9001", "view-9001", "view-9002");
+        report(main, vec![item("Settings", false)]);
+        report(second, vec![item("plan.md", true)]);
+        report(other, vec![item("ideas.md", true)]);
+        assert_eq!(unsaved_in(second), [item("plan.md", true)]);
+        assert!(unsaved_in_main().contains(&item("Settings", false)) && !unsaved_in_main().contains(&item("plan.md", true)), "Recovery reloads the main window only");
+        let all = unsaved();
+        assert!(all.contains(&item("Settings", false)) && all.contains(&item("plan.md", true)) && all.contains(&item("ideas.md", true)), "{all:?}");
+        // A window whose page reloads, or that reports nothing any more, or that closes, holds nothing.
+        page_started(second);
+        assert!(unsaved_in(second).is_empty());
+        report(other, vec![]);
+        assert!(unsaved_in(other).is_empty());
+        forget(main);
+        assert!(!unsaved().contains(&item("Settings", false)));
     }
 
     #[test]

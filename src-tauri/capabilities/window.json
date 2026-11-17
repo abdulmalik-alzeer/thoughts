@@ -1,0 +1,27 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "window",
+  "description": "A second app window (\"Open in new window\", src/windows.rs), labelled view-<n>. It shows the app like the main window, but gets only what showing a note or a chat needs: talking to the background service, opening and saving files the person picks, reporting unsaved work for itself, opening another window and going back to the main one. Everything that belongs to the app as a whole (updates, the Dock, notifications, menus, links, voice, quick capture, safe mode, restarting or quitting, the yes to switching off permission checks) stays with the main window (see src-tauri/build.rs).",
+  "windows": [
+    "view-*"
+  ],
+  "permissions": [
+    "allow-daemon-info",
+    "allow-open-window",
+    "allow-focus-main",
+    "allow-set-unsaved",
+    "allow-open-library-file",
+    "allow-reveal-library-file",
+    "allow-open-chat-attachment",
+    "allow-reveal-chat-attachment",
+    "allow-save-file",
+    "core:webview:allow-set-webview-zoom",
+    "core:webview:allow-print",
+    "core:webview:allow-internal-toggle-devtools",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:window:allow-set-title",
+    "dialog:allow-open",
+    "opener:default"
+  ]
+}

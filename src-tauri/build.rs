@@ -2,8 +2,9 @@
 //
 // The rule: every command in `generate_handler!` (src/main.rs) is named once in `COMMANDS` below,
 // and granted by name (`allow-<command-with-dashes>`) only to the windows that call it, in
-// `capabilities/default.json` (the app window, `main` / `main-*`) or `capabilities/capture.json`
-// (the quick capture box). A window, or a frame inside one, that has no grant cannot call the
+// `capabilities/default.json` (the app window, `main` / `main-*`), `capabilities/window.json` (a
+// second app window, `view-*`, see src/windows.rs) or `capabilities/capture.json` (the quick
+// capture box). A window, or a frame inside one, that has no grant cannot call the
 // command at all; add-on frames get none. Commands that matter also check the caller's window label
 // themselves (`is_main_label` in main.rs), as a second lock.
 //
@@ -31,6 +32,8 @@ const COMMANDS: &[&str] = &[
     "quit_app",
     "set_safe_mode",
     "set_unsaved",
+    "open_window",
+    "focus_main",
     "take_deep_link",
     "open_capture",
     "capture_ready",
@@ -92,7 +95,7 @@ fn check_commands() {
     for name in COMMANDS {
         let grant = format!("\"allow-{}\"", name.replace('_', "-"));
         if !grants.contains(&grant) {
-            problems.push(format!("`{name}` is granted to no window: add {grant} to capabilities/default.json or capture.json"));
+            problems.push(format!("`{name}` is granted to no window: add {grant} to capabilities/default.json, window.json or capture.json"));
         }
     }
     if !problems.is_empty() {

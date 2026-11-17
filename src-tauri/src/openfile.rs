@@ -163,7 +163,7 @@ fn checked_library_file(app: &tauri::AppHandle, rel: &str, show: bool) -> Result
 /// `false`: the user chose not to.
 #[tauri::command]
 pub(crate) async fn open_library_file(app: tauri::AppHandle, window: tauri::Window, path: String) -> Result<bool, String> {
-    crate::main_only(&window)?;
+    crate::windows::app_window_only(&window)?;
     let a = app.clone();
     let Some(file) = tauri::async_runtime::spawn_blocking(move || checked_library_file(&a, &path, false)).await.map_err(|e| e.to_string())?? else {
         return Ok(false);
@@ -176,7 +176,7 @@ pub(crate) async fn open_library_file(app: tauri::AppHandle, window: tauri::Wind
 /// checks as opening it, whatever its kind. `false`: the user chose not to.
 #[tauri::command]
 pub(crate) async fn reveal_library_file(app: tauri::AppHandle, window: tauri::Window, path: String) -> Result<bool, String> {
-    crate::main_only(&window)?;
+    crate::windows::app_window_only(&window)?;
     let a = app.clone();
     let Some(file) = tauri::async_runtime::spawn_blocking(move || checked_library_file(&a, &path, true)).await.map_err(|e| e.to_string())?? else {
         return Ok(false);
@@ -190,7 +190,7 @@ pub(crate) async fn reveal_library_file(app: tauri::AppHandle, window: tauri::Wi
 /// kept outside the library, so no private folder applies.
 #[tauri::command]
 pub(crate) fn open_chat_attachment(app: tauri::AppHandle, window: tauri::Window, chat_id: String, name: String) -> Result<(), String> {
-    crate::main_only(&window)?;
+    crate::windows::app_window_only(&window)?;
     let file = chat_attachment(&thoughtsd::paths::attachments_dir(), &chat_id, &name).map_err(say)?;
     app.opener().open_path(file.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
@@ -199,7 +199,7 @@ pub(crate) fn open_chat_attachment(app: tauri::AppHandle, window: tauri::Window,
 /// from the app window.
 #[tauri::command]
 pub(crate) fn reveal_chat_attachment(app: tauri::AppHandle, window: tauri::Window, chat_id: String, name: String) -> Result<(), String> {
-    crate::main_only(&window)?;
+    crate::windows::app_window_only(&window)?;
     let file = chat_file(&thoughtsd::paths::attachments_dir(), &chat_id, &name).map_err(say)?;
     app.opener().reveal_item_in_dir(&file).map_err(|e| e.to_string())
 }

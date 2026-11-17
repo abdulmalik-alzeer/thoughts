@@ -18,6 +18,7 @@ mod pdf;
 mod quit;
 mod recovery;
 mod voice;
+mod windows;
 
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -419,7 +420,7 @@ fn export_file(name: &str, bytes: &[u8]) -> Result<(String, String), String> {
 #[tauri::command]
 async fn save_file(app: tauri::AppHandle, window: tauri::Window, request: tauri::ipc::Request<'_>) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
-    main_only(&window)?;
+    windows::app_window_only(&window)?;
     let (name, bytes) = match request.body() {
         tauri::ipc::InvokeBody::Json(v) => {
             let contents = v["contents"].as_str().ok_or("nothing to save")?;
@@ -445,13 +446,27 @@ async fn save_file(app: tauri::AppHandle, window: tauri::Window, request: tauri:
 /// `{port, token, version, platform, stale}`. `stale: true` means the daemon belongs to another app
 /// version and was left running because it is busy (a save or a running chat); it is replaced on
 /// a later `daemon_info` call once idle, or at once by `restart_daemon {force: true}`.
-/// Only the app window and the quick capture box (which saves through the service) are answered.
+/// Only the app window and the quick capture box (which saves through the service) are answered,
+/// and a second app window (`windows.rs`), which shows the app as the main window does. A second
+/// window is told about the service already running and nothing more: starting, replacing or
+/// restarting the service stays with the main window, which a second window cannot be without.
 #[tauri::command]
 async fn daemon_info(window: tauri::Window) -> Result<Value, String> {
+    if windows::is_view_label(window.label()) {
+        return running_connection().await;
+    }
     if !is_main_label(window.label()) && window.label() != capture::LABEL {
         return Err("not allowed".into());
     }
     connection().await
+}
+
+/// `daemon_info` for a second window: the service that has proved itself, never one started here.
+async fn running_connection() -> Result<Value, String> {
+    let alive = tauri::async_runtime::spawn_blocking(daemon_alive).await.map_err(|e| e.to_string())?;
+    let (i, version) = alive.ok_or("The Thoughts daemon is not running")?;
+    let stale = version.as_deref().unwrap_or(&i.version) != VERSION;
+    Ok(json!({"port": i.port, "token": i.token, "version": i.version, "platform": PLATFORM, "stale": stale}))
 }
 
 /// What `daemon_info` answers.
@@ -1268,6 +1283,8 @@ fn main() {
             quit_app,
             set_safe_mode,
             quit::set_unsaved,
+            windows::open_window,
+            windows::focus_main,
             links::take_deep_link,
             capture::open_capture,
             capture::capture_ready,
@@ -1294,8 +1311,8 @@ fn main() {
         ])
         // A page that starts loading holds nothing unsaved yet, whatever the last one reported.
         .on_page_load(|webview, payload| {
-            if payload.event() == tauri::webview::PageLoadEvent::Started && is_main_label(webview.label()) {
-                quit::page_started();
+            if payload.event() == tauri::webview::PageLoadEvent::Started && windows::is_app_label(webview.label()) {
+                quit::page_started(webview.label());
             }
         })
         .setup(|app| {
@@ -1352,6 +1369,10 @@ fn main() {
                 capture::on_window_event(window, ev);
                 return;
             }
+            if windows::is_view_label(window.label()) {
+                windows::on_window_event(window, ev);
+                return;
+            }
             if !is_main_label(window.label()) {
                 return;
             }
@@ -1365,6 +1386,8 @@ fn main() {
                 }
                 // Back in front: the list of earlier versions in the Recovery menu may be out of date.
                 tauri::WindowEvent::Focused(true) => recovery::refresh_versions_soon(window.app_handle()),
+                // A window Recovery replaced: what it reported unsaved went with it.
+                tauri::WindowEvent::Destroyed => quit::forget(window.label()),
                 _ => {}
             }
         })
@@ -1374,7 +1397,8 @@ fn main() {
             if recovery::handle(app, id) {
                 return;
             }
-            let win = main_window(app);
+            // The standard window items act on the app window in front (a second one, or the main one).
+            let win = app.webview_windows().into_values().find(|w| windows::is_app_label(w.label()) && w.is_focused().unwrap_or(false)).or_else(|| main_window(app));
             match id {
                 "settings" => { show_main(app); let _ = app.emit("open-settings", ()); }
                 "help" => { show_main(app); let _ = app.emit("open-help", ()); }
