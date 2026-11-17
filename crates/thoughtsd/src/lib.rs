@@ -32,6 +32,7 @@ pub mod layer_api;
 pub mod libraries;
 pub mod library;
 pub mod links;
+pub mod listings;
 pub mod log;
 pub mod mentions;
 pub mod modules;

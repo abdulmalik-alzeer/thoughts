@@ -1630,7 +1630,9 @@ async fn codex_recheck(State(st): S) -> R { Ok(Json(crate::codex::recheck(&st).a
 
 async fn ideas(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = lib(&st).await?;
-    let mut all = library::ideas(&root);
+    // Off the async workers: every item's README is looked at (`listings` keeps the list between requests).
+    let r2 = root.clone();
+    let mut all = tokio::task::spawn_blocking(move || Vec::clone(&crate::listings::ideas(&r2))).await?;
     // For an add-on, ideas kept in a private folder do not exist, nor those outside the folders it reads.
     let scope = scope_of(&q);
     if scope.plugin {
@@ -1647,11 +1649,15 @@ async fn private_filter(st: &AppState, q: &HashMap<String, String>) -> Vec<Strin
 }
 async fn tree(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = lib(&st).await?;
-    let mut list = library::tree(&root, &private_filter(&st, &q).await);
+    let (r2, exclude) = (root.clone(), private_filter(&st, &q).await);
+    let mut list = tokio::task::spawn_blocking(move || library::tree(&r2, &exclude)).await?;
     scope_of(&q).keep_readable(&root, &mut list, "path");
     Ok(Json(json!(list)))
 }
-async fn stats(State(st): S) -> R { Ok(Json(library::stats(&lib(&st).await?))) }
+async fn stats(State(st): S) -> R {
+    let root = lib(&st).await?;
+    Ok(Json(tokio::task::spawn_blocking(move || library::stats(&root)).await?))
+}
 /// What the chat's @-list offers (see `mentions::list`): never anything in a private folder.
 async fn mention_list(State(st): S) -> R {
     let root = lib(&st).await?;
@@ -2153,7 +2159,8 @@ async fn add_picture(State(st): S, Json(req): Json<PictureReq>) -> R {
 
 async fn todo_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let root = lib(&st).await?;
-    let mut lists = todos::list(&root);
+    let r2 = root.clone();
+    let mut lists = tokio::task::spawn_blocking(move || todos::list(&r2)).await?;
     // For an add-on, task lists kept in a private folder do not exist, nor those outside the folders it reads.
     let scope = scope_of(&q);
     if scope.plugin {
