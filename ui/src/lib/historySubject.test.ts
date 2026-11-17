@@ -1,8 +1,6 @@
 // The app's own history descriptions are shown in the reader's language, and each one still
 // matches what the service writes (a renamed subject would quietly show in English again).
 import { describe, it, expect, vi } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
 
 const app = { settings: { language: 'en' } as { language: string } };
 vi.mock('./store.svelte', () => ({ app }));
@@ -22,8 +20,9 @@ describe('history subjects', () => {
   });
 
   it('each one is a subject the service really writes', () => {
-    const dir = join(__dirname, '../../../crates/thoughtsd/src');
-    const src = readdirSync(dir).filter((f) => f.endsWith('.rs')).map((f) => readFileSync(join(dir, f), 'utf8')).join('\n');
+    const files = import.meta.glob('../../../crates/thoughtsd/src/*.rs', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+    const src = Object.values(files).join('\n');
+    expect(src).toContain('pub mod subject');
     for (const s of Object.keys(FIXED)) {
       const [kind, ...rest] = s.split(': ');
       const why = rest.join(': ');

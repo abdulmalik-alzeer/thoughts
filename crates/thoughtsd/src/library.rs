@@ -731,11 +731,12 @@ impl Hidden {
 }
 
 /// All markdown and output files, grouped client-side. Anything under `exclude`
-/// (library-relative folders) is left out.
+/// (library-relative folders) is left out. In name order, so a folder's files are listed the same
+/// way every time (the disk's own order looks random).
 pub fn tree(root: &Path, exclude: &[String]) -> Vec<Value> {
     let mut out = vec![];
     let hidden = Hidden::new(root, exclude);
-    for e in WalkDir::new(root).into_iter().filter_entry(|e| !skip(e) && !hidden.folder(e)).flatten() {
+    for e in WalkDir::new(root).sort_by_file_name().into_iter().filter_entry(|e| !skip(e) && !hidden.folder(e)).flatten() {
         if !e.file_type().is_file() { continue; }
         let Some(rel) = rel_of(root, e.path()) else { continue };
         if crate::paths::is_under(&rel, exclude) { continue; }
@@ -1851,6 +1852,18 @@ mod tests {
             std::os::unix::fs::symlink(d.join("photos"), d.join("linked/more")).unwrap();
             assert_eq!(folder_state(&d.join("linked")), FolderState::Library);
         }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn tree_lists_a_folders_files_in_name_order() {
+        let d = tmp();
+        for n in ["zebra.md", "Apple.md", "mango.pdf", "banana.md", "cherry.png", "0-first.md"] { write(&d, &format!("files/{n}"), "x").unwrap(); }
+        let got: Vec<String> = tree(&d, &[]).iter().map(|x| x["path"].as_str().unwrap().to_string()).collect();
+        let mut want = got.clone();
+        want.sort();
+        assert_eq!(got, want);
+        assert_eq!(got.len(), 6);
         std::fs::remove_dir_all(d).unwrap();
     }
 
