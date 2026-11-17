@@ -14,13 +14,17 @@
   import { trapFocus } from '../../lib/focus';
   import { canOpenInApp, revealChatAttachment, revealLabelKey } from '../../lib/openInApp';
   import { openImage } from '../../lib/imageOpen.svelte';
+  import FilePreview from '../../lib/preview/FilePreview.svelte';
+  import { previewKind } from '../../lib/preview/kinds';
+  import { renderers } from '../../lib/preview/renderers';
 
   let { chatId, paths }: { chatId: string; paths: string[] } = $props();
 
+  // `pdf`: shown in the viewer here (lib/preview: PDFs, text, code, Word… whatever has a preview).
   type F = { name: string; image: boolean; pdf: boolean };
   const files = $derived(paths.map((p): F => {
     const name = p.split(/[\\/]/).pop() || p;
-    return { name, image: isImageName(name), pdf: /\.pdf$/i.test(name) };
+    return { name, image: isImageName(name), pdf: !!renderers[previewKind(name)] };
   }));
 
   function url(name: string): Promise<string | null> {
@@ -51,16 +55,8 @@
   }
 
   let viewing = $state<F | null>(null);
-  let viewUrl = $state<string | null>(null);
-  let viewFailed = $state(false);
-  let opened = 0;
-  async function view(f: F) {
-    const n = ++opened;
-    viewing = f; viewUrl = null; viewFailed = false;
-    const u = await url(f.name);
-    if (n !== opened) return; // another file was opened meanwhile
-    if (u) viewUrl = u; else viewFailed = true;
-  }
+  const view = (f: F) => { viewing = f; };
+  const fetchFile = (name: string) => () => apiBlob(`/chats/${encodeURIComponent(chatId)}/attachments/${encodeURIComponent(name)}`);
 </script>
 
 <div class="atts">
@@ -93,13 +89,7 @@
           <bdi class="ell vname">{viewing.name}</bdi>
           <button type="button" class="btn ghost" onclick={() => (viewing = null)} aria-label={t('close')} title={t('close')}><Icon name="close" /></button>
         </div>
-        {#if viewFailed}
-          <p class="muted vmsg">{t('chatc.att.gone')}</p>
-        {:else if !viewUrl}
-          <p class="muted vmsg" role="status">{t('chatc.att.loading')}</p>
-        {:else}
-          <iframe class="vpdf" src={viewUrl} title={viewing.name}></iframe>
-        {/if}
+        <div class="vbody"><FilePreview name={viewing.name} load={fetchFile(viewing.name)} fill onReveal={inTauri() ? () => revealOutside(viewing!.name) : undefined} /></div>
       </div>
     </div>
   {/if}
@@ -122,7 +112,6 @@
     display: flex; flex-direction: column; overflow: hidden; }
   .vhead { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; border-bottom: var(--border-w) solid var(--border); }
   .vname { flex: 1; font-weight: 600; min-width: 0; }
-  .vmsg { padding: 24px; margin: 0; text-align: center; }
-  .vpdf { width: 100%; height: calc(100vh - 120px); border: 0; background: #fff; }
+  .vbody { height: calc(100vh - 120px); min-height: 0; }
   @media print { .viewer-back { display: none; } .thumb { cursor: default; } }
 </style>

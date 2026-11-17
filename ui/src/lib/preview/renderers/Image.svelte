@@ -18,7 +18,7 @@
 
 <figure class="img" class:fill>
   {#if zoom}
-    <button type="button" class="zoom" onclick={() => zoom?.(src, name)} aria-label={t('libf-preview-core.zoom', { name })} title={t('libf-preview-core.zoom', { name })}>
+    <button type="button" class="zoom" onclick={() => zoom?.(src, name)} data-no-zoom aria-label={t('libf-preview-core.zoom', { name })} title={t('libf-preview-core.zoom', { name })}>
       <img {src} alt={name} onload={loaded} onerror={() => unsupported()} />
     </button>
   {:else}

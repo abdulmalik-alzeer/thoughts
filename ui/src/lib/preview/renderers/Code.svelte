@@ -52,7 +52,12 @@
     const hl = knownLang(lang) && s.length <= HL_CHARS * 4;
     const c = hl ? cutText(s, HL_LINES, HL_CHARS) : cutText(s, MAX_LINES, MAX_CHARS);
     total = c.lines; shown = c.shownLines; cut = c.cut;
-    if (hl) { rows = lines(highlight(c.text, lang)); plain = ''; }
+    if (hl) {
+      const r = lines(highlight(c.text, lang));
+      // A file's final line end does not start another (numbered) line.
+      if (r.length > 1 && !r[r.length - 1].length && c.text.endsWith('\n')) r.pop();
+      rows = r; plain = '';
+    }
     else { rows = null; plain = c.text; }
     phase = 'ready';
   }

@@ -16,13 +16,13 @@
   import { revealLabelKey } from '../openInApp';
   import { codeLang, LIMITS, mimeFor, previewKind, tooLarge } from './kinds';
   import { renderers, type RendererProps } from './renderers';
+  import { openImage } from '../imageOpen.svelte';
 
   let {
     name,
     load,
     size,
     onReveal,
-    zoom,
     fill = false,
     label,
   }: {
@@ -34,8 +34,6 @@
     size?: number;
     /** "Show in Finder" / "Show in folder", offered when the file is too big or can't be shown. */
     onReveal?: () => unknown;
-    /** Open a picture in the app's zoom-and-pan viewer (pictures become clickable when set). */
-    zoom?: (src: string, alt: string) => void;
     /** Fill the parent's height (a viewer dialog) instead of a page-sized frame. */
     fill?: boolean;
     /** The region's accessible name (default: "Preview of {name}"). */
@@ -87,6 +85,9 @@
     data = null; Comp = null;
   }
 
+  /** Pictures open in the app's one picture viewer (lib/ImageViewer.svelte). */
+  const zoom = (src: string, alt: string) => openImage({ src, alt, name: alt });
+
   async function reveal() {
     try { await onReveal?.(); }
     catch (e) { notify(t('docs.revealFailed'), { kind: 'error', detail: errDetail(e) }); }
@@ -119,8 +120,9 @@
 
 <style>
   .fp { margin-top: 14px; min-width: 0; }
-  .fp.fill { margin-top: 0; height: 100%; display: flex; flex-direction: column; min-height: 0; }
-  .fp.fill > :global(*) { flex: 1; min-height: 0; }
+  /* In a dialog: renderers that fill (code, PDF, pictures…) take the height; the rest scroll. */
+  .fp.fill { margin-top: 0; height: 100%; min-height: 0; overflow: auto; }
+  .fp.fill > .state { height: 100%; }
   .state { display: grid; justify-items: center; gap: 8px; text-align: center; padding: 28px 16px; border: var(--border-w) dashed var(--border); border-radius: var(--radius); color: var(--muted); }
   .fp.fill .state { border: 0; align-content: center; }
   .state p { margin: 0; color: var(--fg); max-width: 52ch; }

@@ -24,7 +24,8 @@ export type RendererProps = {
   fill: boolean;
   /** Call when this file turns out not to be showable after all. `detail`: a plain reason, optional. */
   unsupported: (detail?: string) => void;
-  /** Open a picture in the app's zoom-and-pan viewer, when the caller has one (see FilePreview). */
+  /** Open a picture in the app's picture viewer (zoom and move); FilePreview always passes it.
+   *  Pictures inside rendered content can use `use:zoomImages` (lib/zoomImages.ts) instead. */
   zoom?: (src: string, alt: string) => void;
 };
 

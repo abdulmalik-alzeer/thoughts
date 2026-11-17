@@ -11,7 +11,7 @@
   import { errCode, errDetail, failed } from '../lib/errors';
   import { saveFile } from '../lib/download';
   import { noteLink } from '../lib/deeplink';
-  import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, prettyName, rawBlobUrl, readAsDataURL } from '../lib/content/util';
+  import { MAX_FILE_BYTES, copyText, fmtSize, notify, prettyName, rawBlobUrl, readAsDataURL } from '../lib/content/util';
   import Versions from './docs/Versions.svelte';
   import FolderPicker from './docs/FolderPicker.svelte';
   import Conflict from './docs/Conflict.svelte';
@@ -20,7 +20,9 @@
   import SearchResults from '../lib/SearchResults.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
   import Backlinks from './docs/Backlinks.svelte';
-  import DocxPreview from './docs/DocxPreview.svelte';
+  import FilePreview from '../lib/preview/FilePreview.svelte';
+  import { previewKind } from '../lib/preview/kinds';
+  import { renderers } from '../lib/preview/renderers';
   import { docDir, toDocx } from '../lib/content/docx';
   import ImportNotes from './ImportNotes.svelte';
   import PageExtras from './PageExtras.svelte';
@@ -43,9 +45,6 @@
   let results = $state<any[] | null>(null);
   let filter = $state('');
   let open = $state<Record<string, boolean>>(readOpen());
-  let imgUrl = $state<string | null>(null);
-  let pdfUrl = $state<string | null>(null);
-  let pdfError = $state('');
   let showVersions = $state(false);
   let menu = $state(false);
   let menuBtn = $state<HTMLButtonElement>();
@@ -81,8 +80,14 @@
   /** Text files that can be edited here like notes (the rest of TEXT_EXT is shown read-only). */
   const EDIT_EXT = /\.(md|txt|csv|json)$/i;
   const isMd = (p: string) => /\.md$/i.test(p);
-  const isPdf = (p: string) => /\.pdf$/i.test(p);
-  const isDocx = (p: string) => /\.docx$/i.test(p);
+  /** What the shared preview shows: a file's own bytes, or the text already loaded for a text file. */
+  const previewLoad = $derived.by(() => {
+    const p = current, d = doc;
+    if (d && !d.binary) { const text = String(d.content ?? ''); return async () => new TextEncoder().encode(text); }
+    return () => apiBlob(`/library/raw?path=${encodeURIComponent(p)}`);
+  });
+  /** Text files with a richer view than plain text (highlighted code, a JSON tree, a table…). */
+  const richText = $derived(!!doc?.plain && previewKind(current) !== 'text' && !!renderers[previewKind(current)]);
   /** Bumped on every library change, so "Linked from" stays current. */
   let libVersion = $state(0);
   const isDir = (f: any) => f?.dir === true || f?.isDir === true || f?.type === 'dir' || f?.kind === 'dir' || String(f?.path ?? '').endsWith('/');
@@ -260,8 +265,6 @@
     document.documentElement.classList.remove('print-doc');
     off?.();
     clearTimeout(refreshTimer);
-    if (imgUrl) URL.revokeObjectURL(imgUrl);
-    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     dropInline();
     if (app.leaveGuard === leaveOk) app.leaveGuard = null;
     reportUnsaved('docs', null);
@@ -279,15 +282,6 @@
     return false;
   }
 
-  async function loadPdf(p: string) {
-    pdfError = '';
-    try {
-      const b = await apiBlob(`/library/raw?path=${encodeURIComponent(p)}`);
-      const u = URL.createObjectURL(new Blob([b], { type: 'application/pdf' }));
-      if (current === p) pdfUrl = u; else URL.revokeObjectURL(u);
-    } catch (e) { if (current === p) pdfError = errDetail(e) || t('docs3.pdfFailed'); }
-  }
-
   /** `replace`: the route is corrected in place (a default file), not added to Back. */
   async function openFile(p?: string, force = false, replace = false) {
     if (!p) return;
@@ -298,16 +292,11 @@
     results = null; editing = false; current = p; docError = ''; menu = false; treeOpen = false; showSource = false; theirs = null;
     if (path !== p) go({ kind: 'docs', path: p }, { replace });
     try { localStorage.setItem(lastKey(), p); } catch { /* private mode */ }
-    if (imgUrl) { URL.revokeObjectURL(imgUrl); imgUrl = null; }
-    if (pdfUrl) { URL.revokeObjectURL(pdfUrl); pdfUrl = null; }
-    pdfError = '';
     // Make sure every folder above the file is open in the tree.
     const parts = p.split('/');
     for (let i = 1; i < parts.length; i++) { const k = parts.slice(0, i).join('/'); if (!open[k]) setOpen(k, true); }
     if (!isMd(p) && !TEXT_EXT.test(p)) {
-      doc = { content: '', binary: true };
-      if (isImageName(p)) rawBlobUrl(p).then((u) => { if (current === p) imgUrl = u; else if (u) URL.revokeObjectURL(u); });
-      else if (isPdf(p)) loadPdf(p);
+      doc = { content: '', binary: true }; // shown by FilePreview, which loads it
       return;
     }
     docLoading = true;
@@ -1040,7 +1029,6 @@
               <div class="muted sm">{[ext(current) && t('docs.fileType', { type: ext(current) }), info ? fmtSize(info.size) : '', info?.modified ? fmtDate(info.modified) : ''].filter(Boolean).join(' · ')}</div>
             </div>
           </div>
-          {#if !isImageName(current) && !isPdf(current) && !isDocx(current)}<p class="muted">{t('docs.notPreviewable')}</p>{/if}
           {#if desktop && !canOpenInApp(current)}<p class="muted">{t('sec-shell-open.notOpened')}</p>{/if}
           <div class="row wrapr">
             {#if desktop && canOpenExternal && canOpenInApp(current)}<button class="btn primary" onclick={openExternal}><Icon name="external" size={14} /> {t('docs.openDefault')}</button>
@@ -1048,18 +1036,8 @@
             <button class="btn" onclick={discuss}><Icon name="chat" size={14} /> {t('docs.discussAssistant')}</button>
           </div>
         </div>
-        {#if imgUrl}<img class="inline-img" src={imgUrl} alt={baseName(current)} use:zoomImages={{ name: baseName(current) }} />{/if}
-        {#if isDocx(current)}<DocxPreview path={current} name={baseName(current)} />{/if}
-        {#if isPdf(current)}
-          {#if pdfUrl}
-            <iframe class="pdf" src={pdfUrl} title={t('docs3.pdfTitle', { name: baseName(current) })}></iframe>
-          {:else if pdfError}
-            <div class="state" role="alert"><Icon name="warning" size={24} /><p>{t('docs3.pdfFailed')}</p><p class="muted sm" dir="auto">{pdfError}</p>
-              <button class="btn" onclick={() => loadPdf(current)}><Icon name="retry" size={14} /> {t('docs3.retry')}</button></div>
-          {:else}
-            <div class="pad" role="status" aria-busy="true"><span class="sr-only">{t('docs3.pdfLoading')}</span><div class="skel h"></div><div class="skel"></div><div class="skel w70"></div></div>
-          {/if}
-        {/if}
+        <!-- The card above already offers Show in Finder when the file can't be opened in its app. -->
+        <FilePreview name={current} load={previewLoad} size={info?.size} onReveal={desktop && canOpenExternal && canOpenInApp(current) ? reveal : undefined} />
       {:else if editing}
         {#if theirs}
           <div class="banner no-print" role="status">
@@ -1070,7 +1048,11 @@
         <Editor bind:value={draft} path={current} plain={doc.plain} preview={preview && !doc.plain} label={t('docs.editorLabel', { name: current })} />
       {:else if doc.plain}
         <h1 class="ptitle" dir="auto">{baseName(current)}</h1>
-        <article bind:this={article} aria-label={t('docs3.textLabel', { name: baseName(current) })}><pre class="plain" dir="auto">{doc.content}</pre></article>
+        {#if richText}
+          <article bind:this={article} aria-label={t('docs3.textLabel', { name: baseName(current) })}><FilePreview name={current} load={previewLoad} /></article>
+        {:else}
+          <article bind:this={article} aria-label={t('docs3.textLabel', { name: baseName(current) })}><pre class="plain" dir="auto">{doc.content}</pre></article>
+        {/if}
       {:else if showSource}
         <div class="banner info no-print">
           <span class="grow">{t('docsa.sourceNote')} <code class="inv">U+202E</code></span>
@@ -1155,7 +1137,6 @@
   .mi :global(.icon) { color: var(--muted); flex: none; }
   .mi.danger, .mi.danger :global(.icon) { color: var(--danger); }
   .ptitle { font-size: 20px; margin: 10px 0 0; overflow-wrap: anywhere; }
-  .pdf { display: block; width: 100%; height: calc(100vh - 230px); min-height: 360px; margin-top: 14px; border: var(--border-w) solid var(--border); border-radius: var(--radius); background: #fff; }
   .dirty { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-sm); color: var(--muted); }
   .dirty .dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid var(--muted); }
   .dirty.on { color: var(--fg); font-weight: 500; }
@@ -1195,7 +1176,6 @@
   .fbadge { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--fill); color: var(--accent-2); flex: none; }
   .fname { display: block; overflow-wrap: anywhere; font-size: 14px; font-weight: 700; letter-spacing: 0; line-height: 1.4; margin: 0; }
   .wrapr { flex-wrap: wrap; }
-  .inline-img { display: block; max-width: 100%; margin-top: 16px; border-radius: var(--radius); box-shadow: var(--shadow); }
   .plain { margin-top: 16px; font-size: var(--fs-sm); white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; text-align: start; }
 
   .pad { padding-top: 16px; display: grid; gap: 12px; }
