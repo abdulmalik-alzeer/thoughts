@@ -235,7 +235,9 @@ fn file_under(root: &Path, capture: &str, item: &str, private: &[String]) -> any
     }
     let readme_path = crate::library::resolve(root, &readme_rel)?;
     let readme = std::fs::read(&readme_path).map_err(|_| crate::tr::err("not_found.item", &[]))?;
-    let readme = String::from_utf8_lossy(&readme).into_owned();
+    // Written back in full below: a page that is not plain text (an old Arabic encoding, a stray
+    // byte) is refused rather than damaged.
+    let readme = String::from_utf8(readme).map_err(|_| crate::tr::err("inbox.readme_not_text", &[]))?;
     let src = crate::library::resolve(root, &capture)?;
     let meta = std::fs::symlink_metadata(&src).map_err(|_| crate::tr::err("not_found.file", &[]))?;
     if !meta.is_file() { return Err(crate::tr::err("invalid.path", &[])); }
@@ -427,6 +429,26 @@ mod tests {
             assert_eq!(count(&d), 0, "a link is not the library's inbox");
             std::fs::remove_dir_all(elsewhere).unwrap();
         }
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn filing_refuses_an_item_page_that_is_not_plain_text_and_leaves_both_as_they_were() {
+        let d = lib();
+        put(&d, "inbox/idea.md", "# Idea\nA thought.\n");
+        // Saved in an old Arabic encoding (Windows-1256): not valid UTF-8.
+        let legacy: &[u8] = b"---\ntitle: \xc7\xe1\xd3\xe6\xe2\n---\n# Shop\n";
+        std::fs::create_dir_all(d.join("apps/shop")).unwrap();
+        std::fs::write(d.join("apps/shop/README.md"), legacy).unwrap();
+        let e = file_under(&d, "inbox/idea.md", "apps/shop", &[]).unwrap_err();
+        assert!(e.to_string().contains("Nothing was moved"), "{e}");
+        assert_eq!(std::fs::read(d.join("apps/shop/README.md")).unwrap(), legacy);
+        assert!(d.join("inbox/idea.md").exists() && !d.join("apps/shop/notes/idea.md").exists());
+        // A plain-text page is filed under as usual.
+        put(&d, "apps/shop/README.md", "---\ntitle: Shop\n---\n# Shop\n");
+        let (to, line) = file_under(&d, "inbox/idea.md", "apps/shop", &[]).unwrap();
+        assert_eq!(to, "apps/shop/notes/idea.md");
+        assert!(std::fs::read_to_string(d.join("apps/shop/README.md")).unwrap().contains(&line));
         std::fs::remove_dir_all(d).unwrap();
     }
 
