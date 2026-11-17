@@ -212,6 +212,9 @@ impl Verdict {
 pub struct Approvals {
     file: PathBuf,
     inner: std::sync::Mutex<Inner>,
+    /// The newest change of `always` already in `file`. Held while writing, so the writes take
+    /// turns and an older copy never lands after a newer one (`save`).
+    saved: std::sync::Mutex<u64>,
 }
 
 #[derive(Default)]
@@ -220,11 +223,13 @@ struct Inner {
     waiting: HashMap<String, Waiting>,
     /// chat id -> what is always allowed there; read from `file` the first time it is needed.
     always: Option<BTreeMap<String, Vec<Always>>>,
+    /// Counts the changes to `always`: each copy handed to `save` carries the count it was taken at.
+    always_version: u64,
 }
 
 impl Approvals {
     /// Approvals that remember "always" in `file`.
-    pub fn at(file: PathBuf) -> Self { Self { file, inner: Default::default() } }
+    pub fn at(file: PathBuf) -> Self { Self { file, inner: Default::default(), saved: Default::default() } }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> { self.inner.lock().unwrap_or_else(|e| e.into_inner()) }
 
@@ -232,9 +237,21 @@ impl Approvals {
         inner.always.get_or_insert_with(|| std::fs::read_to_string(&self.file).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default())
     }
 
-    fn save(&self, map: &BTreeMap<String, Vec<Always>>) {
-        let text = serde_json::to_string_pretty(map).unwrap_or_else(|_| "{}".into());
+    /// A copy of `always` after a change, numbered, for `save` (taken under the lock).
+    fn changed(inner: &mut Inner) -> (u64, BTreeMap<String, Vec<Always>>) {
+        inner.always_version += 1;
+        (inner.always_version, inner.always.clone().unwrap_or_default())
+    }
+
+    /// Write copy number `version` of `always`, unless a newer one was written already: two
+    /// changes saved at once (a take-back and a new "always") can reach here in either order, and
+    /// the older must not put back a rule the user took away.
+    fn save(&self, (version, map): (u64, BTreeMap<String, Vec<Always>>)) {
+        let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
+        if version <= *saved { return; }
+        let text = serde_json::to_string_pretty(&map).unwrap_or_else(|_| "{}".into());
         crate::log::ok_or_warn("could not remember what was allowed for a chat", crate::paths::write_atomic(&self.file, text.as_bytes(), true));
+        *saved = version;
     }
 
     /// What is always allowed in `chat_id`.
@@ -252,9 +269,9 @@ impl Approvals {
             None => return vec![],
         };
         if left.is_empty() { map.remove(chat_id); }
-        let snapshot = map.clone();
+        let snapshot = Self::changed(&mut g);
         drop(g);
-        self.save(&snapshot);
+        self.save(snapshot);
         left
     }
 
@@ -263,9 +280,9 @@ impl Approvals {
         let mut g = self.lock();
         let map = self.always_map(&mut g);
         if map.remove(chat_id).is_none() { return; }
-        let snapshot = map.clone();
+        let snapshot = Approvals::changed(&mut g);
         drop(g);
-        self.save(&snapshot);
+        self.save(snapshot);
     }
 
     /// Is a run of `chat_id` able to ask right now?
@@ -645,9 +662,9 @@ pub async fn answer(state: &AppState, chat_id: &str, id: &str, a: Answer) -> any
             let map = state.approvals.always_map(&mut g);
             let list = map.entry(chat_id.to_string()).or_default();
             if !list.iter().any(|x| x.kind == rule.kind && x.key == rule.key && x.tool == rule.tool) { list.push(rule); }
-            map.clone()
+            Approvals::changed(&mut g)
         };
-        state.approvals.save(&snapshot);
+        state.approvals.save(snapshot);
         state.emit(json!({"type": "approval.changed", "chatId": chat_id}));
     }
     let status = match a { Answer::Once => "once", Answer::Always => "always", Answer::Deny => "denied" };

@@ -623,3 +623,36 @@ async fn real_claude_code_asks_through_the_endpoint_and_obeys_the_answer() {
     }
     std::fs::remove_dir_all(base).unwrap();
 }
+
+/// Two changes saved at once can reach the file in either order: the older copy, written last,
+/// must not bring back a rule the user took away.
+#[test]
+fn a_stale_copy_never_overwrites_a_newer_one() {
+    let dir = std::env::temp_dir().join(format!("thoughts-always-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("chat-approvals.json");
+    let a = Approvals::at(file.clone());
+    let rule = Always { id: "r1".into(), kind: "command".into(), tool: "Bash".into(), key: "npm test".into(),
+        what: "npm test".into(), target: String::new(), at: Utc::now() };
+    // An "always" is added (copy 1, with the rule), then taken back (copy 2, without it)…
+    let with_rule = {
+        let mut g = a.lock();
+        a.always_map(&mut g).entry("c1".into()).or_default().push(rule);
+        Approvals::changed(&mut g)
+    };
+    let without = {
+        let mut g = a.lock();
+        a.always_map(&mut g).remove("c1");
+        Approvals::changed(&mut g)
+    };
+    // …and the take-back's copy reaches the file first.
+    a.save(without);
+    a.save(with_rule);
+    assert!(Approvals::at(file.clone()).always("c1").is_empty(), "the taken-back rule stays gone after a restart");
+    // Through the public calls the newest state is what is kept.
+    let b = Approvals::at(file.clone());
+    b.forget_chat("c1");
+    assert!(b.forget("c1", "r1").is_empty());
+    assert!(Approvals::at(file).always("c1").is_empty());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
