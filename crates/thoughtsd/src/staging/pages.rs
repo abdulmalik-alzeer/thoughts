@@ -81,7 +81,7 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
         };
         let Some(o) = cfg.as_object() else {
             add(format!("`{id}` must be an object, such as {{ \"title\": {{ \"en\": \"Tasks\" }} }}."),
-                format!("يجب أن تكون قيمة `{id}` كائنًا، مثل {{ \"title\": {{ \"en\": \"Tasks\" }} }}."));
+                format!("يجب أن تكون قيمة `{id}` كائناً، مثل {{ \"title\": {{ \"en\": \"Tasks\" }} }}."));
             continue;
         };
         for key in o.keys() {
@@ -97,7 +97,7 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
                 add(format!("The `{id}` page has no {what_en} to change: remove `{key}`."), format!("لا توجد في صفحة `{id}` خانة «{what_ar}» لتغييرها: احذف `{key}`."));
             } else if !text_ok(t, max) {
                 add(format!("`{id}.{key}` must look like {{ \"en\": \"…\", \"ar\": \"…\" }}: at least one language, one line, {max} characters at most."),
-                    format!("يجب أن تكون `{id}.{key}` على هذا الشكل: {{ \"en\": \"…\", \"ar\": \"…\" }}، بلغة واحدة على الأقل، في سطر واحد، وبحد أقصى {max} حرفًا."));
+                    format!("يجب أن تكون `{id}.{key}` على هذا الشكل: {{ \"en\": \"…\", \"ar\": \"…\" }}، بلغة واحدة على الأقل، في سطر واحد، وبحد أقصى {max} حرفاً."));
             }
         }
         if let Some(h) = o.get("hidden") {
@@ -107,7 +107,7 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
                     if !p.parts.contains(&part) {
                         let part = show_hidden(part, false);
                         add(format!("`{part}` is not a part of the `{id}` page that can be hidden. Parts: {}.", join(p.parts, ", ")),
-                            format!("`{part}` ليس جزءًا يمكن إخفاؤه من صفحة `{id}`. الأجزاء: {}.", join(p.parts, "، ")));
+                            format!("`{part}` ليس جزءاً يمكن إخفاؤه من صفحة `{id}`. الأجزاء: {}.", join(p.parts, "، ")));
                     }
                 },
             }
@@ -115,15 +115,15 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
         if let Some(l) = o.get("labels") {
             match l.as_object() {
                 None => add(format!("`{id}.labels` must be an object: {{ \"<name>\": {{ \"en\": text, \"ar\": text }} }}."),
-                    format!("يجب أن تكون `{id}.labels` كائنًا: {{ \"<الاسم>\": {{ \"en\": نص، \"ar\": نص }} }}.")),
+                    format!("يجب أن تكون `{id}.labels` كائناً: {{ \"<الاسم>\": {{ \"en\": نص، \"ar\": نص }} }}.")),
                 Some(m) => for (name, t) in m {
                     if !p.labels.contains(&name.as_str()) {
                         let name = show_hidden(name, false);
                         add(format!("`{name}` is not a text of the `{id}` page that can be renamed. Texts: {}.", join(p.labels, ", ")),
-                            format!("`{name}` ليس نصًّا يمكن تغييره في صفحة `{id}`. النصوص: {}.", join(p.labels, "، ")));
+                            format!("`{name}` ليس نصّاً يمكن تغييره في صفحة `{id}`. النصوص: {}.", join(p.labels, "، ")));
                     } else if !text_ok(t, 60) {
                         add(format!("The label `{id}.labels.{name}` must look like {{ \"en\": \"New task\", \"ar\": \"مهمة جديدة\" }}: one line, 60 characters at most."),
-                            format!("يجب أن تكون التسمية `{id}.labels.{name}` على هذا الشكل: {{ \"en\": \"New task\", \"ar\": \"مهمة جديدة\" }}، في سطر واحد وبحد أقصى ٦٠ حرفًا."));
+                            format!("يجب أن تكون التسمية `{id}.labels.{name}` على هذا الشكل: {{ \"en\": \"New task\", \"ar\": \"مهمة جديدة\" }}، في سطر واحد وبحد أقصى ٦٠ حرفاً."));
                     }
                 },
             }
@@ -139,7 +139,7 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
                     Some(m) => for (place, list) in m {
                         if !PLACES.contains(&place.as_str()) {
                             let place = show_hidden(place, false);
-                            add(format!("`{place}` in `{id}.boxes` is not a place: use `top` or `bottom`."), format!("`{place}` في `{id}.boxes` ليس موضعًا: استخدم `top` أو `bottom`."));
+                            add(format!("`{place}` in `{id}.boxes` is not a place: use `top` or `bottom`."), format!("`{place}` في `{id}.boxes` ليس موضعاً: استخدم `top` أو `bottom`."));
                             continue;
                         }
                         let ok = list.as_array().map_or(false, |a| a.len() <= MAX_BOXES
@@ -155,7 +155,7 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
         if let Some(r) = o.get("replace") {
             if !p.replace {
                 add(format!("The `{id}` page cannot be replaced: remove `replace`. Change its details instead."),
-                    format!("لا يمكن استبدال صفحة `{id}`: احذف `replace` وغيّر تفاصيلها بدلًا من ذلك."));
+                    format!("لا يمكن استبدال صفحة `{id}`: احذف `replace` وغيّر تفاصيلها بدلاً من ذلك."));
             } else {
                 match r.as_str().filter(|s| id_like(s)) {
                     None => add(format!("`{id}.replace` must be the id of an add-on page, such as \"hours.js:board\"."),
@@ -325,7 +325,7 @@ mod tests {
     fn problems_come_in_both_languages() {
         let dir = std::env::temp_dir();
         let p = problems(&json!({"todos": {"hidden": ["nope"]}}), &dir);
-        assert!(p[0].1.contains("ليس جزءًا يمكن إخفاؤه"));
+        assert!(p[0].1.contains("ليس جزءاً يمكن إخفاؤه"));
     }
 
     #[test]

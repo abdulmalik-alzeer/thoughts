@@ -537,7 +537,7 @@ pub fn storage_read(home: &std::path::Path, plugin: &str) -> anyhow::Result<Valu
 pub fn storage_write(home: &std::path::Path, plugin: &str, bytes: &[u8], arabic: bool) -> anyhow::Result<()> {
     let file = storage_file(home, plugin)?;
     if bytes.len() > STORAGE_MAX_BYTES {
-        anyhow::bail!("{}", if arabic { "البيانات المحفوظة لهذه الإضافة كبيرة جدًا (الحد الأقصى ٢٥٦ كيلوبايت)." } else { "This add-on is trying to store too much (the limit is 256 KB)." });
+        anyhow::bail!("{}", if arabic { "البيانات المحفوظة لهذه الإضافة كبيرة جداً (الحد الأقصى ٢٥٦ كيلوبايت)." } else { "This add-on is trying to store too much (the limit is 256 KB)." });
     }
     let v: Value = serde_json::from_slice(bytes).map_err(|_| anyhow::anyhow!("storage must be a JSON object"))?;
     if !v.is_object() { anyhow::bail!("storage must be a JSON object"); }

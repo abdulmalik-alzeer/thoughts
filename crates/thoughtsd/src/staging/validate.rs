@@ -125,23 +125,23 @@ pub fn problems(staging: &Path, files: &[(String, &str)], arabic: bool) -> Vec<V
     let live: Vec<&str> = files.iter().filter(|(_, s)| *s != "deleted").map(|(p, _)| p.as_str()).collect();
     if live.len() > MAX_FILES {
         out.add("", format!("The change touches too many files ({}; the limit is {MAX_FILES}).", live.len()),
-            format!("يشمل التغيير عددًا كبيرًا من الملفات ({}، والحد الأقصى {MAX_FILES}).", live.len()));
+            format!("يشمل التغيير عدداً كبيراً من الملفات ({}، والحد الأقصى {MAX_FILES}).", live.len()));
     }
     let mut total = 0usize;
     for path in live {
         let full = staging.join(path);
         let Ok(meta) = std::fs::symlink_metadata(&full) else { continue };
         if !meta.is_file() {
-            out.add(path, "This is not an ordinary file.", "هذا ليس ملفًا عاديًا.");
+            out.add(path, "This is not an ordinary file.", "هذا ليس ملفاً عادياً.");
             continue;
         }
         total += meta.len() as usize;
         if meta.len() as usize > MAX_FILE_BYTES {
-            out.add(path, "This file is too large (the limit is 512 KB).", "هذا الملف كبير جدًا (الحد الأقصى ٥١٢ كيلوبايت).");
+            out.add(path, "This file is too large (the limit is 512 KB).", "هذا الملف كبير جداً (الحد الأقصى ٥١٢ كيلوبايت).");
             continue;
         }
         let Ok(text) = std::fs::read_to_string(&full) else {
-            out.add(path, "This file is not plain text.", "هذا الملف ليس نصًّا عاديًا.");
+            out.add(path, "This file is not plain text.", "هذا الملف ليس نصّاً عادياً.");
             continue;
         };
         let parts: Vec<&str> = path.split('/').collect();
@@ -183,7 +183,7 @@ pub fn problems(staging: &Path, files: &[(String, &str)], arabic: bool) -> Vec<V
         }
     }
     if total > MAX_TOTAL_BYTES {
-        out.add("", "The change is too large in total (the limit is 4 MB).", "حجم التغيير الإجمالي كبير جدًا (الحد الأقصى ٤ ميغابايت).");
+        out.add("", "The change is too large in total (the limit is 4 MB).", "حجم التغيير الإجمالي كبير جداً (الحد الأقصى ٤ ميغابايت).");
     }
     out.list
 }
@@ -199,7 +199,7 @@ fn api_version(out: &mut Out, path: &str, o: &Map<String, Value>, required: bool
         Some(v) => match v.as_u64() {
             Some(n) if n >= 1 && n <= API_VERSION => {}
             Some(n) if n > API_VERSION => out.add(path, format!("This needs a newer version of the app (apiVersion {n}; this app supports {API_VERSION})."),
-                format!("يتطلب هذا إصدارًا أحدث من التطبيق (apiVersion {n}، وهذا التطبيق يدعم {API_VERSION}).")),
+                format!("يتطلب هذا إصداراً أحدث من التطبيق (apiVersion {n}، وهذا التطبيق يدعم {API_VERSION}).")),
             _ => out.add(path, "`apiVersion` must be the number 1.", "يجب أن تكون قيمة `apiVersion` الرقم 1."),
         },
     }
@@ -222,7 +222,7 @@ fn declaration(out: &mut Out, path: &str, o: &Map<String, Value>, view: bool, ow
                 if allowed.contains(&name) { continue; }
                 if view && PERMISSIONS.contains(&name) {
                     out.add(path, format!("A view can only read: `{name}` is not allowed here. Use a plugin instead."),
-                        format!("صفحات العرض للقراءة فقط: الصلاحية `{name}` غير مسموحة هنا. استخدم إضافة برمجية بدلًا منها."));
+                        format!("صفحات العرض للقراءة فقط: الصلاحية `{name}` غير مسموحة هنا. استخدم إضافة برمجية بدلاً منها."));
                 } else {
                     out.add(path, format!("Unknown permission `{name}`. Allowed: {}.", allowed.join(", ")),
                         format!("صلاحية غير معروفة `{name}`. المسموح: {}.", allowed.join("، ")));
@@ -244,13 +244,13 @@ fn declaration(out: &mut Out, path: &str, o: &Map<String, Value>, view: bool, ow
                         "قائمة `write` لا تعمل إلا مع الصلاحية `library:write` أو `ideas:write`.");
                 }
                 if has_write && list.is_empty() {
-                    out.add(path, "`write` is empty: name at least one folder.", "قائمة `write` فارغة: حدّد مجلدًا واحدًا على الأقل.");
+                    out.add(path, "`write` is empty: name at least one folder.", "قائمة `write` فارغة: حدّد مجلداً واحداً على الأقل.");
                 }
-                if list.len() > 20 { out.add(path, "`write` lists too many folders (at most 20).", "قائمة `write` طويلة جدًا (٢٠ مجلدًا على الأكثر)."); }
+                if list.len() > 20 { out.add(path, "`write` lists too many folders (at most 20).", "قائمة `write` طويلة جداً (٢٠ مجلداً على الأكثر)."); }
                 for folder in list {
                     if clean_write_folder(folder).is_err() {
                         out.add(path, format!("`{folder}` is not a folder a plugin may write to. Use a folder inside the library such as `clients/` — no `..`, no absolute paths, never `.claude` or `.git`."),
-                            format!("لا يمكن للإضافة الكتابة في `{folder}`. استخدم مجلدًا داخل المكتبة مثل `clients/`، دون `..` ودون مسارات مطلقة، وليس `.claude` أو `.git`."));
+                            format!("لا يمكن للإضافة الكتابة في `{folder}`. استخدم مجلداً داخل المكتبة مثل `clients/`، دون `..` ودون مسارات مطلقة، وليس `.claude` أو `.git`."));
                     }
                 }
             }
@@ -269,20 +269,20 @@ fn declaration(out: &mut Out, path: &str, o: &Map<String, Value>, view: bool, ow
                 }
                 if list.is_empty() {
                     out.add(path, "`read` is empty: name at least one folder, or leave `read` out to read the whole library.",
-                        "قائمة `read` فارغة: حدّد مجلدًا واحدًا على الأقل، أو احذف `read` لتقرأ المكتبة كلها.");
+                        "قائمة `read` فارغة: حدّد مجلداً واحداً على الأقل، أو احذف `read` لتقرأ المكتبة كلها.");
                 }
-                if list.len() > 20 { out.add(path, "`read` lists too many folders (at most 20).", "قائمة `read` طويلة جدًا (٢٠ مجلدًا على الأكثر)."); }
+                if list.len() > 20 { out.add(path, "`read` lists too many folders (at most 20).", "قائمة `read` طويلة جداً (٢٠ مجلداً على الأكثر)."); }
                 for folder in list {
                     if clean_write_folder(folder).is_err() {
                         out.add(path, format!("`{folder}` is not a folder an add-on may read. Use a folder inside the library such as `clients/` — no `..`, no absolute paths, never `.claude` or `.git`."),
-                            format!("لا يمكن للإضافة القراءة من `{folder}`. استخدم مجلدًا داخل المكتبة مثل `clients/`، دون `..` ودون مسارات مطلقة، وليس `.claude` أو `.git`."));
+                            format!("لا يمكن للإضافة القراءة من `{folder}`. استخدم مجلداً داخل المكتبة مثل `clients/`، دون `..` ودون مسارات مطلقة، وليس `.claude` أو `.git`."));
                     }
                 }
             }
         }
     }
     if o.get("description").map_or(false, |d| !d.is_string()) {
-        out.add(path, "`description` must be text.", "يجب أن يكون `description` نصًّا.");
+        out.add(path, "`description` must be text.", "يجب أن يكون `description` نصّاً.");
     }
 }
 
@@ -292,7 +292,7 @@ fn manifest(out: &mut Out, path: &str, v: &Value) {
     for (key, ext, view) in [("plugins", ".js", false), ("views", ".html", true)] {
         let Some(section) = o.get(key) else { continue };
         let Some(map) = section.as_object() else {
-            out.add(path, format!("`{key}` must be an object keyed by file name."), format!("يجب أن يكون `{key}` كائنًا مفاتيحه أسماء الملفات."));
+            out.add(path, format!("`{key}` must be an object keyed by file name."), format!("يجب أن يكون `{key}` كائناً مفاتيحه أسماء الملفات."));
             continue;
         };
         for (name, decl) in map {
@@ -303,7 +303,7 @@ fn manifest(out: &mut Out, path: &str, v: &Value) {
             }
             match decl.as_object() {
                 Some(d) => declaration(out, path, d, view, false),
-                None => out.add(path, format!("The entry for `{name}` must be an object."), format!("يجب أن يكون إدخال `{name}` كائنًا.")),
+                None => out.add(path, format!("The entry for `{name}` must be an object."), format!("يجب أن يكون إدخال `{name}` كائناً.")),
             }
         }
     }
@@ -321,7 +321,7 @@ fn home(out: &mut Out, path: &str, v: &Value) {
             Some(list) => for s in list {
                 if !HOME_SECTIONS.contains(&s) && s != "suggestions" && !s.strip_prefix("widget:").map_or(false, id_like) {
                     out.add(path, format!("`{s}` in `hidden` is not a Home section. Sections: {}.", HOME_SECTIONS.join(", ")),
-                        format!("`{s}` في `hidden` ليس قسمًا من أقسام الصفحة الرئيسية. الأقسام: {}.", HOME_SECTIONS.join("، ")));
+                        format!("`{s}` في `hidden` ليس قسماً من أقسام الصفحة الرئيسية. الأقسام: {}.", HOME_SECTIONS.join("، ")));
                 }
             },
         }
@@ -332,7 +332,7 @@ fn home(out: &mut Out, path: &str, v: &Value) {
             Some(list) => for s in list {
                 if !HOME_SECTIONS.contains(&s) && s != "suggestions" && !s.strip_prefix("widget:").map_or(false, id_like) {
                     out.add(path, format!("`{s}` in `order` is not something Home can place. Use a section ({}), `suggestions`, or `widget:<id>`.", HOME_SECTIONS.join(", ")),
-                        format!("`{s}` في `order` ليس عنصرًا يمكن ترتيبه في الصفحة الرئيسية. استخدم قسمًا ({})، أو `suggestions`، أو `widget:<id>`.", HOME_SECTIONS.join("، ")));
+                        format!("`{s}` في `order` ليس عنصراً يمكن ترتيبه في الصفحة الرئيسية. استخدم قسماً ({})، أو `suggestions`، أو `widget:<id>`.", HOME_SECTIONS.join("، ")));
                 }
             },
         }
@@ -356,7 +356,7 @@ fn nav(out: &mut Out, path: &str, v: &Value) {
     }
     if let Some(labels) = o.get("labels") {
         match labels.as_object() {
-            None => out.add(path, "`labels` must be an object: { \"<page id>\": { \"en\": text, \"ar\": text } }.", "يجب أن يكون `labels` كائنًا: { \"<معرّف الصفحة>\": { \"en\": نص، \"ar\": نص } }."),
+            None => out.add(path, "`labels` must be an object: { \"<page id>\": { \"en\": text, \"ar\": text } }.", "يجب أن يكون `labels` كائناً: { \"<معرّف الصفحة>\": { \"en\": نص، \"ar\": نص } }."),
             Some(map) => for (id, l) in map {
                 let texts_ok = l.as_object().map_or(false, |m| {
                     (m.contains_key("en") || m.contains_key("ar"))
@@ -400,7 +400,7 @@ fn themes(out: &mut Out, path: &str, v: &Value) {
 fn workflow(out: &mut Out, path: &str, v: &Value) {
     let Some(o) = v.as_object() else { return not_object(out, path) };
     if o.get("name").map_or(false, |n| !n.as_str().map_or(false, |s| s.chars().count() <= 80 && !s.chars().any(char::is_control))) {
-        out.add(path, "`name` must be a short line of text.", "يجب أن يكون `name` نصًّا قصيرًا في سطر واحد.");
+        out.add(path, "`name` must be a short line of text.", "يجب أن يكون `name` نصّاً قصيراً في سطر واحد.");
     }
     if !o.get("prompt").and_then(Value::as_str).map_or(false, |p| !p.trim().is_empty() && p.len() <= 20_000) {
         out.add(path, "`prompt` is missing: say what the assistant should do when this runs.", "الحقل `prompt` مفقود: اكتب ما على المساعد فعله عند التشغيل.");
@@ -413,11 +413,11 @@ fn workflow(out: &mut Out, path: &str, v: &Value) {
         (Some("event"), _) => ("An event trigger must be { \"type\": \"event\", \"on\": \"wrap.done\" } or \"app.start\".".into(),
             "مشغّل الحدث يجب أن يكون { \"type\": \"event\", \"on\": \"wrap.done\" } أو \"app.start\".".into()),
         (Some("schedule"), _) if !t["at"].as_str().map_or(false, |a| a.len() == 5 && chrono::NaiveTime::parse_from_str(a, "%H:%M").is_ok()) =>
-            ("`at` must be a 24-hour time such as \"09:00\".".into(), "يجب أن يكون `at` وقتًا بنظام ٢٤ ساعة مثل \"09:00\".".into()),
+            ("`at` must be a 24-hour time such as \"09:00\".".into(), "يجب أن يكون `at` وقتاً بنظام ٢٤ ساعة مثل \"09:00\".".into()),
         (Some("schedule"), Some("month")) => ("A monthly schedule needs `day`: a number from 1 to 28, or \"last\".".into(),
             "الجدول الشهري يحتاج إلى `day`: رقم من 1 إلى 28، أو \"last\".".into()),
         (Some("schedule"), Some("week")) => ("`weekday` must be a number from 0 (Sunday) to 6 (Saturday).".into(),
-            "يجب أن يكون `weekday` رقمًا من 0 (الأحد) إلى 6 (السبت).".into()),
+            "يجب أن يكون `weekday` رقماً من 0 (الأحد) إلى 6 (السبت).".into()),
         (Some("schedule"), Some("weekdays")) => ("`days` must be a list of weekdays, each from 0 (Sunday) to 6 (Saturday).".into(),
             "يجب أن يكون `days` قائمة بأيام الأسبوع، كلٌّ منها من 0 (الأحد) إلى 6 (السبت).".into()),
         (Some("schedule"), _) => ("`every` must be \"day\", \"weekdays\", \"week\" or \"month\".".into(),
