@@ -275,6 +275,7 @@
       <button class="btn" class:primary={!data.private} onclick={continueChat} title={data.private ? say('itemPrivate') : t('item.continueTip')}><Icon name="chat" size={15} /> {t('item.continue')}</button>
       <button class="btn" onclick={startMeeting} aria-expanded={meetingOpen && tab === 'meetings'}><Icon name="plus" size={15} /> {t('item.newMeeting')}</button>
       <button class="btn ghost" onclick={editFront}><Icon name="edit" size={14} /> {t('edit')}</button>
+      <button class="btn ghost" onclick={() => go({ kind: 'graph', path: data.path })} title={t('libf-graph.itemButtonTip')}><Icon name="graph" size={14} /> {t('libf-graph.itemButton')}</button>
     </div>
     {#if data.private}<p class="muted sm privnote" dir="auto"><Icon name="lock" size={12} /> {say('itemPrivate')}</p>{/if}
 

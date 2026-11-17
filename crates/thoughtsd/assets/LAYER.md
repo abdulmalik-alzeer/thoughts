@@ -270,7 +270,7 @@ The sidebar. All keys optional; create the file when you first need it.
 }
 ```
 
-- Page ids: `home`, `chats`, `ideas`, `todos`, `docs`, `projects`, `me`, plus the `id` of any page
+- Page ids: `home`, `chats`, `ideas`, `todos`, `docs`, `projects`, `me`, `graph`, plus the `id` of any page
   a plugin added with `ui.addView`. A plugin page can also be named `<plugin file>:<id>`
   (`hours.js:board`), which stays exact when two plugins use the same `id`; an `id` that is also an
   app page's (`todos`) always means the app's page.

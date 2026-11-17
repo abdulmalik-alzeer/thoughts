@@ -49,6 +49,7 @@ rather than word-for-word translations of the English.
 | Area | قسم | A top-level group of items ("Areas of your library" «أقسام مكتبتك»). |
 | Note | ملاحظة | Any text file in the library. |
 | Docs | المستندات | The page that lists every file. A file is a document «مستند». |
+| Graph | شبكة الروابط | The page that shows the library's notes as a map, joined by their links. "Links around" one page «الروابط حول». A link from a note «تشير إلى»; to it «يشير إليها». |
 | Todo / Todos | مهمة / المهام | One line in a todo list. English never says *task* for a todo. |
 | Todo list; the general list | قائمة المهام؛ القائمة العامة | |
 | Due date | تاريخ الاستحقاق (الموعد) | Given with the calendar button on a todo. |

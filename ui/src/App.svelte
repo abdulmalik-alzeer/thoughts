@@ -25,6 +25,7 @@
   import Item from './views/Item.svelte';
   import { itemOf, openItem } from './lib/item';
   import Docs from './views/Docs.svelte';
+  import Graph from './views/Graph.svelte';
   import Todos from './views/Todos.svelte';
   import Inbox from './views/Inbox.svelte';
   import { inbox, watchInbox } from './lib/inbox.svelte';
@@ -650,12 +651,13 @@
   // customisation layer. Home can never be hidden; Settings and Help live in the footer, outside this list.
   // `custom`: a page an add-on put there (`from` is the add-on's file, `alias` the short id it chose).
   type NavItem = { id: string; label: string; icon: string; active: boolean; custom?: boolean; alias?: string; from?: string; run: () => void };
-  const APP_PAGES = ['home', 'chats', 'ideas', 'todos', 'docs', 'projects', 'inbox', 'me'];
+  const APP_PAGES = ['home', 'chats', 'ideas', 'todos', 'docs', 'projects', 'inbox', 'me', 'graph'];
   const navItems = $derived.by((): NavItem[] => {
     const m = app.settings?.modules ?? {};
     const items: NavItem[] = [];
     const add = (id: string, on = true) => { if (on) items.push({ id, label: navLabel(id), icon: id, active: isActive(id), run: () => { go({ kind: id }); } }); };
     add('home'); add('chats'); add('ideas'); add('todos', m.todos !== false); add('docs', m.docs !== false); add('projects', m.builds !== false);
+    items.push({ id: 'graph', label: navLabel('graph', t('libf-graph.nav')), icon: 'graph', active: app.view.kind === 'graph', run: () => { go({ kind: 'graph' }); } });
     if (inbox.count > 0 || app.view.kind === 'inbox') items.push({ id: 'inbox', label: navLabel('inbox', t('inbox.nav')), icon: 'inbox', active: app.view.kind === 'inbox', run: () => { go({ kind: 'inbox' }); } });
     items.push({ id: 'usage', label: navLabel('usage', t('r10-usage.nav')), icon: 'usage', active: app.view.kind === 'usage', run: () => { go({ kind: 'usage' }); } });
     if (m.me) items.push({ id: 'me', label: navLabel('me'), icon: 'me', active: meOpen, run: () => { go({ kind: 'docs', path: 'me/README.md' }); } });
@@ -1004,6 +1006,7 @@
       {:else if app.view.kind === 'ideas'}<Ideas />
       {:else if app.view.kind === 'item'}<Item path={app.view.path} tab={app.view.id} />
       {:else if app.view.kind === 'docs'}<Docs path={app.view.path} />
+      {:else if app.view.kind === 'graph'}<Graph path={app.view.path} />
       {:else if app.view.kind === 'todos'}<Todos mode={app.view.id === 'calendar' ? 'calendar' : 'list'} />
       {:else if app.view.kind === 'inbox'}<Inbox />
       {:else if app.view.kind === 'history'}<History />
