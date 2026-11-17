@@ -1,6 +1,6 @@
-//! "Save as PDF" for the app window: the page has laid the note out for print (its `#print-root`,
-//! shown only on paper while `html.print-doc` is set), and the shell prints the app window's own
-//! web view straight into a PDF file, page by page, without the system print dialog.
+//! "Save as PDF" for an app window (the main one or a second one, `windows.rs`): the page has laid
+//! the note out for print (its `#print-root`, shown only on paper while `html.print-doc` is set),
+//! and the shell prints that window's own web view straight into a PDF file, page by page, without the system print dialog.
 //!
 //! The file goes only where the user said: the save dialog is opened here, in native code, and the
 //! window never supplies a path. The path the dialog returns is still checked (`pdf_target`): an
@@ -94,7 +94,7 @@ impl Drop for Busy {
 /// `{"id", "file"}` once written (`file` is the file's name, for the message).
 #[tauri::command]
 pub(crate) async fn save_pdf(app: tauri::AppHandle, window: tauri::Window, webview: tauri::Webview, name: String) -> Result<Value, String> {
-    crate::main_only(&window)?;
+    crate::windows::app_window_only(&window)?;
     if !cfg!(target_os = "macos") {
         let _ = (app, webview, name);
         return Ok(json!({"unsupported": true}));
@@ -121,7 +121,7 @@ pub(crate) async fn save_pdf(app: tauri::AppHandle, window: tauri::Window, webvi
 #[tauri::command]
 pub(crate) async fn open_saved_pdf(app: tauri::AppHandle, window: tauri::Window, id: u64, reveal: Option<bool>) -> Result<(), String> {
     use tauri_plugin_opener::OpenerExt;
-    crate::main_only(&window)?;
+    crate::windows::app_window_only(&window)?;
     let path = saved_path(id).ok_or("unknown file")?;
     if !path.is_file() {
         return Err("gone".into());

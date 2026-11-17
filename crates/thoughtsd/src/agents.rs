@@ -558,7 +558,7 @@ mod tests {
         assert_eq!(last.lines().filter(|l| !l.is_empty()).collect::<Vec<_>>(), ["edit: helper Email checker", ".claude/agents/email-checker.md"]);
         let listed = api_list(State(st.clone())).await.unwrap().0;
         let hash = listed[0]["hash"].as_str().unwrap().to_string();
-        api_remove(State(st.clone()), Json(RemoveReq { id: "email-checker".into(), hash })).await.unwrap();
+        let _ = api_remove(State(st.clone()), Json(RemoveReq { id: "email-checker".into(), hash })).await.unwrap();
         assert!(!lib.join(".claude/agents/email-checker.md").exists());
         let last = crate::wraps::testutil::sh(&lib, &["log", "-1", "--format=%s"]);
         assert_eq!(last, "edit: remove helper email-checker");

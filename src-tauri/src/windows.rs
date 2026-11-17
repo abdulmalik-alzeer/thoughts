@@ -377,6 +377,8 @@ mod tests {
             "allow-set-unsaved",
             // Opening and showing library files and chat attachments; saving an exported document.
             "allow-open-library-file", "allow-reveal-library-file", "allow-open-chat-attachment", "allow-reveal-chat-attachment", "allow-save-file",
+            // Saving the note shown as a PDF (to a file the person picks), and opening that PDF.
+            "allow-save-pdf", "allow-open-saved-pdf",
             // The window itself: zoom, print, its title, dragging it by the top, the developer tools of a development build.
             "core:webview:allow-set-webview-zoom", "core:webview:allow-print", "core:webview:allow-internal-toggle-devtools",
             "core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize", "core:window:allow-set-title",

@@ -8,7 +8,7 @@
   // What is saved stays plain Markdown as the user would have typed it: each action is ONE native
   // edit of the lines it is about (so Undo and Redo work as usual), the note details and code are left
   // alone, and the file's own line endings are kept (the text box only knows "\n"). The text changes
-  // themselves are plain functions in editing.ts, checked by scripts/check-editor.mjs.
+  // themselves are plain functions in editing.ts, checked by editing.test.ts (npm test).
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { Link, List, ListOrdered, ListTodo, ListIndentDecrease, ListIndentIncrease, ImagePlus } from '@lucide/svelte';
   import { md, mdClick, resolveLink } from '../../lib/md';
