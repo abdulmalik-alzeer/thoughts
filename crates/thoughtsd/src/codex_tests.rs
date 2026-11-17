@@ -657,7 +657,11 @@ async fn a_refused_sign_in_is_said_plainly_and_pictures_go_along() {
     assert_eq!((tool["code"].as_str(), tool["provider"].as_str()), (Some("signedOut"), Some("codex")));
     assert!(tool["detail"].as_str().unwrap().contains("401"));
     assert!(st.codex.auth_failed.load(Ordering::Relaxed));
-    let events: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    // `chat.done` follows the saved end of the run, which `run_in` already sees.
+    let mut events: Vec<Value> = vec![];
+    while !events.iter().any(|e| e["type"] == "chat.done") {
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await { Ok(Ok(e)) => events.push(e), _ => break }
+    }
     assert!(events.iter().any(|e| e["type"] == "auth.changed" && e["provider"] == "codex" && e["loggedIn"] == false));
     assert!(events.iter().any(|e| e["type"] == "chat.done" && e["ok"] == false));
     // The picture went along under a plain name of its own (its own has a comma); the text file did not.
