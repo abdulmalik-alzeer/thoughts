@@ -44,7 +44,8 @@ export async function syncDockIcon() {
   const cv = document.createElement('canvas'); cv.width = cv.height = 512;
   cv.getContext('2d')!.drawImage(img, 0, 0, 512, 512);
   const blob: Blob = await new Promise((r) => cv.toBlob((b) => r(b!), 'image/png'));
-  const bytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
+  const bytes = new Uint8Array(await blob.arrayBuffer());
   const { invoke } = await import('@tauri-apps/api/core');
-  await invoke('set_dock_icon', { png: bytes }).catch(() => {});
+  // The PNG goes as the raw request body (the shell takes nothing else, and at most 1 MB).
+  await invoke('set_dock_icon', bytes).catch(() => {});
 }

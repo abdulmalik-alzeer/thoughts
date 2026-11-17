@@ -1,11 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "capture",
-  "description": "The quick capture box. It hears that it was opened again and can be dragged by its top edge; everything else it does goes through the app's own commands.",
+  "description": "The quick capture box. It hears that it was opened again, can be dragged by its top edge, and may call only the few app commands it needs to connect, fill, show, hide and hand over to the app window (see src-tauri/build.rs).",
   "windows": [
     "capture"
   ],
   "permissions": [
+    "allow-daemon-info",
+    "allow-capture-ready",
+    "allow-capture-take",
+    "allow-capture-show",
+    "allow-capture-hide",
+    "allow-capture-open-main",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:window:allow-start-dragging"

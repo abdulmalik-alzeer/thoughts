@@ -59,90 +59,112 @@ pub fn plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {
         .build()
 }
 
+/// Voice in is for the app window only (the microphone and the meetings folder are never handed
+/// to the quick capture box or to anything inside a page).
+fn main_only(window: &tauri::Window) -> Result<(), String> {
+    crate::main_only(window)
+}
+
 /// `{supported, reason?, platform, mic, speech, langs: {en|ar: {locale, onDevice, available}},
 /// dictating, recording, transcribing, result}`. `mic`/`speech`: granted | denied | restricted | ask.
 #[tauri::command]
-pub fn voice_status() -> Value {
+pub fn voice_status(window: tauri::Window) -> Result<Value, String> {
+    main_only(&window)?;
     let mut v = imp::status();
     v["platform"] = json!(std::env::consts::OS);
-    v
+    Ok(v)
 }
 
 /// Ask the system for speech recognition and (with `mic`, the default) microphone access where it
 /// has not been asked yet. Answers with the status afterwards.
 #[tauri::command]
-pub async fn voice_permit(mic: Option<bool>) -> Value {
+pub async fn voice_permit(window: tauri::Window, mic: Option<bool>) -> Result<Value, String> {
+    main_only(&window)?;
     let mic = mic.unwrap_or(true);
     let mut v = tauri::async_runtime::spawn_blocking(move || imp::permit(mic)).await.unwrap_or_else(|_| imp::status());
     v["platform"] = json!(std::env::consts::OS);
-    v
+    Ok(v)
 }
 
 /// Start listening in `lang` (`en` | `ar`): `{locale}`.
 #[tauri::command]
-pub fn voice_dictate_start(lang: String) -> Result<Value, String> {
+pub fn voice_dictate_start(window: tauri::Window, lang: String) -> Result<Value, String> {
+    main_only(&window)?;
     imp::dictate_start(&lang)
 }
 
 /// Stop listening and answer with what was said.
 #[tauri::command]
-pub async fn voice_dictate_stop() -> Result<String, String> {
+pub async fn voice_dictate_stop(window: tauri::Window) -> Result<String, String> {
+    main_only(&window)?;
     tauri::async_runtime::spawn_blocking(imp::dictate_stop).await.map_err(|e| fail("failed", Some(&e.to_string())))?
 }
 
 #[tauri::command]
-pub fn voice_dictate_cancel() {
-    imp::dictate_cancel()
+pub fn voice_dictate_cancel(window: tauri::Window) -> Result<(), String> {
+    main_only(&window)?;
+    imp::dictate_cancel();
+    Ok(())
 }
 
 /// Start recording a meeting of the item at `item` (`<area>/<item>`) into its meetings folder:
 /// `{path, item, title, lang, date, seconds, paused}`.
 #[tauri::command]
-pub fn voice_record_start(item: String, title: String, lang: String) -> Result<Value, String> {
+pub fn voice_record_start(window: tauri::Window, item: String, title: String, lang: String) -> Result<Value, String> {
+    main_only(&window)?;
     imp::record_start(&item, &title, &lang)
 }
 
 #[tauri::command]
-pub fn voice_record_pause(paused: bool) -> Result<Value, String> {
+pub fn voice_record_pause(window: tauri::Window, paused: bool) -> Result<Value, String> {
+    main_only(&window)?;
     imp::record_pause(paused)
 }
 
 /// Finish the recording; the file is complete. Same shape as `voice_record_start`, plus `ended`
 /// (why it had already stopped by itself, if it had).
 #[tauri::command]
-pub fn voice_record_stop() -> Result<Value, String> {
+pub fn voice_record_stop(window: tauri::Window) -> Result<Value, String> {
+    main_only(&window)?;
     imp::record_stop()
 }
 
 /// Stop the recording and delete its file.
 #[tauri::command]
-pub fn voice_record_discard() -> Result<(), String> {
+pub fn voice_record_discard(window: tauri::Window) -> Result<(), String> {
+    main_only(&window)?;
     imp::record_discard()
 }
 
 /// Start turning the recording at `path` (library-relative) into text, in `lang`. `meta` is kept
 /// with the job and handed back with the result.
 #[tauri::command]
-pub fn voice_transcribe(path: String, lang: String, meta: Option<Value>) -> Result<Value, String> {
+pub fn voice_transcribe(window: tauri::Window, path: String, lang: String, meta: Option<Value>) -> Result<Value, String> {
+    main_only(&window)?;
     imp::transcribe(&path, &lang, meta.unwrap_or(Value::Null))
 }
 
 #[tauri::command]
-pub fn voice_transcribe_cancel() {
-    imp::transcribe_cancel()
+pub fn voice_transcribe_cancel(window: tauri::Window) -> Result<(), String> {
+    main_only(&window)?;
+    imp::transcribe_cancel();
+    Ok(())
 }
 
 /// The finished transcript waiting to be filed, or null: `{path, meta, paragraphs: [{at, text}],
 /// seconds, complete}`.
 #[tauri::command]
-pub fn voice_result() -> Value {
-    imp::result()
+pub fn voice_result(window: tauri::Window) -> Result<Value, String> {
+    main_only(&window)?;
+    Ok(imp::result())
 }
 
 /// The transcript of `path` was filed (or given up): forget it.
 #[tauri::command]
-pub fn voice_result_clear(path: String) {
-    imp::result_clear(&path)
+pub fn voice_result_clear(window: tauri::Window, path: String) -> Result<(), String> {
+    main_only(&window)?;
+    imp::result_clear(&path);
+    Ok(())
 }
 
 /// Windows and Linux: no recognizer the app can keep on the computer (see the top of this file).

@@ -380,8 +380,9 @@ fn ensure_daemon() -> Result<(thoughtsd::paths::DaemonInfo, bool), String> {
 /// Save an exported customisation pack. The save dialog is opened here, in native code, so the
 /// destination is always one the user picked; the window never supplies a path.
 #[tauri::command]
-async fn save_pack(app: tauri::AppHandle, name: String, contents: String) -> Result<bool, String> {
+async fn save_pack(app: tauri::AppHandle, window: tauri::Window, name: String, contents: String) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
+    main_only(&window)?;
     if contents.len() > 8 << 20 { return Err("pack is too large".into()); }
     let safe: String = name.chars().filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ')).take(60).collect();
     let file = format!("{}.json", if safe.trim().is_empty() { "thoughts-pack" } else { safe.trim() });
@@ -414,8 +415,9 @@ fn export_file(name: &str, bytes: &[u8]) -> Result<(String, String), String> {
 /// choice (see `export_file` for what may be saved). Text comes as `{name, contents}`; anything else
 /// (a Word document) as the raw request body, with the file name, URI-encoded, in `x-file-name`.
 #[tauri::command]
-async fn save_file(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<bool, String> {
+async fn save_file(app: tauri::AppHandle, window: tauri::Window, request: tauri::ipc::Request<'_>) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
+    main_only(&window)?;
     let (name, bytes) = match request.body() {
         tauri::ipc::InvokeBody::Json(v) => {
             let contents = v["contents"].as_str().ok_or("nothing to save")?;
@@ -514,8 +516,17 @@ fn open_chat_attachment(app: tauri::AppHandle, window: tauri::Window, chat_id: S
 /// `{port, token, version, platform, stale}`. `stale: true` means the daemon belongs to another app
 /// version and was left running because it is busy (a save or a running chat); it is replaced on
 /// a later `daemon_info` call once idle, or at once by `restart_daemon {force: true}`.
+/// Only the app window and the quick capture box (which saves through the service) are answered.
 #[tauri::command]
-async fn daemon_info() -> Result<Value, String> {
+async fn daemon_info(window: tauri::Window) -> Result<Value, String> {
+    if !is_main_label(window.label()) && window.label() != capture::LABEL {
+        return Err("not allowed".into());
+    }
+    connection().await
+}
+
+/// What `daemon_info` answers.
+async fn connection() -> Result<Value, String> {
     let (i, stale) = tauri::async_runtime::spawn_blocking(ensure_daemon).await.map_err(|e| e.to_string())??;
     Ok(json!({"port": i.port, "token": i.token, "version": i.version, "platform": PLATFORM, "stale": stale}))
 }
@@ -524,10 +535,11 @@ async fn daemon_info() -> Result<Value, String> {
 /// Without `force` it rejects with `BUSY::{"saving":bool,"chats":[title,…]}` while the daemon is
 /// saving or a chat is running, and nothing is stopped.
 #[tauri::command]
-async fn restart_daemon(force: Option<bool>) -> Result<Value, String> {
+async fn restart_daemon(window: tauri::Window, force: Option<bool>) -> Result<Value, String> {
+    main_only(&window)?;
     let force = force.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || stop_daemon_checked(force)).await.map_err(|e| e.to_string())??;
-    daemon_info().await
+    connection().await
 }
 
 /// Where an update that can be offered was found.
@@ -631,7 +643,8 @@ fn problem_error(code: &str, detail: &str) -> String {
 /// `"github"` (the fallback). A check that could not tell is not an error either: `problem` is a
 /// code the window has a sentence for (see `NoAnswer`), `detail` what happened.
 #[tauri::command]
-async fn update_check(app: tauri::AppHandle) -> Result<Value, String> {
+async fn update_check(app: tauri::AppHandle, window: tauri::Window) -> Result<Value, String> {
+    main_only(&window)?;
     if !app.state::<UpdaterConfigured>().0 {
         return Ok(json!({"configured": false, "available": false, "reason": "build"}));
     }
@@ -658,7 +671,8 @@ async fn update_check(app: tauri::AppHandle) -> Result<Value, String> {
 /// `BUSY::{"saving":bool,"chats":[title,…]}` while a save or a chat is running (checked before the
 /// download and again just before installing); nothing is stopped or installed in that case.
 #[tauri::command]
-async fn update_install(app: tauri::AppHandle, force: Option<bool>) -> Result<(), String> {
+async fn update_install(app: tauri::AppHandle, window: tauri::Window, force: Option<bool>) -> Result<(), String> {
+    main_only(&window)?;
     install_update(app, force.unwrap_or(false)).await
 }
 
@@ -799,14 +813,18 @@ mod rehearsal {
 /// Quit completely (after "Remove Thoughts from this computer": the settings are gone, so
 /// "keep running in the background" must not keep a hidden window alive).
 #[tauri::command]
-fn quit_app(app: tauri::AppHandle) {
+fn quit_app(app: tauri::AppHandle, window: tauri::Window) {
+    if !is_main_label(window.label()) {
+        return;
+    }
     QUIT_ALL.store(true, Ordering::SeqCst);
     app.exit(0);
 }
 
 /// Rebuild the native menus after the UI language changed.
 #[tauri::command]
-fn refresh_menu(app: tauri::AppHandle) -> Result<(), String> {
+fn refresh_menu(app: tauri::AppHandle, window: tauri::Window) -> Result<(), String> {
+    main_only(&window)?;
     recovery::refresh_versions_soon(&app);
     install_menus(&app).map_err(|e| e.to_string())
 }
@@ -815,7 +833,8 @@ fn refresh_menu(app: tauri::AppHandle) -> Result<(), String> {
 /// "Turn customisations back on" buttons). The shell remembers it, so the choice survives a
 /// restart and the Recovery menu shows the same thing as the page.
 #[tauri::command]
-fn set_safe_mode(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+fn set_safe_mode(app: tauri::AppHandle, window: tauri::Window, on: bool) -> Result<(), String> {
+    main_only(&window)?;
     recovery::set_safe_mode(on);
     install_menus(&app).map_err(|e| e.to_string())
 }
@@ -827,6 +846,12 @@ fn refresh_menus(app: &tauri::AppHandle) {
 
 fn is_main_label(label: &str) -> bool {
     label == "main" || label.starts_with("main-")
+}
+
+/// Refuse a command called from anywhere but the app window (`main`, or the `main-<n>` Recovery
+/// opens in its place). The second lock after the window grants in `capabilities/` (see build.rs).
+fn main_only(window: &tauri::Window) -> Result<(), String> {
+    if is_main_label(window.label()) { Ok(()) } else { Err("not allowed".into()) }
 }
 
 /// The app window, if it exists (it may be hidden in the tray).
@@ -1153,11 +1178,30 @@ fn install_menus(h: &tauri::AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Replace the running app's Dock icon with a theme-coloured PNG rendered by the UI.
+/// The most a Dock icon may weigh: the UI's 512-pixel PNG is far smaller.
+const DOCK_ICON_MAX: usize = 1 << 20;
+
+/// May `bytes` go to the system as a Dock icon? Only a PNG (by its signature), and not a huge one.
+fn dock_icon_ok(bytes: &[u8]) -> Result<(), String> {
+    if bytes.len() > DOCK_ICON_MAX {
+        return Err("icon is too large".into());
+    }
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err("icon is not a PNG".into());
+    }
+    Ok(())
+}
+
+/// Replace the running app's Dock icon with a theme-coloured PNG rendered by the UI. The PNG is the
+/// raw request body (a `Uint8Array`), from the app window only.
 #[tauri::command]
-fn set_dock_icon(app: tauri::AppHandle, png: Vec<u8>) -> Result<(), String> {
+fn set_dock_icon(app: tauri::AppHandle, window: tauri::Window, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    main_only(&window)?;
+    let tauri::ipc::InvokeBody::Raw(png) = request.body() else { return Err("icon is not a PNG".into()) };
+    dock_icon_ok(png)?;
     #[cfg(target_os = "macos")]
     {
+        let png = png.clone();
         app.run_on_main_thread(move || {
             use objc2::{AllocAnyThread, MainThreadMarker};
             use objc2_app_kit::{NSApplication, NSImage};
@@ -1431,6 +1475,21 @@ mod tests {
     use super::*;
 
     fn url(s: &str) -> tauri::Url { tauri::Url::parse(s).unwrap() }
+
+    #[test]
+    fn only_a_png_of_sensible_size_becomes_the_dock_icon() {
+        let png = |len: usize| { let mut b = b"\x89PNG\r\n\x1a\n".to_vec(); b.resize(len, 0); b };
+        assert!(dock_icon_ok(&png(40_000)).is_ok());
+        assert!(dock_icon_ok(&png(DOCK_ICON_MAX)).is_ok());
+        assert!(dock_icon_ok(&png(DOCK_ICON_MAX + 1)).is_err(), "too large");
+        assert!(dock_icon_ok(b"").is_err());
+        assert!(dock_icon_ok(b"\x89PNG").is_err(), "a cut-off signature");
+        assert!(dock_icon_ok(b"GIF89a\0\0\0\0").is_err());
+        assert!(dock_icon_ok(b"<svg xmlns='http://www.w3.org/2000/svg'/>").is_err());
+        let mut tiff = vec![0u8; 100];
+        tiff[..4].copy_from_slice(b"MM\0*");
+        assert!(dock_icon_ok(&tiff).is_err());
+    }
 
     #[test]
     fn only_a_chats_own_harmless_files_are_opened() {
