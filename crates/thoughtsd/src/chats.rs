@@ -649,6 +649,9 @@ impl ChatStore {
             let _held = gate.as_ref().map(|g| { let mut v = g.lock().unwrap_or_else(|e| e.into_inner()); *v = GONE; v });
             let _ = std::fs::remove_file(file);
         }).await;
+        // The copies of its attached files made for its runs (`run_files`) go with it.
+        let (home, cid) = (crate::paths::home(), id.to_string());
+        let _ = tokio::task::spawn_blocking(move || crate::run_files::clear(&home, Some(&cid))).await;
         // Only a real folder: a link placed there is never followed to whatever it points at.
         let files = crate::paths::attachments_dir().join(id);
         if std::fs::symlink_metadata(&files).map_or(false, |m| m.is_dir()) { let _ = std::fs::remove_dir_all(&files); }

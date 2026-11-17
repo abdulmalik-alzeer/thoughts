@@ -4,8 +4,8 @@
 //! depends on which chats happen to have files when the run starts. A run reads the files of its
 //! own chat from copies made for it when the message is sent, with the Read tool only (the shell is
 //! closed to all copies), in a folder of its own under `<home>/chat-files/`. That folder's place is
-//! worked out from the chat id (`folder`): one single-digit folder per level, `DEPTH` levels down,
-//! then a random name for the run. Every place a copy of *another* chat could ever be is then one
+//! worked out from the chat id (`folder`): one single-digit folder per level, `DEPTH` levels down;
+//! the copies are kept there from one run to the next (`copy` refreshes them). Every place a copy of *another* chat could ever be is then one
 //! of the 9 other digits at some level along this chat's path — a fixed list that can be closed
 //! before any of those folders exist (`closed_for`). Digits have no letter case, so a rule can not
 //! be dodged by spelling a name in capitals on a file system that ignores case.
@@ -27,7 +27,7 @@ fn digits(chat_id: &str) -> String {
 }
 
 /// The folder (below `root`) of chat `chat_id`'s copies; `None` for an id that is not a chat id.
-/// Each run's copies are in a folder with a random name inside it.
+/// The copies themselves are in a folder inside it (`copy`).
 pub fn folder(home: &Path, chat_id: &str) -> Option<PathBuf> {
     if !crate::chats::valid_id(chat_id) { return None; }
     let mut p = root(home);
@@ -73,38 +73,72 @@ fn plain_path(home: &Path, dir: &Path, create: bool) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// Copy the files attached to chat `chat_id` into a new folder of this run's (earlier copies of the
-/// chat are removed) and return that folder. Only plain files directly in the chat's own
-/// attachments folder are copied: a link, a sub-folder, a file whose real place is elsewhere or one
-/// with other names (a hard link) is left out, and so is everything when the chat's folder is
-/// itself a link. Each copy keeps the name of the file it copies. Refused when any folder on the
-/// way to the copies is a link.
+/// The folder (inside the chat's `folder`) holding the copies of its attached files. It stays from
+/// one run to the next: a send copies only what is new or changed, and removes the copies of files
+/// that are no longer attached. Nothing at the end of a run removes it (a run the next message
+/// starts at once reads the very same files); it goes with the chat (`clear`, from `chats::remove`)
+/// and when the daemon starts.
+const COPIES: &str = "files";
+/// Start of the name a copy has while it is being written, before it takes its own name.
+const PART: &str = ".thoughts-part-";
+
+/// Bring the copies of the files attached to chat `chat_id` up to date and return their folder.
+/// Only plain files directly in the chat's own attachments folder are copied: a link, a
+/// sub-folder, a file whose real place is elsewhere or one with other names (a hard link) is left
+/// out, and so is everything when the chat's folder is itself a link. Each copy keeps the name of
+/// the file it copies; a copy whose file is no longer there (or no longer qualifies) is removed.
+/// Refused when any folder on the way to the copies is a link. Blocking: call it off the runtime.
 pub fn copy(home: &Path, chat_id: &str) -> std::io::Result<PathBuf> {
     let bad = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidInput, what.to_string());
     let mine = folder(home, chat_id).ok_or_else(|| bad("not a chat id"))?;
-    clear(home, Some(chat_id));
-    let dest = mine.join(uuid::Uuid::new_v4().simple().to_string());
+    let dest = mine.join(COPIES);
     if !plain_path(home, &dest, true)? { return Err(bad("a folder on the way to the copies is a link")); }
+    let mut kept: std::collections::HashSet<std::ffi::OsString> = Default::default();
     let att = home.join("attachments");
     let src = att.join(chat_id);
     let plain_dir = |p: &Path| std::fs::symlink_metadata(p).map_or(false, |m| m.is_dir());
-    if !plain_dir(&att) || !plain_dir(&src) { return Ok(dest); }
-    let real = crate::paths::canonical(&src)?;
-    for e in std::fs::read_dir(&src)?.flatten() {
-        let path = e.path();
-        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
-        if !meta.file_type().is_file() { continue; }
-        if crate::paths::canonical(&path).ok().and_then(|r| r.parent().map(|p| p == real)) != Some(true) { continue; }
-        if let Err(err) = copy_one(&path, &meta, &dest.join(e.file_name())) {
-            crate::log::warn(format!("an attached file could not be copied for the assistant: {err}"));
+    if plain_dir(&att) && plain_dir(&src) {
+        let real = crate::paths::canonical(&src)?;
+        for e in std::fs::read_dir(&src)?.flatten() {
+            let path = e.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if !meta.file_type().is_file() { continue; }
+            if crate::paths::canonical(&path).ok().and_then(|r| r.parent().map(|p| p == real)) != Some(true) { continue; }
+            let to = dest.join(e.file_name());
+            if !up_to_date(&to, &meta) {
+                if let Err(err) = copy_one(&path, &meta, &dest, &to) {
+                    crate::log::warn(format!("an attached file could not be copied for the assistant: {err}"));
+                    continue;
+                }
+            }
+            kept.insert(e.file_name());
+        }
+    }
+    // Whatever else is there goes: copies of files no longer attached, half-written ones.
+    for e in std::fs::read_dir(&dest)?.flatten() {
+        if kept.contains(&e.file_name()) { continue; }
+        let p = e.path();
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.is_dir() => { let _ = std::fs::remove_dir_all(&p); }
+            Ok(_) => { let _ = std::fs::remove_file(&p); }
+            Err(_) => {}
         }
     }
     Ok(dest)
 }
 
+/// Is `to` a plain file copied from the file looked at (`meta`): same size and same time of change?
+fn up_to_date(to: &Path, meta: &std::fs::Metadata) -> bool {
+    let Ok(have) = std::fs::symlink_metadata(to) else { return false };
+    have.file_type().is_file() && have.len() == meta.len()
+        && matches!((have.modified(), meta.modified()), (Ok(a), Ok(b)) if a == b)
+}
+
 /// Copy one attached file, only if what is opened is the very file looked at (`meta`): not a link
-/// put in its place since, and not a file with a second name somewhere else. The copy is read-only.
-fn copy_one(from: &Path, meta: &std::fs::Metadata, to: &Path) -> std::io::Result<()> {
+/// put in its place since, and not a file with a second name somewhere else. The copy is written
+/// under a passing name in `dir` and then takes its place at `to` (a run reading the earlier copy
+/// keeps reading that one). It is read-only and carries the file's time of change.
+fn copy_one(from: &Path, meta: &std::fs::Metadata, dir: &Path, to: &Path) -> std::io::Result<()> {
     let bad = || std::io::Error::new(std::io::ErrorKind::InvalidData, "not the attached file");
     let mut f = std::fs::File::open(from)?;
     let opened = f.metadata()?;
@@ -114,21 +148,27 @@ fn copy_one(from: &Path, meta: &std::fs::Metadata, to: &Path) -> std::io::Result
         if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) || opened.nlink() != 1 { return Err(bad()); }
     }
     if !opened.is_file() || opened.len() != meta.len() { return Err(bad()); }
+    let part = dir.join(format!("{PART}{}", uuid::Uuid::new_v4().simple()));
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create_new(true);
     #[cfg(unix)]
     { use std::os::unix::fs::OpenOptionsExt; o.mode(0o600); }
-    let mut out = o.open(to)?;
-    if let Err(e) = std::io::copy(&mut f, &mut out) { drop(out); let _ = std::fs::remove_file(to); return Err(e); }
+    let mut out = o.open(&part)?;
+    let written = std::io::copy(&mut f, &mut out).and_then(|_| match opened.modified() {
+        Ok(t) => out.set_modified(t),
+        Err(_) => Ok(()),
+    });
     drop(out);
     // (Read-only on disk only where that does not keep the folder from being removed afterwards.)
     #[cfg(unix)]
-    { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(to, std::fs::Permissions::from_mode(0o400))?; }
-    Ok(())
+    let written = written.and_then(|_| { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o400)) });
+    let placed = written.and_then(|_| std::fs::rename(&part, to));
+    if placed.is_err() { let _ = std::fs::remove_file(&part); let _ = std::fs::remove_file(to); }
+    placed
 }
 
-/// Remove the copies made for `chat_id`'s runs (when one ends or never started), or with `None` all
-/// of them (when the daemon starts). Nothing is removed through a link.
+/// Remove the copies made for `chat_id`'s runs (when the chat is deleted), or with `None` all of
+/// them (when the daemon starts). Nothing is removed through a link.
 pub fn clear(home: &Path, chat_id: Option<&str>) {
     let target = match chat_id {
         Some(id) => match folder(home, id) { Some(f) => f, None => return },
@@ -162,7 +202,7 @@ mod tests {
         }
         let other = copy(&home, "c-2").unwrap();
         let dir = copy(&home, "c-1").unwrap();
-        // In a folder of its own with a random name, below the chat's digits-only path.
+        // In a folder of its own, below the chat's digits-only path.
         assert_eq!(dir.parent(), folder(&home, "c-1").as_deref());
         assert!(dir.starts_with(root(&home)) && !dir.starts_with(home.join("attachments")));
         let rel = folder(&home, "c-1").unwrap().strip_prefix(root(&home)).unwrap().to_string_lossy().replace('\\', "/");
@@ -185,8 +225,27 @@ mod tests {
         assert_eq!(closed_for("../c-2"), None);
         // An id that is not one (it could name a path) copies nothing.
         assert!(copy(&home, "../c-2").is_err() && folder(&home, "..").is_none());
-        // Copying again starts from an empty folder; a chat without files gets an empty one.
+        // Copying again keeps the copies that are still right (the same file on disk, not copied
+        // again), copies a changed file anew, and removes the copy of a file no longer attached and
+        // anything else found there. A chat without files gets an empty folder.
+        #[cfg(unix)]
+        let ino = |p: &Path| { use std::os::unix::fs::MetadataExt; std::fs::metadata(p).unwrap().ino() };
+        #[cfg(unix)]
+        let shot = ino(&dir.join("shot.png"));
         std::fs::remove_file(home.join("attachments/c-1/notes.txt")).unwrap();
+        std::fs::write(home.join("attachments/c-1/later.txt"), b"one").unwrap();
+        std::fs::write(dir.join(".thoughts-part-left"), b"half").unwrap();
+        std::fs::create_dir_all(dir.join("planted")).unwrap();
+        assert_eq!(copy(&home, "c-1").unwrap(), dir);
+        assert_eq!(names(&dir), ["later.txt", "shot.png"]);
+        #[cfg(unix)]
+        assert_eq!(ino(&dir.join("shot.png")), shot, "an unchanged file was copied again");
+        std::fs::write(home.join("attachments/c-1/later.txt"), b"two!").unwrap();
+        copy(&home, "c-1").unwrap();
+        assert_eq!(std::fs::read(dir.join("later.txt")).unwrap(), b"two!");
+        #[cfg(unix)]
+        assert_eq!(ino(&dir.join("shot.png")), shot);
+        std::fs::remove_file(home.join("attachments/c-1/later.txt")).unwrap();
         assert_eq!(names(&copy(&home, "c-1").unwrap()), ["shot.png"]);
         assert!(names(&copy(&home, "c-9").unwrap()).is_empty());
         // A chat's attachments folder that is a link is not followed.
@@ -211,7 +270,7 @@ mod tests {
             std::fs::rename(&aside, &first).unwrap();
             assert!(copy(&home, "c-1").is_ok());
         }
-        // Clean-up: when a run ends only its own copies go; when the daemon starts, everything.
+        // Clean-up: when a chat is deleted only its own copies go; when the daemon starts, everything.
         let dir = copy(&home, "c-1").unwrap();
         clear(&home, Some("c-1"));
         assert!(!dir.exists() && other.exists());

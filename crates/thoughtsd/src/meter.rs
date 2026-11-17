@@ -38,8 +38,10 @@ pub const CLAUDE: &str = "claude";
 pub const CODEX: &str = "codex";
 /// The longest period the page offers.
 pub const MAX_DAYS: i64 = 90;
+/// Past this size the file is cut down to its newest records, to well under it (`KEEP_BYTES`), so
+/// that it is not rewritten again for a long while.
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
-const KEEP_LINES: usize = 40_000;
+const KEEP_BYTES: usize = (MAX_BYTES / 2) as usize;
 
 fn is_zero(n: &u64) -> bool { *n == 0 }
 
@@ -84,9 +86,7 @@ pub fn append(home: &Path, recs: &[Record]) -> anyhow::Result<()> {
     let _one = WRITE.lock().unwrap_or_else(|e| e.into_inner());
     if std::fs::metadata(&path).map_or(false, |m| m.len() > MAX_BYTES) {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
-        let lines: Vec<&str> = text.lines().collect();
-        let kept = lines[lines.len().saturating_sub(KEEP_LINES)..].join("\n") + "\n";
-        crate::paths::write_atomic(&path, kept.as_bytes(), true)?;
+        crate::paths::write_atomic(&path, newest(&text, KEEP_BYTES, Utc::now() - chrono::Duration::days(MAX_DAYS)).as_bytes(), true)?;
     }
     let mut out = String::new();
     for r in recs { out.push_str(&serde_json::to_string(r)?); out.push('\n'); }
@@ -96,6 +96,32 @@ pub fn append(home: &Path, recs: &[Record]) -> anyhow::Result<()> {
     { use std::os::unix::fs::OpenOptionsExt; opts.mode(0o600); }
     opts.open(&path)?.write_all(out.as_bytes())?;
     Ok(())
+}
+
+/// The newest whole lines of `text` that fit in `keep` bytes, without those of records older than
+/// `since` (the page never shows them), each line ending in a newline.
+fn newest(text: &str, keep: usize, since: DateTime<Utc>) -> String {
+    #[derive(Deserialize)]
+    struct At { t: DateTime<Utc> }
+    let mut kept: Vec<&str> = vec![];
+    let mut size = 0;
+    for l in text.lines().rev() {
+        if l.trim().is_empty() { continue; }
+        if size + l.len() + 1 > keep { break; }
+        if serde_json::from_str::<At>(l).map_or(false, |a| a.t < since) { break; }
+        size += l.len() + 1;
+        kept.push(l);
+    }
+    kept.iter().rev().fold(String::with_capacity(size), |mut s, l| { s.push_str(l); s.push('\n'); s })
+}
+
+/// Add records to the file, off the runtime (it is file work, and now and then a rewrite), and
+/// tell the window.
+async fn keep(state: &AppState, recs: Vec<Record>) {
+    let home = crate::paths::home();
+    let r = tokio::task::spawn_blocking(move || append(&home, &recs)).await.map_err(anyhow::Error::from).and_then(|r| r);
+    if let Err(e) = r { crate::log::warn(format!("usage: could not keep a run's figures: {e}")); }
+    changed(state);
 }
 
 /// Every record, oldest first (lines that cannot be read are skipped).
@@ -137,11 +163,10 @@ pub fn claude_records(ev: &Value, chat: Option<&str>, now: DateTime<Utc>) -> Vec
 }
 
 /// Keep what a Claude Code run used (its `result`), and tell the window.
-pub fn record_claude(state: &AppState, chat: Option<&str>, ev: &Value) {
+pub async fn record_claude(state: &AppState, chat: Option<&str>, ev: &Value) {
     let recs = claude_records(ev, chat, Utc::now());
     if recs.is_empty() { return; }
-    if let Err(e) = append(&crate::paths::home(), &recs) { crate::log::warn(format!("usage: could not keep a run's figures: {e}")); }
-    changed(state);
+    keep(state, recs).await;
 }
 
 fn changed(state: &AppState) { state.emit(json!({"type": "meter.changed"})); }
@@ -312,15 +337,14 @@ impl CodexRun {
 /// Keep what a Codex run used, and the plan's limits it reported. Gives the estimated cost, which
 /// the caller adds to the month's spending (`AppState::add_usage`): the record here is for the
 /// usage page, the month's figure for the spending limit, and neither is ever added to the other.
-fn keep_codex(state: &AppState, chat: Option<&str>, session: Option<String>, mut run: CodexRun, chosen: Option<String>) -> Option<f64> {
+async fn keep_codex(state: &AppState, chat: Option<&str>, session: Option<String>, mut run: CodexRun, chosen: Option<String>) -> Option<f64> {
     if let Some((rl, at)) = run.limits.take() { update_plans(state, CODEX, codex_windows(&rl, at)); }
     let tokens = run.tokens();
     if tokens.is_empty() { return None; }
     let model = run.model.clone().or(chosen).unwrap_or_default();
     let cost_usd = run.cost(&model);
     let rec = Record { t: Utc::now(), provider: CODEX.into(), chat: chat.map(String::from), session, model, tokens, cache_write_long: 0, cost_usd, estimated: true };
-    if let Err(e) = append(&crate::paths::home(), &[rec]) { crate::log::warn(format!("usage: could not keep a run's figures: {e}")); }
-    changed(state);
+    keep(state, vec![rec]).await;
     cost_usd
 }
 
@@ -331,7 +355,7 @@ pub async fn record_codex(state: &AppState, chat: Option<&str>, session: Option<
         let from_file = tokio::task::spawn_blocking(move || crate::codex::session_file(&home, &sid).map(|p| read_rollout(&p))).await.ok().flatten();
         if let Some(f) = from_file { run.fill_from(f); }
     }
-    if let Some(c) = keep_codex(state, chat, session, run, chosen) { state.add_usage(c).await; }
+    if let Some(c) = keep_codex(state, chat, session, run, chosen).await { state.add_usage(c).await; }
 }
 
 /// A one-shot Codex answer: its whole output, and its session file read before it was removed.
@@ -339,7 +363,7 @@ pub async fn record_codex_one_shot(state: &AppState, stdout: &str, chosen: Optio
     let mut run = CodexRun::default();
     for l in stdout.lines() { run.feed(l); }
     if let Some(f) = file { run.fill_from(f); }
-    if let Some(c) = keep_codex(state, None, None, run, chosen) { state.add_usage(c).await; }
+    if let Some(c) = keep_codex(state, None, None, run, chosen).await { state.add_usage(c).await; }
 }
 
 // ---------- plan limits ----------
@@ -806,6 +830,35 @@ mod tests {
         let back = read(&d);
         assert_eq!(back.len(), 2);
         assert_eq!(back[0], r);
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn a_large_file_is_cut_to_well_under_its_limit() {
+        let d = temp();
+        let r = |t: DateTime<Utc>| Record { t, provider: CLAUDE.into(), chat: Some("c".repeat(36)), session: Some("s".repeat(36)), model: "claude-sonnet-4-5".into(), tokens: Tokens { input: 123456, output: 7890, cache_read: 1234567, cache_write: 12345 }, cache_write_long: 0, cost_usd: Some(0.123456), estimated: false };
+        // Past the limit with records of the usual size: once cut, the file is at most half the
+        // limit, and the next record is added without rewriting it again.
+        let line = serde_json::to_string(&r(Utc::now())).unwrap().len() + 1;
+        let n = (MAX_BYTES as usize) / line + 50;
+        let mut text = String::new();
+        for i in 0..n { text.push_str(&serde_json::to_string(&r(Utc::now() - chrono::Duration::seconds((n - i) as i64))).unwrap()); text.push('\n'); }
+        std::fs::write(file(&d), &text).unwrap();
+        append(&d, &[r(Utc::now())]).unwrap();
+        let size = std::fs::metadata(file(&d)).unwrap().len();
+        assert!(size <= MAX_BYTES / 2 + 2 * line as u64, "{size}");
+        let before = read(&d);
+        let ino = |p: &Path| { #[cfg(unix)] { use std::os::unix::fs::MetadataExt; std::fs::metadata(p).unwrap().ino() } #[cfg(not(unix))] { let _ = p; 0 } };
+        let first = ino(&file(&d));
+        append(&d, &[r(Utc::now())]).unwrap();
+        assert_eq!(ino(&file(&d)), first, "rewritten again right after being cut");
+        assert_eq!(read(&d).len(), before.len() + 1);
+        // Records older than the longest period shown go as well, and a line that cannot be read is kept.
+        let old = serde_json::to_string(&r(Utc::now() - chrono::Duration::days(MAX_DAYS + 1))).unwrap();
+        let new = serde_json::to_string(&r(Utc::now())).unwrap();
+        let cut = newest(&format!("{old}\nnot json\n{new}\n"), 1 << 20, Utc::now() - chrono::Duration::days(MAX_DAYS));
+        assert_eq!(cut, format!("not json\n{new}\n"));
+        assert_eq!(newest(&format!("{new}\n{new}\n"), new.len() + 1, Utc::now() - chrono::Duration::days(1)), format!("{new}\n"));
         std::fs::remove_dir_all(d).unwrap();
     }
 

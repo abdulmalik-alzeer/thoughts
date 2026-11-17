@@ -214,8 +214,8 @@ async fn attachments_of_several_megabytes_arrive_and_never_replace_each_other() 
     let names = |prompt: &str, name: &str| prompt.lines().filter(|l| l.starts_with(&format!("- {}", copies.display())) && l.ends_with(&format!("/{name}"))).count();
     assert_eq!((names(&prompt, "image.png"), names(&prompt, "image (2).png")), (1, 1), "{prompt}");
     assert!(prompt.contains("Read tool"));
-    for _ in 0..200 { if !copies.exists() { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
-    assert!(!copies.exists(), "the copies stay after the run");
+    // They stay after the run (the next message's run may be reading them already) and go with the chat.
+    assert!(copies.exists(), "the copies went at the end of the run");
 
     // A later message with the same file name gets a file of its own; the earlier ones are untouched.
     chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "and this".into(), attachments: vec![att("image.png", b"third")], ..Default::default() })).await.unwrap();
@@ -236,6 +236,9 @@ async fn attachments_of_several_megabytes_arrive_and_never_replace_each_other() 
     let bad = Json(SendBody { text: "two files".into(), attachments: vec![att("fine.txt", b"ok"), Attachment { name: "broken.png".into(), data: "@@".into() }], ..Default::default() });
     assert_eq!(shown(chat_send(State(st.clone()), Path(chat.clone()), bad).await).status, 422);
     assert_eq!((std::fs::read_dir(&dir).unwrap().count(), st.chats.meta(&chat).await.unwrap().message_count), before);
+    // Deleting the chat removes the copies with it.
+    assert!(copies.exists() && st.chats.remove(&chat).await.is_some());
+    assert!(!copies.exists(), "the copies outlived their chat");
     std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
 }
 

@@ -16,9 +16,26 @@ pub fn load(file: &Path) -> Vec<RunRecord> {
 }
 
 fn save(file: &Path, runs: &[RunRecord]) {
+    // Replaced whole, but not forced to the disk (no fsync on every run start and end, on the
+    // runtime): the record is for a daemon that dies, and then the system still has the file. A
+    // power cut that loses it ends the processes it lists as well.
     let r = serde_json::to_string(runs).map_err(std::io::Error::other)
-        .and_then(|t| crate::paths::write_atomic(file, t.as_bytes(), true));
+        .and_then(|t| write_unsynced(file, t.as_bytes()));
     crate::log::ok_or_warn("could not save runs.json", r);
+}
+
+/// Write `file` whole and privately: a new file in its folder put in its place.
+fn write_unsynced(file: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let name = file.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let tmp = file.with_file_name(format!(".{}.{}.tmp", name.to_string_lossy(), uuid::Uuid::new_v4().simple()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; o.mode(0o600); }
+    let r = o.open(&tmp).and_then(|mut f| f.write_all(bytes)).and_then(|_| std::fs::rename(&tmp, file));
+    if r.is_err() { let _ = std::fs::remove_file(&tmp); }
+    r
 }
 
 pub fn record_in(file: &Path, pid: u32, chat_id: &str) {

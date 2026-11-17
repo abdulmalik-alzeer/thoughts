@@ -250,7 +250,14 @@ impl Approvals {
         let mut saved = self.saved.lock().unwrap_or_else(|e| e.into_inner());
         if version <= *saved { return; }
         let text = serde_json::to_string_pretty(&map).unwrap_or_else(|_| "{}".into());
-        crate::log::ok_or_warn("could not remember what was allowed for a chat", crate::paths::write_atomic(&self.file, text.as_bytes(), true));
+        // A write forced to the disk: on the service's runtime, its other work is moved off this
+        // thread meanwhile (the copies still reach the file one at a time, in their order).
+        let write = || crate::paths::write_atomic(&self.file, text.as_bytes(), true);
+        let r = match tokio::runtime::Handle::try_current() {
+            Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => tokio::task::block_in_place(write),
+            _ => write(),
+        };
+        crate::log::ok_or_warn("could not remember what was allowed for a chat", r);
         *saved = version;
     }
 

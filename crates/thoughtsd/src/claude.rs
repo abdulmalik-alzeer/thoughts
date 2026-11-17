@@ -1564,7 +1564,7 @@ where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Option<bool>> {
         }
         None => {
             // The whole group: the assistant's own children (shells, tools) must not live on.
-            if let Some(pid) = pid { crate::proc::kill_tree(pid); }
+            if let Some(pid) = pid { crate::proc::end_tree(pid).await; }
             let _ = child.kill().await;
             child.wait().await
         }
@@ -2024,13 +2024,13 @@ pub async fn start_run(
         e
     })?;
     let Some(mut stdin) = child.stdin.take() else {
-        if let Some(pid) = child.id() { crate::proc::kill_tree(pid); }
+        if let Some(pid) = child.id() { crate::proc::end_tree(pid).await; }
         return Err(crate::tr::err("assistant.no_connection", &[]));
     };
     // Only now is it known that no other run of this chat got in meanwhile; if one did, this one goes.
     let mut kill_rx = match take_switch(&state, &id).await {
         Ok(rx) => rx,
-        Err(e) => { if let Some(pid) = child.id() { crate::proc::kill_tree(pid); } let _ = child.start_kill(); return Err(e); }
+        Err(e) => { if let Some(pid) = child.id() { crate::proc::end_tree(pid).await; } let _ = child.start_kill(); return Err(e); }
     };
     // Remember the process, so a daemon that dies uncleanly can be cleaned up after.
     let pid = child.id();
@@ -2476,7 +2476,7 @@ pub(crate) async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Opti
                 if sid.is_some() { c.session_id = sid; }
             }).await;
             state.add_usage(cost).await;
-            crate::meter::record_claude(state, Some(id), ev);
+            crate::meter::record_claude(state, Some(id), ev).await;
             if let Some(used) = ev["modelUsage"].as_object() { note_models(state, used.keys().cloned()).await; crate::handoff::note_claude(used); }
             // What the assistant was not allowed to do goes under its answer — and before an error,
             // which must stay the last message of a run that failed.
@@ -2652,21 +2652,17 @@ async fn complete_with(state: &AppState, prompt: &str, model: Option<String>, en
     let mut child = c.spawn()?;
     let pid = child.id();
     crate::runs::record(pid, "one-shot");
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("could not connect to the assistant process"))?;
-    // The child is killed when this future is dropped (`kill_on_drop`), so a timeout leaves nothing behind.
-    let out = tokio::time::timeout(COMPLETE_TIMEOUT, async {
-        stdin.write_all(prompt.as_bytes()).await?;
-        drop(stdin);
-        child.wait_with_output().await
-    }).await;
+    if child.stdin.is_none() { crate::runs::forget(pid); anyhow::bail!("could not connect to the assistant process"); }
+    // On timeout it and everything it started are ended before it is let go (`proc::output_within`).
+    let out = crate::proc::output_within(&mut child, Some(prompt.as_bytes()), COMPLETE_TIMEOUT).await;
     crate::runs::forget(pid);
     let out = match out {
-        Ok(r) => r?,
-        Err(_) => {
-            if let Some(pid) = pid { crate::proc::kill_tree(pid); }
+        Ok(r) => r,
+        Err(e) if crate::proc::timed_out(&e) => {
             crate::log::warn(format!("one-shot completion timed out after {}s", COMPLETE_TIMEOUT.as_secs()));
             anyhow::bail!("the assistant timed out (no answer within {} seconds)", COMPLETE_TIMEOUT.as_secs())
         }
+        Err(e) => return Err(e.into()),
     };
     let v: Value = serde_json::from_slice(&out.stdout)
         .map_err(|_| anyhow::anyhow!("claude: {}", String::from_utf8_lossy(&out.stderr)))?;
@@ -2677,7 +2673,7 @@ async fn complete_with(state: &AppState, prompt: &str, model: Option<String>, en
 /// cost counts towards the month either way: summaries, titles and drafts cost money like any run.
 async fn one_shot_outcome(state: &AppState, v: &Value) -> anyhow::Result<String> {
     state.add_usage(v["total_cost_usd"].as_f64().unwrap_or(0.0)).await;
-    crate::meter::record_claude(state, None, v);
+    crate::meter::record_claude(state, None, v).await;
     if v["is_error"].as_bool().unwrap_or(false) {
         let text = v["result"].as_str().unwrap_or("error");
         if let Some(plain) = note_plan_limit(state, text).await { anyhow::bail!("{plain}"); }

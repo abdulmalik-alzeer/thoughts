@@ -1203,7 +1203,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = c.spawn().map_err(|e| { crate::log::error(format!("run {id}: could not start Codex: {e}")); e })?;
     let Some(mut stdin) = child.stdin.take() else {
-        if let Some(pid) = child.id() { crate::proc::kill_tree(pid); }
+        if let Some(pid) = child.id() { crate::proc::end_tree(pid).await; }
         anyhow::bail!("could not connect to the assistant process");
     };
     let pid = child.id();
@@ -1217,7 +1217,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     // One run per chat: if another got in meanwhile, this one goes.
     let mut kill_rx = match crate::claude::take_switch(&state, &id).await {
         Ok(rx) => rx,
-        Err(e) => { if let Some(pid) = pid { crate::proc::kill_tree(pid); } let _ = child.start_kill(); crate::runs::forget(pid); return Err(e); }
+        Err(e) => { if let Some(pid) = pid { crate::proc::end_tree(pid).await; } let _ = child.start_kill(); crate::runs::forget(pid); return Err(e); }
     };
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), l.spec.cwd.clone());
     state.ack_interrupted(&id).await;
@@ -1353,13 +1353,10 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>, che
     let mut child = c.spawn()?;
     let pid = child.id();
     crate::runs::record(pid, "one-shot");
-    let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("could not connect to the assistant process"))?;
+    if child.stdin.is_none() { crate::runs::forget(pid); anyhow::bail!("could not connect to the assistant process"); }
     let text = format!("{note}{prompt}");
-    let out = tokio::time::timeout(crate::claude::COMPLETE_TIMEOUT, async {
-        stdin.write_all(text.as_bytes()).await?;
-        drop(stdin);
-        child.wait_with_output().await
-    }).await;
+    // On timeout it and everything it started are ended before it is let go (`proc::output_within`).
+    let out = crate::proc::output_within(&mut child, Some(text.as_bytes()), crate::claude::COMPLETE_TIMEOUT).await;
     crate::runs::forget(pid);
     // What Codex kept of this answer goes: it was never a conversation of the user's.
     let home = codex_home();
@@ -1372,9 +1369,9 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>, che
         Some(used)
     }).await.ok().flatten();
     let out = match out {
-        Ok(r) => r?,
+        Ok(r) => r,
+        Err(e) if !crate::proc::timed_out(&e) => return Err(e.into()),
         Err(_) => {
-            if let Some(pid) = pid { crate::proc::kill_tree(pid); }
             crate::log::warn(format!("one-shot Codex answer timed out after {}s", crate::claude::COMPLETE_TIMEOUT.as_secs()));
             anyhow::bail!("the assistant timed out (no answer within {} seconds)", crate::claude::COMPLETE_TIMEOUT.as_secs())
         }
