@@ -55,12 +55,17 @@ scripts.
 
 ## Pipeline notes
 
-- **Jobs:** `preflight` → the three platform `build` jobs side by side → `assemble` → `publish`.
+- **Jobs:** `preflight` → the three platform `compile` jobs side by side → one `sign` job per
+  platform → `assemble` → `publish`.
   Beside the builds, `ci-status` decides whether `tests` has to run.
   - `preflight` stops the run before any build minute is spent when the tag does not match the
     version in `Cargo.toml`, or when a release for that tag is already published.
-  - Each `build` job compiles, bundles, signs and hands its installers over as a workflow
-    artifact. It can read the repository and nothing else.
+  - Each `compile` job builds the app with no secret at all and hands over one file, the
+    compiled executable (with its size and checksum), as a workflow artifact.
+  - Each `sign` job starts on a fresh machine from a fresh checkout, installs the Tauri CLI with
+    `npm ci --ignore-scripts`, checks the executable and puts it in place
+    (`scripts/release/compiled.mjs`), then packs, signs and hands its installers over. Both
+    kinds of job can read the repository and nothing else.
   - `assemble` checks that the set is complete and intact (every platform, every file with the
     size and checksum its build recorded, nothing extra) and writes the updater manifest
     `latest.json` once, from all platforms.
@@ -75,7 +80,7 @@ scripts.
   moving a tag to another commit, ends with an error once the release for that tag is public.
   To ship a fix, release a new version. (Switch on "release immutability" as well, see
   [Repository settings](#repository-settings-worth-switching-on).)
-- **How long it takes.** The build jobs keep a cache of the compiled Rust dependencies. A tag
+- **How long it takes.** The compile jobs keep a cache of the compiled Rust dependencies. A tag
   can read caches saved on `main` but not another tag's, so the caches are saved from `main`
   only: by a rehearsal run on `main`, and by a "warm-up" run that starts by itself when a push
   to `main` changes the Rust dependencies or the workflow, and every Monday and Thursday
@@ -95,14 +100,23 @@ scripts.
   good costs about 6; one that rebuilds after a new Rust version about 45. Together that is
   roughly 80 a month; delete the `schedule:` lines in `release.yml` to save them, at the price
   of a cold release now and then. The included allowance of a free account is 2,000 a month.
-- **Secrets** go to two steps only, "Windows signing certificate" and "Bundle and sign". Both
-  run after the compile step, the step in which the build code of every Rust and npm dependency
-  runs; that step gets no secret and no GitHub token (`scripts/tauri-ci.mjs` strips them, and
-  the checkout leaves no token on disk). This stops a dependency from reading a signing key out
-  of the environment while it is being built. It does not stop a dependency that deliberately
-  plants something on the build machine for the later signing step to run; only a separate
-  signing machine would. Treat the updater key accordingly, and see the protected environment
-  under [Repository settings](#repository-settings-worth-switching-on).
+- **Secrets** go to two steps only, "Windows signing certificate" and "Bundle and sign", both in
+  the `sign` job. The build code of every Rust and npm dependency runs in the `compile` job, on
+  another machine, which gets no secret and no GitHub token (`scripts/tauri-ci.mjs` strips them,
+  and the checkout leaves no token on disk). Before 0.1.0 both halves shared one job, so a
+  dependency could plant something for the signing step to run (a line in `GITHUB_ENV` such as
+  `NODE_OPTIONS=--import=…`, or a changed `node_modules` or `target/`). Now nothing from the
+  compile machine reaches the signing but the executable, which is checked and only packed and
+  signed, never run. The sign job runs no project dependency code while it holds the secrets:
+  no build cache and no npm cache, `npm ci --ignore-scripts`, nothing compiled, `tauri bundle`
+  told to run no hook command, and of the installed packages only the Tauri CLI itself is
+  started (it is the tool that signs, at the version in the lock file). `tauri-ci.mjs` also
+  removes `GITHUB_ENV`, `GITHUB_PATH`, `GITHUB_OUTPUT`, `GITHUB_STATE`, `GITHUB_STEP_SUMMARY`,
+  the runner's `ACTIONS_*` tokens and `NODE_OPTIONS` from the compiler's environment, a speed
+  bump on top. Still trusted: the Tauri CLI, GitHub's runner image and the system's packing and
+  signing tools. Treat the updater key accordingly, and see the protected environment under
+  [Repository settings](#repository-settings-worth-switching-on). **This split has not been run
+  yet** (see [Known unverified](#known-unverified)).
 - **Pinned actions:** every third-party action is pinned to a full commit SHA with the version
   in a comment; Dependabot (`.github/dependabot.yml`) proposes updates. `tauri-apps/tauri-action`
   is no longer used: the workflow calls the Tauri CLI itself (`tauri build --no-bundle`, then
@@ -186,8 +200,11 @@ commit yours, or how many were not.
 
 **What it builds:** the universal `.dmg`, the `.app.tar.gz` with its `.sig`, and `latest.json`,
 into `release-out/` and `release-meta/`. The private key is handed to the packing step only,
-never to the compile step. Before anything counts as built, every update file is checked the
-way an installed copy will check it: against `updater.pub`, and for exactly this version.
+never to the compile step. On this Mac both steps run on the same account, so that only keeps
+the key out of the compiler's environment: see
+[Keeping the updater key safe](#keeping-the-updater-key-safe) for the rest. Before anything
+counts as built, every update file is checked the way an installed copy will check it: against
+`updater.pub`, and for exactly this version.
 
 **`--draft`** reuses those files when they were built from the commit that is checked out. It
 switches the CI, Release and Advisories workflows off, pushes `main` and the tag, attaches the
@@ -197,13 +214,77 @@ CI, and the tag would start the pipeline's own release.) Nobody is offered a dra
 **`--publish`** makes the draft public. From that moment every copy that checks is offered
 the update. A published release is never changed: to fix something, release a new version.
 
-The key's password is taken from `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if that is set,
-otherwise from the macOS keychain. Save it there once, so it never passes through a command
-line:
+### Keeping the updater key safe
+
+Whoever has the updater key **and** its password can ship an update that every installed copy
+accepts. The key file (`~/.tauri/thoughts-updater.key`) is only usable with the password, so
+where the password lives matters most.
+
+**Where the command looks for the password**, in this order:
+
+1. `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, if it is set. It works, with a warning: never keep it
+   in a shell profile or any other file, where every program running as you can read it.
+2. A separate keychain, when `THOUGHTS_UPDATER_KEYCHAIN` names one. The command unlocks it
+   (macOS asks for that keychain's password in the terminal), reads the item
+   `thoughts-updater`, and locks it again at once, before anything is built.
+3. An **always-ask** item in the login keychain: service `thoughts-updater`, account
+   `always-ask`, made with `-T ""`. macOS shows a dialog every time it is read. Choose
+   **Allow**, never **Always Allow**: that would make it readable without a question again. If
+   you choose **Deny**, the command stops; it never falls back to another item.
+4. The item made the old way (`security add-generic-password -s thoughts-updater -a release -w`,
+   the instruction before 0.1.0). It still works, with a warning on every run: an item made
+   without `-T` trusts the `security` tool itself, so **any program running as you reads it
+   without being asked**, with the very command this script uses. That includes the build code
+   of every Rust and npm dependency, and every command an assistant runs (Thoughts' own chats run
+   Claude Code with a shell). Move it.
+
+**Moving to an always-ask item** (the simplest). Type these yourself, in Terminal:
 
 ```bash
-security add-generic-password -s thoughts-updater -a release -w
+# 1. The new item. -T "" trusts no program, so macOS asks every time; -w last asks for the
+#    password here, so it never appears on a command line.
+security add-generic-password -s thoughts-updater -a always-ask -T "" -w
+# 2. Check: macOS asks (choose Allow), then the build signs as before.
+node scripts/release/local.mjs
+# 3. Delete the old item from the login keychain.
+security delete-generic-password -s thoughts-updater -a release ~/Library/Keychains/login.keychain-db
 ```
+
+While the old item exists the command warns that it is still there.
+
+**Or a separate keychain that stays locked.** Its own password, locked when the Mac sleeps and
+after five minutes; the command unlocks it only for the moment it reads the item:
+
+```bash
+# 1. The keychain (asks for a new password for it: use one you do not use anywhere else).
+security create-keychain ~/Library/Keychains/thoughts-release.keychain-db
+security set-keychain-settings -l -u -t 300 ~/Library/Keychains/thoughts-release.keychain-db
+# 2. The item. `security` only asks for the password when -w comes last, and a keychain named
+#    on the command line would have to come after it, so make the new keychain the default for
+#    this one command, then put the login keychain back.
+security default-keychain -s ~/Library/Keychains/thoughts-release.keychain-db
+security add-generic-password -s thoughts-updater -a release -T "" -w
+security default-keychain -s ~/Library/Keychains/login.keychain-db
+security default-keychain   # must name login.keychain-db again
+security lock-keychain ~/Library/Keychains/thoughts-release.keychain-db
+# 3. Release with it named (or export it in your shell profile: it is a path, not a secret).
+THOUGHTS_UPDATER_KEYCHAIN=~/Library/Keychains/thoughts-release.keychain-db node scripts/release/local.mjs
+# 4. Delete the old item from the login keychain.
+security delete-generic-password -s thoughts-updater -a release ~/Library/Keychains/login.keychain-db
+```
+
+With `-T ""` the item also asks before it is read while the keychain is unlocked, so a program
+that catches the short unlocked moment still gets a dialog, not the password.
+
+**Better still: keep the key off the account you use every day.** Both moves above stop a
+silent read; they do not stop a program running as you from waiting for you to click Allow, or
+from reading what you type into a terminal. The account you work, browse and run assistant
+chats in is the one most likely to run something hostile. Keep the key file and its password
+on a separate macOS user that is used only for releasing (a fresh clone of the repository, `gh`
+signed in there, nothing else installed), or on a machine used only for that. Tauri's updater
+key cannot live on a hardware token, so a separate account is the practical choice. Whichever
+you choose, keep the backup copy of the key and its password in a password manager and offline,
+as [the updater](#the-updater) section says.
 
 ## Rehearsing an update
 
@@ -408,6 +489,8 @@ Generate it yourself and keep a backup somewhere safe (a password manager).
    Choose a password when asked. This writes the private key to
    `~/.tauri/thoughts-updater.key` and the public key to `~/.tauri/thoughts-updater.key.pub`.
    Keep the private key and its password in a password manager, and one more copy offline.
+   Where the copy you release with lives, and where its password is kept, is in
+   [Keeping the updater key safe](#keeping-the-updater-key-safe).
 2. Commit the public key as `src-tauri/updater.pub`
    (`cp ~/.tauri/thoughts-updater.key.pub src-tauri/updater.pub`). It is not secret. Every
    build with the updater reads it from there, on this Mac and in CI, so the two cannot
@@ -658,6 +741,13 @@ seen it work and noted the version and date.
 - **Plugin frames under the bundled CSP.** In bundled builds Tauri adds a nonce to `<style>` in
   HTML assets, which may block inline styles inside add-on and view frames. This cannot be seen
   in `tauri dev`; it needs a look in an installed build (test plan step 8).
+- **The compile and sign jobs apart (0.1.0).** `release.yml` now compiles in one job and packs
+  and signs in another, on a fresh machine, with the executable handed over as an artifact. That
+  has never run. Its scripts are tested (`release.test.mjs` also checks the workflow's shape:
+  which job gets which secret, what the sign job runs, the pinned actions) and on this Mac
+  `tauri bundle` was seen packing an `.app` from nothing but the executable; whether Windows and
+  Linux need anything more from the compile job, and the artifact hand-over itself, are only
+  proven by the first rehearsal.
 - **The release pipeline as rebuilt for 0.0.9.** It was written without being able to run it:
   its scripts are covered by tests and every action input was checked against the action's own
   definition, but parallel builds, the `tauri build --no-bundle` / `tauri bundle` split on
@@ -779,6 +869,6 @@ the release tags (below).
   GitHub Enterprise; on a public repository both are free. Limiting the environment to tags
   `v*` (also possible on Pro or Team) already keeps the secrets away from every branch and
   rehearsal run. To adopt it: create the environment, move the signing secrets into it, and add
-  `environment: release` to the `build` job in `release.yml`. With a tags-only rule a rehearsal
+  `environment: release` to the `sign` job in `release.yml` (the only job that reads them). With a tags-only rule a rehearsal
   on `main` would then be refused, so let only release runs name the environment. Worth doing
   before the updater key exists, because that key can ship code to every installed copy.

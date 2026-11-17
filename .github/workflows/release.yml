@@ -15,8 +15,8 @@ name: Release
 #              job only checks that and stops (about 6 counted runner minutes per run; delete the
 #              `schedule` lines below to turn the timed runs off).
 #
-# Jobs:  preflight ─┬─ build (macOS | Windows | Linux, in parallel) ── assemble ─┐
-#                   └─ ci-status ── tests (only if this commit has no passing CI) ─┴─ publish
+# Jobs:  preflight ─┬─ compile ── sign (macOS | Windows | Linux, each in parallel) ── assemble ─┐
+#                   └─ ci-status ── tests (only if this commit has no passing CI) ────────────┴─ publish
 #
 # Every signing step is skipped when its secrets are missing, so all of this also works with no
 # secrets at all (unsigned builds, updater off). See docs/RELEASING.md.
@@ -30,10 +30,14 @@ name: Release
 #   UPDATER_PUBKEY      the updater PUBLIC key (not secret)
 #
 # Where secrets go:
-#   - Signing secrets reach two steps only: "Windows signing certificate" and "Bundle and sign".
-#     Both run AFTER the compile step, which is where the build code of every Rust and npm
-#     dependency runs; that step gets no secret and no usable GitHub token.
-#   - The build jobs can only read the repository. The one job that can write to releases
+#   - Signing secrets reach two steps only, "Windows signing certificate" and "Bundle and sign",
+#     both in the `sign` job. The build code of every Rust and npm dependency runs in the
+#     `compile` job, on another runner, which gets no secret and no usable GitHub token: nothing
+#     it plants on its runner (GITHUB_ENV, NODE_OPTIONS, a changed node_modules or target/) can
+#     reach the signing. The sign job starts from a fresh checkout, installs with
+#     `npm ci --ignore-scripts`, compiles nothing and starts no package but the Tauri CLI; it
+#     receives one file from the compile job, the executable, checked before use.
+#   - The compile and sign jobs can only read the repository. The one job that can write to releases
 #     ("publish") runs none of the project's dependencies.
 #   - Nothing secret is written to GITHUB_ENV, to an output, or to a file a later step can read.
 #   - Every third-party action is pinned to a full commit SHA; .github/dependabot.yml proposes
@@ -89,6 +93,9 @@ jobs:
       platforms: ${{ steps.plan.outputs.platforms }}
       matrix: ${{ steps.plan.outputs.matrix }}
       artifact-days: ${{ steps.plan.outputs.artifact-days }}
+      updater: ${{ steps.conf.outputs.updater }}
+      macos-signing: ${{ steps.conf.outputs.macos-signing }}
+      macos-notarisation: ${{ steps.conf.outputs.macos-notarisation }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -100,6 +107,31 @@ jobs:
         env:
           PLATFORMS: ${{ inputs.platforms }}
         run: node scripts/release/plan.mjs
+      # What is configured? Yes or no only: no secret value enters this step (each secret is
+      # compared with '' by GitHub, and only the answer is passed). The compile job needs the
+      # updater answer (the public key is compiled into the app); the sign job needs all of them.
+      # Updater: on only when both the public key (variable) and the private key (secret) exist.
+      - name: What is configured?
+        id: conf
+        shell: bash
+        env:
+          UPDATER_PUBKEY: ${{ vars.UPDATER_PUBKEY }}
+          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
+          HAS_APPLE_NOTARISATION: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
+        run: |
+          if [ -n "$UPDATER_PUBKEY" ] && [ "$HAS_UPDATER_KEY" = "true" ]; then
+            echo "updater=true" >> "$GITHUB_OUTPUT"
+            echo "Updater: on"
+          else
+            echo "updater=false" >> "$GITHUB_OUTPUT"
+            echo "Updater: off (this build will say updates are not configured)"
+            if [ -n "$UPDATER_PUBKEY" ] || [ "$HAS_UPDATER_KEY" = "true" ]; then
+              echo "::warning::Only one half of the updater key is configured (UPDATER_PUBKEY variable, TAURI_SIGNING_PRIVATE_KEY secret). The updater stays off."
+            fi
+          fi
+          echo "macos-signing=$HAS_APPLE_SIGNING" >> "$GITHUB_OUTPUT"
+          echo "macos-notarisation=$HAS_APPLE_NOTARISATION" >> "$GITHUB_OUTPUT"
       # crates/thoughtsd/src/kit_history.rs must list what every earlier release's starter kit
       # shipped (docs/RELEASING.md, checklist step 2); the release's own tag is not in it.
       - name: The starter kit's history is up to date
@@ -145,10 +177,12 @@ jobs:
     if: needs.ci-status.outputs.tests-needed == 'true'
     uses: ./.github/workflows/ci.yml
 
-  # One job per platform, all at once. They compile, bundle, sign, and hand their installers
-  # over as a workflow artifact. They cannot write to the repository or to a release.
-  build:
-    name: ${{ matrix.name || 'Installers' }}
+  # COMPILE: one job per platform, all at once. Every dependency's build code runs here, so this
+  # job is given no secret at all (not one appears anywhere in it) and cannot write to the
+  # repository. It hands over exactly one file, the compiled executable, as the workflow
+  # artifact `compiled-<platform>`; the `sign` job below packs and signs it on another runner.
+  compile:
+    name: ${{ matrix.name && format('Compile {0}', matrix.name) || 'Compile' }}
     needs: preflight
     strategy:
       fail-fast: false
@@ -170,7 +204,8 @@ jobs:
       # Release-profile build cache. A tag can read the caches saved on main but not another
       # tag's, so they are SAVED from main only (warm-up runs and rehearsals on main) and only
       # read here. The key is the same for all three kinds of run. It is saved only when the
-      # whole job succeeded, so an exact hit always means a complete cache.
+      # whole job succeeded, so an exact hit always means a complete cache. (The sign job uses
+      # no cache: a cache is written by jobs that run dependency code.)
       - name: Restore the Rust build cache
         id: cache
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -178,7 +213,8 @@ jobs:
           shared-key: release-${{ matrix.id }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # A warm-up run whose cache is already exact has nothing left to do.
+      # A warm-up run whose cache is already exact has nothing left to do; a warm-up never hands
+      # anything over to be signed.
       - name: What does this job have to do?
         id: todo
         shell: bash
@@ -186,16 +222,16 @@ jobs:
           MODE: ${{ needs.preflight.outputs.mode }}
           CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
         run: |
-          build=true; bundle=true
+          build=true; handover=true
           if [ "$MODE" = "warm" ]; then
-            bundle=false
+            handover=false
             if [ "$CACHE_HIT" = "true" ]; then
               build=false
               echo "The release build cache for this platform is already up to date: nothing to do."
             fi
           fi
           echo "build=$build" >> "$GITHUB_OUTPUT"
-          echo "bundle=$bundle" >> "$GITHUB_OUTPUT"
+          echo "handover=$handover" >> "$GITHUB_OUTPUT"
 
       # Bounded and retried: a slow package mirror must not stall the job (scripts/ci/apt-install.sh).
       - name: Linux system packages (Tauri, keyring)
@@ -215,56 +251,127 @@ jobs:
       - run: npm ci
         if: steps.todo.outputs.build == 'true'
 
-      # --- What is configured? This step only answers yes or no; no secret value enters it.
-      # Updater: on only when both the public key (variable) and the private key (secret) exist.
-      - name: What is configured?
-        id: conf
-        if: steps.todo.outputs.build == 'true'
-        shell: bash
-        env:
-          UPDATER_PUBKEY: ${{ vars.UPDATER_PUBKEY }}
-          HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
-          HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
-          HAS_APPLE_NOTARISATION: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
-        run: |
-          if [ -n "$UPDATER_PUBKEY" ] && [ "$HAS_UPDATER_KEY" = "true" ]; then
-            echo "updater=true" >> "$GITHUB_OUTPUT"
-            echo "Updater: on"
-          else
-            echo "updater=false" >> "$GITHUB_OUTPUT"
-            echo "Updater: off (this build will say updates are not configured)"
-            if [ -n "$UPDATER_PUBKEY" ] || [ "$HAS_UPDATER_KEY" = "true" ]; then
-              echo "::warning::Only one half of the updater key is configured (UPDATER_PUBKEY variable, TAURI_SIGNING_PRIVATE_KEY secret). The updater stays off."
-            fi
-          fi
-          echo "macos-signing=$HAS_APPLE_SIGNING" >> "$GITHUB_OUTPUT"
-          echo "macos-notarisation=$HAS_APPLE_NOTARISATION" >> "$GITHUB_OUTPUT"
-
-      # Public values only (see scripts/release-config.mjs). They are compiled into the app.
+      # Public values only (see scripts/release-config.mjs). They are compiled into the app. The
+      # sign job writes the same file again from the same values, on its own checkout.
       - name: Write the release config
         if: steps.todo.outputs.build == 'true'
         shell: bash
         env:
-          UPDATER_PUBKEY: ${{ steps.conf.outputs.updater == 'true' && vars.UPDATER_PUBKEY || '' }}
-          UPDATER_ENDPOINT: ${{ steps.conf.outputs.updater == 'true' && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
+          UPDATER_PUBKEY: ${{ needs.preflight.outputs.updater == 'true' && vars.UPDATER_PUBKEY || '' }}
+          UPDATER_ENDPOINT: ${{ needs.preflight.outputs.updater == 'true' && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
         run: node scripts/release-config.mjs
 
-      # COMPILE. The UI build and `cargo build --release`: the build scripts and procedural macros
-      # of every Rust dependency and every npm package the UI build loads run here. No secret is
-      # handed to this step, and scripts/tauri-ci.mjs removes any that might be present.
-      - name: Compile (no secrets in this step)
+      # The UI build and `cargo build --release`: the build scripts and procedural macros of every
+      # Rust dependency and every npm package the UI build loads run here. scripts/tauri-ci.mjs
+      # also removes GITHUB_ENV, GITHUB_PATH, GITHUB_OUTPUT, GITHUB_STATE, GITHUB_STEP_SUMMARY and
+      # NODE_OPTIONS from the compiler's environment; that is a speed bump only, since this
+      # runner is thrown away and the signing happens on another one.
+      - name: Compile (no secrets in this job)
         if: steps.todo.outputs.build == 'true'
         shell: bash
         env:
           TAURI_ARGS: ${{ matrix.args }}
         run: node scripts/tauri-ci.mjs build --no-bundle --config src-tauri/release.conf.json $TAURI_ARGS
 
-      # --- Windows: import the .pfx certificate (only when the secret exists), now that the
-      # dependencies' build code has finished. The thumbprint is not secret; it is passed on as
-      # a step output.
+      # Only the executable, with its size and checksum, goes on (scripts/release/compiled.mjs).
+      - name: Hand the compiled app over
+        if: steps.todo.outputs.handover == 'true'
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.id }}
+        run: node scripts/release/compiled.mjs pack "$PLATFORM" "$RUNNER_TEMP/compiled"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.todo.outputs.handover == 'true'
+        with:
+          name: compiled-${{ matrix.id }}
+          path: ${{ runner.temp }}/compiled/
+          if-no-files-found: error
+          retention-days: 1 # a hand-over between two jobs of this run
+          overwrite: true # a re-run of this job replaces what its first attempt uploaded
+
+  # PACKAGE AND SIGN: one job per platform, on a FRESH runner, after that platform compiled. The
+  # only job that sees the signing secrets. It never runs project dependency code while it holds
+  # them:
+  #   - a fresh checkout of the same commit; no build cache, no npm cache (both are written by
+  #     jobs that run dependency code);
+  #   - `npm ci --ignore-scripts`: packages are installed from the lock file, checked against its
+  #     hashes, and no install script runs. Of everything installed, only the Tauri CLI itself
+  #     (@tauri-apps/cli and its prebuilt binary for this platform) is ever started: it is the
+  #     tool that packs and signs. The UI build, vite and every other package stay untouched;
+  #   - nothing is compiled: the executable comes from the compile job, checked by
+  #     scripts/release/compiled.mjs, and is packed and signed, never run;
+  #   - scripts/tauri-ci.mjs tells `tauri bundle` to run no hook command;
+  #   - every action is pinned to a full commit SHA; secrets are given to single steps only.
+  # What remains trusted here: the Tauri CLI at its locked version, GitHub's runner image and
+  # the system packaging tools (codesign, hdiutil, signtool, NSIS, and on Linux the AppImage
+  # tools the CLI downloads, which look at the executable they pack).
+  #
+  # This job has not been run yet (no Actions budget): the first rehearsal is its test.
+  sign:
+    name: ${{ matrix.name || 'Installers' }}
+    needs: [preflight, compile]
+    # Not skipped when another platform's compile failed: in a rehearsal the platforms that did
+    # compile are still packed (a platform whose compile failed stops at the download below).
+    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.preflight.outputs.mode != 'warm' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.preflight.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # `tauri bundle` asks cargo for the project layout (`cargo metadata`, which runs no build
+      # code). The macOS targets match the compile job's.
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.rust_targets }}
+
+      # The AppImage carries the system's WebKit libraries, so the packer needs them installed.
+      # These are Ubuntu's own packages, not the project's dependencies.
+      - name: Linux system packages (for packing)
+        if: runner.os == 'Linux'
+        timeout-minutes: 12
+        run: >-
+          bash scripts/ci/apt-install.sh
+          libwebkit2gtk-4.1-dev build-essential curl wget file
+          libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+          libdbus-1-dev pkg-config
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 20
+          # No `cache:` here on purpose (see above).
+      - name: Install the Tauri CLI from the lock file (no install scripts)
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Write the release config
+        shell: bash
+        env:
+          UPDATER_PUBKEY: ${{ needs.preflight.outputs.updater == 'true' && vars.UPDATER_PUBKEY || '' }}
+          UPDATER_ENDPOINT: ${{ needs.preflight.outputs.updater == 'true' && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
+        run: node scripts/release-config.mjs
+
+      # Downloaded outside the checkout, then only the expected file is copied in.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: compiled-${{ matrix.id }}
+          path: ${{ runner.temp }}/compiled
+      - name: Put the compiled app in place
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.id }}
+        run: node scripts/release/compiled.mjs place "$PLATFORM" "$RUNNER_TEMP/compiled"
+
+      # --- Windows: import the .pfx certificate (only when the secret exists). The thumbprint is
+      # not secret; it is passed on as a step output.
       - name: Windows signing certificate
         id: wincert
-        if: steps.todo.outputs.bundle == 'true' && runner.os == 'Windows'
+        if: runner.os == 'Windows'
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
@@ -291,14 +398,12 @@ jobs:
           WINDOWS_CERTIFICATE_THUMBPRINT: ${{ steps.wincert.outputs.thumbprint }}
         run: node scripts/release-config.mjs --add-windows-signing
 
-      # PACKAGE AND SIGN. The only step that sees the Apple and updater signing secrets. It runs
-      # no dependency build code: `tauri bundle` packs what the compile step built, with the
-      # system's packaging tools. scripts/tauri-ci.mjs drops the secrets that are empty or
-      # incomplete before starting the Tauri CLI (an empty variable would make it try to sign and
-      # fail), so the same step works with all, some or none of them. Apple secrets go to the
-      # macOS job only.
+      # The only step that sees the Apple and updater signing secrets. `tauri bundle` packs what
+      # the compile job built, with the system's packaging tools. scripts/tauri-ci.mjs drops the
+      # secrets that are empty or incomplete before starting the Tauri CLI (an empty variable
+      # would make it try to sign and fail), so the same step works with all, some or none of
+      # them. Apple secrets go to the macOS job only.
       - name: Bundle and sign
-        if: steps.todo.outputs.bundle == 'true'
         shell: bash
         env:
           TAURI_ARGS: ${{ matrix.args }}
@@ -308,26 +413,24 @@ jobs:
           APPLE_ID: ${{ matrix.id == 'macos' && secrets.APPLE_ID || '' }}
           APPLE_PASSWORD: ${{ matrix.id == 'macos' && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ matrix.id == 'macos' && secrets.APPLE_TEAM_ID || '' }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ steps.conf.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ steps.conf.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.preflight.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.preflight.outputs.updater == 'true' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         run: node scripts/tauri-ci.mjs bundle --config src-tauri/release.conf.json $TAURI_ARGS
 
       # The files this platform contributes, under their release names, with sizes and checksums
       # (build-info-<platform>.json). Fails when an installer or an updater signature is missing.
       - name: Collect the installers
-        if: steps.todo.outputs.bundle == 'true'
         shell: bash
         env:
           PLATFORM: ${{ matrix.id }}
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.preflight.outputs.version }}
-          UPDATER: ${{ steps.conf.outputs.updater }}
-          MACOS_SIGNED: ${{ steps.conf.outputs.macos-signing }}
-          MACOS_NOTARIZED: ${{ steps.conf.outputs.macos-notarisation }}
+          UPDATER: ${{ needs.preflight.outputs.updater }}
+          MACOS_SIGNED: ${{ needs.preflight.outputs.macos-signing }}
+          MACOS_NOTARIZED: ${{ needs.preflight.outputs.macos-notarisation }}
           WINDOWS_SIGNED: ${{ steps.wincert.outputs.thumbprint != '' }}
         run: node scripts/release/collect.mjs
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: steps.todo.outputs.bundle == 'true'
         with:
           name: installers-${{ matrix.id }}
           path: release-out/
@@ -340,7 +443,7 @@ jobs:
   # and writes the updater manifest (latest.json) from all platforms in one go. Read-only.
   assemble:
     name: Check the installers and write the update manifest
-    needs: [preflight, build]
+    needs: [preflight, sign]
     if: needs.preflight.outputs.mode != 'warm'
     runs-on: ubuntu-latest
     timeout-minutes: 10

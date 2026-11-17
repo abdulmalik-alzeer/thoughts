@@ -26,13 +26,24 @@
 // It needs:
 //   - the updater's private key in ~/.tauri/thoughts-updater.key, or TAURI_SIGNING_PRIVATE_KEY
 //     holding the key or the path of its file;
-//   - the key's password in TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or in the macOS keychain:
-//       security add-generic-password -s thoughts-updater -a release -w
+//   - the key's password in TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or in a keychain (findPassword
+//     below; the commands that set one up are in docs/RELEASING.md, "Keeping the updater key safe"):
+//       * a separate keychain named by THOUGHTS_UPDATER_KEYCHAIN, which stays locked: this command
+//         unlocks it (macOS asks for its password here), reads the password, and locks it again;
+//       * an item "thoughts-updater", account "always-ask", made with `-T ""` in the login
+//         keychain: macOS asks every time it is read;
+//       * the item "thoughts-updater" made the old way (no `-T`). It still works, with a warning:
+//         any program running as you can read it without being asked, with the very command
+//         this script uses;
 //   - the public key committed as src-tauri/updater.pub;
 //   - `gh` signed in, for --draft and --publish.
 //
 // The key is handed to one step only, the one that packs and signs; the compile step, where the
-// build code of every dependency runs, never sees it (scripts/tauri-ci.mjs, as in the pipeline).
+// build code of every dependency runs, never sees it in its environment (scripts/tauri-ci.mjs, as
+// in the pipeline). That only covers the environment: a password any program can read from the
+// keychain, or a key file on the account you use every day, is open to that same build code, and
+// to every assistant command run as you. Hence the warning above, and the advice in the docs to
+// keep the key off the everyday account.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -46,7 +57,12 @@ import { publish, refusePublished } from './publish.mjs';
 const MAC = PLATFORMS.find((p) => p.id === 'macos');
 export const DEFAULT_KEY = join(homedir(), '.tauri', 'thoughts-updater.key');
 const PUBLIC_KEY = join(ROOT, 'src-tauri', 'updater.pub');
-const KEYCHAIN_SERVICE = 'thoughts-updater';
+export const KEYCHAIN_SERVICE = 'thoughts-updater';
+/** The account of the always-ask keychain item (made with `-T ""`, so macOS asks every time). */
+export const ALWAYS_ASK_ACCOUNT = 'always-ask';
+/** The account the item had when it was made the old way (docs before 0.1.0). */
+const OLD_ACCOUNT = 'release';
+const SAFETY_DOCS = 'docs/RELEASING.md, "Keeping the updater key safe"';
 /** The workflows a push to `main` or of a tag would start. */
 const WORKFLOWS = ['CI', 'Release', 'Advisories'];
 
@@ -87,7 +103,7 @@ export function commitsByOthers(log, own) {
 /** Everything that must hold before a release is built. Returns the reasons it does not.
  *  `others`: the commits since the release `since` that someone else made (`commitsByOthers`);
  *  `behind`: how many commits GitHub's `main` has that this computer does not. */
-export function preflightProblems({ branch, dirty, version, head, tagAt, key, password, publicKey, keysMatch, changelog, changelogAr, others = [], since = null, includeOthers = false, behind = 0 }) {
+export function preflightProblems({ branch, dirty, version, head, tagAt, key, password, passwordProblem = null, publicKey, keysMatch, changelog, changelogAr, others = [], since = null, includeOthers = false, behind = 0 }) {
   const problems = [];
   if (behind > 0) problems.push(`GitHub's main has ${behind} commit${behind === 1 ? '' : 's'} this Mac does not have: someone else pushed. Read ${behind === 1 ? 'it' : 'them'} before releasing (git log HEAD..origin/main), then bring ${behind === 1 ? 'it' : 'them'} in or leave ${behind === 1 ? 'it' : 'them'} out.`);
   if (others.length && !includeOthers) {
@@ -101,7 +117,7 @@ export function preflightProblems({ branch, dirty, version, head, tagAt, key, pa
   if (!/^\d+\.\d+\.\d+$/.test(version || '')) problems.push(`"${version}" is not a version like 1.2.3.`);
   if (tagAt && tagAt !== head) problems.push(`The tag v${version} already exists on another commit (${tagAt.slice(0, 7)}). Set a new version, or delete the tag if that version was never published.`);
   if (!key) problems.push(`The updater's private key was not found (looked in TAURI_SIGNING_PRIVATE_KEY and ${DEFAULT_KEY}).`);
-  if (key && password === null) problems.push(`The key's password was not found. Set TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or save it in the keychain: security add-generic-password -s ${KEYCHAIN_SERVICE} -a release -w`);
+  if (key && password === null) problems.push(passwordProblem || `The key's password was not found. Set TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or save it in a keychain as ${SAFETY_DOCS} describes.`);
   if (!publicKey) problems.push('src-tauri/updater.pub is missing. Commit the public key (the .pub file made with the private key): it is not secret, and every build reads it from there.');
   if (key && publicKey && password !== null && keysMatch === false) problems.push('The private key does not match src-tauri/updater.pub (or its password is wrong). A copy built with the wrong public key can never be updated.');
   if (!changelog) problems.push(`docs/CHANGELOG.md has no entry "## ${version}". It becomes the release page and this version's Help › What's new (and the update notes copies older than 0.1.0 show).`);
@@ -127,11 +143,77 @@ function sh(cmd, args, { env = process.env, capture = false, allowFail = false, 
 const git = (...args) => sh('git', args, { capture: true, allowFail: true });
 const node = (script, args = [], env = process.env) => sh(process.execPath, [join(ROOT, script), ...args], { env });
 
-function findPassword(env) {
-  if (env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD !== undefined) return env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD;
-  if (process.platform !== 'darwin') return null;
-  const r = sh('security', ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'], { capture: true, allowFail: true });
-  return r.ok ? r.out : null;
+/** Runs /usr/bin/security. `interactive`: it may ask in this terminal (unlocking a keychain). */
+function security(args, { interactive = false } = {}) {
+  return sh('/usr/bin/security', args, { capture: !interactive, allowFail: true });
+}
+
+/** The path inside the quotes `security login-keychain` prints. */
+export function keychainPath(out) {
+  const m = String(out ?? '').match(/"([^"]+)"/);
+  return m ? m[1] : String(out ?? '').trim() || null;
+}
+
+/** The updater key's password and where it came from. `run(args, { interactive })` stands for
+ *  /usr/bin/security and answers `{ ok, out }` (the tests pass a fake). Returns
+ *  `{ password, source, warnings, problem }`: `password` is null when there is none, and then
+ *  `problem` may say why; `warnings` are printed but stop nothing.
+ *
+ *  In this order:
+ *    1. TAURI_SIGNING_PRIVATE_KEY_PASSWORD, when set.
+ *    2. THOUGHTS_UPDATER_KEYCHAIN: a separate keychain that stays locked. It is unlocked (macOS asks
+ *       for its password in this terminal), the password is read, and it is locked again at once.
+ *    3. The always-ask item (account "always-ask") in the login keychain. Whether it exists is
+ *       looked up without reading the password, so a "Deny" stops here and never falls through to
+ *       an older item.
+ *    4. Any item "thoughts-updater": the old way. It works, with a warning, because unless it was
+ *       made with `-T ""` any program running as you reads it without being asked. */
+export function findPassword(env, { platform = process.platform, run = security } = {}) {
+  const warnings = [];
+  const result = (password, source, problem = null) => ({ password, source, warnings, problem });
+  // An old item left behind after the move is still readable without a question.
+  const oldItemLeft = () => {
+    const login = run(['login-keychain']);
+    const where = login.ok ? keychainPath(login.out) : null;
+    if (where && run(['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', OLD_ACCOUNT, where]).ok) {
+      warnings.push(`The old keychain item for the updater key's password (account "${OLD_ACCOUNT}") is still in your login keychain, where any program running as you can read it without being asked. Delete it (${SAFETY_DOCS}).`);
+    }
+  };
+
+  if (env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD !== undefined) {
+    warnings.push(`The updater key's password came from TAURI_SIGNING_PRIVATE_KEY_PASSWORD. Never keep it in a shell profile or any other file: every program running as you can read those. A keychain that asks is safer (${SAFETY_DOCS}).`);
+    return result(env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD, 'environment');
+  }
+  if (platform !== 'darwin') return result(null, null);
+
+  const keychain = (env.THOUGHTS_UPDATER_KEYCHAIN || '').trim();
+  if (keychain) {
+    if (!run(['unlock-keychain', keychain], { interactive: true }).ok) {
+      return result(null, 'separate-keychain', `Could not unlock the keychain ${keychain} (THOUGHTS_UPDATER_KEYCHAIN): wrong password, or no such keychain.`);
+    }
+    let r;
+    try {
+      r = run(['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w', keychain]);
+    } finally {
+      // Locked again before anything else runs, the build included.
+      if (!run(['lock-keychain', keychain]).ok) warnings.push(`Could not lock ${keychain} again. Lock it yourself (${SAFETY_DOCS}).`);
+    }
+    if (!r.ok) return result(null, 'separate-keychain', `The keychain ${keychain} holds no item "${KEYCHAIN_SERVICE}", or macOS was not allowed to read it.`);
+    oldItemLeft();
+    return result(r.out, 'separate-keychain');
+  }
+
+  if (run(['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', ALWAYS_ASK_ACCOUNT]).ok) {
+    const r = run(['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', ALWAYS_ASK_ACCOUNT, '-w']);
+    if (!r.ok) return result(null, 'always-ask', `macOS was not allowed to read the updater key's password. Run this again and choose Allow (never Always Allow: that would let any program read it without asking).`);
+    oldItemLeft();
+    return result(r.out, 'always-ask');
+  }
+
+  const r = run(['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w']);
+  if (!r.ok) return result(null, null);
+  warnings.push(`The updater key's password is in a keychain item that any program running as you can read without being asked (with the same command this script uses): a dependency's build code, or a command an assistant runs. Move it to an always-ask item or to a separate keychain that stays locked, and keep the key off the account you use every day (${SAFETY_DOCS}).`);
+  return result(r.out, 'login-keychain');
 }
 
 /** Does `key` (with `password`) sign what `publicKey` verifies? Signs a few bytes and checks. */
@@ -150,11 +232,14 @@ function keysAgree(key, password, publicKey) {
   }
 }
 
-function facts() {
+function facts({ withKey = true } = {}) {
   const version = readVersion();
   const changelog = (file) => (existsSync(join(ROOT, file)) ? readFileSync(join(ROOT, file), 'utf8') : '');
-  const key = findKey(process.env);
-  const password = key ? findPassword(process.env) : null;
+  // --publish signs nothing, so it does not ask for the key's password.
+  const key = withKey ? findKey(process.env) : null;
+  const found = key ? findPassword(process.env) : { password: null, warnings: [], problem: null };
+  for (const w of found.warnings) console.warn(`Warning: ${w}`);
+  const password = found.password;
   const publicKey = existsSync(PUBLIC_KEY) ? readFileSync(PUBLIC_KEY, 'utf8').trim() : '';
   const tag = git('rev-parse', '-q', '--verify', `refs/tags/v${version}^{commit}`);
   // Whose commits go into this release: everything since the release before it.
@@ -176,6 +261,7 @@ function facts() {
     repo: repoFromRemote(git('remote', 'get-url', 'origin').out),
     key,
     password,
+    passwordProblem: found.problem,
     publicKey,
     keysMatch: key && publicKey && password !== null ? keysAgree(key, password, publicKey) : null,
     changelog: changelogSection(version, changelog('docs/CHANGELOG.md')),
@@ -308,7 +394,7 @@ if (isMain(import.meta.url)) {
     if (unknown.length || (args.has('--draft') && args.has('--publish'))) stop('usage: local.mjs [--draft | --publish] [--skip-tests] [--include-others]');
     if (process.platform !== 'darwin') stop('This command builds the macOS release, so it runs on a Mac.');
 
-    const f = facts();
+    const f = facts({ withKey: !args.has('--publish') });
     if (!f.repo) stop('The origin remote is not a GitHub repository.');
 
     if (args.has('--publish')) {

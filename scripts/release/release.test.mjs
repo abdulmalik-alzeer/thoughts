@@ -7,17 +7,19 @@
 // calls the scripts make, with the rules that matter here (a read-only token cannot see drafts,
 // a draft cannot be fetched by tag, a file name can only be uploaded once).
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
 import { releaseConfig } from '../release-config.mjs';
+import { NO_HOOKS, prepare, RUNNER_CHANNELS } from '../tauri-ci.mjs';
 import { assemble, changelogSection, notesFor, updaterManifest } from './assemble.mjs';
 import { decide, verdict } from './ci-status.mjs';
 import { collect } from './collect.mjs';
 import { GitHub, PLATFORMS, Stop } from './lib.mjs';
-import { commitsByOthers, findKey, preflightProblems, publicEndpoint, repoFromRemote, workflowsToSwitch } from './local.mjs';
+import { ALWAYS_ASK_ACCOUNT, commitsByOthers, findKey, findPassword, keychainPath, KEYCHAIN_SERVICE, preflightProblems, publicEndpoint, repoFromRemote, workflowsToSwitch } from './local.mjs';
+import { executable, MANIFEST, pack, place } from './compiled.mjs';
 import { checkSignature } from './minisign.mjs';
 import { plan } from './plan.mjs';
 import { publish, refusePublished } from './publish.mjs';
@@ -628,4 +630,288 @@ test('local release: commits someone else made are listed, and the build waits u
   const behind = preflightProblems({ ...ready, behind: 2 });
   assert.equal(behind.length, 1);
   assert.match(behind[0], /GitHub's main has 2 commits this Mac does not have/);
+});
+
+// A stand-in for /usr/bin/security: a set of keychains, each locked or not, holding items
+// { service, account, password }. Records every call, so a test can see what was asked and when.
+// Never touches a real keychain.
+function fakeSecurity({ keychains = {}, deny = false, unlockPassword = 'right', typed = 'right' } = {}) {
+  const LOGIN = '/Users/me/Library/Keychains/login.keychain-db';
+  const chains = { [LOGIN]: { locked: false, items: [] }, ...keychains };
+  const calls = [];
+  const run = (args, opts = {}) => {
+    calls.push({ args, interactive: !!opts.interactive, locked: Object.fromEntries(Object.entries(chains).map(([k, v]) => [k, v.locked])) });
+    const [cmd, ...rest] = args;
+    if (cmd === 'login-keychain') return { ok: true, out: `"${LOGIN}"` };
+    if (cmd === 'unlock-keychain' || cmd === 'lock-keychain') {
+      const chain = chains[rest.at(-1)];
+      if (!chain) return { ok: false, out: '' };
+      if (cmd === 'unlock-keychain') {
+        if (!opts.interactive || typed !== unlockPassword) return { ok: false, out: '' };
+        chain.locked = false;
+      } else chain.locked = true;
+      return { ok: true, out: '' };
+    }
+    if (cmd === 'find-generic-password') {
+      const get = (flag) => (rest.includes(flag) ? rest[rest.indexOf(flag) + 1] : undefined);
+      const reveal = rest.includes('-w');
+      const last = rest.at(-1);
+      const where = last in chains ? [last] : [LOGIN, ...Object.keys(keychains).filter((k) => keychains[k].inSearchList)];
+      for (const name of where) {
+        const chain = chains[name];
+        const item = chain.items.find((i) => i.service === get('-s') && (get('-a') === undefined || i.account === get('-a')));
+        if (!item) continue;
+        if (reveal && (chain.locked || (item.alwaysAsk && deny))) return { ok: false, out: '' };
+        return { ok: true, out: reveal ? item.password : `keychain: "${name}"` };
+      }
+      return { ok: false, out: '' };
+    }
+    throw new Error(`unexpected security ${args.join(' ')}`);
+  };
+  return { run, calls, chains, LOGIN };
+}
+const item = (account, password, extra = {}) => ({ service: KEYCHAIN_SERVICE, account, password, ...extra });
+
+test('key password: the environment comes first, with a warning not to keep it in a file', () => {
+  const sec = fakeSecurity();
+  const r = findPassword({ TAURI_SIGNING_PRIVATE_KEY_PASSWORD: 'from-env' }, { platform: 'darwin', run: sec.run });
+  assert.equal(r.password, 'from-env');
+  assert.equal(r.source, 'environment');
+  assert.match(r.warnings.join(' '), /shell profile/);
+  assert.equal(sec.calls.length, 0, 'no keychain is asked');
+  assert.equal(findPassword({ TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '' }, { platform: 'darwin', run: sec.run }).password, '', 'an empty password is a password');
+  assert.equal(findPassword({}, { platform: 'linux', run: sec.run }).password, null, 'no keychain off macOS');
+});
+
+test('key password: the old login-keychain item still works, with a warning to move it', () => {
+  const sec = fakeSecurity();
+  sec.chains[sec.LOGIN].items.push(item('release', 'old-way'));
+  const r = findPassword({}, { platform: 'darwin', run: sec.run });
+  assert.equal(r.password, 'old-way');
+  assert.equal(r.source, 'login-keychain');
+  assert.equal(r.problem, null);
+  assert.equal(r.warnings.length, 1);
+  assert.match(r.warnings[0], /without being asked/);
+  assert.match(r.warnings[0], /always-ask item or to a separate keychain/);
+  assert.match(r.warnings[0], /off the account you use every day/);
+  assert.match(r.warnings[0], /Keeping the updater key safe/);
+});
+
+test('key password: an always-ask item is read once macOS asked; a Deny never falls back to the old item', () => {
+  const sec = fakeSecurity();
+  sec.chains[sec.LOGIN].items.push(item(ALWAYS_ASK_ACCOUNT, 'asked', { alwaysAsk: true }));
+  const r = findPassword({}, { platform: 'darwin', run: sec.run });
+  assert.equal(r.password, 'asked');
+  assert.equal(r.source, 'always-ask');
+  assert.deepEqual(r.warnings, [], 'moved: nothing to warn about');
+  // Whether it exists is looked up without -w (no question, no password), then it is read.
+  const reads = sec.calls.filter((c) => c.args[0] === 'find-generic-password');
+  assert.ok(!reads[0].args.includes('-w'));
+  assert.ok(reads[1].args.includes('-w') && reads[1].args.includes(ALWAYS_ASK_ACCOUNT));
+
+  // The old item is still there: works, and says to delete it.
+  const both = fakeSecurity();
+  both.chains[both.LOGIN].items.push(item(ALWAYS_ASK_ACCOUNT, 'asked', { alwaysAsk: true }), item('release', 'old-way'));
+  const r2 = findPassword({}, { platform: 'darwin', run: both.run });
+  assert.equal(r2.password, 'asked');
+  assert.match(r2.warnings.join(' '), /old keychain item .* is still in your login keychain/);
+  assert.ok(!both.calls.some((c) => c.args.includes('release') && c.args.includes('-w')), 'the old item is looked up, never read');
+
+  // Deny: no password, a clear reason, and the old item is not read instead.
+  const denied = fakeSecurity({ deny: true });
+  denied.chains[denied.LOGIN].items.push(item(ALWAYS_ASK_ACCOUNT, 'asked', { alwaysAsk: true }), item('release', 'old-way'));
+  const r3 = findPassword({}, { platform: 'darwin', run: denied.run });
+  assert.equal(r3.password, null);
+  assert.match(r3.problem, /choose Allow \(never Always Allow/);
+  assert.match(preflightProblems({ branch: 'main', version: '1.2.3', key: 'KEY', password: r3.password, passwordProblem: r3.problem, publicKey: 'PUB', changelog: 'x', changelogAr: 'y' })[0], /choose Allow/);
+});
+
+test('key password: a separate keychain is unlocked by asking, read, and locked again before anything else', () => {
+  const RELEASE = '/Users/me/Library/Keychains/thoughts-release.keychain-db';
+  const sec = fakeSecurity({ keychains: { [RELEASE]: { locked: true, items: [item('release', 'separate')] } } });
+  const r = findPassword({ THOUGHTS_UPDATER_KEYCHAIN: RELEASE }, { platform: 'darwin', run: sec.run });
+  assert.equal(r.password, 'separate');
+  assert.equal(r.source, 'separate-keychain');
+  assert.deepEqual(r.warnings, []);
+  assert.equal(sec.chains[RELEASE].locked, true, 'locked again');
+  const order = sec.calls.map((c) => c.args[0]);
+  assert.deepEqual(order.slice(0, 3), ['unlock-keychain', 'find-generic-password', 'lock-keychain']);
+  assert.equal(sec.calls[0].interactive, true, 'unlocking asks in the terminal');
+  assert.equal(sec.calls[1].args.at(-1), RELEASE, 'read from that keychain only');
+
+  // Wrong password typed: nothing is read, and the reason names the keychain.
+  const wrong = fakeSecurity({ typed: 'wrong', keychains: { [RELEASE]: { locked: true, items: [item('release', 'separate')] } } });
+  const r2 = findPassword({ THOUGHTS_UPDATER_KEYCHAIN: RELEASE }, { platform: 'darwin', run: wrong.run });
+  assert.equal(r2.password, null);
+  assert.match(r2.problem, /Could not unlock the keychain .*thoughts-release/);
+  assert.ok(!wrong.calls.some((c) => c.args.includes('-w')));
+
+  // The keychain has no such item: still locked again afterwards.
+  const empty = fakeSecurity({ keychains: { [RELEASE]: { locked: true, items: [] } } });
+  const r3 = findPassword({ THOUGHTS_UPDATER_KEYCHAIN: RELEASE }, { platform: 'darwin', run: empty.run });
+  assert.equal(r3.password, null);
+  assert.match(r3.problem, /holds no item "thoughts-updater"/);
+  assert.equal(empty.chains[RELEASE].locked, true);
+
+  // Moved, but the old login item was left behind.
+  const left = fakeSecurity({ keychains: { [RELEASE]: { locked: true, items: [item('release', 'separate')] } } });
+  left.chains[left.LOGIN].items.push(item('release', 'old-way'));
+  assert.match(findPassword({ THOUGHTS_UPDATER_KEYCHAIN: RELEASE }, { platform: 'darwin', run: left.run }).warnings.join(' '), /old keychain item/);
+
+  assert.equal(keychainPath('    "/Users/me/Library/Keychains/login.keychain-db"\n'), '/Users/me/Library/Keychains/login.keychain-db');
+});
+
+test('key password: nothing anywhere is "not found", and the problem points to the docs, not a command', () => {
+  const sec = fakeSecurity();
+  const r = findPassword({}, { platform: 'darwin', run: sec.run });
+  assert.equal(r.password, null);
+  const [problem] = preflightProblems({ branch: 'main', version: '1.2.3', key: 'KEY', password: null, publicKey: 'PUB', changelog: 'x', changelogAr: 'y' });
+  assert.match(problem, /password was not found/);
+  assert.match(problem, /Keeping the updater key safe/);
+  assert.doesNotMatch(problem, /add-generic-password/);
+});
+
+// ------------------------------------------------- compile and sign apart (release.yml, tauri-ci)
+//
+// The workflow cannot be run here, so its shape is checked as text: which job gets which secret,
+// what the sign job runs, and that every action is pinned. A plain splitter, not a YAML parser
+// (these scripts have no dependencies): jobs are the two-space keys under `jobs:`, steps the
+// `      - ` items, comment lines are ignored.
+
+const WORKFLOW = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
+function jobsOf(text) {
+  const lines = text.split('\n').filter((l) => !/^\s*#/.test(l));
+  const start = lines.indexOf('jobs:');
+  const jobs = {};
+  let name = null;
+  for (const line of lines.slice(start + 1)) {
+    const m = line.match(/^ {2}([a-z][a-z-]*):\s*$/);
+    if (m) jobs[(name = m[1])] = [];
+    else if (name) jobs[name].push(line.replace(/\s+#.*$/, ''));
+  }
+  return Object.fromEntries(Object.entries(jobs).map(([k, v]) => [k, v.join('\n')]));
+}
+const stepsOf = (job) => job.split(/\n(?= {6}- )/).slice(1);
+const stepName = (step) => (step.match(/name: (.+)/) || step.match(/uses: (.+)/) || [, '?'])[1].trim();
+
+test('release.yml: the compile job never sees a secret; the sign job sees them in two steps only', () => {
+  const jobs = jobsOf(WORKFLOW);
+  assert.ok(jobs.compile && jobs.sign, 'a compile job and a sign job');
+  assert.ok(!('build' in jobs), 'no job compiles and signs at once any more');
+  assert.doesNotMatch(jobs.compile, /secrets\./, 'not one secret in the compile job');
+  assert.match(jobs.sign, /needs: \[preflight, compile\]/);
+  assert.match(jobs.assemble, /needs: \[preflight, sign\]/);
+
+  const withSecrets = stepsOf(jobs.sign).filter((s) => /secrets\./.test(s)).map(stepName);
+  assert.deepEqual(withSecrets, ['Windows signing certificate', 'Bundle and sign']);
+  // Elsewhere a secret is only ever compared with '' (its value never enters a step).
+  for (const [name, job] of Object.entries(jobs)) {
+    if (name === 'sign') continue;
+    for (const use of job.match(/secrets\.[A-Z_]+[^}&|]*/g) || []) assert.match(use, /secrets\.[A-Z_]+ != ''/, `${name}: ${use}`);
+  }
+  for (const job of Object.values(jobs)) assert.doesNotMatch(job, /secrets: inherit/);
+});
+
+test('release.yml: the sign job starts fresh and runs no dependency code but the Tauri CLI', () => {
+  const sign = jobsOf(WORKFLOW).sign;
+  const steps = stepsOf(sign);
+  assert.match(stepName(steps[0]), /^actions\/checkout@/, 'a fresh checkout first');
+  assert.match(steps[0], /persist-credentials: false/);
+  assert.doesNotMatch(sign, /rust-cache|cache:/, 'no build cache and no npm cache');
+  const runs = steps.map((s) => (s.match(/run: (?:>-|\|)?\s*([\s\S]*)/) || [, ''])[1].trim()).filter(Boolean);
+  const npm = runs.filter((r) => /\bnpm\b|\bnpx\b|\byarn\b|\bpnpm\b/.test(r));
+  assert.deepEqual(npm, ['npm ci --ignore-scripts --no-audit --no-fund'], 'one npm command, with install scripts off');
+  assert.ok(!runs.some((r) => /cargo (build|run|test)|tauri-ci\.mjs build|vite/.test(r)), 'nothing is compiled or built');
+  assert.ok(runs.some((r) => /^node scripts\/tauri-ci\.mjs bundle /.test(r)));
+  assert.ok(runs.some((r) => /^node scripts\/release\/compiled\.mjs place /.test(r)));
+  // The secrets come after the executable is in place and checked.
+  const names = steps.map(stepName);
+  assert.ok(names.indexOf('Put the compiled app in place') < names.indexOf('Windows signing certificate'));
+  assert.ok(names.indexOf('Windows signing certificate') < names.indexOf('Bundle and sign'));
+});
+
+test('release.yml: every action is pinned to a full commit', () => {
+  const uses = [...WORKFLOW.matchAll(/^\s*(?:- )?uses: (\S+)/gm)].map((m) => m[1]);
+  assert.ok(uses.length > 10);
+  for (const u of uses) assert.match(u, /^(\.\/\.github\/workflows\/[\w.-]+\.yml|[\w.-]+\/[\w.-]+@[0-9a-f]{40})$/, u);
+});
+
+test('tauri-ci: the compile step loses the secrets, the tokens, the runner file commands and NODE_OPTIONS', () => {
+  const given = {
+    PATH: '/bin', HOME: '/home/me', CARGO_HOME: '/c',
+    TAURI_SIGNING_PRIVATE_KEY: 'KEY', TAURI_SIGNING_PRIVATE_KEY_PASSWORD: 'pw', APPLE_CERTIFICATE: 'cert', WINDOWS_CERTIFICATE: 'pfx',
+    GITHUB_TOKEN: 't', GH_TOKEN: 't', NODE_OPTIONS: '--import=/tmp/x.mjs',
+    ...Object.fromEntries(RUNNER_CHANNELS.map((k) => [k, `/runner/${k}`])),
+  };
+  const r = prepare(['build', '--no-bundle', '--config', 'src-tauri/release.conf.json'], given, { platform: 'linux' });
+  assert.deepEqual(Object.keys(r.env).sort(), ['CARGO_HOME', 'HOME', 'PATH']);
+  assert.deepEqual(r.args, ['build', '--no-bundle', '--config', 'src-tauri/release.conf.json'], 'arguments unchanged');
+  assert.match(r.log.join('\n'), /::warning::The compile step was given APPLE_CERTIFICATE, TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD, WINDOWS_CERTIFICATE\./);
+  assert.match(r.log.join('\n'), /removed GITHUB_ENV, GITHUB_PATH, GITHUB_OUTPUT, GITHUB_STATE/);
+  assert.match(r.log.join('\n'), /NODE_OPTIONS/);
+  assert.doesNotMatch(r.log.join('\n'), /KEY'|pw|\/tmp\/x/, 'names only, never values');
+  assert.equal(given.NODE_OPTIONS, '--import=/tmp/x.mjs', 'the caller\'s environment is not changed');
+});
+
+test('tauri-ci: the bundle step keeps usable secrets, drops the rest, and runs no hook command', () => {
+  const r = prepare(['bundle', '--config', 'src-tauri/release.conf.json'], {
+    PATH: '/bin', TAURI_SIGNING_PRIVATE_KEY: 'KEY', TAURI_SIGNING_PRIVATE_KEY_PASSWORD: '',
+    APPLE_CERTIFICATE: '', APPLE_SIGNING_IDENTITY: '', APPLE_ID: 'me', NODE_OPTIONS: '--require x', GITHUB_ENV: '/f', GITHUB_TOKEN: 't',
+  }, { platform: 'darwin' });
+  assert.equal(r.env.TAURI_SIGNING_PRIVATE_KEY, 'KEY');
+  assert.equal(r.env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD, '', 'an empty password is kept with its key');
+  for (const k of ['APPLE_CERTIFICATE', 'APPLE_SIGNING_IDENTITY', 'APPLE_ID', 'NODE_OPTIONS', 'GITHUB_ENV', 'GITHUB_TOKEN']) assert.ok(!(k in r.env), k);
+  assert.equal(r.env.TAURI_BUNDLER_DMG_IGNORE_CI, 'true');
+  assert.deepEqual(r.args.slice(-2), ['--config', NO_HOOKS]);
+  assert.deepEqual(JSON.parse(NO_HOOKS), { build: { beforeBundleCommand: null, beforeBuildCommand: null } });
+  const none = prepare(['bundle'], { TAURI_SIGNING_PRIVATE_KEY: ' ', TAURI_SIGNING_PRIVATE_KEY_PASSWORD: 'pw' }, { platform: 'linux' });
+  assert.ok(!('TAURI_SIGNING_PRIVATE_KEY' in none.env) && !('TAURI_SIGNING_PRIVATE_KEY_PASSWORD' in none.env), 'no key: no password either');
+});
+
+test('compiled app hand-over: only the checked executable reaches the sign job', () => {
+  for (const id of ['macos', 'windows', 'linux']) {
+    const compiler = tmp();
+    const exe = executable(id, compiler);
+    mkdirSync(join(exe.path, '..'), { recursive: true });
+    writeFileSync(exe.path, `binary for ${id}`);
+    mkdirSync(join(compiler, 'target', 'release', 'build', 'evil'), { recursive: true }); // never handed over
+    const out = join(tmp(), 'compiled');
+    const record = pack({ platform: id, root: compiler, out });
+    assert.equal(record.file, id === 'windows' ? 'thoughts.exe' : 'thoughts');
+    if (id === 'macos') assert.match(exe.path, /target\/universal-apple-darwin\/release\/thoughts$/);
+
+    const fresh = tmp();
+    const placed = place({ platform: id, root: fresh, from: out });
+    assert.equal(readFileSync(placed.path, 'utf8'), `binary for ${id}`);
+    if (process.platform !== 'win32') assert.equal(statSync(placed.path).mode & 0o777, 0o755, 'executable again');
+    assert.throws(() => place({ platform: id, root: fresh, from: out }), stops(/already exists/), 'a fresh checkout only');
+  }
+
+  const make = () => {
+    const compiler = tmp();
+    const exe = executable('linux', compiler);
+    mkdirSync(join(exe.path, '..'), { recursive: true });
+    writeFileSync(exe.path, 'binary');
+    const out = join(tmp(), 'compiled');
+    pack({ platform: 'linux', root: compiler, out });
+    return out;
+  };
+  let out = make();
+  writeFileSync(join(out, 'tauri.js'), 'planted');
+  assert.throws(() => place({ platform: 'linux', root: tmp(), from: out }), stops(/exactly compiled\.json and thoughts; found compiled\.json, tauri\.js, thoughts/));
+  out = make();
+  writeFileSync(join(out, 'thoughts'), 'changed on the way');
+  assert.throws(() => place({ platform: 'linux', root: tmp(), from: out }), stops(/not the file the compile job recorded/));
+  assert.throws(() => place({ platform: 'macos', root: tmp(), from: make() }), stops(/describes thoughts for linux, not thoughts for macos/), 'another platform\'s file');
+  if (process.platform !== 'win32') {
+    out = join(tmp(), 'compiled');
+    mkdirSync(out);
+    symlinkSync('/etc/hosts', join(out, 'thoughts'));
+    writeFileSync(join(out, MANIFEST), '{}');
+    assert.throws(() => place({ platform: 'linux', root: tmp(), from: out }), stops(/not a plain file/));
+  }
+  assert.throws(() => place({ platform: 'linux', root: tmp(), from: join(tmp(), 'nothing') }), stops(/was not handed over/));
+  const empty = tmp();
+  assert.throws(() => pack({ platform: 'linux', root: empty, out: join(tmp(), 'o') }), stops(/compiled app is missing/));
+  assert.ok(!existsSync(join(empty, 'target')));
 });
