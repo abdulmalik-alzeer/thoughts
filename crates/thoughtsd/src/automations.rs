@@ -100,8 +100,9 @@ pub const SUMMARY_MAX: usize = 8_000;
 pub fn helpers_offered(program: Program) -> bool { program == Program::Claude }
 
 /// The helpers already in the library: (name, description).
-// TODO(auto-agents): read them with `crate::agents::list(lib)` once `agents.rs` exists.
-fn existing_helpers(_lib: &Path) -> Vec<(String, String)> { vec![] }
+fn existing_helpers(lib: &Path) -> Vec<(String, String)> {
+    crate::agents::list(lib).iter().map(|h| (clean(h["title"].as_str().unwrap_or_default(), 80), clean(h["description"].as_str().unwrap_or_default(), 300))).collect()
+}
 
 /// Text as one plain line: whitespace collapsed, control and invisible characters gone, cut at `max` characters.
 fn clean(s: &str, max: usize) -> String {

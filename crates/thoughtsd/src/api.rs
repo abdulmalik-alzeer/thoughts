@@ -254,6 +254,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::addons::routes())
         .merge(crate::routines::routes())
         .merge(crate::automations::routes())
+        .merge(crate::agents::routes())
         .merge(crate::inbox::routes())
         .merge(crate::tokens::routes())
         .merge(crate::approvals::routes())

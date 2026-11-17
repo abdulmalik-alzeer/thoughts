@@ -645,3 +645,19 @@ async fn codex_gets_no_helpers_and_a_signed_out_assistant_is_said_up_front() {
     assert_eq!(api_state(State(st.clone())).await.unwrap().0["blocked"], "signedOut");
     cleanup(&lib);
 }
+
+#[tokio::test]
+async fn helpers_in_the_library_are_named_in_the_summary_and_not_suggested_again() {
+    let (st, lib) = crate::wraps::testutil::library().await;
+    crate::agents::save(&lib, None, None, &crate::agents::Draft {
+        title: "Proof reader".into(), description: "Checks drafts for mistakes.".into(), instructions: "You read the draft.".into(),
+    }).unwrap();
+    let facts = gather(&st, &lib).await;
+    assert_eq!(facts.helpers, [("Proof reader".to_string(), "Checks drafts for mistakes.".to_string())]);
+    assert!(render_summary(&summarise(&facts, now())).contains("Proof reader — Checks drafts for mistakes."));
+    let helpers: Vec<String> = facts.helpers.iter().map(|(t, _)| t.clone()).collect();
+    let none = HashSet::new();
+    let p = parse_suggestions(&answer(vec![item("agent", "Proof-reader"), item("agent", "Translator")]), &ctx(&none, &[], &helpers)).unwrap();
+    assert_eq!(p.suggestions.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Translator"]);
+    cleanup(&lib);
+}
