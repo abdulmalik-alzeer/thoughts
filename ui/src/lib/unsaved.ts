@@ -31,3 +31,8 @@ export function reportUnsaved(id: string, what: string | null, kept = false) {
     } catch { sent = ''; /* not told: try again on the next change */ }
   });
 }
+
+/** What a reload of this window would lose: the unsaved work that is not kept as a draft. */
+export function unsavedLost(): string[] {
+  return [...items.values()].filter((x) => !x.kept).map((x) => x.what);
+}

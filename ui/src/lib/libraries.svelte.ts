@@ -7,6 +7,7 @@ import { app, go, toast } from './store.svelte';
 import { t, tn } from './i18n';
 import { confirmDialog, promptDialog } from './dialog.svelte';
 import { failed } from './errors';
+import { unsavedLost } from './unsaved';
 import type { PaletteItem } from './CommandPalette.svelte';
 
 export type Lib = { id: string; name: string; displayName: string; path: string; open: boolean; missing: boolean; running: number; waiting: number };
@@ -26,6 +27,9 @@ export const openLib = () => libs.list.find((l) => l.open);
 export async function loadLibraries() {
   try {
     const r = await api<{ libraries: Lib[]; openId: string | null }>('/libraries');
+    // Another window opened another library and this one waits to reload (see `switchedElsewhere`):
+    // it keeps naming the library it shows, so its changes are refused, never written to the new one.
+    if (away) return;
     libs.list = Array.isArray(r?.libraries) ? r.libraries : [];
     libs.openId = r?.openId ?? '';
     setLibraryId(libs.openId);
@@ -35,6 +39,26 @@ export async function loadLibraries() {
 
 let started = false;
 let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+let away = false;
+let awayTimer: ReturnType<typeof setInterval> | undefined;
+
+/** Another window opened another library. With nothing unsaved here this window follows at once.
+ *  Unsaved Settings edits or a typed key cannot be saved any more (they belong to the library left
+ *  behind, and the service refuses them), and a reload would throw them away without a word: the
+ *  window says so and waits for "Reload now", or reloads by itself once that work is saved elsewhere,
+ *  copied and discarded. Note drafts are kept through a reload and never hold it back. */
+export function switchedElsewhere(id?: string) {
+  const lost = unsavedLost();
+  const name = (id && libs.list.find((l) => l.id === id)?.displayName) || '';
+  if (!lost.length) { stopAway(); toast(t('libs.switched')); reloadApp(); return; }
+  away = true;
+  clearTimeout(reloadTimer);
+  toast(t(name ? 'ui-guards.switchedNamed' : 'ui-guards.switched', { name, what: lost.join(', ') }), {
+    key: 'libs', stay: true, action: { label: t('ui-guards.reloadNow'), run: () => { stopAway(); reloadApp(); } },
+  });
+  if (!awayTimer) awayTimer = setInterval(() => { if (!unsavedLost().length) { stopAway(); reloadApp(); } }, 1000);
+}
+function stopAway() { clearInterval(awayTimer); awayTimer = undefined; }
 /** Load the list, say what happened in the reload that brought this window here, and follow
  *  the background service: another window (or a setup) opening another library reloads this one. */
 export function startLibraries() {
@@ -48,12 +72,12 @@ export function startLibraries() {
       // This window started it (and reloads itself), or it already shows that library.
       if (libs.busy || libs.adding) return;
       if (!e.stale && e.id && e.id === libs.openId) return;
-      toast(t('libs.switched'));
-      reloadApp();
+      switchedElsewhere(e.id ? String(e.id) : undefined);
       return;
     }
     if (['libraries.changed', 'settings.changed', 'chat.done', 'chat.updated', 'chat.removed', 'resync'].includes(e?.type)) {
       // Running and waiting counts follow the chats; a burst of events is one look.
+      if (away) return;
       clearTimeout(reloadTimer);
       reloadTimer = setTimeout(loadLibraries, 400);
     }
