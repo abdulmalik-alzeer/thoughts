@@ -83,9 +83,14 @@
   /** The sheet runs right to left when Excel says so, or when most of its letters are Arabic/Hebrew. */
   function dirOf(s: SheetData): 'rtl' | 'ltr' {
     if (s.rtl) return 'rtl';
+    // Counted by cells, not letters: a column of long Arabic names doesn't outweigh English headings.
     let r = 0, l = 0, seen = 0;
     for (const row of s.rows) {
-      for (const c of row) if (c && !c.num) { r += c.v.match(RTL)?.length ?? 0; l += c.v.match(LTR)?.length ?? 0; seen++; }
+      for (const c of row) if (c && !c.num) {
+        const a = c.v.match(RTL)?.length ?? 0, b = c.v.match(LTR)?.length ?? 0;
+        if (a > b) r++; else if (b > a) l++;
+        seen++;
+      }
       if (seen > 2000) break;
     }
     return r > l ? 'rtl' : 'ltr';
@@ -163,7 +168,7 @@
                 <tr>
                   <th scope="row" class="rn">{row.n}</th>
                   {#each row.cells as x (x.c)}
-                    <td class:num={x.cell?.num} rowspan={x.rs > 1 ? x.rs : undefined} colspan={x.cs > 1 ? x.cs : undefined} dir={x.cell?.num ? 'ltr' : 'auto'}>{x.cell?.v ?? ''}</td>
+                    <td class:num={x.cell?.num} class:long={!!x.cell && (x.cell.v.length > 40 || x.cell.v.includes('\n'))} rowspan={x.rs > 1 ? x.rs : undefined} colspan={x.cs > 1 ? x.cs : undefined} dir={x.cell?.num ? 'ltr' : 'auto'}>{x.cell?.v ?? ''}</td>
                   {/each}
                 </tr>
               {/each}
@@ -191,12 +196,14 @@
   .scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   table { border-collapse: separate; border-spacing: 0; font-size: var(--fs-sm, 13px); font-variant-numeric: tabular-nums; }
   th, td { border-inline-end: 1px solid var(--fill-2); border-bottom: 1px solid var(--fill-2); padding: 4px 8px; vertical-align: top; }
-  td { white-space: pre-wrap; overflow-wrap: anywhere; max-width: 32em; min-width: 3em; text-align: start; }
+  /* Short values stay on one line (columns widen, the table scrolls); long ones wrap in a wide column. */
+  td { white-space: pre; text-align: start; }
+  td.long { white-space: pre-wrap; overflow-wrap: break-word; min-width: 18em; max-width: 32em; }
   td.num { text-align: right; white-space: nowrap; }
   table[dir='rtl'] td.num { text-align: left; }
-  thead th { position: sticky; top: 0; z-index: 1; background: var(--fill); color: var(--muted); font-weight: 600; font-size: var(--fs-xs); text-align: start; white-space: nowrap; }
+  thead th { position: sticky; top: 0; z-index: 1; background: linear-gradient(var(--fill), var(--fill)), var(--panel); color: var(--muted); font-weight: 600; font-size: var(--fs-xs); text-align: start; white-space: nowrap; }
   thead th.letter { text-align: center; }
-  th.rn { position: sticky; inset-inline-start: 0; background: var(--fill); color: var(--muted); font-weight: 400; font-size: var(--fs-xs); text-align: end; min-width: 2.5em; }
+  th.rn { position: sticky; inset-inline-start: 0; background: linear-gradient(var(--fill), var(--fill)), var(--panel); color: var(--muted); font-weight: 400; font-size: var(--fs-xs); text-align: end; min-width: 2.5em; }
   th.corner { inset-inline-start: 0; z-index: 2; }
   .msg { display: flex; align-items: center; gap: 8px; margin: 0; padding: 16px; }
   .pad { display: grid; gap: 10px; padding: 8px 0; }
