@@ -59,6 +59,7 @@ rather than word-for-word translations of the English.
 | Folders | المجلدات | Folders outside the library linked to Thoughts to chat in. |
 | Private folder | مجلد خاص | Closed to the assistant. *Strict private folders* «المجلدات الخاصة بصرامة». |
 | Me | ملفي | The user's profile. |
+| People · People list · Person | الأشخاص · قائمة «الأشخاص» · شخص | The people the user writes to: one page each (name, email address, role, organisation, how the user knows them «صلتك به», language, tone «الأسلوب», notes). Not an item and not in the index, like Me. |
 | Status: New · Active · On hold · Done · Dropped | جديد · قيد العمل · معلّق · منتهٍ · متروك | |
 
 ## Saving, history and backup
@@ -117,7 +118,7 @@ freely.
 
 | English | Arabic | What it is |
 |---|---|---|
-| Customise | التخصيص | The page (in the sidebar) and the verb. What the user kept are customisations «تخصيصات». |
+| Customise | التخصيص | The page (in the sidebar) and the verb. What the user kept are customisations «تخصيصات». Tabs: Ask «اطلب» · Automate «أتمتة» · Add-ons «الإضافات» · Ready-made «حزم جاهزة» · Automatic tasks «المهام التلقائية» · Share «المشاركة» · History «السجل» · App updates «تحديثات التطبيق». |
 | Change | تغيير | A prepared customisation waiting to be kept. |
 | Review | المراجعة | Looking at a change before it is kept. The only meaning of «مراجعة» in the app. |
 | Try it · Keep · Discard | تجربة · اعتماد · تجاهل | The three buttons of a review. |
@@ -129,3 +130,19 @@ freely.
 | Pack · Ready-made packs | حزمة · حزم جاهزة | A file of customisations to share or import. |
 | App updates | تحديثات التطبيق | Where a new release and the user's changes meet. |
 | Go back to an earlier version | العودة إلى نسخة سابقة | Puts the whole app back to an earlier point (History › App changes, or the Recovery menu). |
+
+## Suggest automations
+
+| English | Arabic | What it is |
+|---|---|---|
+| Automate | أتمتة | The Customise tab that holds Suggest automations. |
+| Suggest automations · Suggest again | اقترح أتمتة · اقترح مجدداً | The button: one request to the assistant, made only when pressed. |
+| Suggestion | اقتراح | One card in the result. *What it does* «ما يفعله» · *Why you're seeing this* «لماذا يظهر لك» · *What building it involves* «ما يتطلبه إنشاؤه». |
+| Build it · Not for me | أنشئه · لا يناسبني | The two buttons of a suggestion. |
+| See what will be sent | اعرض ما سيُرسَل | Shows the exact summary the assistant would get. |
+| Kinds: Routine · Helper · Connection · New page | الأنواع: روتين · مساعد فرعي · ربط · صفحة جديدة | Never *skill*, *agent*, *integration* or *tab* in what the user sees. |
+| Helper / Helpers | مساعد فرعي / المساعدون الفرعيون | A specialist the assistant can hand one part of a chat's work to (Claude Code only). Always with «فرعي»: plain «المساعد» is the assistant itself. |
+| Connection | ربط (عملية ربط) | Linking Thoughts to another service, such as an email account; the app only shows the steps, the user does the sign-in. |
+| Walk me through it in a chat | أرشدني إلى ذلك في محادثة | Opens a new chat with an unsent request. |
+| Email writing (routine) | كتابة رسائل البريد | The ready-made routine for drafting email. |
+| Open in Mail | افتح في البريد | The link that opens the user's own mail app with the draft filled in. Thoughts never sends email. |

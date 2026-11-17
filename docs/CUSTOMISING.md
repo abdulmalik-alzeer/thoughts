@@ -114,6 +114,42 @@ About once a month, Home may show one suggestion titled as an app tune-up. If yo
 
 The summary is kept on your computer and is only sent to the assistant when you accept the suggestion. You can dismiss the suggestion; a dismissed one does not come back.
 
+### Suggest automations
+
+Thoughts can look at how you use it and suggest things that would save you work. Open **Customise › Automate** (Home and the command palette also have **Suggest automations**) and press **Suggest automations**. Nothing is looked at until you press the button, nothing runs in the background, and you are never interrupted with suggestions.
+
+**What your assistant is sent.** One short summary of how you use Thoughts in the library that is open. You can read it word for word before anything goes: press **See what will be sent**. It holds:
+
+- the titles of your chats from the last three months and the beginning of your first message in each, as one line of at most 200 characters (email addresses in it are replaced by "[email address]");
+- how often certain kinds of request come up (writing email, meetings, summaries, translations, reports, invoices, posts, plans, letters, CVs), and openings you use again and again;
+- how many other runs there were (Wraps, customisations, automatic tasks), as numbers only;
+- the names of your routines, helpers, automatic tasks, add-ons and added pages, your Home buttons and the pages you hid;
+- how many people your People list holds, and how many email addresses your chats mention (a number, never the addresses);
+- how many files each top-level folder holds, of which kinds, and how many changed in the last month (folder names only);
+- how many todos are open, done, overdue or repeating, and the headings of your general list;
+- which screens and shortcuts you use, only while **Keep these notes and show suggestions** is on (Settings › Privacy & cost);
+- which assistant program you use, and the app's language.
+
+**What it is not sent:** the contents of your notes, documents or todos, the rest of your messages, the assistant's answers, email addresses, and anything from other libraries. **Private folders are left out completely**: they are not counted, and a chat that mentions or attaches anything in a private folder is not in the summary at all.
+
+**It counts toward your usage.** Each press is one request to your assistant, so it costs the same as a short question and counts toward your plan or spending limit. The button is unavailable while the month's spending limit or your plan's limit is reached, while you are signed out, or while suggestions are already being made. You can leave the page meanwhile; the suggestions appear when they are ready.
+
+**What you get.** Up to five suggestions, the most useful first. Each says what it would do, why you are seeing it (the numbers it came from) and what building it involves. **Not for me** removes one (with Undo); **Build it** starts building it. A suggestion you built or turned down does not come back, and your assistant is told not to suggest it again. If there is not enough to go on yet, Thoughts says so. Suggestions are kept on this computer, not in your library, so they are not synced.
+
+**The four kinds, and how each is built and undone:**
+
+- **Routine** — steps the assistant follows whenever you ask for that kind of work. Building one shows you its steps in the routine editor first (for the app's own ready-made routines at once; otherwise your assistant drafts them, which is one more request, and you are told before it runs). Nothing is saved until you press **Keep**. It then appears under **Customise › Automatic tasks**, where you can change or remove it, and the change is in your library's History.
+- **Helper** — a specialist your assistant can hand one part of a chat's work to, for example checking an email draft for tone. You review its instructions before keeping it, exactly like a routine. A helper never gets more permissions than the chat it works in. Helpers exist only with Claude Code.
+- **Connection** — linking Thoughts to another service, such as your email account. Thoughts never signs in, stores a password or connects anything by itself: you get plain steps to follow, and **Walk me through it in a chat** opens a new chat with a ready-written request that you read and send yourself.
+- **New page** — a page of its own in the sidebar. Building one starts a customisation chat that goes through the usual review: Try it, then Keep or Discard, and it can be undone from **Customise › History**.
+
+**Example: someone who writes a lot of email.** If many of your chats are "write an email to …", you are likely to see:
+
+1. **Email writing**, a ready-made routine. When you ask for an email, the assistant finds the person in your **People** list, writes in their language and in the tone that suits them, shows you the subject and the text, and ends with an **Open in Mail** link. That link opens your own mail app with the message filled in; you check it and press Send there. Thoughts never sends email and never signs in to your mail. If someone is not in your list yet, the assistant asks once who they are and offers to add them.
+
+   While you build this routine you can fill in your **People** list: for each person their name, email address, role and organisation, how you know them, the language to write in, the tone (formal, friendly …) and any notes. You can add more people, change them or remove them later. The list is ordinary notes in your library, in a folder of its own, one page per person plus a front page that lists everyone; it is not an item and does not appear in your index. If you make that folder private, your assistant cannot read it and will ask you instead.
+2. **Your email account**, a connection, which first explains that the **Open in Mail** links already work with any mail app and need nothing connected.
+
 ### Sharing and moving customisations: packs
 
 Under **Customise** you can export what you have made as a pack file.
