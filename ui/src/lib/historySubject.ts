@@ -15,6 +15,7 @@ export const FIXED: Record<string, string> = {
   'edit: Thoughts added its rules, index and routines': 'final-walk-a.subj.adopted',
   'edit: changes before bringing in files': 'final-walk-a.subj.beforeImport',
   'sync: changes from another device combined with yours': 'final-walk-a.subj.combined',
+  'outside: changed outside Thoughts': 'libf-sync.hist.subject',
 };
 
 /** A history entry's subject in the reader's language when it is one of the app's own, else null. */

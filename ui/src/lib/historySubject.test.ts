@@ -14,6 +14,7 @@ describe('history subjects', () => {
     expect(appSubject('edit: your changes')).toBe('Your changes');
     app.settings.language = 'ar';
     expect(appSubject('edit: your changes')).toBe('تغييراتك');
+    expect(appSubject('outside: changed outside Thoughts')).toBe('تغيّر خارج Thoughts');
     expect(appSubject('wrap: 2026-11-17 — 2 chat(s)')).toBeNull();
     expect(appSubject('edit: moved a.md to b.md')).toBeNull();
     for (const s of Object.keys(FIXED)) expect(appSubject(s)).not.toContain('final-walk-a.');
