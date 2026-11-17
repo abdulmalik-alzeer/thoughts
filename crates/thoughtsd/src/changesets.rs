@@ -543,47 +543,6 @@ fn inside(lib: &Path, dir: &Path) -> anyhow::Result<()> {
     if dunce::canonicalize(dir)?.starts_with(real(lib)) { Ok(()) } else { anyhow::bail!("{} is not inside the library", dir.display()) }
 }
 
-/// Write `bytes` as the library file `rel`, never through a link: a link found there is removed
-/// (its target is never touched) and the file takes its place. Only inside the library, checked on
-/// the real path. The new file is written beside it, given its mode, then renamed over the old name,
-/// so no link is ever followed, for the contents or for the mode.
-fn put_file(lib: &Path, rel: &str, bytes: &[u8], exec: bool) -> anyhow::Result<()> {
-    use std::io::Write;
-    let p = target(lib, rel).ok_or_else(|| anyhow::anyhow!("{rel} is reached through a link"))?;
-    let parent = p.parent().ok_or_else(|| anyhow::anyhow!("{rel} has no folder"))?.to_path_buf();
-    std::fs::create_dir_all(&parent)?;
-    inside(lib, &parent)?;
-    #[allow(unused_mut)]
-    let mut mode: Option<u32> = None;
-    match std::fs::symlink_metadata(&p) {
-        Ok(m) if m.file_type().is_symlink() => std::fs::remove_file(&p)?,
-        Ok(m) if m.is_dir() => anyhow::bail!("{rel} is a folder now"),
-        #[cfg(unix)]
-        Ok(m) => { use std::os::unix::fs::PermissionsExt; mode = Some(m.permissions().mode()); }
-        #[cfg(not(unix))]
-        Ok(_) => {}
-        Err(_) => {}
-    }
-    let tmp = parent.join(format!(".thoughts-{}.tmp", uuid::Uuid::new_v4()));
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
-    let done = (|| -> std::io::Result<()> {
-        f.write_all(bytes)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let base = mode.unwrap_or(0o644) & 0o7777;
-            f.set_permissions(std::fs::Permissions::from_mode(if exec { base | 0o111 } else { base & !0o111 }))?;
-        }
-        #[cfg(not(unix))]
-        let _ = (exec, mode);
-        f.sync_all()?;
-        drop(f);
-        std::fs::rename(&tmp, &p)
-    })();
-    if done.is_err() { let _ = std::fs::remove_file(&tmp); }
-    Ok(done?)
-}
-
 /// Remove the library file `rel` (a link is removed itself, never what it points at), and the
 /// folders that held only it.
 fn remove_file_at(lib: &Path, rel: &str) -> anyhow::Result<()> {
@@ -600,11 +559,165 @@ fn remove_file_at(lib: &Path, rel: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Write the planned files: removals first (a file may take the place of a folder that goes).
+/// What a library file was before `carry_out` changed it, to put it back if a later file fails.
+enum Was { Missing, File(Vec<u8>, Option<u32>), Link(PathBuf) }
+
+/// What is at `p` now (`None`: a folder, which is never changed).
+fn was_at(p: &Path) -> std::io::Result<Option<Was>> {
+    match std::fs::symlink_metadata(p) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(Was::Missing)),
+        Err(e) => Err(e),
+        Ok(m) if m.is_dir() => Ok(None),
+        Ok(m) if m.file_type().is_symlink() => Ok(Some(Was::Link(std::fs::read_link(p)?))),
+        Ok(m) => Ok(Some(Was::File(std::fs::read(p)?, mode_of(&m)))),
+    }
+}
+
+#[cfg(unix)]
+fn mode_of(m: &std::fs::Metadata) -> Option<u32> { use std::os::unix::fs::PermissionsExt; m.is_file().then(|| m.permissions().mode()) }
+#[cfg(not(unix))]
+fn mode_of(_: &std::fs::Metadata) -> Option<u32> { None }
+
+/// Write `bytes` into a new file of its own inside the folder `dir` (a name nothing else uses),
+/// with `mode` (a plain file's when `None`), executable or not. Returns its path.
+fn write_beside(dir: &Path, mode: Option<u32>, bytes: &[u8], exec: bool) -> anyhow::Result<PathBuf> {
+    use std::io::Write;
+    let tmp = dir.join(format!(".thoughts-{}.tmp", uuid::Uuid::new_v4()));
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+    let done = (|| -> std::io::Result<()> {
+        f.write_all(bytes)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let base = mode.unwrap_or(0o644) & 0o7777;
+            f.set_permissions(std::fs::Permissions::from_mode(if exec { base | 0o111 } else { base & !0o111 }))?;
+        }
+        #[cfg(not(unix))]
+        let _ = (exec, mode);
+        f.sync_all()
+    })();
+    drop(f);
+    if let Err(e) = done { let _ = std::fs::remove_file(&tmp); return Err(e.into()); }
+    Ok(tmp)
+}
+
+/// The deepest folder above `p` that exists now, inside the library (the new file is written
+/// there first, so nothing in the library changes until every file is ready).
+fn nearest_folder(lib: &Path, p: &Path) -> anyhow::Result<PathBuf> {
+    let mut at = p.parent();
+    while let Some(d) = at {
+        if std::fs::symlink_metadata(d).map_or(false, |m| m.is_dir()) { inside(lib, d)?; return Ok(d.to_path_buf()); }
+        if d == lib { break; }
+        at = d.parent();
+    }
+    anyhow::bail!("{} has no folder", p.display())
+}
+
+/// Folders above `p` that are not there yet, the deepest last.
+fn missing_folders(lib: &Path, p: &Path) -> Vec<PathBuf> {
+    let mut missing = vec![];
+    let mut at = p.parent();
+    while let Some(d) = at.filter(|d| *d != lib && d.starts_with(lib)) {
+        if std::fs::symlink_metadata(d).is_ok() { break; }
+        missing.push(d.to_path_buf());
+        at = d.parent();
+    }
+    missing.reverse();
+    missing
+}
+
+/// Put `p` back as it was. Best effort: used only while taking back a `carry_out` that failed.
+fn put_back(lib: &Path, p: &Path, was: &Was) -> anyhow::Result<()> {
+    let here = std::fs::symlink_metadata(p).ok();
+    if here.as_ref().map_or(false, |m| m.is_dir()) { anyhow::bail!("{} is a folder now", p.display()); }
+    let clear = |p: &Path| -> std::io::Result<()> { if here.is_some() { std::fs::remove_file(p) } else { Ok(()) } };
+    match was {
+        Was::Missing => clear(p)?,
+        Was::File(bytes, mode) => {
+            let parent = p.parent().ok_or_else(|| anyhow::anyhow!("{} has no folder", p.display()))?;
+            std::fs::create_dir_all(parent)?;
+            inside(lib, parent)?;
+            if here.as_ref().map_or(false, |m| m.file_type().is_symlink()) { clear(p)?; }
+            let tmp = write_beside(parent, *mode, bytes, mode.map_or(false, |m| m & 0o111 != 0))?;
+            if let Err(e) = std::fs::rename(&tmp, p) { let _ = std::fs::remove_file(&tmp); return Err(e.into()); }
+        }
+        #[cfg(unix)]
+        Was::Link(to) => {
+            let parent = p.parent().ok_or_else(|| anyhow::anyhow!("{} has no folder", p.display()))?;
+            std::fs::create_dir_all(parent)?;
+            inside(lib, parent)?;
+            clear(p)?;
+            std::os::unix::fs::symlink(to, p)?;
+        }
+        #[cfg(not(unix))]
+        Was::Link(_) => anyhow::bail!("{} was a link", p.display()),
+    }
+    Ok(())
+}
+
+/// What `carry_out` has changed so far, and the new files still waiting to be put in place.
+#[derive(Default)]
+struct Journal { changed: Vec<(PathBuf, Was)>, folders: Vec<PathBuf>, waiting: Vec<PathBuf> }
+
+impl Journal {
+    /// Take back everything changed so far, newest first, and remove what was never put in place.
+    fn take_back(self, lib: &Path) {
+        for (p, was) in self.changed.iter().rev() {
+            if let Err(e) = put_back(lib, p, was) { crate::log::error(format!("changes: {} could not be put back as it was ({e})", p.display())); }
+        }
+        for t in &self.waiting { let _ = std::fs::remove_file(t); }
+        for d in self.folders.iter().rev() { let _ = std::fs::remove_dir(d); }
+    }
+}
+
+/// Write the planned files, all or none. Every new file is first written beside the library file
+/// it replaces (nothing in the library changes while any of them cannot be written); then the
+/// removals are made (a file may take the place of a folder that goes) and the new files renamed
+/// into place. When anything fails on the way, what was already changed is put back as it was.
 fn carry_out(lib: &Path, steps: &[(String, Step)]) -> anyhow::Result<()> {
-    for (rel, _) in steps.iter().filter(|(_, s)| matches!(s, Step::Remove)) { remove_file_at(lib, rel)?; }
+    let mut journal = Journal::default();
+    let done = carry_out_into(lib, steps, &mut journal);
+    if done.is_err() { journal.take_back(lib); }
+    done
+}
+
+fn carry_out_into(lib: &Path, steps: &[(String, Step)], journal: &mut Journal) -> anyhow::Result<()> {
+    let reached = |rel: &str| target(lib, rel).ok_or_else(|| anyhow::anyhow!("{rel} is reached through a link"));
+    // Every new file, ready beside its place.
+    let mut ready = vec![];
     for (rel, step) in steps {
-        if let Step::Write(bytes, exec) = step { put_file(lib, rel, bytes, *exec)?; }
+        let Step::Write(bytes, exec) = step else { continue };
+        let p = reached(rel)?;
+        let here = std::fs::symlink_metadata(&p).ok();
+        // A folder there that the removals do not empty is refused before anything changes.
+        let inner = format!("{rel}/");
+        if here.as_ref().map_or(false, |m| m.is_dir()) && !steps.iter().any(|(r, s)| matches!(s, Step::Remove) && r.starts_with(&inner)) {
+            anyhow::bail!("{rel} is a folder now");
+        }
+        let tmp = write_beside(&nearest_folder(lib, &p)?, here.as_ref().and_then(mode_of), bytes, *exec)?;
+        journal.waiting.push(tmp.clone());
+        ready.push((rel, p, tmp));
+    }
+    for (rel, _) in steps.iter().filter(|(_, s)| matches!(s, Step::Remove)) {
+        let p = reached(rel)?;
+        let Some(was) = was_at(&p)? else { continue };
+        if matches!(was, Was::Missing) { continue; }
+        journal.changed.push((p, was));
+        remove_file_at(lib, rel)?;
+    }
+    for (rel, p, tmp) in ready {
+        let parent = p.parent().ok_or_else(|| anyhow::anyhow!("{rel} has no folder"))?;
+        let missing = missing_folders(lib, &p);
+        std::fs::create_dir_all(parent)?;
+        journal.folders.extend(missing);
+        inside(lib, parent)?;
+        let was = was_at(&p)?.ok_or_else(|| anyhow::anyhow!("{rel} is a folder now"))?;
+        let link = matches!(was, Was::Link(_));
+        journal.changed.push((p.clone(), was));
+        // A link found there is removed itself (its target is never touched); the file takes its place.
+        if link { std::fs::remove_file(&p)?; }
+        std::fs::rename(&tmp, &p)?;
+        journal.waiting.retain(|t| *t != tmp);
     }
     Ok(())
 }
@@ -926,5 +1039,71 @@ mod tests {
         assert_eq!(crate::tr::classify_in(false, &undo(&st, &lib2, &chat, &id, false).await.unwrap_err()).code, "conflict");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
         std::fs::remove_dir_all(lib2.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_undo_that_cannot_finish_changes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let (st, lib) = t::library().await;
+        // The answer added a note at the top and one in a folder, and edited the list.
+        let (chat, _w) = watched_chat(&st, &lib, "Notes").await;
+        t::write(&lib, "a.md", "the answer's note\n");
+        t::write(&lib, "locked/b.md", "another of its notes\n");
+        t::write(&lib, "TODO.md", "# Todo\n\n- [x] call the bank\n");
+        assert!(finish(&st, &chat, "assistant: Notes").await);
+        let id = msg_id(&st, &chat).await;
+        let head = t::sh(&lib, &["rev-parse", "HEAD"]);
+        // The folder cannot be changed any more: its note can be neither removed nor replaced.
+        std::fs::set_permissions(lib.join("locked"), std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(undo(&st, &lib, &chat, &id, false).await.is_err());
+        std::fs::set_permissions(lib.join("locked"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(t::read(&lib, "a.md"), "the answer's note\n", "nothing was removed");
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [x] call the bank\n", "nothing was put back");
+        assert_eq!(t::read(&lib, "locked/b.md"), "another of its notes\n");
+        assert_eq!(t::sh(&lib, &["rev-parse", "HEAD"]), head, "no undo was recorded");
+        assert!(changes(&st, &chat).await.unwrap()["undone"].is_null(), "the answer still says it was not undone");
+        assert_eq!(t::sh(&lib, &["status", "--porcelain"]), "");
+        assert!(std::fs::read_dir(&lib).unwrap().all(|e| !e.unwrap().file_name().to_string_lossy().ends_with(".tmp")), "no file of the app's own is left behind");
+        // Once the folder can be changed again, the same undo goes through.
+        undo(&st, &lib, &chat, &id, false).await.unwrap();
+        assert!(!lib.join("a.md").exists() && !lib.join("locked").exists());
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [ ] call the bank\n");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_rollback_that_cannot_finish_puts_back_what_it_had_changed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (st, lib) = t::library().await;
+        t::write(&lib, "notes/run.sh", "echo hi\n");
+        std::fs::set_permissions(lib.join("notes/run.sh"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        t::sh(&lib, &["add", "-A"]);
+        t::sh(&lib, &["commit", "-q", "-m", "snapshot before wrap"]);
+        let snap = t::sh(&lib, &["rev-parse", "HEAD"]);
+        // Changed since: one note edited, one removed, one added; then the list became a folder.
+        t::write(&lib, "README.md", "edited since\n");
+        t::write(&lib, "notes/run.sh", "echo changed\n");
+        std::fs::remove_file(lib.join("ideas/shop/README.md")).unwrap();
+        t::write(&lib, "added.md", "new since\n");
+        std::fs::remove_file(lib.join("TODO.md")).unwrap();
+        std::fs::create_dir(lib.join("TODO.md")).unwrap();
+        assert!(crate::git::rollback_to(&st, &lib, &snap).await.is_err());
+        assert_eq!(t::read(&lib, "README.md"), "edited since\n");
+        assert_eq!(t::read(&lib, "notes/run.sh"), "echo changed\n");
+        assert_eq!(std::fs::metadata(lib.join("notes/run.sh")).unwrap().permissions().mode() & 0o777, 0o700, "its mode is kept too");
+        assert_eq!(t::read(&lib, "added.md"), "new since\n");
+        assert_eq!(std::fs::read_dir(lib.join("ideas/shop")).unwrap().count(), 0, "nothing was put back there, and nothing of the app's own was left");
+        assert!(lib.join("TODO.md").is_dir());
+        // A folder that removals empty may give way to a file.
+        std::fs::remove_dir(lib.join("TODO.md")).unwrap();
+        t::write(&lib, "TODO.md/inside.md", "made since\n");
+        crate::git::rollback_to(&st, &lib, &snap).await.unwrap();
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [ ] call the bank\n");
+        assert_eq!(t::read(&lib, "README.md"), "my library\n");
+        assert!(!lib.join("added.md").exists());
+        assert_eq!(t::sh(&lib, &["status", "--porcelain"]), "");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 }

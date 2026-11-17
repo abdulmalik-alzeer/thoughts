@@ -893,16 +893,11 @@ async fn tree_changes(state: &AppState, lib: &Path, from: &str, to: &str) -> any
 }
 
 /// The library exactly as it is on disk right now, as a git tree (everything a save would record),
-/// without recording anything: the history does not move. The caller holds the git lock.
+/// without recording anything: the history does not move, and the history's own index (which
+/// someone working on the library from a terminal may have filled by hand) is left as it is. The
+/// caller holds the git lock.
 async fn worktree_tree(state: &AppState, lib: &Path) -> anyhow::Result<String> {
-    crate::trust::require_git(lib)?;
-    let tree = match crate::git::git(state, lib, &["add", "-A"]).await {
-        Ok(_) => crate::git::git(state, lib, &["write-tree"]).await,
-        Err(e) => Err(e),
-    };
-    // Nothing stays staged, whether or not that worked.
-    let _ = crate::git::git(state, lib, &["reset", "-q"]).await;
-    let tree = tree?.trim().to_string();
+    let tree = crate::changesets::snapshot(state, lib).await?;
     if !crate::git::valid_hash(&tree) { anyhow::bail!("could not read the library's current state"); }
     Ok(tree)
 }
@@ -932,7 +927,14 @@ async fn restore_paths(state: &AppState, lib: &Path, point: &str, changes: &[Cha
         args.extend(chunk.iter().map(String::as_str));
         crate::git::git(state, lib, &args).await?;
     }
-    let _ = crate::git::git(state, lib, &["reset", "-q"]).await;
+    // These paths are unstaged again (as they are after any save); whatever else someone staged by
+    // hand stays staged.
+    let all: Vec<String> = changes.iter().map(|c| format!(":(top,literal){}", c.path)).collect();
+    for chunk in all.chunks(100) {
+        let mut args = vec!["reset", "-q", "--"];
+        args.extend(chunk.iter().map(String::as_str));
+        let _ = crate::git::git(state, lib, &args).await;
+    }
     Ok(())
 }
 
@@ -1277,7 +1279,7 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
             };
             saved = r.map_err(|e| { crate::log::error(format!("wrap {wid}: commit failed: {e}")); crate::tr::classify_in(ar, &e).message });
         }
-        report_saved(&st, &wid, &lib, git_on, ids.len(), saved, commit, snapshot.as_deref(), ar).await;
+        report_saved(&st, &wid, &lib, git_on, ids.len(), saved, commit, snapshot.as_deref(), ar, true).await;
     }));
     let started = match fresh {
         Some(fresh) => run_wrap(state.clone(), spec, fresh, ar, done).await,
@@ -1315,7 +1317,7 @@ async fn stamp_saved(st: &AppState, wid: &str, ids: &[String], marks: &HashMap<S
         s.set_last_wrap(home.as_deref(), Utc::now());
         crate::log::ok_or_warn("wrap: could not save settings", s.save());
     }
-    st.chats.update(wid, |c| { c.meta["phase"] = json!("done"); c.meta["stamps"] = Value::Object(stamps); c.meta["partial"] = Value::Null; }).await;
+    st.chats.update(wid, |c| { c.meta["phase"] = json!("done"); c.meta["stamps"] = Value::Object(stamps); c.meta["partial"] = Value::Null; c.meta["keeping"] = Value::Null; }).await;
     // The plan the preview left in the assistant's own folder has done its job.
     if let (Some(dir), Some(sessions)) = (crate::traces::config_dir(), st.chats.with(wid, |c| c.all_sessions()).await) {
         let _ = tokio::task::spawn_blocking(move || crate::traces::remove_plans(&dir, &sessions)).await;
@@ -1326,7 +1328,9 @@ async fn stamp_saved(st: &AppState, wid: &str, ids: &[String], marks: &HashMap<S
 /// words, and the list of what changed between `snapshot` and `commit`. `saved`: whether there was
 /// anything to add to the history (or why that failed).
 #[allow(clippy::too_many_arguments)]
-async fn report_saved(st: &Arc<AppState>, wid: &str, lib: &Path, git_on: bool, chats: usize, saved: Result<bool, String>, commit: Option<String>, snapshot: Option<&str>, ar: bool) {
+/// `sync_now`: a backup that is automatic is sent now (not while the app is starting up: the person
+/// is then told to press Sync).
+async fn report_saved(st: &AppState, wid: &str, lib: &Path, git_on: bool, chats: usize, saved: Result<bool, String>, commit: Option<String>, snapshot: Option<&str>, ar: bool, sync_now: bool) {
     let mut docs: Vec<Change> = vec![];
     let mut complete = false;
     if let Some(h) = &commit {
@@ -1342,7 +1346,7 @@ async fn report_saved(st: &Arc<AppState>, wid: &str, lib: &Path, git_on: bool, c
     let mut backup = Backup::NotAsked;
     if git_on && saved.is_ok() {
         backup = match git_mode.as_str() {
-            "git-auto" => match crate::git::sync(st, lib).await {
+            "git-auto" if sync_now => match crate::git::sync(st, lib).await {
                 // Only say a copy was sent when one was: no backup location means nothing to report.
                 Ok(v) => {
                     let log: Vec<&str> = v["log"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
@@ -1355,7 +1359,7 @@ async fn report_saved(st: &Arc<AppState>, wid: &str, lib: &Path, git_on: bool, c
                 Err(e) if e.to_string().starts_with("CONFLICT::") => Backup::Clash,
                 Err(e) => { crate::log::warn(format!("wrap {wid}: sync after the wrap failed: {e}")); Backup::Failed(crate::tr::classify_in(ar, &e).message) }
             },
-            "git-manual" if !crate::git::remotes(st, lib).await.is_empty() => Backup::Manual,
+            "git-auto" | "git-manual" if !crate::git::remotes(st, lib).await.is_empty() => Backup::Manual,
             _ => Backup::NotAsked,
         };
     }
@@ -1502,7 +1506,7 @@ fn after_copy_run(wid: String, lib: PathBuf, ar: bool) -> Done {
                 close_copy(&st, &lib, &wid).await;
                 let (ids, marks) = plan_marks(&w);
                 stamp_saved(&st, &wid, &ids, &marks).await;
-                report_saved(&st, &wid, &lib, true, ids.len(), Ok(false), None, None, ar).await;
+                report_saved(&st, &wid, &lib, true, ids.len(), Ok(false), None, None, ar, true).await;
                 return;
             }
             (true, Ok(n)) => n,
@@ -1624,7 +1628,16 @@ pub async fn save(state: Arc<AppState>, wrap_id: &str) -> anyhow::Result<()> {
             // Everything it would add is in the library already (the person made the same changes).
             if crate::git::head(&state, &dir).await.as_deref() == Some(target.as_str()) { return Ok((target, None)); }
         }
-        crate::git::git(&state, &lib, &["merge", "-q", "--ff-only", &branch]).await?;
+        // Noted before the library's branch moves: when the app stops right after, the next start
+        // finishes this wrap (its chats saved) instead of leaving them to be wrapped a second time.
+        let tip = crate::git::head(&state, &dir).await.ok_or_else(|| anyhow::anyhow!("the working copy has no history"))?;
+        state.chats.update(wrap_id, |c| c.meta["keeping"] = json!({"commit": tip, "snapshot": target})).await;
+        if let Err(e) = crate::git::git(&state, &lib, &["merge", "-q", "--ff-only", &branch]).await {
+            state.chats.update(wrap_id, |c| c.meta["keeping"] = Value::Null).await;
+            return Err(e);
+        }
+        #[cfg(test)]
+        if tests::STOP_AFTER_MERGE.lock().unwrap().remove(wrap_id) { anyhow::bail!("the app stopped"); }
         Ok((target, crate::git::head(&state, &lib).await))
     }.await;
     let (snapshot, commit) = merged?;
@@ -1633,7 +1646,7 @@ pub async fn save(state: Arc<AppState>, wrap_id: &str) -> anyhow::Result<()> {
     claude::push(&state, wrap_id, Msg::new("user", tr(ar, "Keep these changes.", "أبقِ هذه التغييرات."))).await;
     stamp_saved(&state, wrap_id, &ids, &marks).await;
     let saved = Ok(commit.is_some());
-    report_saved(&state, wrap_id, &lib, true, ids.len(), saved, commit, Some(&snapshot), ar).await;
+    report_saved(&state, wrap_id, &lib, true, ids.len(), saved, commit, Some(&snapshot), ar, true).await;
     Ok(())
 }
 
@@ -1980,6 +1993,25 @@ pub async fn recover(state: &AppState) {
     }
 }
 
+/// A wrap whose changes were being kept when the app stopped: when its entry `commit` reached the
+/// library's history, it is finished as `save` would have (its copy goes, its chats are saved) and
+/// true is returned; otherwise nothing changes.
+async fn finish_kept(state: &AppState, lib: &Path, w: &ChatMeta, commit: &str, ar: bool) -> bool {
+    let merged = {
+        let _g = state.git_lock.lock().await;
+        crate::git::git(state, lib, &["merge-base", "--is-ancestor", commit, "HEAD"]).await.is_ok()
+    };
+    if !merged { return false; }
+    crate::log::warn(format!("wrap {}: its changes were kept just before the app stopped; finishing it", w.id));
+    close_copy(state, lib, &w.id).await;
+    claude::push(state, &w.id, Msg::new("user", tr(ar, "Keep these changes.", "أبقِ هذه التغييرات."))).await;
+    let (ids, marks) = plan_marks(w);
+    stamp_saved(state, &w.id, &ids, &marks).await;
+    let snapshot = w.meta["keeping"]["snapshot"].as_str().filter(|h| crate::git::valid_hash(h));
+    report_saved(state, &w.id, lib, true, ids.len(), Ok(true), Some(commit.to_string()), snapshot, ar, false).await;
+    true
+}
+
 /// The per-chat half of `recover`. Returns whether a reorganize is waiting to be reviewed (its
 /// working copy must then stay).
 pub(crate) async fn recover_chats(state: &AppState) -> bool {
@@ -1993,6 +2025,13 @@ pub(crate) async fn recover_chats(state: &AppState) -> bool {
         }
         // Where this wrap's library is: the folder it was started in, or the open one.
         let home = c.library.as_ref().map(PathBuf::from).or_else(|| lib.clone()).filter(|l| l.is_dir());
+        // Its changes were being kept when the app stopped: once they are in the library, the wrap is finished.
+        if c.kind == "wrap" && c.meta["phase"] != "done" {
+            if let Some(commit) = c.meta["keeping"]["commit"].as_str().filter(|h| crate::git::valid_hash(h)) {
+                if let Some(home) = &home { if finish_kept(state, home, &c, commit, ar).await { continue; } }
+                state.chats.update(&c.id, |c| c.meta["keeping"] = Value::Null).await;
+            }
+        }
         match (c.kind.as_str(), c.meta["phase"].as_str()) {
             // It was writing into its working copy: the library itself was never touched.
             ("wrap", Some("applying")) if c.meta["inCopy"] == true => {
@@ -2174,6 +2213,9 @@ mod tests {
         assert!(ar.starts_with('\u{2066}') && ar.ends_with('\u{2069}') && ar.contains("2026-11-11 21:09"));
     }
     use super::testutil as t;
+
+    /// Wraps whose `save` stops (as if the app stopped) right after their changes reached the library.
+    pub(super) static STOP_AFTER_MERGE: std::sync::Mutex<std::collections::BTreeSet<String>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
 
     /// What a wrap that dies halfway leaves behind: an edit, a deletion, new files.
     fn half_a_wrap(lib: &Path) {
@@ -3656,6 +3698,70 @@ mod tests {
         reorganize_conclude(&st, &lib, &wt, &branch, false).await.unwrap();
         assert!(!wt.exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn preparing_an_undo_keeps_what_the_person_staged_by_hand() {
+        let (st, lib) = t::library().await;
+        let head = t::sh(&lib, &["rev-parse", "HEAD"]);
+        // Someone working on the library from a terminal staged part of an edit.
+        t::write(&lib, "README.md", "staged by hand\n");
+        t::sh(&lib, &["add", "README.md"]);
+        t::write(&lib, "README.md", "staged by hand\nand more, not staged\n");
+        t::write(&lib, "ideas/shop/log.md", "written by the wrap\n");
+        let staged = || (t::sh(&lib, &["diff", "--cached", "--name-only"]), t::sh(&lib, &["show", ":README.md"]));
+        let before = staged();
+        assert_eq!(before, ("README.md".to_string(), "staged by hand".to_string()));
+        let _g = st.git_lock.lock().await;
+        let tree = worktree_tree(&st, &lib).await.unwrap();
+        assert_eq!(staged(), before, "looking at the library left the staging alone");
+        let wrote: Vec<Change> = tree_changes(&st, &lib, &head, &tree).await.unwrap().into_iter().filter(|c| c.path == "ideas/shop/log.md").collect();
+        assert_eq!(wrote.len(), 1);
+        restore_paths(&st, &lib, &head, &wrote).await.unwrap();
+        assert!(!lib.join("ideas/shop/log.md").exists());
+        assert_eq!(staged(), before, "taking the wrap's file back left the staging alone");
+        assert_eq!(t::read(&lib, "README.md"), "staged by hand\nand more, not staged\n");
+        drop(_g);
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_wrap_kept_just_before_the_app_stopped_is_finished_and_its_chats_are_never_wrapped_twice() {
+        let (st, lib) = t::library().await;
+        let chat = said(&st, "Shop plans", &[("user", "open in May".to_string())]).await;
+        summaries(&st, |_, _| Ok("- **Decided:** open in May".into()));
+        shop_assistant(&st, "the plan");
+        let mut rx = st.events.subscribe();
+        let wrap = start(st.clone(), false).await.unwrap();
+        t::until_phase(&st, &wrap, &["preview"]).await;
+        apply(st.clone(), &wrap, "").await.unwrap();
+        t::event(&mut rx, &st, "wrap.review").await;
+        // Stopped while keeping, before the library moved: the changes wait for review again.
+        let tip = t::sh(&copy_dir(&wrap).unwrap(), &["rev-parse", "HEAD"]);
+        st.chats.update(&wrap, |c| c.meta["keeping"] = json!({"commit": tip})).await;
+        recover_chats(&st).await;
+        let w = st.chats.meta(&wrap).await.unwrap();
+        assert_eq!((w.meta["phase"].as_str(), &w.meta["keeping"]), (Some("review"), &Value::Null));
+        assert!(st.chats.meta(&chat).await.unwrap().is_unwrapped());
+        // Stopped right after the library took the wrap's entry, before its chats were saved.
+        STOP_AFTER_MERGE.lock().unwrap().insert(wrap.clone());
+        assert!(save(st.clone(), &wrap).await.is_err());
+        assert!(t::sh(&lib, &["log", "-1", "--format=%s"]).starts_with("wrap: "));
+        assert!(st.chats.meta(&chat).await.unwrap().is_unwrapped());
+        recover_chats(&st).await;
+        let w = st.chats.meta(&wrap).await.unwrap();
+        assert_eq!((w.meta["phase"].as_str(), w.meta["saved"].as_bool(), w.meta["changedCount"].as_u64()), (Some("done"), Some(true), Some(2)));
+        assert_eq!(w.meta["keeping"], Value::Null);
+        assert!(!st.chats.meta(&chat).await.unwrap().is_unwrapped(), "its chats are saved, so no later wrap writes them again");
+        assert!(!copy_dir(&wrap).unwrap().exists());
+        assert_eq!(t::sh(&lib, &["branch", "--list", "wrap/*"]), "");
+        assert_eq!(t::sh(&lib, &["status", "--porcelain"]), "");
+        assert_eq!(t::read(&lib, "ideas/shop/log.md"), "## today\n- Decided: open in May\n");
+        assert_eq!(st.chats.with(&wrap, |c| c.messages.last().unwrap().text.clone()).await.unwrap(), "Saved to your library and its history: 2 documents changed.");
+        // A second start finds nothing left to finish.
+        recover_chats(&st).await;
+        assert_eq!(t::phase(&st, &wrap).await, "done");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]
