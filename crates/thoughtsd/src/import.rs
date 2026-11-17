@@ -46,7 +46,8 @@ const SHOW_LEFT: usize = 40;
 /// Files counted as notes; everything else is an attachment (pictures, PDFs…) and comes along too.
 const NOTE_EXT: &[&str] = &["md", "markdown", "txt", "text"];
 /// Top-level names the library uses for its own things: notes brought in never land there.
-const RESERVED: &[&str] = &["me", "tasks", "inbox", "routines", "meetings", "presets", "imports", "outputs"];
+// `people` is where the People page keeps its contacts (`people::DIR`).
+const RESERVED: &[&str] = &["me", "tasks", "inbox", "routines", "meetings", "presets", "imports", "outputs", crate::people::DIR];
 
 /// Why a file in the user's folder is not brought in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,9 +691,10 @@ mod tests {
         assert_eq!(default_into(&lib, Path::new("/somewhere/Vault")), "Vault (2)");
         assert_eq!(default_into(&lib, Path::new("/somewhere/vault")), "vault (2)", "a name that differs only in case is taken");
         assert_eq!(default_into(&lib, Path::new("/somewhere/inbox")), "inbox (2)");
+        assert_eq!(default_into(&lib, Path::new("/somewhere/People")), "People (2)", "the People page's folder is the library's own");
         assert_eq!(default_into(&lib, Path::new("/somewhere/.hidden")), "hidden");
         assert_eq!(check_into(&lib, " Old notes/2024 ").unwrap(), "Old notes/2024");
-        for (bad, code) in [("Vault", "import_exists"), ("me", "validation"), ("Tasks/x", "validation"), ("../out", "validation"), (".claude/x", "protected"), ("", "validation")] {
+        for (bad, code) in [("Vault", "import_exists"), ("me", "validation"), ("Tasks/x", "validation"), ("people", "validation"), ("../out", "validation"), (".claude/x", "protected"), ("", "validation")] {
             let e = tr::classify_in(false, &check_into(&lib, bad).unwrap_err());
             assert_eq!(e.code, code, "{bad}: {}", e.message);
         }
