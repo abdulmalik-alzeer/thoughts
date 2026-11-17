@@ -1,5 +1,11 @@
 # What's new in Thoughts
 
+## 0.0.14
+
+A calmer update.
+
+- **One progress bar for an update's download.** When you agree to an update, Thoughts opens Settings › Maintenance and shows a single bar with how much has arrived. Before, a new notification appeared every few percent. You will see the bar the first time this version downloads the one after it.
+
 ## 0.0.13
 
 A fix for attachments in customisation chats.
