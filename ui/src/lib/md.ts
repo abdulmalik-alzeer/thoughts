@@ -84,6 +84,18 @@ function render(src: string): string {
   // the same answer; inline code is always left-to-right and isolated from the sentence around it.
   for (const el of Array.from(frag.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, td, th'))) el.setAttribute('dir', 'auto');
   for (const code of Array.from(frag.querySelectorAll('code'))) if (!code.closest('pre')) code.setAttribute('dir', 'ltr');
+  // `dir="auto"` skips children that carry their own `dir`, so a quote or a list item whose words sit
+  // in a paragraph inside it would always come out left-to-right (an Arabic quote with its bar on
+  // the left, bullets on the wrong side). These take the direction of their own first words instead,
+  // and a list follows its first item, so its bullets sit on the same side.
+  for (const el of Array.from(frag.querySelectorAll('li, blockquote'))) {
+    const d = firstStrongDir(el);
+    if (d) el.setAttribute('dir', d);
+  }
+  for (const list of Array.from(frag.querySelectorAll('ul, ol'))) {
+    const d = list.querySelector(':scope > li')?.getAttribute('dir');
+    if (d === 'rtl' || d === 'ltr') list.setAttribute('dir', d);
+  }
   for (const box of Array.from(frag.querySelectorAll('span[title]'))) {
     const m = /^([0-9a-f]{24}):([xo])$/.exec(box.getAttribute('title') || '');
     if (!m || m[1] !== taskMark) continue;
@@ -110,6 +122,25 @@ function render(src: string): string {
   const host = document.createElement('div');
   host.append(frag);
   return host.innerHTML;
+}
+
+/** Letters written right to left (Hebrew, Arabic, Syriac, Thaana, N'Ko and their presentation forms). */
+const RTL_LETTER = /[֐-׿؈؋؍؛-ي٭-ٯٱ-ەۥۦۮۯۺ-ܐܒ-ܯݍ-ޥޱ-ߪߴߵߺ-ࠕࡀ-ࡘࡠ-ࣉיִ-﷿ﹰ-﻾]/;
+const LETTER = /\p{L}/u;
+
+/** The direction of the first letter in an element's own words, leaving code out (it is always
+ *  left-to-right and says nothing about the sentence); null when there is no letter. */
+function firstStrongDir(el: Element): 'rtl' | 'ltr' | null {
+  const walk = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+    acceptNode: (n) => (n.parentElement?.closest('code, pre') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  });
+  for (let n = walk.nextNode(); n; n = walk.nextNode()) {
+    for (const ch of n.nodeValue || '') {
+      if (RTL_LETTER.test(ch)) return 'rtl';
+      if (LETTER.test(ch)) return 'ltr';
+    }
+  }
+  return null;
 }
 
 // ---- text a reader cannot see ----

@@ -74,9 +74,21 @@ describe('md: direction', () => {
   it('blocks find their own direction; inline code is left-to-right', () => {
     const d = render('مرحبا `code`\n\n- item\n\n| a |\n|---|\n| 1 |');
     expect(d.querySelector('p')?.getAttribute('dir')).toBe('auto');
-    expect(d.querySelector('li')?.getAttribute('dir')).toBe('auto');
+    expect(d.querySelector('li')?.getAttribute('dir')).toBe('ltr');
     expect(d.querySelector('td')?.getAttribute('dir')).toBe('auto');
     expect(d.querySelector('p code')?.getAttribute('dir')).toBe('ltr');
+  });
+  it('a quote or list item whose words sit in a paragraph takes their direction', () => {
+    // `dir="auto"` alone would skip the inner paragraph (it has its own `dir`) and resolve to LTR.
+    const q = render('> مرحبا بكم').querySelector('blockquote')!;
+    expect(q.querySelector('p')).not.toBeNull();
+    expect(q.getAttribute('dir')).toBe('rtl');
+    const d = render('- `x` أولاً\n\n- ثانياً');
+    expect(Array.from(d.querySelectorAll('li')).map((li) => li.getAttribute('dir'))).toEqual(['rtl', 'rtl']);
+    expect(d.querySelector('ul')?.getAttribute('dir')).toBe('rtl');
+    expect(render('> hello').querySelector('blockquote')?.getAttribute('dir')).toBe('ltr');
+    // Nothing to go by (a number, a bare checkbox): the browser decides.
+    expect(render('- 12').querySelector('li')?.getAttribute('dir')).toBe('auto');
   });
   it('code blocks are left alone', () => {
     expect(render('```\nx\n```').querySelector('pre code')?.hasAttribute('dir')).toBe(false);
