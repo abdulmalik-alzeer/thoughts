@@ -21,6 +21,7 @@
   import { api, del, on, patch, post, ApiError } from '../lib/api';
   import { approval } from '../lib/consent';
   import { md, mdClick } from '../lib/md';
+  import { zoomImages } from '../lib/zoomImages';
   import { app, costVisible, go, refreshChats } from '../lib/store.svelte';
   import { t, tn, fmtMoney, fmtNum } from '../lib/i18n';
   import { failed } from '../lib/errors';
@@ -787,7 +788,7 @@
           {:else if m.role === 'assistant'}
             <div class="msg ai">
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-              <div class="md" dir="auto" onclick={mdClick}>{@html md(m.text)}</div>
+              <div class="md" dir="auto" onclick={mdClick} use:zoomImages>{@html md(m.text)}</div>
               <div class="acts" class:show={m.id === lastAnswerId}>
                 <button class="act" onclick={() => copyMsg(m.text)} aria-label={t('chat.copyMessage')} title={t('chat.copyMessage')}><Icon name="copy" size={14} /><span>{t('chat.copy')}</span></button>
                 {#if m.id === lastAnswerId && !chat.running && lastUser && canCompose}
@@ -915,7 +916,7 @@
           <ul class="files">
             {#each files as f, i (f.name + i)}
               <li class="file" class:gone={f.missing} title={f.missing ? t('chat3.reattachTip') : undefined}>
-                {#if f.image && !f.missing}<img src={f.data} alt="" />{:else}<span class="ficon"><Icon name={f.missing ? 'warning' : 'docs'} size={16} /></span>{/if}
+                {#if f.image && !f.missing}<img src={f.data} alt="" use:zoomImages={{ name: f.name }} />{:else}<span class="ficon"><Icon name={f.missing ? 'warning' : 'docs'} size={16} /></span>{/if}
                 <span class="fmeta"><bdi class="ell fname">{f.name}</bdi><span class="muted">{f.missing ? t('chat3.reattach') : fmtSize(f.size)}</span></span>
                 <button class="x" type="button" onclick={() => files.splice(i, 1)} aria-label={t('chat.removeFile', { name: f.name })} title={t('chat.removeFile', { name: f.name })}><Icon name="close" size={13} /></button>
               </li>

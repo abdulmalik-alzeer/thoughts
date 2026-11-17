@@ -57,6 +57,7 @@
   import SyncJoin from './lib/SyncJoin.svelte';
   import { settleJoin } from './lib/join.svelte';
   import Toasts from './lib/Toasts.svelte';
+  import ImageViewer from './lib/ImageViewer.svelte';
   import VoiceBar from './lib/voice/VoiceBar.svelte';
   import RecentMessages from './lib/RecentMessages.svelte';
   import { crashText, reportError } from './lib/crash';
@@ -998,6 +999,7 @@
 {#if app.showPalette}<CommandPalette items={paletteItems} close={() => (app.showPalette = false)} />{/if}
 {#if app.ready && app.settings?.onboarded}<LibraryAdd />{/if}
 
+<ImageViewer />
 <Toasts />
 {#if linkTip}<div class="linktip no-print" aria-hidden="true" dir="ltr">{linkTip}</div>{/if}
 

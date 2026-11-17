@@ -7,6 +7,7 @@
   import { errCode, errDetail, failed } from '../../lib/errors';
   import { trapFocus } from '../../lib/focus';
   import { md } from '../../lib/md';
+  import { zoomImages } from '../../lib/zoomImages';
   import { go } from '../../lib/store.svelte';
   import { t, fmtDate } from '../../lib/i18n';
 
@@ -174,7 +175,7 @@
               {/if}
             {:else if /\.md$/i.test(path)}
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-              <article class="md" dir="auto" onclick={(e) => { if ((e.target as HTMLElement).closest('a')) e.preventDefault(); }}>{@html md(content)}</article>
+              <article class="md" dir="auto" onclick={(e) => { if ((e.target as HTMLElement).closest('a')) e.preventDefault(); }} use:zoomImages>{@html md(content)}</article>
             {:else}
               <pre class="plain" dir="auto">{content}</pre>
             {/if}

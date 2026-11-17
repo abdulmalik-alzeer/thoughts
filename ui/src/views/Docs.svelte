@@ -3,6 +3,7 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { api, apiBlob, inTauri, on, post, put } from '../lib/api';
   import { hasHiddenText, md, mdClick, resolveLink, revealInvisible } from '../lib/md';
+  import { unmarkImages, zoomImages } from '../lib/zoomImages';
   import { app, go, refreshChats, track } from '../lib/store.svelte';
   import { reportUnsaved } from '../lib/unsaved';
   import { t, tn, lang, fmtDate, fmtNum } from '../lib/i18n';
@@ -499,6 +500,7 @@
     if (!article) return null;
     const el = article.cloneNode(true) as HTMLElement;
     for (const b of Array.from(el.querySelectorAll('[data-md-copy]'))) b.remove();
+    unmarkImages(el);
     for (const n of Array.from(el.querySelectorAll('[tabindex]'))) n.removeAttribute('tabindex');
     return el;
   }
@@ -1046,7 +1048,7 @@
             <button class="btn" onclick={discuss}><Icon name="chat" size={14} /> {t('docs.discussAssistant')}</button>
           </div>
         </div>
-        {#if imgUrl}<img class="inline-img" src={imgUrl} alt={baseName(current)} />{/if}
+        {#if imgUrl}<img class="inline-img" src={imgUrl} alt={baseName(current)} use:zoomImages={{ name: baseName(current) }} />{/if}
         {#if isDocx(current)}<DocxPreview path={current} name={baseName(current)} />{/if}
         {#if isPdf(current)}
           {#if pdfUrl}
@@ -1088,7 +1090,7 @@
           </div>
         {/if}
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-        <article class="md" dir="auto" bind:this={article} onclick={clickLink}>{@html md(doc.content)}</article>
+        <article class="md" dir="auto" bind:this={article} onclick={clickLink} use:zoomImages>{@html md(doc.content)}</article>
         <Backlinks path={current} version={libVersion} open={(p) => openFile(p)} />
       {/if}
       {#if doc.binary}<Backlinks path={current} version={libVersion} open={(p) => openFile(p)} />{/if}

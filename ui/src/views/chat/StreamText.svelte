@@ -7,6 +7,7 @@
   import { untrack } from 'svelte';
   import { marked } from 'marked';
   import { md, mdClick } from '../../lib/md';
+  import { zoomImages } from '../../lib/zoomImages';
   import { linkDefs, type LinkMap } from './linkDefs';
 
   let { text, onrender }: { text: string; onrender?: () => void } = $props();
@@ -53,4 +54,4 @@
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="md" dir="auto" onclick={mdClick}>{#each blocks as html, i (i)}{@html html}{/each}</div>
+<div class="md" dir="auto" onclick={mdClick} use:zoomImages>{#each blocks as html, i (i)}{@html html}{/each}</div>

@@ -20,6 +20,7 @@
   import { t, tn, fmtDate, fmtHijri, fmtNum } from '../lib/i18n';
   import { errDetail, failed } from '../lib/errors';
   import { hasHiddenText, md, mdClick, resolveLink } from '../lib/md';
+  import { zoomImages } from '../lib/zoomImages';
   import { dueLabel, dueState, isoDay, notify, prettyName, rawBlobUrl } from '../lib/content/util';
   import { clock } from '../lib/clock.svelte';
   import { showHijri } from '../lib/weekPrefs.svelte';
@@ -305,7 +306,7 @@
             <button class="btn sm" onclick={editFront}><Icon name="edit" size={13} /> {t('edit')}</button>
           </div>
           <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
-          <article class="md" dir="auto" bind:this={article} onclick={(e) => clickLink(e, data.path)}>{@html md(body)}</article>
+          <article class="md" dir="auto" bind:this={article} onclick={(e) => clickLink(e, data.path)} use:zoomImages>{@html md(body)}</article>
           <FindBar root={() => article} where={'doc:' + data.path} bottom />
         {/if}
       {:else if tab === 'todos'}
@@ -377,7 +378,7 @@
                 </h3>
                 {#if String(en.body ?? '').trim()}
                   <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-                  <div class="md" dir="auto" onclick={(e) => clickLink(e, data.log.path)}>{@html md(en.body)}</div>
+                  <div class="md" dir="auto" onclick={(e) => clickLink(e, data.log.path)} use:zoomImages>{@html md(en.body)}</div>
                 {/if}
               </article>
             {/each}

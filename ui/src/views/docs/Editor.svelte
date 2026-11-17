@@ -12,6 +12,7 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { Link, List, ListOrdered, ListTodo, ListIndentDecrease, ListIndentIncrease, ImagePlus } from '@lucide/svelte';
   import { md, mdClick, resolveLink } from '../../lib/md';
+  import { zoomImages } from '../../lib/zoomImages';
   import { post } from '../../lib/api';
   import { t, tn, lang } from '../../lib/i18n';
   import { failed } from '../../lib/errors';
@@ -571,7 +572,7 @@
     <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
     <article class="md pv scroll" dir="auto" aria-label={t('docs.preview')} bind:this={pv} onscroll={onPvScroll}
       onloadcapture={pictureLoaded}
-      onclick={(e) => { if (!mdClick(e) && (e.target as HTMLElement).closest('a')) e.preventDefault(); }}>{@html pvHtml}</article>
+      onclick={(e) => { if (!mdClick(e) && (e.target as HTMLElement).closest('a')) e.preventDefault(); }} use:zoomImages>{@html pvHtml}</article>
   {/if}
 </div>
 

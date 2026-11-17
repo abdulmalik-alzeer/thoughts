@@ -2,6 +2,7 @@
   // A guide (or the release notes) read inside the app: rendered markdown, links between guides work.
   import Icon from '../lib/Icon.svelte';
   import { md, mdClick } from '../lib/md';
+  import { zoomImages } from '../lib/zoomImages';
   import { t } from '../lib/i18n';
   import { guideLink, slug } from '../lib/guides';
 
@@ -31,4 +32,4 @@
 </script>
 
 <p><button class="btn" onclick={back}><Icon name="left" size={15} class="flip-rtl" /> {t('help.back')}</button></p>
-<article class="md guide" dir="auto" bind:this={box} onclick={click}>{@html html}</article>
+<article class="md guide" dir="auto" bind:this={box} onclick={click} use:zoomImages>{@html html}</article>

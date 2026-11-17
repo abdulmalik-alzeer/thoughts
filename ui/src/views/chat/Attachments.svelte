@@ -4,8 +4,8 @@
 </script>
 
 <script lang="ts">
-  // The files sent with a message: pictures as thumbnails, PDFs and pictures open in a viewer
-  // inside the app, anything else is named. The service serves only this chat's own files.
+  // The files sent with a message: pictures as thumbnails that open in the app's picture viewer
+  // (lib/ImageViewer.svelte), PDFs in a viewer of their own here, anything else is named. The service serves only this chat's own files.
   import Icon from '../../lib/Icon.svelte';
   import { apiBlob, inTauri } from '../../lib/api';
   import { toast } from '../../lib/store.svelte';
@@ -13,6 +13,7 @@
   import { isImageName } from '../../lib/content/util';
   import { trapFocus } from '../../lib/focus';
   import { canOpenInApp, revealChatAttachment, revealLabelKey } from '../../lib/openInApp';
+  import { openImage } from '../../lib/imageOpen.svelte';
 
   let { chatId, paths }: { chatId: string; paths: string[] } = $props();
 
@@ -69,7 +70,7 @@
         <span class="thumb wait" aria-hidden="true"></span>
       {:then u}
         {#if u}
-          <button type="button" class="thumb" onclick={() => view(f)} title={t('chatc.att.open', { name: f.name })} aria-label={t('chatc.att.open', { name: f.name })}><img src={u} alt="" /></button>
+          <button type="button" class="thumb" onclick={(e) => openImage({ src: u, name: f.name, alt: f.name, from: e.currentTarget })} title={t('chatc.att.open', { name: f.name })} aria-label={t('chatc.att.open', { name: f.name })}><img src={u} alt="" /></button>
         {:else}
           <span class="fchip" title={t('chatc.att.gone')}><Icon name="attach" size={12} /><bdi class="ell">{f.name}</bdi></span>
         {/if}
@@ -96,8 +97,6 @@
           <p class="muted vmsg">{t('chatc.att.gone')}</p>
         {:else if !viewUrl}
           <p class="muted vmsg" role="status">{t('chatc.att.loading')}</p>
-        {:else if viewing.image}
-          <img class="vimg" src={viewUrl} alt={viewing.name} />
         {:else}
           <iframe class="vpdf" src={viewUrl} title={viewing.name}></iframe>
         {/if}
@@ -124,7 +123,6 @@
   .vhead { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; border-bottom: var(--border-w) solid var(--border); }
   .vname { flex: 1; font-weight: 600; min-width: 0; }
   .vmsg { padding: 24px; margin: 0; text-align: center; }
-  .vimg { max-width: 100%; max-height: calc(100vh - 120px); object-fit: contain; margin: auto; display: block; padding: 12px; }
   .vpdf { width: 100%; height: calc(100vh - 120px); border: 0; background: #fff; }
   @media print { .viewer-back { display: none; } .thumb { cursor: default; } }
 </style>

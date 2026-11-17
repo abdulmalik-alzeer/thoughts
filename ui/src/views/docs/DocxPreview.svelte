@@ -8,6 +8,7 @@
   import { errDetail } from '../../lib/errors';
   import { docxToDom } from '../../lib/content/docxview';
   import { docDir } from '../../lib/content/docx';
+  import { zoomImages } from '../../lib/zoomImages';
 
   let { path, name }: { path: string; name: string } = $props();
 
@@ -53,7 +54,7 @@
 {#if skipped && phase === 'ready'}
   <p class="muted sm note"><Icon name="info" size={14} /> {t('docsb.docxSkipped')}</p>
 {/if}
-<article class="md page" class:hide={phase !== 'ready'} bind:this={host} aria-label={t('docsb.docxLabel', { name })}></article>
+<article class="md page" class:hide={phase !== 'ready'} bind:this={host} aria-label={t('docsb.docxLabel', { name })} use:zoomImages></article>
 
 <style>
   .page { margin-top: 16px; padding: 28px 32px; background: var(--panel); border: var(--border-w) solid var(--border); border-radius: var(--radius); max-width: 820px; overflow-wrap: anywhere; }
