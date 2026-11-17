@@ -17,9 +17,9 @@
 //!   data and other chats' files, which the Claude Code path refuses. Runs are told so, `.claude/`
 //!   and `.mcp.json` (and the standing files, for runs nobody watches) are put back when a run
 //!   changed them (`claude::StandingSnapshot`), and the app says it plainly for Codex chats;
-//! - so where the app keeps passwords in a plain file (`plain_passwords`), a run in Codex's own
-//!   sandbox does not start at all; a Bypass run on macOS is put inside the app's own sandbox
-//!   instead, which closes the app's data folder and the release signing key (`outer_sandbox`).
+//! - so where the app keeps passwords in a plain file (`plain_passwords`) no Codex run starts; and a
+//!   Bypass run on macOS is put inside the app's own sandbox, which closes the app's data folder, the
+//!   release signing key, the keychain and the plain ways out of it (`outer_sandbox`).
 
 use crate::chats::Msg;
 use crate::claude::{Ended, Profile, RunSpec, StandingSnapshot};
@@ -502,8 +502,8 @@ pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 /// app's data folder and the release signing key to it? Only where Codex has no sandbox of its own
 /// (Bypass) and only on macOS: Codex's own sandbox lets its commands read every file, and macOS
 /// refuses a second sandbox inside one, so `read-only` and `workspace-write` cannot be wrapped
-/// (Codex's commands would then fail to start). Those runs are refused instead where it matters
-/// (`plain_passwords`).
+/// (Codex's commands would then fail to start). Where passwords sit in a plain file no Codex run
+/// starts at all (`plain_passwords`).
 pub fn outer_sandbox(sandbox: &str) -> bool { cfg!(target_os = "macos") && sandbox == "danger-full-access" }
 
 /// A path as a string in a sandbox profile.
@@ -517,32 +517,73 @@ fn both_spellings(p: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// The app's sandbox around a Codex run (`outer_sandbox`): everything stays allowed (Bypass is no
-/// sandbox) except reading or changing the folders in `closed` — the app's data folder and `~/.tauri`,
-/// where the updater signing key is kept — and starting the keychain tool, which can hand out the
-/// key's password. `readable` (the customisation layer, the search add-on, this run's pictures) may
-/// be read and `open` (a folder the run works in) read and changed, also inside a closed folder.
-/// Later rules win over earlier ones in a profile.
-pub fn outer_profile(closed: &[PathBuf], readable: &[PathBuf], open: &[PathBuf]) -> String {
+/// The keychain's own services: what reads a saved password (the updater key's included), whichever
+/// program asks. Codex's sign-in is a file of its own and its connections are checked by `trustd`,
+/// so it needs none of these.
+const KEYCHAIN_SERVICES: &[&str] = &["com.apple.SecurityServer", "com.apple.securityd.xpc", "com.apple.security.agent",
+    "com.apple.security.authhost", "com.apple.security.keychain-circle-notification"];
+/// Ways out of the sandbox: a program started by someone else runs outside it (Launch Services,
+/// launchd jobs, Apple events, scheduled commands).
+const ESCAPE_SERVICES: &[&str] = &["com.apple.coreservices.launchservicesd", "com.apple.lsd.open", "com.apple.lsd.modifydb", "com.apple.backgroundtaskmanagementagent",
+    "com.apple.backgroundtaskmanagement.agent", "com.apple.coreservices.appleevents"];
+const ESCAPE_PROGRAMS: &[&str] = &["/usr/bin/security", "/bin/launchctl", "/usr/bin/open", "/usr/bin/osascript", "/usr/bin/crontab", "/usr/bin/at",
+    "/usr/bin/batch", "/usr/bin/atq", "/usr/bin/automator", "/usr/bin/shortcuts", "/usr/bin/sfltool"];
+
+/// What `outer_profile` closes and opens (`outer_folders`).
+#[derive(Debug, Default, PartialEq)]
+pub struct OuterFolders {
+    /// Neither read nor changed: the app's data folder and `~/.tauri`.
+    pub closed: Vec<PathBuf>,
+    /// Read only, also inside a closed folder: the customisation layer, the search add-on, this run's pictures.
+    pub readable: Vec<PathBuf>,
+    /// Read and changed, also inside a closed folder: a folder the run works in.
+    pub open: Vec<PathBuf>,
+    /// Never changed: what another program would later run outside the sandbox (start-up files of the
+    /// shells, login agents, the assistants' own settings).
+    pub no_write: Vec<PathBuf>,
+}
+
+/// The app's sandbox around a Codex run (`outer_sandbox`). Bypass means no sandbox, so everything
+/// else stays allowed; what it closes:
+/// - reading or changing `closed` (with `readable` and `open` reopened inside them);
+/// - the keychain's services, so no program reads a saved password (the updater key's included);
+/// - the ways a command could have something run later outside this sandbox and read the files from
+///   there: Launch Services and `open`, launchd jobs and `launchctl`, Apple events and `osascript`,
+///   scheduled commands, login items, and writing the files listed in `no_write`.
+/// It does not make Bypass safe: the run still changes anything else it can reach and has the network.
+/// Later rules win over earlier ones in a profile, so the reopening rules come last.
+pub fn outer_profile(f: &OuterFolders) -> String {
     let list = |ps: &[PathBuf]| ps.iter().flat_map(|p| both_spellings(p)).map(|p| format!("(subpath {})", sb_path(&p))).collect::<Vec<_>>().join(" ");
+    let names = |ns: &[&str]| ns.iter().map(|n| format!("(global-name \"{n}\")")).collect::<Vec<_>>().join(" ");
     let mut out = String::from("(version 1)(allow default)");
-    if !closed.is_empty() { out.push_str(&format!("(deny file-read* file-write* {})", list(closed))); }
-    out.push_str("(deny process-exec (literal \"/usr/bin/security\"))");
-    if !readable.is_empty() { out.push_str(&format!("(allow file-read* {})", list(readable))); }
-    if !open.is_empty() { out.push_str(&format!("(allow file-read* file-write* {})", list(open))); }
+    if !f.closed.is_empty() { out.push_str(&format!("(deny file-read* file-write* {})", list(&f.closed))); }
+    if !f.no_write.is_empty() { out.push_str(&format!("(deny file-write* {})", list(&f.no_write))); }
+    out.push_str(&format!("(deny mach-lookup {} {})", names(KEYCHAIN_SERVICES), names(ESCAPE_SERVICES)));
+    out.push_str("(deny job-creation)(deny lsopen)(deny appleevent-send)");
+    out.push_str(&format!("(deny process-exec {})", ESCAPE_PROGRAMS.iter().map(|p| format!("(literal \"{p}\")")).collect::<Vec<_>>().join(" ")));
+    if !f.readable.is_empty() { out.push_str(&format!("(allow file-read* {})", list(&f.readable))); }
+    if !f.open.is_empty() { out.push_str(&format!("(allow file-read* file-write* {})", list(&f.open))); }
     out
 }
 
 /// The folders `outer_profile` closes and opens for a run working in `cwd` (and `writable`), with
 /// its pictures in `pictures`, given the app's data folder `home` and the user's home folder.
-pub fn outer_folders(home: &Path, user_home: Option<&Path>, cwd: &Path, writable: &[PathBuf], pictures: Option<&Path>) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+pub fn outer_folders(home: &Path, user_home: Option<&Path>, cwd: &Path, writable: &[PathBuf], pictures: Option<&Path>) -> OuterFolders {
     let mut closed = vec![home.to_path_buf()];
-    if let Some(h) = user_home { closed.push(h.join(".tauri")); }
+    let mut no_write = vec![];
+    if let Some(h) = user_home {
+        closed.push(h.join(".tauri"));
+        for f in [".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
+                  ".config/fish", ".ssh", "Library/LaunchAgents", "Library/Application Support/com.apple.backgroundtaskmanagementagent",
+                  ".claude/settings.json", ".claude/settings.local.json", ".claude.json", ".codex/config.toml"] {
+            no_write.push(h.join(f));
+        }
+    }
     let mut readable: Vec<PathBuf> = ["app-layer", "app-layer-staging", "extensions"].iter().map(|d| home.join(d)).collect();
     readable.extend(pictures.map(Path::to_path_buf));
-    let inside = |d: &Path| closed.iter().any(|c| d.starts_with(c)) || both_spellings(d).iter().any(|d| closed.iter().flat_map(|c| both_spellings(c)).any(|c| d.starts_with(&c)));
+    let inside = |d: &Path| both_spellings(d).iter().any(|d| closed.iter().flat_map(|c| both_spellings(c)).any(|c| d.starts_with(&c)));
     let open: Vec<PathBuf> = std::iter::once(cwd).chain(writable.iter().map(PathBuf::as_path)).filter(|d| inside(d)).map(Path::to_path_buf).collect();
-    (closed, readable, open)
+    OuterFolders { closed, readable, open, no_write }
 }
 
 /// Does the app keep passwords in a plain file that a Codex command could read: the sync sign-in
@@ -1086,14 +1127,15 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         crate::log::error(format!("run {id}: not started — this Codex has no {sandbox} sandbox"));
         return Err(crate::tr::err("codex.mode_unavailable", &[]));
     }
-    // Codex's own sandbox lets commands read every file. Where passwords sit in a plain file, only a
-    // run the app can close its data folder to may start (`outer_sandbox`).
+    // Codex's own sandbox lets commands read every file: where passwords sit in a plain file, no
+    // Codex run starts.
     let outer = outer_sandbox(sandbox);
     if outer && !Path::new(SANDBOX_EXEC).is_file() {
         crate::log::error(format!("run {id}: not started — {SANDBOX_EXEC} is missing"));
         return Err(crate::tr::err("codex.mode_unavailable", &[]));
     }
-    if !outer && plain_passwords(&crate::paths::home()) {
+    // Bypass included: its sandbox closes the obvious ways, not every one (`outer_profile`).
+    if plain_passwords(&crate::paths::home()) {
         crate::log::warn(format!("run {id}: not started on Codex — passwords are kept in a plain file it could read"));
         return Err(crate::tr::err("codex.plain_passwords", &[]));
     }
@@ -1142,9 +1184,9 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     let args = exec_args(&Plan { help: &help, sandbox, model: l.spec.options.model.as_deref(), effort: effort.as_deref(), web: sw.web,
         own_setup: sw.own_setup, mcp: sw.mcp, network: sw.network, images: &images, writable: &writable, resume: resume.as_ref() });
     let mut c = if outer {
-        let (closed, readable, open) = outer_folders(&crate::paths::home(), dirs::home_dir().as_deref(), &l.spec.cwd, &writable, files.0.as_deref());
+        let folders = outer_folders(&crate::paths::home(), dirs::home_dir().as_deref(), &l.spec.cwd, &writable, files.0.as_deref());
         let mut c = cmd(Path::new(SANDBOX_EXEC));
-        c.arg("-p").arg(outer_profile(&closed, &readable, &open)).arg(&bin);
+        c.arg("-p").arg(outer_profile(&folders)).arg(&bin);
         c
     } else { cmd(&bin) };
     c.current_dir(&l.spec.cwd).args(&args)

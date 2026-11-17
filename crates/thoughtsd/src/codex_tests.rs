@@ -715,39 +715,61 @@ fn only_a_run_without_codexs_own_sandbox_is_wrapped_and_only_on_macos() {
 #[test]
 fn the_outer_profile_closes_the_apps_folder_and_the_signing_key_and_opens_only_what_the_run_needs() {
     let home = Path::new("/Users/u/.thoughts");
-    let (closed, readable, open) = outer_folders(home, Some(Path::new("/Users/u")), Path::new("/Users/u/Library"), &[PathBuf::from("/Users/u/proj")], Some(Path::new("/Users/u/.thoughts/run-tmp/codex-1")));
-    assert_eq!(closed, vec![home.to_path_buf(), PathBuf::from("/Users/u/.tauri")]);
-    assert!(readable.contains(&home.join("app-layer")) && readable.contains(&home.join("extensions")) && readable.contains(&home.join("run-tmp/codex-1")));
-    assert!(open.is_empty(), "the library and a project outside the app's folder are not affected: {open:?}");
-    let (_, _, open) = outer_folders(home, None, &home.join("reorganize-worktree"), &[], None);
-    assert_eq!(open, vec![home.join("reorganize-worktree")], "a folder the run works in stays open, even inside the app's folder");
+    let f = outer_folders(home, Some(Path::new("/Users/u")), Path::new("/Users/u/Library"), &[PathBuf::from("/Users/u/proj")], Some(Path::new("/Users/u/.thoughts/run-tmp/codex-1")));
+    assert_eq!(f.closed, vec![home.to_path_buf(), PathBuf::from("/Users/u/.tauri")]);
+    assert!(f.readable.contains(&home.join("app-layer")) && f.readable.contains(&home.join("extensions")) && f.readable.contains(&home.join("run-tmp/codex-1")));
+    assert!(f.open.is_empty(), "the library and a project outside the app's folder are not affected: {:?}", f.open);
+    for w in [".zshrc", ".bash_profile", ".profile", "Library/LaunchAgents", ".ssh", ".claude/settings.json", ".codex/config.toml"] {
+        assert!(f.no_write.contains(&Path::new("/Users/u").join(w)), "{w}");
+    }
+    let g = outer_folders(home, None, &home.join("reorganize-worktree"), &[], None);
+    assert_eq!(g.open, vec![home.join("reorganize-worktree")], "a folder the run works in stays open, even inside the app's folder");
 
-    let p = outer_profile(&closed, &readable, &[PathBuf::from("/Users/u/.thoughts/x \"q\" \\b")]);
+    let p = outer_profile(&OuterFolders { open: vec![PathBuf::from("/Users/u/.thoughts/x \"q\" \\b")], ..f });
     assert!(p.starts_with("(version 1)(allow default)(deny file-read* file-write* (subpath \"/Users/u/.thoughts\") (subpath \"/Users/u/.tauri\"))"), "{p}");
-    assert!(p.contains("(deny process-exec (literal \"/usr/bin/security\"))"), "{p}");
+    assert!(p.contains("(deny file-write* (subpath \"/Users/u/.zshrc\")") && p.contains("(subpath \"/Users/u/Library/LaunchAgents\")"), "{p}");
+    // The keychain itself, whichever program asks, and the ways a command gets something run outside.
+    for want in ["(global-name \"com.apple.SecurityServer\")", "(global-name \"com.apple.securityd.xpc\")", "(global-name \"com.apple.coreservices.launchservicesd\")",
+                 "(deny job-creation)", "(deny lsopen)", "(deny appleevent-send)", "(literal \"/usr/bin/security\")", "(literal \"/bin/launchctl\")",
+                 "(literal \"/usr/bin/open\")", "(literal \"/usr/bin/osascript\")", "(literal \"/usr/bin/crontab\")"] {
+        assert!(p.contains(want), "missing {want}: {p}");
+    }
     assert!(p.contains("(allow file-read* (subpath \"/Users/u/.thoughts/app-layer\")"), "{p}");
     assert!(p.ends_with(r#"(allow file-read* file-write* (subpath "/Users/u/.thoughts/x \"q\" \\b"))"#), "{p}");
-    // The opening rules come after the closing ones: in a profile the later rule wins.
-    assert!(p.find("(deny file-read*").unwrap() < p.find("(allow file-read*").unwrap());
+    // The opening rules come after every closing one: in a profile the later rule wins.
+    let first_allow = p.find("(allow file-read*").unwrap();
+    for deny in ["(deny file-read*", "(deny file-write*", "(deny mach-lookup", "(deny process-exec"] { assert!(p.find(deny).unwrap() < first_allow, "{deny}"); }
 }
 
-/// The profile does what it says, under macOS's own sandbox program (temp folders only).
+/// The profile does what it says, under macOS's own sandbox program (temp folders only; nothing is
+/// asked of the real keychain but an item that does not exist).
 #[cfg(target_os = "macos")]
 #[test]
-fn the_outer_profile_really_refuses_reading_the_closed_folders() {
+fn the_outer_profile_really_refuses_the_closed_folders_and_the_ways_out() {
     let d = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("thoughts-outer-{}", uuid::Uuid::new_v4()));
-    let (home, key, lib) = (d.join("app"), d.join("home/.tauri"), d.join("lib"));
-    for f in [home.join("extensions"), key.clone(), lib.clone()] { std::fs::create_dir_all(f).unwrap(); }
+    let (home, uhome, lib) = (d.join("app"), d.join("home"), d.join("lib"));
+    let key = uhome.join(".tauri");
+    for f in [home.join("extensions"), key.clone(), lib.clone(), uhome.join("Library/LaunchAgents")] { std::fs::create_dir_all(f).unwrap(); }
     std::fs::write(home.join("secrets.json"), "s").unwrap();
     std::fs::write(home.join("extensions/tool"), "t").unwrap();
     std::fs::write(key.join("thoughts-updater.key"), "k").unwrap();
     std::fs::write(lib.join("note.md"), "n").unwrap();
-    let (closed, readable, open) = outer_folders(&home, Some(&d.join("home")), &lib, &[], None);
-    let run = |sh: &str| std::process::Command::new(SANDBOX_EXEC).arg("-p").arg(outer_profile(&closed, &readable, &open)).args(["/bin/sh", "-c", sh]).output().unwrap();
+    let profile = outer_profile(&outer_folders(&home, Some(&uhome), &lib, &[], None));
+    let run = |sh: &str| std::process::Command::new(SANDBOX_EXEC).arg("-p").arg(&profile).args(["/bin/sh", "-c", sh]).output().unwrap();
     for sh in [format!("cat '{}'", home.join("secrets.json").display()), format!("cat '{}'", key.join("thoughts-updater.key").display()),
-               format!("ln '{}' '{}'", home.join("secrets.json").display(), lib.join("h").display()), "/usr/bin/security help".into()] {
+               format!("ln '{}' '{}'", home.join("secrets.json").display(), lib.join("h").display()), "/usr/bin/security help".into(),
+               format!("echo x >> '{}'", uhome.join(".zshrc").display()), format!("echo x > '{}'", uhome.join("Library/LaunchAgents/a.plist").display()),
+               "/usr/bin/osascript -e 1".into(), "/bin/launchctl print gui/$(id -u) >/dev/null".into()] {
         assert!(!run(&sh).status.success(), "{sh}");
     }
+    // Another program asking the keychain (here the keychain tool, let through for this check) gets
+    // no answer: the keychain's services are closed, not only one program. What it asks for is a
+    // public certificate of the system's own, which it finds outside the sandbox.
+    let ask = ["find-certificate", "-c", "Apple Root CA", "/System/Library/Keychains/SystemRootCertificates.keychain"];
+    assert!(std::process::Command::new("/usr/bin/security").args(ask).output().unwrap().status.success());
+    let without_exec_rule = profile.replace("(literal \"/usr/bin/security\")", "");
+    let o = std::process::Command::new(SANDBOX_EXEC).arg("-p").arg(&without_exec_rule).arg("/usr/bin/security").args(ask).output().unwrap();
+    assert!(!o.status.success(), "the keychain answered inside the sandbox");
     for sh in [format!("cat '{}'", lib.join("note.md").display()), format!("echo x > '{}'", lib.join("new.md").display()),
                format!("cat '{}'", home.join("extensions/tool").display())] {
         let o = run(&sh);
