@@ -64,9 +64,9 @@
   .from :global(.icon) { flex: none; }
   .pv { height: calc(100vh - 26px - 24px); }
   /* The same entrance as a built-in page: the strip is its first section, the add-on's page the second. */
-  .from { animation: rise .5s var(--ease) both; }
+  .from { animation: rise .5s var(--ease) backwards; }
   .pv.wait { opacity: 0; }
-  .pv.in { animation: rise .5s var(--ease) 50ms both; }
+  .pv.in { animation: rise .5s var(--ease) 50ms backwards; }
   /* Less motion: nothing is held back or slid in. */
   @media (prefers-reduced-motion: reduce) { .pv.wait { opacity: 1; } .from, .pv.in { animation: none; } }
   :global(html[data-motion='reduce']) .pv.wait { opacity: 1; }

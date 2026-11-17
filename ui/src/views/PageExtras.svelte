@@ -50,7 +50,7 @@
   .box { padding: 6px; min-width: 0; overflow: hidden; }
   /* A box rises like the page's own sections, once its add-on has drawn it (lib/surfaceIn.ts). */
   .box:global([data-drawn='no']) { opacity: 0; }
-  .box:global([data-drawn='yes']) { animation: rise .5s var(--ease) both; }
+  .box:global([data-drawn='yes']) { animation: rise .5s var(--ease) backwards; }
   @media (prefers-reduced-motion: reduce) { .box:global([data-drawn='no']) { opacity: 1; } }
   :global(html[data-motion='reduce']) .box:global([data-drawn='no']) { opacity: 1; }
   @media print { .box:global([data-drawn='no']) { opacity: 1; } }

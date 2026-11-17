@@ -274,7 +274,7 @@
 </aside>
 
 <style>
-  .pane { position: relative; flex: none; display: flex; flex-direction: column; min-width: 0; height: calc(100vh - 26px); background: var(--panel, var(--bg)); border-inline-start: var(--border-w, 1px) solid var(--border); animation: pane-in .18s ease-out both; }
+  .pane { position: relative; flex: none; display: flex; flex-direction: column; min-width: 0; height: calc(100vh - 26px); background: var(--panel, var(--bg)); border-inline-start: var(--border-w, 1px) solid var(--border); animation: pane-in .18s ease-out backwards; }
   .pane.overlay { position: absolute; inset-block: 0; inset-inline-end: 0; height: auto; z-index: 30; max-width: 100%; box-shadow: var(--shadow-lg, 0 10px 40px rgba(0, 0, 0, .22)); }
   .scrim { position: absolute; inset: 0; z-index: 29; background: color-mix(in srgb, var(--fg) 12%, transparent); animation: fade-in .18s ease-out both; }
   @keyframes pane-in { from { opacity: 0; transform: translateX(12px); } }

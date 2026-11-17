@@ -509,7 +509,7 @@
   .autoq { margin-top: 24px; display: flex; justify-content: center; }
   /* An add-on box rises like the sections around it, once its add-on has drawn it (lib/surfaceIn.ts). */
   .widget:global([data-drawn='no']) { opacity: 0; animation: none; }
-  .widget:global([data-drawn='yes']) { animation: rise .5s var(--ease) both; }
+  .widget:global([data-drawn='yes']) { animation: rise .5s var(--ease) backwards; }
   @media (prefers-reduced-motion: reduce) { .widget:global([data-drawn='no']) { opacity: 1; } }
   :global(html[data-motion='reduce']) .widget:global([data-drawn='no']) { opacity: 1; }
   @media print { .widget:global([data-drawn='no']) { opacity: 1; } }
