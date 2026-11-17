@@ -1,5 +1,11 @@
 # What's new in Thoughts
 
+## 0.0.13
+
+A fix for attachments in customisation chats.
+
+- **Customisation chats can read what you attach again.** Since 0.0.11 a screenshot, picture or document attached in a customisation chat was refused when the assistant tried to open it, so it could not see what you meant. The same happened in an ordinary chat with web lookups switched on, and other chats asked for permission first. Now every chat reads the files attached to it without asking. Files attached to other chats stay closed, as before.
+
 ## 0.0.12
 
 Thoughts can now update itself, and tells you what changed before it does.

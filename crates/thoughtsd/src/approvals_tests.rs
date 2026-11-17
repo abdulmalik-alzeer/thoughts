@@ -422,7 +422,40 @@ async fn only_ordinary_chats_get_the_prompt_tool_strict_mode_closes_commands_and
     let home = crate::paths::home().file_name().unwrap().to_string_lossy().to_string();
     let rules_of = |i: &RunInfo| i.deny.iter().filter(|d| !d.contains("clients/") && !d.contains("[Cc][Ll][Ii]") && !d.contains(&home) && !d.contains(&crate::claude::fold_case(&home))).cloned().collect::<std::collections::BTreeSet<_>>();
     assert_eq!(rules_of(&r), rules_of(&bypass_before), "only the private folder's own rules were added");
-    assert_eq!((r.allow.clone(), r.profile), (bypass_before.allow.clone(), bypass_before.profile));
+    // (Each run's one allow rule opens the copies of its own chat's attached files.)
+    let own = |i: &RunInfo| crate::claude::own_copies_allow(&crate::paths::home(), &i.chat_id).into_iter().collect::<Vec<_>>();
+    assert_eq!((r.allow.clone(), r.profile), (own(&r), bypass_before.profile));
+    assert_eq!(bypass_before.allow, own(&bypass_before));
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[tokio::test]
+async fn a_run_nobody_can_answer_reads_the_copies_of_its_own_chats_files_by_rule() {
+    let st = Arc::new(AppState::for_test());
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<RunInfo>::new()));
+    let log = seen.clone();
+    *st.run_hook.lock().unwrap() = Some(Arc::new(move |info: RunInfo| { log.lock().unwrap().push(info); Box::pin(async { true }) }));
+    let base = std::env::temp_dir().join(format!("thoughts-appr-copies-{}", uuid::Uuid::new_v4()));
+    let lib = base.join("Library");
+    std::fs::create_dir_all(&lib).unwrap();
+    { let mut s = st.settings.write().await; s.library_path = Some(lib.to_string_lossy().into()); }
+    let home = crate::paths::home();
+    let other = crate::run_files::folder(&home, "some-other-chat").unwrap();
+    // A customise chat and a chat with web lookups ask nobody; an ordinary chat should not have to ask for this either.
+    for (kind, web) in [("customize", false), ("chat", true), ("chat", false)] {
+        let r = run_info(&st, &seen, &lib, kind, "acceptEdits", web).await;
+        let own = crate::run_files::folder(&home, &r.chat_id).unwrap();
+        let rule = format!("Read({}/**)", crate::claude::rule_path(&own));
+        assert!(r.allow.contains(&rule), "{kind} web={web}: {:?}", r.allow);
+        // Reading only, this chat's folder only: nothing else in the app's home is opened by rule…
+        let opened: Vec<&String> = r.allow.iter().filter(|a| a.contains(&*home.to_string_lossy())).collect();
+        assert_eq!(opened, [&rule], "{kind} web={web}");
+        // …no deny rule closes it (a deny rule would win), and another chat's copies stay closed.
+        let closes = |p: &Path| r.deny.iter().any(|d| p.ancestors().any(|a| *d == format!("Read({}/**)", crate::claude::rule_path(a))));
+        assert!(!closes(&own.join("run/shot.png")) && closes(&other.join("run/shot.png")), "{kind} web={web}");
+        assert!(r.deny.contains(&format!("Edit({}/**)", crate::claude::rule_path(&crate::run_files::root(&home)))));
+    }
+    assert_eq!(crate::claude::own_copies_allow(&home, "../some-other-chat"), None);
     std::fs::remove_dir_all(base).unwrap();
 }
 

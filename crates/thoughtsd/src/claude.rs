@@ -881,6 +881,15 @@ pub fn protective_deny(cwd: &Path, add_dirs: &[PathBuf], home: &Path, chat_id: &
     deny
 }
 
+/// The rule that lets a run read the copies of its own chat's attached files (`run_files`) without
+/// asking: they are in the app's home, outside the folders it works in, and a run nobody can
+/// answer (a customise run, a chat with web lookups on) is refused whatever would ask. Reading
+/// only, and only this chat's folder: every other chat's stays closed by `protective_deny`, and a
+/// deny rule wins over this one. Nothing for an id that is not a chat id.
+pub fn own_copies_allow(home: &Path, chat_id: &str) -> Option<String> {
+    crate::run_files::folder(home, chat_id).map(|own| format!("Read({}/**)", rule_path(&own)))
+}
+
 /// `pat`, a rule's path pattern, in every letter case: each ASCII letter outside a character class
 /// or an escape becomes a class of its two cases (`/Users/a` → `/[Uu][Ss][Ee][Rr][Ss]/[Aa]`).
 pub fn fold_case(pat: &str) -> String {
@@ -1659,6 +1668,11 @@ pub async fn start_run(
     let dirs: Vec<&Path> = std::iter::once(spec.cwd.as_path()).chain(spec.add_dirs.iter().map(PathBuf::as_path)).collect();
     let (prof_deny, prof_allow) = profile_rules(&prof, &dirs);
     if !prof_deny.is_empty() { deny = merge_deny(deny, Some(json!({"permissions": {"deny": prof_deny}}).to_string())); }
+    // The copies of this chat's own attached files are outside the folders the run works in, where
+    // a read is a question — and a customise run has nobody to answer it. They are opened by rule.
+    let mut prof_allow = prof_allow;
+    // (Only for the runs that get copies: the ones a message starts, `api::chat_send`.)
+    if matches!(kind.as_str(), "chat" | "customize") { prof_allow.extend(own_copies_allow(&crate::paths::home(), &spec.chat_id)); }
     let deny = with_allow(deny, &prof_allow);
     let deny = if strict && prof.shell { with_ask(deny, &SHELL_TOOLS) } else { deny };
     // Every command is checked before it runs, in every mode (`shell_guard`). Without the app's
@@ -3625,7 +3639,9 @@ pub(crate) mod tests {
         };
         let chat = run("chat", false).await;
         assert_eq!(chat.profile.name, "chat");
-        assert!(chat.allow.is_empty() && !chat.deny.iter().any(|d| d == "Bash"));
+        // Its one allow rule opens the copies of its own attached files.
+        assert_eq!(chat.allow, own_copies_allow(&crate::paths::home(), &chat.chat_id).into_iter().collect::<Vec<_>>());
+        assert!(!chat.deny.iter().any(|d| d == "Bash"));
         // Every run is told which folders are private (its instructions travel in a private file).
         assert!(chat.system.contains("- clients/acme"), "{}", chat.system);
         let web = run("chat", true).await;
