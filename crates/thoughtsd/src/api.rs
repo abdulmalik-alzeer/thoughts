@@ -1709,13 +1709,18 @@ async fn move_file(State(st): S, Query(q): Query<HashMap<String, String>>, Json(
     // place. Worked out before the move; an add-on only changes notes in its own folders.
     let plan = {
         let private = if scope.plugin { st.settings.read().await.private_paths.clone() } else { vec![] };
-        let may = |rel: &str| !scope.plugin || (!paths::is_private(&root, rel, &private) && library::check_plugin_write(&root, rel, &scope.allow).is_ok() && scope.may_read(&root, rel));
-        links::plan_move(&root, &from, &to, &may)
+        // Reads every note: off the async workers.
+        let (root, from, to) = (root.clone(), from.clone(), to.clone());
+        let scope = Scope { plugin: scope.plugin, allow: scope.allow.clone(), read: scope.read.clone() };
+        tokio::task::spawn_blocking(move || {
+            let may = |rel: &str| !scope.plugin || (!paths::is_private(&root, rel, &private) && library::check_plugin_write(&root, rel, &scope.allow).is_ok() && scope.may_read(&root, rel));
+            links::plan_move(&root, &from, &to, &may)
+        }).await?
     };
     // With history on, the move and its link changes are one entry (pending edits are recorded first;
     // while the assistant works in the library, only the files the move touches).
     let recoverable = history_lib(&st).await.is_ok() && wraps::interrupted_wrap(&st).await.is_none();
-    let touched: Vec<String> = [from.clone(), to.clone()].into_iter().chain(plan.writes.iter().map(|(p, _)| p.clone())).collect();
+    let touched: Vec<String> = [from.clone(), to.clone()].into_iter().chain(plan.writes.iter().map(|w| w.path.clone())).collect();
     if recoverable { claude::record_app_write(&st, &root, &git::subject::edit(&format!("changes before moving {from}")), &touched, false).await; }
     library::rename(&root, &from, &to)?;
     let notes = links::apply(&root, &plan);

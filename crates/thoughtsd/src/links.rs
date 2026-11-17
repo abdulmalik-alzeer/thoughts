@@ -300,10 +300,53 @@ fn markdown_files(root: &Path) -> Vec<(String, PathBuf)> {
 /// What moving `from` to `to` changes in the library's links, computed before the move.
 #[derive(Debug, Default)]
 pub struct MovePlan {
-    /// (library-relative path AFTER the move, new content) for every file whose links change.
-    pub writes: Vec<(String, String)>,
+    /// Every file whose links change.
+    pub writes: Vec<PlannedWrite>,
     /// How many links were rewritten.
     pub links: usize,
+    from: String,
+    to: String,
+}
+
+/// One file a move rewrites.
+#[derive(Debug)]
+pub struct PlannedWrite {
+    /// Library-relative path AFTER the move.
+    pub path: String,
+    /// Its new content.
+    pub content: String,
+    /// Where it was before the move, and its text when the plan was made: when the file changed
+    /// before the plan is applied, its links are worked out again on the text it has then.
+    was: String,
+    before: String,
+}
+
+/// The link edits (byte range, new destination) that moving `from` to `to` makes in `text`, a
+/// file at `rel` that ends up at `new_src`. `existed(p)`: did library path `p` exist before the move.
+fn link_edits(text: &str, rel: &str, new_src: &str, from: &str, to: &str, existed: &mut dyn FnMut(&str) -> bool) -> Vec<(usize, usize, String)> {
+    let mut edits: Vec<(usize, usize, String)> = vec![];
+    for l in find_links(text) {
+        let dest = &text[l.start..l.end];
+        let Some(t) = target(dest) else { continue };
+        let Some(old_t) = resolve(rel, &t.path) else { continue };
+        if old_t.is_empty() { continue; }
+        let new_t = moved(&old_t, from, to);
+        if new_t.is_none() && new_src == rel { continue; }
+        // Only links that work today are kept working; a broken one is left as it is.
+        if !existed(&old_t) { continue; }
+        let new_t = new_t.unwrap_or(old_t);
+        let new_dest = rewrite(&t, l.angle, new_src, &new_t);
+        if new_dest != dest { edits.push((l.start, l.end, new_dest)); }
+    }
+    edits
+}
+
+fn splice(text: &str, edits: &[(usize, usize, String)]) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut at = 0;
+    for (s, e, d) in edits { out.push_str(&text[at..*s]); out.push_str(d); at = *e; }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// Work out every link that has to change when `from` (a file or folder) becomes `to`. Must run
@@ -312,47 +355,60 @@ pub struct MovePlan {
 pub fn plan_move(root: &Path, from: &str, to: &str, may_write: &dyn Fn(&str) -> bool) -> MovePlan {
     let from = from.trim_matches('/');
     let to = to.trim_matches('/');
-    let mut plan = MovePlan::default();
+    let mut plan = MovePlan { from: from.to_string(), to: to.to_string(), ..Default::default() };
     let mut exists: HashMap<String, bool> = HashMap::new();
+    let mut existed = |p: &str| *exists.entry(p.to_string()).or_insert_with(|| {
+        crate::library::resolve(root, p).map_or(false, |p| std::fs::symlink_metadata(p).is_ok())
+    });
     for (rel, abs) in markdown_files(root) {
         let new_src = moved(&rel, from, to).unwrap_or_else(|| rel.clone());
         if !may_write(&rel) { continue; }
         let Ok(text) = std::fs::read_to_string(&abs) else { continue };
-        let mut edits: Vec<(usize, usize, String)> = vec![];
-        for l in find_links(&text) {
-            let dest = &text[l.start..l.end];
-            let Some(t) = target(dest) else { continue };
-            let Some(old_t) = resolve(&rel, &t.path) else { continue };
-            if old_t.is_empty() { continue; }
-            let new_t = moved(&old_t, from, to);
-            if new_t.is_none() && new_src == rel { continue; }
-            // Only links that work today are kept working; a broken one is left as it is.
-            let ok = *exists.entry(old_t.clone()).or_insert_with(|| {
-                crate::library::resolve(root, &old_t).map_or(false, |p| std::fs::symlink_metadata(p).is_ok())
-            });
-            if !ok { continue; }
-            let new_t = new_t.unwrap_or(old_t);
-            let new_dest = rewrite(&t, l.angle, &new_src, &new_t);
-            if new_dest != dest { edits.push((l.start, l.end, new_dest)); }
-        }
+        let edits = link_edits(&text, &rel, &new_src, from, to, &mut existed);
         if edits.is_empty() { continue; }
         plan.links += edits.len();
-        let mut out = String::with_capacity(text.len() + 64);
-        let mut at = 0;
-        for (s, e, d) in &edits { out.push_str(&text[at..*s]); out.push_str(d); at = *e; }
-        out.push_str(&text[at..]);
-        plan.writes.push((new_src, out));
+        plan.writes.push(PlannedWrite { path: new_src, content: splice(&text, &edits), was: rel, before: text });
     }
     plan
 }
 
-/// Write a move plan's files (after the move). Returns how many files were changed.
+/// Write a move plan's files (after the move). A file that changed since the plan was made (an
+/// assistant run or another app wrote to it in the meantime) gets its links worked out again on the
+/// text it has now, so that edit is kept; one that can no longer be read as text is left alone.
+/// Every file is tried even when one fails. Returns how many files were changed.
 pub fn apply(root: &Path, plan: &MovePlan) -> anyhow::Result<usize> {
-    for (rel, content) in &plan.writes {
-        let p = crate::library::resolve(root, rel)?;
-        crate::paths::write_atomic(&p, content.as_bytes(), false)?;
+    let (from, to) = (plan.from.as_str(), plan.to.as_str());
+    // After the move: a path existed before it when it (or where the move took it) exists now.
+    let mut exists: HashMap<String, bool> = HashMap::new();
+    let mut existed = |p: &str| *exists.entry(p.to_string()).or_insert_with(|| {
+        let now = moved(p, from, to).unwrap_or_else(|| p.to_string());
+        crate::library::resolve(root, &now).map_or(false, |p| std::fs::symlink_metadata(p).is_ok())
+    });
+    let (mut changed, mut failed) = (0, None);
+    for w in &plan.writes {
+        let res = (|| -> anyhow::Result<bool> {
+            let p = crate::library::resolve(root, &w.path)?;
+            let content = match std::fs::read(&p) {
+                Ok(now) if now == w.before.as_bytes() => w.content.clone(),
+                Ok(now) => {
+                    let Ok(now) = String::from_utf8(now) else { return Ok(false) };
+                    let edits = link_edits(&now, &w.was, &w.path, from, to, &mut existed);
+                    if edits.is_empty() { return Ok(false); }
+                    splice(&now, &edits)
+                }
+                // Gone since the plan was made: not brought back.
+                Err(_) => return Ok(false),
+            };
+            crate::paths::write_atomic(&p, content.as_bytes(), false)?;
+            Ok(true)
+        })();
+        match res {
+            Ok(true) => changed += 1,
+            Ok(false) => {}
+            Err(e) => { crate::log::warn(format!("move: could not update the links in {} ({e})", w.path)); failed.get_or_insert(e); }
+        }
     }
-    Ok(plan.writes.len())
+    match failed { Some(e) => Err(e), None => Ok(changed) }
 }
 
 /// The text of a version of a note written while it was at `was`, about to be put back at `now`:
@@ -573,6 +629,40 @@ mod tests {
         put(&r, "b.md", before);
         assert_eq!(mv(&r, "a.md", "n/a.md"), 2);
         assert_eq!(get(&r, "b.md"), before.replacen("[a](a.md \"title\")", "[a](n/a.md \"title\")", 1).replacen("[ref]: a.md", "[ref]: n/a.md", 1));
+    }
+
+    #[test]
+    fn a_note_edited_between_plan_and_apply_keeps_the_edit() {
+        let r = tmp();
+        put(&r, "a.md", "x\n");
+        put(&r, "b.md", "[a](a.md)\n");
+        put(&r, "c.md", "see [a](a.md)\n");
+        put(&r, "d.md", "[a](a.md)\n");
+        put(&r, "e.md", "[a](a.md)\n");
+        let plan = plan_move(&r, "a.md", "n/a.md", &|_| true);
+        assert_eq!(plan.writes.len(), 4);
+        // While the move runs, someone else writes to the linking notes.
+        put(&r, "b.md", "[a](a.md)\nA line written during the move, and [again](./a.md).\n");
+        std::fs::write(r.join("d.md"), b"[a](a.md)\n\xff stray byte\n").unwrap();
+        std::fs::remove_file(r.join("e.md")).unwrap();
+        crate::library::rename(&r, "a.md", "n/a.md").unwrap();
+        assert_eq!(apply(&r, &plan).unwrap(), 2);
+        assert_eq!(get(&r, "b.md"), "[a](n/a.md)\nA line written during the move, and [again](./n/a.md).\n");
+        assert_eq!(get(&r, "c.md"), "see [a](n/a.md)\n");
+        assert_eq!(std::fs::read(r.join("d.md")).unwrap(), b"[a](a.md)\n\xff stray byte\n", "not text any more: left alone");
+        assert!(!r.join("e.md").exists(), "a deleted note is not brought back");
+    }
+
+    #[test]
+    fn a_moved_note_edited_during_the_move_keeps_the_edit() {
+        let r = tmp();
+        put(&r, "x/other.md", "o\n");
+        put(&r, "x/a.md", "[o](other.md)\n");
+        let plan = plan_move(&r, "x/a.md", "y/a.md", &|_| true);
+        crate::library::rename(&r, "x/a.md", "y/a.md").unwrap();
+        put(&r, "y/a.md", "[o](other.md) and more\n");
+        assert_eq!(apply(&r, &plan).unwrap(), 1);
+        assert_eq!(get(&r, "y/a.md"), "[o](../x/other.md) and more\n");
     }
 
     #[test]
