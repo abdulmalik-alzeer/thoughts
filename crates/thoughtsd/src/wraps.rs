@@ -1601,6 +1601,8 @@ pub async fn save(state: Arc<AppState>, wrap_id: &str) -> anyhow::Result<()> {
     // A chat or workflow still writing in the library would race the save.
     if state.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
     let _guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
+    // An edit admitted a moment ago finishes first, so this never takes it with it (as in `apply`).
+    state.drain_edits().await?;
     let (ids, marks) = plan_marks(&w);
     never_twice(&state, &ids, &marks).await?;
     let dir = w.meta["copy"]["dir"].as_str().map(PathBuf::from).filter(|d| is_copy(d) && d.is_dir()).ok_or_else(|| crate::tr::err("wrap.closed", &[]))?;
@@ -1683,6 +1685,8 @@ pub async fn rollback(state: &AppState, wrap_id: &str) -> anyhow::Result<Value> 
     if !Scope::now(state).await.holds(w.library.as_deref()) { return Err(crate::tr::err("wrap.other_library", &[])); }
     let snap = w.meta["snapshot"].as_str().ok_or_else(|| crate::tr::err("wrap.no_history", &[]))?.to_string();
     let _guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
+    // An edit admitted a moment ago finishes first, so this never takes it with it (as in `apply`).
+    state.drain_edits().await?;
     let ar = is_ar(state).await;
     let (reverted, kept) = {
         let _g = state.git_lock.lock().await;
@@ -1753,6 +1757,8 @@ pub async fn undo(state: &AppState, wrap_id: &str) -> anyhow::Result<()> {
     require_no_interrupted(state).await?;
     if state.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
     let _guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
+    // An edit admitted a moment ago finishes first, so this never takes it with it (as in `apply`).
+    state.drain_edits().await?;
     crate::git::undo_commit(state, &lib, &commit).await?;
     crate::log::info(format!("wrap {wrap_id}: undone"));
     // The chats go back to waiting — unless a later wrap has stamped them since.
@@ -1943,6 +1949,8 @@ pub async fn reorganize_finish(state: &AppState, id: &str, keep: bool) -> anyhow
     require_no_interrupted(state).await?;
     if keep && state.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
     let _guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
+    // An edit admitted a moment ago finishes first, so this never takes it with it (as in `apply`).
+    state.drain_edits().await?;
     match c.meta["worktree"].as_str() {
         Some(wt) => reorganize_conclude(state, &lib, Path::new(wt), &branch, keep).await?,
         // A reorganize started by an older version, which switched the library itself to the branch.
@@ -2789,6 +2797,61 @@ mod tests {
     }
 
     // ---------- what the person is shown ----------
+
+    /// An edit let in a moment before (it holds `sync_files` for reading, as `api::library_edit`
+    /// does) and still writing when `op` starts: `op` takes the library, then waits for the edit.
+    async fn waits_for_an_edit_under_way<F>(st: &Arc<AppState>, lib: &Path, op: F) -> tokio::task::JoinHandle<Result<(), String>>
+    where F: std::future::Future<Output = anyhow::Result<()>> + Send + 'static {
+        let edit = st.sync_files.clone().read_owned().await;
+        let task = tokio::spawn(async move { op.await.map_err(|e| e.to_string()) });
+        for _ in 0..100 { if st.library_busy_at(lib) { break; } tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+        assert!(st.library_busy_at(lib), "it holds the library, so nothing new gets in");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!task.is_finished(), "it waits for the edit under way");
+        t::write(lib, "notes/typed.md", "typed just before\n");
+        drop(edit);
+        task
+    }
+
+    #[tokio::test]
+    async fn undoing_a_wrap_or_a_cut_off_one_or_ending_a_reorganize_waits_for_an_edit_under_way() {
+        let (st, lib) = t::library().await;
+        let chat = t::chat(&st, "let us plan the shop").await;
+        let wrap = t::wrap_ready(&st, &[chat.clone()]).await;
+        assistant(&st, &lib, |lib| { t::write(lib, "TODO.md", "# Todo\n\n- [ ] call the bank\n- [ ] order the sign\n"); true });
+        let mut rx = st.events.subscribe();
+        apply(st.clone(), &wrap, "").await.unwrap();
+        t::event(&mut rx, &st, "wrap.done").await;
+        // Undoing the wrap: the edit finishes first, then the wrap's change alone is taken back.
+        let (st2, w) = (st.clone(), wrap.clone());
+        waits_for_an_edit_under_way(&st, &lib, async move { undo(&st2, &w).await }).await.await.unwrap().unwrap();
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [ ] call the bank\n");
+        assert_eq!(t::read(&lib, "notes/typed.md"), "typed just before\n", "the edit is kept");
+        assert_eq!(t::phase(&st, &wrap).await, "undone");
+        std::fs::remove_file(lib.join("notes/typed.md")).unwrap();
+        t::sh(&lib, &["add", "-A"]);
+        t::sh(&lib, &["commit", "-q", "-m", "tidy"]);
+        // Undoing a wrap that was cut off waits the same way (it never runs while the edit writes).
+        let (cut, _, _) = cut_off(&st, &lib).await;
+        let st2 = st.clone();
+        let c = cut.clone();
+        waits_for_an_edit_under_way(&st, &lib, async move { rollback(&st2, &c).await.map(|_| ()) }).await.await.unwrap().unwrap();
+        assert_eq!(t::phase(&st, &cut).await, "failed");
+        // Keeping or discarding a reorganize waits the same way.
+        t::sh(&lib, &["add", "-A"]);
+        t::sh(&lib, &["commit", "-q", "-m", "tidy"]);
+        let wt = lib.parent().unwrap().join("reorganize-copy");
+        let (base, branch) = reorganize_prepare(&st, &lib, &wt).await.unwrap();
+        let mut c = Chat { kind: "reorganize".into(), ..Default::default() };
+        c.meta = json!({"base": base, "branch": branch, "worktree": wt, "phase": "review", "ok": false});
+        let id = c.id.clone();
+        st.chats.insert(c).await;
+        let st2 = st.clone();
+        waits_for_an_edit_under_way(&st, &lib, async move { reorganize_finish(&st2, &id, false).await }).await.await.unwrap().unwrap();
+        assert!(!wt.exists());
+        assert_eq!(t::read(&lib, "notes/typed.md"), "typed just before\n", "the edit is kept");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
 
     #[tokio::test]
     async fn approving_shows_plain_words_and_the_wrap_ends_with_what_it_changed() {
