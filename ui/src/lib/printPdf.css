@@ -60,8 +60,8 @@
   }
   html.print-doc #print-root .md-code { position: static; margin: 0; }
 
-  /* Tables fit the paper: no scrolling box, long words wrap, rows are never split across pages and
-     the header row repeats on each page. */
+  /* Tables fit the paper: no scrolling box, long words wrap, rows are not split across pages, and
+     the header row repeats on each page where the system's print engine supports it. */
   html.print-doc #print-root .md-table { overflow: visible !important; max-width: none; margin: 0 0 .9em; outline: none; }
   html.print-doc #print-root table { border-collapse: collapse; max-width: 100%; font-size: 9.5pt; }
   html.print-doc #print-root thead { display: table-header-group; }
