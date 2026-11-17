@@ -55,6 +55,8 @@
   import MessageEdit from './chat/MessageEdit.svelte';
   import BranchOrigin from './chat/BranchOrigin.svelte';
   import { canBranch, editKind, madeKey, takeJump } from './chat/branch';
+  import SidePane from './chat/SidePane.svelte';
+  import { clickIntent, linkTarget } from './chat/sidePane';
   import type { Chat, DaemonEvent } from '../lib/types';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
@@ -67,6 +69,34 @@
 
 
   let chat = $state<any>(null);
+  // ---- a file read beside the chat (chat/SidePane.svelte) ----
+  // A plain click on a changed file, a link to a library file or an @-mention opens it beside the
+  // chat; with ⌘/Ctrl (or the middle button) it opens in Docs, as before. Another chat starts
+  // without it (this view is made again for each chat).
+  let pane = $state<string | null>(null);
+  let paneFrom: HTMLElement | null = null;
+  let splitW = $state(0);
+  const modKey = /mac/i.test(navigator.platform || navigator.userAgent) ? '⌘' : 'Ctrl';
+  function openFile(path: string, e: MouseEvent) {
+    const how = clickIntent(e);
+    if (!how) return;
+    e.preventDefault();
+    if (how === 'docs') { go({ kind: 'docs', path }); return; }
+    if (!pane) paneFrom = ((e.target as Element | null)?.closest?.('a, button') as HTMLElement | null) ?? (document.activeElement as HTMLElement | null);
+    pane = path;
+  }
+  function closePane() {
+    const from = paneFrom;
+    pane = null; paneFrom = null;
+    tick().then(() => { if (from?.isConnected) from.focus({ preventScroll: true }); else input?.focus({ preventScroll: true }); });
+  }
+  /** Links in an answer: a library file opens beside the chat; anything else is left to the window. */
+  function msgLink(e: MouseEvent) {
+    if (e.type === 'click' && mdClick(e)) return;
+    const a = (e.target as Element | null)?.closest?.('a');
+    const p = a && linkTarget(a.getAttribute('href'), String(app.status?.library ?? ''));
+    if (p) openFile(p, e);
+  }
   let loadState = $state<'loading' | 'ok' | 'missing' | 'error'>('loading');
   let loadError = $state('');
   let streaming = $state('');
@@ -747,6 +777,7 @@
     </div>
   </div>
 {:else}
+  <div class="split" class:paned={!!pane} bind:clientWidth={splitW}>
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div class="wrap" ondragenter={dragenter} ondragover={dragover} ondragleave={dragleave} ondrop={drop}>
     <header class="row">
@@ -819,7 +850,7 @@
                 <MessageEdit chatId={id} {chat} {m} kind={ek} {mentionName} onclose={() => (editing = null)} />
               {:else}
               <div class="bubble" dir="auto">{m.text}
-                {#if m.attachments?.length}<Attachments chatId={id} paths={m.attachments} />{/if}{#if m.tool?.mentions?.length}<div class="sm att refs">{#each m.tool.mentions as p (p)}<button type="button" class="ref" onclick={() => go({ kind: 'docs', path: p })} title={t('chatc.mention.open', { path: p })}>@<bdi>{mentionName(p)}</bdi></button>{/each}</div>{/if}
+                {#if m.attachments?.length}<Attachments chatId={id} paths={m.attachments} />{/if}{#if m.tool?.mentions?.length}<div class="sm att refs">{#each m.tool.mentions as p (p)}<button type="button" class="ref" onclick={(e) => openFile(p, e)} onauxclick={(e) => openFile(p, e)} title={t('chatfPane.readTip', { path: p, key: modKey })}>@<bdi>{mentionName(p)}</bdi></button>{/each}</div>{/if}
               </div>
               <div class="acts">
                 <button class="act" onclick={() => copyMsg(m.text)} aria-label={t('chat.copyMessage')} title={t('chat.copyMessage')}><Icon name="copy" size={14} /></button>
@@ -835,7 +866,7 @@
           {:else if m.role === 'assistant'}
             <div class="msg ai" class:flash={flashId === m.id} data-msg={m.id} tabindex="-1">
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-              <div class="md" dir="auto" onclick={mdClick} use:zoomImages>{@html md(m.text)}</div>
+              <div class="md" dir="auto" onclick={msgLink} onauxclick={msgLink} use:zoomImages>{@html md(m.text)}</div>
               <div class="acts" class:show={m.id === lastAnswerId}>
                 <button class="act" onclick={() => copyMsg(m.text)} aria-label={t('chat.copyMessage')} title={t('chat.copyMessage')}><Icon name="copy" size={14} /><span>{t('chat.copy')}</span></button>
                 {#if m.id === lastAnswerId && !chat.running && lastUser && canCompose}
@@ -873,7 +904,7 @@
             <ApprovalCard {m} chatId={id} running={!!chat.running} />
           {:else if m.role === 'changes'}
             <!-- What this answer changed in the library, with Undo (FEAT-06). -->
-            <RunChanges {m} chatId={id} busy={!!chat.running} onchange={(x) => { const i = chat.messages.findIndex((y: any) => y.id === x.id); if (i >= 0) chat.messages[i] = x; }} />
+            <RunChanges {m} chatId={id} busy={!!chat.running} onopen={openFile} onchange={(x) => { const i = chat.messages.findIndex((y: any) => y.id === x.id); if (i >= 0) chat.messages[i] = x; }} />
           {:else if m.role === 'denied'}
             <div class="msg denied" role="note">
               <div class="deniedhead"><Icon name="shield" size={13} /> <span>{t('runb.denied.title')}</span></div>
@@ -1018,9 +1049,13 @@
 
     {#if dragging}<div class="dropzone" aria-hidden="true"><Icon name="upload" size={26} /><span>{t('chat.dropHere')}</span></div>{/if}
   </div>
+  {#if pane}<SidePane path={pane} chatId={id} avail={splitW} onclose={closePane} onopen={openFile} />{/if}
+  </div>
 {/if}
 
 <style>
+  .split { position: relative; display: flex; min-width: 0; }
+  .split > .wrap { flex: 1 1 auto; min-width: 0; }
   .wrap { position: relative; display: flex; flex-direction: column; height: calc(100vh - 26px); padding: 0 24px 16px; max-width: 980px; margin: 0 auto; }
   header { padding-bottom: 8px; border-bottom: var(--border-w) solid var(--border); }
   header select { width: auto; }
@@ -1149,6 +1184,7 @@
   /* On paper: the whole conversation from the first message, not the screenful the window shows.
      The list stops being a scroll box, and everything that is only for working in the chat goes. */
   @media print {
+    .split { display: block; }
     .wrap { display: block; height: auto; max-width: none; padding: 0; }
     .msgs-wrap, .msgs { display: block; overflow: visible; }
     .msgs { padding: 12px 0 0; }

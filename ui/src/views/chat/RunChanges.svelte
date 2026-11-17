@@ -10,7 +10,7 @@
   import { t, tn } from '../../lib/i18n';
   import { toast } from '../../lib/store.svelte';
 
-  let { chatId, m, busy = false, onchange }: { chatId: string; m: any; busy?: boolean; onchange?: (m: any) => void } = $props();
+  let { chatId, m, busy = false, onchange, onopen }: { chatId: string; m: any; busy?: boolean; onchange?: (m: any) => void; onopen?: (path: string, e: MouseEvent) => void } = $props();
 
   const c = $derived(m.tool ?? {});
   const total = $derived(Number(c.total) || (c.files?.length ?? 0));
@@ -100,7 +100,7 @@
         <button class="act show" onclick={load}><Icon name="retry" size={14} /><span>{t('cs.retry')}</span></button>
       {:else if docs}
         {#if undone}<p class="muted note">{t('cs.undoneNote')}</p>{/if}
-        <DocChanges files={docs} canOpen />
+        <DocChanges files={docs} canOpen {onopen} />
       {/if}
     </div>
   {/if}

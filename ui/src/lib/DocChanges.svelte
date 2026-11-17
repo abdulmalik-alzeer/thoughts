@@ -9,9 +9,11 @@
   type Hunk = { line: number; lines: [string, string][] };
   export type Doc = { path: string; from?: string | null; change: string; detail: boolean; binary: boolean; tooLarge?: boolean; added?: number | null; removed?: number | null; more: number; hunks: Hunk[] };
 
-  let { files, canOpen = false, labels, single = false }: {
+  let { files, canOpen = false, onopen, labels, single = false }: {
     files: Doc[];
     canOpen?: boolean;
+    /** With `canOpen`: what Open does instead of going to Docs (a chat reads the file beside it). */
+    onopen?: (path: string, e: MouseEvent) => void;
     /** When comparing two versions (not showing a change): what a `+` and a `-` line mean here
      *  ("Only in this version"…). Shown as a key above the documents and read out for each line. */
     labels?: { added: string; removed: string };
@@ -76,7 +78,7 @@
           {#if counts(d)}<span class="n muted">{counts(d)}</span>{/if}
         </button>
         {#if canOpen && d.change !== 'deleted'}
-          <button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: d.path })} aria-label={t('wrapa.openDoc', { path: d.path })}>{t('wrapb.doc.open')}</button>
+          <button class="btn ghost sm" onclick={(e) => (onopen ? onopen(d.path, e) : go({ kind: 'docs', path: d.path }))} onauxclick={onopen ? (e) => onopen(d.path, e) : undefined} aria-label={t('wrapa.openDoc', { path: d.path })}>{t('wrapb.doc.open')}</button>
         {/if}
       </div>
       {#if shown}
