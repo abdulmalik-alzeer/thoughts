@@ -67,3 +67,14 @@ fn the_app_policy_allows_no_asset_protocol() {
     assert!(!app_policy.contains("asset"), "the app policy allows the asset protocol again: {app_policy}");
     assert!(!repo("src-tauri/Cargo.toml").contains("protocol-asset"), "the asset protocol was switched on: update the policy and this test together");
 }
+
+#[test]
+fn the_app_policy_plays_only_its_own_sound_and_video() {
+    // File previews play sound and video from blob: URLs the window's own script makes
+    // (URL.createObjectURL). Without media-src the policy falls back to default-src 'self' and every
+    // one of them is refused. Allow exactly that: no data:, no remote hosts, no asset protocol.
+    let conf = repo("src-tauri/tauri.conf.json");
+    let app_policy = attr(&conf, "\"csp\": \"");
+    let media = app_policy.split(';').map(str::trim).find(|d| d.starts_with("media-src")).expect("media-src: blob: sound and video previews are refused without it");
+    assert_eq!(media, "media-src 'self' blob:");
+}

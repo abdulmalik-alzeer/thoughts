@@ -131,6 +131,7 @@ scripts.
   `dangerousDisableAssetCspModification` is set for `style-src` only, because Tauri would otherwise
   add a nonce to styles in every HTML asset, which blocks inline styles inside the sandboxed add-on
   frames. Script hashing stays on: the add-on runtime relies on it.
+  `media-src 'self' blob:` lets file previews play sound and video from `blob:` URLs the app's own script makes; nothing wider.
 - **Linux `.deb`** installs are not updated from inside the app; only the AppImage is. This is the
   app's choice, not a limit of the updater: tauri-plugin-updater 2.x can install a `.deb` (it runs
   `dpkg -i` through `pkexec`, a graphical `sudo` prompt or `sudo`, and `latest.json` carries a
