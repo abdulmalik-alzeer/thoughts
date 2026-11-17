@@ -161,6 +161,8 @@ export default {
     'r10-usage.scope.computerHint': 'ويشمل أيضاً ما فعلته بـ Claude Code وCodex خارج Thoughts، في الطرفية مثلاً. يقرأ Thoughts سجلّهما على هذا الجهاز ليَعُدّه، ولا يغيّر فيه شيئاً.',
     'r10-usage.set.priceNote': 'إن كنت مشتركاً في خطة Claude أو ChatGPT فلن تدفع هذه المبالغ؛ إنها تبيّن ما كان سيكلّفه الاستخدام نفسه بمفتاح API.',
     'r10-usage.period': 'المدة',
+    'r10-usage.days_one': 'يوم واحد',
+    'r10-usage.days_two': 'يومان',
     'r10-usage.days_few': '{n} أيام',
     'r10-usage.days_other': '{n} يوماً',
     'r10-usage.plans': 'حدود الخطة',
