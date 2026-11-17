@@ -81,7 +81,7 @@
 
   // A view that throws while it renders is replaced by a card with a way out, and the error is logged.
   let crashCopied = $state(false);
-  function viewFailed(err: unknown) { reportError('view:' + app.view.kind, err); }
+  function viewFailed(err: unknown) { reportError('view:' + app.view.kind, err); if (app.view.kind === 'docs') docsFailedAt = viewKey; }
   async function copyCrash(err: unknown) {
     try { await navigator.clipboard.writeText(`Thoughts ${versionLabel()} · ${app.view.kind}\n${crashText(err)}`); crashCopied = true; setTimeout(() => (crashCopied = false), 2000); }
     catch { crashCopied = false; }
@@ -644,6 +644,13 @@
   let announce = $state('');
   let viewEl = $state<HTMLElement | null>(null);
   const viewKey = $derived(`${app.view.kind}:${app.view.id ?? ''}:${app.view.path ?? ''}`);
+  // What starts a view afresh. Docs follows its route itself (opening a file, a search, Back), so it
+  // stays mounted across files instead of reloading its tree each time; after it failed, the next
+  // route starts it again, as every other view is (they read their route once, when they start).
+  let docsFailedAt = '';
+  let docsRun = $state(0);
+  $effect(() => { const k = viewKey; if (docsFailedAt && k !== docsFailedAt) { docsFailedAt = ''; docsRun++; } });
+  const mountKey = $derived(app.view.kind === 'docs' ? `docs#${docsRun}` : viewKey);
   let firstView = true;
   // Before the new page is drawn: remember where the old one was, open the new one at its top.
   $effect.pre(() => { pageChanging(viewKey); });
@@ -927,7 +934,7 @@
         </div>
       {/if}
       {#if app.preview}<PreviewBanner />{:else}<CustomWaiting />{/if}
-      {#key viewKey}<div class="view" bind:this={viewEl}>
+      {#key mountKey}<div class="view" bind:this={viewEl}>
       <svelte:boundary onerror={viewFailed}>
       {#if libraryGone && app.view.kind !== 'settings' && app.view.kind !== 'help'}
         <div class="page missing">
