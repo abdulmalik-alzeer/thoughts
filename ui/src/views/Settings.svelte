@@ -15,6 +15,7 @@
   import ProviderPresets from './ProviderPresets.svelte';
   import CodexSettings from './CodexSettings.svelte';
   import SpendingGuard from './SpendingGuard.svelte';
+  import RemoteTokenHelp from './RemoteTokenHelp.svelte';
   import { restartService } from '../lib/shell';
   import { keepLibraryToMe, libraryOpenToOthers, offerIndexCleanup } from '../lib/privacy';
   import ThemePicker from './ThemePicker.svelte';
@@ -911,6 +912,7 @@
                     <div><label for="st-st-{i}">{t('set.remoteToken')}</label><input id="st-st-{i}" dir="ltr" type="password" bind:value={signForm.token} autocomplete="off" onkeydown={(e) => { if (e.key === 'Enter') saveSignIn(); }} /></div>
                   </div>
                   <p class="muted sm">{t('histb.signin.hint')}</p>
+                  <RemoteTokenHelp />
                   <div class="row wrap">
                     <button type="button" class="btn primary" disabled={!signForm.token || busy.signin} aria-busy={busy.signin} onclick={saveSignIn}>{busy.signin ? t('histb.signin.checking') : t('histb.signin.save')}</button>
                     <button type="button" class="btn ghost" onclick={() => (signForm = null)}>{signForm.result ? t('close') : t('cancel')}</button>
@@ -934,6 +936,7 @@
               <div><label for="st-ruser">{t('set.remoteUser')}</label><input id="st-ruser" dir="ltr" bind:value={remote.username} autocomplete="off" /></div>
               <div><label for="st-rtoken">{t('set.remoteToken')}</label><input id="st-rtoken" dir="ltr" type="password" bind:value={remote.token} autocomplete="off" /></div>
             </div>
+            <RemoteTokenHelp />
             {#if remote.url.trim() && !validRemote}<p class="err" role="alert">{t('set.errRemote')}</p>{/if}
             <p class="note"><Icon name="warning" size={15} /> <span>{t('set.uploadBody')}</span></p>
             <div class="row wrap">

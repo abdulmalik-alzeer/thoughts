@@ -7,6 +7,7 @@
   import { app, command, go } from '../lib/store.svelte';
   import { failed } from '../lib/errors';
   import { t } from '../lib/i18n';
+  import { isReady, primaryOf, programName, statusOf } from '../lib/assistantReady';
 
   let { chat, reload, reply, stop }: { chat: any; reload: () => void; reply: (text: string) => void; stop: () => void } = $props();
 
@@ -28,7 +29,9 @@
   const first = $derived(chat?.meta?.first?.path ? (chat.meta.first as { path: string; title: string }) : null);
   // Made without an assistant: setup waits until one is connected, then is offered here (FEAT-08).
   const waiting = $derived(chat?.kind === 'setup' && !chat?.running && phase === 'waiting');
-  const connected = $derived(!!app.status?.claude?.installed && !!app.status?.claude?.loggedIn);
+  // It runs on the program chosen in Settings › Assistant (Claude Code or Codex).
+  const program = $derived(primaryOf(app.settings));
+  const connected = $derived(isReady(statusOf(app.status, program), program));
 
   let starting = $state(false);
   async function again() {
@@ -61,7 +64,7 @@
     <span class="ic"><Icon name="ai" size={18} /></span>
     <div class="grow">
       <b>{t(connected ? 'sb.wait.readyTitle' : 'sb.wait.title')}</b>
-      <p class="muted">{t(connected ? 'sb.wait.readyBody' : 'sb.wait.body')}</p>
+      <p class="muted">{connected ? t('sb.wait.readyBody') : t('ux-onboarding.wait.body', { name: programName(program) })}</p>
     </div>
     {#if connected}
       <button type="button" class="btn primary" disabled={starting} aria-busy={starting} onclick={again}><Icon name="ai" size={14} /> {starting ? t('sb.wait.starting') : t('sb.wait.run')}</button>

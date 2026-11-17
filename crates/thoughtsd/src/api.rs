@@ -1409,10 +1409,7 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
     let name = s.user_name.clone();
     let (git_on, sync_on) = (s.history_enabled(), s.sync_enabled());
     let chat_id = id.to_string();
-    // What replies in this chat run with once setup is done: the same as a chat started for the user.
-    let mut chat_options = normalized(RunOptions { model: s.ai.claude.model.clone(), effort: s.ai.claude.effort.clone(),
-        permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() }, None);
-    chat_options.permission_mode = inherited_mode(chat_options.permission_mode.take(), "chat", false);
+    let chat_options = setup_chat_options(&s);
     let on_done = Box::new(move |st: Arc<AppState>, ok: bool| -> futures::future::BoxFuture<'static, ()> { Box::pin(async move {
         if ok {
             // The assistant was told to leave these to the app (it cannot write under `.claude/`).
@@ -1457,6 +1454,16 @@ async fn start_setup(st: Arc<AppState>, id: &str, again: bool) -> anyhow::Result
     }
     if again && !waited { claude::push(&st, id, Msg::new("user", if s.language == "ar" { "أعد تجهيز مكتبتي." } else { "Run setup again." })).await; }
     Ok(())
+}
+
+/// What replies in a setup chat run with once setup is done: the same as a chat started for the
+/// user, on the program the setup ran on (the one chosen in Settings, `assistant::for_run`) — never
+/// a Claude Code model name sent to Codex.
+fn setup_chat_options(s: &Settings) -> RunOptions {
+    let (model, effort) = crate::assistant::chat_defaults(s, crate::assistant::primary(s));
+    let mut o = normalized(RunOptions { model, effort, permission_mode: s.ai.claude.permission_mode.clone(), ..Default::default() }, None);
+    o.permission_mode = inherited_mode(o.permission_mode.take(), "chat", false);
+    o
 }
 
 /// Run a new library's setup again, in its setup chat, after a run that failed or was stopped —
@@ -3495,6 +3502,23 @@ mod tests {
         assert_eq!(linux_git_hint(|t| t == "dnf"), "sudo dnf install git");
         assert_eq!(linux_git_hint(|t| t == "apt" || t == "dnf"), "sudo apt install git");
         assert_eq!(linux_git_hint(|_| false), "sudo apt install git");
+    }
+
+    #[test]
+    fn a_setup_chat_continues_with_the_model_of_the_program_it_ran_on() {
+        let mut s = Settings::default();
+        s.ai.claude.model = Some("opus".into());
+        s.ai.claude.effort = Some("high".into());
+        s.ai.codex.model = Some("gpt-5".into());
+        let o = setup_chat_options(&s);
+        assert_eq!((o.model.as_deref(), o.effort.as_deref()), (Some("opus"), Some("high")));
+        // Set up on Codex: its replies never ask Codex for a Claude Code model.
+        s.ai.primary = "codex".into();
+        let o = setup_chat_options(&s);
+        assert_eq!((o.model.as_deref(), o.effort.as_deref()), (Some("gpt-5"), None));
+        // Bypass is never inherited by a chat the app made.
+        s.ai.claude.permission_mode = Some(crate::settings::BYPASS.into());
+        assert_eq!(setup_chat_options(&s).permission_mode.as_deref(), Some("acceptEdits"));
     }
 
     #[test]

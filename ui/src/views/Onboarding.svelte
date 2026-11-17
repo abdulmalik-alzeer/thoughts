@@ -12,6 +12,9 @@
   import ThemePicker from './ThemePicker.svelte';
   import Logo from '../lib/Logo.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
+  import CodexSettings from './CodexSettings.svelte';
+  import RemoteTokenHelp from './RemoteTokenHelp.svelte';
+  import { isReady, primaryOf, statusOf } from '../lib/assistantReady';
   import { fmtSize } from '../lib/content/util';
   import { libs, switchLibrary } from '../lib/libraries.svelte';
 
@@ -50,7 +53,8 @@
   // The assistant can be connected later (FEAT-08): the library is made now, its setup waits.
   let later = $state(false);
   // Adding a library to an app whose assistant is not connected: its setup waits, as on first use.
-  if (adding) { const c = app.status?.claude ?? {}; later = !(c.installed && (c.loggedIn || app.settings?.ai?.claude?.hasApiToken)); }
+  // (The setup runs on the program chosen in Settings › Assistant, Claude Code or Codex.)
+  if (adding) { const p = primaryOf(app.settings); const c = statusOf(app.status, p); later = !(isReady(c, p) || (p === 'claude' && c.installed && app.settings?.ai?.claude?.hasApiToken)); }
   // "I already have one" on a folder of notes (FEAT-09): use it where it is (with the user's yes to
   // what is added), or keep it as it is and bring a copy into a new library.
   let adoptChoice = $state<'' | 'adopt' | 'copy'>('');
@@ -156,8 +160,23 @@
   });
   const adopting = $derived(!!adoptFor && adoptChoice === 'adopt');
   const bringing = $derived(libraryMode === 'new' && !!importFrom.trim());
+  // Which assistant program the app runs on (Settings › Assistant's choice, set here the same way):
+  // the library's setup, Wrap and new chats use it.
+  const onCodex = $derived(s.ai?.primary === 'codex');
+  const codex = $derived<any>(app.status?.codex ?? {});
+  function setProgram(p: 'claude' | 'codex') { s.ai.primary = p; }
+  // Codex has no live check of its own: while it is chosen and not ready, look every few seconds
+  // (only while the window is in front), so installing or signing in shows up by itself.
+  $effect(() => {
+    if (step !== 1 || !onCodex || isReady(codex, 'codex')) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      post('/ai/codex/recheck').then((r) => { if (r && typeof r === 'object') app.status = { ...app.status, codex: r }; }).catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+  });
   /** The assistant is not connected and the user chose to connect it later. */
-  const assistantReady = $derived(!!claude.installed && (!!claude.loggedIn || useApi));
+  const assistantReady = $derived(onCodex ? isReady(codex, 'codex') : !!claude.installed && (!!claude.loggedIn || useApi));
   const waitsForAssistant = $derived(later && !assistantReady);
 
   async function pickNotes() {
@@ -211,14 +230,30 @@
       const st = await api('/status');
       claude = st.claude ?? {};
       git = st.git ?? git;
-      const ready = step === 1 ? claude.installed && (claude.loggedIn || useApi) : git.installed;
+      if (st.codex) app.status = { ...app.status, codex: st.codex };
+      const ready = step === 1 ? assistantReady : git.installed;
+      if (step !== 1 && git.installed && gitAsked) gitSaid = t('ux-onboarding.git.nowInstalled');
       toast(t(ready ? 'ob.checkOk' : 'ob.checkStill'));
     } catch (e) { failed(t('ob3.checkFailed'), e); }
     finally { checking = false; }
   }
 
+  const isMac = app.status?.platform === 'macos';
+  // After "Install Git", the card looks by itself every few seconds until Git is there (Apple's
+  // installer takes minutes), then says so and goes away; "Check again" still works meanwhile.
+  let gitAsked = $state(false);
+  let gitSaid = $state('');
+  $effect(() => {
+    if (!gitAsked || git.installed || step !== 2) return;
+    const timer = setInterval(async () => {
+      if (document.visibilityState !== 'visible' || checking) return;
+      try { const st = await api('/status'); if (st?.git) git = st.git; if (git.installed) gitSaid = t('ux-onboarding.git.nowInstalled'); } catch { /* the next look tries again */ }
+    }, 10_000);
+    return () => clearInterval(timer);
+  });
   const installGit = () => act('git', async () => {
     const r = await post('/git/install');
+    gitAsked = true;
     // Windows: the service hands back the download page; Linux: the command for this system.
     if (r?.url) { try { const { openUrl } = await import('@tauri-apps/plugin-opener'); await openUrl(r.url); } catch { window.open(r.url, '_blank', 'noopener'); } }
     if (r?.hint) toast(t('ob.gitInstallToast'), { detail: String(r.hint), duration: 0 }); else toast(t('ob.gitInstallToast'));
@@ -266,7 +301,10 @@
 
   /** Why the Next button is disabled on the current step ('' = good to go). */
   const blocker = $derived.by(() => {
-    if (step === 1 && !later) {
+    if (step === 1 && !later && onCodex) {
+      if (!codex.installed) return t('ux-onboarding.needCodex');
+      if (!isReady(codex, 'codex')) return t('ux-onboarding.needCodexSignIn');
+    } else if (step === 1 && !later) {
       if (!claude.installed) return t('ob.needClaude');
       if (useApi) {
         if (!validUrl(s.ai.claude.baseUrl)) return t('ob.needApiUrl');
@@ -310,8 +348,56 @@
     return '';
   });
 
+  // Screen readers: what the folder holds is said in one short line (not the cards below it, with
+  // their buttons), once the typing has paused; a card with choices that appears takes the focus to
+  // its first control — unless the user is typing the folder, who is never moved out of the field.
+  const cardKey = $derived(listedHere ? 'listed' : libraryMode === 'new' ? (here === 'library' ? 'library' : '') : here === 'starter' || here === 'files' ? here : '');
+  const folderSummary = $derived.by(() => {
+    const more = cardKey ? ' ' + t('ux-onboarding.choicesBelow') : '';
+    if (listedHere) return t('libs.already', { name: listedHere.displayName }) + more;
+    if (!here) return '';
+    const key = libraryMode === 'new'
+      ? ({ missing: 'sa.folder.new', empty: 'sa.folder.empty', starter: 'sa.folder.starter', library: 'sa.folder.library', files: 'sa.folder.files', notFolder: 'sa.folder.notFolder' } as Record<string, string>)[here]
+      : ({ library: 'sa.folder.found', starter: 'sa.folder.unfinished', missing: 'sa.folder.missing', files: 'sb.adopt.title' } as Record<string, string>)[here] ?? 'sa.folder.notLibrary';
+    return key ? t(key) + more : '';
+  });
+  let folderSaid = $state('');
+  $effect(() => {
+    const v = folderSummary;
+    if (!v) return; // keep the last line: nothing new to say while a path is being typed
+    const timer = setTimeout(() => (folderSaid = v), 800);
+    return () => clearTimeout(timer);
+  });
+  let pathEl = $state<HTMLInputElement | null>(null);
+  let saysEl = $state<HTMLElement | null>(null);
+  let lastCard = '';
+  let cardOnStep = false;
+  $effect(() => {
+    const key = cardKey;
+    if (step !== 2) { cardOnStep = false; lastCard = ''; return; }
+    // Arriving on the step: the heading takes the focus, not a card that is already there.
+    if (!cardOnStep) { cardOnStep = true; lastCard = key; return; }
+    if (key === lastCard) return;
+    lastCard = key;
+    if (!key) return;
+    tick().then(() => {
+      if (document.activeElement === pathEl) return;
+      saysEl?.querySelector<HTMLElement>('button:not([disabled]), input:not([disabled])')?.focus();
+    });
+  });
+
   const modName = (m: any) => (ar && m.nameAr) || m.name;
   const modDesc = (m: any) => (ar && m.descriptionAr) || m.description;
+  // Why Next is greyed out, said aloud only once it has settled — never "Checking…" at every key
+  // pressed — and not when the folder line has just said the same.
+  const transient = ['sa.folder.checking', 'sb.bring.busy', 'sb.adopt.looking'];
+  let whySaid = $state('');
+  $effect(() => {
+    const v = step < steps.length - 1 ? blocker : '';
+    if (v && transient.some((k) => t(k) === v)) return;
+    const timer = setTimeout(() => (whySaid = v && v !== folderSummary ? v : ''), 1000);
+    return () => clearTimeout(timer);
+  });
   const syncLabel = $derived(t(isDrive ? 'histb.backup.drive' : isGit ? 'hista.backup.online' : s.sync.mode === 'folder' ? 'hista.backup.folder' : 'hista.backup.none'));
 
   async function finish() {
@@ -319,7 +405,9 @@
     busy = true;
     try {
       const settings = structuredClone($state.snapshot(s));
-      if (!useApi) settings.ai.claude.baseUrl = null;
+      // A key for another service belongs to Claude Code only: with Codex chosen, none is sent.
+      const keyed = useApi && !onCodex;
+      if (!keyed) settings.ai.claude.baseUrl = null;
       if (settings.ai?.claude && !['acceptEdits', 'plan'].includes(settings.ai.claude.permissionMode ?? 'acceptEdits')) settings.ai.claude.permissionMode = 'plan';
       // The app keeps the choice itself (its id, or the user's own few words): every screen reads its
       // wording from that. The name of the choice in the user's language is for the assistant only.
@@ -328,7 +416,7 @@
       const r = await post('/onboarding', {
         settings, libraryMode, seeds: seeds.split('\n').map((x) => x.trim()).filter(Boolean),
         remoteUrl: isGit && !isDrive ? remoteUrl.trim() : '', remoteUsername: isGit && !isDrive ? remoteUser : '', remoteToken: isGit && !isDrive ? remoteToken : '',
-        apiToken: useApi ? apiToken.trim() : '',
+        apiToken: keyed ? apiToken.trim() : '',
         profession: own || (profession ? t('layer.prof.' + profession) : ''),
         assistantLater: waitsForAssistant,
         adopt: adopting && adoptYes,
@@ -397,30 +485,48 @@
       <p class="muted sm">{t('layer.prof.hint')}</p>
     {:else if step === 1}
       <h1 tabindex="-1">{t('ob.aiTitle')}</h1>
-      <p>{t('ob.aiBody')}</p>
-      <div class="card status">
-        <p class="row"><Icon name="info" size={16} /> <b>{t('ob3.planTitle')}</b></p>
-        <ul class="plain">
-          <li>{t('ob3.planPaid')}</li>
-          <li>{t('ob3.planNoBill')}</li>
-          <li>{t('ob3.planData')}</li>
-        </ul>
+      <p>{onCodex ? t('ux-onboarding.ai.bodyCodex') : t('ob.aiBody')}</p>
+      <div class="lbl" id="ob-prog">{t('ux-onboarding.ai.which')}</div>
+      <div class="opts" role="group" aria-labelledby="ob-prog">
+        <button type="button" class="opt" class:sel={!onCodex} aria-pressed={!onCodex} onclick={() => setProgram('claude')}><b><bdi>Claude</bdi></b><span class="muted">{t('ux-onboarding.ai.claudeHint')}</span></button>
+        <button type="button" class="opt" class:sel={onCodex} aria-pressed={onCodex} onclick={() => setProgram('codex')}><b><bdi>Codex</bdi></b><span class="muted">{t('ux-onboarding.ai.codexHint')}</span></button>
       </div>
+      {#if onCodex}
+        <div class="card status">
+          <p class="row"><Icon name="info" size={16} /> <b>{t('ux-onboarding.codex.planTitle')}</b></p>
+          <ul class="plain">
+            <li>{t('ux-onboarding.codex.planPaid')}</li>
+            <li>{t('ux-onboarding.codex.planData')}</li>
+            <li>{t('ux-onboarding.codex.customise')}</li>
+          </ul>
+        </div>
+        <CodexSettings bind:ai={s.ai} part="codex" vis={() => true} />
+        <p class="muted sm">{t('ux-onboarding.codex.change')}</p>
+      {:else}
+        <div class="card status">
+          <p class="row"><Icon name="info" size={16} /> <b>{t('ob3.planTitle')}</b></p>
+          <ul class="plain">
+            <li>{t('ob3.planPaid')}</li>
+            <li>{t('ob3.planNoBill')}</li>
+            <li>{t('ob3.planData')}</li>
+          </ul>
+        </div>
 
-      <h2>{t('sb.guide.title')}</h2>
-      <AssistantGuide bind:claude keyInstead={useApi} />
+        <h2>{t('sb.guide.title')}</h2>
+        <AssistantGuide bind:claude keyInstead={useApi} />
 
-      <details class="adv" open={useApi}>
-        <summary>{t('ob.advApi')}</summary>
-        <label class="check"><input type="checkbox" checked={useApi} onchange={(e) => setUseApi(e.currentTarget.checked)} /> {t('ob.useApi')}</label>
-        {#if useApi}
-          <label for="ob-base">{t('ob.apiUrl')}</label>
-          <input id="ob-base" dir="ltr" bind:value={s.ai.claude.baseUrl} placeholder="https://api.anthropic.com" autocomplete="off" />
-          <label for="ob-key">{t('ob.apiKey')}</label>
-          <input id="ob-key" dir="ltr" type="password" bind:value={apiToken} autocomplete="off" />
-          <p class="muted sm">{t('ob3.apiKeyHint')}</p>
-        {/if}
-      </details>
+        <details class="adv" open={useApi}>
+          <summary>{t('ob.advApi')}</summary>
+          <label class="check"><input type="checkbox" checked={useApi} onchange={(e) => setUseApi(e.currentTarget.checked)} /> {t('ob.useApi')}</label>
+          {#if useApi}
+            <label for="ob-base">{t('ob.apiUrl')}</label>
+            <input id="ob-base" dir="ltr" bind:value={s.ai.claude.baseUrl} placeholder="https://api.anthropic.com" autocomplete="off" />
+            <label for="ob-key">{t('ob.apiKey')}</label>
+            <input id="ob-key" dir="ltr" type="password" bind:value={apiToken} autocomplete="off" />
+            <p class="muted sm">{t('ob3.apiKeyHint')}</p>
+          {/if}
+        </details>
+      {/if}
 
       {#if !assistantReady}
         <div class="card status later" class:sel={later}>
@@ -455,8 +561,10 @@
         <button type="button" class="opt" class:sel={libraryMode === 'existing'} aria-pressed={libraryMode === 'existing'} onclick={() => (libraryMode = 'existing')}><b>{t('ob.libExisting')}</b><span class="muted">{t('ob.libExistingHint')}</span></button>
       </div>
       <label for="ob-path">{t('ob.folder')}</label>
-      <div class="row"><input id="ob-path" class="grow" dir="ltr" bind:value={s.libraryPath} oninput={() => (pathTouched = true)} autocomplete="off" aria-describedby="ob-path-says" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.browse')}</button></div>
-      <div id="ob-path-says" role="status">
+      <div class="row"><input id="ob-path" class="grow" dir="ltr" bind:this={pathEl} bind:value={s.libraryPath} oninput={() => (pathTouched = true)} autocomplete="off" aria-describedby="ob-path-sum" /><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.browse')}</button></div>
+      <p class="sr-only" id="ob-path-sum" role="status">{folderSaid}</p>
+      <p class="sr-only" role="status">{gitSaid}</p>
+      <div id="ob-path-says" bind:this={saysEl}>
         {#if listedHere}
           <div class="card status">
             <p class="row"><Icon name="info" size={16} /> <b>{t('libs.already', { name: listedHere.displayName })}</b></p>
@@ -538,88 +646,95 @@
         {/if}
       {/if}
 
-      <h2 id="ob-history">{t('hista.historyTitle')}</h2>
-      <label class="check"><input type="checkbox" checked={historyOn} disabled={isGit} onchange={(e) => (s.keepHistory = e.currentTarget.checked)} /> {t('hista.keep')}</label>
-      <p class="muted sm">{t(isGit ? 'hista.keepForced' : historyOn ? 'hista.keepHint' : 'hista.keepOffHint')}</p>
-      {#if historyOn && !git.installed}
-        <div class="card status" role="note">
-          <p class="row"><Icon name="info" size={16} /> <b>{t('hista.needsGitTitle')}</b></p>
-          <p class="muted">{t(isGit ? 'hista.needsGitOnline' : 'hista.needsGitBody')}</p>
-          <div class="row gap-top">
-            <button type="button" class="btn" class:primary={isGit} disabled={working.git} onclick={installGit}>{working.git ? t('ob.opening') : t('ob3.installGit')}</button>
-            <button type="button" class="btn" disabled={checking} aria-busy={checking} onclick={checkAgain}><Icon name="sync" size={14} class={checking ? 'spin' : ''} /> {checking ? t('ob.checking') : t('ob.checkAgain')}</button>
+      <!-- Backup and the history start with safe choices (no backup, history on): they wait, closed, until wanted. -->
+      <details class="adv backup">
+        <summary><span>{t('ux-onboarding.backup.section')}</span> <span class="muted cur">{syncLabel} · {t('hista.historyTitle')}: {t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</span></summary>
+        <h3 id="ob-history">{t('hista.historyTitle')}</h3>
+        <label class="check"><input type="checkbox" checked={historyOn} disabled={isGit} onchange={(e) => (s.keepHistory = e.currentTarget.checked)} /> {t('hista.keep')}</label>
+        <p class="muted sm">{t(isGit ? 'hista.keepForced' : historyOn ? 'hista.keepHint' : 'hista.keepOffHint')}</p>
+        {#if gitSaid && git.installed}<p class="okline"><Icon name="check" size={15} /> <span>{gitSaid}</span></p>{/if}
+        {#if historyOn && !git.installed}
+          <div class="card status" role="note">
+            <p class="row"><Icon name="info" size={16} /> <b>{t('hista.needsGitTitle')}</b></p>
+            <p class="muted">{t(isGit ? 'hista.needsGitOnline' : 'hista.needsGitBody')}</p>
+            <div class="row gap-top">
+              <button type="button" class="btn" class:primary={isGit} disabled={working.git} onclick={installGit}>{working.git ? t('ob.opening') : t('ob3.installGit')}</button>
+              <button type="button" class="btn" disabled={checking} aria-busy={checking} onclick={checkAgain}><Icon name="sync" size={14} class={checking ? 'spin' : ''} /> {checking ? t('ob.checking') : t('ob.checkAgain')}</button>
+            </div>
+            {#if isMac}<p class="muted sm gap-top">{t(isGit ? 'ux-onboarding.git.macOnline' : 'ux-onboarding.git.mac')}</p>{/if}
           </div>
-        </div>
-      {/if}
+        {/if}
 
-      <h2 id="ob-backup">{t('ob3.backupTitle')}</h2>
-      <p class="muted">{t('hista.backupBody')}</p>
-      <div class="opts four" role="group" aria-labelledby="ob-backup">
-        <button type="button" class="opt" class:sel={s.sync.mode === 'none'} aria-pressed={s.sync.mode === 'none'} onclick={() => setBackup('none')}><b>{t('hista.backup.none')}</b><span class="muted">{t('hista.backup.noneHint')}</span></button>
-        <button type="button" class="opt" class:sel={s.sync.mode === 'folder'} aria-pressed={s.sync.mode === 'folder'} onclick={() => setBackup('folder')}><b>{t('hista.backup.folder')}</b><span class="muted">{t('hista.backup.folderHint')}</span></button>
-        <button type="button" class="opt" class:sel={isGit && !isDrive} aria-pressed={isGit && !isDrive} onclick={() => setBackup('online')}><b>{t('hista.backup.online')}</b><span class="muted">{t('hista.backup.onlineHint')}</span></button>
-        <button type="button" class="opt" class:sel={isDrive} aria-pressed={isDrive} onclick={() => setBackup('drive')}><b>{t('histb.backup.drive')}</b><span class="muted">{t('histb.backup.driveHint')}</span></button>
-      </div>
-      {#if s.sync.mode === 'none'}
-        <p class="warn"><Icon name="warning" size={15} /> <span>{t('hista.backup.noneWarn')}</span></p>
-      {:else if s.sync.mode === 'folder'}
-        <div class="card status">
-          <p>{t('ob.folderPick')}</p>
-          <div class="row gap-top"><code class="grow path"><bdi>{s.libraryPath}</bdi></code><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.chooseFolder')}</button></div>
-          {#if inCloud}<p class="okline"><Icon name="check" size={15} /> <span>{t('hista.cloud.inside', { service: cloudName })}</span></p>
-          {:else}<p class="warn"><Icon name="warning" size={15} /> <span>{t('ob.folderNotCloud')}</span></p>{/if}
-          <p class="muted sm">{t('ob.cloudPrivacy')}</p>
+        <h3 id="ob-backup">{t('ob3.backupTitle')}</h3>
+        <p class="muted">{t('hista.backupBody')}</p>
+        <div class="opts four" role="group" aria-labelledby="ob-backup">
+          <button type="button" class="opt" class:sel={s.sync.mode === 'none'} aria-pressed={s.sync.mode === 'none'} onclick={() => setBackup('none')}><b>{t('hista.backup.none')}</b><span class="muted">{t('hista.backup.noneHint')}</span></button>
+          <button type="button" class="opt" class:sel={s.sync.mode === 'folder'} aria-pressed={s.sync.mode === 'folder'} onclick={() => setBackup('folder')}><b>{t('hista.backup.folder')}</b><span class="muted">{t('hista.backup.folderHint')}</span></button>
+          <button type="button" class="opt" class:sel={isGit && !isDrive} aria-pressed={isGit && !isDrive} onclick={() => setBackup('online')}><b>{t('hista.backup.online')}</b><span class="muted">{t('hista.backup.onlineHint')}</span></button>
+          <button type="button" class="opt" class:sel={isDrive} aria-pressed={isDrive} onclick={() => setBackup('drive')}><b>{t('histb.backup.drive')}</b><span class="muted">{t('histb.backup.driveHint')}</span></button>
         </div>
-      {:else if isDrive}
-        <div class="card status">
-          <p class="muted sm">{t('histb.drive.hint')}</p>
-          <div class="row gap-top"><code class="grow path"><bdi>{driveFolder || '—'}</bdi></code><button type="button" class="btn" onclick={pickDrive}><Icon name="folder" size={14} /> {t('histb.drive.add')}</button></div>
-          {#if !driveFolder}<p class="muted sm">{t('histb.backup.driveLater')}</p>{/if}
-          <label for="ob-drivemode">{t('hista.online.when')}</label>
-          <select id="ob-drivemode" bind:value={s.sync.mode}>
-            <option value="git-manual">{t('hista.online.manual')}</option>
-            <option value="git-auto">{t('hista.online.auto')}</option>
-          </select>
-        </div>
-      {:else}
-        <div class="card status">
-          <p class="muted sm">{t('hista.online.body')}</p>
-          {#if inCloud}
-            <div class="warn box" role="note">
-              <Icon name="warning" size={15} />
-              <div>
-                <div>{t('hista.cloud.clash', { service: cloudName })}</div>
-                <label class="check"><input type="checkbox" bind:checked={s.sync.allowCloud} /> {t('hista.cloud.anyway')}</label>
+        {#if s.sync.mode === 'none'}
+          <p class="warn"><Icon name="warning" size={15} /> <span>{t('hista.backup.noneWarn')}</span></p>
+        {:else if s.sync.mode === 'folder'}
+          <div class="card status">
+            <p>{t('ob.folderPick')}</p>
+            <div class="row gap-top"><code class="grow path"><bdi>{s.libraryPath}</bdi></code><button type="button" class="btn" onclick={browse}><Icon name="folder" size={14} /> {t('ob.chooseFolder')}</button></div>
+            {#if inCloud}<p class="okline"><Icon name="check" size={15} /> <span>{t('hista.cloud.inside', { service: cloudName })}</span></p>
+            {:else}<p class="warn"><Icon name="warning" size={15} /> <span>{t('ob.folderNotCloud')}</span></p>{/if}
+            <p class="muted sm">{t('ob.cloudPrivacy')}</p>
+          </div>
+        {:else if isDrive}
+          <div class="card status">
+            <p class="muted sm">{t('histb.drive.hint')}</p>
+            <div class="row gap-top"><code class="grow path"><bdi>{driveFolder || '—'}</bdi></code><button type="button" class="btn" onclick={pickDrive}><Icon name="folder" size={14} /> {t('histb.drive.add')}</button></div>
+            {#if !driveFolder}<p class="muted sm">{t('histb.backup.driveLater')}</p>{/if}
+            <label for="ob-drivemode">{t('hista.online.when')}</label>
+            <select id="ob-drivemode" bind:value={s.sync.mode}>
+              <option value="git-manual">{t('hista.online.manual')}</option>
+              <option value="git-auto">{t('hista.online.auto')}</option>
+            </select>
+          </div>
+        {:else}
+          <div class="card status">
+            <p class="muted sm">{t('hista.online.body')}</p>
+            {#if inCloud}
+              <div class="warn box" role="note">
+                <Icon name="warning" size={15} />
+                <div>
+                  <div>{t('hista.cloud.clash', { service: cloudName })}</div>
+                  <label class="check"><input type="checkbox" bind:checked={s.sync.allowCloud} /> {t('hista.cloud.anyway')}</label>
+                </div>
               </div>
-            </div>
-          {/if}
-          <label for="ob-gitmode">{t('hista.online.when')}</label>
-          <select id="ob-gitmode" bind:value={s.sync.mode}>
-            <option value="git-manual">{t('hista.online.manual')}</option>
-            <option value="git-auto">{t('hista.online.auto')}</option>
-          </select>
-          <p class="muted sm">{t('ob.wrapDef')}</p>
-          <label for="ob-remote">{t('hista.online.address')}</label>
-          <input id="ob-remote" dir="ltr" bind:value={remoteUrl} placeholder="https://github.com/you/thoughts.git" autocomplete="off" />
-          {#if remoteUrl.trim()}
-            <div class="warn box" role="note">
-              <Icon name="warning" size={15} />
-              <div>
-                <b>{t('ob.uploadTitle')}</b>
-                <div>{t('ob.uploadBody')}</div>
-                <label class="check"><input type="checkbox" bind:checked={remoteAck} /> {t('ob.uploadAck')}</label>
+            {/if}
+            <label for="ob-gitmode">{t('hista.online.when')}</label>
+            <select id="ob-gitmode" bind:value={s.sync.mode}>
+              <option value="git-manual">{t('hista.online.manual')}</option>
+              <option value="git-auto">{t('hista.online.auto')}</option>
+            </select>
+            <p class="muted sm">{t('ob.wrapDef')}</p>
+            <label for="ob-remote">{t('hista.online.address')}</label>
+            <input id="ob-remote" dir="ltr" bind:value={remoteUrl} placeholder="https://github.com/you/thoughts.git" autocomplete="off" />
+            {#if remoteUrl.trim()}
+              <div class="warn box" role="note">
+                <Icon name="warning" size={15} />
+                <div>
+                  <b>{t('ob.uploadTitle')}</b>
+                  <div>{t('ob.uploadBody')}</div>
+                  <label class="check"><input type="checkbox" bind:checked={remoteAck} /> {t('ob.uploadAck')}</label>
+                </div>
               </div>
-            </div>
-            <div class="row top">
-              <div class="grow"><label for="ob-ruser">{t('ob.remoteUser')}</label><input id="ob-ruser" dir="ltr" bind:value={remoteUser} autocomplete="off" /></div>
-              <div class="grow"><label for="ob-rtoken">{t('ob.remoteToken')}</label><input id="ob-rtoken" dir="ltr" type="password" bind:value={remoteToken} autocomplete="off" /></div>
-            </div>
-            <label for="ob-cred">{t('ob.credStore')}</label>
-            <select id="ob-cred" bind:value={s.sync.credentialStore}><option value="keychain">{t('ob.credKeychain')}</option><option value="file">{t('ob.credFile')}</option></select>
-            <p class="muted sm">{t(s.sync.credentialStore === 'file' ? 'ob3.credFileNote' : 'ob3.credKeychainNote')}</p>
-          {/if}
-        </div>
-      {/if}
+              <div class="row top">
+                <div class="grow"><label for="ob-ruser">{t('ob.remoteUser')}</label><input id="ob-ruser" dir="ltr" bind:value={remoteUser} autocomplete="off" /></div>
+                <div class="grow"><label for="ob-rtoken">{t('ob.remoteToken')}</label><input id="ob-rtoken" dir="ltr" type="password" bind:value={remoteToken} autocomplete="off" /></div>
+              </div>
+              <RemoteTokenHelp />
+              <label for="ob-cred">{t('ob.credStore')}</label>
+              <select id="ob-cred" bind:value={s.sync.credentialStore}><option value="keychain">{t('ob.credKeychain')}</option><option value="file">{t('ob.credFile')}</option></select>
+              <p class="muted sm">{t(s.sync.credentialStore === 'file' ? 'ob3.credFileNote' : 'ob3.credKeychainNote')}</p>
+            {/if}
+          </div>
+        {/if}
+      </details>
 
       <details class="adv">
         <summary>{t('ob3.featuresAdv')}</summary>
@@ -653,7 +768,7 @@
       <dl class="sum">
         <dt>{t('ob.sumNotes')}</dt><dd><code><bdi>{s.libraryPath}</bdi></code> · {t(libraryMode === 'new' ? 'ob.sumNew' : 'ob.sumExisting')}{#if adopting}{' · '}{t('sb.adopt.sum')}{/if}</dd>
         {#if bringing}<dt>{t('sb.bring.sum')}</dt><dd><code><bdi>{importFrom.trim()}</bdi></code></dd>{/if}
-        {#if !adding}<dt>{t('ob.sumAi')}</dt><dd><bdi>Claude</bdi>{#if useApi} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}{#if waitsForAssistant}{' · '}{t('sb.later.sum')}{/if}</dd>
+        {#if !adding}<dt>{t('ob.sumAi')}</dt><dd><bdi>{onCodex ? 'Codex' : 'Claude'}</bdi>{#if useApi && !onCodex} · <bdi>{s.ai.claude.baseUrl}</bdi>{/if}{#if waitsForAssistant}{' · '}{t('sb.later.sum')}{/if}</dd>
         {:else if libName.trim()}<dt>{t('libs.nameLabel')}</dt><dd dir="auto">{libName.trim()}</dd>{/if}
         <dt>{t('ob.sumBackup')}</dt><dd>{syncLabel}{#if isDrive && driveFolder} · <bdi>{driveFolder}</bdi>{:else if isGit && !isDrive && remoteUrl.trim()} · <bdi>{remoteUrl.trim()}</bdi>{/if}{#if s.sync.mode === 'folder' && !inCloud} · {t('sa.sum.notCloud')}{/if}</dd>
         <dt>{t('hista.historyTitle')}</dt><dd>{t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</dd>
@@ -677,7 +792,8 @@
   <div class="row nav">
     {#if step > first}<button type="button" class="btn" disabled={busy} onclick={() => step--}>{t('back')}</button>{/if}
     {#if adding && cancel}<button type="button" class="btn ghost" disabled={busy} onclick={cancel}>{t('libs.cancelAdd')}</button>{/if}
-    <span class="grow why" id="ob-why" role="status">{#if blocker && step < steps.length - 1}{blocker}{/if}</span>
+    <span class="grow why" id="ob-why">{#if blocker && step < steps.length - 1}{blocker}{/if}</span>
+    <span class="sr-only" role="status">{whySaid}</span>
     {#if step < steps.length - 1}
       <button type="button" class="btn primary" disabled={!!blocker} aria-describedby="ob-why" onclick={() => step++}>{t('next')}</button>
     {:else}
@@ -719,6 +835,9 @@
   .blk { display: block; font-weight: 400; }
   .adv { margin-top: 14px; border-top: 1px solid var(--hairline); padding-top: 4px; }
   .adv > summary { cursor: pointer; font-size: 13px; font-weight: 500; color: var(--muted); padding: 6px 0; }
+  .adv.backup > summary { font-size: 14px; color: var(--fg); }
+  .adv.backup > summary .cur { display: block; font-size: var(--fs-xs); font-weight: 400; margin-inline-start: 18px; }
+  .adv h3 { font-size: 14px; font-weight: 600; margin: 14px 0 6px; }
   .warn, .okline { display: flex; gap: 8px; align-items: flex-start; font-size: 13px; margin: 8px 0; }
   .warn :global(.icon), .okline :global(.icon) { flex: none; margin-top: 3px; }
   .warn :global(.icon) { color: var(--danger); }

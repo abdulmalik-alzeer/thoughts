@@ -7,16 +7,20 @@
   import { app, go, refreshChats } from '../lib/store.svelte';
   import { failed } from '../lib/errors';
   import { t } from '../lib/i18n';
+  import { isReady, isSignedOut, primaryOf, statusOf } from '../lib/assistantReady';
 
   const KEY = 'thoughts.setupWaiting.hidden';
   const read = () => { try { return sessionStorage.getItem(KEY) ?? ''; } catch { return ''; } };
   let hidden = $state(read());
 
   const waiting = $derived(app.chats.find((c: any) => c.kind === 'setup' && c.phase === 'waiting' && !c.running) ?? null);
-  const claude = $derived(app.status?.claude ?? {});
-  const connected = $derived(!!claude.installed && !!claude.loggedIn);
+  // The setup runs on the program chosen in Settings › Assistant (Claude Code or Codex): that one
+  // has to be connected.
+  const program = $derived(primaryOf(app.settings));
+  const st = $derived(statusOf(app.status, program));
+  const connected = $derived(isReady(st, program));
   // Installed but signed out: the app's own sign-in banner already says what to do.
-  const signedOutShown = $derived(claude.installed === true && claude.loggedIn === false);
+  const signedOutShown = $derived(isSignedOut(st, program));
   // Not over the setup chat itself, nor over Settings, where the assistant is being connected.
   const here = $derived((app.view.kind === 'chat' && app.view.id === waiting?.id) || app.view.kind === 'settings');
   // A hidden "connect" banner comes back once the assistant is connected: that is news.
