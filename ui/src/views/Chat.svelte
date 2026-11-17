@@ -52,6 +52,9 @@
   import { confirmDeleteChat } from './chat/deleteChat';
   import { joinDraft, type SavedDraft } from './chat/draft';
   import { Fetches, applyEvent, applyPartial, type Effects, type Stream } from './chat/merge';
+  import MessageEdit from './chat/MessageEdit.svelte';
+  import BranchOrigin from './chat/BranchOrigin.svelte';
+  import { canBranch, editKind, madeKey, takeJump } from './chat/branch';
   import type { Chat, DaemonEvent } from '../lib/types';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
@@ -187,6 +190,7 @@
       // Seen: the "cut off" marker stays on screen for this visit but no longer follows the chat around.
       if (c.interrupted && first) post(`/chats/${id}/ack-interrupted`).catch(() => {});
       await scrollDown(first);
+      if (first) tick().then(showJump);
       if (first) {
         const missing = files.filter((f) => f.missing).length;
         if (missing) notify(tn('chat3.reattachNote', missing), { kind: 'info', key: 'reattach:' + id });
@@ -264,7 +268,7 @@
       fetches.hold(e);
       if (chat) onEvent(e);
     });
-    return () => { gone = true; off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); };
+    return () => { gone = true; off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); clearTimeout(flashTimer); };
   });
 
   // ---- which assistant program answers this chat (Claude Code or Codex), and its own choices ----
@@ -411,6 +415,37 @@
     const again = prev && prev.text === lastUser.text ? prev.files : [];
     if (!again.length && lastUser.attachments?.length) notify(t('chat3.retryNoFiles'), { kind: 'info' });
     await sendBody({ text: lastUser.text, attachments: again.map(({ name, data }) => ({ name, data })), mentions: lastUser.tool?.mentions ?? [], options: chat.options }, 'chat3.retryFailed');
+  }
+
+  // ---- editing a sent message, branching the chat (chat/branch.ts) ----
+  let editing = $state<string | null>(null);    // the message being edited in its row
+  let branching = $state<string | null>(null);  // the message a branch is being made from
+  let flashId = $state<string | null>(null);    // the message shown after following a branch's link to it
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+  async function branchFrom(m: any) {
+    if (branching || sending) return;
+    branching = m.id;
+    try {
+      const r = await post(`/chats/${encodeURIComponent(id)}/branch`, { messageId: m.id });
+      refreshChats().catch(() => {});
+      notify(t(madeKey(String(r?.how ?? ''), chat.provider)), { kind: 'info', key: 'branch:' + r?.id });
+      if (r?.id) go({ kind: 'chat', id: r.id });
+    } catch (e) { failed(t('chatfBranch.branchFailed'), e); }
+    finally { branching = null; }
+  }
+  /** A branch's "at this message" link opened this chat: that message is shown and given the focus. */
+  async function showJump() {
+    const target = takeJump(id);
+    if (!target || !scroller) return;
+    const el = scroller.querySelector<HTMLElement>(`[data-msg="${CSS.escape(target)}"]`);
+    if (!el) { notify(t('chatfBranch.jumpGone'), { kind: 'info' }); return; }
+    stick = false;
+    flashId = target;
+    await tick();
+    el.scrollIntoView({ block: 'center' });
+    el.focus({ preventScroll: true });
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => (flashId = null), 2500);
   }
 
   async function stop() {
@@ -775,24 +810,39 @@
       <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div class="msgs scroll" bind:this={scroller} {onscroll} {onwheel} onkeydown={onscrollkey} ontouchstart={(e) => (touchY = e.touches[0]?.clientY ?? 0)} {ontouchmove}
         role="group" aria-label={t('chat.conversation')}>
+        <BranchOrigin {chat} />
         {#each chat.messages as m (m.id)}
           {#if m.role === 'user'}
-            <div class="msg user">
+            {@const ek = canCompose ? editKind(chat, m.id) : null}
+            <div class="msg user" class:flash={flashId === m.id} data-msg={m.id} tabindex="-1">
+              {#if editing === m.id && ek}
+                <MessageEdit chatId={id} {chat} {m} kind={ek} {mentionName} onclose={() => (editing = null)} />
+              {:else}
               <div class="bubble" dir="auto">{m.text}
                 {#if m.attachments?.length}<Attachments chatId={id} paths={m.attachments} />{/if}{#if m.tool?.mentions?.length}<div class="sm att refs">{#each m.tool.mentions as p (p)}<button type="button" class="ref" onclick={() => go({ kind: 'docs', path: p })} title={t('chatc.mention.open', { path: p })}>@<bdi>{mentionName(p)}</bdi></button>{/each}</div>{/if}
               </div>
               <div class="acts">
                 <button class="act" onclick={() => copyMsg(m.text)} aria-label={t('chat.copyMessage')} title={t('chat.copyMessage')}><Icon name="copy" size={14} /></button>
+                {#if ek}
+                  <button class="act" onclick={() => (editing = m.id)} title={t(ek === 'branch' ? 'chatfBranch.editEarlierTip' : 'chatfBranch.editTip')} aria-label={t(ek === 'branch' ? 'chatfBranch.editEarlierTip' : 'chatfBranch.editTip')}><Icon name="edit" size={14} /><span>{t('chatfBranch.edit')}</span></button>
+                {/if}
+                {#if canCompose && canBranch(chat, m)}
+                  <button class="act" onclick={() => branchFrom(m)} disabled={!!branching} aria-busy={branching === m.id} title={t('chatfBranch.branchTip')} aria-label={t(branching === m.id ? 'chatfBranch.branching' : 'chatfBranch.branchTip')}><Icon name="git" size={14} /><span>{t(branching === m.id ? 'chatfBranch.branching' : 'chatfBranch.branch')}</span></button>
+                {/if}
               </div>
+              {/if}
             </div>
           {:else if m.role === 'assistant'}
-            <div class="msg ai">
+            <div class="msg ai" class:flash={flashId === m.id} data-msg={m.id} tabindex="-1">
               <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
               <div class="md" dir="auto" onclick={mdClick} use:zoomImages>{@html md(m.text)}</div>
               <div class="acts" class:show={m.id === lastAnswerId}>
                 <button class="act" onclick={() => copyMsg(m.text)} aria-label={t('chat.copyMessage')} title={t('chat.copyMessage')}><Icon name="copy" size={14} /><span>{t('chat.copy')}</span></button>
                 {#if m.id === lastAnswerId && !chat.running && lastUser && canCompose}
                   <button class="act" onclick={retry} title={t('chat.retryTip')}><Icon name="retry" size={14} /><span>{t('chat.retry')}</span></button>
+                {/if}
+                {#if canCompose && canBranch(chat, m) && !(chat.running && m.id === lastAnswerId)}
+                  <button class="act" onclick={() => branchFrom(m)} disabled={!!branching} aria-busy={branching === m.id} title={t('chatfBranch.branchTip')} aria-label={t(branching === m.id ? 'chatfBranch.branching' : 'chatfBranch.branchTip')}><Icon name="git" size={14} /><span>{t(branching === m.id ? 'chatfBranch.branching' : 'chatfBranch.branch')}</span></button>
                 {/if}
               </div>
             </div>
@@ -1029,6 +1079,9 @@
   .act { font: inherit; font-size: var(--fs-xs); color: var(--muted); background: none; border: 0; border-radius: 7px; padding: 3px 7px; cursor: pointer; display: inline-flex; align-items: center; gap: 5px; }
   .act:hover { color: var(--fg); background: var(--fill); }
   .act.show { opacity: 1; }
+  .act:disabled { opacity: .5; cursor: default; }
+  /* The message a branch's link points to, for a moment (chat/branch.ts). */
+  .msg.flash { outline: 2px solid var(--accent); outline-offset: 4px; border-radius: 12px; }
 
   .toolrow { min-width: 0; }
   .tool { font: inherit; background: none; border: 0; padding: 2px 4px; margin-inline-start: -4px; border-radius: 6px; text-align: start; cursor: pointer; font-family: var(--mono); font-size: var(--fs-xs); color: var(--muted); display: flex; align-items: center; gap: 6px; max-width: 100%; }
