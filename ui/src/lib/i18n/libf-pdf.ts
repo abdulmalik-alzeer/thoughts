@@ -1,0 +1,31 @@
+// libf-pdf: Print and Save as PDF for every note (Docs, an item's front page and its log).
+export default {
+  en: {
+    'libf-pdf.group': 'Print or save as PDF',
+    'libf-pdf.print': 'Print…',
+    'libf-pdf.printTip': 'Print this note',
+    'libf-pdf.save': 'Save as PDF…',
+    'libf-pdf.saveTip': 'Save this note as a PDF file',
+    'libf-pdf.saving': 'Saving the PDF…',
+    'libf-pdf.saved': 'Saved “{file}”.',
+    'libf-pdf.open': 'Open',
+    'libf-pdf.busy': 'A PDF is already being saved. Try again in a moment.',
+    'libf-pdf.failed': 'Couldn’t save the PDF. You can use Print instead and save it as a PDF from there.',
+    'libf-pdf.gone': 'That PDF is no longer where it was saved.',
+    'libf-pdf.openFailed': 'Couldn’t open the PDF.',
+  },
+  ar: {
+    'libf-pdf.group': 'الطباعة أو الحفظ بصيغة PDF',
+    'libf-pdf.print': 'طباعة…',
+    'libf-pdf.printTip': 'اطبع هذه الملاحظة',
+    'libf-pdf.save': 'حفظ بصيغة PDF…',
+    'libf-pdf.saveTip': 'احفظ هذه الملاحظة ملفاً بصيغة PDF',
+    'libf-pdf.saving': 'جارٍ حفظ ملف PDF…',
+    'libf-pdf.saved': 'حُفظ «{file}».',
+    'libf-pdf.open': 'فتح',
+    'libf-pdf.busy': 'يجري حفظ ملف PDF الآن. حاول بعد لحظات.',
+    'libf-pdf.failed': 'تعذّر حفظ ملف PDF. يمكنك استعمال «طباعة» بدلاً من ذلك والحفظ بصيغة PDF من هناك.',
+    'libf-pdf.gone': 'لم يعد ملف PDF في المكان الذي حُفظ فيه.',
+    'libf-pdf.openFailed': 'تعذّر فتح ملف PDF.',
+  },
+};

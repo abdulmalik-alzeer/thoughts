@@ -6,7 +6,7 @@
   import { t, fmtDate } from '../../lib/i18n';
   import { saveFile } from '../../lib/download';
   import { copyText, notify } from '../../lib/content/util';
-  import { isMac } from '../../lib/shortcuts';
+  import { printView } from '../../lib/printPdf';
   import { chatMarkdown, exportName } from './exportChat';
 
   let { chat }: { chat: any } = $props();
@@ -27,17 +27,7 @@
     const ok = await copyText(text());
     notify(t(ok ? 'chatc.export.copied' : 'chat.copyFailed'), { kind: ok ? 'info' : 'error' });
   }
-  async function print() {
-    close(false);
-    notify(t(isMac ? 'docsb.pdfHintMac' : 'docsb.pdfHint'), { kind: 'info', duration: 15000, key: 'chat-pdf-hint' });
-    await tick();
-    // The window's title is the name a saved PDF is offered under.
-    const was = document.title;
-    document.title = chat.title || was;
-    const done = () => { document.title = was; window.removeEventListener('afterprint', done); };
-    window.addEventListener('afterprint', done);
-    setTimeout(() => { try { window.print(); } catch { done(); notify(t('docs.printFailed'), { kind: 'error' }); } }, 300);
-  }
+  function print() { close(false); printView(chat.title, 'chat-pdf-hint'); }
 
   function close(refocus = true) { open = false; if (refocus) button?.focus(); }
   async function toggle() {

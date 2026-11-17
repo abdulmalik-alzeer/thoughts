@@ -13,6 +13,7 @@
   import Icon from '../lib/Icon.svelte';
   import ItemActions from '../lib/ItemActions.svelte';
   import FindBar from '../lib/FindBar.svelte';
+  import PrintPdf from '../lib/PrintPdf.svelte';
   import ItemTodos from './item/ItemTodos.svelte';
   import ItemFiles from './item/ItemFiles.svelte';
   import { ApiError, api, on, post } from '../lib/api';
@@ -184,6 +185,7 @@
     if (other) openItem(other, 'overview'); else go({ kind: 'docs', path: target });
   }
   let article = $state<HTMLElement>();
+  let logEl = $state<HTMLElement>();
   const inline: string[] = [];
   const dropInline = () => { for (const u of inline.splice(0)) URL.revokeObjectURL(u); };
   $effect(() => {
@@ -301,6 +303,7 @@
               <button class="btn sm" onclick={() => go({ kind: 'docs', path: data.path })}>{t('item.openInDocs')}</button></div>
           {/if}
           <div class="row tools">
+            <PrintPdf source={() => (article ? { content: article, title, heading: title } : null)} />
             <span class="grow"></span>
             <button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: data.path })} title={t('item.openInDocsTip')}><Icon name="docs" size={13} /> {t('item.openInDocs')}</button>
             <button class="btn sm" onclick={editFront}><Icon name="edit" size={13} /> {t('edit')}</button>
@@ -370,7 +373,7 @@
         {/if}
       {:else if tab === 'log'}
         {#if data.log.entries.length}
-          <div class="log">
+          <div class="log" bind:this={logEl}>
             {#each data.log.entries as en, i (i)}
               <article class="entry">
                 <h3 dir="auto">
@@ -385,6 +388,7 @@
           </div>
           <div class="row tools">
             {#if data.log.archive}<button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: data.log.archive })}><Icon name="rollback" size={13} /> {t('item.log.older')}</button>{/if}
+            <PrintPdf source={() => (logEl ? { content: logEl, title: `${title} — ${t('item.tab.log')}`, heading: `${title} — ${t('item.tab.log')}` } : null)} />
             <span class="grow"></span>
             <button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: data.log.path })}><Icon name="docs" size={13} /> {t('item.openInDocs')}</button>
           </div>

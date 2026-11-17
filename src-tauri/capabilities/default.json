@@ -13,6 +13,8 @@
     "allow-reveal-chat-attachment",
     "allow-save-pack",
     "allow-save-file",
+    "allow-save-pdf",
+    "allow-open-saved-pdf",
     "allow-daemon-info",
     "allow-restart-daemon",
     "allow-approve-action",

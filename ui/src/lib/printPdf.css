@@ -1,0 +1,81 @@
+/* A note on paper (Print and Save as PDF, lib/printPdf.ts). Only the copy in #print-root is laid out,
+   and only while `html.print-doc` is set, so printing any other view (a conversation) is unaffected.
+   The look is fixed and light whatever the theme: black ink on white, the theme's colours unused.
+   Fonts: the system's own, which carry Arabic on every platform (macOS: SF / SF Arabic, Geeza Pro;
+   Windows: Segoe UI, Tahoma; Linux: Noto Sans / Noto Sans Arabic, DejaVu Sans). */
+#print-root { display: none; }
+
+@media print {
+  @page { margin: 18mm 16mm 20mm; }
+
+  html.print-doc, html.print-doc body { height: auto !important; min-height: 0 !important; overflow: visible !important; background: #fff !important; }
+  html.print-doc body > *:not(#print-root) { display: none !important; }
+
+  html.print-doc #print-root {
+    display: block; margin: 0; padding: 0; max-width: none;
+    color: #111; background: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Arabic", "Geeza Pro", "Segoe UI", Tahoma, "Noto Sans", "Noto Sans Arabic", "DejaVu Sans", Arial, sans-serif;
+    font-size: 11pt; line-height: 1.55; letter-spacing: normal; word-spacing: normal;
+    overflow-wrap: break-word;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  /* Arabic first where the note runs right to left: its own letter shapes, not a fallback's. */
+  html.print-doc #print-root[dir="rtl"] {
+    font-family: "SF Arabic", "Geeza Pro", -apple-system, "Segoe UI", Tahoma, "Noto Sans Arabic", "Noto Naskh Arabic", "DejaVu Sans", Arial, sans-serif;
+  }
+  html.print-doc #print-root * { color: inherit; background: transparent; box-shadow: none !important; text-shadow: none !important; animation: none !important; transition: none !important; }
+
+  html.print-doc #print-root h1, html.print-doc #print-root h2, html.print-doc #print-root h3,
+  html.print-doc #print-root h4, html.print-doc #print-root h5, html.print-doc #print-root h6 {
+    line-height: 1.25; margin: 1.1em 0 .45em; font-weight: 700; break-after: avoid; page-break-after: avoid; break-inside: avoid;
+  }
+  html.print-doc #print-root h1 { font-size: 20pt; margin-top: 0; }
+  html.print-doc #print-root h2 { font-size: 15pt; border-bottom: .5pt solid #bbb; padding-bottom: 2pt; }
+  html.print-doc #print-root h3 { font-size: 12.5pt; }
+  html.print-doc #print-root h4, html.print-doc #print-root h5, html.print-doc #print-root h6 { font-size: 11pt; }
+  html.print-doc #print-root .print-title { margin-bottom: .8em; }
+
+  html.print-doc #print-root p { margin: 0 0 .7em; orphans: 3; widows: 3; }
+  html.print-doc #print-root ul, html.print-doc #print-root ol { margin: 0 0 .7em; padding-inline-start: 1.6em; }
+  html.print-doc #print-root li { margin: .15em 0; }
+  html.print-doc #print-root li > p { margin: 0; }
+  html.print-doc #print-root .md-task { font-family: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; font-size: .9em; }
+  html.print-doc #print-root hr { border: 0; border-top: .5pt solid #999; margin: 1.2em 0; }
+
+  html.print-doc #print-root a { color: #0b3d91; text-decoration: underline; }
+  html.print-doc #print-root a.print-url::after { content: " (" attr(href) ")"; color: #555; font-size: .85em; text-decoration: none; overflow-wrap: anywhere; }
+
+  html.print-doc #print-root blockquote { margin: 0 0 .8em; padding-block: .1em; padding-inline: 1em 0; border-inline-start: 2.5pt solid #bbb; color: #333; break-inside: avoid; }
+
+  html.print-doc #print-root code, html.print-doc #print-root kbd, html.print-doc #print-root samp {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace; font-size: .9em;
+  }
+  html.print-doc #print-root :not(pre) > code { background: #f2f2f2; border-radius: 3px; padding: 0 .25em; }
+  /* Code is wrapped, never cut at the paper's edge; it always runs left to right. */
+  html.print-doc #print-root pre {
+    direction: ltr; text-align: left; unicode-bidi: isolate;
+    white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; overflow: visible; max-height: none;
+    background: #f5f5f5; border: .5pt solid #ccc; border-radius: 4px; padding: 8pt 10pt; margin: 0 0 .8em;
+    font-size: 9pt; line-height: 1.45; break-inside: avoid;
+  }
+  html.print-doc #print-root .md-code { position: static; margin: 0; }
+
+  /* Tables fit the paper: no scrolling box, long words wrap, rows are never split across pages and
+     the header row repeats on each page. */
+  html.print-doc #print-root .md-table { overflow: visible !important; max-width: none; margin: 0 0 .9em; outline: none; }
+  html.print-doc #print-root table { border-collapse: collapse; max-width: 100%; font-size: 9.5pt; }
+  html.print-doc #print-root thead { display: table-header-group; }
+  html.print-doc #print-root tr { break-inside: avoid; page-break-inside: avoid; }
+  html.print-doc #print-root th, html.print-doc #print-root td { border: .5pt solid #999; padding: 3pt 6pt; text-align: start; vertical-align: top; overflow-wrap: anywhere; }
+  html.print-doc #print-root th { background: #eee; font-weight: 700; }
+
+  html.print-doc #print-root img { display: inline-block; max-width: 100%; max-height: 240mm; height: auto; break-inside: avoid; cursor: default; }
+  html.print-doc #print-root figure { margin: 0 0 .8em; break-inside: avoid; }
+
+  html.print-doc #print-root mark { background: #fff2a8; }
+  html.print-doc #print-root details > summary { list-style: none; font-weight: 600; }
+
+  /* An item's log: each entry under its date. */
+  html.print-doc #print-root .entry { margin: 0 0 1em; }
+  html.print-doc #print-root .entry > h3 { margin-top: .6em; }
+}

@@ -23,11 +23,12 @@
   import FilePreview from '../lib/preview/FilePreview.svelte';
   import { previewKind } from '../lib/preview/kinds';
   import { renderers } from '../lib/preview/renderers';
-  import { docDir, toDocx } from '../lib/content/docx';
+  import { toDocx } from '../lib/content/docx';
   import ImportNotes from './ImportNotes.svelte';
   import PageExtras from './PageExtras.svelte';
   import { pageText, shows } from '../lib/pages.svelte';
   import { canOpenInApp, openLibraryFile, revealLabelKey, revealLibraryFile } from '../lib/openInApp';
+  import { printNote, saveNotePdf, titleOf as noteTitle, type PrintSource } from '../lib/printPdf';
 
   let { path }: { path?: string } = $props();
 
@@ -94,7 +95,6 @@
   const baseName = (p: string) => p.split('/').pop() || p;
   const dirName = (p: string) => (p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : '');
   const desktop = inTauri();
-  const isMac = /mac/i.test(navigator.platform || navigator.userAgent);
   const dirty = $derived(editing && !!doc && draft !== doc.content);
   // The desktop app asks before quitting while this is set (the draft itself is kept: see the stash below).
   $effect(() => { reportUnsaved('docs', dirty && current ? baseName(current) : null, true); });
@@ -534,27 +534,17 @@
     } catch (e) { failed(t('docs3.exportFailed'), e); }
   }
 
-  /** Prints only the document: a copy of the rendered article is placed at the top of <body> for the print pass.
-   *  The "hide everything else" print rules apply only while `html.print-doc` is set, so printing any other view is unaffected. */
-  async function printDoc(title?: string | Event) {
+  /** The open document as it prints (lib/printPdf.ts): the rendered note, named after its title. */
+  function printSource(): PrintSource | null {
+    if (!article || editing) return null;
+    return { content: article, title: noteTitle(String(doc?.content ?? ''), docTitle()) };
+  }
+  /** Prints only the document (a copy of the rendered article; see lib/printPdf.ts). */
+  async function printDoc() {
     await tick();
-    if (!article || editing) { notify(t(editing ? 'docs3.restoreUnsaved' : 'docs3.printNotDoc'), { kind: 'info' }); return; }
-    document.getElementById('print-root')?.remove();
-    const root = document.createElement('div');
-    root.id = 'print-root';
-    root.className = 'md';
-    // The page runs the way most of the note reads (an Arabic note prints right to left).
-    root.dir = docDir(article.textContent ?? '');
-    for (const n of article.childNodes) root.appendChild(n.cloneNode(true));
-    document.body.appendChild(root);
-    const html = document.documentElement;
-    // The window's title is the name a saved PDF is offered under.
-    const was = document.title;
-    if (typeof title === 'string' && title) document.title = title;
-    const done = () => { root.remove(); html.classList.remove('print-doc'); document.title = was; window.removeEventListener('afterprint', done); };
-    window.addEventListener('afterprint', done);
-    html.classList.add('print-doc');
-    try { window.print(); } catch { done(); notify(t('docs.printFailed'), { kind: 'error' }); }
+    const src = printSource();
+    if (!src) { notify(t(editing ? 'docs3.restoreUnsaved' : 'docs3.printNotDoc'), { kind: 'info' }); return; }
+    printNote(src);
   }
 
   const docTitle = () => String(doc?.frontmatter?.title || info?.title || prettyName(current));
@@ -613,12 +603,13 @@
     }
     go({ kind: 'docs', path: p });
   }
-  /** "Save as PDF" goes through the print window, which offers it; the PDF is named after the note. */
+  /** "Save as PDF": straight into a file the user picks where the desktop app can, else through the print window. */
   async function savePdf() {
     if (showSource) { showSource = false; await tick(); }
-    notify(t(isMac ? 'docsb.pdfHintMac' : 'docsb.pdfHint'), { kind: 'info', duration: 15000, key: 'docs-pdf-hint' });
-    await new Promise((r) => setTimeout(r, 350));
-    printDoc(docTitle());
+    await tick();
+    const src = printSource();
+    if (!src) { notify(t(editing ? 'docs3.restoreUnsaved' : 'docs3.printNotDoc'), { kind: 'info' }); return; }
+    if ((await saveNotePdf(src)) === 'busy') notify(t('libf-pdf.busy'), { kind: 'info', key: 'pdf-save' });
   }
 
   // ---------- create, rename, move, delete ----------
@@ -1189,19 +1180,8 @@
 
   .sm { font-size: var(--fs-xs); }
 
-  /* Printing a document: only the copy made by printDoc() is laid out. These rules apply ONLY while
-     printDoc() has set `html.print-doc`, so "Print" in any other view prints that view normally. */
-  :global(#print-root) { display: none; }
+  /* Printing a document: lib/printPdf.css lays out only its copy, while `html.print-doc` is set. */
   @media print {
-    :global(html.print-doc), :global(html.print-doc body) { height: auto !important; overflow: visible !important; background: #fff !important; }
-    :global(html.print-doc body > *:not(#print-root)) { display: none !important; }
-    :global(html.print-doc #print-root) { display: block; color: #000; background: #fff; font-size: 12pt; line-height: 1.5; padding: 0; }
-    :global(html.print-doc #print-root a) { color: inherit; text-decoration: underline; }
-    :global(html.print-doc #print-root pre), :global(html.print-doc #print-root table), :global(html.print-doc #print-root img), :global(html.print-doc #print-root blockquote) { break-inside: avoid; }
-    :global(html.print-doc #print-root pre) { white-space: pre-wrap; border: 1px solid #ccc; padding: 8px; }
-    :global(html.print-doc #print-root [data-md-copy]) { display: none; }
-    :global(html.print-doc #print-root h1), :global(html.print-doc #print-root h2), :global(html.print-doc #print-root h3) { break-after: avoid; }
-    :global(html.print-doc #print-root td), :global(html.print-doc #print-root th) { border: 1px solid #999; }
     /* Any other view printed while Docs is open underneath (never the case today) keeps the app layout rules in theme.css. */
     .docs { height: auto; }
   }

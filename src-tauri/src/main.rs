@@ -14,6 +14,7 @@ mod consent;
 mod ghfeed;
 mod links;
 mod openfile;
+mod pdf;
 mod quit;
 mod recovery;
 mod voice;
@@ -1253,6 +1254,8 @@ fn main() {
             openfile::reveal_chat_attachment,
             save_pack,
             save_file,
+            pdf::save_pdf,
+            pdf::open_saved_pdf,
             daemon_info,
             restart_daemon,
             consent::approve_action,
