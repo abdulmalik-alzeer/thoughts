@@ -52,12 +52,12 @@ fn arabic() -> bool {
 /// What the confirmation is about, as the service (not the window) describes it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Subject {
-    /// One chat: its title (when the service could say) and whether Codex answers in it.
-    Chat { title: Option<String>, codex: bool },
+    /// One chat: its title and whether Codex answers in it.
+    Chat { title: String, codex: bool },
     /// The default for new chats.
     Default,
-    /// A folder to trust (when the service could say which).
-    Folder(Option<String>),
+    /// A folder to trust: its full path.
+    Folder(String),
 }
 
 /// The words of the native confirmation.
@@ -69,12 +69,38 @@ pub(crate) struct Ask {
     pub no: &'static str,
 }
 
-/// A name inside a sentence: one line, not too long, kept apart from the text around it so it
-/// reads the right way in either language.
+/// `text` with every character that could hide or reorder what is shown (control characters,
+/// direction marks and overrides, invisible joiners) written out visibly as `<U+XXXX>` instead.
+/// Nothing is dropped or merged, so what is shown is what the text really is.
+fn visible(text: &str) -> String {
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}')
+    };
+    text.chars().map(|c| if hidden(c) { format!("<U+{:04X}>", c as u32) } else { c.to_string() }).collect()
+}
+
+/// `text` (already `visible`) cut from the middle when it is longer than `max` characters, so its
+/// beginning and its end, where a path names the folder itself, always show.
+fn middle_cut(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let tail = max / 2;
+    let head = max - tail - 1;
+    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[chars.len() - tail..].iter().collect::<String>())
+}
+
+/// A name inside a sentence, kept apart from the text around it so it reads the right way in either
+/// language.
 fn named(text: &str, max: usize) -> String {
-    let bidi = |c: char| matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
-    let plain: String = text.chars().filter(|c| !bidi(*c)).collect();
-    format!("\u{2068}{}\u{2069}", crate::recovery::one_line(&plain, max))
+    format!("\u{2068}{}\u{2069}", middle_cut(&visible(text), max))
+}
+
+/// The folder's own name: the last part of `path`.
+fn last_part(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().filter(|p| !p.is_empty()).unwrap_or(path)
 }
 
 /// The confirmation for `subject`, in Arabic when `ar`.
@@ -100,11 +126,7 @@ pub(crate) fn ask_text(subject: &Subject, ar: bool) -> Ask {
     match subject {
         Subject::Chat { title, codex } => {
             let (risk, note) = if *codex { (CODEX_RISK, CODEX_NOTE) } else { (CLAUDE_RISK, CLAUDE_NOTE) };
-            let which = match title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-                Some(t) if ar => format!("المحادثة: «{}»", named(t, 80)),
-                Some(t) => format!("Chat: “{}”", named(t, 80)),
-                None => pick(("This chat.", "هذه المحادثة.")).to_string(),
-            };
+            let which = if ar { format!("المحادثة: «{}»", named(title, 160)) } else { format!("Chat: “{}”", named(title, 160)) };
             let applies = pick(("It applies to this chat until you change it back.", "يسري هذا على هذه المحادثة إلى أن تغيّره."));
             Ask {
                 title: if *codex { pick(("Give Codex full access in this chat?", "منح Codex وصولاً كاملاً في هذه المحادثة؟")) } else { pick(("Bypass all permissions in this chat?", "تجاوز كل الأذونات في هذه المحادثة؟")) },
@@ -128,11 +150,10 @@ pub(crate) fn ask_text(subject: &Subject, ar: bool) -> Ask {
             no: cancel,
         },
         Subject::Folder(path) => {
-            let which = match path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
-                Some(p) if ar => format!("المجلد: «{}»", named(p, 200)),
-                Some(p) => format!("Folder: “{}”", named(p, 200)),
-                None => pick(("The folder shown in the app window.", "المجلد المعروض في نافذة التطبيق.")).to_string(),
-            };
+            // The folder's own name on a line of its own, then the whole path (only a path longer
+            // than any real one is cut, from the middle, so its end still shows).
+            let (name, full) = (named(last_part(path), 300), named(path, 1000));
+            let which = if ar { format!("المجلد: «{name}»\nمكانه: «{full}»") } else { format!("Folder: “{name}”\nLocation: “{full}”") };
             Ask {
                 title: pick(("Trust this folder?", "هل تثق بهذا المجلد؟")),
                 body: format!(
@@ -175,26 +196,43 @@ fn get(i: &DaemonInfo, path: &str) -> Option<serde_json::Value> {
         .set("Authorization", &format!("Bearer {}", i.token))
         .timeout(Duration::from_secs(3))
         .call()
-        .ok()?
-        .into_string()
         .ok()
-        .and_then(|body| serde_json::from_str(&body).ok())
+        // A chat with a long history can be large: read it as it comes, with no size cap.
+        .and_then(|r| serde_json::from_reader(r.into_reader()).ok())
 }
 
-/// What `subject` of `what` is, asked of the service: the chat's title and assistant, the folder's
-/// path. Nothing here comes from the window, which only sent the id the approval is bound to.
-fn learn(i: &DaemonInfo, what: Action, subject: &str) -> Subject {
+/// What the dialog names for `subject` of `what`, asked of the service, and what the approval is
+/// signed over (`thoughtsd::consent::chat_subject` / `trust_subject`): the chat's title and the
+/// program that answers in it, the folder's path. Nothing here comes from the window, which only
+/// sent the id. `None` when the service cannot say: then nothing is asked and nothing approved.
+fn learn(i: &DaemonInfo, what: Action, subject: &str) -> Option<(Subject, String)> {
     match what {
         Action::ChatBypass => {
-            let chat = get(i, "/chats").and_then(|list| list.as_array()?.iter().find(|c| c["id"] == subject).cloned());
-            Subject::Chat {
-                title: chat.as_ref().and_then(|c| c["title"].as_str()).map(str::to_string),
-                codex: chat.as_ref().is_some_and(|c| c["provider"] == "codex"),
+            let chat = get(i, &format!("/chats/{subject}"))?;
+            if chat["id"] != subject {
+                return None;
             }
+            let provider = chat["provider"].as_str()?;
+            let title = chat["title"].as_str().unwrap_or("").to_string();
+            Some((Subject::Chat { title, codex: provider == "codex" }, consent::chat_subject(subject, provider)))
         }
-        Action::SettingsBypass => Subject::Default,
-        Action::Trust => Subject::Folder(get(i, &format!("/library/trust?id={subject}")).and_then(|v| v["path"].as_str().map(str::to_string))),
+        Action::SettingsBypass => Some((Subject::Default, String::new())),
+        Action::Trust => {
+            let path = get(i, &format!("/library/trust?id={subject}"))?["path"].as_str()?.to_string();
+            Some((Subject::Folder(path.clone()), consent::trust_subject(subject, &path)))
+        }
     }
+}
+
+/// Why no approval was made when the service could not say what it is for.
+fn unknown(what: Action, ar: bool) -> String {
+    match (what, ar) {
+        (Action::Trust, false) => "Thoughts could not find the folder this question is about, so nothing was trusted. Try again.",
+        (Action::Trust, true) => "تعذّر على Thoughts العثور على المجلد الذي يخصّه هذا السؤال، فلم يُمنح أي ثقة. حاول مرة أخرى.",
+        (_, false) => "Thoughts could not find this chat to confirm the change, so nothing was changed. Try again.",
+        (_, true) => "تعذّر على Thoughts العثور على هذه المحادثة لتأكيد التغيير، فلم يتغيّر شيء. حاول مرة أخرى.",
+    }
+    .to_string()
 }
 
 /// `approve_action(action, subject)` → an approval for exactly that action, which the window sends
@@ -223,11 +261,12 @@ pub async fn approve_action(app: tauri::AppHandle, window: tauri::Window, action
             }
             .to_string());
         };
-        let ask = ask_text(&learn(&i, what, &subject), ar);
+        let Some((shown, signed)) = learn(&i, what, &subject) else { return Err(unknown(what, ar)) };
+        let ask = ask_text(&shown, ar);
         if crate::recovery::choose(&app, MessageDialogKind::Warning, ask.title, &ask.body, &[ask.yes, ask.no]) != 0 {
             return Err(DECLINED.to_string());
         }
-        Ok(consent::mint(key(), what, &subject, consent::now_ms()))
+        Ok(consent::mint(key(), what, &signed, consent::now_ms()))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -237,13 +276,11 @@ pub async fn approve_action(app: tauri::AppHandle, window: tauri::Window, action
 mod tests {
     use super::*;
 
-    const ALL: [fn() -> Subject; 6] = [
-        || Subject::Chat { title: Some("Budget".into()), codex: false },
-        || Subject::Chat { title: Some("Budget".into()), codex: true },
-        || Subject::Chat { title: None, codex: false },
+    const ALL: [fn() -> Subject; 4] = [
+        || Subject::Chat { title: "Budget".into(), codex: false },
+        || Subject::Chat { title: "Budget".into(), codex: true },
         || Subject::Default,
-        || Subject::Folder(Some("/Users/me/Thoughts".into())),
-        || Subject::Folder(None),
+        || Subject::Folder("/Users/me/Thoughts".into()),
     ];
 
     #[test]
@@ -258,32 +295,53 @@ mod tests {
             assert!(arabic(ar.title) && arabic(&ar.body) && arabic(ar.yes) && arabic(ar.no), "{ar:?}");
             assert!(!arabic(en.title) && !arabic(&en.body) && !arabic(en.yes) && !arabic(en.no), "{en:?}");
         }
+        for what in [Action::ChatBypass, Action::SettingsBypass, Action::Trust] {
+            assert_ne!(unknown(what, false), unknown(what, true));
+        }
     }
 
     #[test]
     fn each_action_says_plainly_what_it_does_and_names_its_subject() {
-        let chat = ask_text(&Subject::Chat { title: Some("Budget".into()), codex: false }, false);
+        let chat = ask_text(&Subject::Chat { title: "Budget".into(), codex: false }, false);
         assert_eq!((chat.title, chat.yes), ("Bypass all permissions in this chat?", "Bypass permissions"));
         assert!(chat.body.contains("Budget") && chat.body.contains("Claude") && chat.body.contains("this chat"), "{}", chat.body);
-        let codex = ask_text(&Subject::Chat { title: Some("Budget".into()), codex: true }, false);
+        let codex = ask_text(&Subject::Chat { title: "Budget".into(), codex: true }, false);
         assert!(codex.title.contains("Codex") && codex.body.contains("no sandbox") && !codex.body.contains("Claude"), "{codex:?}");
         let default = ask_text(&Subject::Default, false);
         assert!(default.title.contains("new chats") && default.body.contains("default for new chats"), "{default:?}");
-        let folder = ask_text(&Subject::Folder(Some("/Users/me/Thoughts".into())), true);
+        let folder = ask_text(&Subject::Folder("/Users/me/Thoughts".into()), true);
         assert_eq!((folder.yes, folder.no), ("أثق به", "لا أثق به"));
         assert!(folder.body.contains("/Users/me/Thoughts"), "{}", folder.body);
-        // Without a name from the service, nothing is made up.
-        assert!(ask_text(&Subject::Folder(None), false).body.starts_with("The folder shown in the app window."));
-        assert!(ask_text(&Subject::Chat { title: Some("  ".into()), codex: false }, false).body.starts_with("This chat."));
     }
 
     #[test]
-    fn a_name_cannot_break_the_sentence_around_it() {
-        let title = "Line one\nline two\u{202e}\u{0007} and much more text than any dialog line should ever carry, repeated, repeated, repeated";
-        let body = ask_text(&Subject::Chat { title: Some(title.into()), codex: false }, false).body;
-        let first = body.lines().next().unwrap();
-        assert!(first.starts_with("Chat: “\u{2068}Line one line two") && first.ends_with("\u{2069}”"), "{first}");
-        assert!(first.contains('…') && !first.contains('\u{0007}') && !first.contains('\u{202e}'), "{first}");
+    fn a_long_path_keeps_its_end_and_the_folder_has_its_own_line() {
+        let deep = format!("/Users/me/{}Downloads/evil-repo", "a/".repeat(600));
+        let body = ask_text(&Subject::Folder(deep.clone()), false).body;
+        let mut lines = body.lines();
+        assert_eq!(lines.next().unwrap(), "Folder: “\u{2068}evil-repo\u{2069}”");
+        let location = lines.next().unwrap();
+        assert!(location.starts_with("Location: “\u{2068}/Users/me/a/") && location.ends_with("a/Downloads/evil-repo\u{2069}”"), "{location}");
+        assert!(location.contains('…'));
+        // An ordinary path is shown whole.
+        let body = ask_text(&Subject::Folder("/Users/me/Projects/Thoughts/".into()), false).body;
+        assert!(body.starts_with("Folder: “\u{2068}Thoughts\u{2069}”\nLocation: “\u{2068}/Users/me/Projects/Thoughts/\u{2069}”"), "{body}");
+    }
+
+    #[test]
+    fn hidden_characters_are_shown_not_removed() {
+        // A path that would read as ".../gpj.exe" reversed, a line break, a zero-width space.
+        let path = "/Users/me/inv\u{202e}gpj.exe\nfake line\u{200b}x";
+        let body = ask_text(&Subject::Folder(path.into()), false).body;
+        assert!(body.contains("inv<U+202E>gpj.exe<U+000A>fake line<U+200B>x"), "{body}");
+        assert!(!body.contains('\u{202e}') && !body.contains('\u{200b}'), "{body}");
+        let title = "Line one\nline  two\u{0007}";
+        let body = ask_text(&Subject::Chat { title: title.into(), codex: false }, false).body;
+        assert!(body.lines().next().unwrap().contains("Line one<U+000A>line  two<U+0007>"), "{body}");
+        // A very long title is cut from the middle: both ends stay.
+        let long = format!("start {} the end", "x".repeat(400));
+        let first = ask_text(&Subject::Chat { title: long, codex: false }, false).body.lines().next().unwrap().to_string();
+        assert!(first.contains("start xx") && first.ends_with("x the end\u{2069}”") && first.contains('…'), "{first}");
     }
 
     #[test]

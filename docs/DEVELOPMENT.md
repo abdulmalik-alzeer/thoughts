@@ -105,7 +105,11 @@ Thoughts.app
   The trust dialog shows what was found; its button opens the shell's own native confirmation,
   which names the folder as the daemon has it (`GET /api/library/trust?id=`) and is the yes. Bypass
   switches have no in-page dialog: the shell's native warning is the confirmation. Script in the
-  page cannot answer, word or skip that dialog, and only one is open at a time.
+  page cannot answer, word or skip that dialog, and only one is open at a time. The approval is
+  signed over what the dialog named (`consent::chat_subject`: the chat and its program;
+  `trust_subject`: the question and its folder), and the daemon checks it against the chat or
+  question as it is when the approval is used. When the shell cannot learn the subject from the
+  daemon it shows no dialog and makes no approval.
 - Trust is stored daemon-side in `~/.thoughts/trusted.json`, per folder, in two parts so that a
   change in one is never reported as a change in the other: the *assistant* part (its findings
   plus the bytes of every file under a `.claude` folder that the starter kit did not put there,

@@ -144,6 +144,24 @@ fn used() -> &'static Mutex<Used> {
     U.get_or_init(Default::default)
 }
 
+/// What a chat-bypass approval is signed over: the chat and the assistant program the shell's dialog
+/// named. An approval made while the chat was a Claude chat no longer passes once it is a Codex one.
+/// (The chat id is checked by the shell, `Action::subject_ok`, so it holds no line break.)
+pub fn chat_subject(id: &str, provider: &str) -> String {
+    format!("{id}\nprovider:{provider}")
+}
+
+/// What a trust approval is signed over: the question and the folder the shell's dialog named, as
+/// `GET /api/library/trust?id=` gives it.
+pub fn trust_subject(id: &str, path: &str) -> String {
+    format!("{id}\npath:{path}")
+}
+
+/// The folder of trust question `id` the way the shell is shown it and the approval names it.
+pub fn trust_path_shown(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// The daemon's check: a good approval from the shell for exactly this action, used up by passing.
 pub fn verify(approval: Option<&str>, action: Action, subject: &str) -> bool {
     let mut u = used().lock().unwrap_or_else(|e| e.into_inner());
@@ -172,6 +190,19 @@ pub fn test_key() -> &'static Key {
 #[cfg(test)]
 pub fn test_approval(action: Action, subject: &str) -> String {
     mint(test_key(), action, subject, now_ms())
+}
+
+/// Tests: the shell's yes to switching Claude chat `id` to bypass (`Chat::default()` is a Claude chat).
+#[cfg(test)]
+pub fn test_chat_approval(id: &str) -> String {
+    test_approval(Action::ChatBypass, &chat_subject(id, "claude"))
+}
+
+/// Tests: the shell's yes to trust question `id`, naming the folder the daemon asked about.
+#[cfg(test)]
+pub fn test_trust_approval(id: &str) -> String {
+    let path = crate::trust::asked_about(id).map(|p| trust_path_shown(&p)).unwrap_or_default();
+    test_approval(Action::Trust, &trust_subject(id, &path))
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -212,6 +243,24 @@ mod tests {
         // The real one passes once, then never again.
         assert!(verify_with(Some(&K), &mut used, Some(&good), Action::ChatBypass, "abc", now + 1000));
         assert!(!verify_with(Some(&K), &mut used, Some(&good), Action::ChatBypass, "abc", now + 2000));
+    }
+
+    #[test]
+    fn an_approval_is_bound_to_what_the_dialog_named() {
+        let now = now_ms();
+        let mut used = Used::new();
+        let id = "0b0f6c2e-1d2a-4f8e-9c1e-5c9f2d7e8a10";
+        let claude = mint(&K, Action::ChatBypass, &chat_subject(id, "claude"), now);
+        // The chat became a Codex chat after the dialog said Claude: refused.
+        assert!(!verify_with(Some(&K), &mut used, Some(&claude), Action::ChatBypass, &chat_subject(id, "codex"), now));
+        assert!(!verify_with(Some(&K), &mut used, Some(&claude), Action::ChatBypass, id, now));
+        assert!(verify_with(Some(&K), &mut used, Some(&claude), Action::ChatBypass, &chat_subject(id, "claude"), now));
+        // A trust approval for one folder does not trust another under the same question id.
+        let q = "0123456789abcdef0123456789abcdef";
+        let shown = mint(&K, Action::Trust, &trust_subject(q, "/Users/me/Thoughts"), now);
+        assert!(!verify_with(Some(&K), &mut used, Some(&shown), Action::Trust, &trust_subject(q, "/Users/me/Thoughts-evil"), now));
+        assert!(!verify_with(Some(&K), &mut used, Some(&shown), Action::Trust, q, now));
+        assert!(verify_with(Some(&K), &mut used, Some(&shown), Action::Trust, &trust_subject(q, "/Users/me/Thoughts"), now));
     }
 
     #[test]
