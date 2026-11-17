@@ -865,6 +865,9 @@ const TABLE: &[Entry] = &[
         "The assistant's draft could not be read. Try again, or write the routine yourself.",
         "تعذّرت قراءة المسودة التي كتبها المساعد. حاول مرة أخرى، أو اكتب الروتين بنفسك."),
     // --- helpers (auto-agents) ---
+    e("text.hidden", "validation", 422, "",
+        "This text contains a character that does not show on screen ({code}). Remove it, so that what you read is all there is.",
+        "يحتوي هذا النص على حرف لا يظهر على الشاشة ({code}). احذفه ليكون ما تقرؤه هو كل ما فيه."),
     e("helper.changed", "stale", 409, "",
         "This helper was changed after you opened it. Open it again to see the latest version.",
         "تغيّر هذا المساعد الفرعي بعد أن فتحته. افتحه مرة أخرى لترى أحدث نسخة."),

@@ -661,3 +661,22 @@ async fn helpers_in_the_library_are_named_in_the_summary_and_not_suggested_again
     assert_eq!(p.suggestions.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["Translator"]);
     cleanup(&lib);
 }
+
+#[test]
+fn suggestions_with_hidden_characters_are_dropped_and_arabic_ones_kept() {
+    let none = HashSet::new();
+    let with = |k: &str, v: String, base: Value| { let mut b = base; b[k] = json!(v); b };
+    let mut items = vec![];
+    for (n, c) in ["\u{202E}", "\u{200B}", "\u{E0041}"].iter().enumerate() {
+        items.push(item("skill", &format!("Title {n}{c}")));
+        items.push(with("why", format!("because {c}"), item("skill", &format!("Why {n}"))));
+        items.push(with("request", format!("1. Do it\n{c}2. And more"), item("tab", &format!("Request {n}"))));
+    }
+    items.push(with("what", "يكتب رسالةً قصيرةً بأسلوبٍ رسمي".into(), item("skill", "كتابة الرسائل")));
+    let p = parse_suggestions(&answer(items), &ctx(&none, &[], &[])).unwrap();
+    assert_eq!(p.suggestions.iter().map(|s| s.title.as_str()).collect::<Vec<_>>(), ["كتابة الرسائل"]);
+    assert_eq!(p.suggestions[0].what, "يكتب رسالةً قصيرةً بأسلوبٍ رسمي");
+    // The "nothing" line too.
+    let n = parse_suggestions(&json!({"suggestions": [], "nothing": "Too early\u{202E}"}).to_string(), &ctx(&none, &[], &[])).unwrap();
+    assert_eq!(n.nothing, "");
+}

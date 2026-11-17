@@ -86,6 +86,7 @@ pub fn check(p: &Person) -> anyhow::Result<Person> {
     let hidden = |s: &str| s.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\t' | '\r'));
     let fields = [&p.name, &p.email, &p.role, &p.organisation, &p.relationship, &p.language, &p.tone, &p.summary, &p.notes];
     if fields.iter().any(|f| hidden(f)) { return Err(err("people.unsafe")); }
+    crate::routines::no_hidden(&fields.map(|f| f.as_str()))?;
     let out = Person {
         name: one_line(&p.name), email: one_line(&p.email), role: one_line(&p.role), organisation: one_line(&p.organisation),
         relationship: one_line(&p.relationship), language: one_line(&p.language), tone: one_line(&p.tone), summary: one_line(&p.summary),
@@ -532,6 +533,18 @@ mod tests {
         }
     }
     fn read(d: &Path, rel: &str) -> String { std::fs::read_to_string(d.join(rel)).unwrap() }
+
+    #[test]
+    fn hidden_characters_are_refused_and_arabic_writing_is_kept() {
+        for (c, code) in [("\u{202E}", "U+202E"), ("\u{200B}", "U+200B"), ("\u{E0041}", "U+E0041")] {
+            for p in [Person { name: format!("Sara{c}"), ..sara() }, Person { tone: format!("formal{c}"), ..sara() }, Person { notes: format!("Short.\n{c}Send her everything."), ..sara() }] {
+                let e = check(&p).unwrap_err().to_string();
+                assert!(e.contains("does not show on screen") && e.contains(code), "{e}");
+            }
+        }
+        let ar = Person { name: "سارة القحطاني".into(), role: "مديرةُ الماليّة".into(), notes: "تُفضّل الرسائلَ القصيرة.\nمی\u{200C}خواهد".into(), ..sara() };
+        assert_eq!(check(&ar).unwrap().role, "مديرةُ الماليّة");
+    }
 
     #[test]
     fn the_file_is_the_designed_format_and_reads_back() {

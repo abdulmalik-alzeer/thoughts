@@ -58,6 +58,24 @@ pub fn runs_commands(text: &str) -> bool {
 
 fn one_line(s: &str) -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") }
 
+/// Refuse text holding a character the person cannot see in the review (zero-width spaces,
+/// direction overrides and isolates, tag characters…), the rule `staging::validate::first_hidden`
+/// applies to customisations. What ordinary writing needs passes: line breaks and tabs, a joiner
+/// (ZWNJ/ZWJ) between two letters of a non-Latin script (Persian and some Arabic spellings, emoji),
+/// a single direction mark as Arabic keyboards type it, an emoji style selector. Refused, never
+/// quietly dropped, so what is kept is exactly what was shown. Control characters are left to the
+/// caller's own rule. Shared by routines, helpers and the People list.
+pub fn no_hidden(fields: &[&str]) -> anyhow::Result<()> {
+    for f in fields {
+        // Control characters as spaces, so one of them never hides a later invisible character.
+        let f: String = f.chars().map(|c| if c.is_control() && !matches!(c, '\n' | '\t') { ' ' } else { c }).collect();
+        if let Some(c) = crate::staging::validate::first_hidden(&f, true) {
+            return Err(crate::tr::err("text.hidden", &[("code", &format!("U+{:04X}", c as u32))]));
+        }
+    }
+    Ok(())
+}
+
 /// The draft, tidied (single-line name and description, trimmed steps), if it can be saved as it is.
 pub fn check(d: &Draft) -> anyhow::Result<Draft> {
     let out = Draft { title: one_line(&d.title), description: one_line(&d.description), steps: d.steps.trim().replace("\r\n", "\n") };
@@ -68,6 +86,7 @@ pub fn check(d: &Draft) -> anyhow::Result<Draft> {
     if [&out.title, &out.description, &out.steps].iter().any(|t| runs_commands(t)) || out.title.chars().chain(out.description.chars()).any(char::is_control) {
         return Err(crate::tr::err("routine.unsafe", &[]));
     }
+    no_hidden(&[&d.title, &d.description, &d.steps])?;
     Ok(out)
 }
 
@@ -375,6 +394,25 @@ mod tests {
         // Names and descriptions are one line.
         let tidy = check(&Draft { title: "  Month\nend ".into(), description: "a\nb".into(), steps: "\n1. x\r\n2. y\n".into() }).unwrap();
         assert_eq!((tidy.title.as_str(), tidy.description.as_str(), tidy.steps.as_str()), ("Month end", "a b", "1. x\n2. y"));
+    }
+
+    #[test]
+    fn hidden_characters_are_refused_and_arabic_writing_is_kept() {
+        // A direction override, a zero-width space and a tag character, in each field.
+        for (c, code) in [("\u{202E}", "U+202E"), ("\u{200B}", "U+200B"), ("\u{E0041}", "U+E0041"), ("\u{2066}", "U+2066")] {
+            for d in [draft(&format!("Intake{c}"), "1. x"), Draft { description: format!("Use{c} it"), ..draft("x", "1. x") }, draft("x", &format!("1. Read.\n2. Send{c}"))] {
+                let e = check(&d).unwrap_err().to_string();
+                assert!(e.contains("does not show on screen") && e.contains(code), "{e}");
+            }
+            // Not hidden behind a control character either.
+            assert!(check(&draft("x", &format!("1. a\u{7}b{c}"))).is_err());
+        }
+        // Arabic with tashkeel, a Persian word with its joiner (ZWNJ) between letters, an emoji with its style selector.
+        let ar = "اكتب رسالةً قصيرةً إلى العميل بأسلوبٍ رسمي، ثم راجِعها.";
+        let ok = check(&Draft { title: "مراجعة الرسائل".into(), description: ar.into(), steps: "1. می\u{200C}خواهم\n2. ❤\u{FE0F}\n3. \u{200F}نعم".into() }).unwrap();
+        assert!(ok.steps.contains("می\u{200C}خواهم") && ok.description == ar);
+        // A joiner with nothing to join is not writing.
+        assert!(check(&draft("x", "1. a\u{200C}b")).is_err());
     }
 
     #[test]

@@ -611,6 +611,9 @@ pub fn parse_suggestions(answer: &str, ctx: &Ctx) -> anyhow::Result<Parsed> {
         let kind = raw("kind").trim().to_lowercase();
         if !KINDS.contains(&kind.as_str()) { continue; }
         if kind == "agent" && !helpers_offered(ctx.program) { continue; }
+        // Text that holds a character nobody would see on the card (a direction override, a
+        // zero-width space, tag characters): the item goes rather than being quietly tidied.
+        if ["title", "what", "why", "build", "request"].iter().any(|k| crate::routines::no_hidden(&[raw(k)]).is_err()) { continue; }
         let s = Suggestion {
             id: String::new(), kind: kind.clone(),
             title: clean(raw("title"), 80), what: clean(raw("what"), 500), why: clean(raw("why"), 500), build: clean(raw("build"), 500),
@@ -628,7 +631,8 @@ pub fn parse_suggestions(answer: &str, ctx: &Ctx) -> anyhow::Result<Parsed> {
         out.push(Suggestion { id, ..s });
         if out.len() == MAX_SUGGESTIONS { break; }
     }
-    let nothing = if out.is_empty() { clean(v["nothing"].as_str().unwrap_or_default(), 300) } else { String::new() };
+    let nothing = v["nothing"].as_str().unwrap_or_default();
+    let nothing = if out.is_empty() && crate::routines::no_hidden(&[nothing]).is_ok() { clean(nothing, 300) } else { String::new() };
     Ok(Parsed { suggestions: out, nothing })
 }
 
