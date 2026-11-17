@@ -234,7 +234,7 @@
     <p class="hint"><Icon name="warning" size={15} /> <span>{t('wrapa.banner')}</span></p>
     <div class="row acts">
       <button class="btn primary" disabled={busy} onclick={() => act(() => finishWrap(id))} title={t('wrapa.finishTip')}><Icon name="check" size={14} /> {t('wrapa.finish')}</button>
-      {#if meta.canRollback !== false}<button class="btn" disabled={busy} onclick={() => act(() => undoCutOffWrap(id))} title={t('wrapa.undoTip')}><Icon name="undo" size={14} /> {t('wrapa.undo')}</button>{/if}
+      {#if meta.canRollback !== false}<button class="btn" disabled={busy} onclick={() => act(() => undoCutOffWrap(id))} title={t('wrapa.undoTip')}><Icon name="undo" size={14} class="flip-rtl" /> {t('wrapa.undo')}</button>{/if}
       <button class="btn" disabled={busy} onclick={() => act(() => keepCutOffWrap(id))} title={t('wrapa.keepTip')}>{t('wrapa.keep')}</button>
     </div>
     {#if meta.canRollback === false}<p class="hint muted">{t('wrapa.noUndo')}</p>{/if}
@@ -250,7 +250,7 @@
   <div class="wp card">
     <div class="row">
       <b class="grow">{meta.changesKnown !== true ? t('wrapa.savedUnlisted') : total ? tn('wrapa.changed', total) : t('wrapa.changedNone')}</b>
-      {#if meta.saved && meta.commit}<button class="btn" disabled={busy} onclick={() => act(() => undoSavedWrap(id))}><Icon name="undo" size={14} /> {t('wrapa.undoWrap')}</button>{/if}
+      {#if meta.saved && meta.commit}<button class="btn" disabled={busy} onclick={() => act(() => undoSavedWrap(id))}><Icon name="undo" size={14} class="flip-rtl" /> {t('wrapa.undoWrap')}</button>{/if}
     </div>
     {#if docs?.files?.length}
       <div class="scroll review saved"><DocChanges files={docs.files} canOpen /></div>

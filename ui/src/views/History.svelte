@@ -211,7 +211,7 @@
                   <!-- Nothing exists before the first entry, so there is nothing to go back to. -->
                   <span class="muted sm firstmark">{t('hista.hist.first')}</span>
                 {:else}
-                  <button class="btn" disabled={!!busy} aria-busy={busy === e.hash} onclick={() => undo(e)}><Icon name="undo" size={14} /> {t('ui.hist.undo')}</button>
+                  <button class="btn" disabled={!!busy} aria-busy={busy === e.hash} onclick={() => undo(e)}><Icon name="undo" size={14} class="flip-rtl" /> {t('ui.hist.undo')}</button>
                 {/if}
                 {#if changes[e.hash]}
                   {@const c = changes[e.hash]}

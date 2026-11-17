@@ -287,7 +287,7 @@
   <section class="block">
     <div class="bh">
       <div><h2>{pageText('home', 'ideasTitle', t('continueWhere'))}</h2><p class="muted">{pageText('home', 'ideasIntro', term('continueSub'))}</p></div>
-      <button class="more" onclick={() => go({ kind: 'ideas' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button>
+      <button class="more" onclick={() => go({ kind: 'ideas' })} aria-label={t('ux-small.seeAll', { what: pageText('home', 'ideasTitle', t('continueWhere')) })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button>
     </div>
     <div class="ideas">
       {#each recentIdeas as i (i.path)}
@@ -313,7 +313,7 @@
     <section class="block up">
       <div class="surface panel">
         <div class="ph"><div class="phl"><div class="eyebrow">{t('home.upcomingEyebrow')}</div><h2>{pageText('home', 'upcomingTitle', t('home.upcoming'))}</h2></div>
-          <button class="more" onclick={() => go({ kind: 'todos' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
+          <button class="more" onclick={() => go({ kind: 'todos' })} aria-label={t('ux-small.seeAll', { what: pageText('home', 'upcomingTitle', t('home.upcoming')) })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
         {#each upcoming as it (it.file + it.line)}
           {@const s = dueState(it.due!)}
           <label class="todo">
@@ -331,7 +331,7 @@
 {#snippet panel(k: string)}
   {#if k === 'todos'}
     <div class="surface panel">
-      <div class="ph"><h2>{pageText('home', 'todosTitle', t('todos'))}</h2><button class="more" onclick={() => go({ kind: 'todos' })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
+      <div class="ph"><h2>{pageText('home', 'todosTitle', t('todos'))}</h2><button class="more" onclick={() => go({ kind: 'todos' })} aria-label={t('ux-small.seeAll', { what: pageText('home', 'todosTitle', t('todos')) })}>{t('seeAll')} <Icon name="right" size={14} class="flip-rtl" /></button></div>
       {#each openTodos.slice(0, 7) as it (it.file + it.line)}
         <label class="todo">
           <input type="checkbox" onchange={(e) => toggle(it, e.currentTarget)} />
@@ -394,7 +394,7 @@
     <section class="block">
       <div class="bh">
         <div><h2>{pageText('home', 'projectsTitle', t('projects'))}</h2><p class="muted">{t('noProjects')}</p></div>
-        <button class="more" onclick={() => go({ kind: 'projects' })}>{t('manage')} <Icon name="right" size={14} class="flip-rtl" /></button>
+        <button class="more" onclick={() => go({ kind: 'projects' })} aria-label={t('ux-small.manage', { what: pageText('home', 'projectsTitle', t('projects')) })}>{t('manage')} <Icon name="right" size={14} class="flip-rtl" /></button>
       </div>
       <div class="projects">
         {#each projects.slice(0, 4) as p (p.id)}

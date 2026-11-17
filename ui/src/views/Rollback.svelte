@@ -124,7 +124,7 @@
             {/if}
             <div class="row wrap acts">
               {#if canUndo(h)}
-                <button class="btn" disabled={busy} onclick={() => undo(h)}><Icon name="undo" size={14} /> {t('layer.undoThis')}</button>
+                <button class="btn" disabled={busy} onclick={() => undo(h)}><Icon name="undo" size={14} class="flip-rtl" /> {t('layer.undoThis')}</button>
               {:else}
                 <span class="muted sm">{t(h.kind === 'start' ? 'lda.hist.start' : 'lda.hist.system')}</span>
               {/if}

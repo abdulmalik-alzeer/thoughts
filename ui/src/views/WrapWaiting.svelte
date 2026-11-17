@@ -23,7 +23,7 @@
     <Icon name="warning" size={16} />
     <span class="grow">{t('wrapa.banner')}</span>
     <button class="btn primary" disabled={busy} onclick={() => act(finishWrap)} title={t('wrapa.finishTip')}><Icon name="check" size={14} /> {t('wrapa.finish')}</button>
-    {#if canUndo}<button class="btn" disabled={busy} onclick={() => act(undoCutOffWrap)} title={t('wrapa.undoTip')}><Icon name="undo" size={14} /> {t('wrapa.undo')}</button>{/if}
+    {#if canUndo}<button class="btn" disabled={busy} onclick={() => act(undoCutOffWrap)} title={t('wrapa.undoTip')}><Icon name="undo" size={14} class="flip-rtl" /> {t('wrapa.undo')}</button>{/if}
     <button class="btn" disabled={busy} onclick={() => act(keepCutOffWrap)} title={t('wrapa.keepTip')}>{t('wrapa.keep')}</button>
     <button class="link" onclick={() => go({ kind: 'chat', id })}>{t('wrapa.open')}</button>
   </div>

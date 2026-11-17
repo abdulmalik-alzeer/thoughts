@@ -78,7 +78,7 @@
       </button>
     {:else}
       <button class="act show" onclick={() => act('undo')} disabled={working || busy} title={busy ? t('cs.busy') : t('cs.undoTip')}>
-        <Icon name="undo" size={14} /><span>{t('cs.undo')}</span>
+        <Icon name="undo" size={14} class="flip-rtl" /><span>{t('cs.undo')}</span>
       </button>
     {/if}
   </div>

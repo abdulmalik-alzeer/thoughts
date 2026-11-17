@@ -43,6 +43,7 @@
   import ChatAllowed from './ChatAllowed.svelte';
   import LibraryGone from '../lib/LibraryGone.svelte';
   import CustomiseStart from './CustomiseStart.svelte';
+  import { confirmDeleteChat } from './chat/deleteChat';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
   // "Continue chatting" (lib/layer.ts) lands here: the cursor goes into the message box.
@@ -642,7 +643,7 @@
   }
 
   async function remove() {
-    if (!(await confirmDialog({ title: t('chat.deleteTitle'), body: t('chata.deleteBody'), confirmLabel: t('delete'), danger: true }))) return;
+    if (!(await confirmDeleteChat(chat, id))) return;
     try {
       // A chat that is already gone (deleted in another window) counts as deleted.
       await del(`/chats/${id}`).catch((e) => { if (!(e instanceof ApiError && e.status === 404)) throw e; });
