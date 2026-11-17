@@ -5,14 +5,14 @@
   import Icon from '../../lib/Icon.svelte';
   import { t } from '../../lib/i18n';
   import { trapFocus } from '../../lib/focus';
-  import type { Guide } from '../../lib/automate';
+  import { toBody, type Guide } from '../../lib/automate';
 
   let { guide, busy = false, onwalk, ondone, onclose }: {
     guide: Guide; busy?: boolean; onwalk: () => void; ondone: () => void; onclose: () => void;
   } = $props();
 </script>
 
-<div class="modal-bg no-print" role="presentation" onclick={(e) => e.target === e.currentTarget && !busy && onclose()}>
+<div class="modal-bg no-print" role="presentation" use:toBody onclick={(e) => e.target === e.currentTarget && !busy && onclose()}>
   <div class="modal gd" role="dialog" aria-modal="true" aria-labelledby="au-gd-h" aria-describedby="au-gd-intro" tabindex="-1" use:trapFocus={{ onEscape: () => { if (!busy) onclose(); } }}>
     <span class="pill accent kind"><Icon name="external" size={13} /> {t('auto-ui.kind.integration')}</span>
     <h2 id="au-gd-h" dir="auto">{guide.title}</h2>

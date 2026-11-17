@@ -8,7 +8,7 @@
   import { failed } from '../../lib/errors';
   import { trapFocus } from '../../lib/focus';
   import { confirmDialog } from '../../lib/dialog.svelte';
-  import { draftFrom, draftReady, draftUnsafe, emptyDraft, saveBody, tidyDraft, type Draft } from '../../lib/automate';
+  import { draftFrom, draftReady, draftUnsafe, emptyDraft, saveBody, tidyDraft, toBody, type Draft } from '../../lib/automate';
 
   let { kind, title, what, request, initial = null, onkept, onclose }: {
     kind: 'skill' | 'agent'; title: string; what: string; request: string;
@@ -66,7 +66,7 @@
   }
 </script>
 
-<div class="modal-bg no-print" role="presentation" onclick={(e) => e.target === e.currentTarget && close()}>
+<div class="modal-bg no-print" role="presentation" use:toBody onclick={(e) => e.target === e.currentTarget && close()}>
   <div class="modal ed" role="dialog" aria-modal="true" aria-labelledby={id('h')} tabindex="-1" use:trapFocus={{ onEscape: close }}>
     {#if phase === 'ask' || phase === 'drafting'}
       <h2 id={id('h')} dir="auto">{title}</h2>

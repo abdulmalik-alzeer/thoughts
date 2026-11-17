@@ -159,3 +159,10 @@ export const personLine = (p: Person) => [p.role.trim(), p.organisation.trim()].
 
 export const loadState = async () => normState(await api('/automations'));
 export const loadPeople = async () => normPeople(await api('/people'));
+
+/** Svelte action: show a dialog at the top of the page. Inside a page whose sections rise in (they
+ *  keep a transform), a fixed box would otherwise be placed and clipped by that section. */
+export function toBody(node: HTMLElement) {
+  document.body.appendChild(node);
+  return { destroy() { node.remove(); } };
+}

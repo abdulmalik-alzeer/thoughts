@@ -12,7 +12,7 @@
   import { errCode, failed } from '../lib/errors';
   import { trapFocus } from '../lib/focus';
   import {
-    blockedKey, chatDraft, draftFrom, loadState, normGuide, normState, phaseOf,
+    blockedKey, chatDraft, draftFrom, loadState, normGuide, normState, phaseOf, toBody,
     type AutoState, type Draft, type Guide, type Suggestion,
   } from '../lib/automate';
   import SuggestionCard from './automate/SuggestionCard.svelte';
@@ -266,7 +266,7 @@
 {/if}
 
 {#if peopleStep}
-  <div class="modal-bg no-print" role="presentation">
+  <div class="modal-bg no-print" role="presentation" use:toBody>
     <div class="modal pp" role="dialog" aria-modal="true" aria-labelledby="au-pp-h" aria-describedby="au-pp-d" tabindex="-1" use:trapFocus={{ onEscape: () => (peopleStep = false) }}>
       <h2 id="au-pp-h">{t('auto-ui.ppl.stepTitle')}</h2>
       <p id="au-pp-d" class="muted sm">{t('auto-ui.ppl.stepHint')}</p>
