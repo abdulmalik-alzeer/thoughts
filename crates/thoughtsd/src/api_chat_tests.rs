@@ -419,7 +419,7 @@ async fn a_view_that_opens_mid_answer_gets_what_was_written_so_far() {
     for _ in 0..500 { if st.chats.partial(&chat).map_or(false, |p| p.seq == 2) { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
     let v = get().await;
     assert_eq!(v["running"], true);
-    assert_eq!(v["partial"], json!({"text": "The answer so far", "seq": 2, "thinking": "weighing the options"}));
+    assert_eq!(v["partial"], json!({"text": "The answer so far", "seq": 2, "thinking": "weighing the options", "thinkingSeq": 1}));
     gate.notify_one();
     t::event(&mut rx, &st, "chat.done").await;
     let v = get().await;

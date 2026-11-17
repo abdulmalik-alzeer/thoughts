@@ -34,6 +34,25 @@ describe('applyEvent: text pieces', () => {
   });
 });
 
+describe('applyEvent: thinking', () => {
+  it('thinking that arrives during a refresh is kept: the copy plus every later piece, once', () => {
+    // Pieces 1–3 arrive live while a fetch is on its way; the copy was taken after piece 2.
+    const s = stream({ thinking: 'a', thinkSeq: 1 });
+    const held = [think('b', 2), think('c', 3)];
+    for (const e of held) applyEvent(chatOf(), s, e, { ...live, loading: true });
+    expect(s.thinking).toBe('abc');
+    applyPartial({ running: true }, s, { text: '', seq: 0, thinking: 'ab', thinkingSeq: 2 });
+    for (const e of held) applyEvent(chatOf(), s, e, replay);
+    expect([s.thinking, s.thinkSeq]).toEqual(['abc', 3]);
+  });
+  it('an unnumbered piece (older service) is added live only', () => {
+    const s = stream({ thinking: 'a' });
+    applyEvent(chatOf(), s, think('b'), live);
+    applyEvent(chatOf(), s, think('c'), replay);
+    expect(s.thinking).toBe('ab');
+  });
+});
+
 describe('applyEvent: messages', () => {
   it('a completed answer replaces the text in progress and ends the thinking line', () => {
     const c = chatOf(); const s = stream({ text: 'Hi', seq: 1, thinking: 'hmm' });

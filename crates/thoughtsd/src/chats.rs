@@ -352,6 +352,9 @@ pub struct Partial {
     pub seq: u64,
     /// The latest of the assistant's reasoning, as shown in the "thinking" line.
     pub thinking: String,
+    /// How many pieces of reasoning this run has produced so far; each `chat.thinking` event
+    /// carries its number, like `seq` for the text.
+    pub thinking_seq: u64,
 }
 
 /// Proof that this request is the only one starting a run for a chat; given back when dropped.
@@ -455,7 +458,8 @@ impl ChatStore {
     }
 
     /// A piece of the answer being written has arrived (`thinking`: of the reasoning shown while
-    /// the assistant works). Returns the piece's number within this run.
+    /// the assistant works). Returns the piece's number within this run (text and reasoning are
+    /// numbered apart).
     pub fn add_partial(&self, id: &str, piece: &str, thinking: bool) -> u64 {
         /// The "thinking" line shows only its last words: no need to keep more than this.
         const THINKING_KEEP: usize = 2000;
@@ -470,11 +474,13 @@ impl ChatStore {
                 while !p.thinking.is_char_boundary(cut) { cut += 1; }
                 p.thinking.drain(..cut);
             }
+            p.thinking_seq += 1;
+            p.thinking_seq
         } else {
             p.text.push_str(piece);
             p.seq += 1;
+            p.seq
         }
-        p.seq
     }
 
     /// The answer in progress in this chat, if a run has written any of it yet.
@@ -716,17 +722,21 @@ mod tests {
         assert_eq!(s.partial(&id), None);
         s.update(&id, |c| c.running = true).await;
         // Pieces are numbered through the whole run.
-        assert_eq!(s.add_partial(&id, "Thinking about ", true), 0);
+        // Reasoning is numbered apart from the text, so a view can tell which pieces of it a fetched copy already has.
+        assert_eq!(s.add_partial(&id, "Thinking about ", true), 1);
         assert_eq!((s.add_partial(&id, "Hel", false), s.add_partial(&id, "lo ", false), s.add_partial(&id, "there", false)), (1, 2, 3));
-        assert_eq!(s.partial(&id).unwrap(), Partial { text: "Hello there".into(), seq: 3, thinking: "Thinking about ".into() });
+        assert_eq!(s.partial(&id).unwrap(), Partial { text: "Hello there".into(), seq: 3, thinking: "Thinking about ".into(), thinking_seq: 1 });
         // A tool call ends the thinking line but not the text; the user's own message ends neither.
         s.update(&id, |c| c.messages.push(Msg::new("user", "hi"))).await;
         assert_eq!(s.partial(&id).unwrap().thinking, "Thinking about ");
         s.update(&id, |c| c.messages.push(Msg::new("tool", "Read: a.md"))).await;
-        assert_eq!(s.partial(&id).unwrap(), Partial { text: "Hello there".into(), seq: 3, thinking: String::new() });
+        assert_eq!(s.partial(&id).unwrap(), Partial { text: "Hello there".into(), seq: 3, thinking: String::new(), thinking_seq: 1 });
+        // The thinking line starts again, but its numbering goes on.
+        assert_eq!(s.add_partial(&id, "Then ", true), 2);
+        assert_eq!(s.partial(&id).unwrap().thinking, "Then ");
         // The completed message replaces the text; the numbering goes on, so an old piece is never taken for a new one.
         s.update(&id, |c| c.messages.push(Msg::new("assistant", "Hello there"))).await;
-        assert_eq!(s.partial(&id).unwrap(), Partial { text: String::new(), seq: 3, thinking: String::new() });
+        assert_eq!(s.partial(&id).unwrap(), Partial { text: String::new(), seq: 3, thinking: String::new(), thinking_seq: 2 });
         assert_eq!(s.add_partial(&id, "Next", false), 4);
         // An update that adds no message (a title, the cost) leaves it alone.
         s.update(&id, |c| c.title = "Greeting".into()).await;

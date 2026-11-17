@@ -2486,7 +2486,7 @@ async fn chat_get(State(st): S, Path(id): Path<String>) -> R {
     // so a view that opens in the middle of an answer starts from its beginning.
     let (chat, partial) = st.chats.with(&id, |c| (serde_json::to_value(c), c.running.then(|| st.chats.partial(&id).unwrap_or_default()))).await.ok_or_else(no_chat)?;
     let mut v = chat?;
-    if let Some(p) = partial { v["partial"] = json!({"text": p.text, "seq": p.seq, "thinking": p.thinking}); }
+    if let Some(p) = partial { v["partial"] = json!({"text": p.text, "seq": p.seq, "thinking": p.thinking, "thinkingSeq": p.thinking_seq}); }
     Ok(Json(v))
 }
 

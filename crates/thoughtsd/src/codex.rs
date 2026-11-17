@@ -921,8 +921,8 @@ async fn handle(state: &AppState, id: &str, ev: Ev, t: &mut Track) -> Option<boo
         Ev::Reasoning(text) => {
             if !text.trim().is_empty() {
                 let piece = format!("{} ", text.trim());
-                state.chats.add_partial(id, &piece, true);
-                state.emit(json!({"type": "chat.thinking", "chatId": id, "text": piece}));
+                let seq = state.chats.add_partial(id, &piece, true);
+                state.emit(json!({"type": "chat.thinking", "chatId": id, "text": piece, "seq": seq}));
             }
         }
         Ev::Command { id: call, command } => {

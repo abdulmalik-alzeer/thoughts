@@ -2273,8 +2273,8 @@ pub(crate) async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Opti
                     let seq = state.chats.add_partial(id, t, false);
                     state.emit(json!({"type": "chat.delta", "chatId": id, "text": t, "seq": seq}));
                 } else if let Some(t) = e["delta"]["thinking"].as_str() {
-                    state.chats.add_partial(id, t, true);
-                    state.emit(json!({"type": "chat.thinking", "chatId": id, "text": t}));
+                    let seq = state.chats.add_partial(id, t, true);
+                    state.emit(json!({"type": "chat.thinking", "chatId": id, "text": t, "seq": seq}));
                 }
             }
             None

@@ -104,6 +104,9 @@ async fn pieces_of_an_answer_are_numbered_and_kept_until_the_message_is_complete
     let events: Vec<Value> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
     let pieces: Vec<(&str, Option<u64>)> = events.iter().filter(|e| e["type"] == "chat.delta").map(|e| (e["text"].as_str().unwrap(), e["seq"].as_u64())).collect();
     assert_eq!(pieces, [("The shop ", Some(1)), ("should sell candles.", Some(2))]);
+    // Reasoning is numbered too (on its own count), so a view refreshing mid-answer keeps what it adds.
+    let thought: Vec<Option<u64>> = events.iter().filter(|e| e["type"] == "chat.thinking").map(|e| e["seq"].as_u64()).collect();
+    assert_eq!(thought, [Some(1)]);
     let p = state.chats.partial(&id).unwrap();
     assert_eq!((p.text.as_str(), p.seq, p.thinking.as_str()), ("The shop should sell candles.", 2, "Looking at the notes"));
     // The completed message takes the place of the pieces.
