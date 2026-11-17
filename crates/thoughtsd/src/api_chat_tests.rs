@@ -398,6 +398,35 @@ async fn any_other_failure_is_shown_and_not_sent_again() {
 }
 
 #[tokio::test]
+async fn a_message_sent_as_a_lost_session_is_resent_starts_one_run_only() {
+    let (st, lib) = t::library().await;
+    let chat = chat_with_history(&st).await;
+    let prompts = record_prompts(&st, true);
+    let mut m = Msg::new("error", "The assistant could no longer open its earlier session for this conversation.");
+    m.tool = Some(json!({"code": claude::SESSION_LOST}));
+    claude::push(&st, &chat, m).await;
+    let again = || RunSpec { chat_id: chat.clone(), prompt: "again".into(), cwd: lib.clone(), add_dirs: vec![], options: Default::default(),
+        resume: None, append_system: None, extra_deny: vec![] };
+    // The user's next message is on its way to a run of its own: the resend stands back, and changes nothing.
+    let sending = st.chats.claim_send(&chat).unwrap();
+    assert!(!resend_without_session(&st, again(), "chat").await);
+    let c = st.chats.get(&chat).await.unwrap();
+    assert_eq!((c.session_id.as_deref(), c.messages.last().unwrap().role.as_str()), (Some(OLD_SESSION), "error"));
+    // A chat already running again is left alone as well.
+    drop(sending);
+    st.chats.update(&chat, |c| c.running = true).await;
+    assert!(!resend_without_session(&st, again(), "chat").await);
+    st.chats.update(&chat, |c| c.running = false).await;
+    // With nobody else in the way it goes ahead, once.
+    let mut rx = st.events.subscribe();
+    assert!(resend_without_session(&st, again(), "chat").await);
+    until_done(&mut rx, 1).await;
+    assert_eq!(*prompts.lock().unwrap(), ["again"]);
+    assert!(!st.chats.get(&chat).await.unwrap().messages.iter().any(|m| m.role == "system" && m.text.starts_with("Stopped")), "no run stopped another");
+    std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn a_view_that_opens_mid_answer_gets_what_was_written_so_far() {
     let (st, lib) = t::library().await;
     let chat = t::chat(&st, "hello").await;

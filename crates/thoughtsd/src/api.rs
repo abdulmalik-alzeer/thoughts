@@ -2704,6 +2704,11 @@ fn after_chat_run(kind: &str, id: &str) -> Option<RunDone> {
 /// saved conversation in place of the session. Returns whether that new run was started.
 async fn resend_without_session(st: &Arc<AppState>, again: RunSpec, kind: &str) -> bool {
     let id = again.chat_id.clone();
+    // Like any send, and for the same reason: the run before this one is over, so a message the
+    // user sends now could start a run of its own beside this one. Whoever is first goes ahead; the
+    // other stands back (a newer message that lost its session is resent when its own run fails).
+    let Some(_claim) = st.chats.claim_send(&id) else { return false };
+    if st.chats.with(&id, |c| c.running).await != Some(false) { return false; }
     let lost = st.chats.with(&id, |c| c.messages.last()
         .filter(|m| m.role == "error" && m.tool.as_ref().map_or(false, |t| t["code"] == claude::SESSION_LOST)).map(|m| m.id.clone())).await.flatten();
     let Some(lost) = lost else { return false };

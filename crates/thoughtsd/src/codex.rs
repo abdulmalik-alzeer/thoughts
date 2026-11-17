@@ -1214,8 +1214,11 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         let _ = stdin.write_all(prompt.as_bytes()).await;
         let _ = stdin.shutdown().await;
     });
-    let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
-    state.runs.lock().await.insert(id.clone(), kill_tx);
+    // One run per chat: if another got in meanwhile, this one goes.
+    let mut kill_rx = match crate::claude::take_switch(&state, &id).await {
+        Ok(rx) => rx,
+        Err(e) => { if let Some(pid) = pid { crate::proc::kill_tree(pid); } let _ = child.start_kill(); crate::runs::forget(pid); return Err(e); }
+    };
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), l.spec.cwd.clone());
     state.ack_interrupted(&id).await;
     if let Some(ch) = state.chats.update(&id, |c| { c.running = true; c.provider = ID.into(); }).await {
@@ -1226,6 +1229,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     let (kind, record, touches_library, on_done, resumed) = (l.kind, l.record, l.touches_library, l.on_done, resume.is_some());
     let chosen_model = l.spec.options.model.clone();
     tokio::spawn(async move {
+        let guard = crate::claude::RunGuard::new(&state, &id);
         let _files = files;
         let track = Arc::new(tokio::sync::Mutex::new(Track::default()));
         let (st, cid, tr) = (state.clone(), id.clone(), track.clone());
@@ -1242,8 +1246,9 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
                 done
             }
         }).await;
+        drop(kill_rx);
         for s in snapshots { crate::claude::put_back_standing(&state, &id, s).await; }
-        if state.stopping.load(Ordering::Relaxed) { return; }
+        if state.stopping.load(Ordering::Relaxed) { guard.disarm(); return; }
         crate::runs::forget(pid);
         let t = std::mem::take(&mut *track.lock().await);
         let secs = started.elapsed().as_secs();
@@ -1302,6 +1307,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
             crate::log::warn(format!("run {id} on Codex did not finish ({status}, {secs}s, {:?})", f.ended));
         }
         crate::claude::finish(state, id, ok, record, touches_library, on_done).await;
+        guard.disarm();
     });
     Ok(())
 }

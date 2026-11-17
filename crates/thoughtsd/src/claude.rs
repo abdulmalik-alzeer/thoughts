@@ -1421,6 +1421,65 @@ pub enum Ended {
     Lost(String),
 }
 
+/// The longest one line of a run's output may be. A longer one (a tool result carrying a large
+/// picture as text, say) is skipped and logged, rather than held in memory several times over.
+pub(crate) const LINE_MAX: usize = 64 * 1024 * 1024;
+
+/// What `Lines::next` read.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Read {
+    /// A line, in `Lines::raw` (without its end, as `read_until` gives it, newline included).
+    Line,
+    /// A line longer than the limit was read past and dropped; this many bytes.
+    TooLong(usize),
+    /// The output is over.
+    End,
+}
+
+/// Reads a program's output line by line, never holding more than `cap` bytes of one line. Safe
+/// to cancel (inside `select!`): a line read halfway is carried on with on the next call.
+pub(crate) struct Lines<R> { reader: BufReader<R>, pub(crate) raw: Vec<u8>, over: Option<usize>, cap: usize }
+
+impl<R: tokio::io::AsyncRead + Unpin> Lines<R> {
+    pub(crate) fn new(r: R, cap: usize) -> Self { Lines { reader: BufReader::new(r), raw: Vec::new(), over: None, cap } }
+
+    /// The next line. The caller empties `raw` once it has taken a line.
+    pub(crate) async fn next(&mut self) -> std::io::Result<Read> {
+        loop {
+            let buf = self.reader.fill_buf().await?;
+            if buf.is_empty() {
+                if let Some(n) = self.over.take() { return Ok(Read::TooLong(n)); }
+                return Ok(if self.raw.is_empty() { Read::End } else { Read::Line });
+            }
+            let (take, ends) = match buf.iter().position(|b| *b == b'\n') { Some(i) => (i + 1, true), None => (buf.len(), false) };
+            match &mut self.over {
+                Some(n) => *n += take,
+                None if self.raw.len() + take > self.cap => { self.over = Some(self.raw.len() + take); self.raw = Vec::new(); }
+                None => self.raw.extend_from_slice(&buf[..take]),
+            }
+            self.reader.consume(take);
+            if ends {
+                if let Some(n) = self.over.take() { return Ok(Read::TooLong(n)); }
+                return Ok(Read::Line);
+            }
+        }
+    }
+}
+
+/// After a run's program has exited by itself, end what it left running in its process group
+/// (background shells, servers a command started, helpers). Only the group: the program's own id
+/// cannot be taken by another process while the group still has members, but once it is empty the
+/// id is free again, so the program itself is never signalled by number. (Windows: nothing here.)
+async fn end_left_behind(pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = pid.filter(|p| *p > 1) {
+        let _ = crate::proc::command("kill").args(["-TERM", "--", &format!("-{pid}")])
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().await;
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
 /// What `follow` reports.
 pub(crate) struct Followed { pub(crate) ended: Ended, pub(crate) exit: std::io::Result<std::process::ExitStatus>, pub(crate) stderr: String }
 
@@ -1438,31 +1497,45 @@ where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Option<bool>> {
     let mut err_task = child.stderr.take().map(|e| {
         let text = err_text.clone();
         tokio::spawn(async move {
-            let (mut reader, mut raw) = (BufReader::new(e), Vec::new());
-            while matches!(reader.read_until(b'\n', &mut raw).await, Ok(n) if n > 0) {
-                let mut t = text.lock().unwrap_or_else(|e| e.into_inner());
-                if t.len() < 4000 { t.push_str(String::from_utf8_lossy(&raw).trim_end()); t.push('\n'); }
-                raw.clear();
+            let mut lines = Lines::new(e, LINE_MAX);
+            loop {
+                match lines.next().await {
+                    Ok(Read::Line) => {
+                        let mut t = text.lock().unwrap_or_else(|e| e.into_inner());
+                        if t.len() < 4000 { t.push_str(String::from_utf8_lossy(&lines.raw).trim_end()); t.push('\n'); }
+                        lines.raw.clear();
+                    }
+                    Ok(Read::TooLong(_)) => {}
+                    Ok(Read::End) | Err(_) => break,
+                }
             }
         })
     });
     let (started, mut last_output, mut result, mut past_limit) = (std::time::Instant::now(), std::time::Instant::now(), None, false);
+    // Stop was pressed while the output was still being read (its switch has fired and is spent).
+    let mut stopped = false;
     let mut ended = match child.stdout.take() {
         None => Ended::Lost("the program has no output to read".into()),
         Some(out) => {
             // Bytes, not text: one line that is not valid UTF-8 must not end the run.
-            let (mut reader, mut raw) = (BufReader::new(out), Vec::new());
+            let mut lines = Lines::new(out, LINE_MAX);
             loop {
                 let wait = limits.next_check(started.elapsed(), last_output.elapsed(), result.is_some());
                 tokio::select! {
-                    _ = &mut *kill => break Ended::Stopped,
-                    n = reader.read_until(b'\n', &mut raw) => match n {
-                        Ok(0) => break result.map_or(Ended::NoResult, Ended::Result),
-                        Ok(_) => {
+                    // Stopped after its answer came (while it lingers before exiting): the answer stands.
+                    _ = &mut *kill => { stopped = true; break result.map_or(Ended::Stopped, Ended::Result) }
+                    n = lines.next() => match n {
+                        Ok(Read::End) => break result.map_or(Ended::NoResult, Ended::Result),
+                        Ok(Read::Line) => {
                             last_output = std::time::Instant::now();
-                            let line = String::from_utf8_lossy(&raw).trim().to_string();
-                            raw.clear();
+                            let raw = std::mem::take(&mut lines.raw);
+                            let line = String::from_utf8(raw).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+                            let line = if line.trim().len() == line.len() { line } else { line.trim().to_string() };
                             if !line.is_empty() { if let Some(r) = on_line(line).await { result = Some(r); } }
+                        }
+                        Ok(Read::TooLong(n)) => {
+                            last_output = std::time::Instant::now();
+                            crate::log::warn(format!("run (pid {}): skipped one line of output of {n} bytes, over the {LINE_MAX}-byte limit", pid.unwrap_or(0)));
                         }
                         Err(e) => break Ended::Lost(e.to_string()),
                     },
@@ -1476,7 +1549,7 @@ where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Option<bool>> {
     // The output is over. A program that finished exits at once; wait for that — but it can still
     // be stopped, and it does not get for ever.
     let mut exit = None;
-    if !past_limit && matches!(ended, Ended::Result(_) | Ended::NoResult) {
+    if !past_limit && !stopped && matches!(ended, Ended::Result(_) | Ended::NoResult) {
         tokio::select! {
             e = child.wait() => exit = Some(e),
             _ = &mut *kill => { if result.is_none() { ended = Ended::Stopped; } }
@@ -1484,7 +1557,11 @@ where F: FnMut(String) -> Fut, Fut: std::future::Future<Output = Option<bool>> {
         }
     }
     let exit = match exit {
-        Some(e) => e,
+        Some(e) => {
+            // It exited by itself: what it started and left behind goes as well.
+            if e.is_ok() { end_left_behind(pid).await; }
+            e
+        }
         None => {
             // The whole group: the assistant's own children (shells, tools) must not live on.
             if let Some(pid) = pid { crate::proc::kill_tree(pid); }
@@ -1614,16 +1691,72 @@ fn touches_library(library: Option<&Path>, cwd: &Path, add_dirs: &[PathBuf], kin
     kind != "customize" && mode != "plan" && library.map_or(false, |l| cwd == l || add_dirs.iter().any(|d| d == l))
 }
 
-/// Everything that happens once a run is over, however it ended.
+/// Give a new run of chat `id` its Stop switch (`AppState::runs`). Refused while another run of the
+/// same chat holds one: the second run's switch would replace the first one's, and the first would
+/// read that as Stop.
+pub(crate) async fn take_switch(state: &AppState, id: &str) -> anyhow::Result<tokio::sync::oneshot::Receiver<()>> {
+    let mut runs = state.runs.lock().await;
+    if runs.contains_key(id) {
+        crate::log::warn(format!("run {id}: not started — another run of this chat is still going"));
+        return Err(crate::tr::err("chat.running", &[]));
+    }
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    runs.insert(id.to_string(), tx);
+    Ok(rx)
+}
+
+/// Let go of a run of chat `id` that is over: its Stop switch, its folder, `running`. The run has
+/// dropped its own end of the switch by now; a switch that is still listened to belongs to a newer
+/// run of the chat (started after this one was stopped), and then nothing is touched — that run
+/// lets go when it is over. Returns the chat when it was let go.
+async fn release(state: &AppState, id: &str) -> Option<crate::chats::ChatMeta> {
+    {
+        let mut runs = state.runs.lock().await;
+        if runs.get(id).map_or(false, |k| !k.is_closed()) { return None; }
+        runs.remove(id);
+    }
+    state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+    state.chats.update(id, |c| { c.running = false; c.updated = chrono::Utc::now(); }).await
+}
+
+/// Held by a run's task until `finish` has run. Should the task end without getting there (it
+/// panicked), the chat is let go all the same — it must not stay "running", refusing every
+/// message, until the daemon restarts.
+pub(crate) struct RunGuard { state: Option<Arc<AppState>>, id: String }
+
+impl RunGuard {
+    pub(crate) fn new(state: &Arc<AppState>, id: &str) -> Self { RunGuard { state: Some(state.clone()), id: id.to_string() } }
+    /// The run was finished (or the daemon is stopping, and the run stays marked to be told as interrupted).
+    pub(crate) fn disarm(mut self) { self.state = None; }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else { return };
+        let id = std::mem::take(&mut self.id);
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        crate::log::error(format!("run {id}: its work ended unexpectedly; letting go of the chat"));
+        // Spawned: by the time it runs, the dropped task has let go of its end of the Stop switch.
+        rt.spawn(async move {
+            if state.stopping.load(std::sync::atomic::Ordering::Relaxed) { return; }
+            if state.chats.with(&id, |c| c.running).await != Some(true) { return; }
+            push(&state, &id, Msg::new("error", crate::tr::text("assistant.no_answer", &[]))).await;
+            if let Some(ch) = release(&state, &id).await {
+                state.emit(json!({"type": "chat.done", "chatId": id, "ok": false, "title": ch.title, "chat": ch.summary()}));
+            }
+        });
+    }
+}
+
+/// Everything that happens once a run is over, however it ended. The run's task drops its end of
+/// the Stop switch before calling this (see `release`).
 pub(crate) async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathBuf>, touches_library: bool, on_done: Option<OnDone>) {
     // What this run changed in the library, told apart from what the user or another chat changed
     // meanwhile, becomes its own history entry and a list under its answer (FEAT-06). Worked out
     // while the run still counts as at work, so a save of the user's waiting for it records only theirs.
     let what = state.chats.with(&id, |c| if c.kind == "workflow" { format!("workflow {}", c.title) } else { c.title.clone() }).await.unwrap_or_default();
     let recorded = crate::changesets::finish(&state, &id, &crate::git::subject::assistant(&what)).await;
-    state.runs.lock().await.remove(&id);
-    state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
-    let done = state.chats.update(&id, |c| { c.running = false; c.updated = chrono::Utc::now(); }).await;
+    let done = release(&state, &id).await;
     // What the assistant changed in the library becomes its own history entry, apart from the user's edits.
     // (Without a change set — no history, or it could not be worked out — the library is recorded as one entry.)
     if let (Some(lib), Some(_), false) = (&record, &done, recorded) {
@@ -1666,6 +1799,8 @@ pub async fn start_run(
     crate::settings::check_cli_value("model", spec.options.model.as_deref())?;
     crate::settings::check_cli_value("effort", spec.options.effort.as_deref())?;
     crate::settings::check_cli_value("session", spec.resume.as_deref())?;
+    // One run per chat at a time (checked again, for good, when the run takes its Stop switch).
+    if state.runs.lock().await.contains_key(&spec.chat_id) { return Err(crate::tr::err("chat.running", &[])); }
     let settings = state.settings.read().await.clone();
     // The library this run works for, from where it works and the library its chat belongs to
     // (`libraries::of_run`, which refuses the two disagreeing). That library's own private folders
@@ -1813,22 +1948,24 @@ pub async fn start_run(
         let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: Some(mode.clone()),
             deny: rules("deny"), allow: rules("allow"), ask: rules("ask"), prompt_token: ticket.as_ref().map(|t| t.token().to_string()),
             profile: prof, system: system_text(true), program };
-        let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
-        state.runs.lock().await.insert(id.clone(), kill_tx);
+        let mut kill_rx = take_switch(&state, &id).await?;
         state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
         state.ack_interrupted(&id).await;
         if let Some(ch) = state.chats.update(&id, |c| c.running = true).await {
             state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
         }
         tokio::spawn(async move {
+            let guard = RunGuard::new(&state, &id);
             let _watching = watching;
             let ok = tokio::select! {
                 _ = &mut kill_rx => { push(&state, &id, Msg::new("system", stopped)).await; false }
                 ok = hook(info) => ok,
             };
+            drop(kill_rx);
             drop(ticket);
             if let Some(s) = standing { put_back_standing(&state, &id, s).await; }
             finish(state, id, ok, record, touches_library, on_done).await;
+            guard.disarm();
         });
         return Ok(());
     }
@@ -1890,6 +2027,11 @@ pub async fn start_run(
         if let Some(pid) = child.id() { crate::proc::kill_tree(pid); }
         return Err(crate::tr::err("assistant.no_connection", &[]));
     };
+    // Only now is it known that no other run of this chat got in meanwhile; if one did, this one goes.
+    let mut kill_rx = match take_switch(&state, &id).await {
+        Ok(rx) => rx,
+        Err(e) => { if let Some(pid) = child.id() { crate::proc::kill_tree(pid); } let _ = child.start_kill(); return Err(e); }
+    };
     // Remember the process, so a daemon that dies uncleanly can be cleaned up after.
     let pid = child.id();
     crate::runs::record(pid, &spec.chat_id);
@@ -1902,8 +2044,6 @@ pub async fn start_run(
         let _ = stdin.shutdown().await;
     });
 
-    let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
-    state.runs.lock().await.insert(spec.chat_id.clone(), kill_tx);
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
     state.ack_interrupted(&id).await;
     if let Some(ch) = state.chats.update(&id, |c| c.running = true).await {
@@ -1912,6 +2052,7 @@ pub async fn start_run(
 
     let limits = run_limits(&kind);
     tokio::spawn(async move {
+        let guard = RunGuard::new(&state, &id);
         // Removed when the run is over, however it ends.
         let _temp = temp;
         let ticket = ticket;
@@ -1924,13 +2065,14 @@ pub async fn start_run(
                 handle_event(&st, &cid, &ev).await
             }
         }).await;
+        drop(kill_rx);
         // Nothing more can be asked: what still waits is refused, and its card says so.
         drop(ticket);
         // Put back what a run nobody watched changed among the standing files (also when it was cut off).
         if let Some(s) = standing { put_back_standing(&state, &id, s).await; }
         // The daemon is stopping (and has ended this process): the run was cut off, not finished.
         // It stays marked as running, so the next start tells the user it was interrupted.
-        if state.stopping.load(std::sync::atomic::Ordering::Relaxed) { return; }
+        if state.stopping.load(std::sync::atomic::Ordering::Relaxed) { guard.disarm(); return; }
         crate::runs::forget(pid);
         let secs = started.elapsed().as_secs();
         let ok = f.ended == Ended::Result(true);
@@ -1967,6 +2109,7 @@ pub async fn start_run(
                 if first.is_empty() { String::new() } else { format!(": {first}") }));
         }
         finish(state, id, ok, record, touches_library, on_done).await;
+        guard.disarm();
     });
     Ok(())
 }
@@ -2396,6 +2539,9 @@ mod session_tests;
 #[cfg(test)]
 #[path = "claude_suggestion_tests.rs"]
 mod suggestion_tests;
+#[cfg(test)]
+#[path = "claude_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 /// The chat message for a failed run. A missing or expired sign-in is said in plain words and
 /// marked (`tool.code = "signedOut"`) so the chat can offer to sign in; the CLI's text is kept as detail.
