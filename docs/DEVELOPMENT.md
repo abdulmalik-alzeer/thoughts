@@ -51,8 +51,11 @@ cp -R target/release/bundle/macos/Thoughts.app /Applications/
 
 ### 4. Open it
 
-Open **Thoughts** from Applications. The build isn't code-signed yet, so macOS may block the first
-launch. If it does, right-click the app, choose **Open**, then confirm.
+Open **Thoughts** from Applications. A build you made on this Mac usually opens straight away. A
+copy that was downloaded or passed on is not code-signed yet, so macOS blocks its first launch: on
+macOS 15 and later allow it under System Settings › Privacy & Security › **Open Anyway**; on older
+versions Control-click the app and choose **Open**. The steps are in the README,
+[Opening Thoughts the first time](../README.md#opening-thoughts-the-first-time).
 
 > Just want to try it without installing? Run `npm run tauri dev` from the project folder.
 

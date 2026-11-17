@@ -35,9 +35,19 @@ What drives usage is how much the assistant has to read and write, not how many 
 
 On a subscription the practical effect of heavy use is reaching your plan's usage limit sooner, after which the provider makes you wait or offers an upgrade. On an API key the effect is a larger bill.
 
+## Where to see usage
+
+- **In a chat: the usage circle beside Send.** It fills as you use up your plan's limit. Hover over it or click it to see the plan's limits and when they reset, and what this chat has used: its tokens and what they would cost at API prices. **All usage** opens the Usage page.
+- **On Home: the Usage tile** ("Your plans"). It shows how much of your Claude and Codex plans you have used. **Details** opens the Usage page.
+- **The Usage page** (in the sidebar): your plans' limits, then tokens and cost by day, by chat and by model, for the period you choose.
+- **Settings › Usage**: the last 30 days at a glance, and **What the cost figures cover**. Choose **Only chats in Thoughts** (chats, Wraps and everything else Thoughts asks the assistant to do), or **Everything on this computer**, which also counts what you did with Claude Code and Codex outside Thoughts, for example in Terminal. Thoughts reads their history on this computer to count it, and never changes it. This choice changes what the Usage page and Settings › Usage show; it does not change the month total or the spending limit below.
+- **Settings › Privacy & cost**: the estimated assistant cost this month, and the monthly spending limit.
+
+The plan figures arrive with the assistant's answers, so they are as of your last chat.
+
 ## The "estimated cost" figure in the app
 
-After a run, the assistant reports how much text was processed, and Thoughts shows what that amount would cost at the provider's pay-as-you-go rates. The month total, which includes the automatic summaries, is in Settings. A chat's own figure appears beside it (on a subscription, only if you switch on “Show estimated cost” in Settings).
+After a run, the assistant reports how much text was processed, and Thoughts shows what that amount would cost at the provider's pay-as-you-go rates (shown as "at API prices"). Every ordinary chat shows its own figure in the usage circle, on a plan too. Wrap, Reorganize and setup chats have no usage circle: with an API key their cost is shown at the top of the chat, and on a plan only if you switch on “Show cost on Wrap, Reorganize and setup chats” in Settings › Privacy & cost. The month total, which includes the automatic summaries, is in Settings › Privacy & cost.
 
 - **On a subscription, this is not a bill.** Your use is covered by your plan. Nothing extra is charged because of this number. Read it as a measure of how heavy a conversation was.
 - **On an API key, it is an approximation** of what the provider will charge. The provider's own usage page is the authority; the figure in the app can differ from it.
@@ -51,7 +61,7 @@ If you are on a Claude plan and reach its usage limit, Thoughts says so in plain
 
 ## Codex
 
-Codex reports how many tokens a run used, but not what they cost. A Codex chat shows its tokens instead of an estimated cost, Codex runs are not part of the month's figure, and the monthly limit cannot stop them: an automatic task on Codex has only its time limit. Background summaries on Codex use the model chosen for summaries (or Codex's own) at the lowest effort Codex offers. What you pay is set by your ChatGPT plan or your OpenAI account; their own usage pages are the authority.
+Codex reports how many tokens a run used, but not what they cost. Thoughts estimates the cost from the providers' published API prices, and a Codex chat shows that estimate in its usage circle, marked as an estimate; the Usage page includes it too. A model with no published price is left uncounted rather than guessed. Codex runs are not part of the month total in Settings › Privacy & cost, and the monthly limit cannot stop them: an automatic task on Codex has only its time limit. Background summaries on Codex use the model chosen for summaries (or Codex's own) at the lowest effort Codex offers. What you pay is set by your ChatGPT plan or your OpenAI account; their own usage pages are the authority.
 
 ## Keeping usage down
 

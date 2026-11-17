@@ -297,8 +297,10 @@ they are (for step 1, the tests are run on this Mac by that command).
    them with their checksums.
 8. Download each installer and run the [first-run test plan](#first-run-test-plan) for its
    platform. Do not publish a platform that has not passed it.
-9. Read the release notes (the draft starts with the version's entry in `docs/CHANGELOG.md`),
-   then press **Publish release**. From that moment the release is final: the workflow will not
+9. Read the release notes (the draft starts with the version's entry in `docs/CHANGELOG.md`).
+   While the builds are unsigned, they must send people installing by hand to the README's
+   [Opening Thoughts the first time](../README.md#opening-thoughts-the-first-time) (on macOS 15
+   and later, Control-click › Open no longer gets past the warning). Then press **Publish release**. From that moment the release is final: the workflow will not
    touch it again.
 
 ### When a release run fails
@@ -576,8 +578,10 @@ OS version and result of each line in the release notes draft.
 ### macOS
 
 - Apple Silicon and Intel separately (the universal build has two halves; test both).
-- Gatekeeper on a downloaded copy: unsigned (right-click → Open) today; after signing,
-  `spctl -a -vv` reports a notarised Developer ID.
+- Gatekeeper on a downloaded copy: unsigned today, so it follows the README's
+  [Opening Thoughts the first time](../README.md#opening-thoughts-the-first-time) (System Settings ›
+  Privacy & Security › Open Anyway on macOS 15 and later; Control-click › Open before); after
+  signing, `spctl -a -vv` reports a notarised Developer ID.
 - Keychain prompt on first password save, and no repeated prompts after an update.
 - The LaunchAgent `app.thoughts.daemon.plist` is created, points at the installed app (not a
   translocated or `.dmg` path), and is replaced correctly on upgrade.

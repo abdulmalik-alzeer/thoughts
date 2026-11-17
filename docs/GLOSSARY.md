@@ -31,7 +31,7 @@ rather than word-for-word translations of the English.
 | Library | المكتبة | The folder on the computer that holds the user's notes as plain files. |
 | Assistant | المساعد | The AI program Thoughts works with (Claude Code). |
 | Background service | خدمة الخلفية | The part of Thoughts that keeps running and does the work. |
-| Settings | الإعدادات | Categories: General «عام» · Accessibility «تسهيلات الاستخدام» · Assistant «المساعد» · Library & backup «المكتبة والنسخ الاحتياطي» · Privacy & cost «الخصوصية والتكلفة» · Features «المزايا» · Background service «خدمة الخلفية» · Customise «التخصيص» · Maintenance «الصيانة». |
+| Settings | الإعدادات | Categories: General «عام» · Accessibility «تسهيلات الاستخدام» · Assistant «المساعد» · Usage «الاستخدام» · Library & backup «المكتبة والنسخ الاحتياطي» · Privacy & cost «الخصوصية والتكلفة» · Features «المزايا» · Background service «خدمة الخلفية» · Customise «التخصيص» · Maintenance «الصيانة». |
 | Help | المساعدة | The Help page. |
 | Command palette | لوحة الأوامر | Opened with ⌘K / Ctrl+K. |
 | Quick capture | التدوين السريع | Write a todo or a note from any app. |
@@ -87,6 +87,7 @@ rather than word-for-word translations of the English.
 | Approval | موافقة | The assistant asks before it does something. |
 | Automatic summaries | الملخصات التلقائية | Short summaries made in the background for Wrap. |
 | Spending limit | حد الإنفاق | |
+| Usage · usage circle | الاستخدام · دائرة الاستخدام | The Usage page and Settings › Usage; the circle beside Send in a chat that shows the plan's limit and the chat's use. |
 | Plan (Claude subscription) | الاشتراك / خطة Claude | |
 | Key for other programs | مفتاح للبرامج الأخرى | Lets a shortcut or a script on the computer add to the library or read it. |
 

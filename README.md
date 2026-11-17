@@ -61,7 +61,59 @@ source) only work for people who have been given access.
 - **Windows** (an installer) and **Linux** (a `.deb` package and an AppImage) come out of the same
   release but have never been run on a real computer. Treat them as experiments.
 
-Nothing is signed yet, so macOS and Windows ask you to confirm the first launch.
+### Opening Thoughts the first time
+
+Thoughts is not signed by Apple or Microsoft yet, so the first launch of a copy you installed by
+hand needs one extra confirmation. Updates from inside the app do not ask this again.
+
+**On a Mac with macOS 15 (Sequoia) or later**
+
+1. Drag Thoughts into Applications and open it from there, not from the `.dmg` or Downloads
+   (started from there, Thoughts cannot start at login and cannot update itself).
+2. Open Thoughts. macOS says it cannot check the app and does not open it. Choose **Done**, not
+   **Move to Trash**.
+3. Open **System Settings › Privacy & Security** and scroll down to **Security**. A line says that
+   Thoughts was blocked: choose **Open Anyway**. (If the line is not there, open Thoughts once more
+   and come back.)
+4. macOS asks once more: choose **Open Anyway**, and give your Mac's password or Touch ID if it
+   asks. Thoughts opens, and from then on it opens like any other app.
+
+**On macOS 14 (Sonoma) or earlier:** in Applications, Control-click (or right-click) Thoughts,
+choose **Open**, then **Open** again in the message.
+
+**Questions macOS may ask later**
+
+- **"Thoughts wants to use … in your keychain".** Thoughts keeps the sign-in for an online backup,
+  and an API key if you give one, in your Mac's password store (the Keychain), unless you chose
+  the file instead. This is Thoughts asking for its own saved sign-in: type your Mac login
+  password and choose **Always Allow**. macOS sees every unsigned version as a new app, so the
+  question can come back once after an update.
+- **"Background items added".** This only appears if you switch on **Start Thoughts in the
+  background when I log in** (in setup under More options, or Settings › Background service). It
+  is that switch: Thoughts' background service then starts when you log in. You can see it under
+  System Settings › General › Login Items, and switching it off in Thoughts removes it.
+- **Microphone, speech recognition and notifications** are asked for the first time you dictate
+  or Thoughts sends a notification. Each is optional.
+
+**On Windows** (not yet tried on a real computer): if Windows says it protected your PC, choose
+**More info**, then **Run anyway**.
+
+### What setup will ask you
+
+Four short steps. Only the folder is required; everything else can be changed later in Settings.
+
+1. **Welcome:** the language (English or Arabic), what to call you, and what you mainly use
+   Thoughts for, which decides how your library is arranged.
+2. **Assistant:** Claude (recommended) or Codex, with help to install it and sign in. With Claude
+   you can use an API key instead, under Advanced. Or choose **Set up the assistant later**.
+3. **Your notes:** start a new library or open one you already have, and the folder it lives in.
+   Optionally, a few things on your mind (they become your first ideas) and a folder of notes to
+   bring in. **Backup and history** is a closed, optional section: no backup unless you choose one,
+   and a history of changes on this computer.
+4. **Finish:** what is sent to the assistant and what stays on your computer, a summary
+   of your choices, and the look of the app. Under More options: notifications, letting long tasks
+   continue after you close the window, and starting at login. When you press **Finish** for a new
+   library, the assistant sets it up in your first chat.
 
 ## Updates
 
@@ -74,7 +126,9 @@ you installed this one.
 
 **For testers, while the repository is private.** The address Thoughts asks for updates only
 answers once the project is public. Until then a copy can look for updates as you, through the
-GitHub command-line tool. In a terminal, once:
+GitHub command-line tool. The **Updates for testers** card in Settings › Maintenance walks you
+through it, says whether it is on and what is missing, and has each line ready to copy. In a
+terminal, once:
 
 ```bash
 brew install gh        # if you do not have it
