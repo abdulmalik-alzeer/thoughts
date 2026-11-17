@@ -5,33 +5,30 @@
   // shown in their folder, the way Docs does it.
   import Icon from '../../lib/Icon.svelte';
   import { inTauri } from '../../lib/api';
-  import { app, go } from '../../lib/store.svelte';
+  import { go } from '../../lib/store.svelte';
   import { t, fmtDate, fmtHijri, lang } from '../../lib/i18n';
   import { fmtSize, notify, prettyName } from '../../lib/content/util';
   import { showHijri } from '../../lib/weekPrefs.svelte';
+  import { canOpenInApp, openLibraryFile, revealLabelKey, revealLibraryFile } from '../../lib/openInApp';
 
   import type { Snippet } from 'svelte';
   let { files, mode, extra }: { files: any[]; mode: 'meetings' | 'notes' | 'outputs' | 'other'; /** More buttons for a file (a meeting note's recording, FEAT-55). */ extra?: Snippet<[any]> } = $props();
 
   const desktop = inTauri();
-  const isMac = /mac/i.test(navigator.platform || navigator.userAgent);
   const EDIT_EXT = /\.(md|txt|csv|json)$/i;
-  // The kinds of file the shell opens in their usual app (src-tauri `open_library_file`).
-  const SAFE = /\.(pdf|docx?|xlsx?|pptx?|csv|tsv|txt|md|rtf|odt|ods|odp|png|jpe?g|gif|webp|heic|tiff|bmp|mp3|m4a|wav|mp4|mov|epub)$/i;
   const nameOf = (f: any) => String(f.title || prettyName(String(f.path)));
   const day = (d: any) => (/^\d{4}-\d{2}-\d{2}/.test(String(d ?? '')) ? String(d).slice(0, 10) : '');
   const when = (d: string) => fmtDate(d + 'T12:00:00', { day: 'numeric', month: 'short', year: 'numeric' });
   const names = (a: string[]) => { try { return new Intl.ListFormat(lang(), { type: 'conjunction' }).format(a); } catch { return a.join(', '); } };
   const ext = (p: string) => (/\.([a-z0-9]+)$/i.exec(p)?.[1] ?? '').toUpperCase();
-  const absPath = (p: string) => (app.status?.library ? `${String(app.status.library).replace(/[\\/]+$/, '')}/${p}` : '');
 
   async function openExternal(p: string) {
-    try { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_library_file', { path: p }); }
+    try { await openLibraryFile(p); }
     catch (e: any) { notify(t('docs.openFailed'), { kind: 'error', detail: String(e?.message ?? e) }); }
   }
   async function reveal(p: string) {
-    try { const { revealItemInDir } = await import('@tauri-apps/plugin-opener'); await revealItemInDir(absPath(p)); }
-    catch { notify(t('docs.revealFailed'), { kind: 'error' }); }
+    try { await revealLibraryFile(p); }
+    catch (e: any) { notify(t('docs.revealFailed'), { kind: 'error', detail: String(e?.message ?? e) }); }
   }
 </script>
 
@@ -61,11 +58,11 @@
         {#if (mode === 'meetings' || mode === 'notes') && EDIT_EXT.test(f.path)}
           <button class="ib" onclick={() => go({ kind: 'docs', path: f.path, id: 'edit' })} aria-label={t('item.editNote', { name: nameOf(f) })} title={t('edit')}><Icon name="edit" size={14} /></button>
         {/if}
-        {#if mode === 'outputs' && desktop && SAFE.test(f.path)}
+        {#if mode === 'outputs' && desktop && canOpenInApp(f.path)}
           <button class="ib" onclick={() => openExternal(f.path)} aria-label={t('item.outputs.openTip', { name: f.name })} title={t('docs.openDefault')}><Icon name="external" size={14} /></button>
         {/if}
-        {#if (mode === 'outputs' || mode === 'other') && desktop && absPath(f.path)}
-          <button class="ib" onclick={() => reveal(f.path)} aria-label={t('item.outputs.revealTip', { name: f.name })} title={t(isMac ? 'docs.revealMac' : 'docs.reveal')}><Icon name="folder" size={14} /></button>
+        {#if (mode === 'outputs' || mode === 'other') && desktop}
+          <button class="ib" onclick={() => reveal(f.path)} aria-label={t('item.outputs.revealTip', { name: f.name })} title={t(revealLabelKey())}><Icon name="folder" size={14} /></button>
         {/if}
       </span>
     </li>

@@ -12,7 +12,9 @@
 // to no window.
 const COMMANDS: &[&str] = &[
     "open_library_file",
+    "reveal_library_file",
     "open_chat_attachment",
+    "reveal_chat_attachment",
     "save_pack",
     "save_file",
     "daemon_info",

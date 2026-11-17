@@ -13,6 +13,7 @@ mod capture;
 mod consent;
 mod ghfeed;
 mod links;
+mod openfile;
 mod quit;
 mod recovery;
 mod voice;
@@ -438,79 +439,6 @@ async fn save_file(app: tauri::AppHandle, window: tauri::Window, request: tauri:
     if path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) != Some(ext.clone()) { path.set_extension(&ext); }
     std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(true)
-}
-
-/// Document and media types the system may open in their own app: none of them can run code when
-/// opened (no scripts, programs, web pages, shortcuts or macro-enabled documents).
-const SAFE_TO_OPEN: &[&str] = &["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "csv", "tsv", "txt", "md", "rtf", "odt",
-    "ods", "odp", "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "mp3", "m4a", "wav", "mp4", "mov", "epub",
-    // Every kind of sound a meeting recording may be (`thoughtsd::voice::AUDIO_EXT`): the Meetings tab plays them.
-    "aac", "caf", "aiff", "aif"];
-
-/// Open a document from the library in the user's default app. Only regular files inside the
-/// library, and only document/media types that cannot run code when opened.
-#[tauri::command]
-fn open_library_file(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    const SAFE: &[&str] = SAFE_TO_OPEN;
-    let lib = thoughtsd::settings::Settings::load().library().ok_or("no library")?;
-    // dunce: plain `C:\…` paths on Windows — the shell cannot open `\\?\` verbatim paths.
-    let root = dunce::canonicalize(&lib).map_err(|e| e.to_string())?;
-    let rel = std::path::Path::new(&path);
-    if rel.is_absolute() || rel.components().any(|c| !matches!(c, std::path::Component::Normal(_))) {
-        return Err("invalid path".into());
-    }
-    let full = dunce::canonicalize(root.join(rel)).map_err(|e| e.to_string())?;
-    if !full.starts_with(&root) || !full.is_file() { return Err("not a file in the library".into()); }
-    let ext = full.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    if !SAFE.contains(&ext.as_str()) { return Err("this file type can't be opened from Thoughts".into()); }
-    app.opener().open_path(full.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
-}
-
-/// The real path of file `name` sent with chat `chat_id`, when it may be opened: a plain file name,
-/// a regular file (not a link) directly in that chat's own folder under `attachments`, whose real
-/// location is inside it, and a kind that cannot run code when opened (`SAFE_TO_OPEN`).
-fn chat_attachment(attachments: &std::path::Path, chat_id: &str, name: &str) -> Result<std::path::PathBuf, String> {
-    let refuse = || "this file can't be opened from Thoughts".to_string();
-    if !thoughtsd::chats::valid_id(chat_id) {
-        return Err(refuse());
-    }
-    let plain = !name.is_empty() && name.len() <= 400 && !name.starts_with('.') && name != ".."
-        && !name.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control());
-    if !plain {
-        return Err(refuse());
-    }
-    let ext = std::path::Path::new(name).extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    if !SAFE_TO_OPEN.contains(&ext.as_str()) {
-        return Err(refuse());
-    }
-    let gone = || "the file is no longer there".to_string();
-    let base = dunce::canonicalize(attachments).map_err(|_| gone())?;
-    let dir = attachments.join(chat_id);
-    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-        return Err(gone());
-    }
-    let file = dir.join(name);
-    if !std::fs::symlink_metadata(&file).is_ok_and(|m| m.file_type().is_file()) {
-        return Err(gone());
-    }
-    let real = dunce::canonicalize(&file).map_err(|_| gone())?;
-    if real.parent() != Some(base.join(chat_id).as_path()) {
-        return Err(refuse());
-    }
-    Ok(real)
-}
-
-/// Open a file sent in a chat (a Word or Excel file, say) in the user's default app. Only the
-/// chat's own files, only from the app window, and only kinds that cannot run code when opened.
-#[tauri::command]
-fn open_chat_attachment(app: tauri::AppHandle, window: tauri::Window, chat_id: String, name: String) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    if !is_main_label(window.label()) {
-        return Err("not allowed".into());
-    }
-    let file = chat_attachment(&thoughtsd::paths::attachments_dir(), &chat_id, &name)?;
-    app.opener().open_path(file.to_string_lossy(), None::<&str>).map_err(|e| e.to_string())
 }
 
 /// `{port, token, version, platform, stale}`. `stale: true` means the daemon belongs to another app
@@ -1309,8 +1237,10 @@ fn main() {
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![
-            open_library_file,
-            open_chat_attachment,
+            openfile::open_library_file,
+            openfile::reveal_library_file,
+            openfile::open_chat_attachment,
+            openfile::reveal_chat_attachment,
             save_pack,
             save_file,
             daemon_info,
@@ -1492,46 +1422,6 @@ mod tests {
     }
 
     #[test]
-    fn only_a_chats_own_harmless_files_are_opened() {
-        let base = std::env::temp_dir().join(format!("thoughts-att-test-{}-{:?}", std::process::id(), std::thread::current().id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let att = base.join("attachments");
-        let chat = "0b0f6c2e-1d2a-4f8e-9c1e-5c9f2d7e8a10";
-        std::fs::create_dir_all(att.join(chat)).unwrap();
-        std::fs::create_dir_all(att.join("other-chat")).unwrap();
-        for f in ["Budget 2026.xlsx", "عقد.docx", "run.command", "page.html", "macro.docm", "noext"] {
-            std::fs::write(att.join(chat).join(f), "x").unwrap();
-        }
-        std::fs::write(att.join("other-chat").join("theirs.docx"), "x").unwrap();
-        std::fs::write(base.join("outside.docx"), "x").unwrap();
-        let real = |p: std::path::PathBuf| dunce::canonicalize(p).unwrap();
-        assert_eq!(chat_attachment(&att, chat, "Budget 2026.xlsx"), Ok(real(att.join(chat).join("Budget 2026.xlsx"))));
-        assert_eq!(chat_attachment(&att, chat, "عقد.docx"), Ok(real(att.join(chat).join("عقد.docx"))));
-        // Kinds that can run something when opened, and files with no kind at all.
-        for bad in ["run.command", "page.html", "macro.docm", "noext"] {
-            assert!(chat_attachment(&att, chat, bad).is_err(), "{bad}");
-        }
-        // Another chat's file, a way out of the folder, a made-up chat, a missing file.
-        assert!(chat_attachment(&att, "other-chat", "missing.docx").is_err());
-        assert!(chat_attachment(&att, chat, "theirs.docx").is_err());
-        for bad in ["../other-chat/theirs.docx", "..", "../../outside.docx", "a/b.docx", "a\\b.docx", "C:x.docx", ".hidden.docx", ""] {
-            assert!(chat_attachment(&att, chat, bad).is_err(), "{bad}");
-        }
-        for bad in ["..", "../attachments", "a/b", ""] {
-            assert!(chat_attachment(&att, bad, "theirs.docx").is_err(), "{bad}");
-        }
-        // A link in the chat's folder that leads elsewhere is not opened, whatever it is named.
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(base.join("outside.docx"), att.join(chat).join("link.docx")).unwrap();
-            assert!(chat_attachment(&att, chat, "link.docx").is_err());
-            std::os::unix::fs::symlink(att.join("other-chat"), att.join("c0ffee")).unwrap();
-            assert!(chat_attachment(&att, "c0ffee", "theirs.docx").is_err());
-        }
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
     fn generated_files_are_saved_only_as_documents_that_cannot_run() {
         let docx = b"PK\x03\x04 rest of a Word package";
         assert_eq!(export_file("Plan.docx", docx), Ok(("Plan.docx".into(), "docx".into())));
@@ -1604,14 +1494,6 @@ mod tests {
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), std::process::id(), Some(daemon), exe), Unproven::Leave);
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 1, Some(daemon), exe), Unproven::Leave);
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 0, Some(daemon), exe), Unproven::Leave);
-    }
-
-    #[test]
-    fn every_meeting_recording_can_be_played() {
-        // The Meetings tab offers Play for each of these; opening one must not be refused.
-        for ext in thoughtsd::voice::AUDIO_EXT {
-            assert!(SAFE_TO_OPEN.contains(ext), "{ext}");
-        }
     }
 
     #[test]

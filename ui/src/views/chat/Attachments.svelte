@@ -12,6 +12,7 @@
   import { t } from '../../lib/i18n';
   import { isImageName } from '../../lib/content/util';
   import { trapFocus } from '../../lib/focus';
+  import { canOpenInApp, revealChatAttachment, revealLabelKey } from '../../lib/openInApp';
 
   let { chatId, paths }: { chatId: string; paths: string[] } = $props();
 
@@ -34,14 +35,18 @@
   }
 
   // Other documents (Word, Excel…) open in their own app on the desktop; kinds that could run
-  // something when opened never do (the desktop app checks the same list).
-  const OWN_APP = /\.(docx?|xlsx?|pptx?|csv|tsv|txt|md|rtf|od[tsp]|epub|heic|tiff|bmp|mp3|m4a|wav|mp4|mov)$/i;
-  const openable = (name: string) => inTauri() && OWN_APP.test(name);
+  // something when opened (old Office files, programs…) are only shown in their folder (the
+  // desktop app checks the same list, `lib/openInApp.ts`).
+  const openable = (name: string) => canOpenInApp(name);
   async function openOutside(name: string) {
     try {
       const { invoke } = await import('@tauri-apps/api/core');
       await invoke('open_chat_attachment', { chatId, name });
     } catch { toast(t('nativeb.att.openFailed', { name }), { kind: 'error' }); }
+  }
+  async function revealOutside(name: string) {
+    try { await revealChatAttachment(chatId, name); }
+    catch { toast(t('sec-shell-open.revealFailed'), { kind: 'error' }); }
   }
 
   let viewing = $state<F | null>(null);
@@ -73,6 +78,8 @@
       <button type="button" class="fchip open" onclick={() => view(f)} title={t('chatc.att.open', { name: f.name })}><Icon name="docs" size={12} /><bdi class="ell">{f.name}</bdi></button>
     {:else if openable(f.name)}
       <button type="button" class="fchip open" onclick={() => openOutside(f.name)} title={t('nativeb.att.open', { name: f.name })}><Icon name="attach" size={12} /><bdi class="ell">{f.name}</bdi></button>
+    {:else if inTauri()}
+      <button type="button" class="fchip open" onclick={() => revealOutside(f.name)} title={`${t('sec-shell-open.revealTip', { name: f.name })} (${t(revealLabelKey())})`}><Icon name="folder" size={12} /><bdi class="ell">{f.name}</bdi></button>
     {:else}
       <span class="fchip"><Icon name="attach" size={12} /><bdi class="ell">{f.name}</bdi></span>
     {/if}

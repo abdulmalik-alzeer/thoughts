@@ -8,7 +8,9 @@
   ],
   "permissions": [
     "allow-open-library-file",
+    "allow-reveal-library-file",
     "allow-open-chat-attachment",
+    "allow-reveal-chat-attachment",
     "allow-save-pack",
     "allow-save-file",
     "allow-daemon-info",

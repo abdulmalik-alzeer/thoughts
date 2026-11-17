@@ -24,6 +24,7 @@
   import ImportNotes from './ImportNotes.svelte';
   import PageExtras from './PageExtras.svelte';
   import { pageText, shows } from '../lib/pages.svelte';
+  import { canOpenInApp, openLibraryFile, revealLabelKey, revealLibraryFile } from '../lib/openInApp';
 
   let { path }: { path?: string } = $props();
 
@@ -92,7 +93,6 @@
   // The desktop app asks before quitting while this is set (the draft itself is kept: see the stash below).
   $effect(() => { reportUnsaved('docs', dirty && current ? baseName(current) : null, true); });
   const info = $derived(files.find((f) => f.path === current));
-  const absPath = $derived(app.status?.library ? `${String(app.status.library).replace(/[\\/]+$/, '')}/${current}` : '');
 
   function readOpen(): Record<string, boolean> { try { return JSON.parse(localStorage.getItem('thoughts.docs.open') || '{}') || {}; } catch { return {}; } }
   function setOpen(k: string, v: boolean) { open[k] = v; try { localStorage.setItem('thoughts.docs.open', JSON.stringify(open)); } catch { /* private mode */ } }
@@ -467,7 +467,7 @@
   }
 
   async function openExternal() {
-    try { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_library_file', { path: current }); }
+    try { await openLibraryFile(current); }
     catch (e: any) {
       const msg = String(e?.message ?? e);
       // An older shell without the command: stop offering the button.
@@ -476,8 +476,8 @@
     }
   }
   async function reveal() {
-    try { const { revealItemInDir } = await import('@tauri-apps/plugin-opener'); await revealItemInDir(absPath); }
-    catch { notify(t('docs.revealFailed'), { kind: 'error' }); }
+    try { await revealLibraryFile(current); }
+    catch (e: any) { notify(t('docs.revealFailed'), { kind: 'error', detail: String(e?.message ?? e) }); }
   }
   /** What a reader sees, as text: the clean copy laid out off screen (a detached element has no line breaks). */
   function plainText(): string {
@@ -616,8 +616,8 @@
   }
   /** A saved export: in Word (or whatever opens it) on the desktop, here otherwise. */
   async function openOutput(p: string) {
-    if (desktop && canOpenExternal) {
-      try { const { invoke } = await import('@tauri-apps/api/core'); await invoke('open_library_file', { path: p }); return; }
+    if (desktop && canOpenExternal && canOpenInApp(p)) {
+      try { if (await openLibraryFile(p)) return; }
       catch { /* show it here instead */ }
     }
     go({ kind: 'docs', path: p });
@@ -819,7 +819,7 @@
         { id: 'copy', label: t('docs.copyText'), icon: 'copy', run: copyDoc },
         ...(isMd(current) ? [{ id: 'source', label: t(showSource ? 'docsa.showFormatted' : 'docsa.showSource'), icon: 'eye', run: () => (showSource = !showSource) }] : []),
       ] : []),
-      ...(desktop && absPath ? [{ id: 'reveal', label: t(isMac ? 'docs.revealMac' : 'docs.reveal'), icon: 'folder', run: reveal }] : []),
+      ...(desktop && current ? [{ id: 'reveal', label: t(revealLabelKey()), icon: 'folder', run: reveal }] : []),
       ...(desktop && current ? [{ id: 'link', label: t('nativeb.link.copy'), icon: 'copy', run: copyNoteLink }] : []),
       { id: 'rename', label: t('docs3.rename'), icon: 'edit', run: () => renamePath(current) },
       { id: 'move', label: t('docs3.move'), icon: 'arrow', run: () => movePath(current) },
@@ -1039,8 +1039,10 @@
             </div>
           </div>
           {#if !isImageName(current) && !isPdf(current) && !isDocx(current)}<p class="muted">{t('docs.notPreviewable')}</p>{/if}
+          {#if desktop && !canOpenInApp(current)}<p class="muted">{t('sec-shell-open.notOpened')}</p>{/if}
           <div class="row wrapr">
-            {#if desktop && canOpenExternal}<button class="btn primary" onclick={openExternal}><Icon name="external" size={14} /> {t('docs.openDefault')}</button>{/if}
+            {#if desktop && canOpenExternal && canOpenInApp(current)}<button class="btn primary" onclick={openExternal}><Icon name="external" size={14} /> {t('docs.openDefault')}</button>
+            {:else if desktop}<button class="btn primary" onclick={reveal}><Icon name="folder" size={14} /> {t(revealLabelKey())}</button>{/if}
             <button class="btn" onclick={discuss}><Icon name="chat" size={14} /> {t('docs.discussAssistant')}</button>
           </div>
         </div>
