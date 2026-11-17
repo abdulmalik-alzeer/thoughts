@@ -895,7 +895,7 @@ fn short(s: &str, n: usize) -> String {
 async fn handle(state: &AppState, id: &str, ev: Ev, t: &mut Track) -> Option<bool> {
     let tool = |name: &str, label: String, input: Value, call: &str| {
         let mut m = Msg::new("tool", label);
-        m.tool = Some(json!({"name": name, "input": input, "id": call}));
+        m.tool = Some(json!({"name": name, "input": crate::chats::stored_input(&input), "id": call}));
         m
     };
     let result = |call: &str, out: &str, failed: bool| {

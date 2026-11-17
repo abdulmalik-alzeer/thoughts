@@ -2432,7 +2432,7 @@ pub(crate) async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Opti
                     Some("tool_use") => {
                         let name = block["name"].as_str().unwrap_or("tool");
                         let mut m = Msg::new("tool", tool_label(name, &block["input"]));
-                        m.tool = Some(json!({"name": name, "input": block["input"], "id": block["id"]}));
+                        m.tool = Some(json!({"name": name, "input": crate::chats::stored_input(&block["input"]), "id": block["id"]}));
                         push(state, id, m).await;
                     }
                     _ => {}

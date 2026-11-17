@@ -323,7 +323,59 @@ impl Chat {
 /// a run starts and when it finishes.
 pub const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
 
-struct DiskState { last: std::time::Instant, dirty: bool }
+/// How far a chat's file is behind memory. `version` counts the changes made to the chat in memory
+/// (moved on while the chats lock is held for writing, so it follows the order of the changes).
+struct DiskState { last: std::time::Instant, dirty: bool, version: u64 }
+
+/// One chat's file is written by one save at a time; this holds the version that file has. A save
+/// of an older copy than the one already written is dropped, so a slow save never puts back what a
+/// newer one replaced. `GONE` once the chat is deleted: nothing writes its file again.
+type Gate = std::sync::Arc<std::sync::Mutex<u64>>;
+const GONE: u64 = u64::MAX;
+
+/// A copy of a chat taken under the lock, to be written after the lock is let go.
+struct Save { chat: Chat, version: u64, gate: Gate, dir: std::path::PathBuf }
+
+impl Save {
+    /// Write the copy unless the file already has this version or a newer one. Blocking: run it
+    /// away from the async runtime.
+    fn run(&self) -> std::io::Result<()> {
+        let mut on_file = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        if *on_file >= self.version { return Ok(()); }
+        ChatStore::write(&self.dir, &self.chat)?;
+        *on_file = self.version;
+        Ok(())
+    }
+}
+
+/// The longest a value given to a tool is kept in the chat, in characters. A Write or Edit is given
+/// whole files; the chat only needs enough to show what the step was.
+const INPUT_PREVIEW: usize = 2000;
+/// Fields kept whole (up to `INPUT_KEEP`): what the app reads back to know what a step touched — the
+/// file it wrote (the changes list and undo), the command it ran (what a customise run may have
+/// changed), the plan it proposed (Wrap) — and what the chat view shows as the step's name.
+const INPUT_WHOLE: &[&str] = &["file_path", "notebook_path", "path", "command", "plan", "url", "pattern", "glob", "query"];
+const INPUT_KEEP: usize = 20_000;
+
+/// What is kept of a tool's input in the chat: the same fields, long texts cut to a preview.
+pub fn stored_input(v: &Value) -> Value {
+    fn cut(s: &str, max: usize) -> Value {
+        if s.chars().count() <= max { return Value::String(s.to_string()); }
+        Value::String(format!("{}…", s.chars().take(max).collect::<String>()))
+    }
+    fn walk(v: &Value, max: usize) -> Value {
+        match v {
+            Value::String(s) => cut(s, max),
+            Value::Array(a) => Value::Array(a.iter().take(200).map(|x| walk(x, INPUT_PREVIEW)).collect()),
+            Value::Object(o) => Value::Object(o.iter().map(|(k, x)| {
+                let max = if INPUT_WHOLE.contains(&k.as_str()) { INPUT_KEEP } else { INPUT_PREVIEW };
+                (k.clone(), match x { Value::String(s) => cut(s, max), x => walk(x, INPUT_PREVIEW) })
+            }).collect()),
+            x => x.clone(),
+        }
+    }
+    walk(v, INPUT_PREVIEW)
+}
 
 pub struct ChatStore {
     pub chats: RwLock<HashMap<String, Chat>>,
@@ -331,6 +383,8 @@ pub struct ChatStore {
     /// Chat files that could not be read at startup. They are left on disk and skipped.
     pub unreadable: usize,
     disk: std::sync::Mutex<HashMap<String, DiskState>>,
+    /// chat id -> its file's gate (see `Gate`).
+    gates: std::sync::Mutex<HashMap<String, Gate>>,
     /// Where save failures are announced (set once by the app state).
     pub events: std::sync::OnceLock<tokio::sync::broadcast::Sender<Value>>,
     last_error_event: std::sync::Mutex<Option<std::time::Instant>>,
@@ -384,11 +438,28 @@ impl ChatStore {
                 let parsed = parsed.and_then(|c| if valid_id(&c.id) { Ok(c) } else { Err(anyhow::anyhow!("its id is not a valid chat id")) });
                 match parsed {
                     Ok(mut c) => {
+                        // Files from before tool inputs were cut keep their messages; only memory gets the preview.
+                        for m in c.messages.iter_mut().filter(|m| m.role == "tool") {
+                            if let Some(t) = m.tool.as_mut().and_then(Value::as_object_mut) {
+                                if let Some(i) = t.get("input") { let i = stored_input(i); t.insert("input".into(), i); }
+                            }
+                        }
+                        let mut touched = false;
                         if c.running {
                             c.running = false;
                             c.interrupted = true;
-                            cut_off.push(c.id.clone());
+                            touched = true;
+                            crate::log::warn(format!("chat {} was cut off by a restart", c.id));
                         }
+                        // No run survives a restart, so nobody is waiting for an answer any more.
+                        for m in c.messages.iter_mut().filter(|m| m.role == "approval") {
+                            if let Some(t) = m.tool.as_mut().filter(|t| t["status"] == "waiting") {
+                                t["status"] = Value::from("ended");
+                                t["answeredAt"] = Value::from(Utc::now().to_rfc3339());
+                                touched = true;
+                            }
+                        }
+                        if touched { cut_off.push(c.id.clone()); }
                         map.insert(c.id.clone(), c);
                     }
                     Err(err) => {
@@ -398,16 +469,14 @@ impl ChatStore {
                 }
             }
         }
-        let store = Self { chats: RwLock::new(map), dir: dir.to_path_buf(), unreadable, disk: Default::default(),
+        let store = Self { chats: RwLock::new(map), dir: dir.to_path_buf(), unreadable, disk: Default::default(), gates: Default::default(),
             events: Default::default(), last_error_event: Default::default(), sending: Default::default(), partial: Default::default() };
-        if let Ok(m) = store.chats.try_read() {
-            for id in &cut_off {
-                if let Some(c) = m.get(id) {
-                    crate::log::warn(format!("chat {id} was cut off by a restart"));
-                    store.persist_now(c);
-                }
-            }
-        }
+        let saves: Vec<Save> = match store.chats.try_read() {
+            Ok(m) => cut_off.iter().filter_map(|id| m.get(id)).map(|c| { store.changed(&c.id); store.save_of(c) }).collect(),
+            Err(_) => vec![],
+        };
+        // Still starting up: nothing else is waiting on this thread.
+        for s in saves { let res = s.run(); store.saved(&s.chat.id, res); }
         store
     }
 
@@ -417,19 +486,47 @@ impl ChatStore {
         crate::paths::write_atomic(&dir.join(format!("{}.json", c.id)), &text, true)
     }
 
-    /// Write the chat now. A failure is logged, announced (`chat.persistError`) and retried by `flush`.
-    fn persist_now(&self, c: &Chat) {
-        let res = Self::write(&self.dir, c);
+    /// The chat has changed in memory. Call with the chats lock held for writing.
+    fn changed(&self, id: &str) {
         let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
-        disk.insert(c.id.clone(), DiskState { last: std::time::Instant::now(), dirty: res.is_err() });
+        let d = disk.entry(id.to_string()).or_insert(DiskState { last: std::time::Instant::now(), dirty: false, version: 0 });
+        d.version += 1;
+        d.dirty = true;
+    }
+
+    /// A copy of the chat as it is now, to be written once the lock is let go. Call with the chats
+    /// lock held (reading is enough), so the copy and its version agree.
+    fn save_of(&self, c: &Chat) -> Save {
+        let mut disk = self.disk.lock().unwrap_or_else(|e| e.into_inner());
+        let d = disk.entry(c.id.clone()).or_insert(DiskState { last: std::time::Instant::now(), dirty: true, version: 1 });
+        d.last = std::time::Instant::now();
+        d.dirty = false;
+        let version = d.version;
         drop(disk);
+        let gate = self.gates.lock().unwrap_or_else(|e| e.into_inner()).entry(c.id.clone()).or_default().clone();
+        Save { chat: c.clone(), version, gate, dir: self.dir.clone() }
+    }
+
+    /// Write saves away from the async runtime, one after another, and note how each went.
+    async fn persist(&self, saves: Vec<Save>) {
+        if saves.is_empty() { return; }
+        let done = tokio::task::spawn_blocking(move || saves.into_iter().map(|s| { let r = s.run(); (s.chat.id, r) }).collect::<Vec<_>>()).await;
+        match done {
+            Ok(done) => for (id, res) in done { self.saved(&id, res); },
+            Err(e) => crate::log::error(format!("chats could not be saved: {e}")),
+        }
+    }
+
+    /// How a save went. A failure is logged, announced (`chat.persistError`) and retried by `flush`.
+    fn saved(&self, id: &str, res: std::io::Result<()>) {
         if let Err(e) = res {
-            crate::log::error(format!("chat {} could not be saved: {e}", c.id));
+            if let Some(d) = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) { d.dirty = true; }
+            crate::log::error(format!("chat {id} could not be saved: {e}"));
             let mut last = self.last_error_event.lock().unwrap_or_else(|e| e.into_inner());
             if last.map_or(true, |t| t.elapsed() > std::time::Duration::from_secs(30)) {
                 *last = Some(std::time::Instant::now());
                 if let Some(tx) = self.events.get() {
-                    let _ = tx.send(serde_json::json!({"type": "chat.persistError", "chatId": c.id, "error": e.to_string()}));
+                    let _ = tx.send(serde_json::json!({"type": "chat.persistError", "chatId": id, "error": e.to_string()}));
                 }
             }
         }
@@ -441,12 +538,15 @@ impl ChatStore {
             .filter(|(_, d)| d.dirty && (force || d.last.elapsed() >= PERSIST_DEBOUNCE)).map(|(id, _)| id.clone()).collect();
         if ids.is_empty() { return; }
         let chats = self.chats.read().await;
+        let mut saves = vec![];
         for id in ids {
             match chats.get(&id) {
-                Some(c) => self.persist_now(c),
+                Some(c) => saves.push(self.save_of(c)),
                 None => { self.disk.lock().unwrap_or_else(|e| e.into_inner()).remove(&id); }
             }
         }
+        drop(chats);
+        self.persist(saves).await;
     }
 
     /// Reserve the chat for one "send": from accepting a message until its run has started (when
@@ -504,8 +604,11 @@ impl ChatStore {
     pub async fn insert(&self, mut c: Chat) {
         c.note_session();
         let mut w = self.chats.write().await;
-        self.persist_now(&c);
+        self.changed(&c.id);
+        let save = self.save_of(&c);
         w.insert(c.id.clone(), c);
+        drop(w);
+        self.persist(vec![save]).await;
     }
 
     /// Mutate a chat in place. It is saved right away, except while a run is streaming into it,
@@ -522,12 +625,13 @@ impl ChatStore {
         else if c.messages.len() > had { if let Some(m) = c.messages.last() { self.settle_partial(id, &m.role); } }
         let streaming = was_running && c.running;
         let due = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get(id).map_or(true, |d| d.last.elapsed() >= PERSIST_DEBOUNCE);
-        if !streaming || due {
-            self.persist_now(c);
-        } else if let Some(d) = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) {
-            d.dirty = true;
-        }
-        Some(c.meta_only())
+        self.changed(id);
+        // Copied under the lock, written after it is let go: other chats never wait for this file.
+        let save = (!streaming || due).then(|| self.save_of(c));
+        let meta = c.meta_only();
+        drop(w);
+        if let Some(save) = save { self.persist(vec![save]).await; }
+        Some(meta)
     }
 
     /// Forget a chat and delete its file and its attachments folder; returns the chat that was
@@ -538,7 +642,13 @@ impl ChatStore {
         let chat = self.chats.write().await.remove(id)?;
         self.disk.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
         self.partial.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
-        let _ = std::fs::remove_file(self.dir.join(format!("{id}.json")));
+        // A save still on its way must not bring the file back: close the gate, then delete.
+        let gate = self.gates.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
+        let file = self.dir.join(format!("{id}.json"));
+        let _ = tokio::task::spawn_blocking(move || {
+            let _held = gate.as_ref().map(|g| { let mut v = g.lock().unwrap_or_else(|e| e.into_inner()); *v = GONE; v });
+            let _ = std::fs::remove_file(file);
+        }).await;
         // Only a real folder: a link placed there is never followed to whatever it points at.
         let files = crate::paths::attachments_dir().join(id);
         if std::fs::symlink_metadata(&files).map_or(false, |m| m.is_dir()) { let _ = std::fs::remove_dir_all(&files); }
@@ -815,6 +925,83 @@ mod tests {
         s.update("old", |c| c.title = "Renamed".into()).await.unwrap();
         let raw: Value = serde_json::from_str(&std::fs::read_to_string(d.join("old.json")).unwrap()).unwrap();
         assert_eq!((raw["schemaVersion"].as_u64(), raw["title"].as_str()), (Some(1), Some("Renamed")));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn tool_inputs_keep_what_is_read_back_and_only_a_preview_of_the_rest() {
+        let big = "x".repeat(50_000);
+        let kept = stored_input(&serde_json::json!({"file_path": "/lib/notes/a.md", "content": big, "edits": [{"old_string": big, "new_string": "y"}],
+            "command": format!("cat > out.md <<EOF\n{}\nEOF", "z".repeat(5000)), "plan": "p".repeat(9000), "files": ["a", "b"], "n": 3}));
+        assert_eq!(kept["file_path"], "/lib/notes/a.md");
+        assert_eq!(kept["content"].as_str().unwrap().chars().count(), INPUT_PREVIEW + 1);
+        assert!(kept["content"].as_str().unwrap().ends_with('…'));
+        assert_eq!(kept["edits"][0]["old_string"].as_str().unwrap().chars().count(), INPUT_PREVIEW + 1);
+        assert_eq!(kept["edits"][0]["new_string"], "y");
+        assert!(kept["command"].as_str().unwrap().ends_with("EOF"), "a command is kept whole");
+        assert_eq!(kept["plan"].as_str().unwrap().len(), 9000);
+        assert_eq!((kept["files"].clone(), kept["n"].clone()), (serde_json::json!(["a", "b"]), serde_json::json!(3)));
+    }
+
+    #[tokio::test]
+    async fn an_old_chat_with_whole_files_in_its_steps_still_loads() {
+        let d = dir();
+        let big = "w".repeat(100_000);
+        let old = serde_json::json!({"id": "old", "title": "Old", "messages": [
+            {"id": "u", "role": "user", "text": "write it", "ts": "2026-01-01T00:00:00Z"},
+            {"id": "t", "role": "tool", "text": "Write a.md", "tool": {"name": "Write", "id": "toolu_1", "input": {"file_path": "/lib/a.md", "content": big}}, "ts": "2026-01-01T00:00:01Z"}]});
+        std::fs::write(d.join("old.json"), old.to_string()).unwrap();
+        let s = ChatStore::load_from(&d);
+        let t = s.with("old", |c| c.messages[1].tool.clone().unwrap()).await.unwrap();
+        assert_eq!((t["name"].as_str(), t["id"].as_str(), t["input"]["file_path"].as_str()), (Some("Write"), Some("toolu_1"), Some("/lib/a.md")));
+        assert_eq!(t["input"]["content"].as_str().unwrap().chars().count(), INPUT_PREVIEW + 1);
+        assert!(std::fs::read_to_string(d.join("old.json")).unwrap().contains(&big), "loading alone does not rewrite the file");
+        s.update("old", |c| c.title = "Renamed".into()).await;
+        assert!(std::fs::metadata(d.join("old.json")).unwrap().len() < 10_000, "the next save is the small one");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn waiting_approval_cards_end_with_the_restart() {
+        let d = dir();
+        let card = |id: &str, status: &str| serde_json::json!({"id": id, "role": "approval", "text": "asked", "ts": "2026-01-01T00:00:00Z",
+            "tool": {"code": "approval", "status": status, "card": {"tool": "Bash"}, "expiresAt": "2099-01-01T00:00:00Z"}});
+        std::fs::write(d.join("a.json"), serde_json::json!({"id": "a", "running": true, "messages": [card("1", "once"), card("2", "waiting")]}).to_string()).unwrap();
+        // Not marked running (the run ended without the card being settled): the card still ends.
+        std::fs::write(d.join("b.json"), serde_json::json!({"id": "b", "messages": [card("3", "waiting")]}).to_string()).unwrap();
+        let s = ChatStore::load_from(&d);
+        let status = |c: &Chat, i: usize| c.messages[i].tool.as_ref().unwrap()["status"].as_str().unwrap().to_string();
+        for c in [on_disk(&d, "a"), s.chats.try_read().unwrap()["a"].clone()] {
+            assert_eq!((status(&c, 0), status(&c, 1)), ("once".into(), "ended".into()));
+        }
+        let b = on_disk(&d, "b");
+        assert_eq!(status(&b, 0), "ended");
+        assert!(!b.interrupted && b.messages[0].tool.as_ref().unwrap()["answeredAt"].is_string());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_older_copy_never_overwrites_a_newer_one_or_a_deleted_chat() {
+        let d = dir();
+        let s = ChatStore::load_from(&d);
+        let c = Chat::default();
+        let id = c.id.clone();
+        s.insert(c).await;
+        let copy = |title: &str| {
+            let mut m = s.chats.try_write().unwrap();
+            let c = m.get_mut(&id).unwrap();
+            c.title = title.into();
+            s.changed(&id);
+            s.save_of(c)
+        };
+        let (older, newer) = (copy("first"), copy("second"));
+        newer.run().unwrap();
+        older.run().unwrap();
+        assert_eq!(on_disk(&d, &id).title, "second", "the slower, older save was dropped");
+        let late = copy("third");
+        s.remove(&id).await;
+        late.run().unwrap();
+        assert!(!d.join(format!("{id}.json")).exists(), "a deleted chat's file is not brought back");
         std::fs::remove_dir_all(d).unwrap();
     }
 
