@@ -489,7 +489,7 @@ pub fn index_with_status(index: &str, readme: &str, status: &str, was: Option<&s
 
 #[derive(Clone)]
 struct Outgoing { target: String, line: usize, text: String }
-struct Cached { modified: Option<std::time::SystemTime>, len: u64, title: String, links: Vec<Outgoing> }
+struct Cached { modified: Option<std::time::SystemTime>, len: u64, title: String, summary: String, status: String, links: Vec<Outgoing> }
 
 /// Parsed links per file, reused while the file's size and time are unchanged, so a lookup over a
 /// few thousand notes reads only the ones that changed since the last one.
@@ -511,6 +511,31 @@ fn parse_outgoing(rel: &str, text: &str) -> Vec<Outgoing> {
     out
 }
 
+/// Every markdown file of the library not under `exclude`, with its parsed links from the cache
+/// (read again only when its size or time changed). Private folders are left out by where they
+/// really are as well as by name, as in the file list and search. Shared by "Linked from" and the graph.
+fn each_note(root: &Path, exclude: &[String], mut f: impl FnMut(&str, &Cached)) {
+    let files = markdown_files(root);
+    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
+    if c.len() > 50_000 { c.clear(); }
+    let hidden = crate::library::Hidden::new(root, exclude);
+    let mut hidden_dirs: HashMap<PathBuf, bool> = HashMap::new();
+    for (rel, abs) in files {
+        if crate::paths::is_under(&rel, exclude) { continue; }
+        if !exclude.is_empty() && abs.parent().map_or(false, |p| *hidden_dirs.entry(p.to_path_buf()).or_insert_with(|| hidden.dir(p))) { continue; }
+        let Ok(meta) = std::fs::metadata(&abs) else { continue };
+        let (modified, len) = (meta.modified().ok(), meta.len());
+        let fresh = c.get(&abs).map_or(false, |e| e.modified == modified && e.len == len && modified.is_some());
+        if !fresh {
+            let Ok(text) = std::fs::read_to_string(&abs) else { continue };
+            let fm = crate::library::frontmatter(&text).0;
+            let s = |k: &str| fm.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+            c.insert(abs.clone(), Cached { modified, len, title: s("title"), summary: s("summary"), status: s("status"), links: parse_outgoing(&rel, &text) });
+        }
+        f(&rel, &c[&abs]);
+    }
+}
+
 /// The notes that link to `target` (a library-relative file; a folder's README also counts links to
 /// the folder itself): `[{path, title, line, text}]`, one per linking note, in path order. Notes
 /// under `exclude` are left out, exactly as the file list and search leave them out.
@@ -518,32 +543,114 @@ pub fn backlinks(root: &Path, target: &str, exclude: &[String]) -> Vec<Value> {
     let target = target.trim_matches('/');
     // Links to a folder open its README, so they count as links to the README.
     let folder = match target.rsplit_once('/') { Some((d, f)) if f.eq_ignore_ascii_case("README.md") => Some(d.to_string()), _ => None };
-    let files = markdown_files(root);
-    let mut c = cache().lock().unwrap_or_else(|e| e.into_inner());
-    if c.len() > 50_000 { c.clear(); }
     let mut out = vec![];
-    // Private folders by where they really are as well as by name, as in the file list and search.
-    let hidden = crate::library::Hidden::new(root, exclude);
-    let mut hidden_dirs: HashMap<PathBuf, bool> = HashMap::new();
-    for (rel, abs) in files {
-        if crate::paths::is_under(&rel, exclude) || rel == target { continue; }
-        if !exclude.is_empty() && abs.parent().map_or(false, |p| *hidden_dirs.entry(p.to_path_buf()).or_insert_with(|| hidden.dir(p))) { continue; }
-        let Ok(meta) = std::fs::metadata(&abs) else { continue };
-        let (modified, len) = (meta.modified().ok(), meta.len());
-        let fresh = c.get(&abs).map_or(false, |e| e.modified == modified && e.len == len && modified.is_some());
-        if !fresh {
-            let Ok(text) = std::fs::read_to_string(&abs) else { continue };
-            let title = crate::library::frontmatter(&text).0.get("title").and_then(Value::as_str).unwrap_or("").to_string();
-            c.insert(abs.clone(), Cached { modified, len, title, links: parse_outgoing(&rel, &text) });
-        }
-        let e = &c[&abs];
+    each_note(root, exclude, |rel, e| {
+        if rel == target { return; }
         let to_it = |o: &&Outgoing| o.target == target || folder.as_deref() == Some(o.target.as_str());
         if let Some(o) = e.links.iter().find(to_it) {
             let count = e.links.iter().filter(to_it).count();
             out.push(json!({"path": rel, "title": e.title, "line": o.line, "text": o.text, "count": count}));
         }
-    }
+    });
     out
+}
+
+// ---------- the graph ----------
+
+/// At most this many notes in one graph; beyond it the best-linked are kept (`truncated`).
+pub const GRAPH_MAX_NODES: usize = 4000;
+/// At most this many connections in one graph; beyond it the most-used are kept (`truncated`).
+pub const GRAPH_MAX_EDGES: usize = 20_000;
+
+/// Is `rel` an item's front page (`<area>/<item>/README.md`), the pages the Ideas list shows?
+fn is_item(rel: &str) -> bool {
+    let p: Vec<&str> = rel.split('/').collect();
+    p.len() == 3 && p[2] == "README.md" && !p[0].starts_with('.') && p[0] != "me" && p[0] != "inbox"
+}
+
+/// The library as a graph, from the same parsed links as "Linked from": nodes
+/// `{path, title, summary, area, status, kind: item|note}` and edges `{from, to, count}` (one per
+/// linking note and target, counting its links). Every item is a node; another note only when it
+/// links or is linked. A link counts only when it leads to a markdown file that exists here (a link
+/// to a folder leads to its README); links to oneself and the master index (root `INDEX.md`, which
+/// links to every item) are left out. `focus`: only that note and what is within `depth` links of
+/// it, either way. Bounded by `max_nodes` / `max_edges`, with `truncated: true` when cut.
+pub fn graph(root: &Path, exclude: &[String], focus: Option<&str>, depth: usize, max_nodes: usize, max_edges: usize) -> Value {
+    struct N { title: String, summary: String, status: String, out: Vec<String> }
+    let mut notes: std::collections::BTreeMap<String, N> = Default::default();
+    each_note(root, exclude, |rel, e| {
+        if rel == "INDEX.md" { return; }
+        notes.insert(rel.to_string(), N { title: e.title.clone(), summary: e.summary.clone(), status: e.status.clone(), out: e.links.iter().map(|o| o.target.clone()).collect() });
+    });
+    // Where a link leads: the file itself, or a folder's README.
+    let lead = |t: &str| -> Option<String> {
+        let t = t.trim_end_matches('/');
+        if notes.contains_key(t) { return Some(t.to_string()); }
+        let r = if t.is_empty() { "README.md".to_string() } else { format!("{t}/README.md") };
+        notes.contains_key(&r).then_some(r)
+    };
+    let mut counts: std::collections::BTreeMap<(String, String), usize> = Default::default();
+    for (from, n) in &notes {
+        for t in &n.out {
+            let Some(to) = lead(t) else { continue };
+            if &to != from { *counts.entry((from.clone(), to)).or_default() += 1; }
+        }
+    }
+    let mut degree: HashMap<&str, usize> = HashMap::new();
+    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
+    for (from, to) in counts.keys() {
+        *degree.entry(from).or_default() += 1;
+        *degree.entry(to).or_default() += 1;
+        adj.entry(from).or_default().push(to);
+        adj.entry(to).or_default().push(from);
+    }
+    let asked = focus.map(|f| f.trim_matches('/')).filter(|f| !f.is_empty());
+    let focus = asked.and_then(|f| lead(f));
+    let mut keep: Vec<&str> = match &focus {
+        // Asked about a note that is not here (gone, private, not a note): nothing to show.
+        None if asked.is_some() => vec![],
+        Some(f) => {
+            // Breadth-first, both directions, up to `depth` links away.
+            let mut seen: HashMap<&str, usize> = HashMap::from([(f.as_str(), 0)]);
+            let mut queue = std::collections::VecDeque::from([f.as_str()]);
+            while let Some(p) = queue.pop_front() {
+                let d = seen[p];
+                if d >= depth { continue; }
+                for &q in adj.get(p).into_iter().flatten() {
+                    if !seen.contains_key(q) { seen.insert(q, d + 1); queue.push_back(q); }
+                }
+            }
+            seen.into_keys().collect()
+        }
+        None => notes.keys().map(String::as_str).filter(|p| is_item(p) || degree.contains_key(p)).collect(),
+    };
+    let total = keep.len();
+    let mut truncated = false;
+    if keep.len() > max_nodes {
+        truncated = true;
+        // The best-linked are kept, and always the note the graph is about.
+        keep.sort_by(|a, b| (Some(*b) == focus.as_deref()).cmp(&(Some(*a) == focus.as_deref()))
+            .then(degree.get(b).unwrap_or(&0).cmp(degree.get(a).unwrap_or(&0))).then(a.cmp(b)));
+        keep.truncate(max_nodes);
+    }
+    keep.sort();
+    let kept: std::collections::HashSet<&str> = keep.iter().copied().collect();
+    let mut edges: Vec<(&String, &String, usize)> = counts.iter()
+        .filter(|((f, t), _)| kept.contains(f.as_str()) && kept.contains(t.as_str())).map(|((f, t), c)| (f, t, *c)).collect();
+    let total_edges = edges.len();
+    if edges.len() > max_edges {
+        truncated = true;
+        edges.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)).then(a.1.cmp(b.1)));
+        edges.truncate(max_edges);
+        edges.sort();
+    }
+    let nodes: Vec<Value> = keep.iter().map(|p| {
+        let n = &notes[*p];
+        let area = p.split_once('/').map_or("", |(a, _)| a);
+        json!({"path": p, "title": n.title, "summary": n.summary, "area": area, "status": n.status, "kind": if is_item(p) { "item" } else { "note" }})
+    }).collect();
+    let edges: Vec<Value> = edges.iter().map(|(f, t, c)| json!({"from": f, "to": t, "count": c})).collect();
+    json!({"nodes": nodes, "edges": edges, "truncated": truncated, "total": {"nodes": total, "edges": total_edges}, "focus": focus})
 }
 
 #[cfg(test)]
@@ -764,5 +871,111 @@ mod tests {
         let t = std::time::Instant::now();
         assert_eq!(backlinks(&r, "hub.md", &[]).len(), 3000);
         assert!(t.elapsed() < std::time::Duration::from_secs(2), "cached lookup took {:?} (first {first:?})", t.elapsed());
+    }
+
+    fn graph_of(r: &Path, exclude: &[String], focus: Option<&str>, depth: usize) -> Value { graph(r, exclude, focus, depth, GRAPH_MAX_NODES, GRAPH_MAX_EDGES) }
+    fn node_paths(g: &Value) -> Vec<String> { g["nodes"].as_array().unwrap().iter().map(|n| n["path"].as_str().unwrap().to_string()).collect() }
+    fn edge_list(g: &Value) -> Vec<(String, String, u64)> {
+        g["edges"].as_array().unwrap().iter().map(|e| (e["from"].as_str().unwrap().into(), e["to"].as_str().unwrap().into(), e["count"].as_u64().unwrap())).collect()
+    }
+
+    #[test]
+    fn the_graph_joins_notes_both_ways_and_ignores_broken_links() {
+        let r = tmp();
+        put(&r, "apps/one/README.md", "---\ntitle: One\nstatus: active\nsummary: The first\n---\n[plan](notes/plan.md)\nAnd [plan again](notes/plan.md#x) [two](../two/) [gone](../gone/README.md) [pic](p.png) [web](https://x.y) [me](README.md)\n");
+        put(&r, "apps/one/notes/plan.md", "Back to [one](../README.md).\n");
+        put(&r, "apps/two/README.md", "# Two, links nowhere\n");
+        put(&r, "apps/three/README.md", "# Three, alone\n");
+        put(&r, "loose.md", "Not linked, not an item.\n");
+        put(&r, "INDEX.md", "- [One](apps/one/README.md)\n- [Two](apps/two/README.md)\n");
+        let g = graph_of(&r, &[], None, 1);
+        assert_eq!(node_paths(&g), ["apps/one/README.md", "apps/one/notes/plan.md", "apps/three/README.md", "apps/two/README.md"]);
+        assert_eq!(edge_list(&g), [
+            ("apps/one/README.md".into(), "apps/one/notes/plan.md".into(), 2),
+            ("apps/one/README.md".into(), "apps/two/README.md".into(), 1),
+            ("apps/one/notes/plan.md".into(), "apps/one/README.md".into(), 1),
+        ]);
+        let one = &g["nodes"][0];
+        assert_eq!((one["title"].as_str(), one["summary"].as_str(), one["status"].as_str(), one["area"].as_str(), one["kind"].as_str()),
+            (Some("One"), Some("The first"), Some("active"), Some("apps"), Some("item")));
+        assert_eq!(g["nodes"][1]["kind"], "note");
+        assert_eq!(g["truncated"], false);
+        std::fs::remove_dir_all(r).unwrap();
+    }
+
+    #[test]
+    fn the_graph_leaves_out_private_folders_by_name_and_by_where_they_are() {
+        let r = tmp();
+        put(&r, "apps/one/README.md", "[money](../../me/finances/x.md)\n");
+        put(&r, "me/finances/x.md", "[one](../../apps/one/README.md) salary\n");
+        put(&r, "ideas/a.md", "[one](../apps/one/README.md)\n");
+        let all = graph_of(&r, &[], None, 1);
+        assert!(node_paths(&all).contains(&"me/finances/x.md".to_string()));
+        let g = graph_of(&r, &["me/finances".into()], None, 1);
+        assert_eq!(node_paths(&g), ["apps/one/README.md", "ideas/a.md"]);
+        assert_eq!(edge_list(&g), [("ideas/a.md".into(), "apps/one/README.md".into(), 1)]);
+        // Asked about a private note: nothing.
+        assert!(node_paths(&graph_of(&r, &["me/finances".into()], Some("me/finances/x.md"), 1)).is_empty());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("../me/finances", r.join("ideas/money")).unwrap();
+            let g = graph_of(&r, &["ideas/money".into()], None, 1);
+            assert_eq!(node_paths(&g), ["apps/one/README.md", "ideas/a.md"]);
+        }
+        std::fs::remove_dir_all(r).unwrap();
+    }
+
+    #[test]
+    fn a_focused_graph_shows_what_is_near_one_note() {
+        let r = tmp();
+        // a → b → c → d, and e → a.
+        put(&r, "x/a.md", "[b](b.md)\n");
+        put(&r, "x/b.md", "[c](c.md)\n");
+        put(&r, "x/c.md", "[d](d.md)\n");
+        put(&r, "x/d.md", "end\n");
+        put(&r, "x/e.md", "[a](a.md)\n");
+        put(&r, "apps/alone/README.md", "# Alone\n");
+        assert_eq!(node_paths(&graph_of(&r, &[], Some("x/b.md"), 1)), ["x/a.md", "x/b.md", "x/c.md"]);
+        let two = graph_of(&r, &[], Some("x/b.md"), 2);
+        assert_eq!(node_paths(&two), ["x/a.md", "x/b.md", "x/c.md", "x/d.md", "x/e.md"]);
+        assert_eq!(two["focus"], "x/b.md");
+        assert_eq!(edge_list(&two).len(), 4);
+        // An item without links is still shown on its own; a folder names its README.
+        let alone = graph_of(&r, &[], Some("apps/alone"), 1);
+        assert_eq!((node_paths(&alone), alone["edges"].as_array().unwrap().len()), (vec!["apps/alone/README.md".to_string()], 0));
+        assert!(node_paths(&graph_of(&r, &[], Some("x/nothing.md"), 1)).is_empty());
+        std::fs::remove_dir_all(r).unwrap();
+    }
+
+    #[test]
+    fn a_large_graph_is_cut_to_the_best_linked_notes() {
+        let r = tmp();
+        put(&r, "hub.md", "[a](a.md) [b](b.md) [c](c.md)\n");
+        put(&r, "a.md", "[hub](hub.md) [b](b.md)\n");
+        put(&r, "b.md", "x\n");
+        put(&r, "c.md", "x\n");
+        let g = graph(&r, &[], None, 1, 3, GRAPH_MAX_EDGES);
+        assert_eq!((g["truncated"].as_bool(), g["total"]["nodes"].as_u64()), (Some(true), Some(4)));
+        assert_eq!(node_paths(&g), ["a.md", "b.md", "hub.md"]);
+        assert!(edge_list(&g).iter().all(|(f, t, _)| f != "c.md" && t != "c.md"));
+        // The note the graph is about is kept even when it is the least linked.
+        let f = graph(&r, &[], Some("c.md"), 2, 2, GRAPH_MAX_EDGES);
+        assert!(node_paths(&f).contains(&"c.md".to_string()) && f["truncated"] == true);
+        let e = graph(&r, &[], None, 1, 10, 2);
+        assert_eq!((e["edges"].as_array().unwrap().len(), e["truncated"].as_bool()), (2, Some(true)));
+        std::fs::remove_dir_all(r).unwrap();
+    }
+
+    #[test]
+    fn the_graph_stays_quick_on_a_few_thousand_notes() {
+        let r = tmp();
+        for i in 0..3000 { put(&r, &format!("area{}/n{i}.md", i % 30), &format!("# Note {i}\n\n[hub](../hub.md) [next](n{}.md) [far](../area{}/n{}.md)\n", i + 30, (i + 7) % 30, i + 7)); }
+        put(&r, "hub.md", "# Hub");
+        let _ = graph_of(&r, &[], None, 1);
+        let t = std::time::Instant::now();
+        let g = graph_of(&r, &[], None, 1);
+        assert_eq!(g["nodes"].as_array().unwrap().len(), 3001);
+        assert!(t.elapsed() < std::time::Duration::from_secs(3), "cached graph took {:?}", t.elapsed());
+        std::fs::remove_dir_all(r).unwrap();
     }
 }

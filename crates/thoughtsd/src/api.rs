@@ -204,6 +204,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/library/search", get(search))
         .route("/api/search", get(search_all))
         .route("/api/library/backlinks", get(backlinks))
+        .route("/api/library/graph", get(library_graph))
         .route("/api/library/output", post(save_output).layer(DefaultBodyLimit::max(IMPORT_BODY_LIMIT)))
         .route("/api/library/stats", get(stats))
         .route("/api/todos", get(todo_list))
@@ -1786,6 +1787,17 @@ async fn backlinks(State(st): S, Query(q): Query<HashMap<String, String>>) -> R 
     library::resolve(&root, &rel)?;
     let exclude = private_filter(&st, &q).await;
     Ok(Json(json!(tokio::task::spawn_blocking(move || links::backlinks(&root, &rel, &exclude)).await?)))
+}
+
+/// `GET /api/library/graph[?focus=<path>&depth=1]` → `{nodes, edges, truncated, total, focus}`: the
+/// links between the library's notes (`links::graph`). Private folders are left out as in "Linked from".
+async fn library_graph(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
+    let root = lib(&st).await?;
+    let focus = q.get("focus").map(|p| p.trim().replace('\\', "/")).filter(|p| !p.is_empty());
+    if let Some(f) = &focus { library::resolve(&root, f)?; }
+    let depth = q.get("depth").and_then(|d| d.parse::<usize>().ok()).unwrap_or(1).clamp(1, 3);
+    let exclude = private_filter(&st, &q).await;
+    Ok(Json(tokio::task::spawn_blocking(move || links::graph(&root, &exclude, focus.as_deref(), depth, links::GRAPH_MAX_NODES, links::GRAPH_MAX_EDGES)).await?))
 }
 
 #[derive(Deserialize, Default)]
@@ -4843,6 +4855,13 @@ mod tests {
         let mut from: Vec<&str> = b.as_array().unwrap().iter().filter_map(|x| x["path"].as_str()).collect();
         from.sort();
         assert_eq!(from, ["INDEX.md", "apps/two/README.md"]);
+        // The graph: every item (one more comes with the test library) and the link between two; the master index is not part of it.
+        let g = library_graph(State(st.clone()), q(&[])).await.unwrap().0;
+        assert_eq!(g["edges"], json!([{"from": "apps/two/README.md", "to": "apps/one/README.md", "count": 1}]));
+        assert_eq!(g["nodes"].as_array().unwrap().len(), 3, "{g}");
+        let g = library_graph(State(st.clone()), q(&[("focus", "apps/one/README.md"), ("depth", "9")])).await.unwrap().0;
+        assert_eq!((g["focus"].as_str(), g["nodes"].as_array().unwrap().len()), (Some("apps/one/README.md"), 2));
+        assert!(library_graph(State(st.clone()), q(&[("focus", "../outside.md")])).await.is_err());
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
