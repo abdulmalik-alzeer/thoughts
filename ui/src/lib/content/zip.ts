@@ -107,6 +107,8 @@ export class ZipReader {
   }
   has(name: string) { return this.entries.has(name); }
   names() { return [...this.entries.keys()]; }
+  /** Every entry with its unpacked and packed size, in the order stored (nothing is unpacked). */
+  list() { return [...this.entries].map(([name, e]) => ({ name, size: e.size, packed: e.csize })); }
   async bytes(name: string): Promise<Uint8Array | null> {
     const e = this.entries.get(name);
     if (!e) return null;

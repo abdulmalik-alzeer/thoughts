@@ -35,15 +35,15 @@ export const renderers: Record<PreviewKind, Loader | null> = {
   image: () => import('./renderers/Image.svelte'),
   svg: () => import('./renderers/Image.svelte'),
   pdf: () => import('./renderers/Pdf.svelte'),
-  text: null, // → renderers/Code.svelte (next)
-  code: null, // → renderers/Code.svelte (next)
-  json: null, // → renderers/Json.svelte (next)
-  yaml: null, // → renderers/Code.svelte (next)
-  xml: null, // → renderers/Code.svelte (next)
-  html: null, // → renderers/Html.svelte (next)
-  audio: null, // → renderers/Media.svelte (next)
-  video: null, // → renderers/Media.svelte (next)
-  zip: null, // → renderers/Zip.svelte (next)
+  text: () => import('./renderers/Code.svelte'),
+  code: () => import('./renderers/Code.svelte'),
+  json: () => import('./renderers/Json.svelte'),
+  yaml: () => import('./renderers/Code.svelte'),
+  xml: () => import('./renderers/Code.svelte'),
+  html: () => import('./renderers/Html.svelte'),
+  audio: () => import('./renderers/Media.svelte'),
+  video: () => import('./renderers/Media.svelte'),
+  zip: () => import('./renderers/Zip.svelte'),
   docx: () => import('./renderers/Docx.svelte'),
   xlsx: null, // → renderers/Sheet.svelte (Office renderers)
   csv: null, // → renderers/Sheet.svelte
