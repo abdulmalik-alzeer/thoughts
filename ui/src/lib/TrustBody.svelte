@@ -51,7 +51,11 @@
     </ul>
   {/if}
 
-  <p class="note" dir="auto">{t('seca.trust.note')}</p>
+  {#if info.blocked}
+    <p class="note blocked" role="alert" dir="auto">{info.blocked}</p>
+  {:else}
+    <p class="note" dir="auto">{t('seca.trust.note')}</p>
+  {/if}
 </div>
 
 <style>
@@ -72,4 +76,5 @@
   .where { font-size: 12px; color: var(--muted); display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
   .where.err { color: var(--danger); }
   .note { font-size: 13px; color: var(--fg); background: var(--fill); border-radius: var(--radius); padding: 8px 10px; }
+  .note.blocked { border-inline-start: 3px solid var(--danger); }
 </style>

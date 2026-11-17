@@ -934,6 +934,9 @@ pub struct Untrusted {
     pub items: Vec<(Finding, bool)>,
     /// Assistant files that were added, changed or removed since then.
     pub files: Vec<(String, &'static str)>,
+    /// Why a yes cannot be recorded for the folder as it is (the message `accept` would refuse
+    /// with), so the app shows the reason instead of a button that can only fail.
+    pub blocked: Option<&'static str>,
 }
 
 impl Untrusted {
@@ -952,6 +955,7 @@ impl Untrusted {
             })).collect::<Vec<_>>(),
             "files": self.files.iter().take(SHOWN_FILES).map(|(file, what)| json!({"file": file, "what": what})).collect::<Vec<_>>(),
             "moreFiles": self.files.len().saturating_sub(SHOWN_FILES),
+            "blocked": self.blocked.map(|k| crate::tr::text(k, &[])),
         })
     }
 }
@@ -1046,7 +1050,8 @@ fn check(path: &Path, scope: Scope) -> anyhow::Result<()> {
         files.extend(e.files.keys().filter(|f| !scan.files.contains_key(*f)).map(|f| (f.clone(), "removed")));
         files.sort();
     }
-    Err(Untrusted { id: ask(path, &scan.state()), path: key, known: old.is_some(), changed, items, files }.into())
+    let blocked = if scan.git_inside { Some("trust.git_include_inside") } else if !scan.trustable { Some("trust.too_large") } else { None };
+    Err(Untrusted { id: ask(path, &scan.state()), path: key, known: old.is_some(), changed, items, files, blocked }.into())
 }
 
 /// Fail with [`Untrusted`] when `path` needs the user's trust before the assistant works in it.
@@ -1701,6 +1706,9 @@ mod tests {
         let refused = |d: &Path| {
             let q = question(require_git(d));
             assert!(q.items.iter().any(|(f, _)| f.kind == "git_include_inside"), "{q:?}");
+            // The question says so up front, with the same sentence a yes would be refused with.
+            assert_eq!(q.blocked, Some("trust.git_include_inside"));
+            assert_eq!(q.payload()["blocked"], crate::tr::text("trust.git_include_inside", &[]));
             assert_eq!(accept(&q.id).unwrap_err().to_string(), crate::tr::text("trust.git_include_inside", &[]));
             // Not even the daemon's own silent record makes it pass.
             trust(d).unwrap();
@@ -1874,6 +1882,7 @@ mod tests {
         assert_eq!((mail["name"].as_str(), mail["detail"].as_str(), mail["new"].as_bool()), (Some("mail"), Some("other-server"), Some(true)));
         assert!(mail["open"].as_str().unwrap().ends_with(".mcp.json"));
         assert_eq!(p["files"][0], json!({"file": ".mcp.json", "what": "changed"}));
+        assert!(p["blocked"].is_null(), "an ordinary question can be answered yes");
         std::fs::remove_dir_all(d).unwrap();
     }
 

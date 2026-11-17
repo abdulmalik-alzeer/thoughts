@@ -203,7 +203,7 @@ export class ApiError extends Error {
   }
 }
 
-const trustAsked = new Map<string, Promise<boolean>>();
+const trustAsked = new Map<string, Promise<boolean | string>>();
 
 /** The user's yes to trust question `id`, confirmed in the desktop app's own dialog. Resolves a newer
  *  question when the folder changed while the dialog was open (the daemon then refuses the old answer
@@ -259,7 +259,10 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
         const id = data.trust.id;
         let asked = trustAsked.get(id);
         if (!asked) { asked = askTrust(data.trust, answerTrust).finally(() => trustAsked.delete(id)); trustAsked.set(id, asked); }
-        if (!(await asked)) {
+        const said = await asked;
+        // A folder that cannot be trusted as it is: the dialog said why; the refusal says it again.
+        if (typeof said === 'string') throw new ApiError(said, r.status, 'untrusted');
+        if (!said) {
           const { t } = await import('./i18n');
           throw new ApiError(t('seca.trust.declined'), r.status, 'TRUST_DECLINED');
         }
