@@ -760,8 +760,26 @@ async fn is_ancestor(state: &AppState, dir: &Path, a: &str, b: &str) -> bool {
     git(state, dir, &["merge-base", "--is-ancestor", a, b]).await.is_ok()
 }
 
-/// Commit local changes, take in what the main location has (fetch, then rebase onto it), send to
-/// all. A pull that conflicts is undone and reported as `CONFLICT::<file;file;…>` (see `resolve`).
+/// May the changes recorded here that `theirs` does not have be replayed on top of it (a rebase)?
+/// Not when one of them combines two sides (replaying it would undo how a clash was settled, and
+/// ask about the same documents again), and not when any location already took one of them: that
+/// location would hold the old ones and refuse the replayed ones for good, since the app never
+/// overwrites what a location has. In doubt, no: combining (a merge) is always safe.
+async fn may_replay(state: &AppState, dir: &Path, theirs: &str) -> bool {
+    async fn count(state: &AppState, dir: &Path, args: &[&str]) -> Option<u64> {
+        git(state, dir, args).await.ok().and_then(|c| c.trim().parse::<u64>().ok())
+    }
+    let range = format!("{theirs}..HEAD");
+    let all = count(state, dir, &["rev-list", "--count", &range]).await;
+    let merges = count(state, dir, &["rev-list", "--count", "--merges", &range]).await;
+    // Every location's branches as this computer last saw them (a push updates them too).
+    let sent_nowhere = count(state, dir, &["rev-list", "--count", &range, "--not", "--remotes"]).await;
+    matches!((all, merges, sent_nowhere), (Some(a), Some(0), Some(u)) if a == u)
+}
+
+/// Commit local changes, take in what the main location has (fetch, then rebase onto it — or merge
+/// it, when a rebase would rewrite changes a location already took or a clash already settled, see
+/// `may_replay`), send to all. A pull that conflicts is undone and reported as `CONFLICT::<file;file;…>` (see `resolve`).
 /// Fails (`no_location`) when there is nowhere to send the library, and (`sync_failed`, naming the
 /// location and the reason) when any location did not take it: `Ok` means it is backed up.
 ///
@@ -804,11 +822,17 @@ pub async fn sync(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
                     let _g = state.git_lock.lock().await;
                     // What was saved while the fetch ran is recorded first, like everything before it.
                     committed |= commit_all(state, dir, &subject::edit("your changes")).await?;
-                    if let Err(e) = git_ident(state, dir, &["rebase", "--autostash", &theirs]).await {
-                        // Read the conflict list before undoing the half-finished rebase.
+                    // Changes recorded here are replayed on top of what arrived when nothing else has
+                    // them yet; otherwise the two are combined, and what was recorded stays as it is.
+                    let replay = may_replay(state, dir, &theirs).await;
+                    let took = if is_ancestor(state, dir, &theirs, "HEAD").await { Ok(String::new()) }
+                        else if replay { git_ident(state, dir, &["rebase", "--autostash", &theirs]).await }
+                        else { git_ident(state, dir, &["merge", "--no-edit", "-m", &subject::combined(), &theirs]).await };
+                    if let Err(e) = took {
+                        // Read the conflict list before undoing the half-finished rebase or merge.
                         let files = unmerged(state, dir).await;
                         let conflict = !files.is_empty() || e.to_string().contains("CONFLICT");
-                        if let Err(e2) = git(state, dir, &["rebase", "--abort"]).await {
+                        if let Err(e2) = git(state, dir, &[if replay { "rebase" } else { "merge" }, "--abort"]).await {
                             if conflict { crate::log::error(format!("sync: could not undo the conflicting pull: {e2}")); }
                         }
                         if conflict {
@@ -2391,6 +2415,81 @@ mod tests {
         // Choosing the backup folder itself works as well.
         sh(&lib, &["remote", "remove", "usb"]);
         assert_eq!(add_folder_location(&st, &lib, "usb", &repo).await.unwrap(), repo);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A change that reached a second location while the main one was away is never replayed as a
+    /// new change: that location would refuse the new one for good (the app never overwrites).
+    #[tokio::test]
+    async fn changes_a_second_location_already_has_are_combined_not_rewritten() {
+        let (root, lib, drive) = library_and_drive("sent-twice");
+        let st = AppState::for_test();
+        let repo = add_folder_location(&st, &lib, "usb", &drive).await.unwrap();
+        sync(&st, &lib).await.unwrap();
+        let other = root.join("other.git");
+        std::fs::create_dir_all(&other).unwrap();
+        sh(&other, &["init", "-q", "--bare", "-b", "main"]);
+        sh(&lib, &["remote", "add", "online", other.to_str().unwrap()]);
+        sync(&st, &lib).await.unwrap();
+        // The drive is away: a change made here reaches only the second location.
+        let away = root.join("unplugged");
+        std::fs::rename(&drive, &away).unwrap();
+        write(&lib, "notes.md", "second\n");
+        assert_eq!(crate::tr::classify_in(false, &sync(&st, &lib).await.unwrap_err()).code, "sync_failed");
+        let sent = sh(&lib, &["rev-parse", "HEAD"]);
+        assert_eq!(sh(&other, &["rev-parse", "main"]), sent);
+        // Meanwhile another computer sent its own change to the drive.
+        std::fs::rename(&away, &drive).unwrap();
+        sh(&root, &["clone", "-q", repo.to_str().unwrap(), "laptop"]);
+        let laptop = root.join("laptop");
+        write(&laptop, "laptop.md", "from the laptop\n");
+        sh(&laptop, &["add", "-A"]);
+        sh(&laptop, &["commit", "-q", "-m", "laptop"]);
+        sh(&laptop, &["push", "-q", "origin", "HEAD:main"]);
+        // Plugged in again: both locations take the library, and the change they had stays as it was.
+        let v = sync(&st, &lib).await.unwrap();
+        assert_eq!(v["received"], true);
+        assert_eq!((read(&lib, "laptop.md").as_str(), read(&lib, "notes.md").as_str()), ("from the laptop\n", "second\n"));
+        let here = sh(&lib, &["rev-parse", "HEAD"]);
+        sh(&lib, &["merge-base", "--is-ancestor", &sent, "HEAD"]);
+        assert_eq!((sh(&repo, &["rev-parse", "main"]), sh(&other, &["rev-parse", "main"])), (here.clone(), here));
+        // And the syncs after it go on as usual.
+        write(&lib, "notes.md", "third\n");
+        sync(&st, &lib).await.unwrap();
+        assert_eq!(sh(&other, &["rev-parse", "main"]), sh(&lib, &["rev-parse", "HEAD"]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A clash settled here whose result could not be sent is not undone by the next sync, and the
+    /// person is not asked about it again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_settled_clash_that_could_not_be_sent_is_not_asked_about_again() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, mine, remote) = diverged();
+        let st = AppState::for_test();
+        assert!(sync(&st, &mine).await.unwrap_err().to_string().starts_with("CONFLICT::"));
+        let lock = |mode: u32| for d in ["objects", "refs/heads", "."] { std::fs::set_permissions(remote.join(d), std::fs::Permissions::from_mode(mode)).unwrap(); };
+        lock(0o555);
+        assert_eq!(crate::tr::classify_in(false, &resolve(&st, &mine, "mine").await.unwrap_err()).code, "sync_failed");
+        let settled = sh(&mine, &["rev-parse", "HEAD"]);
+        assert_eq!(read(&mine, "notes.md"), "my line\n");
+        // Still not taken, with nothing new there: the settled result stays exactly as it is.
+        let again = sync(&st, &mine).await.unwrap_err();
+        lock(0o755);
+        assert_eq!(crate::tr::classify_in(false, &again).code, "sync_failed", "{again}");
+        assert_eq!(sh(&mine, &["rev-parse", "HEAD"]), settled);
+        // The other device sends something else meanwhile: it is put together with the settled result.
+        let other = root.join("other");
+        write(&other, "c.md", "later\n");
+        sh(&other, &["add", "-A"]);
+        sh(&other, &["commit", "-q", "-m", "later"]);
+        sh(&other, &["push", "-q", "origin", "HEAD:main"]);
+        sync(&st, &mine).await.unwrap();
+        assert_eq!((read(&mine, "notes.md").as_str(), read(&mine, "c.md").as_str()), ("my line\n", "later\n"));
+        sh(&mine, &["merge-base", "--is-ancestor", &settled, "HEAD"]);
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), sh(&mine, &["rev-parse", "HEAD"]));
+        assert_eq!(sh(&mine, &["status", "--porcelain"]), "");
         std::fs::remove_dir_all(root).unwrap();
     }
 
