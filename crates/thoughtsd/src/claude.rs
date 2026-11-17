@@ -577,23 +577,83 @@ async fn auth_failure(state: &AppState, text: &str) -> Option<(String, &'static 
     Some((signed_out_text(), "signedOut"))
 }
 
-/// `claude --help` of the installed assistant program. Asked once per program (and again when the
-/// program file changes, or after an hour), never without a time limit: opening a chat must not
-/// wait on it again and again.
+/// `claude --help` of the installed assistant program, for the menus: empty when it cannot be read.
+/// Whatever starts the program goes through `run_help` instead, which never answers "" (that would
+/// read as "this version has none of the safety flags").
 pub async fn help_text(state: &AppState) -> String {
-    static HELP: std::sync::Mutex<Option<(PathBuf, Option<std::time::SystemTime>, std::time::Instant, String)>> = std::sync::Mutex::new(None);
-    let Some(bin) = binary(state).await else { return String::new() };
-    let modified = std::fs::metadata(&bin).and_then(|m| m.modified()).ok();
-    let cached = HELP.lock().unwrap_or_else(|e| e.into_inner()).clone()
-        .filter(|(b, m, at, _)| *b == bin && *m == modified && at.elapsed() < std::time::Duration::from_secs(3600)).map(|(_, _, _, h)| h);
-    if let Some(h) = cached { return h; }
-    let mut c = cmd(&bin);
-    c.arg("--help");
-    let h = crate::proc::output_timeout(&mut c, std::time::Duration::from_secs(15)).await.ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-    if !h.is_empty() { *HELP.lock().unwrap_or_else(|e| e.into_inner()) = Some((bin, modified, std::time::Instant::now(), h.clone())); }
-    h
+    run_help(state).await.unwrap_or_default()
 }
+
+/// Is this a real `--help` (it lists `--print`, the flag every run is started with), and not an
+/// empty, cut-off or error answer?
+pub fn usable_help(h: &str) -> bool { supports(h, "--print") }
+
+/// The last good help kept in the daemon's folder, for when the program cannot answer right now
+/// (a slow cold start, a self-update under way).
+fn saved_help_file() -> PathBuf { crate::paths::home().join("assistant-help.json") }
+
+fn read_saved_help(file: &Path) -> Option<String> {
+    let v: Value = serde_json::from_str(&std::fs::read_to_string(file).ok()?).ok()?;
+    v["help"].as_str().map(str::to_string).filter(|h| usable_help(h))
+}
+
+fn write_saved_help(file: &Path, bin: &Path, help: &str) {
+    let text = json!({"bin": bin.to_string_lossy(), "help": help}).to_string();
+    crate::log::ok_or_warn("could not keep the assistant's list of options", crate::paths::write_atomic(file, text.as_bytes(), true));
+}
+
+/// Which help a run is built from: a fresh answer (asked at most twice), else the last good one
+/// this daemon read, else the one kept on disk. `None`: nothing usable, the run must not start.
+/// The flag says whether the answer is fresh.
+pub async fn resolve_help<F, Fut>(mut ask: F, last: Option<String>, saved: impl FnOnce() -> Option<String>) -> Option<(String, bool)>
+where F: FnMut() -> Fut, Fut: std::future::Future<Output = String> {
+    for _ in 0..2 {
+        let h = ask().await;
+        if usable_help(&h) { return Some((h, true)); }
+    }
+    last.filter(|h| usable_help(h)).or_else(saved).map(|h| (h, false))
+}
+
+/// `claude --help` of the installed assistant program, for starting it. Asked once per program
+/// (and again when the program file changes, or after an hour), never without a time limit:
+/// opening a chat must not wait on it again and again. An empty, failed or timed-out answer is
+/// asked once more, then the last good help stands in; with none, this is an error, so a run is
+/// never started without its safety flags or its spending limit.
+pub async fn run_help(state: &AppState) -> anyhow::Result<String> {
+    static HELP: std::sync::Mutex<Option<(PathBuf, Option<std::time::SystemTime>, std::time::Instant, String)>> = std::sync::Mutex::new(None);
+    let Some(bin) = binary(state).await else { return Err(crate::tr::err("assistant.missing", &[])) };
+    let modified = std::fs::metadata(&bin).and_then(|m| m.modified()).ok();
+    let remembered = HELP.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some((_, _, _, h)) = remembered.as_ref().filter(|(b, m, at, _)| *b == bin && *m == modified && at.elapsed() < std::time::Duration::from_secs(3600)) {
+        return Ok(h.clone());
+    }
+    let last = remembered.map(|(_, _, _, h)| h);
+    let ask = || async {
+        let mut c = cmd(&bin);
+        c.arg("--help");
+        crate::proc::output_timeout(&mut c, std::time::Duration::from_secs(15)).await.ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+    };
+    match resolve_help(ask, last.clone(), || read_saved_help(&saved_help_file())).await {
+        Some((h, true)) => {
+            if last.as_deref() != Some(h.as_str()) { write_saved_help(&saved_help_file(), &bin, &h); }
+            *HELP.lock().unwrap_or_else(|e| e.into_inner()) = Some((bin, modified, std::time::Instant::now(), h.clone()));
+            Ok(h)
+        }
+        Some((h, false)) => {
+            crate::log::warn("the assistant did not list its options (twice); using the last list it gave");
+            Ok(h)
+        }
+        None => {
+            crate::log::error("the assistant did not list its options (twice) and none was kept; not starting it");
+            Err(crate::tr::err("assistant.help_unreadable", &[]))
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "claude_help_tests.rs"]
+mod help_tests;
 
 /// Pull the choices for a flag out of `claude --help`, so the UI never ships a
 /// stale static list. Returns models, efforts and permission modes.
@@ -1085,6 +1145,17 @@ pub fn profile_rules(p: &Profile, dirs: &[&Path]) -> (Vec<String>, Vec<String>) 
     let mut seen = std::collections::HashSet::new();
     deny.retain(|r| seen.insert(r.clone()));
     (deny, allow)
+}
+
+/// The `--max-budget-usd` value for a run asked to keep to `max` dollars. A limit that was asked
+/// for and that the installed program (`help`) cannot hold is an error: the run does not start
+/// without it.
+pub fn budget_arg(max: Option<f64>, help: &str) -> anyhow::Result<Option<String>> {
+    match max.filter(|b| b.is_finite() && *b > 0.0) {
+        Some(b) if supports(help, "--max-budget-usd") => Ok(Some(format!("{b:.2}"))),
+        Some(_) => Err(crate::tr::err("assistant.no_budget_limit", &[])),
+        None => Ok(None),
+    }
 }
 
 /// The flags a profile adds to the command line, as far as the installed program (`help`) has them.
@@ -1658,7 +1729,9 @@ pub async fn start_run(
     // Who answers when something needs permission: the user, in the chat (`approvals.rs`), for an
     // ordinary chat whose program can ask that way; nobody (it is refused) for everything else.
     let hook = state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let help = if hook.is_some() { String::new() } else { help_text(&state).await };
+    // (Codex runs and the tests' stand-in never read Claude Code's help; a real Claude Code run is
+    // refused when its help cannot be read, never started without the flags it gives.)
+    let help = if hook.is_some() || on_codex { String::new() } else { run_help(&state).await? };
     // (Codex has no way to ask: its runs never get the prompt tool.)
     let asks = !on_codex && crate::approvals::wanted(&kind, &mode, &prof)
         && (hook.is_some() || (crate::approvals::supported(&help) && crate::approvals::port() != 0));
@@ -1752,11 +1825,10 @@ pub async fn start_run(
     }
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
-    let budget = match spec.options.max_budget_usd.filter(|b| b.is_finite() && *b > 0.0) {
-        Some(b) if has_flag(&state, "--max-budget-usd").await => Some(format!("{b:.2}")),
-        Some(_) => { crate::log::warn(format!("run {}: this version of the assistant cannot limit spending; only the time limit applies", spec.chat_id)); None }
-        None => None,
-    };
+    let budget = budget_arg(spec.options.max_budget_usd, &help).map_err(|e| {
+        crate::log::error(format!("run {}: not started — this version of the assistant cannot limit spending", spec.chat_id));
+        e
+    })?;
     // The rules always travel in a private file, never on the command line: they grow with the
     // library (private folders, other chats' attachments), one argument may only be so long, and
     // every account on this computer can read a program's command line. The extra instructions
@@ -2402,7 +2474,7 @@ async fn complete_with(state: &AppState, prompt: &str, model: Option<String>, en
     let mut c = cmd(&bin);
     // Right after `-p`, so `--disallowedTools` (which takes a list) is followed by another flag.
     let mut args = one_shot_args(model.as_deref(), language_note(&state.settings.read().await.language));
-    args.splice(1..1, one_shot_guard(&help_text(state).await));
+    args.splice(1..1, one_shot_guard(&run_help(state).await?));
     c.current_dir(crate::paths::home()).args(args);
     provider.apply(&mut c);
     c.stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
