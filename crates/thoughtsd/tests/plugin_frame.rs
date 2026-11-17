@@ -56,3 +56,14 @@ fn the_frame_runtime_hash_is_the_same_in_the_frame_page_and_in_the_app_policy() 
     let frames = app_policy.split(';').map(str::trim).find(|d| d.starts_with("frame-src")).expect("frame-src");
     assert_eq!(frames, "frame-src 'self' blob:");
 }
+
+#[test]
+fn the_app_policy_allows_no_asset_protocol() {
+    // The shell does not turn on Tauri's asset protocol (no `protocol-asset` feature, no
+    // `assetProtocol` setting) and the UI never calls `convertFileSrc`, so the window's policy must
+    // not allow `asset:` or `http://asset.localhost` (sources nothing serves are only extra room).
+    let conf = repo("src-tauri/tauri.conf.json");
+    let app_policy = attr(&conf, "\"csp\": \"");
+    assert!(!app_policy.contains("asset"), "the app policy allows the asset protocol again: {app_policy}");
+    assert!(!repo("src-tauri/Cargo.toml").contains("protocol-asset"), "the asset protocol was switched on: update the policy and this test together");
+}
