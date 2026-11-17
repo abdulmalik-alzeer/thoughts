@@ -1068,7 +1068,10 @@
     transition: grid-template-columns 220ms cubic-bezier(.33, 1, .68, 1); }
   .shell.collapsed { grid-template-columns: 50px 1fr; }
   .shell::before { content: ''; grid-area: 1 / 1; min-width: 0; background: var(--sidebar-glass); border-inline-end: 1px solid var(--hairline);
-    -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%); }
+    -webkit-backdrop-filter: blur(30px) saturate(180%); backdrop-filter: blur(30px) saturate(180%);
+    /* Its backdrop filter makes it a layer of its own, which is painted above plain grid items: kept
+       behind them, or the sidebar's contents sit under the glass (dimmed, and not clickable). */
+    z-index: -1; }
   :global(html.native.os-macos) .shell::before { background: color-mix(in srgb, var(--sidebar) 40%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
   :global(html.native:not(.os-macos)) .shell::before { background: var(--sidebar); -webkit-backdrop-filter: none; backdrop-filter: none; }
   /* Positioned, so they paint above the glass: its backdrop filter makes it a stacking context,

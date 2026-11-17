@@ -1060,6 +1060,15 @@
   .split { position: relative; display: flex; min-width: 0; }
   .split > .wrap { flex: 1 1 auto; min-width: 0; }
   .wrap { position: relative; display: flex; flex-direction: column; height: calc(100vh - 26px); padding: 0 24px 16px; max-width: 980px; margin: 0 auto; }
+  /* An open chat fills only what is left below the notices above the page (signed out, chats to
+     wrap, usage…): with the whole window's height it pushed the message box and Send below the
+     window's edge. */
+  @media screen {
+    :global(.mainscroll:has(> .view > .split)) { display: flex; flex-direction: column; }
+    :global(.mainscroll > .view:has(> .split)) { flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; }
+    .split { flex: 1 1 0; min-height: 0; }
+    .split > .wrap, .split > :global(.pane) { height: auto; }
+  }
   header { padding-bottom: 8px; border-bottom: var(--border-w) solid var(--border); }
   header select { width: auto; }
   .h { margin: 0; font-size: inherit; font-weight: inherit; letter-spacing: 0; line-height: inherit; min-width: 0; display: flex; border-radius: 6px; }

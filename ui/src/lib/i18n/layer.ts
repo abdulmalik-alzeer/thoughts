@@ -118,7 +118,7 @@ export default {
     'layer.signalsToggle': 'Keep these notes and show suggestions',
 
     // app updates
-    'layer.appUpdatesHint': 'When you install a new version, your customisations are kept: anything you changed yourself is never overwritten without asking. To hear about new versions, switch on the weekly check under Settings › Maintenance.',
+    'layer.appUpdatesHint': 'When you install a new version, your customisations are kept: anything you changed yourself is never overwritten without asking. To hear about new versions, switch on “Check for new versions automatically” under Settings › Maintenance.',
     'layer.upd.check': 'Check for updates',
     'layer.upd.desktopOnly': 'Updates are only available in the desktop app.',
     'layer.upd.notConfigured': 'Updates aren’t set up in this build yet.',
@@ -312,7 +312,7 @@ export default {
     'layer.signalsBody': 'يدوّن التطبيق الصفحات التي تفتحها والأزرار السريعة التي تستخدمها — ولا يدوّن أبداً ما تكتبه — ليقترح عليك تحسينات صغيرة. تبقى هذه الملاحظات على هذا الجهاز ولا تُرسل إلينا، ولا يطّلع المساعد إلا على ملخص قصير لأعدادها حين تقبل اقتراحاً يعتمد عليها، مثل الصيانة الشهرية.',
     'layer.signalsToggle': 'احتفظ بهذه الملاحظات واعرض الاقتراحات',
 
-    'layer.appUpdatesHint': 'حين تثبّت إصداراً جديداً تبقى تخصيصاتك محفوظة: ما غيّرته بنفسك لا يُستبدل أبداً دون سؤالك. ولتعرف بصدور الإصدارات الجديدة، فعّل التحقق الأسبوعي من الإعدادات › الصيانة.',
+    'layer.appUpdatesHint': 'حين تثبّت إصداراً جديداً تبقى تخصيصاتك محفوظة: ما غيّرته بنفسك لا يُستبدل أبداً دون سؤالك. ولتعرف بصدور الإصدارات الجديدة، فعّل «التحقق تلقائياً من وجود إصدارات جديدة» من الإعدادات › الصيانة.',
     'layer.upd.check': 'التحقق من التحديثات',
     'layer.upd.desktopOnly': 'التحديثات متاحة في تطبيق سطح المكتب فقط.',
     'layer.upd.notConfigured': 'التحديثات غير مهيأة في هذه النسخة بعد.',

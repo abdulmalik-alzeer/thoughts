@@ -19,7 +19,8 @@
   loadLibraryWeek();
   const autoStart = $derived(dayName(autoWeekStart()));
   const autoEnd = $derived(daysName(autoWeekend()));
-  const example = fmtHijri(new Date(), { day: 'numeric', month: 'long', year: 'numeric' });
+  // Derived, so switching the language on this page shows the example in the new language.
+  const example = $derived(fmtHijri(new Date(), { day: 'numeric', month: 'long', year: 'numeric' }));
 
   let lastAlarm = cal.alarm || '09:00';
 </script>
