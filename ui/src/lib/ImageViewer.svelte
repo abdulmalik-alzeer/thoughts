@@ -256,8 +256,8 @@
 
 <style>
   /* Above every other dialog: a picture can be opened from one. */
-  .iv-back { z-index: 95; place-items: stretch; background: color-mix(in srgb, var(--bg) 86%, transparent); padding: 0; }
-  .iv { display: grid; grid-template-rows: auto 1fr auto; width: 100vw; height: 100vh; outline: none; color: var(--fg); }
+  .iv-back { z-index: 95; place-items: stretch; grid-template: minmax(0, 1fr) / minmax(0, 1fr); background: color-mix(in srgb, var(--bg) 86%, transparent); padding: 0; }
+  .iv { display: grid; grid-template-rows: auto 1fr auto; width: 100%; height: 100%; min-width: 0; min-height: 0; outline: none; color: var(--fg); }
   .iv-bar { display: flex; align-items: center; gap: 10px; padding: 10px 12px; padding-inline-start: 18px;
     background: var(--glass); -webkit-backdrop-filter: blur(30px) saturate(160%); backdrop-filter: blur(30px) saturate(160%);
     border-bottom: var(--border-w) solid var(--hairline); min-width: 0; }
