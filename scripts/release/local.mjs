@@ -20,7 +20,8 @@
 // on GitHub's `main` that this Mac does not have, and waits until you have read them.
 //
 // Before it: set the version (scripts/set-version.mjs), write the entry in docs/CHANGELOG.md and
-// docs/ar/CHANGELOG.md (it becomes the update dialog's text and the release page), commit.
+// docs/ar/CHANGELOG.md (it becomes the release page and the new version's Help › What's new; it is
+// also written into latest.json, whose notes only copies older than 0.1.0 show), commit.
 //
 // It needs:
 //   - the updater's private key in ~/.tauri/thoughts-updater.key, or TAURI_SIGNING_PRIVATE_KEY
@@ -103,8 +104,8 @@ export function preflightProblems({ branch, dirty, version, head, tagAt, key, pa
   if (key && password === null) problems.push(`The key's password was not found. Set TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or save it in the keychain: security add-generic-password -s ${KEYCHAIN_SERVICE} -a release -w`);
   if (!publicKey) problems.push('src-tauri/updater.pub is missing. Commit the public key (the .pub file made with the private key): it is not secret, and every build reads it from there.');
   if (key && publicKey && password !== null && keysMatch === false) problems.push('The private key does not match src-tauri/updater.pub (or its password is wrong). A copy built with the wrong public key can never be updated.');
-  if (!changelog) problems.push(`docs/CHANGELOG.md has no entry "## ${version}". It becomes the text of the update dialog and of the release page.`);
-  if (!changelogAr) problems.push(`docs/ar/CHANGELOG.md has no entry "## ${version}". Copies set to Arabic show it in the update dialog.`);
+  if (!changelog) problems.push(`docs/CHANGELOG.md has no entry "## ${version}". It becomes the release page and this version's Help › What's new (and the update notes copies older than 0.1.0 show).`);
+  if (!changelogAr) problems.push(`docs/ar/CHANGELOG.md has no entry "## ${version}". It becomes this version's Help › What's new in Arabic (and the update notes Arabic copies older than 0.1.0 show).`);
   return problems;
 }
 

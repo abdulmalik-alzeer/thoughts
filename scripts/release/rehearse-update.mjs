@@ -299,7 +299,7 @@ function report(results, facts) {
   if (by.public) {
     const r = by.public;
     row('An update from the public address installs and the new version starts', yes(r.ok && r.newStarted), r.ok ? `0.0.90 became ${r.installed} in ${r.seconds} s, with no password and nothing to click` : `installed version is ${r.installed || 'unknown'}; ${r.install?.error ?? why(r)}`);
-    row('The update dialog would show the release notes, in both languages', yes(!!r.check?.notes && !!r.check?.notesAr), r.check?.notes ? `"${String(r.check.notes).slice(0, 40)}…"` : '');
+    row('The update check carries the release notes in both languages (shown only by copies older than 0.1.0)', yes(!!r.check?.notes && !!r.check?.notesAr), r.check?.notes ? `"${String(r.check.notes).slice(0, 40)}…"` : '');
     row('The new copy carries no quarantine mark', yes(!r.quarantine));
     row('The background service is the new version afterwards', r.service ? yes(r.service === NEW) : 'not seen', r.service ? `it reports ${r.service}` : 'the service had not started when the copy closed');
     const k = r.keychainRead;
@@ -371,8 +371,8 @@ if (isMain(import.meta.url)) {
     // as the released app is today.
     const identity = value('--identity');
     // `--by-hand public` or `--by-hand fallback`: nothing is clicked for you. The old version is
-    // opened and waits for you to choose Check for Updates… in its menu, so the dialog, the notes,
-    // the progress line and the restart can be seen as a person sees them.
+    // opened and waits for you to choose Check for Updates… in its menu, so the dialog (from 0.1.0 the
+    // app's own words and a link to the release page, not the notes), the progress line and the restart can be seen as a person sees them.
     const byHand = args.includes('--by-hand') ? (value('--by-hand') === 'fallback' ? 'fallback' : 'public') : null;
     if (!existsSync(where)) stop(`${where} does not exist`);
     if (existsSync(join(where, `${NAME}.app`))) stop(`${join(where, `${NAME}.app`)} already exists: an earlier rehearsal did not clean up. Look at it, remove it, and run this again.`);

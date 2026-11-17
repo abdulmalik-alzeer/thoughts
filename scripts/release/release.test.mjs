@@ -470,7 +470,7 @@ A small release.
 Older.
 `;
 
-test('notes: the changelog entry of a version becomes the text of the update dialog', () => {
+test('notes: the changelog entry of a version becomes the plain-text notes of latest.json (shown by copies before 0.1.0)', () => {
   assert.equal(changelogSection('1.2.2', CHANGELOG), 'Older.');
   assert.equal(changelogSection('9.9.9', CHANGELOG), null);
   assert.equal(changelogSection('1.2', CHANGELOG), null, 'only the exact version');

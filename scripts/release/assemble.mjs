@@ -38,9 +38,11 @@ export function changelogSection(version, changelog) {
   return lines.slice(start + 1, end).join('\n').trim() || null;
 }
 
-/** The same entry as the update dialog shows it. The dialog shows text as it is, so heading and
- *  emphasis marks go, bullets become "•", links keep their words, and it is cut where a dialog
- *  stops being readable. Null when the changelog has no entry for `version`. */
+/** The entry as plain text, for the `notes` of latest.json. Copies older than 0.1.0 show those
+ *  notes in their update dialog, as they are, so heading and emphasis marks go, bullets become
+ *  "•", links keep their words, and it is cut where a dialog stops being readable. (From 0.1.0 the
+ *  dialog shows only the app's own words and a link to the release page; each version's own
+ *  change log is in Help › What's new.) Null when the changelog has no entry for `version`. */
 export function notesFor(version, changelog, { max = 1200 } = {}) {
   const section = changelogSection(version, changelog);
   if (!section) return null;
@@ -62,8 +64,9 @@ export function notesFor(version, changelog, { max = 1200 } = {}) {
 }
 
 /** The updater manifest (Tauri's static JSON format) for these builds. `notes` is what the
- *  update dialog of an installed copy shows; `notesAr` the same for a copy set to Arabic (an
- *  extra field the updater library ignores and the app reads). */
+ *  update dialog of a copy older than 0.1.0 shows; `notesAr` the same for such a copy set to
+ *  Arabic (an extra field the updater library ignores). Copies from 0.1.0 on never show either:
+ *  the manifest is not signed. Both are still written, for the older copies. */
 export function updaterManifest({ infos, version, tag, repo, signatureOf, server = 'https://github.com', date = new Date(), notes = null, notesAr = null }) {
   const platforms = {};
   for (const info of infos) {
