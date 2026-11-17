@@ -1,0 +1,13 @@
+{
+  "title": "Connect your email account",
+  "intro": "You do not need this to write emails. The Email writing routine already ends every draft with an Open in Mail link that works with any mail app, with nothing to connect. A connection only adds something more: in chats you start yourself, the assistant can look things up in your mailbox, such as the last email from someone.",
+  "steps": [
+    "Decide whether you want it. With a connection, the assistant can read your email in your own chats when you ask it to. Tasks Thoughts runs by itself never use it.",
+    "Connections are added in your assistant program's own settings (Claude Code), not in Thoughts. Thoughts never connects to your email, never sends anything and never keeps a password.",
+    "Use the official connection from your email provider, such as Google for Gmail or Microsoft for Outlook, or one from a source you trust.",
+    "Sign in on your provider's own page. If anything asks you to type your email password into a chat, stop: that is never needed.",
+    "Back in Thoughts, start a new chat and ask, for example, \"Find the last email from Sara\". The assistant asks before it uses the connection.",
+    "To stop it, remove the connection in the same place you added it."
+  ],
+  "chatPrompt": "Walk me through connecting my email account to Claude Code, so you can read my email in chats when I ask. First ask me which email service I use. Explain each step in plain words and wait for me after each one. I will do every sign-in myself, on my email provider's own page. Never ask me for my password or any code, and do not change any settings or files yourself."
+}

@@ -9,6 +9,7 @@ pub mod api;
 pub mod applayer;
 pub mod approvals;
 pub mod assistant;
+pub mod automations;
 pub mod askpass;
 pub mod care_api;
 pub mod changes;
