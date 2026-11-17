@@ -6,6 +6,7 @@ import { lang, t, tn } from './i18n';
 import { checkPending } from './layer';
 import { withBusyPrompt } from './shell';
 import { offerDownload } from './maintenance';
+import { download } from './updateProgress.svelte';
 
 let checking = false;
 
@@ -33,7 +34,10 @@ export async function checkAppUpdate(manual = false) {
       note: t('layer.upd.note'), confirmLabel: t('layer.upd.install'), cancelLabel: t('layer.later'),
     });
     if (!ok) return;
-    toast(t('layer.upd.installing'), { key: 'upd', stay: true });
+    // The download shows as one bar in Settings › Maintenance, which is opened for it.
+    app.toasts = app.toasts.filter((x) => x.key !== 'upd');
+    Object.assign(download, { active: true, got: 0, total: 0 });
+    go({ kind: 'settings', id: 'maintenance' });
     const stopProgress = await showProgress();
     try {
       const done = await withBusyPrompt((force) => invoke('update_install', { force }), 'update');
@@ -43,7 +47,7 @@ export async function checkAppUpdate(manual = false) {
       const problem = /^PROBLEM::([a-z-]+)::([\s\S]*)$/.exec(said);
       if (problem) sayProblem(problem[1], problem[2]);
       else toast(t('layer.upd.installFailed'), { kind: 'error', key: 'upd', detail: said });
-    } finally { stopProgress(); }
+    } finally { stopProgress(); download.active = false; }
   } finally { checking = false; }
 }
 
@@ -57,20 +61,15 @@ function sayProblem(code: string, detail = '') {
   toast(sentence === key ? t('layer.upd.checkFailed') : sentence, { key: 'upd', kind: calm ? undefined : 'error', detail: detail || undefined });
 }
 
-/** While an update downloads, say how far it is (the shell reports each piece as it arrives).
- *  Returns what stops the reports. */
+/** While an update downloads, keep how far it is (the shell reports each piece as it arrives) for
+ *  the bar in Settings › Maintenance. Returns what stops the reports. */
 async function showProgress(): Promise<() => void> {
   try {
     const { listen } = await import('@tauri-apps/api/event');
-    let shown = -1;
-    const mb = (n: number) => (n / 1048576).toFixed(n >= 10 * 1048576 ? 0 : 1);
     return await listen<{ downloaded?: number; total?: number | null }>('update-progress', (e) => {
       const got = Number(e.payload?.downloaded ?? 0), total = Number(e.payload?.total ?? 0);
-      if (!got || !total) return;
-      const step = Math.floor((got / total) * 20); // a new line every 5%, not for every piece
-      if (step === shown) return;
-      shown = step;
-      toast(t('care.upd.progress', { done: mb(got), total: mb(total) }), { key: 'upd', stay: true });
+      if (got > 0) download.got = got;
+      if (total > 0) download.total = total;
     });
   } catch { return () => {}; }
 }

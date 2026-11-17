@@ -26,6 +26,7 @@
   import AccessKeys from './AccessKeys.svelte';
   import UsageSettings from './usage/UsageSettings.svelte';
   import { checkAppUpdate } from '../lib/updates';
+  import { download } from '../lib/updateProgress.svelte';
 
   let { reload }: { reload: () => Promise<void> } = $props();
 
@@ -75,6 +76,8 @@
 
   let tab = $state<Cat>((cats as readonly string[]).includes(app.view.id ?? '') ? (app.view.id as Cat) : 'general');
   let query = $state('');
+  // An update that starts downloading shows its bar under Maintenance, also when Settings was open elsewhere.
+  $effect(() => { if (download.active) { tab = 'maintenance'; query = ''; } });
   let s = $state<any>(fresh());
   let base = $state<any>(fresh()); // last saved state; `s` is the draft
   let opts = $state<any>({ models: [], efforts: [], permissionModes: [] });
@@ -1051,7 +1054,15 @@
         <label class="check"><input type="checkbox" bind:checked={s.releaseCheck} aria-describedby="st-release-hint" /> {t('care.upd.toggle')}</label>
         <p class="muted sm" id="st-release-hint">{t('care.upd.hint')}</p>
         {#if app.status?.newerVersion?.version}<p class="muted sm" role="status">{t('care.upd.available', { version: app.status.newerVersion.version })}</p>{/if}
-        <button type="button" class="btn" onclick={() => checkAppUpdate(true)}><Icon name="sync" size={14} /> {t('care.upd.check')}</button>
+        {#if download.active}
+          {@const mb = (n: number) => (n / 1048576).toFixed(n >= 10 * 1048576 ? 0 : 1)}
+          {@const known = download.total > 0 && download.got > 0}
+          {@const label = known ? t('care.upd.progress', { done: mb(download.got), total: mb(download.total) }) : t('layer.upd.installing')}
+          <progress class="upd-bar" max={known ? download.total : undefined} value={known ? Math.min(download.got, download.total) : undefined} aria-label={label}></progress>
+          <p class="muted sm">{label}</p>
+        {:else}
+          <button type="button" class="btn" onclick={() => checkAppUpdate(true)}><Icon name="sync" size={14} /> {t('care.upd.check')}</button>
+        {/if}
       </div>
     {/if}
     <Maintenance show={(...keys) => vis(c, ...keys)} open={(to) => { tab = to; query = ''; if (to === 'ai') advOpen.ai = true; }} />
@@ -1116,6 +1127,7 @@
 </div>
 
 <style>
+  .upd-bar { display: block; width: 100%; max-width: 420px; height: 8px; margin-block: 10px 6px; accent-color: var(--accent); }
   .settings { display: grid; grid-template-columns: 220px 1fr; min-height: calc(100vh - 26px); }
   .lockable { border: 0; padding: 0; margin: 0; min-width: 0; }
   .ro { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 14px; font-size: 13px; border-color: var(--accent-2); }
