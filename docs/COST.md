@@ -61,7 +61,7 @@ If you are on a Claude plan and reach its usage limit, Thoughts says so in plain
 
 ## Codex
 
-Codex reports how many tokens a run used, but not what they cost. Thoughts estimates the cost from the providers' published API prices, and a Codex chat shows that estimate in its usage circle, marked as an estimate; the Usage page includes it too. A model with no published price is left uncounted rather than guessed. Codex runs are not part of the month total in Settings › Privacy & cost, and the monthly limit cannot stop them: an automatic task on Codex has only its time limit. Background summaries on Codex use the model chosen for summaries (or Codex's own) at the lowest effort Codex offers. What you pay is set by your ChatGPT plan or your OpenAI account; their own usage pages are the authority.
+Codex reports how many tokens a run used, but not what they cost. Thoughts estimates the cost from the providers' published API prices, and a Codex chat shows that estimate in its usage circle, marked as an estimate; the Usage page includes it too. A model with no published price is left uncounted rather than guessed. The estimate also counts toward the month total in Settings › Privacy & cost and the monthly spending limit, so at the limit automatic tasks and summaries on Codex stop too. One automatic task on Codex cannot be held to its own spending limit, only to its time limit. Background summaries on Codex use the model chosen for summaries (or Codex's own) at the lowest effort Codex offers. What you pay is set by your ChatGPT plan or your OpenAI account; their own usage pages are the authority.
 
 ## Keeping usage down
 

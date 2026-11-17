@@ -242,15 +242,21 @@ impl AppState {
     /// Record what a finished run cost against the current month.
     pub async fn add_usage(&self, cost_usd: f64) {
         if !(cost_usd.is_finite() && cost_usd > 0.0) { return; }
-        {
-            let mut u = self.usage.lock().await;
-            *u.entry(month_key()).or_insert(0.0) += cost_usd;
-            if let Ok(text) = serde_json::to_string_pretty(&*u) {
-                let _ = crate::paths::write_atomic(&crate::paths::usage_file(), text.as_bytes(), true);
-            }
-        }
+        self.add_usage_to(cost_usd, crate::paths::usage_file()).await;
         // The window shows the new figure, and the spending guard may have something to say.
         crate::spend::after_cost(self).await;
+    }
+
+    /// Add to this month and save the ledger to `file`. The save (with its fsync) runs off the
+    /// async runtime, and the ledger stays locked until it is written: two runs ending at once each
+    /// save a figure that holds the other's cost or is followed by one that does, so none is lost.
+    async fn add_usage_to(&self, cost_usd: f64, file: PathBuf) {
+        let mut u = self.usage.lock().await;
+        *u.entry(month_key()).or_insert(0.0) += cost_usd;
+        let Ok(text) = serde_json::to_string_pretty(&*u) else { return };
+        let saved = tokio::task::spawn_blocking(move || crate::paths::write_atomic(&file, text.as_bytes(), true)).await;
+        if !matches!(saved, Ok(Ok(()))) { crate::log::warn("usage: could not save this month's spending"); }
+        drop(u);
     }
 
     /// This calendar month's AI spend in USD.
@@ -333,5 +339,24 @@ mod tests {
         let shown = serde_json::to_string(&st.month_cost().await).unwrap();
         assert_eq!(shown, "0.0");
         assert_eq!(crate::spend::usage_json(&st).await["monthCostUsd"].to_string(), "0.0");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn runs_ending_at_once_each_count_and_the_saved_ledger_has_them_all() {
+        let st = Arc::new(AppState::for_test());
+        let dir = std::env::temp_dir().join(format!("thoughts-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("usage.json");
+        let mut tasks = vec![];
+        for _ in 0..20 {
+            let (st, file) = (st.clone(), file.clone());
+            tasks.push(tokio::spawn(async move { st.add_usage_to(0.25, file).await }));
+        }
+        for t in tasks { t.await.unwrap(); }
+        assert!((st.month_cost().await - 5.0).abs() < 1e-9);
+        let saved: BTreeMap<String, f64> = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert!((saved[&month_key()] - 5.0).abs() < 1e-9, "the last save holds every run's cost: {saved:?}");
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

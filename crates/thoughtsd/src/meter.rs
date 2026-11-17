@@ -309,16 +309,19 @@ impl CodexRun {
     }
 }
 
-/// Keep what a Codex run used, and the plan's limits it reported.
-fn keep_codex(state: &AppState, chat: Option<&str>, session: Option<String>, mut run: CodexRun, chosen: Option<String>) {
+/// Keep what a Codex run used, and the plan's limits it reported. Gives the estimated cost, which
+/// the caller adds to the month's spending (`AppState::add_usage`): the record here is for the
+/// usage page, the month's figure for the spending limit, and neither is ever added to the other.
+fn keep_codex(state: &AppState, chat: Option<&str>, session: Option<String>, mut run: CodexRun, chosen: Option<String>) -> Option<f64> {
     if let Some((rl, at)) = run.limits.take() { update_plans(state, CODEX, codex_windows(&rl, at)); }
     let tokens = run.tokens();
-    if tokens.is_empty() { return; }
+    if tokens.is_empty() { return None; }
     let model = run.model.clone().or(chosen).unwrap_or_default();
     let cost_usd = run.cost(&model);
     let rec = Record { t: Utc::now(), provider: CODEX.into(), chat: chat.map(String::from), session, model, tokens, cache_write_long: 0, cost_usd, estimated: true };
     if let Err(e) = append(&crate::paths::home(), &[rec]) { crate::log::warn(format!("usage: could not keep a run's figures: {e}")); }
     changed(state);
+    cost_usd
 }
 
 /// After a Codex run the app started (a chat, a wrap…). `chosen` is the model the chat asked for.
@@ -328,15 +331,15 @@ pub async fn record_codex(state: &AppState, chat: Option<&str>, session: Option<
         let from_file = tokio::task::spawn_blocking(move || crate::codex::session_file(&home, &sid).map(|p| read_rollout(&p))).await.ok().flatten();
         if let Some(f) = from_file { run.fill_from(f); }
     }
-    keep_codex(state, chat, session, run, chosen);
+    if let Some(c) = keep_codex(state, chat, session, run, chosen) { state.add_usage(c).await; }
 }
 
 /// A one-shot Codex answer: its whole output, and its session file read before it was removed.
-pub fn record_codex_one_shot(state: &AppState, stdout: &str, chosen: Option<String>, file: Option<CodexRun>) {
+pub async fn record_codex_one_shot(state: &AppState, stdout: &str, chosen: Option<String>, file: Option<CodexRun>) {
     let mut run = CodexRun::default();
     for l in stdout.lines() { run.feed(l); }
     if let Some(f) = file { run.fill_from(f); }
-    keep_codex(state, None, None, run, chosen);
+    if let Some(c) = keep_codex(state, None, None, run, chosen) { state.add_usage(c).await; }
 }
 
 // ---------- plan limits ----------
@@ -986,5 +989,27 @@ mod tests {
         let none = scan(&d.join("nope"), &d.join("nope2"), since);
         assert_eq!((none.files, none.claude_found), (0, false));
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_codex_run_counts_once_on_the_usage_page_and_once_in_the_month() {
+        let st = AppState::for_test();
+        let chat = format!("codex-spend-{}", uuid::Uuid::new_v4());
+        let mut run = CodexRun::default();
+        run.feed(r#"{"type":"turn.completed","usage":{"input_tokens":200000,"cached_input_tokens":100000,"output_tokens":20000}}"#);
+        let est = run.cost("gpt-5.5").expect("a priced model");
+        assert!(est > 0.0);
+        record_codex(&st, Some(&chat), None, run, Some("gpt-5.5".into())).await;
+        // The month's figure (the spending limit) has the estimate once.
+        assert!((st.month_cost().await - est).abs() < 1e-9, "{} vs {est}", st.month_cost().await);
+        // The usage page reads only the records, never the month's figure: the run is there once.
+        let mine: Vec<Record> = read(&crate::paths::home()).into_iter().filter(|r| r.chat.as_deref() == Some(chat.as_str())).collect();
+        assert_eq!(mine.len(), 1);
+        let page = summarise(&combine(&mine, vec![], &HashMap::new()), &HashMap::new(), Utc::now() - chrono::Duration::days(1), Utc::now());
+        let shown = page["totals"]["codex"]["costUsd"].as_f64().unwrap();
+        assert!((shown - (est * 10_000.0).round() / 10_000.0).abs() < 1e-9, "{shown} vs {est}");
+        // A run with nothing used adds nothing.
+        record_codex(&st, Some(&chat), None, CodexRun::default(), Some("gpt-5.5".into())).await;
+        assert!((st.month_cost().await - est).abs() < 1e-9);
     }
 }

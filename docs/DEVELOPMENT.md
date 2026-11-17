@@ -324,7 +324,7 @@ when Codex is chosen.
   one (`thread.started`, `item.*`, `turn.completed`). Commands, file changes, connected tools, web
   searches and plans become the chat's `tool` / `tool_result` messages; a command the sandbox
   refused is listed as `denied` (`why: "codexSandbox"`); tokens are added to `Chat.usage_tokens`
-  (Codex reports no cost, so none is counted). Errors are told apart (`codex::problem`):
+  (Codex reports no cost; `meter::record_codex` estimates one from `prices.rs` and adds it to the month's figure with `add_usage`, never to `Chat.cost_usd`). Errors are told apart (`codex::problem`):
   signed out (`signedOut`, `provider: "codex"`), the plan's limit (`codexLimit`), offline
   (`network`), anything else in Codex's words.
 - **Sessions.** A later Codex prints its session id and has `codex exec resume <id>`. Codex 0.2x
@@ -347,8 +347,8 @@ when Codex is chosen.
   whole tree (links are never followed, `.git` is not entered); there is no cut-off a run could hide
   a kept name behind. The Claude Code backstop does the same. Codex itself keeps a
   writable folder's top-level `.git` read-only and gives sandboxed commands no network (checked
-  with `codex debug seatbelt`, which runs no model). No spending ceiling: automatic tasks on Codex
-  have only their time limits, and Codex runs are not in the month's cost.
+  with `codex debug seatbelt`, which runs no model). No per-run spending ceiling: automatic tasks on Codex
+  have only their time limits, though their estimated cost counts toward the month's limit.
 - **Moving a chat** (`PATCH /api/chats/:id {provider}`, `handoff.rs`): the old session stays
   behind (kept in `session_ids`), the model and effort become the new program's own, the mode
   stays — except Bypass, which goes back to Accept edits (the chat says so; switching it on again

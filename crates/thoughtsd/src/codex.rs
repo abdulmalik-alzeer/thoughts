@@ -1151,7 +1151,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     let listed = efforts(&state).await;
     let effort = l.spec.options.effort.clone().filter(|e| listed.is_empty() || listed.contains(e));
     if l.spec.options.max_budget_usd.is_some() {
-        crate::log::warn(format!("run {id}: Codex cannot be held to a spending limit; only the time limit applies"));
+        crate::log::warn(format!("run {id}: Codex cannot be held to a spending limit for one run; the task's time limit and the monthly spending limit still apply"));
     }
     let writable = writable_roots(&l.kind, sandbox, &l.spec.add_dirs);
     // Continue the earlier session: by its id where this Codex can, else from its file. A session
@@ -1379,7 +1379,7 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>, che
             anyhow::bail!("the assistant timed out (no answer within {} seconds)", crate::claude::COMPLETE_TIMEOUT.as_secs())
         }
     };
-    crate::meter::record_codex_one_shot(state, &String::from_utf8_lossy(&out.stdout), model, seen);
+    crate::meter::record_codex_one_shot(state, &String::from_utf8_lossy(&out.stdout), model, seen).await;
     one_shot_outcome(state, &String::from_utf8_lossy(&out.stdout), &String::from_utf8_lossy(&out.stderr))
 }
 
