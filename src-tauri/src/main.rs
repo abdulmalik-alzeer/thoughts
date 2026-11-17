@@ -1262,6 +1262,7 @@ fn main() {
             set_dock_icon,
             update_check,
             update_install,
+            ghfeed::updates_gh_state,
             refresh_menu,
             quit_app,
             set_safe_mode,

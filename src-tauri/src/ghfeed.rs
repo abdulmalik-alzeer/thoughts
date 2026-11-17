@@ -435,6 +435,66 @@ fn report(switch: &Path, api: &str) -> i32 {
     }
 }
 
+// ---------- the "Updates for testers" card (Settings › Maintenance) ----------
+
+/// What the card in Settings shows: `{on, gh, state, account?, detail?, command: {on, off}}`.
+/// It never writes the switch: that stays the terminal command's alone, so nothing in the window
+/// (a customisation, a chat) can turn the fallback on. With the switch off, `gh` is not started:
+/// it is only looked for on disk (`gh` says whether it is there), and the card shows the commands
+/// to run. With it on, the same questions as `updates gh status` are asked. `state` is `off`,
+/// `ready`, or a code of `Problem` (`gh-missing`, `gh-signed-out`, `gh-refused`, `gh-no-access`,
+/// `offline`, `failed`).
+#[tauri::command]
+pub async fn updates_gh_state() -> Value {
+    let mut v = tauri::async_runtime::spawn_blocking(|| {
+        card_state(&switch_file(), &api(), REPO, || thoughtsd::claude::find_binary(&None, "gh").is_some(), sign_in)
+    })
+    .await
+    .unwrap_or_else(|e| serde_json::json!({"on": is_on(), "gh": false, "state": "failed", "detail": e.to_string()}));
+    let exe = this_program();
+    v["command"] = serde_json::json!({
+        "on": exe.as_deref().map(|p| switch_command(p, cfg!(windows), "on")),
+        "off": exe.as_deref().map(|p| switch_command(p, cfg!(windows), "off")),
+    });
+    v
+}
+
+fn card_state(switch: &Path, api: &str, repo: &str, find_gh: impl FnOnce() -> bool, sign_in: impl FnOnce() -> Result<SignIn, Problem>) -> Value {
+    use serde_json::json;
+    let problem = |p: &Problem, gh: bool| json!({"on": true, "gh": gh, "state": p.code(), "detail": p.detail()});
+    if !is_on_in(switch) {
+        return json!({"on": false, "gh": find_gh(), "state": "off"});
+    }
+    let who = match sign_in() {
+        Ok(who) => who,
+        Err(e) => return problem(&e, e != Problem::NoGh),
+    };
+    let name = account(api, &who);
+    match latest_release(api, repo, &who) {
+        // Nothing published yet is still "ready": the account can see the repository.
+        Ok(_) | Err(Problem::NoRelease) => json!({"on": true, "gh": true, "state": "ready", "account": name}),
+        Err(e) => problem(&e, true),
+    }
+}
+
+/// This program, as a terminal can start it: the AppImage itself on Linux (the running file is
+/// inside a folder that disappears when the app quits).
+fn this_program() -> Option<PathBuf> {
+    if let Some(img) = std::env::var_os("APPIMAGE").map(PathBuf::from).filter(|p| p.is_absolute()) { return Some(img); }
+    std::env::current_exe().ok()
+}
+
+/// The terminal line that switches the fallback `word` (`on` / `off`), quoted for the terminal
+/// a person on this system opens (zsh or bash; PowerShell on Windows).
+fn switch_command(exe: &Path, windows: bool, word: &str) -> String {
+    let p = exe.to_string_lossy();
+    if windows {
+        return format!("& \"{}\" updates gh {word}", p.replace('"', "`\""));
+    }
+    let plain = !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+".contains(c));
+    if plain { format!("{p} updates gh {word}") } else { format!("'{}' updates gh {word}", p.replace('\'', "'\\''")) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,5 +752,49 @@ mod tests {
         let d = tmp();
         assert_eq!(report(&d.join(SWITCH), "http://127.0.0.1:1"), 0);
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn the_card_never_starts_gh_while_off_and_reports_what_is_missing_once_on() {
+        let d = tmp();
+        let f = d.join(SWITCH);
+        let api = pretend(|req, _| match req.path.as_str() {
+            "/user" => ok(r#"{"login":"sara"}"#),
+            "/repos/someone/thoughts/releases/latest" => status(404),
+            "/repos/someone/thoughts" => ok("{}"),
+            _ => status(404),
+        });
+        // Off: gh is only looked for, never started, and GitHub is not asked.
+        let started = std::cell::Cell::new(false);
+        let v = card_state(&f, &api.addr, R, || true, || { started.set(true); Ok(who()) });
+        assert_eq!((v["on"].clone(), v["gh"].clone(), v["state"].clone()), (Value::Bool(false), Value::Bool(true), Value::from("off")));
+        assert!(!started.get() && api.seen().is_empty());
+        assert_eq!(card_state(&f, &api.addr, R, || false, || Ok(who()))["gh"], false);
+        // The card never writes the switch.
+        assert!(!f.exists());
+        set_on_in(&f, true).unwrap();
+        // On, signed in, nothing published yet: ready, with the account's name.
+        let v = card_state(&f, &api.addr, R, || unreachable!("gh is found by signing in"), || Ok(who()));
+        assert_eq!((v["state"].as_str(), v["account"].as_str()), (Some("ready"), Some("sara")));
+        assert_eq!(card_state(&f, &api.addr, R, || true, || Err(Problem::NoGh))["state"], "gh-missing");
+        assert_eq!(card_state(&f, &api.addr, R, || true, || Err(Problem::NoGh))["gh"], false);
+        let out = card_state(&f, &api.addr, R, || true, || Err(Problem::SignedOut));
+        assert_eq!((out["state"].as_str(), out["gh"].as_bool()), (Some("gh-signed-out"), Some(true)));
+        // An account that cannot see the repository.
+        let closed_repo = pretend(|_, _| status(404));
+        assert_eq!(card_state(&f, &closed_repo.addr, R, || true, || Ok(who()))["state"], "gh-no-access");
+        let refused = pretend(|_, _| status(401));
+        assert_eq!(card_state(&f, &refused.addr, R, || true, || Ok(who()))["state"], "gh-refused");
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[test]
+    fn the_switch_command_is_quoted_for_the_terminal() {
+        let mac = Path::new("/Applications/Thoughts.app/Contents/MacOS/thoughts");
+        assert_eq!(switch_command(mac, false, "on"), "/Applications/Thoughts.app/Contents/MacOS/thoughts updates gh on");
+        assert_eq!(switch_command(Path::new("/Users/sara/My Apps/Thoughts.app/Contents/MacOS/thoughts"), false, "off"),
+            "'/Users/sara/My Apps/Thoughts.app/Contents/MacOS/thoughts' updates gh off");
+        assert_eq!(switch_command(Path::new("/tmp/it's/thoughts"), false, "on"), "'/tmp/it'\\''s/thoughts' updates gh on");
+        assert_eq!(switch_command(Path::new(r"C:\Program Files\Thoughts\thoughts.exe"), true, "on"), r#"& "C:\Program Files\Thoughts\thoughts.exe" updates gh on"#);
     }
 }
