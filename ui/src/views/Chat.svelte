@@ -15,6 +15,7 @@
   import { onMount, tick } from 'svelte';
   import FindBar from '../lib/FindBar.svelte';
   import { api, del, on, patch, post, ApiError } from '../lib/api';
+  import { approval } from '../lib/consent';
   import { md, mdClick } from '../lib/md';
   import { app, costVisible, go, refreshChats } from '../lib/store.svelte';
   import { t, tn, fmtMoney, fmtNum } from '../lib/i18n';
@@ -576,7 +577,7 @@
       chat.options.permissionMode = want;
     }
     try {
-      const saved = await patch(`/chats/${id}`, { options: chat.options, confirmBypass: turnsOn });
+      const saved = await patch(`/chats/${id}`, { options: chat.options, confirmBypass: turnsOn, approval: turnsOn ? await approval('chat-bypass', id) : undefined });
       savedPerm = saved?.options?.permissionMode ?? want;
     } catch (e) { failed(t('chat3.optionsFailed'), e); }
     // Whatever happened, the picker shows the mode the service has.

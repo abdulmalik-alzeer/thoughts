@@ -255,6 +255,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::inbox::routes())
         .merge(crate::tokens::routes())
         .merge(crate::approvals::routes())
+        .merge(crate::consent::routes())
         // maintenance: self-check, newer version, moving, removing
         .merge(crate::care_api::routes())
         // bringing in notes the user already has
@@ -651,11 +652,13 @@ pub(crate) async fn git_tool_status() -> Value {
 }
 
 #[derive(Deserialize)]
-struct TrustReq { id: String }
+struct TrustReq { id: String, #[serde(default)] approval: Option<String> }
 /// The user's yes to a trust question the daemon asked (`trust.id` of a 403 `untrusted` answer).
 /// There is no way to name a folder here: only a question the daemon itself raised can be answered,
-/// and only while the folder is still what that question listed.
+/// and only while the folder is still what that question listed. The yes itself is proven by the
+/// desktop shell (`approval`, see `consent.rs`): the app token alone trusts nothing.
 async fn trust_library(Json(t): Json<TrustReq>) -> R {
+    if !crate::consent::verify(t.approval.as_deref(), crate::consent::Action::Trust, &t.id) { return Err(crate::tr::err("consent.missing", &[]).into()); }
     crate::trust::accept(&t.id)?;
     ok()
 }
@@ -827,7 +830,8 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     validate(&new, Some(&old))?;
     // Making "bypass permissions" the default for new chats needs the user's yes (the dialog in Settings).
     if crate::settings::bypass_needs_confirm(old.ai.claude.permission_mode.as_deref(), new.ai.claude.permission_mode.as_deref())
-        && q.get("confirm").map(String::as_str) != Some(crate::settings::BYPASS_CONFIRM) {
+        && !(q.get("confirm").map(String::as_str) == Some(crate::settings::BYPASS_CONFIRM)
+            && crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::SettingsBypass, "")) {
         return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
     }
     // The login item goes first: when it is refused (an app run from a download) nothing changes.
@@ -2433,12 +2437,19 @@ fn inherited_mode(default: Option<String>, kind: &str, by_user: bool) -> Option<
 }
 
 /// "Bypass permissions" is for ordinary chats only, and switching it on needs the user's yes
-/// (`confirmed`: the client showed the warning and the user agreed). Staying on it does not.
-fn check_bypass(kind: &str, current: Option<&str>, wanted: Option<&str>, confirmed: bool) -> anyhow::Result<()> {
+/// (`confirmed`: the client showed the warning, the user agreed, and the desktop shell proved it
+/// with an approval for this chat — see `confirmed_for`). Staying on it does not. `confirmed` is
+/// only asked when a yes is needed, so an approval is not spent on a change that needs none.
+fn check_bypass(kind: &str, current: Option<&str>, wanted: Option<&str>, confirmed: impl FnOnce() -> bool) -> anyhow::Result<()> {
     if wanted != Some(crate::settings::BYPASS) { return Ok(()); }
     if kind != "chat" { return Err(crate::tr::err("bypass.chat_only", &[])); }
-    if crate::settings::bypass_needs_confirm(current, wanted) && !confirmed { return Err(crate::tr::err("bypass.unconfirmed", &[])); }
+    if crate::settings::bypass_needs_confirm(current, wanted) && !confirmed() { return Err(crate::tr::err("bypass.unconfirmed", &[])); }
     Ok(())
+}
+
+/// The client says the user confirmed (`confirm_bypass`) and the shell's approval for chat `id` proves it.
+fn confirmed_for<'a>(id: &'a str, confirm_bypass: bool, approval: Option<&'a str>) -> impl FnOnce() -> bool + 'a {
+    move || confirm_bypass && crate::consent::verify(approval, crate::consent::Action::ChatBypass, id)
 }
 
 /// A chat always carries a real permission mode. Options that name none keep the chat's `current`
@@ -2537,6 +2548,8 @@ fn null_clears<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(d: D) -> R
 struct ChatPatch { title: Option<String>, pinned: Option<bool>, archived: Option<bool>,
     #[serde(deserialize_with = "null_clears")] project_id: Option<Option<String>>,
     options: Option<RunOptions>, confirm_bypass: bool,
+    /// The desktop shell's proof of that confirmation (`consent.rs`).
+    approval: Option<String>,
     /// Move the chat to the other assistant program ("claude" | "codex"), see `handoff.rs`.
     provider: Option<String> }
 async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatch>) -> R {
@@ -2544,7 +2557,7 @@ async fn chat_patch(State(st): S, Path(id): Path<String>, Json(p): Json<ChatPatc
     if let Some(o) = &p.options {
         check_run_options(o)?;
         let (kind, current) = st.chats.with(&id, |c| (c.kind.clone(), c.options.permission_mode.clone())).await.ok_or_else(no_chat)?;
-        check_bypass(&kind, current.as_deref(), o.permission_mode.as_deref(), p.confirm_bypass)?;
+        check_bypass(&kind, current.as_deref(), o.permission_mode.as_deref(), confirmed_for(&id, p.confirm_bypass, p.approval.as_deref()))?;
     }
     let c = st.chats.update(&id, |c| {
         // A title the person typed is theirs: the app no longer replaces it with one of its own.
@@ -2588,7 +2601,7 @@ async fn move_chat(st: &Arc<AppState>, id: &str, to: &str) -> anyhow::Result<Opt
 struct Attachment { name: String, data: String }
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<String>, options: Option<RunOptions>, confirm_bypass: bool }
+struct SendBody { text: String, attachments: Vec<Attachment>, mentions: Vec<String>, options: Option<RunOptions>, confirm_bypass: bool, approval: Option<String> }
 
 /// One attached file may be 25 MB (what the composer says), one message 50 MB of files in all.
 const ATTACHMENT_MAX_BYTES: usize = library::IMPORT_MAX_BYTES;
@@ -2712,7 +2725,7 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     if crate::handoff::settled(&chat) { st.chats.update(&id, |c| { if let Some(o) = c.meta.as_object_mut() { o.remove("handoff"); } }).await; }
     if let Some(o) = &m.options {
         check_run_options(o)?;
-        check_bypass(&chat.kind, chat.options.permission_mode.as_deref(), o.permission_mode.as_deref(), m.confirm_bypass)?;
+        check_bypass(&chat.kind, chat.options.permission_mode.as_deref(), o.permission_mode.as_deref(), confirmed_for(&id, m.confirm_bypass, m.approval.as_deref()))?;
     }
     if let Some(lib) = st.settings.read().await.library() { crate::trust::require(&lib)?; }
     // A chat of a library taken off the list stays closed until that library is added back.
@@ -3865,9 +3878,11 @@ mod tests {
             assert!(status == 400 && v["code"] == "error" && v.get("trust").is_none(), "{v}");
         }
         // A folder's path is not an answer; the question's id is.
-        assert!(trust_library(Json(TrustReq { id: d.to_string_lossy().into() })).await.is_err());
+        let yes = |id: &str| Some(crate::consent::test_approval(crate::consent::Action::Trust, id));
+        let path: String = d.to_string_lossy().into();
+        assert!(trust_library(Json(TrustReq { approval: yes(&path), id: path })).await.is_err());
         assert!(crate::trust::require(&d).is_err());
-        trust_library(Json(TrustReq { id })).await.unwrap();
+        trust_library(Json(TrustReq { approval: yes(&id), id })).await.unwrap();
         assert!(crate::trust::require(&d).is_ok());
         std::fs::remove_dir_all(d).unwrap();
     }
@@ -5344,17 +5359,17 @@ mod tests {
     fn bypassing_permissions_needs_a_yes_and_an_ordinary_chat() {
         let b = Some("bypassPermissions");
         // Switching it on: only with the user's confirmation.
-        assert_eq!(shown(check_bypass("chat", Some("plan"), b, false).map(|_| Json(json!({}))).map_err(ApiErr)).code, "confirm_needed");
-        assert!(check_bypass("chat", Some("plan"), b, true).is_ok());
-        assert!(check_bypass("chat", None, b, true).is_ok());
+        assert_eq!(shown(check_bypass("chat", Some("plan"), b, || false).map(|_| Json(json!({}))).map_err(ApiErr)).code, "confirm_needed");
+        assert!(check_bypass("chat", Some("plan"), b, || true).is_ok());
+        assert!(check_bypass("chat", None, b, || true).is_ok());
         // Already on (saving the model or effort of such a chat): nothing to confirm again.
-        assert!(check_bypass("chat", b, b, false).is_ok());
+        assert!(check_bypass("chat", b, b, || false).is_ok());
         // Never for what the app runs itself, confirmed or not.
         for kind in ["customize", "wrap", "workflow", "setup", "module", "reorganize"] {
-            assert_eq!(shown(check_bypass(kind, None, b, true).map(|_| Json(json!({}))).map_err(ApiErr)).status, 403, "{kind}");
+            assert_eq!(shown(check_bypass(kind, None, b, || true).map(|_| Json(json!({}))).map_err(ApiErr)).status, 403, "{kind}");
         }
         // Every other mode passes untouched.
-        for m in [None, Some("plan"), Some("acceptEdits")] { assert!(check_bypass("wrap", b, m, false).is_ok()); }
+        for m in [None, Some("plan"), Some("acceptEdits")] { assert!(check_bypass("wrap", b, m, || false).is_ok()); }
     }
 
     #[tokio::test]
@@ -5363,7 +5378,8 @@ mod tests {
         let chat = Chat::default();
         let id = chat.id.clone();
         st.chats.insert(chat).await;
-        let patch = |confirm: bool| ChatPatch { options: Some(RunOptions { permission_mode: Some("bypassPermissions".into()), ..Default::default() }), confirm_bypass: confirm, ..Default::default() };
+        let with = |confirm: bool, approval: Option<String>| ChatPatch { options: Some(RunOptions { permission_mode: Some("bypassPermissions".into()), ..Default::default() }), confirm_bypass: confirm, approval, ..Default::default() };
+        let patch = |confirm: bool| with(confirm, confirm.then(|| crate::consent::test_approval(crate::consent::Action::ChatBypass, &id)));
         assert_eq!(shown(chat_patch(State(st.clone()), Path(id.clone()), Json(patch(false))).await).code, "confirm_needed");
         assert!(st.chats.get(&id).await.unwrap().options.permission_mode.is_none());
         chat_patch(State(st.clone()), Path(id.clone()), Json(patch(true))).await.unwrap();
@@ -5373,6 +5389,69 @@ mod tests {
         let cid = custom.id.clone();
         st.chats.insert(custom).await;
         assert_eq!(shown(chat_patch(State(st.clone()), Path(cid), Json(patch(true))).await).status, 403);
+    }
+
+    /// The app token alone confirms nothing: switching bypass on (a chat, or the default) and trusting
+    /// a folder each need the shell's approval for exactly that, fresh and unused (`consent.rs`).
+    #[tokio::test]
+    async fn the_token_alone_never_confirms_bypass_or_trust() {
+        use crate::consent::{test_approval, Action};
+        let st = Arc::new(AppState::for_test());
+        let (chat, other) = (Chat::default(), Chat::default());
+        let (id, other_id) = (chat.id.clone(), other.id.clone());
+        st.chats.insert(chat).await;
+        st.chats.insert(other).await;
+        let patch = |approval: Option<String>| Json(ChatPatch { options: Some(RunOptions { permission_mode: Some("bypassPermissions".into()), ..Default::default() }), confirm_bypass: true, approval, ..Default::default() });
+        let issued = crate::consent::now_ms();
+        let refused = [
+            None,                                                                       // only the client's word
+            Some("garbage".to_string()),                                                // made up
+            Some(crate::consent::mint(&[9u8; 32], Action::ChatBypass, &id, issued)),    // another key
+            Some(crate::consent::mint(crate::consent::test_key(), Action::ChatBypass, &id, issued - crate::consent::TTL_MS - 1)), // run out
+            Some(test_approval(Action::ChatBypass, &other_id)),                         // another chat's
+            Some(test_approval(Action::SettingsBypass, "")),                            // another action's
+        ];
+        for a in refused {
+            assert_eq!(shown(chat_patch(State(st.clone()), Path(id.clone()), patch(a.clone())).await).code, "confirm_needed", "{a:?}");
+            assert!(st.chats.get(&id).await.unwrap().options.permission_mode.is_none());
+        }
+        // The same refusal when sending with the options.
+        let send = |approval: Option<String>| Json(SendBody { text: "go".into(), options: Some(RunOptions { permission_mode: Some("bypassPermissions".into()), ..Default::default() }), confirm_bypass: true, approval, ..Default::default() });
+        assert_eq!(shown(chat_send(State(st.clone()), Path(id.clone()), send(None)).await).code, "confirm_needed");
+        // A good one passes once; sent again it is refused.
+        let good = test_approval(Action::ChatBypass, &id);
+        chat_patch(State(st.clone()), Path(id.clone()), patch(Some(good.clone()))).await.unwrap();
+        assert_eq!(st.chats.get(&id).await.unwrap().options.permission_mode.as_deref(), Some("bypassPermissions"));
+        assert_eq!(shown(chat_patch(State(st.clone()), Path(other_id.clone()), patch(Some(good))).await).code, "confirm_needed");
+
+        // The default for new chats: `?confirm=` is not enough without the approval, nor with a used one.
+        let mut wanted = st.settings.read().await.clone();
+        wanted.ai.claude.permission_mode = Some(crate::settings::BYPASS.into());
+        let yes = test_approval(Action::SettingsBypass, "");
+        for query in [vec![("confirm", crate::settings::BYPASS_CONFIRM)], vec![("confirm", crate::settings::BYPASS_CONFIRM), ("approval", "1.2.3")],
+                      vec![("approval", yes.as_str())]] {
+            assert_eq!(shown(put_settings(State(st.clone()), q(&query), Json(wanted.clone())).await).code, "confirm_needed", "{query:?}");
+        }
+        assert_ne!(st.settings.read().await.ai.claude.permission_mode.as_deref(), Some(crate::settings::BYPASS));
+        let both = [("confirm", crate::settings::BYPASS_CONFIRM), ("approval", yes.as_str())];
+        put_settings(State(st.clone()), q(&both), Json(wanted.clone())).await.unwrap();
+        assert_eq!(st.settings.read().await.ai.claude.permission_mode.as_deref(), Some(crate::settings::BYPASS));
+
+        // Trusting a folder: the question's id with no approval, a forged or another question's one
+        // is refused, and the question stays open for the real answer.
+        let d = std::env::temp_dir().join(format!("thoughts-api-consent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join(".mcp.json"), r#"{"mcpServers":{"x":{"command":"evil"}}}"#).unwrap();
+        let e = crate::trust::require(&d).unwrap_err();
+        let tid = e.downcast_ref::<crate::trust::Untrusted>().map(|u| u.id.clone()).expect("a trust question");
+        for a in [None, Some("1.00000000000000000000000000000000.00".to_string()), Some(test_approval(Action::Trust, "0123456789abcdef0123456789abcdef")),
+                  Some(test_approval(Action::ChatBypass, &id))] {
+            assert_eq!(shown(trust_library(Json(TrustReq { id: tid.clone(), approval: a.clone() })).await).code, "confirm_needed", "{a:?}");
+            assert!(crate::trust::require(&d).is_err());
+        }
+        trust_library(Json(TrustReq { approval: Some(test_approval(Action::Trust, &tid)), id: tid })).await.unwrap();
+        assert!(crate::trust::require(&d).is_ok());
+        std::fs::remove_dir_all(d).unwrap();
     }
 
     // ---------- backup locations (hist-b) ----------

@@ -33,7 +33,7 @@ pub enum Probe {
 }
 
 /// HMAC-SHA256 (RFC 2104), built on the SHA-256 the daemon already uses.
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     const BLOCK: usize = 64;
     let mut k = [0u8; BLOCK];
     if key.len() > BLOCK { k[..32].copy_from_slice(&Sha256::digest(key)); } else { k[..key.len()].copy_from_slice(key); }

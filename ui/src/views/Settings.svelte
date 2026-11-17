@@ -3,6 +3,7 @@
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { askNotify, notifState, notifySettingsUrl, openNotifySettings, testNotify, type NotifState } from '../lib/notifyPerm';
   import { api, del, inTauri, post, put, reloadApp } from '../lib/api';
+  import { approval } from '../lib/consent';
   import { reportUnsaved } from '../lib/unsaved';
   import { a11y, app, applyTheme, command, go, keepShowCostChoice, saveSettings, setA11y, setShowCost, toast, zoomStep, A11Y_DEFAULTS, ZOOM_STEPS, type A11y } from '../lib/store.svelte';
   import { recheckSignIn } from '../lib/auth';
@@ -353,7 +354,7 @@
     const confirm = turnsBypassOn();
     const sent = norm(s);
     const query = new URLSearchParams();
-    if (confirm) query.set('confirm', BYPASS);
+    if (confirm) { query.set('confirm', BYPASS); const a = await approval('settings-bypass'); if (a) query.set('approval', a); }
     if (lib.moved) query.set('library', 'moved');
     const qs = query.toString();
     await saveSettings(payload(), qs ? `?${qs}` : '');

@@ -434,7 +434,8 @@ async fn saving_options_answers_with_what_was_saved_and_lists_mark_bypass() {
     let chat = Chat::default();
     let id = chat.id.clone();
     st.chats.insert(chat).await;
-    let patch = |mode: &str, confirm: bool| Json(ChatPatch { options: Some(RunOptions { permission_mode: Some(mode.into()), model: Some("opus".into()), ..Default::default() }), confirm_bypass: confirm, ..Default::default() });
+    let patch = |mode: &str, confirm: bool| Json(ChatPatch { options: Some(RunOptions { permission_mode: Some(mode.into()), model: Some("opus".into()), ..Default::default() }), confirm_bypass: confirm,
+        approval: confirm.then(|| crate::consent::test_approval(crate::consent::Action::ChatBypass, &id)), ..Default::default() });
     let v = chat_patch(State(st.clone()), Path(id.clone()), patch("plan", false)).await.unwrap().0;
     assert_eq!((v["options"]["permissionMode"].as_str(), v["options"]["model"].as_str(), v["bypass"].as_bool()), (Some("plan"), Some("opus"), Some(false)));
     // Refused without the confirmation: nothing changes, and the list does not mark the chat.

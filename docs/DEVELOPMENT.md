@@ -96,8 +96,9 @@ Thoughts.app
   holds open, the folder, each finding (`kind`, `file`, `name`, `detail`, `new`), which part
   changed and which files differ. The UI opens the trust dialog for that object only and words
   each `kind` itself (`ui/src/lib/i18n/sec-a.ts`); `file`, `name` and `detail` come from the folder
-  and are shown as data. `POST /api/library/trust {id}` answers that one question, and only while
-  the folder is still what it listed; there is no call that trusts a path.
+  and are shown as data. `POST /api/library/trust {id, approval}` answers that one question, and only while
+  the folder is still what it listed; there is no call that trusts a path. `approval` comes from the
+  desktop shell (`approve_action`, see `consent.rs` in both crates): the app token alone trusts nothing.
 - Trust is stored daemon-side in `~/.thoughts/trusted.json`, per folder, in two parts so that a
   change in one is never reported as a change in the other: the *assistant* part (its findings
   plus the bytes of every file under a `.claude` folder that the starter kit did not put there,

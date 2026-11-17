@@ -14,6 +14,7 @@ pub mod care_api;
 pub mod changes;
 pub mod changesets;
 pub mod chats;
+pub mod consent;
 pub mod claude;
 pub mod cloud;
 pub mod diffs;
@@ -93,6 +94,8 @@ pub async fn run() -> anyhow::Result<()> {
     }
     log::init(&paths::logs_dir());
     log::install_panic_hook();
+    // The desktop shell that started this daemon hands over its confirmation key (`consent.rs`).
+    consent::take_key_if_asked();
     // Two daemons must never run at once, even if both start in the same instant.
     let _lock = match acquire_lock(&paths::lock_file()) {
         Ok(Some(f)) => Some(f),

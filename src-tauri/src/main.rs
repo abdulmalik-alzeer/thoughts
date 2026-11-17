@@ -9,6 +9,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod capture;
+mod consent;
 mod ghfeed;
 mod links;
 mod quit;
@@ -265,8 +266,11 @@ fn spawn_daemon() -> anyhow::Result<()> {
     #[cfg(not(target_os = "linux"))]
     let exe = std::env::current_exe()?;
     let mut c = std::process::Command::new(exe);
+    // The confirmation key goes over standard input, never in an argument or the environment
+    // (`consent.rs`).
     c.arg("--daemon")
-        .stdin(std::process::Stdio::null())
+        .arg(thoughtsd::consent::KEY_FLAG)
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     #[cfg(unix)]
@@ -282,7 +286,11 @@ fn spawn_daemon() -> anyhow::Result<()> {
         // child (git, claude) pop up its own window. UNTESTED on Windows.
         c.creation_flags(0x08000000 | 0x00000200);
     }
-    c.spawn()?;
+    let mut child = c.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        let _ = writeln!(stdin, "{}", thoughtsd::consent::key_hex(consent::key()));
+    }
     Ok(())
 }
 
@@ -337,14 +345,17 @@ fn ensure_daemon() -> Result<(thoughtsd::paths::DaemonInfo, bool), String> {
     if let Some((i, version)) = daemon_alive() {
         // After an app update the old daemon is still running the old code: replace it.
         let stale = !VERSION_CHECKED.swap(true, Ordering::SeqCst) && version.as_deref().unwrap_or(&i.version) != VERSION;
-        if !stale {
+        // A daemon this launch did not start (at login, or left by an earlier launch) cannot be told
+        // the user's yes to bypass or folder trust (`consent.rs`): it is replaced the same way.
+        let keyed = consent::holds_key(&i);
+        if !stale && keyed {
             return Ok((i, false));
         }
         // …but never in the middle of a save or a running chat: keep it for now and look again on
         // the next `daemon_info` call (the UI is told through `stale: true`).
         if daemon_work(&i).is_some() {
-            VERSION_CHECKED.store(false, Ordering::SeqCst);
-            return Ok((i, true));
+            if stale { VERSION_CHECKED.store(false, Ordering::SeqCst); }
+            return Ok((i, stale));
         }
         stop_daemon(true);
     }
@@ -1259,6 +1270,7 @@ fn main() {
             save_file,
             daemon_info,
             restart_daemon,
+            consent::approve_action,
             set_dock_icon,
             update_check,
             update_install,

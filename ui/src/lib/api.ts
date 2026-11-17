@@ -194,7 +194,8 @@ const trustAsked = new Map<string, Promise<boolean>>();
  *  the dialog was open (the daemon then refuses the old answer and asks again), null once recorded. */
 async function answerTrust(id: string) {
   const { isTrustInfo } = await import('./trust');
-  try { await api('/library/trust', { method: 'POST', body: { id } }); return null; }
+  const { approval } = await import('./consent');
+  try { await api('/library/trust', { method: 'POST', body: { id, approval: await approval('trust', id) } }); return null; }
   catch (e) {
     if (e instanceof ApiError && e.status === 403 && e.data?.code === 'untrusted' && isTrustInfo(e.data?.trust)) return e.data.trust;
     throw e;
