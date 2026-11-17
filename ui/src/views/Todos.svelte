@@ -14,6 +14,9 @@
   import { compose, doneGroupOf, inSentence, REPEATS } from '../lib/todoline';
   import PageExtras from './PageExtras.svelte';
   import { pageText, pageTitle, shows } from '../lib/pages.svelte';
+  import { isAt, reanchor, refOf, type TodoRef } from '../lib/todoref';
+  import { editLost, todoFailed } from '../lib/todofail';
+  import type { TodoList } from '../lib/types';
 
   type Filter = 'all' | 'soon' | 'overdue';
   type GroupBy = 'list' | 'due' | 'tag' | 'none';
@@ -66,14 +69,29 @@
   function hasOwn() { try { return !!localStorage.getItem(PREF_KEY); } catch { return false; } }
   let drafts = $state<Record<string, string>>({});
   let first = $state('');
-  let editing = $state<string | null>(null);
+  // The open edit box, date picker and move bar belong to one todo by file, line AND text (todoref.ts),
+  // so a reload that puts another todo on that line cannot point them — or their save — at it.
+  let editing = $state<TodoRef | null>(null);
   let editText = $state('');
-  let dueFor = $state<string | null>(null);
-  let moveFor = $state<string | null>(null);
+  let editFrom = '';
+  let dueFor = $state<TodoRef | null>(null);
+  let moveFor = $state<TodoRef | null>(null);
   // Items of the library (ideas, clients…), so a todo can go to one that has no list yet.
   let items = $state<any[]>([]);
   let target = $state('');
   async function loadItems() { try { const r = await api('/library/ideas'); items = Array.isArray(r) ? r : []; } catch { /* the list just offers fewer places */ } }
+
+  /** After a reload the open boxes follow their todo to its new line, or close when it changed, went
+   *  away or has a twin with the same text. An edit that closes this way keeps the typed text in a toast. */
+  function follow(now: TodoList[]) {
+    if (editing) {
+      const e = reanchor(editing, now);
+      if (!e && editText.trim() && editText.trim() !== editFrom) editLost(editText.trim());
+      if (e !== editing) editing = e;
+    }
+    if (dueFor) { const d = reanchor(dueFor, now); if (d !== dueFor) dueFor = d; }
+    if (moveFor) { const m = reanchor(moveFor, now); if (m !== moveFor) moveFor = m; }
+  }
 
   async function load() {
     try {
@@ -81,6 +99,7 @@
       // `due` / `title` come from the daemon when it supports them; otherwise they are read from the text.
       lists = raw.map((l) => ({ ...l, items: l.items.map(normTodo) }));
       loadError = '';
+      follow(lists);
     } catch (e: any) { loadError = e?.message ?? String(e); if (lists.length) failed(t('todo.loadFailed'), e); }
     finally { loading = false; }
   }
@@ -99,9 +118,9 @@
   const OP_FAIL: Record<string, string> = { add: 'ui.todo.addFailed', toggle: 'ui.todo.toggleFailed', edit: 'ui.todo.editFailed', delete: 'ui.todo.deleteFailed',
     restore: 'ui.todo.undoFailed', move: 'todob.moveFailed', reorder: 'todob.moveFailed', archive: 'todob.moveFailed' };
   /** Run one change on a list → the service's answer, or null when it failed (already reported). */
-  async function op(name: string, body: any): Promise<any | null> {
+  async function op(name: string, body: any, kept?: string): Promise<any | null> {
     let res: any = null;
-    try { res = (await post(`/todos/${name}`, body)) ?? { ok: true }; } catch (e) { failed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e); }
+    try { res = (await post(`/todos/${name}`, body)) ?? { ok: true }; } catch (e) { todoFailed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e, kept); }
     await load();
     return res;
   }
@@ -173,28 +192,33 @@
   }
 
   const key = (l: any, it: any) => l.file + ':' + it.line;
-  const ref = (l: any, it: any) => ({ file: l.file, line: it.line, text: it.text });
+  const ref = (l: any, it: any): TodoRef => refOf(l.file, it);
+  /** The ref captured when a box opened, when it is this row's; otherwise the row's own (the calendar). */
+  const held = (open: TodoRef | null, l: any, it: any): TodoRef => (open && isAt(open, l.file, it) ? open : ref(l, it));
 
   async function startEdit(l: any, it: any) {
-    editing = key(l, it); editText = it.title; dueFor = null;
+    editing = ref(l, it); editText = it.title; editFrom = it.title; dueFor = null;
     await tick();
     document.getElementById('todo-edit')?.focus();
   }
   async function saveEdit(l: any, it: any) {
+    const at = editing;
     const title = editText.trim();
     editing = null;
-    if (!title || title === it.title) return;
-    await op('edit', { ...ref(l, it), new_text: compose(title, it.every, it.due) });
+    if (!at || !title || title === it.title) return;
+    await op('edit', { ...at, new_text: compose(title, it.every, it.due) }, title);
   }
   async function setDue(l: any, it: any, due: string | null) {
+    const at = held(dueFor, l, it);
     dueFor = null;
     if ((due || null) === it.due) return;
-    await op('edit', { ...ref(l, it), new_text: compose(it.title, it.every, due || null) });
+    await op('edit', { ...at, new_text: compose(it.title, it.every, due || null) });
   }
   async function setRepeat(l: any, it: any, every: string | null) {
     if ((every || null) === (it.every ?? null)) return;
+    const at = held(dueFor, l, it);
     dueFor = null;
-    await op('edit', { ...ref(l, it), new_text: compose(it.title, every || null, it.due) });
+    await op('edit', { ...at, new_text: compose(it.title, every || null, it.due) });
   }
   /** Delete a todo with its notes; Undo puts back exactly the lines that were removed. */
   async function remove(l: any, it: any) {
@@ -232,8 +256,9 @@
   async function moveTask(l: any, it: any, value: string) {
     let to: [string, string];
     try { to = JSON.parse(value); } catch { return; }
+    const at = held(moveFor, l, it);
     moveFor = null;
-    const res = await op('move', { ...ref(l, it), to_file: to[0], group: to[1] });
+    const res = await op('move', { ...at, to_file: to[0], group: to[1] });
     if (!res) return;
     const back = { file: res.file ?? to[0], line: res.line, text: it.text, to_file: l.file, group: it.group || '' };
     notify(t('todob.moved', { place: placeLabel(to[0], to[1]) }), { action: { label: t('undo'), run: () => { op('move', back); } } });
@@ -241,9 +266,9 @@
   /** Neighbours the user can see in the same group, in file order (moving only ever swaps within a group). */
   const siblings = (l: any, it: any) => l.items.filter((x: any) => (x.group ?? '') === (it.group ?? '') && (showDone || !x.done || x.line === it.line));
   async function shiftTask(l: any, it: any, dir: 'up' | 'down') {
-    const res = await op('reorder', { ...ref(l, it), dir, skip_done: !showDone });
+    const res = await op('reorder', { ...held(moveFor, l, it), dir, skip_done: !showDone });
     if (!res || typeof res.line !== 'number') return;
-    moveFor = l.file + ':' + res.line;
+    moveFor = { file: l.file, line: res.line, text: it.text };
     await tick();
     document.getElementById(`mv-${dir}`)?.focus();
   }
@@ -308,7 +333,7 @@
     <div class="row line">
       <input type="checkbox" checked={it.done} aria-label={t(it.done ? 'todo.markOpen' : 'todo.markDone', { title: it.title })}
         onchange={(e) => toggle(l, it, e.currentTarget)} />
-      {#if editing === k}
+      {#if isAt(editing, l.file, it)}
         <form class="grow row" onsubmit={(e) => { e.preventDefault(); saveEdit(l, it); }}>
           <input id="todo-edit" class="grow" bind:value={editText} dir="auto" aria-label={t('todo.editLabel')}
             onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); editing = null; } }} />
@@ -322,7 +347,7 @@
         {#if it.every}<span class="rep" title={t('todob.rep.' + it.every)}><Icon name="retry" size={11} /><span class="sr-only">{t('todob.repeats')}</span> {t('todob.rep.' + it.every)}</span>{/if}
         {#if it.due}
           {@const s = it.done ? 'later' : dueState(it.due)}
-          <button class="due {s}" onclick={() => { moveFor = null; dueFor = dueFor === k ? null : k; }} aria-expanded={dueFor === k} title={t('todo.changeDue')}>
+          <button class="due {s}" onclick={() => { moveFor = null; dueFor = isAt(dueFor, l.file, it) ? null : ref(l, it); }} aria-expanded={isAt(dueFor, l.file, it)} title={t('todo.changeDue')}>
             <Icon name={s === 'overdue' ? 'warning' : 'calendar'} size={12} />
             {#if s === 'overdue'}<b>{t('todo.overdue')}</b> ·{/if}
             {dueLabel(it.due)}
@@ -330,15 +355,15 @@
           </button>
         {/if}
         <span class="acts">
-          {#if !it.due}<button class="ib" onclick={() => { moveFor = null; dueFor = dueFor === k ? null : k; }} aria-expanded={dueFor === k} aria-label={t('todo.setDue')} title={t('todo.setDue')}><Icon name="calendar" size={14} /></button>{/if}
-          <button class="ib" onclick={() => { dueFor = null; moveFor = moveFor === k ? null : k; }} aria-expanded={moveFor === k} aria-label={t('todob.moveItem', { title: it.title })} title={t('todob.move')}><Icon name="arrow" size={14} class="flip-rtl" /></button>
+          {#if !it.due}<button class="ib" onclick={() => { moveFor = null; dueFor = isAt(dueFor, l.file, it) ? null : ref(l, it); }} aria-expanded={isAt(dueFor, l.file, it)} aria-label={t('todo.setDue')} title={t('todo.setDue')}><Icon name="calendar" size={14} /></button>{/if}
+          <button class="ib" onclick={() => { dueFor = null; moveFor = isAt(moveFor, l.file, it) ? null : ref(l, it); }} aria-expanded={isAt(moveFor, l.file, it)} aria-label={t('todob.moveItem', { title: it.title })} title={t('todob.move')}><Icon name="arrow" size={14} class="flip-rtl" /></button>
           <ItemActions target="todo" name={it.title} item={{ file: l.file, idea: l.idea ?? null, line: it.line, text: it.text, title: it.title, due: it.due, done: it.done, group: it.group ?? null }} />
           <button class="ib" onclick={() => startEdit(l, it)} aria-label={t('todo.editItem', { title: it.title })} title={t('edit')}><Icon name="edit" size={14} /></button>
           <button class="ib" onclick={() => remove(l, it)} aria-label={t('todo.deleteItem', { title: it.title })} title={t('delete')}><Icon name="trash" size={14} /></button>
         </span>
       {/if}
     </div>
-    {#if dueFor === k}
+    {#if isAt(dueFor, l.file, it)}
       <div class="row duebar">
         <label class="inl" for="due-{k}">{t('todo.dueDate')}</label>
         <input id="due-{k}" type="date" lang={lang()} value={it.due ?? ''} onchange={(e) => setDue(l, it, (e.target as HTMLInputElement).value)} />
@@ -354,7 +379,7 @@
         <button class="ib" onclick={() => (dueFor = null)} aria-label={t('close')}><Icon name="close" size={14} /></button>
       </div>
     {/if}
-    {#if moveFor === k}
+    {#if isAt(moveFor, l.file, it)}
       {@const sib = siblings(l, it)}
       {@const pos = sib.findIndex((x: any) => x.line === it.line)}
       <div class="row duebar">

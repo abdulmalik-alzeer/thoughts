@@ -2,11 +2,10 @@
   // One item's own todo list (its todo.md), on the item's page: tick, add, edit, date, repeat, move
   // between its groups and up or down, delete with Undo. Same service calls and wording as the
   // Todos page, so the file is changed line by line in place exactly as there.
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { post } from '../../lib/api';
   import { go, track } from '../../lib/store.svelte';
   import { t, tn, fmtHijri, lang } from '../../lib/i18n';
-  import { failed } from '../../lib/errors';
   import Icon from '../../lib/Icon.svelte';
   import ItemActions from '../../lib/ItemActions.svelte';
   import { dueLabel as dueLabelOn, dueState as dueStateOn, isoDay, normTodo, notify, withDue } from '../../lib/content/util';
@@ -15,10 +14,13 @@
   import { compose, doneGroupOf, inSentence, REPEATS } from '../../lib/todoline';
   import { itemTerm } from '../../lib/item';
   import type { AreaWord } from '../../lib/terms';
+  import { isAt, reanchor, refOf, type TodoRef } from '../../lib/todoref';
+  import { editLost, todoFailed } from '../../lib/todofail';
+  import type { TodoItem } from '../../lib/types';
 
   let { list, dir, word, reload }: {
     /** `{file, exists, groups, items}` as the item page's service call returns it. */
-    list: { file: string; exists: boolean; groups: string[]; items: any[] };
+    list: { file: string; exists: boolean; groups: string[]; items: TodoItem[] };
     dir: string;
     word: AreaWord;
     reload: () => Promise<void>;
@@ -29,11 +31,29 @@
   let showDone = $state(false);
   let draft = $state('');
   let addGroup = $state('');
-  let editing = $state<number | null>(null);
+  // The open edit box, date picker and move bar belong to one todo by line AND text (todoref.ts), so
+  // a reload that puts another todo on that line cannot point them — or their save — at it.
+  let editing = $state<TodoRef | null>(null);
   let editText = $state('');
-  let dueFor = $state<number | null>(null);
-  let moveFor = $state<number | null>(null);
+  let editFrom = '';
+  let dueFor = $state<TodoRef | null>(null);
+  let moveFor = $state<TodoRef | null>(null);
   let busy = $state(false);
+
+  // After every reload the open boxes follow their todo to its new line, or close when it changed,
+  // went away or has a twin with the same text. An edit that closes this way keeps the typed text in a toast.
+  $effect(() => {
+    const now = [{ file: list.file, items }];
+    untrack(() => {
+      if (editing) {
+        const e = reanchor(editing, now);
+        if (!e && editText.trim() && editText.trim() !== editFrom) editLost(editText.trim());
+        if (e !== editing) editing = e;
+      }
+      if (dueFor) { const d = reanchor(dueFor, now); if (d !== dueFor) dueFor = d; }
+      if (moveFor) { const m = reanchor(moveFor, now); if (m !== moveFor) moveFor = m; }
+    });
+  });
 
   const dueState = (d: string) => { clock.day; return dueStateOn(d); };
   const dueLabel = (d: string) => { clock.day; return dueLabelOn(d); };
@@ -46,14 +66,18 @@
   const OP_FAIL: Record<string, string> = { add: 'ui.todo.addFailed', toggle: 'ui.todo.toggleFailed', edit: 'ui.todo.editFailed', delete: 'ui.todo.deleteFailed',
     restore: 'ui.todo.undoFailed', move: 'todob.moveFailed', reorder: 'todob.moveFailed', archive: 'todob.moveFailed' };
   /** One change to the list → the service's answer, or null when it failed (already reported). */
-  async function op(name: string, body: any): Promise<any | null> {
+  async function op(name: string, body: any, kept?: string): Promise<any | null> {
     let res: any = null;
     try { res = (await post(`/todos/${name}`, { file: list.file, ...body })) ?? { ok: true }; }
-    catch (e) { failed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e); }
+    catch (e) { todoFailed(t(OP_FAIL[name] ?? 'ui.todo.editFailed'), e, kept); }
     await reload();
     return res;
   }
   const ref = (it: any) => ({ line: it.line, text: it.text });
+  const here = (it: any): TodoRef => refOf(list.file, it);
+  const at = (open: TodoRef | null, it: any) => isAt(open, list.file, it);
+  /** The line and text captured when a box opened, when it is this row's; otherwise the row's own. */
+  const held = (open: TodoRef | null, it: any) => (open && at(open, it) ? { line: open.line, text: open.text } : ref(it));
 
   async function toggle(it: any, box: HTMLInputElement) {
     const was = it.done;
@@ -87,25 +111,28 @@
   }
 
   async function startEdit(it: any) {
-    editing = it.line; editText = it.title; dueFor = null; moveFor = null;
+    editing = here(it); editText = it.title; editFrom = it.title; dueFor = null; moveFor = null;
     await tick();
     document.getElementById('itd-edit')?.focus();
   }
   async function saveEdit(it: any) {
+    const open = editing;
     const title = editText.trim();
     editing = null;
-    if (!title || title === it.title) return;
-    await op('edit', { ...ref(it), new_text: compose(title, it.every, it.due) });
+    if (!open || !title || title === it.title) return;
+    await op('edit', { line: open.line, text: open.text, new_text: compose(title, it.every, it.due) }, title);
   }
   async function setDue(it: any, due: string | null) {
+    const r = held(dueFor, it);
     dueFor = null;
     if ((due || null) === it.due) return;
-    await op('edit', { ...ref(it), new_text: compose(it.title, it.every, due || null) });
+    await op('edit', { ...r, new_text: compose(it.title, it.every, due || null) });
   }
   async function setRepeat(it: any, every: string | null) {
     if ((every || null) === (it.every ?? null)) return;
+    const r = held(dueFor, it);
     dueFor = null;
-    await op('edit', { ...ref(it), new_text: compose(it.title, every || null, it.due) });
+    await op('edit', { ...r, new_text: compose(it.title, every || null, it.due) });
   }
   async function remove(it: any) {
     const res = await op('delete', ref(it));
@@ -117,16 +144,17 @@
     } } });
   }
   async function moveGroup(it: any, group: string) {
+    const r = held(moveFor, it);
     moveFor = null;
-    const res = await op('move', { ...ref(it), to_file: list.file, group });
+    const res = await op('move', { ...r, to_file: list.file, group });
     if (!res) return;
     notify(t('todob.moved', { place: group || t('item.todos.noGroup') }), { action: { label: t('undo'), run: () => { op('move', { line: res.line, text: it.text, to_file: list.file, group: it.group || '' }); } } });
   }
   const siblings = (it: any) => items.filter((x: any) => (x.group ?? '') === (it.group ?? '') && (showDone || !x.done || x.line === it.line));
   async function shift(it: any, dir: 'up' | 'down') {
-    const res = await op('reorder', { ...ref(it), dir, skip_done: !showDone });
+    const res = await op('reorder', { ...held(moveFor, it), dir, skip_done: !showDone });
     if (!res || typeof res.line !== 'number') return;
-    moveFor = res.line;
+    moveFor = { file: list.file, line: res.line, text: it.text };
     await tick();
     document.getElementById(`itd-${dir}`)?.focus();
   }
@@ -155,7 +183,7 @@
           <div class="row line">
             <input type="checkbox" checked={it.done} aria-label={t(it.done ? 'todo.markOpen' : 'todo.markDone', { title: it.title })}
               onchange={(e) => toggle(it, e.currentTarget)} />
-            {#if editing === it.line}
+            {#if at(editing, it)}
               <form class="grow row" onsubmit={(e) => { e.preventDefault(); saveEdit(it); }}>
                 <input id="itd-edit" class="grow" bind:value={editText} dir="auto" aria-label={t('todo.editLabel')}
                   onkeydown={(e) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); editing = null; } }} />
@@ -168,7 +196,7 @@
               {#if it.every}<span class="rep" title={t('todob.rep.' + it.every)}><Icon name="retry" size={11} /><span class="sr-only">{t('todob.repeats')}</span> {t('todob.rep.' + it.every)}</span>{/if}
               {#if it.due}
                 {@const s = it.done ? 'later' : dueState(it.due)}
-                <button class="due {s}" onclick={() => { moveFor = null; dueFor = dueFor === it.line ? null : it.line; }} aria-expanded={dueFor === it.line} title={t('todo.changeDue')}>
+                <button class="due {s}" onclick={() => { moveFor = null; dueFor = at(dueFor, it) ? null : here(it); }} aria-expanded={at(dueFor, it)} title={t('todo.changeDue')}>
                   <Icon name={s === 'overdue' ? 'warning' : 'calendar'} size={12} />
                   {#if s === 'overdue'}<b>{t('todo.overdue')}</b> ·{/if}
                   {dueLabel(it.due)}
@@ -176,15 +204,15 @@
                 </button>
               {/if}
               <span class="acts">
-                {#if !it.due}<button class="ib" onclick={() => { moveFor = null; dueFor = dueFor === it.line ? null : it.line; }} aria-expanded={dueFor === it.line} aria-label={t('todo.setDue')} title={t('todo.setDue')}><Icon name="calendar" size={14} /></button>{/if}
-                <button class="ib" onclick={() => { dueFor = null; moveFor = moveFor === it.line ? null : it.line; }} aria-expanded={moveFor === it.line} aria-label={t('todob.moveItem', { title: it.title })} title={t('todob.move')}><Icon name="arrow" size={14} class="flip-rtl" /></button>
+                {#if !it.due}<button class="ib" onclick={() => { moveFor = null; dueFor = at(dueFor, it) ? null : here(it); }} aria-expanded={at(dueFor, it)} aria-label={t('todo.setDue')} title={t('todo.setDue')}><Icon name="calendar" size={14} /></button>{/if}
+                <button class="ib" onclick={() => { dueFor = null; moveFor = at(moveFor, it) ? null : here(it); }} aria-expanded={at(moveFor, it)} aria-label={t('todob.moveItem', { title: it.title })} title={t('todob.move')}><Icon name="arrow" size={14} class="flip-rtl" /></button>
                 <ItemActions target="todo" name={it.title} item={{ file: list.file, idea: dir, line: it.line, text: it.text, title: it.title, due: it.due, done: it.done, group: it.group ?? null }} />
                 <button class="ib" onclick={() => startEdit(it)} aria-label={t('todo.editItem', { title: it.title })} title={t('edit')}><Icon name="edit" size={14} /></button>
                 <button class="ib" onclick={() => remove(it)} aria-label={t('todo.deleteItem', { title: it.title })} title={t('delete')}><Icon name="trash" size={14} /></button>
               </span>
             {/if}
           </div>
-          {#if dueFor === it.line}
+          {#if at(dueFor, it)}
             <div class="row bar">
               <label class="inl" for="itd-due-{it.line}">{t('todo.dueDate')}</label>
               <input id="itd-due-{it.line}" type="date" lang={lang()} value={it.due ?? ''} onchange={(e) => setDue(it, (e.target as HTMLInputElement).value)} />
@@ -200,7 +228,7 @@
               <button class="ib" onclick={() => (dueFor = null)} aria-label={t('close')}><Icon name="close" size={14} /></button>
             </div>
           {/if}
-          {#if moveFor === it.line}
+          {#if at(moveFor, it)}
             {@const sib = siblings(it)}
             {@const pos = sib.findIndex((x: any) => x.line === it.line)}
             <div class="row bar">
