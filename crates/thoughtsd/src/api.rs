@@ -1239,6 +1239,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
             let scan = tokio::task::spawn_blocking(move || crate::import::Scan::of(&s2, library::IMPORT_MAX_BYTES as u64)).await?;
             if scan.too_big { return Err(crate::tr::err("import.too_big", &[]).into()); }
             if scan.files.is_empty() { return Err(crate::tr::err("import.nothing", &[]).into()); }
+            crate::import::check_setup(&scan, s.sync_enabled() && !remote_url.is_empty())?;
             Some(scan)
         }
     };
@@ -1969,7 +1970,7 @@ async fn library_version(State(st): S, Query(q): Query<HashMap<String, String>>)
 
 /// What changing the library's history needs: history on, nothing else changing the library, no
 /// cut-off wrap waiting, no assistant at work in it. The returned guard keeps a wrap from starting meanwhile.
-async fn history_change(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, tokio::sync::OwnedMutexGuard<()>)> {
+pub(crate) async fn history_change(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, tokio::sync::OwnedMutexGuard<()>)> {
     let root = history_lib(st).await?;
     wraps::require_no_interrupted(st).await?;
     if st.run_active_in(&root) { return Err(crate::tr::err("busy.run", &[])); }

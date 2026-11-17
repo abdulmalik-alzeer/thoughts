@@ -26,6 +26,18 @@ type R = Result<Json<Value>, ApiErr>;
 pub const MAX_FILES: usize = 20_000;
 /// …and at most this much (the history keeps a copy of everything).
 pub const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// How much a copy may be before the user is asked, when the library is sent to a location, and how
+/// much it may be at all then. Everything brought in stays in the history for good (an Undo only adds
+/// a change on top), and every Sync sends that history to every location: a copy too large for them
+/// would make every later Sync fail. Tests pass small numbers (`import_with`).
+#[derive(Debug, Clone, Copy)]
+pub struct Limits { pub ask_over: u64, pub sent_max: u64 }
+impl Limits {
+    /// 100 MB asks first; above 1 GB only the notes may come (online services refuse a push of 2 GB).
+    pub const DEFAULT: Limits = Limits { ask_over: 100 * 1024 * 1024, sent_max: 1024 * 1024 * 1024 };
+}
+/// The subject every copy brought in starts with (see `subject`); only such an entry can be taken back.
+const SUBJECT_START: &str = "brought in notes as ";
 /// A folder with more entries than this (counting folders and what is left out) is not a folder
 /// of notes: looking stops there, so choosing the home folder by mistake answers quickly.
 const MAX_SEEN: usize = 200_000;
@@ -50,13 +62,25 @@ pub enum Left {
     Instructions,
     /// Could not be read, or is not an ordinary file.
     Unreadable,
+    /// Not a note, and the user chose to bring in only the notes.
+    NotNote,
 }
 
 impl Left {
     pub fn as_str(self) -> &'static str {
-        match self { Left::Hidden => "hidden", Left::Link => "link", Left::TooLarge => "tooLarge", Left::Instructions => "instructions", Left::Unreadable => "unreadable" }
+        match self { Left::Hidden => "hidden", Left::Link => "link", Left::TooLarge => "tooLarge", Left::Instructions => "instructions", Left::Unreadable => "unreadable", Left::NotNote => "notNote" }
     }
     const ALL: [Left; 5] = [Left::Hidden, Left::Link, Left::TooLarge, Left::Instructions, Left::Unreadable];
+}
+
+/// What the user chose for a large copy into a library that is sent to a location.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep { Unasked, All, Notes }
+
+impl Keep {
+    fn parse(raw: &str) -> anyhow::Result<Keep> {
+        match raw.trim() { "" => Ok(Keep::Unasked), "all" => Ok(Keep::All), "notes" => Ok(Keep::Notes), _ => Err(tr::err("import.bad_choice", &[])) }
+    }
 }
 
 /// What is in a folder of notes, as far as bringing it in goes.
@@ -116,6 +140,20 @@ impl Scan {
             if s.files.len() > MAX_FILES || s.bytes > MAX_BYTES { s.too_big = true; break; }
         }
         s
+    }
+
+    /// How much the notes alone are.
+    pub fn notes_bytes(&self) -> u64 {
+        self.files.iter().filter(|(p, _)| is_note(p)).map(|(_, n)| n).sum()
+    }
+
+    /// The same scan with only the notes coming along: pictures, PDFs and every other file are left out.
+    pub fn only_notes(mut self) -> Scan {
+        let (keep, out): (Vec<_>, Vec<_>) = std::mem::take(&mut self.files).into_iter().partition(|(p, _)| is_note(p));
+        self.left.extend(out.into_iter().map(|(p, _)| (p, Left::NotNote)));
+        self.bytes = keep.iter().map(|(_, n)| n).sum();
+        self.files = keep;
+        self
     }
 
     /// The preview the window shows: counts, a few names, and what is left out and why.
@@ -244,7 +282,120 @@ pub async fn record(st: &AppState, root: &Path, subject: &str, only: &[String]) 
 
 /// The subject of the history entry for a copy brought in.
 pub fn subject(into: &str, files: usize) -> String {
-    git::subject::edit(&format!("brought in notes as {into} ({files} file{})", if files == 1 { "" } else { "s" }))
+    git::subject::edit(&format!("{SUBJECT_START}{into} ({files} file{})", if files == 1 { "" } else { "s" }))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Small limits for a test, instead of hundreds of megabytes on disk.
+    static TEST_LIMITS: std::cell::Cell<Option<Limits>> = const { std::cell::Cell::new(None) };
+}
+
+fn limits() -> Limits {
+    #[cfg(test)]
+    if let Some(l) = TEST_LIMITS.with(|c| c.get()) { return l; }
+    Limits::DEFAULT
+}
+
+/// Is what is recorded in this library's history sent to a location (online, or a drive or folder)
+/// at the next Sync? Then a copy brought in is sent along, and stays in what is sent for good.
+async fn sent_somewhere(st: &AppState, root: &Path) -> bool {
+    st.settings.read().await.history_enabled() && git::is_repo(st, root).await && !git::remotes(st, root).await.is_empty()
+}
+
+/// What comes in, given the user's choice, for a library that is sent to a location. A large copy
+/// needs the user's choice first; a copy larger than any location takes can only bring the notes.
+pub fn decide(scan: Scan, keep: Keep, l: Limits) -> anyhow::Result<Scan> {
+    match keep {
+        Keep::Unasked if scan.bytes > l.ask_over => Err(tr::err("import.choose", &[])),
+        Keep::Unasked => Ok(scan),
+        Keep::All if scan.bytes > l.sent_max => Err(tr::err("import.too_big_sent", &[])),
+        Keep::All => Ok(scan),
+        Keep::Notes => {
+            let s = scan.only_notes();
+            if s.files.is_empty() { return Err(tr::err("import.no_notes", &[])); }
+            if s.bytes > l.sent_max { return Err(tr::err("import.too_big_sent", &[])); }
+            Ok(s)
+        }
+    }
+}
+
+/// A copy brought in while a new library is set up, to be sent to an online location straight away:
+/// there is no room to ask then, so a large one waits until the library is there (`import_folder` asks).
+pub fn check_setup(scan: &Scan, sent: bool) -> anyhow::Result<()> {
+    if sent && scan.bytes > limits().ask_over { return Err(tr::err("import.large_setup", &[])); }
+    Ok(())
+}
+
+/// How a copy brought in was taken back out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TakenBack {
+    /// Its history entry was removed: it had not been sent anywhere, so it is gone from what is sent.
+    Dropped,
+    /// It had been sent already: it was undone the usual way, with a new entry on top.
+    Undone,
+}
+
+/// Take back the copy brought in as history entry `hash` into `into`. While that entry is the latest
+/// and has not been sent to any location, the entry itself is removed (so what was brought in is no
+/// longer in what a Sync sends) and its files with it. Once sent, it is undone with a new entry like
+/// any other change. Refused, with nothing changed, when anything was recorded after it or the user
+/// changed or added something in that folder since: nothing the user wrote afterwards is ever lost.
+/// The caller holds the library lock.
+pub async fn take_back(st: &AppState, root: &Path, hash: &str, into: &str) -> anyhow::Result<TakenBack> {
+    if !git::valid_hash(hash) { return Err(tr::err("history.bad_entry", &[])); }
+    let into = into.trim().trim_matches('/').to_string();
+    if into.is_empty() { return Err(tr::err("history.bad_entry", &[])); }
+    library::resolve(root, &into)?;
+    let spec = format!(":(top,literal){into}");
+    {
+        let _g = st.git_lock.lock().await;
+        crate::trust::require_git(root)?;
+        let full = git::git(st, root, &["rev-parse", "--verify", "-q", "--end-of-options", &format!("{hash}^{{commit}}")]).await
+            .map_err(|_| tr::err("history.bad_entry", &[]))?.trim().to_string();
+        // Only an entry that brought notes into exactly this folder, and nothing else.
+        let subj = git::git(st, root, &["log", "-1", "--format=%s", "--end-of-options", &full]).await?.trim().to_string();
+        if !subj.starts_with(&git::subject::edit(&format!("{SUBJECT_START}{into} ("))) { return Err(tr::err("import.not_an_import", &[])); }
+        let files: Vec<String> = git::git(st, root, &["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--end-of-options", &full]).await?
+            .split('\0').filter(|f| !f.is_empty()).map(String::from).collect();
+        let inside = format!("{into}/");
+        if files.is_empty() || !files.iter().all(|f| f.starts_with(&inside)) { return Err(tr::err("import.not_an_import", &[])); }
+        let sent = !git::git(st, root, &["for-each-ref", "--format=%(refname)", "--contains", &full, "refs/remotes/"]).await?.trim().is_empty();
+        if !sent {
+            let head = git::head(st, root).await.unwrap_or_default();
+            if head != full { return Err(tr::err("import.take_back_later", &[])); }
+            let parents = git::git(st, root, &["rev-list", "--parents", "-n", "1", "--end-of-options", &full]).await?;
+            let parents: Vec<&str> = parents.split_whitespace().skip(1).collect();
+            let [parent] = parents[..] else { return Err(tr::err("import.take_back_later", &[])) };
+            // A note changed, removed or added in that folder since is the user's: keep everything.
+            let changed = git::git(st, root, &["status", "--porcelain", "-z", "--untracked-files=all", "--", &spec]).await?;
+            if !changed.trim_matches('\0').is_empty() { return Err(tr::err("import.take_back_edited", &[("name", &into)])); }
+            // The branch moves back only if it is still where it was a moment ago.
+            git::git(st, root, &["update-ref", "-m", "thoughts: took back notes brought in", "HEAD", parent, &full]).await?;
+            // Only that folder's entries in the index; anything else the user had staged stays.
+            git::git(st, root, &["reset", "-q", parent, "--", &spec]).await?;
+            let mut failed = 0;
+            for f in &files {
+                match library::resolve(root, f) {
+                    Ok(p) if std::fs::symlink_metadata(&p).map_or(false, |m| m.is_file()) => { if std::fs::remove_file(&p).is_err() { failed += 1; } }
+                    _ => {}
+                }
+            }
+            // The folders the copy made, once empty (anything else in them is kept).
+            if let Ok(top) = library::resolve(root, &into) {
+                let mut dirs: Vec<PathBuf> = walkdir::WalkDir::new(&top).follow_links(false).into_iter().flatten()
+                    .filter(|e| e.file_type().is_dir()).map(|e| e.path().to_path_buf()).collect();
+                dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+                for d in dirs { let _ = std::fs::remove_dir(d); }
+            }
+            if failed > 0 { crate::log::warn(format!("history: took back {hash}, but {failed} file(s) could not be removed")); }
+            crate::log::info(format!("history: took back notes brought in ({} file(s), not sent anywhere yet)", files.len()));
+            return Ok(TakenBack::Dropped);
+        }
+    }
+    // Sent already: what is sent cannot be taken back, so it is undone with an entry on top.
+    git::undo_commit(st, root, hash).await?;
+    Ok(TakenBack::Undone)
 }
 
 // ---------- the user's folder as the library ----------
@@ -371,12 +522,13 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/library/import-folder/preview", post(preview))
         .route("/api/library/import-folder", post(import_folder))
+        .route("/api/library/import-folder/take-back", post(take_back_req))
         .route("/api/onboarding/adopt", post(adopt_preview))
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
-struct FolderReq { path: String, into: String }
+struct FolderReq { path: String, into: String, keep: String }
 
 /// Look through the folder `scan` is to copy, off the async threads (it can be large).
 async fn scan_blocking(path: PathBuf, per_file: u64) -> anyhow::Result<Scan> {
@@ -384,7 +536,10 @@ async fn scan_blocking(path: PathBuf, per_file: u64) -> anyhow::Result<Scan> {
 }
 
 /// `POST /api/library/import-folder/preview {path, into?}` → what bringing that folder in would do:
-/// `{source, name, into, files, notes, other, bytes, sample, left, leftCount, leftBy, tooBig, undo}`.
+/// `{source, name, into, files, notes, other, bytes, sample, left, leftCount, leftBy, tooBig, undo,
+/// sent, ask, allowAll, notesBytes, notesFit}`. `ask`: the library is sent to a location and the copy
+/// is large, so `import_folder` needs the user's `keep` choice (`allowAll`: "all" may be chosen;
+/// `notesFit`: "notes" may be chosen).
 /// Reads only. (Also answers before there is a library, for the setup screens: `into` is then
 /// where the copy would go in a new one.)
 async fn preview(State(st): S, Json(r): Json<FolderReq>) -> R {
@@ -403,11 +558,20 @@ async fn preview(State(st): S, Json(r): Json<FolderReq>) -> R {
     v["name"] = json!(src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
     v["into"] = json!(into);
     v["undo"] = json!(s.history_enabled() && git::usable());
+    let sent = match &root { Some(r) => sent_somewhere(&st, r).await, None => false };
+    let (l, notes_bytes) = (limits(), scan.notes_bytes());
+    v["sent"] = json!(sent);
+    v["ask"] = json!(sent && scan.bytes > l.ask_over);
+    v["allowAll"] = json!(scan.bytes <= l.sent_max);
+    v["notesBytes"] = json!(notes_bytes);
+    v["notesFit"] = json!(scan.notes > 0 && notes_bytes <= l.sent_max);
     Ok(Json(v))
 }
 
-/// `POST /api/library/import-folder {path, into?}` → `{into, copied, left, hash, undo}`: copy the
-/// folder in (see `copy_in`) as one history entry (`hash`, for Undo; `null` without history).
+/// `POST /api/library/import-folder {path, into?, keep?}` → `{into, copied, left, hash, undo}`: copy the
+/// folder in (see `copy_in`) as one history entry (`hash`, for Undo; `null` without history). When the
+/// library is sent to a location and the copy is large, nothing happens without `keep`: "all", or
+/// "notes" for the notes alone (see `decide`).
 async fn import_folder(State(st): S, Json(r): Json<FolderReq>) -> R {
     let root = crate::api::lib(&st).await?;
     crate::api::library_free(&st).await?;
@@ -416,6 +580,8 @@ async fn import_folder(State(st): S, Json(r): Json<FolderReq>) -> R {
     let scan = scan_blocking(src, library::IMPORT_MAX_BYTES as u64).await?;
     if scan.too_big { return Err(tr::err("import.too_big", &[]).into()); }
     if scan.files.is_empty() { return Err(tr::err("import.nothing", &[]).into()); }
+    let keep = Keep::parse(&r.keep)?;
+    let scan = if sent_somewhere(&st, &root).await { decide(scan, keep, limits())? } else if keep == Keep::Notes { decide(scan, keep, limits())? } else { scan };
     // Nothing else changes the library meanwhile (a Wrap waits), and what was there before is
     // recorded first when the history starts here, so the copy is an entry of its own.
     let _guard = st.library_lock.of(&root).try_lock_owned().map_err(|_| tr::err("busy", &[]))?;
@@ -434,6 +600,20 @@ async fn import_folder(State(st): S, Json(r): Json<FolderReq>) -> R {
     st.emit(json!({"type": "todos.changed"}));
     let left: Vec<Value> = scan.left.iter().chain(late.iter()).take(SHOW_LEFT).map(|(p, w)| json!({"path": p, "why": w.as_str()})).collect();
     Ok(Json(json!({"into": into, "copied": copied, "left": left, "leftCount": scan.left.len() + late.len(), "hash": hash, "undo": hash.is_some()})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct TakeBackReq { hash: String, into: String }
+
+/// `POST /api/library/import-folder/take-back {hash, into}` → `{ok, how}`: take back a copy brought
+/// in (see `take_back`). `how`: "dropped" (gone from the history too) or "undone" (it had been sent).
+async fn take_back_req(State(st): S, Json(r): Json<TakeBackReq>) -> R {
+    let (root, _guard) = crate::api::history_change(&st).await?;
+    let how = take_back(&st, &root, &r.hash, &r.into).await?;
+    st.emit(json!({"type": "library.changed"}));
+    st.emit(json!({"type": "todos.changed"}));
+    Ok(Json(json!({"ok": true, "how": match how { TakenBack::Dropped => "dropped", TakenBack::Undone => "undone" }})))
 }
 
 #[derive(Deserialize, Default)]
@@ -574,12 +754,12 @@ mod tests {
         let st = Arc::new(AppState::for_test());
         { let mut s = st.settings.write().await; s.library_path = Some(lib.to_string_lossy().to_string()); s.keep_history = true; }
         // An edit of the user's own that is not recorded yet stays out of the entry.
-        let p = preview(State(st.clone()), Json(FolderReq { path: src.to_string_lossy().to_string(), into: String::new() })).await.unwrap().0;
+        let p = preview(State(st.clone()), Json(FolderReq { path: src.to_string_lossy().to_string(), ..Default::default() })).await.unwrap().0;
         assert_eq!((p["into"].as_str(), p["files"].as_u64(), p["undo"].as_bool()), (Some("Vault"), Some(4), Some(true)));
         assert!(!lib.join("Vault").exists(), "a preview changes nothing");
         git::ready(&st, &lib).await;
         t::write(&lib, "ideas/a/README.md", "an idea, edited\n");
-        let r = import_folder(State(st.clone()), Json(FolderReq { path: src.to_string_lossy().to_string(), into: "Old notes".into() })).await.unwrap().0;
+        let r = import_folder(State(st.clone()), Json(FolderReq { path: src.to_string_lossy().to_string(), into: "Old notes".into(), ..Default::default() })).await.unwrap().0;
         assert_eq!((r["into"].as_str(), r["copied"].as_u64()), (Some("Old notes"), Some(4)));
         let hash = r["hash"].as_str().unwrap().to_string();
         let entry = &git::history(&st, &lib, None, 1).await.unwrap()[0];
@@ -595,9 +775,128 @@ mod tests {
         // Nothing to bring in, or the library itself, is refused.
         let empty = d.join("Empty");
         t::write(&empty, ".obsidian/x.json", "{}");
-        let e = import_folder(State(st.clone()), Json(FolderReq { path: empty.to_string_lossy().to_string(), into: String::new() })).await.unwrap_err();
+        let e = import_folder(State(st.clone()), Json(FolderReq { path: empty.to_string_lossy().to_string(), ..Default::default() })).await.unwrap_err();
         assert_eq!(axum::response::IntoResponse::into_response(e).status().as_u16(), 422);
-        assert!(import_folder(State(st.clone()), Json(FolderReq { path: lib.join("ideas").to_string_lossy().to_string(), into: String::new() })).await.is_err());
+        assert!(import_folder(State(st.clone()), Json(FolderReq { path: lib.join("ideas").to_string_lossy().to_string(), ..Default::default() })).await.is_err());
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    /// A library with its history and an online location (a bare repository standing in for one),
+    /// and a folder of notes with a large attachment. Limits are small, so "large" is a few bytes.
+    async fn sent_library(name: &str) -> (PathBuf, PathBuf, PathBuf, Arc<AppState>) {
+        TEST_LIMITS.with(|c| c.set(Some(Limits { ask_over: 1000, sent_max: 4000 })));
+        let d = tmp(name);
+        let (src, lib, remote) = (d.join("Vault"), d.join("Library"), d.join("remote.git"));
+        vault(&src);
+        t::write(&src, "Clients/Acme/recording.m4a", &"x".repeat(2000));
+        t::write(&lib, "CLAUDE.md", "rules\n");
+        t::write(&lib, "ideas/a/README.md", "an idea\n");
+        std::fs::create_dir_all(&remote).unwrap();
+        let o = std::process::Command::new("git").current_dir(&remote).args(["init", "-q", "--bare"]).output().unwrap();
+        assert!(o.status.success());
+        let st = Arc::new(AppState::for_test());
+        { let mut s = st.settings.write().await; s.library_path = Some(lib.to_string_lossy().to_string()); s.sync.mode = "git-manual".into(); }
+        assert!(git::ready(&st, &lib).await);
+        git::git(&st, &lib, &["remote", "add", "--", "origin", &remote.to_string_lossy()]).await.unwrap();
+        (d, src, lib, st)
+    }
+    fn req(src: &Path, into: &str, keep: &str) -> Json<FolderReq> {
+        Json(FolderReq { path: src.to_string_lossy().to_string(), into: into.into(), keep: keep.into() })
+    }
+    fn code(e: ApiErr) -> (u16,) {
+        (axum::response::IntoResponse::into_response(e).status().as_u16(),)
+    }
+
+    #[tokio::test]
+    async fn a_large_folder_is_not_recorded_for_a_library_that_is_sent_somewhere_until_the_user_chooses() {
+        let (d, src, lib, st) = sent_library("large").await;
+        let before = git::head(&st, &lib).await;
+        // The preview says a choice is needed, and which ones there are.
+        let p = preview(State(st.clone()), req(&src, "", "")).await.unwrap().0;
+        assert_eq!((p["sent"].as_bool(), p["ask"].as_bool(), p["allowAll"].as_bool(), p["notesFit"].as_bool()), (Some(true), Some(true), Some(true), Some(true)));
+        // Without a choice nothing is copied and nothing recorded: this was the bug (one entry of
+        // everything, sent at the next Sync and kept in what is sent for good).
+        let e = import_folder(State(st.clone()), req(&src, "Old notes", "")).await.unwrap_err();
+        assert_eq!(code(e).0, 409);
+        assert!(!lib.join("Old notes").exists());
+        assert_eq!(git::head(&st, &lib).await, before);
+        assert_eq!(tr::classify_in(false, &Keep::parse("maybe").unwrap_err()).code, "validation");
+        // "Only the notes": the recording, the PDF and every other file stay out of the history.
+        let r = import_folder(State(st.clone()), req(&src, "Old notes", "notes")).await.unwrap().0;
+        assert_eq!(r["copied"].as_u64(), Some(3));
+        assert!(lib.join("Old notes/Clients/Acme/Kick-off.md").is_file() && !lib.join("Old notes/Clients/Acme/recording.m4a").exists() && !lib.join("Old notes/Clients/Acme/contract.pdf").exists());
+        let entry = &git::history(&st, &lib, None, 1).await.unwrap()[0];
+        assert!(entry["files"].as_array().unwrap().iter().all(|f| f.as_str().unwrap().ends_with(".md") || f.as_str().unwrap().ends_with(".txt")), "{entry}");
+        // Everything, when the user says so, as long as a location can take it.
+        let r = import_folder(State(st.clone()), req(&src, "All of it", "all")).await.unwrap().0;
+        assert_eq!(r["copied"].as_u64(), Some(5));
+        TEST_LIMITS.with(|c| c.set(Some(Limits { ask_over: 1000, sent_max: 1500 })));
+        let p = preview(State(st.clone()), req(&src, "", "")).await.unwrap().0;
+        assert_eq!((p["allowAll"].as_bool(), p["notesFit"].as_bool()), (Some(false), Some(true)));
+        assert_eq!(code(import_folder(State(st.clone()), req(&src, "Too much", "all")).await.unwrap_err()).0, 413);
+        assert!(!lib.join("Too much").exists());
+        // A small folder needs no choice; neither does a library that is not sent anywhere.
+        let small = d.join("Small");
+        t::write(&small, "a.md", "a\n");
+        assert!(import_folder(State(st.clone()), req(&small, "", "")).await.is_ok());
+        git::git(&st, &lib, &["remote", "remove", "origin"]).await.unwrap();
+        assert_eq!(preview(State(st.clone()), req(&src, "", "")).await.unwrap().0["ask"].as_bool(), Some(false));
+        // Setting up a new library that goes online at once: a large copy waits until it is there.
+        let scan = Scan::of(&src, library::IMPORT_MAX_BYTES as u64);
+        assert!(check_setup(&scan, true).is_err() && check_setup(&scan, false).is_ok());
+        TEST_LIMITS.with(|c| c.set(None));
+        std::fs::remove_dir_all(d).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_copy_not_sent_yet_is_taken_back_out_of_the_history_and_nothing_written_since_is_lost() {
+        let (d, src, lib, st) = sent_library("take-back").await;
+        let before = git::head(&st, &lib).await.unwrap();
+        let r = import_folder(State(st.clone()), req(&src, "Old notes", "all")).await.unwrap().0;
+        let hash = r["hash"].as_str().unwrap().to_string();
+        // An edit elsewhere, not recorded yet, and a file the user had staged: both stay as they are.
+        t::write(&lib, "ideas/a/README.md", "an idea, edited\n");
+        t::write(&lib, "ideas/b.md", "staged\n");
+        git::git(&st, &lib, &["add", "--", "ideas/b.md"]).await.unwrap();
+        // Only an entry that brought notes into that folder.
+        assert!(take_back(&st, &lib, &before, "Old notes").await.is_err());
+        assert!(take_back(&st, &lib, &hash, "ideas").await.is_err());
+        // A note changed in the copy since: refused, the change kept.
+        t::write(&lib, "Old notes/Inbox.md", "# Inbox\nmy new line\n");
+        assert_eq!(tr::classify_in(false, &take_back(&st, &lib, &hash, "Old notes").await.unwrap_err()).code, "import_take_back");
+        assert_eq!(t::read(&lib, "Old notes/Inbox.md"), "# Inbox\nmy new line\n");
+        t::write(&lib, "Old notes/Inbox.md", "# Inbox\n");
+        assert_eq!(take_back(&st, &lib, &hash, "Old notes").await.unwrap(), TakenBack::Dropped);
+        // The entry is gone from what a Sync sends, and the files from the library…
+        assert_eq!(git::head(&st, &lib).await.unwrap(), before);
+        assert!(git::git(&st, &lib, &["merge-base", "--is-ancestor", &hash, "HEAD"]).await.is_err());
+        assert!(!lib.join("Old notes").exists());
+        // …and nothing else changed.
+        assert_eq!(t::read(&lib, "ideas/a/README.md"), "an idea, edited\n");
+        let staged = git::git(&st, &lib, &["diff", "--cached", "--name-only"]).await.unwrap();
+        assert_eq!(staged.trim(), "ideas/b.md");
+        assert_eq!(t::read(&src, "Clients/Acme/Kick-off.md"), "# Kick-off\nWe agreed on the scope.\n");
+        git::git(&st, &lib, &["reset", "-q"]).await.unwrap();
+
+        // Something recorded after the copy: refused, nothing changed.
+        let r = import_folder(State(st.clone()), req(&src, "Old notes", "all")).await.unwrap().0;
+        let hash = r["hash"].as_str().unwrap().to_string();
+        git::commit_all(&st, &lib, &git::subject::edit("your changes")).await.unwrap();
+        let after = git::head(&st, &lib).await;
+        assert_eq!(tr::classify_in(false, &take_back(&st, &lib, &hash, "Old notes").await.unwrap_err()).code, "import_take_back");
+        assert_eq!(git::head(&st, &lib).await, after);
+        assert!(lib.join("Old notes/Inbox.md").is_file());
+
+        // Sent already: the usual undo, an entry on top (what was sent cannot be called back).
+        let r = import_folder(State(st.clone()), req(&src, "Sent notes", "all")).await.unwrap().0;
+        let hash = r["hash"].as_str().unwrap().to_string();
+        git::git(&st, &lib, &["push", "-q", "--", "origin", "HEAD:refs/heads/main"]).await.unwrap();
+        git::git(&st, &lib, &["fetch", "-q", "--", "origin"]).await.unwrap();
+        let head = git::head(&st, &lib).await.unwrap();
+        assert_eq!(take_back(&st, &lib, &hash, "Sent notes").await.unwrap(), TakenBack::Undone);
+        assert!(!lib.join("Sent notes/Inbox.md").exists());
+        assert!(git::git(&st, &lib, &["merge-base", "--is-ancestor", &head, "HEAD"]).await.is_ok(), "nothing sent is rewritten");
+        TEST_LIMITS.with(|c| c.set(None));
         std::fs::remove_dir_all(d).unwrap();
     }
 
