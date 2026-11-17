@@ -1266,7 +1266,7 @@ mod tests {
         let decision = recorded(&lib);
         st.settings.write().await.library_path = Some(lib.to_string_lossy().to_string());
         // A sync, wrap or routine save has the library: the swap waits, nothing is written or recorded.
-        let held = st.library_lock.clone().try_lock_owned().unwrap();
+        let held = st.library_lock.of(&lib).try_lock_owned().unwrap();
         crate::claude::refresh_starter_hook(&st, &lib).await;
         assert_eq!(settings_of(&lib), SETTINGS_0_0_8);
         assert_eq!(recorded(&lib), decision);
@@ -1279,7 +1279,7 @@ mod tests {
         // A folder outside the library has no such lock to wait for (nothing in the app writes there).
         let other = tmp("oldhook-other");
         put(&other, ".claude/settings.json", SETTINGS_0_0_8);
-        let _held = st.library_lock.clone().try_lock_owned().unwrap();
+        let _held = st.library_lock.of(&lib).try_lock_owned().unwrap();
         crate::claude::refresh_starter_hook(&st, &other).await;
         assert_eq!(settings_of(&other), STARTER_SETTINGS);
         std::fs::remove_dir_all(lib).unwrap();

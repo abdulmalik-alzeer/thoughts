@@ -290,7 +290,7 @@ struct SaveReq { id: Option<String>, hash: Option<String>, routine: Draft }
 async fn api_save(State(st): State<Arc<AppState>>, Json(r): Json<SaveReq>) -> R {
     let lib = library(&st).await?;
     // The library's lock is held from the trust check before the write until the history entry after it.
-    let _lib = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    let _lib = st.library_lock.of(&lib).try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
     let _g = LOCK.lock().await;
     // With the assistant at work in the library, this change is the user's, never the run's (FEAT-06).
     let _f = crate::changesets::fence(&st).await;
@@ -309,7 +309,7 @@ struct RemoveReq { id: String, hash: String }
 async fn api_remove(State(st): State<Arc<AppState>>, Json(r): Json<RemoveReq>) -> R {
     let lib = library(&st).await?;
     // The library's lock is held from the trust check before the write until the history entry after it.
-    let _lib = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    let _lib = st.library_lock.of(&lib).try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
     let _g = LOCK.lock().await;
     let _f = crate::changesets::fence(&st).await;
     remove(&lib, &r.id, &r.hash)?;

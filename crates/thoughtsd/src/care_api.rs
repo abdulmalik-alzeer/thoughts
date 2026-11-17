@@ -82,7 +82,8 @@ async fn run_fix(st: &AppState, id: &str) -> anyhow::Result<()> {
             // As History's repair: never under an assistant at work in the library, and with the
             // library held for the whole repair, so no wrap, sync or edit changes it halfway.
             if st.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
-            let _held = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+            let _held = st.library_lock.of(&lib).try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+            st.drain_edits().await?;
             // The same repair as History's: a copy of the library as it is now is kept first.
             let r = crate::repair::repair(st, &lib).await?;
             crate::log::info(format!("self-check: history repaired ({})", r["repaired"]));
@@ -518,7 +519,7 @@ mod tests {
             assert!(crate::tr::classify_in(false, &run_fix(&st, fix).await.unwrap_err()).message.ends_with(&crate::tr::text_in(false, "busy.run", &[])), "{fix}");
             st.run_dirs.lock().unwrap().clear();
             // A wrap, a sync or another repair holds the library: refused, nothing touched.
-            let held = st.library_lock.clone().try_lock_owned().unwrap();
+            let held = st.library_lock.of(&lib).try_lock_owned().unwrap();
             assert!(crate::tr::classify_in(false, &run_fix(&st, fix).await.unwrap_err()).message.ends_with(&crate::tr::text_in(false, "busy", &[])), "{fix}");
             assert!(detached());
             drop(held);

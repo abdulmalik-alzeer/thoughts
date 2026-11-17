@@ -412,8 +412,14 @@ pub(crate) async fn lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
 /// The same holds while a wrap that was cut off waits for the user's decision
 /// (`WRAP_INTERRUPTED::<chatId>`): undoing it must not take later work with it.
 pub(crate) async fn library_free(st: &AppState) -> anyhow::Result<()> {
-    if st.library_busy() { return Err(crate::tr::err("busy", &[])); }
+    if open_busy(st).await { return Err(crate::tr::err("busy", &[])); }
     wraps::require_no_interrupted(st).await
+}
+
+/// Is the open library held (by a wrap, reorganize, sync, undo or repair)? Without one set up: is any?
+pub(crate) async fn open_busy(st: &AppState) -> bool {
+    let open = st.settings.read().await.library();
+    open.map_or_else(|| st.library_busy(), |l| st.library_busy_at(&l))
 }
 
 /// Longest a short edit waits for a sync to finish changing the library's files.
@@ -427,7 +433,13 @@ const EDIT_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// still turns it away at once, as does a cut-off wrap waiting for a decision.
 pub(crate) async fn library_edit(st: &Arc<AppState>) -> anyhow::Result<(tokio::sync::OwnedRwLockReadGuard<()>, Option<crate::changesets::Fence>)> {
     let files = tokio::time::timeout(EDIT_WAIT, st.sync_files.clone().read_owned()).await.map_err(|_| crate::tr::err("busy.sync", &[]))?;
-    if st.library_busy() && !st.syncing.load(std::sync::atomic::Ordering::SeqCst) { return Err(crate::tr::err("busy", &[])); }
+    // Only the open library counts: a wrap still running in one the user left does not hold this one.
+    let open = st.settings.read().await.library();
+    let (busy, syncing) = match &open {
+        Some(l) => (st.library_busy_at(l), st.library_lock.syncing_at(l)),
+        None => (st.library_busy(), false),
+    };
+    if busy && !syncing { return Err(crate::tr::err("busy", &[])); }
     wraps::require_no_interrupted(st).await?;
     // With the assistant at work in the library, what this edit changes is the user's, never the run's (FEAT-06).
     Ok((files, crate::changesets::fence(st).await))
@@ -528,7 +540,7 @@ async fn status(State(st): S) -> R {
         "profession": s.profession,
         "wrapInterrupted": wraps::interrupted_wrap(&st).await,
         "unreadableChats": st.chats.unreadable,
-        "busy": st.library_busy(),
+        "busy": s.library().map_or_else(|| st.library_busy(), |l| st.library_busy_at(&l)),
         "libraryMissing": s.library().map_or(false, |l| !l.is_dir()),
         "platform": std::env::consts::OS,
         "home": dirs::home_dir(),
@@ -1909,7 +1921,7 @@ async fn library_history(State(st): S, Query(q): Query<HashMap<String, String>>)
     // interrupted wrap. The library lock is held for the length of the commit. (Only when reading
     // from the top: a new entry appearing between two pages would shift everything by one.)
     if skip == 0 && !st.run_active_in(&root) {
-        if let Ok(_guard) = st.library_lock.clone().try_lock_owned() {
+        if let Ok(_guard) = st.library_lock.of(&root).try_lock_owned() {
             claude::record_library_locked(&st, &root, &git::subject::edit("your changes")).await;
         }
     }
@@ -1942,7 +1954,10 @@ async fn history_change(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBu
     let root = history_lib(st).await?;
     wraps::require_no_interrupted(st).await?;
     if st.run_active_in(&root) { return Err(crate::tr::err("busy.run", &[])); }
-    let guard = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    let guard = st.library_lock.of(&root).try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    // An edit admitted a moment ago finishes first: an undo that stops on a conflict puts the
+    // library back as it was, and must never take that edit with it.
+    st.drain_edits().await?;
     Ok((root, guard))
 }
 
@@ -2019,7 +2034,8 @@ struct RepairReq { rebuild: bool }
 async fn history_repair(State(st): S, Json(r): Json<RepairReq>) -> R {
     let l = repair_lib(&st).await?;
     if st.run_active_in(&l) { return Err(crate::tr::err("busy.run", &[]).into()); }
-    let _guard = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    let _guard = st.library_lock.of(&l).try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    st.drain_edits().await?;
     let v = if r.rebuild { crate::repair::rebuild(&st, &l).await? } else { crate::repair::repair(&st, &l).await? };
     st.emit(json!({"type": "library.changed"}));
     st.emit(json!({"type": "history.changed"}));
@@ -2980,9 +2996,9 @@ async fn git_status(State(st): S) -> R {
 /// A sync started from the window, for as long as it runs: it holds the library (no wrap,
 /// reorganize or second sync starts meanwhile) and says that it is a sync that holds it, so short
 /// edits wait for it instead of being turned away (`library_edit`).
-struct SyncHold { st: Arc<AppState>, _lib: tokio::sync::OwnedMutexGuard<()> }
+struct SyncHold { slot: Arc<crate::state::LibrarySlot>, _lib: tokio::sync::OwnedMutexGuard<()> }
 impl Drop for SyncHold {
-    fn drop(&mut self) { self.st.syncing.store(false, std::sync::atomic::Ordering::SeqCst); }
+    fn drop(&mut self) { self.slot.syncing.store(false, std::sync::atomic::Ordering::SeqCst); }
 }
 
 /// What a sync needs before it may touch the library: sync switched on, no wrap or reorganize in
@@ -2992,9 +3008,10 @@ impl Drop for SyncHold {
 async fn sync_guard(st: &Arc<AppState>) -> anyhow::Result<(std::path::PathBuf, SyncHold)> {
     let l = lib(st).await?;
     if !st.settings.read().await.sync_enabled() { return Err(crate::tr::err("git.off", &[])); }
-    let guard = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
-    st.syncing.store(true, std::sync::atomic::Ordering::SeqCst);
-    let hold = SyncHold { st: st.clone(), _lib: guard };
+    let slot = st.library_lock.slot(&l);
+    let guard = slot.lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    slot.syncing.store(true, std::sync::atomic::Ordering::SeqCst);
+    let hold = SyncHold { slot, _lib: guard };
     wraps::require_no_interrupted(st).await?;
     if st.run_active_in(&l) { return Err(crate::tr::err("busy.run", &[])); }
     Ok((l, hold))
@@ -3974,6 +3991,76 @@ mod tests {
         todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "new task".into(), ..Default::default() })).await.unwrap();
         assert_eq!(t::read(&lib, "notes/today.md"), "typed after the wrap");
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_edit_under_way_when_a_wrap_starts_is_finished_first_and_kept_when_the_wrap_fails() {
+        let (st, lib) = t::library().await;
+        let chat = t::chat(&st, "plan the shop").await;
+        let wrap = t::wrap_ready(&st, &[chat.clone()]).await;
+        st.chats.update(&wrap, |c| c.meta["direct"] = serde_json::json!(true)).await;
+        // The wrap writes in the library, then fails: it is put back as it was before the wrap.
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let (g, lib2) = (gate.clone(), lib.clone());
+        t::assistant(&st, move |_| { let (g, lib) = (g.clone(), lib2.clone()); async move { t::write(&lib, "ideas/shop/README.md", "half rewritten"); g.notified().await; false } });
+        let mut rx = st.events.subscribe();
+        // A todo was let in a moment before the wrap, and has not written yet.
+        let edit = library_edit(&st).await.unwrap();
+        let st2 = st.clone();
+        let w = wrap.clone();
+        let apply = tokio::spawn(async move { wraps::apply(st2, &w, "").await.map_err(|e| e.to_string()) });
+        // It takes the library, then waits for the edit under way.
+        for _ in 0..100 { if st.library_busy_at(&lib) { break; } tokio::time::sleep(std::time::Duration::from_millis(50)).await; }
+        assert!(st.library_busy_at(&lib), "the wrap holds the library, so nothing new gets in");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(!apply.is_finished(), "the wrap waits for the edit under way");
+        t::write(&lib, "TODO.md", "# Todo\n\n- [ ] call the bank\n- [ ] typed just before the wrap\n");
+        drop(edit);
+        apply.await.unwrap().unwrap();
+        gate.notify_one();
+        assert_eq!(t::event(&mut rx, &st, "wrap.failed").await["rolledBack"], true);
+        assert_eq!(t::read(&lib, "ideas/shop/README.md"), "---\ntitle: Shop\nstatus: seed\n---\nOriginal idea.\n");
+        assert_eq!(t::read(&lib, "TODO.md"), "# Todo\n\n- [ ] call the bank\n- [ ] typed just before the wrap\n", "the edit is not undone with the wrap");
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_edit_that_never_finishes_is_waited_for_only_so_long_then_said_plainly() {
+        let (st, lib) = t::library().await;
+        let edit = library_edit(&st).await.unwrap();
+        let short = std::time::Duration::from_millis(100);
+        let e = crate::tr::classify_in(false, &st.drain_edits_within(short).await.unwrap_err());
+        assert!(e.message.ends_with(&crate::tr::text_in(false, "busy.saving", &[])), "{}", e.message);
+        drop(edit);
+        st.drain_edits().await.unwrap();
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_wrap_in_the_library_left_behind_does_not_hold_the_one_now_open() {
+        let (st, a) = t::library().await;
+        let b = a.parent().unwrap().join("second");
+        std::fs::create_dir_all(&b).unwrap();
+        // A wrap is still at work in the first library (a link to it is the same library).
+        let link = a.parent().unwrap().join("link-to-first");
+        std::os::unix::fs::symlink(&a, &link).unwrap();
+        let held = st.library_lock.of(&link).try_lock_owned().unwrap();
+        assert!(st.library_busy_at(&a));
+        // The user opened the second one: saving and todos there go through.
+        st.settings.write().await.library_path = Some(b.to_string_lossy().to_string());
+        write_file(State(st.clone()), none(), save("notes/today.md", "typed in the second library")).await.unwrap();
+        todo_op(State(st.clone()), Path("add".into()), none(), Json(TodoOp { file: "TODO.md".into(), text: "second task".into(), ..Default::default() })).await.unwrap();
+        assert_eq!(t::read(&b, "notes/today.md"), "typed in the second library");
+        assert!(!st.library_busy_at(&b));
+        // Still nothing may stop the daemon halfway through the first library's wrap.
+        assert!(st.library_busy());
+        assert_eq!(shown(shutdown(State(st.clone()), axum::body::Bytes::new()).await).code, "busy");
+        // Back in the first library, edits are turned away until the wrap is done.
+        st.settings.write().await.library_path = Some(link.to_string_lossy().to_string());
+        assert_eq!(shown(write_file(State(st.clone()), none(), save("notes/x.md", "x")).await).code, "busy");
+        drop(held);
+        write_file(State(st.clone()), none(), save("notes/x.md", "x")).await.unwrap();
+        std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
     }
 
     #[tokio::test]
@@ -5322,8 +5409,9 @@ mod tests {
     async fn an_edit_waits_for_a_sync_to_finish_changing_files_and_then_goes_through() {
         let (st, lib) = t::library().await;
         // A sync started from the window: it holds the library and says so.
-        let held = st.library_lock.clone().try_lock_owned().unwrap();
-        st.syncing.store(true, std::sync::atomic::Ordering::SeqCst);
+        let slot = st.library_lock.slot(&lib);
+        let held = slot.lock.clone().try_lock_owned().unwrap();
+        slot.syncing.store(true, std::sync::atomic::Ordering::SeqCst);
         // While it waits on the network the files are free: a save goes straight through.
         write_file(State(st.clone()), none(), save("notes/a.md", "typed while sending")).await.unwrap();
         assert_eq!(t::read(&lib, "notes/a.md"), "typed while sending");
@@ -5347,7 +5435,7 @@ mod tests {
         assert!(got.is_err(), "the sync waits for the edit");
         drop(writing);
         // A wrap (or reorganize) holding the library still turns an edit away at once.
-        st.syncing.store(false, std::sync::atomic::Ordering::SeqCst);
+        slot.syncing.store(false, std::sync::atomic::Ordering::SeqCst);
         let e = shown(write_file(State(st.clone()), none(), save("notes/b.md", "x")).await);
         assert_eq!((e.status, e.code), (423, "busy"));
         drop(held);
@@ -5368,13 +5456,13 @@ mod tests {
         let sync = tokio::spawn(async move { git_sync(State(st2)).await.map(|v| v.0).map_err(|e| e.0.to_string()) });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert!(!sync.is_finished());
-        assert!(st.syncing.load(std::sync::atomic::Ordering::SeqCst), "the library is held by a sync");
+        assert!(st.library_lock.syncing_at(&lib), "the library is held by a sync");
         t::write(&lib, "notes/late.md", "finished writing\n");
         drop(writing);
         let v = sync.await.unwrap().unwrap();
         assert_eq!(v["locations"][0]["sent"], true);
         assert_eq!(t::sh(&backup, &["show", "main:notes/late.md"]), "finished writing", "what the edit wrote went with the sync");
-        assert!(!st.syncing.load(std::sync::atomic::Ordering::SeqCst) && !st.library_busy());
+        assert!(!st.library_lock.syncing_at(&lib) && !st.library_busy());
         std::fs::remove_dir_all(root).unwrap();
     }
 

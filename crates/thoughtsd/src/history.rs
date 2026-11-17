@@ -54,7 +54,7 @@ async fn record_saved(state: &Arc<AppState>, root: &Path) -> bool {
     if !on || !listed { return true; }
     // The assistant's half-written files are not the user's version; its own entry follows its work.
     if state.run_active_in(root) { return false; }
-    let Ok(_guard) = state.library_lock.clone().try_lock_owned() else { return false };
+    let Ok(_guard) = state.library_lock.of(root).try_lock_owned() else { return false };
     let before = crate::git::head(state, root).await;
     crate::claude::record_library_locked(state, root, &crate::git::subject::edit("your changes")).await;
     if crate::git::head(state, root).await != before { state.emit(serde_json::json!({"type": "history.changed"})); }
@@ -262,7 +262,7 @@ mod tests {
 
         // While a wrap or another save holds the library, or the assistant works in it, the
         // version waits — and is recorded when the way is clear.
-        let held = st.library_lock.clone().lock_owned().await;
+        let held = st.library_lock.of(&lib).lock_owned().await;
         st.run_dirs.lock().unwrap().insert("chat".into(), lib.clone());
         t::write(&lib, "notes/plan.md", "typed while a wrap was saving\n");
         record_after(&st, &lib, quiet);

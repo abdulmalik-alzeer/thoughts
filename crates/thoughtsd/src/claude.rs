@@ -1634,7 +1634,7 @@ pub(crate) async fn refresh_starter_hook(state: &AppState, dir: &Path) {
     let in_library = { let s = state.settings.read().await; s.library().into_iter().chain(s.libraries.iter().map(|l| PathBuf::from(&l.path))).find(|lib| dir.starts_with(lib)) };
     let Some(lib) = in_library else { crate::trust::refresh_starter_hook(dir); return; };
     if crate::wraps::interrupted_wrap_in(state, &lib).await.is_some() { return; }
-    let Ok(_held) = state.library_lock.clone().try_lock_owned() else { return };
+    let Ok(_held) = state.library_lock.of(&lib).try_lock_owned() else { return };
     crate::trust::refresh_starter_hook(dir);
 }
 

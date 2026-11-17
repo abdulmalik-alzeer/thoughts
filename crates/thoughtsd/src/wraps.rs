@@ -1196,7 +1196,10 @@ pub async fn apply(state: Arc<AppState>, wrap_id: &str, note: &str) -> anyhow::R
     // wrap's all-or-nothing undo.
     if state.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
     // Held until the commit is made: nothing else edits, syncs, wraps or shuts down halfway through.
-    let guard = state.library_lock.clone().try_lock_owned().map_err(|_| busy())?;
+    let guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
+    // An edit admitted a moment ago finishes first: a wrap that fails puts the library back as it
+    // was, and must never take that edit with it. Edits after this see the library held.
+    state.drain_edits().await?;
     // Finishing a wrap that was cut off: its undo point is still the state from before it began.
     let earlier = w.meta["snapshot"].as_str().filter(|_| finishing).map(String::from);
     // `around`: the library also changed after the wrap was cut off, so a second failure must take
@@ -1593,7 +1596,7 @@ pub async fn save(state: Arc<AppState>, wrap_id: &str) -> anyhow::Result<()> {
     require_no_interrupted(&state).await?;
     // A chat or workflow still writing in the library would race the save.
     if state.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
-    let _guard = state.library_lock.clone().try_lock_owned().map_err(|_| busy())?;
+    let _guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
     let (ids, marks) = plan_marks(&w);
     never_twice(&state, &ids, &marks).await?;
     let dir = w.meta["copy"]["dir"].as_str().map(PathBuf::from).filter(|d| is_copy(d) && d.is_dir()).ok_or_else(|| crate::tr::err("wrap.closed", &[]))?;
@@ -1666,7 +1669,7 @@ pub async fn rollback(state: &AppState, wrap_id: &str) -> anyhow::Result<Value> 
     if w.kind != "wrap" || w.meta["phase"] != "interrupted" { return Err(crate::tr::err("wrap.no_undo", &[])); }
     if !Scope::now(state).await.holds(w.library.as_deref()) { return Err(crate::tr::err("wrap.other_library", &[])); }
     let snap = w.meta["snapshot"].as_str().ok_or_else(|| crate::tr::err("wrap.no_history", &[]))?.to_string();
-    let _guard = state.library_lock.clone().try_lock_owned().map_err(|_| busy())?;
+    let _guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
     let ar = is_ar(state).await;
     let (reverted, kept) = {
         let _g = state.git_lock.lock().await;
@@ -1708,7 +1711,7 @@ pub async fn rollback(state: &AppState, wrap_id: &str) -> anyhow::Result<Value> 
 pub async fn keep_partial(state: &AppState, wrap_id: &str) -> anyhow::Result<()> {
     let w = state.chats.meta(wrap_id).await.ok_or_else(|| crate::tr::err("not_found.wrap", &[]))?;
     if w.kind != "wrap" || w.meta["phase"] != "interrupted" { return Err(crate::tr::err("wrap.no_undo", &[])); }
-    let _guard = state.library_lock.clone().try_lock_owned().map_err(|_| busy())?;
+    let _guard = state.open_library_lock().await.try_lock_owned().map_err(|_| busy())?;
     crate::log::warn(format!("wrap {wrap_id}: the user kept the partial changes of the interrupted wrap"));
     state.chats.update(wrap_id, |c| {
         c.meta["phase"] = json!("failed"); c.meta["rolledBack"] = json!(false); c.meta["canRollback"] = json!(false);
@@ -1736,7 +1739,7 @@ pub async fn undo(state: &AppState, wrap_id: &str) -> anyhow::Result<()> {
     if !history_on || !crate::git::is_repo(state, &lib).await { return Err(crate::tr::err("no_history", &[])); }
     require_no_interrupted(state).await?;
     if state.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
-    let _guard = state.library_lock.clone().try_lock_owned().map_err(|_| busy())?;
+    let _guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
     crate::git::undo_commit(state, &lib, &commit).await?;
     crate::log::info(format!("wrap {wrap_id}: undone"));
     // The chats go back to waiting — unless a later wrap has stamped them since.
@@ -1926,7 +1929,7 @@ pub async fn reorganize_finish(state: &AppState, id: &str, keep: bool) -> anyhow
     let branch = c.meta["branch"].as_str().unwrap_or_default().to_string();
     require_no_interrupted(state).await?;
     if keep && state.run_active_in(&lib) { return Err(crate::tr::err("busy.run", &[])); }
-    let _guard = state.library_lock.clone().try_lock_owned().map_err(|_| busy())?;
+    let _guard = state.library_lock.of(&lib).try_lock_owned().map_err(|_| busy())?;
     match c.meta["worktree"].as_str() {
         Some(wt) => reorganize_conclude(state, &lib, Path::new(wt), &branch, keep).await?,
         // A reorganize started by an older version, which switched the library itself to the branch.

@@ -2,6 +2,7 @@ use crate::{chats::ChatStore, settings::Settings};
 use rand::Rng;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
@@ -20,15 +21,20 @@ pub struct AppState {
     pub interrupted: Mutex<Vec<(String, String)>>,
     /// AI spend per calendar month ("YYYY-MM" -> USD), kept in `usage.json`.
     pub usage: Mutex<BTreeMap<String, f64>>,
-    /// Held while a wrap or reorganize is changing the library (apply through commit), so nothing
-    /// else syncs or shuts the daemon down halfway.
-    pub library_lock: Arc<Mutex<()>>,
+    /// One lock per library (`library_lock.of(&lib)`), held while a wrap, reorganize, sync, undo
+    /// or repair is changing that library (apply through commit), so nothing else edits, syncs or
+    /// shuts the daemon down halfway. Libraries are told apart by their real folder, so a wrap
+    /// still running in the library the user left never turns away edits in the one now open.
+    ///
+    /// Lock order, everywhere: a library's lock → `sync_files` → `git_lock`. Nothing that holds
+    /// `sync_files` or `git_lock` ever waits for a library's lock (they only `try_lock` it).
+    pub library_lock: LibraryLocks,
     /// Taken for writing by a sync while git changes the library's files (recording them, taking in
     /// what arrived), and for reading by a short edit while it writes, so the two never overlap.
     /// While a sync waits on the network it holds neither, and edits go through (see `api::library_edit`).
+    /// Whatever takes a library's lock to change it then waits for the edits already under way to
+    /// finish (`AppState::drain_edits`), so none of them is caught up in its undo.
     pub sync_files: Arc<RwLock<()>>,
-    /// A sync started from the window holds `library_lock` (see `api::sync_guard`).
-    pub syncing: AtomicBool,
     /// settings.json was damaged at startup and has been moved aside.
     pub settings_recovered: AtomicBool,
     /// Automatic mini-wraps are paused after a sign-in or network failure, until any run succeeds.
@@ -68,6 +74,51 @@ pub struct AppState {
     pub approvals: crate::approvals::Approvals,
     /// Codex's sign-in, as far as the app knows it (`codex.rs`).
     pub codex: crate::codex::CodexState,
+}
+
+/// Longest a wrap, undo or repair waits for edits already under way to finish (`drain_edits`).
+pub const EDIT_DRAIN: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// One library's lock, and whether the one holding it is a sync started from the window (edits
+/// then wait for it instead of being turned away: `api::library_edit`).
+#[derive(Default)]
+pub struct LibrarySlot {
+    pub lock: Arc<Mutex<()>>,
+    pub syncing: AtomicBool,
+}
+
+/// The libraries' locks, by real folder (`paths::canonical_lenient`), made when first asked for.
+#[derive(Default)]
+pub struct LibraryLocks { slots: std::sync::Mutex<HashMap<PathBuf, Arc<LibrarySlot>>> }
+
+impl LibraryLocks {
+    fn slots(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Arc<LibrarySlot>>> {
+        self.slots.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The lock and sync flag of the library at `lib`.
+    pub fn slot(&self, lib: &Path) -> Arc<LibrarySlot> {
+        let key = crate::paths::canonical_lenient(lib);
+        self.slots().entry(key).or_default().clone()
+    }
+
+    /// The lock of the library at `lib`.
+    pub fn of(&self, lib: &Path) -> Arc<Mutex<()>> { self.slot(lib).lock.clone() }
+
+    /// Is the library at `lib` held right now?
+    pub fn busy_at(&self, lib: &Path) -> bool {
+        let key = crate::paths::canonical_lenient(lib);
+        self.slots().get(&key).map_or(false, |s| s.lock.try_lock().is_err())
+    }
+
+    /// Is a sync started from the window what holds the library at `lib`?
+    pub fn syncing_at(&self, lib: &Path) -> bool {
+        let key = crate::paths::canonical_lenient(lib);
+        self.slots().get(&key).map_or(false, |s| s.syncing.load(Ordering::SeqCst))
+    }
+
+    /// Is any library held right now?
+    pub fn any_busy(&self) -> bool { self.slots().values().any(|s| s.lock.try_lock().is_err()) }
 }
 
 fn month_key() -> String { chrono::Local::now().format("%Y-%m").to_string() }
@@ -114,9 +165,8 @@ impl AppState {
             git_lock: Mutex::new(()),
             interrupted: Mutex::new(interrupted),
             usage: Mutex::new(usage),
-            library_lock: Arc::new(Mutex::new(())),
+            library_lock: Default::default(),
             sync_files: Default::default(),
-            syncing: AtomicBool::new(false),
             settings_recovered: AtomicBool::new(settings_recovered),
             mini_wraps_blocked: AtomicBool::new(false),
             mini_wrap_backoff: Mutex::new(HashMap::new()),
@@ -157,9 +207,8 @@ impl AppState {
             git_lock: Mutex::new(()),
             interrupted: Mutex::new(vec![]),
             usage: Mutex::new(BTreeMap::new()),
-            library_lock: Arc::new(Mutex::new(())),
+            library_lock: Default::default(),
             sync_files: Default::default(),
-            syncing: AtomicBool::new(false),
             settings_recovered: AtomicBool::new(false),
             mini_wraps_blocked: AtomicBool::new(false),
             mini_wrap_backoff: Mutex::new(HashMap::new()),
@@ -210,8 +259,31 @@ impl AppState {
         self.usage.lock().await.get(&month_key()).copied().unwrap_or(0.0).max(0.0) + 0.0
     }
 
-    /// Is a wrap or reorganize changing the library right now?
-    pub fn library_busy(&self) -> bool { self.library_lock.try_lock().is_err() }
+    /// Is a wrap, reorganize, sync, undo or repair changing any library right now? For what must
+    /// not cut any of them off (shutting down) and for checks not about one library in particular.
+    pub fn library_busy(&self) -> bool { self.library_lock.any_busy() }
+
+    /// Is something holding the library at `lib` right now (see `library_lock`)?
+    pub fn library_busy_at(&self, lib: &Path) -> bool { self.library_lock.busy_at(lib) }
+
+    /// The lock of the library open now (none set up: the lock of no folder at all).
+    pub async fn open_library_lock(&self) -> Arc<Mutex<()>> {
+        let lib = self.settings.read().await.library().unwrap_or_default();
+        self.library_lock.of(&lib)
+    }
+
+    /// With a library's lock just taken: wait for the short edits already admitted
+    /// (`api::library_edit`) to finish writing, so a wrap's undo or an undo's reset can never take
+    /// one of them with it. Edits that come later see the library held and are turned away. Gives
+    /// up after `EDIT_DRAIN` with a plain "still saving, try again".
+    pub async fn drain_edits(&self) -> anyhow::Result<()> { self.drain_edits_within(EDIT_DRAIN).await }
+
+    pub(crate) async fn drain_edits_within(&self, wait: std::time::Duration) -> anyhow::Result<()> {
+        match tokio::time::timeout(wait, self.sync_files.write()).await {
+            Ok(_writing) => Ok(()),
+            Err(_) => Err(crate::tr::err("busy.saving", &[])),
+        }
+    }
 
     /// Forget that a chat's run was cut off (the user has seen it, or the chat is running again).
     pub async fn ack_interrupted(&self, chat_id: &str) {

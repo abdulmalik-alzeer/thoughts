@@ -347,7 +347,7 @@ async fn api_prepare(State(st): State<Arc<AppState>>) -> R {
     let lib = st.settings.read().await.library().ok_or_else(|| crate::tr::err("library.none", &[]))?;
     if !lib.is_dir() { return Err(crate::tr::err("library.missing", &[("path", &lib.display().to_string())]).into()); }
     crate::wraps::require_no_interrupted(&st).await?;
-    let held = st.library_lock.clone().try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
+    let held = st.library_lock.of(&lib).try_lock_owned().map_err(|_| crate::tr::err("busy", &[]))?;
     // With the assistant at work in the library, this write is the app's, never the run's (FEAT-06).
     let fenced = crate::changesets::fence(&st).await;
     let added = ensure_routine(&lib)?;
