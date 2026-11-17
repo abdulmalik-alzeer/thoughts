@@ -28,6 +28,7 @@
   import Todos from './views/Todos.svelte';
   import Inbox from './views/Inbox.svelte';
   import { inbox, watchInbox } from './lib/inbox.svelte';
+  import { needsYou, startAttention } from './lib/attention.svelte';
   import Projects from './views/Projects.svelte';
   import Settings from './views/Settings.svelte';
   import Rollback from './views/Rollback.svelte';
@@ -244,6 +245,7 @@
   onMount(() => {
     boot();
     watchInbox();
+    startAttention();
     const off = on(async (e) => {
       try {
         if (e.type === 'connection') {
@@ -261,12 +263,12 @@
         // The month's figure and the limits follow what the assistant reports, without a reload.
         if (e.type === 'usage.changed' && app.status && e.usage) app.status = { ...app.status, usage: e.usage };
         if (e.type === 'limit.changed' && app.status) app.status = { ...app.status, planLimit: e.planLimit ?? null };
-        if (e.type === 'chat.done' && app.settings?.notifications && !document.hasFocus()) notify('Thoughts', t('shell.chatFinished', { title: e.title || t('shell.aChat') }));
+        if (e.type === 'chat.done' && app.settings?.notifications && !document.hasFocus()) notify('Thoughts', t('shell.chatFinished', { title: e.title || t('shell.aChat') }), e.chatId);
         if (e.type === 'workflow.result') workflowNotice(e, notify);
         // The assistant waits for the user's OK in a chat they are not looking at (or the window is in the background).
         if (e.type === 'approval.asked' && e.chatId) {
-          if (!(app.view.kind === 'chat' && app.view.id === e.chatId)) toast(t('appr.notifyTitle'), { key: 'approval:' + e.chatId, action: { label: t('appr.open'), run: () => go({ kind: 'chat', id: e.chatId }) } });
-          if (app.settings?.notifications && !document.hasFocus()) notify(t('appr.notifyTitle'), t('appr.notifyBody', { title: e.title || t('shell.aChat') }));
+          if (!(app.view.kind === 'chat' && app.view.id === e.chatId)) toast(t('appr.notifyTitle'), { key: 'approval:' + e.chatId, stay: true, action: { label: t('appr.open'), run: () => go({ kind: 'chat', id: e.chatId }) } });
+          if (app.settings?.notifications && !document.hasFocus()) notify(t('appr.notifyTitle'), t('appr.notifyBody', { title: e.title || t('shell.aChat') }), e.chatId);
         }
         if (e.type === 'notify') { toast(`${e.title}: ${e.body}`); if (app.settings?.notifications && !document.hasFocus()) notify(e.title, e.body); }
         // A change being tried stays on screen while it is still the one chosen (lib/layer.ts `reloadLayer`).
@@ -324,11 +326,12 @@
     command(e.button === 3 ? 'back' : 'forward');
   }
 
-  async function notify(title: string, body: string) {
+  // `chatId`: a click on the notification opens that chat (src-tauri/src/attention.rs).
+  async function notify(title: string, body: string, chatId?: string) {
     try {
       const n = await import('@tauri-apps/plugin-notification');
       if (!(await n.isPermissionGranted())) await n.requestPermission();
-      n.sendNotification({ title, body });
+      n.sendNotification(chatId ? { title, body, extra: { chatId } } : { title, body });
     } catch { /* notifications unavailable */ }
   }
 
@@ -665,7 +668,7 @@
 
   const interrupted = $derived(((app.status?.interrupted ?? []) as { chatId: string; title: string }[]).filter((r) => !dismissedRuns.includes(r.chatId)).slice(0, 3));
 
-  function dotLabel(c: any) { return c.running ? t('shell.dot.running') : c.unwrapped ? t('shell.dot.unwrapped') : ''; }
+  function dotLabel(c: any) { return needsYou(c.id) ? t('ux-attention.dot.needsYou') : c.running ? t('shell.dot.running') : c.unwrapped ? t('shell.dot.unwrapped') : ''; }
 
   const paletteItems = $derived.by((): PaletteItem[] => {
     const g = { go: t('shell.pal.goto'), act: t('shell.pal.actions'), look: t('shell.pal.look'), chat: t('shell.pal.chat'), idea: t('shell.pal.idea'), plug: t('shell.pal.plugin') };
@@ -817,7 +820,7 @@
           <div class="group" dir="auto">{pid ? (proj?.name ?? t('shell.project')) : t('library')}</div>
           {#each list as c (c.id)}
             <button class="chat" class:active={app.view.id === c.id} aria-current={app.view.id === c.id ? 'page' : undefined} title={c.title} onclick={() => go({ kind: 'chat', id: c.id })}>
-              <span class="dot" class:run={c.running} class:unw={!c.running && c.unwrapped} title={dotLabel(c) || undefined}></span>
+              <span class="dot" class:run={c.running} class:unw={!c.running && c.unwrapped} class:ask={needsYou(c.id)} title={dotLabel(c) || undefined}></span>
               <span class="grow ell" dir="auto">{c.title}</span>
               {#if c.pinned}<span class="cut" title={t('chatb.pinned')}><Icon name="pin" size={12} /><span class="sr-only">({t('chatb.pinned')})</span></span>{/if}
               {#if c.interrupted}<span class="cut" title={t('layer.chat.interrupted')}><Icon name="warning" size={12} /><span class="sr-only">({t('layer.chat.interruptedShort')})</span></span>{/if}
@@ -830,8 +833,8 @@
           <div class="group">{t('shell.system')}</div>
           {#each system as c (c.id)}
             <button class="chat" class:active={app.view.id === c.id} aria-current={app.view.id === c.id ? 'page' : undefined} title={c.title} onclick={() => go({ kind: 'chat', id: c.id })}>
-              <span class="dot" class:run={c.running} title={c.running ? t('shell.dot.running') : undefined}></span><span class="grow ell muted" dir="auto">{c.title}</span>
-              {#if c.running}<span class="sr-only">({t('shell.dot.running')})</span>{/if}
+              <span class="dot" class:run={c.running} class:ask={needsYou(c.id)} title={dotLabel(c) || undefined}></span><span class="grow ell muted" dir="auto">{c.title}</span>
+              {#if dotLabel(c)}<span class="sr-only">({dotLabel(c)})</span>{/if}
             </button>
           {/each}
         {/if}
@@ -1120,6 +1123,10 @@
   .dot.run { width: 9px; height: 9px; background: transparent; border: 2px solid var(--accent); animation: pulse 1s infinite alternate; }
   :global([data-theme="contrast"]) .chat.active .dot { background: currentColor; }
   :global([data-theme="contrast"]) .chat.active .dot.run { background: transparent; border-color: currentColor; }
+  /* Waiting for the user's OK (lib/attention.svelte.ts): a filled dot with a halo, unlike the hollow ring of working. */
+  .dot.ask { width: 9px; height: 9px; border: 0; border-radius: 50%; transform: none; background: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); animation: ask 1.6s ease-in-out infinite alternate; }
+  :global([data-theme="contrast"]) .chat.active .dot.ask { background: currentColor; box-shadow: 0 0 0 2px currentColor; }
+  @keyframes ask { to { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 12%, transparent); } }
   @keyframes pulse { to { opacity: .3; } }
   .ver { font: inherit; font-size: 11px; color: var(--muted); background: none; border: 0; padding: 0 4px; text-align: start; cursor: pointer; font-variant-numeric: tabular-nums; }
   .ver:hover { color: var(--fg); }

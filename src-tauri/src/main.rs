@@ -8,6 +8,7 @@
 // updates (ghfeed.rs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod attention;
 mod capture;
 mod consent;
 mod ghfeed;
@@ -1272,6 +1273,7 @@ fn main() {
             restart_daemon,
             consent::approve_action,
             set_dock_icon,
+            attention::set_attention,
             update_check,
             update_install,
             ghfeed::updates_gh_state,
@@ -1322,6 +1324,7 @@ fn main() {
                 h.plugin(tauri_plugin_updater::Builder::new().build())?;
             }
             app.manage(UpdaterConfigured(configured));
+            attention::watch_clicks(h);
             #[cfg(feature = "rehearsal")]
             rehearsal::start(h);
 
