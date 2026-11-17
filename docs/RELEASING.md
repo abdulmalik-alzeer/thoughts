@@ -164,8 +164,10 @@ Before it:
 
 1. Set the version and regenerate the kit history (checklist steps 2 and 3).
 2. Write the version's entry in `docs/CHANGELOG.md` and `docs/ar/CHANGELOG.md` (`## X.Y.Z`, then
-   the entry). It becomes the text of the update dialog in each language, and of the release
-   page. The command refuses to build without both.
+   the entry). It becomes the release page, and the new version's own Help › What's new in each
+   language (the update dialog of 0.1.0 and later shows only the app's own words, never the
+   unsigned notes in `latest.json`; older copies still show those). The command refuses to build
+   without both.
 3. Commit, on `main`.
 
 **What it checks before building:** a clean tree on `main`; a version that is not tagged on
@@ -261,8 +263,9 @@ stops it and starts its own. Any chat that was mid-answer at that moment is cut 
 ## Release checklist
 
 Every release needs its entry in `docs/CHANGELOG.md` and `docs/ar/CHANGELOG.md` before it is
-built (`## X.Y.Z`, then the entry): it becomes the text of the update dialog in each language
-and the first text of the release page.
+built (`## X.Y.Z`, then the entry): it becomes the new version's Help › What's new in each
+language and the first text of the release page (copies before 0.1.0 also show it in their update
+dialog).
 
 While the pipeline cannot run, steps 4 to 7 and 9 are done by
 [`scripts/release/local.mjs`](#a-release-made-on-this-mac) instead. Steps 1 to 3 and 8 stay as

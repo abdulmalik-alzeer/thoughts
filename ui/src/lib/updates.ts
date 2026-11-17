@@ -1,11 +1,11 @@
 // App updates (the native updater in the shell) and updates to the shipped customisation defaults.
 import { api, inTauri, on, post } from './api';
 import { app, go, toast } from './store.svelte';
-import { confirmDialog } from './dialog.svelte';
-import { lang, t, tn } from './i18n';
+import { choiceDialog } from './dialog.svelte';
+import { t, tn } from './i18n';
 import { checkPending } from './layer';
 import { withBusyPrompt } from './shell';
-import { offerDownload } from './maintenance';
+import { offerDownload, openDownload } from './maintenance';
 import { download } from './updateProgress.svelte';
 
 let checking = false;
@@ -27,13 +27,25 @@ export async function checkAppUpdate(manual = false) {
     // fallback not ready): said only when the person asked.
     if (r.problem) { if (manual) sayProblem(String(r.problem), typeof r.detail === 'string' ? r.detail : ''); return; }
     if (!r.available) { if (manual) toast(t('layer.upd.none'), { kind: 'success', key: 'upd' }); return; }
-    const text = (v: unknown) => (typeof v === 'string' && v.trim()) || '';
-    const ok = await confirmDialog({
-      title: t('layer.upd.available', { version: r.version ?? '' }),
-      body: (lang() === 'ar' && text(r.notesAr)) || text(r.notes) || t('layer.upd.body'),
-      note: t('layer.upd.note'), confirmLabel: t('layer.upd.install'), cancelLabel: t('layer.later'),
-    });
-    if (!ok) return;
+    // The dialog speaks in the app's own words only. The notes in the update's description are
+    // not signed and nothing has been checked yet, so they are never shown here: the new version
+    // shows its own (Help › What's new) once it runs, and its release page opens in the browser,
+    // as GitHub's page, for anyone who wants to read about it first.
+    const page = typeof r.page === 'string' ? r.page : '';
+    for (;;) {
+      const choice = await choiceDialog({
+        title: t('layer.upd.available', { version: r.version ?? '' }),
+        body: [t('layer.upd.body'), t('sec-shell-updater.whatsNew'), page ? t('sec-shell-updater.pageHint') : ''].filter(Boolean).join('\n\n'),
+        note: t('layer.upd.note'), cancelLabel: t('layer.later'),
+        choices: [
+          ...(page ? [{ id: 'page', label: t('sec-shell-updater.page') }] : []),
+          { id: 'install', label: t('layer.upd.install'), primary: true },
+        ],
+      });
+      if (choice === 'page') { await openDownload(page); continue; }
+      if (choice !== 'install') return;
+      break;
+    }
     // The download shows as one bar in Settings › Maintenance, which is opened for it.
     app.toasts = app.toasts.filter((x) => x.key !== 'upd');
     Object.assign(download, { active: true, got: 0, total: 0 });

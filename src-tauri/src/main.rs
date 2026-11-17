@@ -564,7 +564,18 @@ fn problem_error(code: &str, detail: &str) -> String {
     format!("PROBLEM::{code}::{detail}")
 }
 
-/// Is there an update? `{configured, available, reason?, version?, notes?, notesAr?, via?, problem?, detail?}`.
+/// What `update_check` says about a newer version: its number, where it was found, and its
+/// release page on GitHub (`page`, only for a plain version number). Never the manifest's notes:
+/// that file is not signed, so its text must not reach the update dialog as the app's own words
+/// before anything was checked. What a version changes is read in that version itself once it
+/// runs (Help › What's new, from its own signed copy of the change log), or on its release page.
+fn offered(version: &str, via: &str) -> Value {
+    let tag = format!("v{}", version.trim_start_matches('v'));
+    let page = (!version.trim_start_matches('v').is_empty() && thoughtsd::release::valid_tag(&tag)).then(|| thoughtsd::release::page_url(&tag));
+    json!({"configured": true, "available": true, "version": version, "page": page, "via": via})
+}
+
+/// Is there an update? `{configured, available, reason?, version?, page?, via?, problem?, detail?}`.
 /// `configured: false` is not an error; `reason` says why: `"build"` (this build has no updater
 /// key/endpoint) or `"deb"` (Linux, not running from an AppImage: a package-manager install
 /// cannot replace itself — update through the package instead). `via` is `"public"` or
@@ -584,9 +595,8 @@ async fn update_check(app: tauri::AppHandle, window: tauri::Window) -> Result<Va
         // A newer version exists, but this copy sits where nothing can replace it.
         Ok(Some(found)) if cannot_be_replaced() => json!({"configured": true, "available": false, "problem": "move-first", "version": found.update().version}),
         Ok(Some(found)) => {
-            let u = found.update();
             let via = if matches!(found, Found::Public(_)) { "public" } else { "github" };
-            json!({"configured": true, "available": true, "version": u.version, "notes": u.body, "notesAr": u.raw_json["notes_ar"], "via": via})
+            offered(&found.update().version, via)
         }
         Ok(None) => json!({"configured": true, "available": false}),
         Err(n) => json!({"configured": true, "available": false, "problem": n.code, "detail": n.detail}),
@@ -1403,6 +1413,21 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_offered_update_never_carries_the_manifest_notes() {
+        let v = offered("0.1.0", "public");
+        assert_eq!(v["version"], "0.1.0");
+        assert_eq!(v["via"], "public");
+        assert_eq!(v["page"], format!("https://github.com/{}/releases/tag/v0.1.0", thoughtsd::release::REPO));
+        let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
+        assert!(!keys.iter().any(|k| k.to_lowercase().contains("notes") || *k == "body"), "{keys:?}");
+        // A leading "v" is not doubled; anything that is not a plain version number gets no page.
+        assert_eq!(offered("v0.2.0-beta.1", "github")["page"], format!("https://github.com/{}/releases/tag/v0.2.0-beta.1", thoughtsd::release::REPO));
+        for odd in ["", "1.0/../../x", "1.0 run this", "1.0?x=1", "1.0#x"] {
+            assert!(offered(odd, "public")["page"].is_null(), "{odd}");
+        }
+    }
 
     fn url(s: &str) -> tauri::Url { tauri::Url::parse(s).unwrap() }
 
