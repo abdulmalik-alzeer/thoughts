@@ -547,8 +547,13 @@ async fn syncable_branch(state: &AppState, dir: &Path) -> anyhow::Result<String>
 }
 
 /// Send `branch` to every location. Returns, per location, `None` when it was sent, or why not
-/// (a key of `tr`'s table, see `why_not_sent`). A drive that is not plugged in is not tried.
+/// (a key of `tr`'s table, see `why_not_sent`). A drive that is not plugged in is not tried, and a
+/// library that keeps files with Git LFS is sent nowhere (`lfs_in_use`).
 async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log: &mut Vec<String>) -> Vec<(String, Option<&'static str>)> {
+    if lfs_in_use(state, dir).await {
+        crate::log::warn("sync: the library keeps files with Git LFS, which the app does not send; nothing was sent");
+        return rs.iter().filter_map(|r| r["name"].as_str()).map(|n| { log.push(format!("{n}: not sent (Git LFS)")); (n.to_string(), Some("sync.why.lfs")) }).collect();
+    }
     let mut sent = vec![];
     // The main location first, and only it becomes what the branch follows: "to send" and "to
     // receive" are counted against it, whatever was added or sent to afterwards.
@@ -574,6 +579,30 @@ async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log:
         }
     }
     sent
+}
+
+/// Does this library keep files with Git LFS? A file its rules give to LFS is then recorded as a
+/// placeholder, and the file itself is uploaded by a step git runs before sending (a hook) — which
+/// the app never runs (see `run_with`). A location would get placeholders for files that exist only
+/// on this computer: GitHub refuses that, other hosts take it silently. True when the LFS filter is
+/// set up as this library's git sees it and one of its attribute rules hands files to it.
+pub async fn lfs_in_use(state: &AppState, dir: &Path) -> bool {
+    let mut set = false;
+    for key in ["filter.lfs.process", "filter.lfs.clean"] {
+        set |= git(state, dir, &["config", "--get", key]).await.map_or(false, |v| !v.trim().is_empty());
+    }
+    if !set { return false; }
+    let mut rules: Vec<PathBuf> = vec![];
+    let listed = git(state, dir, &["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ":(glob)**/.gitattributes"]).await.unwrap_or_default();
+    rules.extend(listed.split('\0').filter(|f| !f.is_empty()).map(|f| dir.join(f)));
+    if let Ok(p) = git(state, dir, &["rev-parse", "--git-path", "info/attributes"]).await {
+        let p = PathBuf::from(p.trim());
+        rules.push(if p.is_absolute() { p } else { dir.join(p) });
+    }
+    if let Ok(p) = git(state, dir, &["config", "--type=path", "--get", "core.attributesFile"]).await {
+        if !p.trim().is_empty() { rules.push(PathBuf::from(p.trim())); }
+    }
+    rules.iter().any(|f| std::fs::read_to_string(f).map_or(false, |t| t.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("filter=lfs"))))
 }
 
 /// The plain reason a location of `kind` (see `location_kind`) did not take the library, or could
@@ -1844,6 +1873,40 @@ mod tests {
         assert_eq!(pick_main(&[], Some("origin")), None);
     }
 
+    /// Git LFS turns large files into placeholders when they are recorded and sends the files
+    /// themselves from a step the app never runs: the library is not sent rather than sent hollow.
+    #[tokio::test]
+    async fn a_library_that_keeps_files_with_git_lfs_is_never_sent_without_them() {
+        let (root, mine, remote) = diverged();
+        let st = AppState::for_test();
+        sh(&mine, &["checkout", "-q", "--", "notes.md"]);
+        write(&mine, ".gitattributes", "# large files\n*.pdf filter=lfs diff=lfs merge=lfs -text\n");
+        write(&mine, "big.pdf", "%PDF the whole file\n");
+        sh(&mine, &["add", "-A"]);
+        sh(&mine, &["commit", "-q", "-m", "a large file"]);
+        // The filter is normally set up in this computer's own settings (`git lfs install`); here
+        // in the library's, which is what its git sees just the same. Empty means not set up.
+        sh(&mine, &["config", "filter.lfs.process", ""]);
+        sh(&mine, &["config", "filter.lfs.clean", ""]);
+        assert!(!lfs_in_use(&st, &mine).await, "rules alone, without the filter, record files whole");
+        sh(&mine, &["config", "filter.lfs.clean", "git-lfs clean -- %f"]);
+        assert!(lfs_in_use(&st, &mine).await);
+        let before = sh(&remote, &["rev-parse", "main"]);
+        let rs = remotes(&st, &mine).await;
+        let mut log = vec![];
+        let sent = push_all(&st, &mine, &rs, "main", &mut log).await;
+        assert_eq!(sent, [("origin".to_string(), Some("sync.why.lfs"))]);
+        assert_eq!(sh(&remote, &["rev-parse", "main"]), before, "nothing was sent");
+        let shown = crate::tr::classify_in(false, &sync_outcome(&mine, &sent).unwrap_err());
+        assert_eq!(shown.code, "sync_failed");
+        assert!(shown.message.starts_with("It was not sent to \"origin\": this library keeps some files with Git LFS"), "{}", shown.message);
+        assert_eq!(backup_health(&st, &mine).await["locations"][0]["whyKey"], "sync.why.lfs");
+        // A rule that is only a comment hands nothing to LFS.
+        write(&mine, ".gitattributes", "# *.pdf filter=lfs\n");
+        assert!(!lfs_in_use(&st, &mine).await);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_location_that_cannot_be_written_to_is_not_a_backup() {
@@ -1894,7 +1957,7 @@ mod tests {
         // Every reason has its sentence in both languages.
         for key in ["sync.why.sign_in", "sync.why.offline", "sync.why.timeout", "sync.why.rejected", "sync.why.too_large", "sync.why.refused",
                     "sync.why.unplugged", "sync.why.full", "sync.why.no_write", "sync.why.host_key", "sync.why.host_changed", "sync.why.ssh_key",
-                    "sync.why.not_found", "sync.why.receive"] {
+                    "sync.why.not_found", "sync.why.receive", "sync.why.lfs"] {
             assert!(!crate::tr::text_in(false, key, &[]).contains("unexpected") && crate::tr::text_in(true, key, &[]) != crate::tr::text_in(false, key, &[]), "{key}");
         }
     }
