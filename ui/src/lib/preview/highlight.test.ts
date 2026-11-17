@@ -53,3 +53,40 @@ describe('highlight', () => {
     expect(l[2]).toEqual([]);
   });
 });
+
+describe('highlight stays fast on hostile input', () => {
+  const LANGS = ['js', 'ts', 'py', 'rb', 'rust', 'go', 'c', 'css', 'sql', 'sh', 'lua', 'yaml', 'json', 'toml', 'ini', 'md', 'make', 'diff', 'xml', 'html', 'tex', 'srt'];
+  const quick = (text: string, lang: string) => {
+    const t0 = performance.now();
+    const out = highlight(text, lang);
+    const ms = performance.now() - t0;
+    expect(join(out), lang).toBe(text);
+    expect(ms, `${lang}: ${Math.round(ms)} ms`).toBeLessThan(1500);
+  };
+  it('one multi-megabyte line, for every language, is shown plain at once', () => {
+    const line = 'word '.repeat(600_000); // 3 MB, no colon, no line end
+    for (const lang of LANGS) {
+      const t0 = performance.now();
+      const out = highlight(line, lang);
+      expect(out, lang).toEqual([{ t: line, c: '' }]);
+      expect(performance.now() - t0, lang).toBeLessThan(200);
+    }
+  });
+  it('lines just under the limit, with patterns that used to rescan the line', () => {
+    const near = (unit: string) => (unit.repeat(Math.floor(3990 / unit.length)) + '\n').repeat(120); // ~480 KB
+    for (const lang of LANGS) {
+      quick(near('a b '), lang); // the YAML key rule rescanned to the line end at every word
+      quick(near('a-b-'), lang); // the CSS property rule rescanned a hyphenated run at every part
+      quick(near('&x '), lang); // markup looked for the next "<" from every "&"
+      quick(near('# '), lang);
+    }
+  }, 60_000);
+  it('many empty lines do not make line-start rules scan ahead', () => {
+    const blank = '\n'.repeat(400_000) + 'k = 1';
+    for (const lang of LANGS) quick(blank, lang);
+  }, 60_000);
+  it('still finds YAML keys under list dashes', () => {
+    const y = highlight('- name: a\n  - - deep: b\nplain text: c', 'yaml');
+    expect(y.filter((x) => x.c === 'key').map((x) => x.t.trim())).toEqual(['- name', '- - deep', 'plain text']);
+  });
+});

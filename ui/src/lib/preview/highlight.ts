@@ -3,6 +3,12 @@
 // text into the page as text, never as markup — so a file can't inject anything by its contents.
 // It is deliberately approximate (no grammar, a handful of rules per language family), fast enough
 // for a few hundred kilobytes, and has no dependency.
+//
+// Speed rule for every pattern below: a rule is tried at many positions, so it must either consume
+// what it scans (a string runs to its end, a comment to its end) or only be tried at a line start
+// (`^` with the `m` flag) or scan a bounded number of characters. A pattern that scans the rest of a
+// line and then gives up, tried at every word, is quadratic on one long line and freezes the window.
+// `highlight` also refuses to colour text with a very long line at all (MAX_LINE).
 
 export type TokClass = '' | 'com' | 'str' | 'num' | 'kw' | 'lit' | 'fn' | 'type' | 'tag' | 'attr' | 'key' | 'meta' | 'ins' | 'del';
 export type Tok = { t: string; c: TokClass };
@@ -35,10 +41,10 @@ const DASH: Rule = [/--.*/y, 'com'];
 
 const cLike = (extra: Rule[] = []): Spec => ({ rules: [BLOCK, SLASH, ...extra, DQ, SQ, BT, NUM], kw: C_KW, lit: C_LIT, types: C_TYPE });
 const SPECS: Record<string, Spec> = {
-  c: cLike([[/#\s*\w+/y, 'meta']]),
+  c: cLike([[/#[^\S\n]*\w+/y, 'meta']]),
   js: cLike(), ts: cLike(), java: cLike([[/@\w+/y, 'meta']]), kotlin: cLike([[/@\w+/y, 'meta']]), cs: cLike(), go: cLike(),
   rust: cLike([[/#!?\[[^\]\n]*\]?/y, 'meta'], [/'[a-z_]\w*(?!')/y, 'meta']]), swift: cLike([[/@\w+/y, 'meta']]), dart: cLike(), scala: cLike(), php: cLike([HASH]),
-  objc: cLike([[/#\s*\w+/y, 'meta']]), zig: cLike(), proto: cLike(), gradle: cLike(), graphql: { rules: [HASH, DQ, NUM], kw: words('query mutation subscription fragment on type input enum interface union scalar schema extend directive implements'), lit: C_LIT, types: C_TYPE },
+  objc: cLike([[/#[^\S\n]*\w+/y, 'meta']]), zig: cLike(), proto: cLike(), gradle: cLike(), graphql: { rules: [HASH, DQ, NUM], kw: words('query mutation subscription fragment on type input enum interface union scalar schema extend directive implements'), lit: C_LIT, types: C_TYPE },
   py: { rules: [HASH, [/(?:[rbuf]{0,2})(?:"""[\s\S]*?(?:"""|$)|'''[\s\S]*?(?:'''|$))/iy, 'str'], [/@[\w.]+/y, 'meta'], DQ, SQ, NUM], kw: PY_KW, lit: PY_LIT },
   rb: { rules: [HASH, DQ, SQ, [/:[a-z_]\w*/iy, 'lit'], NUM], kw: RB_KW, lit: C_LIT },
   sh: { rules: [HASH, DQ, SQ, [/\$\{[^}\n]*\}?|\$\w+/y, 'key'], NUM], kw: SH_KW, lit: words('true false') },
@@ -53,15 +59,16 @@ const SPECS: Record<string, Spec> = {
   clojure: { rules: [[/;.*/y, 'com'], DQ, [/:[\w-]+/y, 'lit'], NUM], kw: words('def defn defmacro let fn if do when cond loop recur ns require') },
   nim: { rules: [HASH, DQ, NUM], kw: words('proc func var let const type object if elif else for while case of return import from include') },
   julia: { rules: [HASH, DQ, NUM], kw: words('function end if elseif else for while return module using import struct mutable let begin') },
-  make: { rules: [HASH, [/\$[({][^)}\n]*[)}]?/y, 'key'], [/^[\w./%-]+(?=\s*:)/my, 'fn'], DQ, SQ], kw: words('ifeq ifneq ifdef ifndef else endif include define endef export') },
+  make: { rules: [HASH, [/\$[({][^)}\n]*[)}]?/y, 'key'], [/^[\w./%-]{1,200}(?=[^\S\n]*:)/my, 'fn'], DQ, SQ], kw: words('ifeq ifneq ifdef ifndef else endif include define endef export') },
   tex: { rules: [[/%.*/y, 'com'], [/\\[a-z@]+/iy, 'kw'], [/\$[^$\n]*\$?/y, 'str']] },
-  css: { rules: [BLOCK, [/\/\/.*/y, 'com'], DQ, SQ, [/@[\w-]+/y, 'kw'], [/#[\da-f]{3,8}\b/iy, 'num'], [/[\w-]+(?=\s*:[^:])/y, 'attr'], NUM] },
-  toml: { rules: [HASH, [/^\s*\[\[?[^\]\n]*\]?\]?/my, 'tag'], [/"""[\s\S]*?(?:"""|$)/y, 'str'], DQ, SQ, [/^\s*[\w.-]+(?=\s*=)/my, 'key'], NUM], lit: words('true false') },
-  ini: { rules: [[/^\s*[;#].*/my, 'com'], [/^\s*\[[^\]\n]*\]?/my, 'tag'], [/^\s*[\w.-]+(?=\s*[=:])/my, 'key'], DQ, SQ, NUM], lit: words('true false yes no on off') },
+  css: { rules: [BLOCK, [/\/\/.*/y, 'com'], DQ, SQ, [/@[\w-]+/y, 'kw'], [/#[\da-f]{3,8}\b/iy, 'num'], [/[\w-]{1,64}(?=[^\S\n]*:[^:])/y, 'attr'], NUM] },
+  toml: { rules: [HASH, [/^[^\S\n]*\[\[?[^\]\n]*\]?\]?/my, 'tag'], [/"""[\s\S]*?(?:"""|$)/y, 'str'], DQ, SQ, [/^[^\S\n]*[\w.-]{1,200}(?=[^\S\n]*=)/my, 'key'], NUM], lit: words('true false') },
+  ini: { rules: [[/^[^\S\n]*[;#].*/my, 'com'], [/^[^\S\n]*\[[^\]\n]*\]?/my, 'tag'], [/^[^\S\n]*[\w.-]{1,200}(?=[^\S\n]*[=:])/my, 'key'], DQ, SQ, NUM], lit: words('true false yes no on off') },
   json: { rules: [[/"(?:[^"\\\n]|\\.)*"?(?=\s*:)/y, 'key'], DQ, NUM, SLASH, BLOCK], lit: words('true false null') },
   yaml: { rules: [HASH, [/^---|^\.\.\./my, 'meta'], [/[&*][\w-]+/y, 'meta'], [/!!?[\w-]*/y, 'meta'],
-    [/[^\s#:'"\-\[\]{},][^:#\n]*?(?=:(?:\s|$))/y, 'key'], DQ, SQ, NUM], lit: words('true false null yes no on off ~ True False Null') },
-  md: { rules: [[/^#{1,6}\s.*/my, 'kw'], [/^```.*/my, 'meta'], [/`[^`\n]*`?/y, 'str'], [/^\s*(?:[-*+]|\d+\.)\s/my, 'meta'], [/^>.*/my, 'com']] },
+    // A key only at a line start, after its indent and any list dashes, and at most 200 characters long.
+    [/^[^\S\n]*(?:-[^\S\n]+)*[^\s#:'"\-\[\]{},][^:#\n]{0,200}?(?=:(?:\s|$))/my, 'key'], DQ, SQ, NUM], lit: words('true false null yes no on off ~ True False Null') },
+  md: { rules: [[/^#{1,6}\s.*/my, 'kw'], [/^```.*/my, 'meta'], [/`[^`\n]*`?/y, 'str'], [/^[^\S\n]*(?:[-*+]|\d+\.)\s/my, 'meta'], [/^>.*/my, 'com']] },
   srt: { rules: [[/^\d+$/my, 'num'], [/^[\d:.,]+ --> [\d:.,]+.*/my, 'meta'], [/^WEBVTT.*/my, 'kw']] },
   diff: { rules: [[/^(?:\+\+\+|---).*/my, 'meta'], [/^@@.*/my, 'meta'], [/^\+.*/my, 'ins'], [/^-.*/my, 'del'], [/^(?:diff|index) .*/my, 'meta']] },
 };
@@ -117,10 +124,13 @@ const ATTR = /\s+|[^\s=>/"']+|=|"[^"]*"?|'[^']*'?|\/?>|\//y;
 function markup(s: string): Tok[] {
   const out: Tok[] = [];
   let i = 0;
+  // Where the next `<` and `&` are, looked up again only once passed (one search per character
+  // overall, not one per piece of text).
+  let lt = -1, amp = -1;
   while (i < s.length) {
-    const lt = s.indexOf('<', i);
-    const amp = s.indexOf('&', i);
-    const next = Math.min(lt < 0 ? s.length : lt, amp < 0 ? s.length : amp);
+    if (lt !== s.length && lt < i) { lt = s.indexOf('<', i); if (lt < 0) lt = s.length; }
+    if (amp !== s.length && amp < i) { amp = s.indexOf('&', i); if (amp < 0) amp = s.length; }
+    const next = Math.min(lt, amp);
     if (next > i) { push(out, s.slice(i, next), ''); i = next; continue; }
     if (s[i] === '&') {
       const e = sticky(/&#?[\w]+;/y, s, i);
@@ -147,9 +157,25 @@ function markup(s: string): Tok[] {
   return out;
 }
 
+/** Longest line coloured; text with a longer line (minified code, one-line data) is shown plain. */
+export const MAX_LINE = 4000;
+
+/** Has `text` a line longer than `max` characters? (One pass, no regular expression.) */
+export function hasLongLine(text: string, max: number): boolean {
+  let start = 0;
+  for (;;) {
+    const nl = text.indexOf('\n', start);
+    const end = nl < 0 ? text.length : nl;
+    if (end - start > max) return true;
+    if (nl < 0) return false;
+    start = nl + 1;
+  }
+}
+
 /** Tokens for `text` in `lang` (kinds.ts `codeLang`); an unknown or empty language is one plain token. */
 export function highlight(text: string, lang: string): Tok[] {
   if (!text) return [];
+  if (hasLongLine(text, MAX_LINE)) return [{ t: text, c: '' }];
   if (lang === 'xml' || lang === 'html') return markup(text);
   const spec = SPECS[lang];
   return spec ? generic(text, spec) : [{ t: text, c: '' }];
