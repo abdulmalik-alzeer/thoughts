@@ -8,6 +8,7 @@ import { t, lang as appLang } from './i18n';
 import { choiceDialog, confirmDialog } from './dialog.svelte';
 import { failed } from './errors';
 import { libs } from './libraries.svelte';
+import { isSecondary } from './windows';
 
 export type VoiceLang = 'en' | 'ar';
 type Perm = 'granted' | 'denied' | 'restricted' | 'ask';
@@ -44,7 +45,8 @@ export const voice = $state({
 });
 
 /** Only the Mac app can turn speech into text without sending it anywhere. */
-export const voiceShell = () => inTauri() && (window as any).__THOUGHTS_PLATFORM__ === 'macos';
+// Voice is one microphone for the whole app: only the main window has it (lib/windows.ts).
+export const voiceShell = () => inTauri() && (window as any).__THOUGHTS_PLATFORM__ === 'macos' && !isSecondary();
 
 async function call<T = any>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke } = await import('@tauri-apps/api/core');

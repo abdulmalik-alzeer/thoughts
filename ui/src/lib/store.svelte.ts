@@ -2,6 +2,7 @@
 import { api, inTauri, post, put } from './api';
 import { syncDockIcon } from './logo';
 import { newestOnly, oneAtATime } from './serial';
+import { isSecondary, MAIN_ONLY, showInMain } from './windows';
 
 export type View = { kind: string; id?: string; path?: string };
 
@@ -93,7 +94,8 @@ export const app = $state({
   safeReason: (new URLSearchParams(location.search).has('safe') ? 'manual' : '') as '' | 'manual' | 'crash',
   /** False while the background service is unreachable mid-session. */
   online: true,
-  sidebarCollapsed: ls.get('thoughts.sidebar') === 'collapsed',
+  /** A second window (lib/windows.ts) starts with the narrow rail, leaving the room to what it shows. */
+  sidebarCollapsed: isSecondary() || ls.get('thoughts.sidebar') === 'collapsed',
   /** "Show cost on Wrap, reorganise and setup chats" as an older window kept it on this device;
    *  the saved setting (`settings.showCost`) wins once there is one (see `costVisible`). */
   showCost: ls.get('thoughts.showCost') === '1',
@@ -152,7 +154,7 @@ export function command(id: string, extra: Record<string, any> = {}) {
 
 export function setSidebarCollapsed(v: boolean) {
   app.sidebarCollapsed = v;
-  ls.set('thoughts.sidebar', v ? 'collapsed' : 'open');
+  if (!isSecondary()) ls.set('thoughts.sidebar', v ? 'collapsed' : 'open');
 }
 
 /** The cost choice is a setting (it travels with "move to another computer"). */
@@ -191,7 +193,7 @@ export async function refreshWrap() {
  *  been quiet for a few seconds (and the reminder is still due) before the dialog takes the focus. */
 let nagWait: ReturnType<typeof setTimeout> | undefined;
 function remindToWrap() {
-  if (app.showWrapNag || nagWait !== undefined) return;
+  if (app.showWrapNag || nagWait !== undefined || isSecondary()) return;
   const QUIET_MS = 4000;
   const typing = () => {
     const el = document.activeElement as HTMLElement | null;
@@ -329,12 +331,12 @@ export function applyTheme() {
   // the window back a step (zoom 110 → 125 → 150 would show 110 again for a moment).
   paint(a11ySaving && painted ? { ...s, accessibility: painted } : s);
   // The native menus are built in the shell: ask it to rebuild them when the language changes.
-  if (menuLang !== undefined && menuLang !== s.language && inTauri()) {
+  if (menuLang !== undefined && menuLang !== s.language && inTauri() && !isSecondary()) {
     import('@tauri-apps/api/core').then(({ invoke }) => invoke('refresh_menu')).catch(() => {});
   }
   menuLang = s.language;
   ls.set('thoughts.look', JSON.stringify({ theme: s.theme, mode: s.mode, language: s.language, accessibility: s.accessibility ?? null }));
-  requestAnimationFrame(() => syncDockIcon().catch(() => {}));
+  if (!isSecondary()) requestAnimationFrame(() => syncDockIcon().catch(() => {}));
 }
 
 { const look = cachedLook(); if (look) paint(look); }
@@ -365,6 +367,8 @@ async function leave(): Promise<boolean> {
 /** Navigate. A view with unsaved work (`app.leaveGuard`) is asked first; resolves false when the user stays.
  *  `replace`: correct the current entry of Back/Forward instead of adding one (a view filling in its default). */
 export async function go(v: View, opts: { replace?: boolean } = {}): Promise<boolean> {
+  // Settings and Customise belong to the main window: a second window sends the person there.
+  if (MAIN_ONLY.includes(v.kind) && isSecondary()) { showInMain(v); return false; }
   if (!(await leave())) return false;
   if (v.kind !== app.view.kind) track('view.' + v.kind);
   if (opts.replace) trail[at] = { ...v };

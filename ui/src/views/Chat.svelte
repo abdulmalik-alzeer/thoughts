@@ -58,6 +58,8 @@
   import SidePane from './chat/SidePane.svelte';
   import { clickIntent, linkTarget } from './chat/sidePane';
   import type { Chat, DaemonEvent } from '../lib/types';
+  import { canOpenWindows } from '../lib/windows';
+  import { openWindow } from '../lib/openWindow';
 
   let { id, projects }: { id: string; projects: any[] } = $props();
   // "Continue chatting" (lib/layer.ts) lands here: the cursor goes into the message box.
@@ -802,6 +804,7 @@
         <button class="btn ghost" class:on={chat.pinned} aria-pressed={!!chat.pinned} onclick={() => flag('pinned')} title={chat.pinned ? t('chatb.unpin') : t('chatb.pin')} aria-label={chat.pinned ? t('chatb.unpin') : t('chatb.pin')}><Icon name="pin" /></button>
         <button class="btn ghost" onclick={() => flag('archived')} title={t('chatb.archive')} aria-label={t('chatb.archive')}><Icon name="archive" /></button>
       {/if}
+      {#if canOpenWindows()}<button class="btn ghost" onclick={() => openWindow({ kind: 'chat', id })} title={t('chatfWindow.openChatTip')} aria-label={t('chatfWindow.open')}><Icon name="window" /></button>{/if}
       <ExportMenu {chat} />
       <button class="btn ghost" onclick={remove} title={t('chat.deleteChat')} aria-label={t('chat.deleteChat')}><Icon name="trash" /></button>
     </header>

@@ -9,6 +9,7 @@ import { app } from './store.svelte';
 import { t, tn } from './i18n';
 import { isoDay, normTodo } from './content/util';
 import { onNewDay } from './clock.svelte';
+import { isSecondary } from './windows';
 
 const KEY = 'thoughts.reminded';
 type Seen = { day: string; ids: string[] };
@@ -69,7 +70,8 @@ export async function checkReminders(): Promise<void> {
       }
     }
     app.dueToday = due.length;
-    if (!app.settings?.notifications || !due.length) return;
+    // Only the main window rings: a second window just keeps its count.
+    if (!app.settings?.notifications || !due.length || isSecondary()) return;
     // Before the reminder time only what is already overdue is announced; look again at that time.
     const at = reminderMinutes();
     const now = new Date();

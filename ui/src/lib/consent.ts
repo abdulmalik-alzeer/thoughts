@@ -8,12 +8,21 @@
 // approval is good for that one action, once, for two minutes. Outside the desktop app (the browser
 // preview) there is none, and the service refuses those changes.
 
+import { isSecondary, showInMain } from './windows';
+
 export type ConsentAction = 'chat-bypass' | 'settings-bypass' | 'trust';
 
 /** The approval, `null` when the user said no in the shell's dialog (or one was already open: say
  *  nothing then either), `undefined` outside the desktop app. Throws only for a real problem. */
 export async function approval(action: ConsentAction, subject = ''): Promise<string | null | undefined> {
   if (typeof (window as any).__TAURI_INTERNALS__ === 'undefined') return undefined;
+  // The desktop app asks only in the main window (src-tauri/src/windows.rs): a second window brings
+  // it forward, at the chat in question, and says so.
+  if (isSecondary()) {
+    await showInMain(action === 'chat-bypass' && subject ? { kind: 'chat', id: subject } : undefined);
+    const { t } = await import('./i18n');
+    throw new Error(t(action === 'trust' ? 'chatfWindow.trustInMain' : 'chatfWindow.confirmInMain'));
+  }
   const { invoke } = await import('@tauri-apps/api/core');
   try { return await invoke<string>('approve_action', { action, subject }); }
   catch (e: any) {

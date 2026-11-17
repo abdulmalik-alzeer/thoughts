@@ -69,8 +69,12 @@
   import { watchDeepLinks } from './lib/deeplink';
   import { contentScroller, pageChanging, returningNext } from './lib/mainScroll';
   import { sidebarSlide, railFade } from './lib/sidebarMotion';
+  import { announceChat, chatOpenElsewhere, initialRoute, isSecondary, mainRoute, setWindowTitle, showInMain } from './lib/windows';
 
   let projects = $state<any[]>([]);
+  /** A second window (lib/windows.ts): the whole app at one note or chat, without what belongs to
+   *  the app as a whole (notifications, announcements from elsewhere, links, updates, the menus). */
+  const secondary = isSecondary();
   let showTour = $state(false);
   let syncing = $state(false);
   let libraryGone = $state(false);
@@ -96,8 +100,12 @@
       app.settings = await api('/settings');
       applyTheme();
       if (app.settings.onboarded) await afterOnboard();
+      // A second window opens at what it was opened for.
+      const opened = secondary && app.settings.onboarded ? initialRoute(location.search) : null;
+      if (opened) await go(opened, { replace: true });
       app.ready = true;
       statusNotices();
+      if (secondary) return;
       // No check for a new version here: the app asks by itself only while the setting for that is on (startAutoUpdateChecks).
       if (app.settings.onboarded) { checkLayerUpdates(); announceWhatsNew(); startupChecks(); } else markWhatsNewSeen(); // a fresh install has nothing new to announce
       startAutoUpdateChecks();
@@ -116,8 +124,9 @@
     checkLibrary();
     startLibraries();
     startReminders();
-    // A change staged earlier (or by an import / app update) is still waiting for a decision.
-    checkPending(true);
+    // A change staged earlier (or by an import / app update) is still waiting for a decision
+    // (reviewed in the main window: a second one only knows it waits).
+    checkPending(!secondary);
   }
 
   async function loadProjects() {
@@ -188,7 +197,7 @@
   // Things the background service had to repair on start: say so once, in plain words.
   let noticed = false;
   function statusNotices() {
-    if (noticed || !app.status) return;
+    if (noticed || !app.status || secondary) return;
     noticed = true;
     if (app.status.settingsRecovered) { toast(t('layer.settingsRecovered'), { kind: 'error', key: 'recovered', duration: 0 }); post('/status/ack-recovered').catch(() => {}); }
     if (app.status.settingsNewer) toast(t('ui.settingsNewer'), { kind: 'error', key: 'newer-settings', duration: 0 });
@@ -265,6 +274,18 @@
         // The month's figure and the limits follow what the assistant reports, without a reload.
         if (e.type === 'usage.changed' && app.status && e.usage) app.status = { ...app.status, usage: e.usage };
         if (e.type === 'limit.changed' && app.status) app.status = { ...app.status, planLimit: e.planLimit ?? null };
+        // What happened elsewhere is announced once, by the main window; a second window only follows along.
+        if (secondary) {
+          if (e.type === 'layer.changed') reloadLayer().catch(layerError);
+          if (e.type === 'layer.pending' || e.type === 'chat.done') checkPending(false);
+          if (e.type === 'wrap.failed' || e.type === 'wrap.done') refreshWrap().catch(() => {});
+          if (e.type === 'wrap.done' && syncOn) refreshBackup();
+          if (e.type === 'settings.changed') { await reloadSettings(); loadProjects(); refreshStatus(); refreshChats().catch(() => {}); refreshWrap().catch(() => {}); }
+          if (e.type === 'auth.changed') refreshStatus();
+          if (e.type === 'library.changed') ideas = [];
+          if (e.type === 'resync') { refreshChats().catch(() => {}); refreshWrap().catch(() => {}); refreshStatus(); }
+          return;
+        }
         if (e.type === 'chat.done' && app.settings?.notifications && !document.hasFocus()) notify('Thoughts', t('shell.chatFinished', { title: e.title || t('shell.aChat') }), e.chatId);
         if (e.type === 'workflow.result') workflowNotice(e, notify);
         // The assistant waits for the user's OK in a chat they are not looking at (or the window is in the background).
@@ -296,10 +317,14 @@
         root.classList.add('native');
         // Older shells don't tag the platform; the translucent window styles are macOS-only.
         if (!/\bos-/.test(root.className)) root.classList.add(isMac ? 'os-macos' : /Win/i.test(navigator.userAgent) ? 'os-windows' : 'os-linux');
+        // The menus, links and updates speak to the main window only (a second one cannot listen).
+        if (secondary) return;
         listen('recovery', () => (app.showRollback = true));
         listen('open-settings', () => command('settings'));
         listen('open-help', () => command('help'));
         listen('check-updates', () => checkAppUpdate(true));
+        // A second window sends the person here (lib/windows.ts `showInMain`).
+        listen<any>('open-view', (e) => { const r = mainRoute(e.payload ?? {}); if (r && app.ready && app.settings?.onboarded) go(r); });
         watchDeepLinks();
         // Everything else in the Recovery menu (undo, going back, safe mode, reload, restart) is done
         // by the desktop app itself, with its own dialogs: it must work when this page does not.
@@ -330,6 +355,7 @@
 
   // `chatId`: a click on the notification opens that chat (src-tauri/src/attention.rs).
   async function notify(title: string, body: string, chatId?: string) {
+    if (secondary) return;
     try {
       const n = await import('@tauri-apps/plugin-notification');
       if (!(await n.isPermissionGranted())) await n.requestPermission();
@@ -353,10 +379,19 @@
     const left = lastChatView;
     lastChatView = now;
     if (left && left !== now) setTimeout(() => dropIfEmpty(left), 600);
+    announceChat(now);
+  });
+  // A second window is named after what it shows.
+  $effect(() => {
+    if (!secondary) return;
+    const v = app.view;
+    const name = v.kind === 'chat' ? (app.chats.find((c: any) => c.id === v.id)?.title ?? '') : v.kind === 'docs' && v.path && !v.path.startsWith('?') ? (v.path.split('/').pop() ?? '') : navLabel(v.kind, '');
+    setWindowTitle(name);
   });
   async function dropIfEmpty(id: string) {
     try {
-      if (app.view.id === id) return;
+      // The main window tidies up, and never a chat another window still shows.
+      if (secondary || app.view.id === id || chatOpenElsewhere(id)) return;
       const c = app.chats.find((x: any) => x.id === id);
       if (!c || (c.kind !== 'chat' && c.kind !== 'customize') || c.messageCount > 0 || c.pinned || c.running) return;
       // Text typed (or files added) but not sent keeps the chat.
@@ -439,9 +474,9 @@
     'back': () => { returningNext(); goBack(); },
     'forward': () => { returningNext(); goForward(); },
     'customise': () => go({ kind: 'customise' }),
-    'customise.new': () => newCustomise(),
-    'review': () => openReview(),
-    'updates.check': () => checkAppUpdate(true),
+    'customise.new': () => (secondary ? showInMain({ kind: 'customise' }) : newCustomise()),
+    'review': () => (secondary ? showInMain({ kind: 'customise' }) : openReview()),
+    'updates.check': () => (secondary ? showInMain() : checkAppUpdate(true)),
     'settings': () => go({ kind: 'settings' }),
     'help': () => go({ kind: 'help' }),
     'tour': () => (showTour = true),
@@ -747,6 +782,15 @@
       <div class="skel" style="width:120px;height:12px"></div>
     </div>
   </div>
+{:else if !app.settings.onboarded && secondary}
+  <div class="center">
+    <div class="card down" role="alert">
+      <Logo size={44} />
+      <h1>{t('chatfWindow.setupTitle')}</h1>
+      <p>{t('chatfWindow.setupBody')}</p>
+      <button class="btn primary" onclick={() => showInMain()}>{t('chatfWindow.toMain')}</button>
+    </div>
+  </div>
 {:else if !app.settings.onboarded}
   <Onboarding done={onboarded} />
 {:else}
@@ -905,7 +949,7 @@
       <div class="drag top no-print" data-tauri-drag-region></div>
       <div class="mainscroll scroll" use:contentScroller>
       <div class="sr-only" role="status" aria-live="polite">{announce}</div>
-      {#if stale}
+      {#if stale && !secondary}
         <div class="safe no-print" role="status">
           <Icon name="download" size={16} />
           <span class="grow">{t('ui.stale.body')}</span>
@@ -932,7 +976,8 @@
           <Icon name="shield" size={16} />
           <span class="grow">{app.safeReason === 'crash' ? safeCrashText() : t('shell.safe.manual')}</span>
           {#if app.safeReason === 'crash'}<button class="btn" onclick={() => command('rollback')}><Icon name="rollback" size={14} /> {t('shell.openRollback')}</button>{/if}
-          <button class="btn" onclick={retryLayer}><Icon name="retry" size={14} /> {app.safeReason === 'crash' ? t('shell.safe.retry') : t('shell.safe.leave')}</button>
+          <!-- Customisations are switched back on from the main window (the desktop app keeps that choice there). -->
+          {#if !secondary}<button class="btn" onclick={retryLayer}><Icon name="retry" size={14} /> {app.safeReason === 'crash' ? t('shell.safe.retry') : t('shell.safe.leave')}</button>{/if}
         </div>
       {/if}
       {#if app.preview}<PreviewBanner />{:else}<CustomWaiting />{/if}

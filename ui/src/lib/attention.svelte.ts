@@ -10,6 +10,7 @@
 import { untrack } from 'svelte';
 import { api, inTauri, on } from './api';
 import { app, dismissToast } from './store.svelte';
+import { isSecondary } from './windows';
 
 /** chat id → approval id → when the question runs out (ms since epoch). */
 const waiting = $state<Record<string, Record<string, number>>>({});
@@ -67,7 +68,8 @@ let last = -1;
  *  icon once when the window is in the background. The app itself shows the count only while the
  *  window is not in front, so this is called again whenever the window gains or loses focus. */
 function dock(ask: boolean) {
-  if (!inTauri()) return;
+  // The Dock belongs to the main window: a second window keeps its marks in its own sidebar only.
+  if (!inTauri() || isSecondary()) return;
   const n = total();
   if (!ask && n === last) return;
   last = n;

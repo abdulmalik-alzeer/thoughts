@@ -29,6 +29,8 @@
   import { pageText, shows } from '../lib/pages.svelte';
   import { canOpenInApp, openLibraryFile, revealLabelKey, revealLibraryFile } from '../lib/openInApp';
   import { printNote, saveNotePdf, titleOf as noteTitle, type PrintSource } from '../lib/printPdf';
+  import { canOpenWindows } from '../lib/windows';
+  import { openWindow } from '../lib/openWindow';
 
   let { path }: { path?: string } = $props();
 
@@ -801,6 +803,8 @@
         { id: 'copy', label: t('docs.copyText'), icon: 'copy', run: copyDoc },
         ...(isMd(current) ? [{ id: 'source', label: t(showSource ? 'docsa.showFormatted' : 'docsa.showSource'), icon: 'eye', run: () => (showSource = !showSource) }] : []),
       ] : []),
+      // Beside something else, in a window of its own: the edits in progress first go one way or the other.
+      ...(canOpenWindows() && current ? [{ id: 'window', label: t('chatfWindow.open'), icon: 'window', run: () => (dirty ? notify(t('chatfWindow.saveFirst'), { kind: 'info' }) : openWindow({ kind: 'docs', path: current })) }] : []),
       ...(desktop && current ? [{ id: 'reveal', label: t(revealLabelKey()), icon: 'folder', run: reveal }] : []),
       ...(desktop && current ? [{ id: 'link', label: t('nativeb.link.copy'), icon: 'copy', run: copyNoteLink }] : []),
       { id: 'rename', label: t('docs3.rename'), icon: 'edit', run: () => renamePath(current) },
