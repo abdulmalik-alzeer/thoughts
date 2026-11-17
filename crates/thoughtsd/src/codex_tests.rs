@@ -705,3 +705,69 @@ async fn options_status_and_one_shot_answers_come_from_the_program() {
     assert!(e.to_string().contains("error sending request"));
     std::fs::remove_dir_all(base).unwrap();
 }
+
+#[test]
+fn only_a_run_without_codexs_own_sandbox_is_wrapped_and_only_on_macos() {
+    assert_eq!(outer_sandbox("danger-full-access"), cfg!(target_os = "macos"));
+    for s in ["read-only", "workspace-write"] { assert!(!outer_sandbox(s), "{s}: macOS refuses a sandbox inside Codex's own"); }
+}
+
+#[test]
+fn the_outer_profile_closes_the_apps_folder_and_the_signing_key_and_opens_only_what_the_run_needs() {
+    let home = Path::new("/Users/u/.thoughts");
+    let (closed, readable, open) = outer_folders(home, Some(Path::new("/Users/u")), Path::new("/Users/u/Library"), &[PathBuf::from("/Users/u/proj")], Some(Path::new("/Users/u/.thoughts/run-tmp/codex-1")));
+    assert_eq!(closed, vec![home.to_path_buf(), PathBuf::from("/Users/u/.tauri")]);
+    assert!(readable.contains(&home.join("app-layer")) && readable.contains(&home.join("extensions")) && readable.contains(&home.join("run-tmp/codex-1")));
+    assert!(open.is_empty(), "the library and a project outside the app's folder are not affected: {open:?}");
+    let (_, _, open) = outer_folders(home, None, &home.join("reorganize-worktree"), &[], None);
+    assert_eq!(open, vec![home.join("reorganize-worktree")], "a folder the run works in stays open, even inside the app's folder");
+
+    let p = outer_profile(&closed, &readable, &[PathBuf::from("/Users/u/.thoughts/x \"q\" \\b")]);
+    assert!(p.starts_with("(version 1)(allow default)(deny file-read* file-write* (subpath \"/Users/u/.thoughts\") (subpath \"/Users/u/.tauri\"))"), "{p}");
+    assert!(p.contains("(deny process-exec (literal \"/usr/bin/security\"))"), "{p}");
+    assert!(p.contains("(allow file-read* (subpath \"/Users/u/.thoughts/app-layer\")"), "{p}");
+    assert!(p.ends_with(r#"(allow file-read* file-write* (subpath "/Users/u/.thoughts/x \"q\" \\b"))"#), "{p}");
+    // The opening rules come after the closing ones: in a profile the later rule wins.
+    assert!(p.find("(deny file-read*").unwrap() < p.find("(allow file-read*").unwrap());
+}
+
+/// The profile does what it says, under macOS's own sandbox program (temp folders only).
+#[cfg(target_os = "macos")]
+#[test]
+fn the_outer_profile_really_refuses_reading_the_closed_folders() {
+    let d = std::fs::canonicalize(std::env::temp_dir()).unwrap().join(format!("thoughts-outer-{}", uuid::Uuid::new_v4()));
+    let (home, key, lib) = (d.join("app"), d.join("home/.tauri"), d.join("lib"));
+    for f in [home.join("extensions"), key.clone(), lib.clone()] { std::fs::create_dir_all(f).unwrap(); }
+    std::fs::write(home.join("secrets.json"), "s").unwrap();
+    std::fs::write(home.join("extensions/tool"), "t").unwrap();
+    std::fs::write(key.join("thoughts-updater.key"), "k").unwrap();
+    std::fs::write(lib.join("note.md"), "n").unwrap();
+    let (closed, readable, open) = outer_folders(&home, Some(&d.join("home")), &lib, &[], None);
+    let run = |sh: &str| std::process::Command::new(SANDBOX_EXEC).arg("-p").arg(outer_profile(&closed, &readable, &open)).args(["/bin/sh", "-c", sh]).output().unwrap();
+    for sh in [format!("cat '{}'", home.join("secrets.json").display()), format!("cat '{}'", key.join("thoughts-updater.key").display()),
+               format!("ln '{}' '{}'", home.join("secrets.json").display(), lib.join("h").display()), "/usr/bin/security help".into()] {
+        assert!(!run(&sh).status.success(), "{sh}");
+    }
+    for sh in [format!("cat '{}'", lib.join("note.md").display()), format!("echo x > '{}'", lib.join("new.md").display()),
+               format!("cat '{}'", home.join("extensions/tool").display())] {
+        let o = run(&sh);
+        assert!(o.status.success(), "{sh}: {}", String::from_utf8_lossy(&o.stderr));
+    }
+    std::fs::remove_dir_all(&d).unwrap();
+}
+
+#[test]
+fn passwords_in_a_plain_file_are_noticed_and_an_empty_store_is_not() {
+    let d = std::env::temp_dir().join(format!("thoughts-plain-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&d).unwrap();
+    assert!(!plain_passwords(&d));
+    std::fs::write(d.join("secrets.json"), "{}").unwrap();
+    std::fs::write(d.join("git-credentials"), "\n").unwrap();
+    assert!(!plain_passwords(&d), "nothing stored yet");
+    std::fs::write(d.join("git-credentials"), "https://me:pw@github.com\n").unwrap();
+    assert!(plain_passwords(&d));
+    std::fs::write(d.join("git-credentials"), "").unwrap();
+    std::fs::write(d.join("secrets.json"), r#"{"thoughts-ai/key": "sk-1"}"#).unwrap();
+    assert!(plain_passwords(&d));
+    std::fs::remove_dir_all(&d).unwrap();
+}
