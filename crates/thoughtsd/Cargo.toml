@@ -17,7 +17,7 @@ yaml_serde = "0.10"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-dirs = "5"
+dirs = "7"
 rand = "0.8"
 regex = "1"
 walkdir = "2"
@@ -25,7 +25,7 @@ include_dir = "0.7"
 futures = "0.3"
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 dunce = "1"
-base64 = "0.22"
+base64 = "0.23"
 # Noticing changes other programs make to the library (watch.rs): FSEvents, inotify, ReadDirectoryChanges. CC0-1.0.
 notify = "8"
 
