@@ -173,6 +173,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/codex/options", get(codex_options))
         .route("/api/ai/codex/login", post(codex_login))
         .route("/api/ai/codex/recheck", post(codex_recheck))
+        .route("/api/ai/codex/models/refresh", post(codex_models_refresh))
         .route("/api/git/install", post(git_install))
         .route("/api/library/trust", get(trust_question).post(trust_library))
         .route("/api/library/access", get(library_access).post(library_keep_to_owner))
@@ -1645,6 +1646,9 @@ async fn claude_recheck(State(st): S) -> R {
 
 /// Codex's models, efforts and the permission modes it can enforce (see `codex::options`).
 async fn codex_options(State(st): S) -> R { Ok(Json(crate::codex::options(&st).await)) }
+
+/// "Refresh models": ask the installed Codex for its models again now (`codex_models`), then the options.
+async fn codex_models_refresh(State(st): S) -> R { Ok(Json(crate::codex::refresh_models(&st).await)) }
 
 /// Opens Codex's browser sign-in (`codex login`): one attempt at a time, ended after ten minutes.
 async fn codex_login(State(st): S) -> R { crate::codex::login(st.clone()).await?; ok() }
