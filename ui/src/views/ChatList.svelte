@@ -11,6 +11,7 @@
   import { fold } from '../lib/CommandPalette.svelte';
   import Icon from '../lib/Icon.svelte';
   import PageExtras from './PageExtras.svelte';
+  import Sections from './Sections.svelte';
   import { pageText, pageTitle, shows } from '../lib/pages.svelte';
 
   let { projects, newChat }: { projects: any[]; newChat: (pid?: string | null) => void } = $props();
@@ -124,9 +125,31 @@
   }
 </script>
 
-<div class="page">
-  <h1>{pageTitle('chats')}</h1>
-  <PageExtras page="chats" />
+    {#snippet card(c: any)}
+      <div class="card item" class:sel={picked.has(c.id)}>
+        {#if selecting}<input type="checkbox" class="pick" checked={picked.has(c.id)} onchange={() => toggle(c.id)} aria-label={t('chatb.selectChat', { title: c.title })} />{/if}
+        <button class="open" onclick={() => (selecting ? toggle(c.id) : go({ kind: 'chat', id: c.id }))}>
+          <div class="row">
+            {#if c.pinned}<span class="pinmark" title={t('chatb.pinned')}><Icon name="pin" size={13} /><span class="sr-only">({t('chatb.pinned')})</span></span>{/if}
+            <b class="grow ell" dir="auto">{c.title}</b>
+            {#if c.running}<span class="pill accent">{t('shell.dot.running')}</span>{/if}
+            {#if c.unwrapped}<span class="pill">{t('shell.dot.unwrapped')}</span>{/if}
+            {#if c.kind !== 'chat'}<span class="pill">{kindLabel(c.kind)}</span>{/if}
+          </div>
+          <div class="muted sm"><span title={fmtDate(c.updated, { dateStyle: 'medium', timeStyle: 'short' })}>{ago(c.updated)}</span> · {c.messageCount ? tn('shell.msgs', c.messageCount) : t('chatb.noMessages')}</div>
+        </button>
+        {#if !selecting}
+          <div class="acts">
+            {#if c.kind === 'chat' && !c.archived}
+              <button class="iconbtn" class:on={c.pinned} aria-pressed={!!c.pinned} title={c.pinned ? t('chatb.unpin') : t('chatb.pin')} aria-label={c.pinned ? t('chatb.unpinNamed', { title: c.title }) : t('chatb.pinNamed', { title: c.title })} onclick={() => setFlag(c, 'pinned')}><Icon name="pin" size={15} /></button>
+            {/if}
+            <button class="iconbtn" title={c.archived ? t('chatb.unarchive') : t('chatb.archive')} aria-label={c.archived ? t('chatb.unarchiveNamed', { title: c.title }) : t('chatb.archiveNamed', { title: c.title })} onclick={() => setFlag(c, 'archived')}><Icon name={c.archived ? 'unarchive' : 'archive'} size={15} /></button>
+          </div>
+        {/if}
+      </div>
+    {/snippet}
+
+{#snippet actionsS()}
   {#if shows('chats', 'newChat') || (shows('chats', 'folderChats') && projects.length)}
   <div class="row" style="flex-wrap:wrap">
     {#if shows('chats', 'newChat')}<button class="btn primary" title={tip(pageText('chats', 'newChat', t('newChat')), 'chat.new')} onclick={() => newChat()}><Icon name="plus" size={15} />{pageText('chats', 'newChat', t('newChat'))}</button>{/if}
@@ -134,9 +157,10 @@
   </div>
   {/if}
 
-  {#if !app.chats.length}
-    <p class="muted">{pageText('chats', 'empty', t('noChats'))}</p>
-  {:else}
+{/snippet}
+
+{#snippet toolsS()}
+  {#if app.chats.length}
     {#if shows('chats', 'search') || shows('chats', 'select')}
     <div class="bar row">
       {#if shows('chats', 'search')}
@@ -167,30 +191,14 @@
 
     {#if filter === 'archived' && !needle && archived.length}<p class="muted sm note">{t('chatb.archivedNote')}</p>{/if}
 
-    {#snippet card(c: any)}
-      <div class="card item" class:sel={picked.has(c.id)}>
-        {#if selecting}<input type="checkbox" class="pick" checked={picked.has(c.id)} onchange={() => toggle(c.id)} aria-label={t('chatb.selectChat', { title: c.title })} />{/if}
-        <button class="open" onclick={() => (selecting ? toggle(c.id) : go({ kind: 'chat', id: c.id }))}>
-          <div class="row">
-            {#if c.pinned}<span class="pinmark" title={t('chatb.pinned')}><Icon name="pin" size={13} /><span class="sr-only">({t('chatb.pinned')})</span></span>{/if}
-            <b class="grow ell" dir="auto">{c.title}</b>
-            {#if c.running}<span class="pill accent">{t('shell.dot.running')}</span>{/if}
-            {#if c.unwrapped}<span class="pill">{t('shell.dot.unwrapped')}</span>{/if}
-            {#if c.kind !== 'chat'}<span class="pill">{kindLabel(c.kind)}</span>{/if}
-          </div>
-          <div class="muted sm"><span title={fmtDate(c.updated, { dateStyle: 'medium', timeStyle: 'short' })}>{ago(c.updated)}</span> · {c.messageCount ? tn('shell.msgs', c.messageCount) : t('chatb.noMessages')}</div>
-        </button>
-        {#if !selecting}
-          <div class="acts">
-            {#if c.kind === 'chat' && !c.archived}
-              <button class="iconbtn" class:on={c.pinned} aria-pressed={!!c.pinned} title={c.pinned ? t('chatb.unpin') : t('chatb.pin')} aria-label={c.pinned ? t('chatb.unpinNamed', { title: c.title }) : t('chatb.pinNamed', { title: c.title })} onclick={() => setFlag(c, 'pinned')}><Icon name="pin" size={15} /></button>
-            {/if}
-            <button class="iconbtn" title={c.archived ? t('chatb.unarchive') : t('chatb.archive')} aria-label={c.archived ? t('chatb.unarchiveNamed', { title: c.title }) : t('chatb.archiveNamed', { title: c.title })} onclick={() => setFlag(c, 'archived')}><Icon name={c.archived ? 'unarchive' : 'archive'} size={15} /></button>
-          </div>
-        {/if}
-      </div>
-    {/snippet}
 
+  {/if}
+{/snippet}
+
+{#snippet listS()}
+  {#if !app.chats.length}
+    <p class="muted">{pageText('chats', 'empty', t('noChats'))}</p>
+  {:else}
     {#if !shown.length}
       <p class="muted">{needle ? t('chatb.noMatch', { q: q.trim() }) : filter === 'archived' ? t('chatb.noneArchived') : filter === 'system' ? t('chatb.noneSystem') : pageText('chats', 'empty', t('noChats'))}</p>
     {:else if filter === 'all'}
@@ -206,6 +214,11 @@
       <div class="list">{#each shown as c (c.id)}{@render card(c)}{/each}</div>
     {/if}
 
+  {/if}
+{/snippet}
+
+{#snippet keepS()}
+  {#if app.chats.length}
     {#if shows('chats', 'keep')}
     <section class="keep card" aria-labelledby="chatb-keep">
       <h2 id="chatb-keep" class="head first">{t('chatb.keep.title')}</h2>
@@ -226,6 +239,12 @@
     </section>
     {/if}
   {/if}
+{/snippet}
+
+<div class="page">
+  <h1>{pageTitle('chats')}</h1>
+  <PageExtras page="chats" />
+  <Sections page="chats" parts={{ actions: actionsS, tools: toolsS, list: listS, keep: keepS }} />
   <PageExtras page="chats" place="bottom" />
 </div>
 

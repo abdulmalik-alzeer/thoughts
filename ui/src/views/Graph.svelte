@@ -10,6 +10,9 @@
   // still; the same connections can be read as a list instead, for the keyboard and screen readers.
   import { onMount, tick, untrack } from 'svelte';
   import Icon from '../lib/Icon.svelte';
+  import PageExtras from './PageExtras.svelte';
+  import Sections from './Sections.svelte';
+  import { pageTitle } from '../lib/pages.svelte';
   import { api, on } from '../lib/api';
   import { a11y, app, go } from '../lib/store.svelte';
   import { t, tn, fmtNum, lang } from '../lib/i18n';
@@ -394,27 +397,7 @@
   const title = $derived(focusPath ? (centreTitle ? t('libf-graph.aroundTitle', { name: centreTitle }) : t('libf-graph.around')) : t('libf-graph.title'));
 </script>
 
-<div class="page graph">
-  <div class="row head">
-    <div class="grow">
-      {#if focusPath}
-        <nav class="crumbs" aria-label={t('libf-graph.backLabel')}>
-          <button class="crumb" onclick={() => go({ kind: 'graph' })}><Icon name="left" size={14} class="flip-rtl" /> {t('libf-graph.whole')}</button>
-        </nav>
-      {/if}
-      <h1 dir="auto">{title}</h1>
-      <p class="muted sub">{focusPath ? t('libf-graph.aroundSub') : t('libf-graph.sub')}</p>
-    </div>
-    {#if focusPath}
-      <div class="seg" role="group" aria-label={t('libf-graph.depth')}>
-        {#each [1, 2, 3] as d (d)}<button type="button" class="segb" aria-pressed={depth === d} onclick={() => (depth = d)}>{tn('libf-graph.steps', d)}</button>{/each}
-      </div>
-      {#if centreTitle && data?.focus}
-        <button class="btn" onclick={() => openPath(data!.focus!)}><Icon name="external" size={14} /> {t('libf-graph.openCentre')}</button>
-      {/if}
-    {/if}
-  </div>
-
+{#snippet graphS()}
   {#if phase === 'loading' || phase === 'layout'}
     <div class="state" role="status" aria-busy="true">
       <span class="spin" aria-hidden="true"></span>
@@ -541,6 +524,32 @@
       <p id="graph-keys" class="keys muted sm">{t('libf-graph.keys')}</p>
     {/if}
   {/if}
+{/snippet}
+
+<div class="page graph">
+  <div class="row head">
+    <div class="grow">
+      {#if focusPath}
+        <nav class="crumbs" aria-label={t('libf-graph.backLabel')}>
+          <button class="crumb" onclick={() => go({ kind: 'graph' })}><Icon name="left" size={14} class="flip-rtl" /> {t('libf-graph.whole')}</button>
+        </nav>
+      {/if}
+      <h1 dir="auto">{focusPath ? title : pageTitle('graph', title)}</h1>
+      <p class="muted sub">{focusPath ? t('libf-graph.aroundSub') : t('libf-graph.sub')}</p>
+    </div>
+    {#if focusPath}
+      <div class="seg" role="group" aria-label={t('libf-graph.depth')}>
+        {#each [1, 2, 3] as d (d)}<button type="button" class="segb" aria-pressed={depth === d} onclick={() => (depth = d)}>{tn('libf-graph.steps', d)}</button>{/each}
+      </div>
+      {#if centreTitle && data?.focus}
+        <button class="btn" onclick={() => openPath(data!.focus!)}><Icon name="external" size={14} /> {t('libf-graph.openCentre')}</button>
+      {/if}
+    {/if}
+  </div>
+
+  <PageExtras page="graph" />
+  <Sections page="graph" parts={{ graph: graphS }} />
+  <PageExtras page="graph" place="bottom" />
   <div class="sr-only" role="status" aria-live="polite">{announce}</div>
 </div>
 

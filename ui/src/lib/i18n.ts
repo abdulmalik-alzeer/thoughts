@@ -65,6 +65,10 @@ for (const m of Object.values(extra)) { Object.assign(EN, m.default.en); Object.
 export type Key = keyof typeof en | (string & {});
 export const lang = () => (app.settings?.language === 'ar' ? 'ar' : 'en');
 
+/** Every string of the current language (English for any key without an Arabic one), for a page
+ *  an add-on draws in place of one of the app's own (`thoughts.i18n`). */
+export function dictionary(): Record<string, string> { return lang() === 'ar' ? { ...EN, ...AR } : { ...EN }; }
+
 export function t(k: Key, vars: Record<string, string | number> = {}): string {
   let s = (lang() === 'ar' ? AR[k] : undefined) ?? EN[k] ?? k;
   for (const [n, v] of Object.entries(vars)) s = s.replaceAll(`{${n}}`, String(v));

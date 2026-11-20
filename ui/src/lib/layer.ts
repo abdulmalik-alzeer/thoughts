@@ -68,7 +68,8 @@ import { fullAccessOn } from './fullAccess';
 import { machineHandle, FULL_ACCESS_ALLOW } from './layer/machine';
 import { setPages } from './pages.svelte';
 import { errCode, errDetail, failed } from './errors';
-import { t, fmtDate , lang } from './i18n';
+import { t, fmtDate , lang, dictionary } from './i18n';
+import REF from './layer/builtin-pages.json';
 
 let styleEl: HTMLStyleElement | null = null;
 
@@ -148,7 +149,9 @@ export function retryLayer() { clearLayerBootFlag(); reloadApp('', { leaveSafe: 
 const shortName = (file: string) => String(file).replace(/\.(js|html)$/i, '');
 
 // ---------- per-plugin bookkeeping ----------
-type Surface = { kind: 'view' | 'widget' | 'html'; id: string };
+/** `page`: for a page, what it stands in for and the route the app was asked for (`thoughts.page`). */
+type PageCtx = { replaces: string | null; route: { kind: string; id: string | null; path: string | null } };
+type Surface = { kind: 'view' | 'widget' | 'html'; id: string; page?: PageCtx };
 type Plugin = {
   name: string; kind: 'plugin' | 'view'; code: string; perms: Set<string>; dead: boolean;
   disposers: (() => void)[]; frames: Set<Frame>; warned: Set<string>;
@@ -181,18 +184,12 @@ let plugins: Plugin[] = [];
 const frames = new Set<Frame>();
 let bg: HTMLElement | null = null;
 
-const PERMS = ['library:read', 'library:write', 'todos:read', 'todos:write', 'ideas:read', 'ideas:write', 'chat:start', 'storage', 'files:save', 'notify', 'assistant:ask'];
-const VIEW_PERMS = ['library:read', 'todos:read', 'ideas:read'];
-const NEEDS: Record<string, string> = {
-  'library.list': 'library:read', 'library.read': 'library:read', 'library.search': 'library:read',
-  'library.write': 'library:write', 'library.remove': 'library:write',
-  'todos.list': 'todos:read', 'todos.add': 'todos:write', 'todos.setDone': 'todos:write', 'todos.edit': 'todos:write', 'todos.remove': 'todos:write',
-  'ideas.list': 'ideas:read', 'ideas.setStatus': 'ideas:write', 'chat.start': 'chat:start',
-  // A Home chip puts a request in front of the assistant, so it needs the same permission as starting a chat.
-  'ui.addHomeChip': 'chat:start',
-  'storage.get': 'storage', 'storage.set': 'storage',
-  'ui.saveFile': 'files:save', 'ui.notify': 'notify', 'assistant.ask': 'assistant:ask',
-};
+// Permissions and the calls that need them come from the reference the service checks against
+// (layer/builtin-pages.json), so the two can never disagree. A Home chip puts a request in front of
+// the assistant, so it needs the same permission as starting a chat.
+const PERMS: string[] = (REF as any).permissions;
+const VIEW_PERMS: string[] = (REF as any).viewPermissions;
+const NEEDS: Record<string, string> = Object.fromEntries(Object.entries((REF as any).api as Record<string, string>).filter(([, p]) => p));
 /** Calls that change something. While a staged change is only being tried none of them reaches the
  *  library or the add-on's storage (see `pretend`), and chats or questions are not started. */
 const WRITES = new Set(['library.write', 'library.remove', 'todos.add', 'todos.setDone', 'todos.edit', 'todos.remove', 'ideas.setStatus', 'storage.set', 'chat.start', 'assistant.ask']);
@@ -201,12 +198,12 @@ const STATUSES = ['seed', 'active', 'parked', 'done', 'dropped'];
 const STORAGE_MAX = 256 * 1024;
 /** The highest `apiVersion` this app can run. */
 export const API_VERSION = 1;
-const READ_ONLY = new Set(['library.list', 'library.read', 'library.search', 'todos.list', 'ideas.list', 'on', 'off']);
+const READ_ONLY = new Set(['library.list', 'library.read', 'library.search', 'todos.list', 'ideas.list', 'chats.list', 'on', 'off']);
 /** Events a plugin may listen to, and the only fields it is given. */
 const EVENTS: Record<string, string[]> = {
   'todos.changed': [], 'library.changed': [], 'layer.changed': [], 'settings.changed': [], 'wrap.done': [], 'chat.done': ['chatId'],
 };
-const VIEWS = ['home', 'chats', 'chat', 'ideas', 'todos', 'docs', 'projects', 'settings', 'help', 'plugin'];
+const VIEWS = ['home', 'chats', 'chat', 'ideas', 'todos', 'docs', 'projects', 'graph', 'inbox', 'usage', 'settings', 'help', 'plugin'];
 
 // ---------- limits on what an add-on may do unasked ----------
 // Kept per add-on NAME for the whole session, so reloading the layer does not reset them.
@@ -250,6 +247,7 @@ function dispose(p: Plugin) {
 function fail(p: Plugin, e: any) {
   if (p.dead) return;
   p.dead = true;
+  noteFailure(p.name, String(e?.message ?? e));
   console.error(`[plugin ${p.name}]`, e);
   dispose(p);
   toast(t('shell.pluginCrashed', { name: p.name }), {
@@ -257,6 +255,28 @@ function fail(p: Plugin, e: any) {
     // The next step after a crash: switch that add-on off, or undo what brought it.
     action: { label: t('ldc.crash.manage'), run: () => { go({ kind: 'customise', id: 'addons' }); } },
   });
+}
+
+// ---------- why an add-on is not there (for a page it was meant to replace) ----------
+const failures = (): Record<string, string> => ((app as any).addonFailures as Record<string, string> | undefined) ?? {};
+function noteFailure(name: string, why: string) { (app as any).addonFailures = { ...failures(), [name]: why.slice(0, 600) }; }
+/** Why the add-on behind page id `id` (`board.js:board`, `view:cal.html`, or a short id) is not
+ *  running: it failed (its error), is switched off, or was made for a newer app. '' when unknown. */
+export function addonFailure(id: string): string {
+  const file = id.startsWith('view:') ? id.slice(5) : id.includes(':') ? id.split(':')[0] : '';
+  const f = failures();
+  if (file) {
+    if (f[file]) return f[file];
+    const off = ((app as any).layerOff as string[] | undefined) ?? [];
+    if (off.some((x) => x.endsWith('/' + file))) return t('pgs.why.off');
+    const it = layerItems().find((x) => x.name === file);
+    if (it?.unsupported) return it.message || t('pgs.why.newer');
+    if (it && !app.pluginViews.some((v) => v.plugin === file)) return '';
+    if (!it) return t('pgs.why.gone', { file });
+    return '';
+  }
+  const all = Object.values(f);
+  return all.length === 1 ? all[0] : '';
 }
 
 // ---------- theme → frames ----------
@@ -277,7 +297,8 @@ function themeCss(): string {
   const cs = getComputedStyle(document.documentElement);
   const vars = varNames.map((n) => { const v = cs.getPropertyValue(n).trim(); return v ? `${n}:${v};` : ''; }).join('');
   const font = getComputedStyle(document.body).fontFamily;
-  return `:root{${vars}}
+  return `${kitCss()}
+:root{${vars}}
 html,body{margin:0;padding:0;background:transparent;color:var(--fg);font:13.5px/1.5 ${font};}
 *{box-sizing:border-box}
 a{color:var(--accent)}
@@ -291,6 +312,27 @@ input,select,textarea{background:var(--fill);border:1px solid var(--hairline);bo
 .card{background:var(--panel);border:1px solid var(--hairline);border-radius:var(--radius-lg);padding:12px 14px}
 code,pre{font-family:var(--mono);font-size:12.5px}
 table{border-collapse:collapse}td,th{border-bottom:1px solid var(--hairline);padding:5px 8px;text-align:start}`;
+}
+
+// The app's own building blocks (`.btn`, `.card`, `.pill`, `.row`, headings, inputs…), copied from
+// its global stylesheet so an add-on page — a rewritten built-in page above all — looks like the
+// app. Only rules that name none of the shell's own parts, load nothing and are not a component's
+// scoped styles are taken.
+let kit: string | null = null;
+const SHELL = /svelte-|\.(shell|main|nav|sidebar|rail|modal|modal-bg|toast|toast-wrap|view|home|scroll|no-print|titlebar)\b|html|body|:root|::-webkit/;
+function kitCss(): string {
+  if (kit !== null) return kit;
+  const out: string[] = [];
+  const take = (r: any): string => {
+    if (r.selectorText !== undefined) return !SHELL.test(r.selectorText) && !/url\(/i.test(r.cssText) ? r.cssText : '';
+    if (r.media && r.cssRules) { const inner = Array.from(r.cssRules as CSSRuleList).map(take).filter(Boolean).join(''); return inner ? `@media ${r.media.mediaText}{${inner}}` : ''; }
+    return '';
+  };
+  for (const sheet of Array.from(document.styleSheets)) {
+    try { for (const r of Array.from(sheet.cssRules)) { const c = take(r); if (c) out.push(c); } } catch { /* cross-origin sheet */ }
+  }
+  kit = out.join('\n').slice(0, 200_000);
+  return kit;
 }
 
 function lookMsg(type: 'init' | 'look') {
@@ -473,8 +515,26 @@ function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Fra
   return f;
 }
 
+/** What a page is told about where it is (`thoughts.page`). The page kind always; the route's file
+ *  only with `library:read`, never a private one and never outside its `read` folders; a chat's id
+ *  only with `chats:read`; any other id only when it is a plain mode word (`calendar`). Anything
+ *  else the page asks for through its permission-checked calls. */
+export function pageCtx(p: { perms: Set<string>; read: string[] }, ctx?: Partial<PageCtx>): PageCtx {
+  const kind = String(ctx?.route?.kind ?? 'plugin').slice(0, 40);
+  const raw = ctx?.route;
+  let path: string | null = null;
+  if (raw?.path && p.perms.has('library:read')) {
+    try { const clean = cleanPath(raw.path); if (!p.read.length || inFolders(p.read, clean)) path = clean; } catch { /* private or not a library path */ }
+  }
+  const id = raw?.id == null ? null
+    : kind === 'chat' ? (p.perms.has('chats:read') ? String(raw.id).slice(0, 200) : null)
+    : /^[a-z][a-zA-Z-]{0,30}$/.test(String(raw.id)) ? String(raw.id) : null;
+  return { replaces: ctx?.replaces ? String(ctx.replaces).slice(0, 40) : null, route: { kind, id, path } };
+}
+
 /** Mount one of a plugin's surfaces into a slot. Returns the cleanup that removes it. */
-function mountSurface(p: Plugin, surface: Surface, el: HTMLElement): () => void {
+function mountSurface(p: Plugin, surface: Surface, el: HTMLElement, ctx?: Partial<PageCtx>): () => void {
+  if (surface.kind !== 'widget') surface = { ...surface, page: pageCtx(p, ctx) };
   if (p.dead) throw new Error(t('layer.pluginOff', { name: p.name }));
   const slot = { f: createFrame(p, surface, el) };
   slot.f.slot = slot;
@@ -812,6 +872,13 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
       await commit(() => post(`/todos/add?${scope}`, { file, text, ...(group ? { group } : {}) }));
       return { ok: true };
     }
+    case 'chats.list': {
+      // Titles and dates only, never a chat's messages.
+      // The service answers an add-on (scope=plugin) only with its own chats:read, leaves out chats that
+      // touch a private folder or lie outside its `read` folders, and gives no messages.
+      const list = (await api(`/chats?${scope}`)) as any[];
+      return (Array.isArray(list) ? list : []).filter((c) => c && c.kind === 'chat').map((c) => plain({ id: c.id, title: c.title, kind: c.kind, updated: c.updated, pinned: !!c.pinned, archived: !!c.archived, running: !!c.running, unwrapped: !!c.unwrapped, projectId: c.projectId ?? null, messageCount: c.messageCount ?? 0 }));
+    }
     case 'ideas.list': {
       const list = ((await api(`/library/ideas?${scope}`)) as any[]).filter((x) => !isPrivate(x.path)).map(plain);
       return trying && pretend.status.size ? list.map((x) => (pretend.status.has(x.path) ? { ...x, status: pretend.status.get(x.path) } : x)) : list;
@@ -924,7 +991,7 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
   if (method !== 'ui.remove' && !id) throw new Error(`${method}: "id" is missing`);
   switch (method) {
     case 'ui.addView':
-      register(p, 'pluginViews', { id: ownId(p, id), short: id, title: str(s.title, 60), icon: s.icon ? str(s.icon, 30) : undefined, plugin: p.name, render: (el: HTMLElement) => mountSurface(p, { kind: 'view', id }, el) });
+      register(p, 'pluginViews', { id: ownId(p, id), short: id, title: str(s.title, 60), icon: s.icon ? str(s.icon, 30) : undefined, plugin: p.name, render: (el: HTMLElement, ctx?: Partial<PageCtx>) => mountSurface(p, { kind: 'view', id }, el, ctx) });
       return null;
     case 'ui.addHomeWidget':
       register(p, 'homeWidgets', { id, title: str(s.title, 60), plugin: p.name, render: (el: HTMLElement) => mountSurface(p, { kind: 'widget', id }, el) });
@@ -969,7 +1036,11 @@ function onMessage(e: MessageEvent) {
     f.ready = true;
     queueLoad(f, {
       ...lookMsg('init'), key: f.key, kind: p.kind, name: p.name, code: p.code,
-      surface: !p.dry && f.surface && f.surface.kind !== 'html' ? f.surface : null,
+      surface: !p.dry && f.surface && f.surface.kind !== 'html' ? { kind: f.surface.kind, id: f.surface.id } : null,
+      // A page (an add-on page, or one standing in for a built-in page) gets where it is and the
+      // app's own wording in the person's language (`thoughts.page`, `thoughts.i18n`).
+      page: !p.dry && f.surface && f.surface.kind !== 'widget' ? f.surface.page ?? null : null,
+      strings: !p.dry && f.surface && f.surface.kind !== 'widget' ? dictionary() : null,
       // A test load first runs the code in a worker, which can be stopped if it never yields.
       preflight: !!p.dry,
     });
@@ -1114,8 +1185,26 @@ function navConfig(v: any): NavConfig | null {
       if (en || ar) labels[String(id).slice(0, 120)] = { ...(en ? { en } : {}), ...(ar ? { ar } : {}) };
     }
   }
-  // With full access even these may be hidden (Settings stays one command away in the palette).
-  return { hidden: strings(v.hidden).filter((x) => fullAccessOn() || !['home', 'settings', 'help'].includes(x)).slice(0, 60), order: strings(v.order).slice(0, 60), labels };
+  const ref = (REF as any).nav as { neverHidden: string[]; fixedLook: string[]; maxGroups: number };
+  // With full access on (lib/fullAccess.ts) nothing is fixed or never hidden; off, exactly as before.
+  const full = fullAccessOn();
+  const fixed = (id: string) => !full && ref.fixedLook.includes(id);
+  for (const id of Object.keys(labels)) if (fixed(id)) delete labels[id];
+  const icons: Record<string, string> = {};
+  if (v.icons && typeof v.icons === 'object' && !Array.isArray(v.icons)) {
+    for (const [id, icon] of Object.entries(v.icons as Record<string, any>).slice(0, 60)) if (!fixed(id) && typeof icon === 'string' && (REF as any).icons.includes(icon)) icons[String(id).slice(0, 120)] = icon;
+  }
+  const seen = new Set<string>();
+  const groups: NavConfig['groups'] = (Array.isArray(v.groups) ? v.groups : []).slice(0, ref.maxGroups).flatMap((g: any) => {
+    if (!g || typeof g.id !== 'string' || !g.label || typeof g.label !== 'object') return [];
+    const en = typeof g.label.en === 'string' ? g.label.en.trim().slice(0, 40) : '', ar = typeof g.label.ar === 'string' ? g.label.ar.trim().slice(0, 40) : '';
+    if (!en && !ar) return [];
+    const items = strings(g.items).filter((x) => !seen.has(x) && (seen.add(x), true)).slice(0, 60);
+    return [{ id: g.id.slice(0, 80), label: { ...(en ? { en } : {}), ...(ar ? { ar } : {}) }, items }];
+  });
+  const hidden = strings(v.hidden).filter((x) => full || ![...ref.neverHidden, 'settings', 'help'].includes(x)).slice(0, 60);
+  const start = typeof v.start === 'string' && !hidden.includes(v.start) ? v.start.slice(0, 120) : undefined;
+  return { hidden, order: strings(v.order).slice(0, 60), labels, icons, groups, ...(start ? { start } : {}) };
 }
 /** `todos.json` → TodosConfig (null when absent); unknown values are dropped, not guessed. */
 function todosConfig(v: any): TodosConfig | null {
@@ -1136,6 +1225,7 @@ const strings = (v: any) => (Array.isArray(v) ? v.filter((x) => typeof x === 'st
  *  now); the service refuses (`CHANGED`) when the staged files are no longer exactly that change. */
 export async function loadLayer(opts: { preview?: boolean; sig?: string } = {}) {
   if (app.safeMode) { app.nav = null; app.todosCfg = null; setPages(null); setLayerItems([]); return; }
+  kit = null;
   const boot = firstLoad;
   firstLoad = false;
   if (boot && crashed) {
@@ -1167,7 +1257,9 @@ export async function loadLayer(opts: { preview?: boolean; sig?: string } = {}) 
   // `order` may also name `widget:<id>` and `suggestions`; Home places them.
   app.nav = navConfig(m.nav);
   app.todosCfg = todosConfig(m.todos);
-  setPages(m.pages);
+  setPages(m.pages, m.builtin);
+  (app as any).layerOff = Array.isArray(m.off) ? m.off : [];
+  (app as any).addonFailures = {};
   const manifest = m.manifest && typeof m.manifest === 'object' ? m.manifest : {};
   const mk = (it: LayerItem, code: string): Plugin =>
     ({ name: it.name, kind: it.kind, code: String(code ?? ''), perms: new Set(it.permissions), write: it.write, read: it.read, description: it.description, dead: false, disposers: [], frames: new Set(), warned: new Set() });
@@ -1182,7 +1274,7 @@ export async function loadLayer(opts: { preview?: boolean; sig?: string } = {}) 
     const p = mk(it, v.code);
     plugins.push(p);
     const id = 'view:' + v.name;
-    register(p, 'pluginViews', { id, title: v.name.replace(/\.html$/, ''), icon: 'plugin', plugin: p.name, render: (el: HTMLElement) => mountSurface(p, { kind: 'html', id }, el) });
+    register(p, 'pluginViews', { id, title: v.name.replace(/\.html$/, ''), icon: 'plugin', plugin: p.name, render: (el: HTMLElement, ctx?: Partial<PageCtx>) => mountSurface(p, { kind: 'html', id }, el, ctx) });
   });
   list.forEach((src, i) => {
     const it = items[i];

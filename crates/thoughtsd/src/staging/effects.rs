@@ -83,6 +83,26 @@ fn nav(b: &Value, a: &Value) -> Vec<Value> {
     for (id, ..) in lb.iter().filter(|(i, ..)| !la.iter().any(|(x, ..)| x == i)) {
         out.push(json!({"area": "nav", "op": "renameRemoved", "what": id}));
     }
+    let icons = |v: &Value| -> Vec<(String, String)> {
+        v["icons"].as_object().into_iter().flatten().filter_map(|(id, i)| Some((line(id), line(i.as_str()?)))).collect()
+    };
+    let (ib, ia) = (icons(b), icons(a));
+    for (id, icon) in ia.iter().filter(|x| !ib.contains(x)) { out.push(json!({"area": "nav", "op": "icon", "what": id, "icon": icon})); }
+    for (id, _) in ib.iter().filter(|(i, _)| !ia.iter().any(|(x, _)| x == i)) { out.push(json!({"area": "nav", "op": "iconRemoved", "what": id})); }
+    let groups = |v: &Value| -> Vec<(String, String, String, Vec<String>)> {
+        v["groups"].as_array().into_iter().flatten().map(|g| {
+            let t = |k: &str| g["label"][k].as_str().map(line).unwrap_or_default();
+            (line(g["id"].as_str().unwrap_or_default()), t("en"), t("ar"), strs(&g["items"]))
+        }).collect()
+    };
+    let (gb, ga) = (groups(b), groups(a));
+    if gb != ga {
+        out.push(if ga.is_empty() { json!({"area": "nav", "op": "groupsRemoved"}) } else {
+            json!({"area": "nav", "op": "groups", "groups": ga.iter().map(|(id, en, ar, items)| json!({"id": id, "en": en, "ar": ar, "items": items})).collect::<Vec<_>>()})
+        });
+    }
+    let (sb, sa) = (b["start"].as_str().map(line), a["start"].as_str().map(line));
+    if sb != sa { out.push(match sa { Some(s) => json!({"area": "nav", "op": "start", "what": s}), None => json!({"area": "nav", "op": "startRemoved"}) }); }
     out
 }
 

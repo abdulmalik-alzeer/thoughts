@@ -339,8 +339,30 @@ fn home(out: &mut Out, path: &str, v: &Value) {
     }
 }
 
+/// Every problem with a `nav.json` value, as plain sentences in the UI language (also used for
+/// the sidebar the user arranges by hand, `applayer::nav_in`).
+pub fn nav_problems(v: &Value, arabic: bool) -> Vec<String> {
+    let mut out = Out { arabic, list: vec![] };
+    nav(&mut out, "nav.json", v);
+    out.list.into_iter().filter_map(|x| x["message"].as_str().map(String::from)).collect()
+}
+
+const NAV_KEYS: &[&str] = &["hidden", "order", "labels", "icons", "groups", "start"];
+
 fn nav(out: &mut Out, path: &str, v: &Value) {
     let Some(o) = v.as_object() else { return not_object(out, path) };
+    let r = super::pages::reference();
+    // Locked in the normal mode: the way out of customisations keeps its place in the sidebar,
+    // its name and its icon (`nav.neverHidden`, `nav.fixedLook` in the reference).
+    let never_hidden = |id: &str| NAV_ALWAYS.contains(&id.to_lowercase().as_str()) || r.nav.never_hidden.iter().any(|x| x.eq_ignore_ascii_case(id));
+    let fixed_look = |id: &str| r.nav.fixed_look.iter().any(|x| x.eq_ignore_ascii_case(id));
+    for key in o.keys().filter(|k| !NAV_KEYS.contains(&k.as_str())) {
+        let k = show_hidden(key, false);
+        // A key the app does not read would be kept and then do nothing: say so instead.
+        out.add(path, format!("`{k}` is not something the sidebar reads. Use {}.", NAV_KEYS.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join(", ")),
+            format!("`{k}` ليس مما يقرؤه الشريط الجانبي. استخدم {}.", NAV_KEYS.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>().join("، ")));
+    }
+    let hidden: Vec<&str> = o.get("hidden").and_then(strings).unwrap_or_default();
     for key in ["hidden", "order"] {
         let Some(list) = o.get(key) else { continue };
         match strings(list) {
@@ -348,7 +370,7 @@ fn nav(out: &mut Out, path: &str, v: &Value) {
             Some(ids) => for id in ids {
                 if !id_like(id) {
                     out.add(path, format!("`{id}` in `{key}` is not a page id."), format!("`{id}` في `{key}` ليس معرّف صفحة."));
-                } else if key == "hidden" && NAV_ALWAYS.contains(&id.to_lowercase().as_str()) {
+                } else if key == "hidden" && never_hidden(id) {
                     out.add(path, format!("`{id}` can never be hidden from the sidebar."), format!("لا يمكن إخفاء `{id}` من الشريط الجانبي."));
                 }
             },
@@ -362,11 +384,56 @@ fn nav(out: &mut Out, path: &str, v: &Value) {
                     (m.contains_key("en") || m.contains_key("ar"))
                         && ["en", "ar"].iter().all(|k| m.get(*k).map_or(true, |t| t.as_str().map_or(false, |s| !s.trim().is_empty() && s.chars().count() <= 40)))
                 });
-                if !id_like(id) || !texts_ok {
+                if fixed_look(id) {
+                    out.add(path, format!("`{id}` keeps the app's own name in the sidebar: remove its label."), format!("يحتفظ `{id}` باسمه الأصلي في الشريط الجانبي: احذف تسميته."));
+                } else if !id_like(id) || !texts_ok {
                     out.add(path, format!("The label for `{id}` must look like {{ \"en\": \"Clients\", \"ar\": \"العملاء\" }} (short text, at least one language)."),
                         format!("يجب أن تكون تسمية `{id}` على هذا الشكل: {{ \"en\": \"Clients\", \"ar\": \"العملاء\" }} (نص قصير، بلغة واحدة على الأقل)."));
                 }
             },
+        }
+    }
+    if let Some(icons) = o.get("icons") {
+        match icons.as_object() {
+            None => out.add(path, "`icons` must be an object: { \"<page id>\": \"<icon>\" }.", "يجب أن يكون `icons` كائناً: { \"<معرّف الصفحة>\": \"<الأيقونة>\" }."),
+            Some(map) => for (id, icon) in map {
+                if fixed_look(id) {
+                    out.add(path, format!("`{id}` keeps the app's own icon in the sidebar: remove it from `icons`."), format!("يحتفظ `{id}` بأيقونته الأصلية: احذفه من `icons`."));
+                } else if !id_like(id) || !icon.as_str().map_or(false, |i| r.icons.iter().any(|x| x == i)) {
+                    let list = r.icons.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>();
+                    out.add(path, format!("The icon for `{id}` must be one of {}.", list.join(", ")), format!("يجب أن تكون أيقونة `{id}` واحدة من {}.", list.join("، ")));
+                }
+            },
+        }
+    }
+    if let Some(groups) = o.get("groups") {
+        let bad = || ("`groups` must be a list (at most 8) of { \"id\": \"work\", \"label\": { \"en\": \"Work\", \"ar\": \"العمل\" }, \"items\": [\"todos\", \"ideas\"] }.".to_string(),
+            "يجب أن تكون `groups` قائمة (٨ على الأكثر) من { \"id\": \"work\", \"label\": { \"en\": \"Work\", \"ar\": \"العمل\" }, \"items\": [\"todos\", \"ideas\"] }.".to_string());
+        match groups.as_array() {
+            Some(a) if a.len() <= r.nav.max_groups => {
+                let mut seen: Vec<&str> = vec![];
+                for g in a {
+                    let ok = g["id"].as_str().map_or(false, id_like)
+                        && super::pages::text_ok(&g["label"], 40)
+                        && g.as_object().map_or(false, |m| m.keys().all(|k| k == "id" || k == "label" || k == "items"))
+                        && strings(&g["items"]).map_or(false, |l| l.iter().all(|x| id_like(x)));
+                    if !ok { let (en, ar) = bad(); out.add(path, en, ar); continue; }
+                    for item in strings(&g["items"]).unwrap_or_default() {
+                        if seen.contains(&item) {
+                            out.add(path, format!("`{item}` is in more than one group: a page sits in one group only."), format!("`{item}` موجود في أكثر من مجموعة: الصفحة تكون في مجموعة واحدة فقط."));
+                        }
+                        seen.push(item);
+                    }
+                }
+            }
+            _ => { let (en, ar) = bad(); out.add(path, en, ar); }
+        }
+    }
+    if let Some(start) = o.get("start") {
+        match start.as_str().filter(|s| id_like(s)) {
+            None => out.add(path, "`start` must be the id of the page the app opens on, such as \"todos\".", "يجب أن يكون `start` معرّف الصفحة التي يفتح عليها التطبيق، مثل \"todos\"."),
+            Some(s) if hidden.contains(&s) => out.add(path, format!("`{s}` is hidden, so the app cannot open on it."), format!("`{s}` مخفية، فلا يمكن أن يفتح التطبيق عليها.")),
+            Some(_) => {}
         }
     }
 }

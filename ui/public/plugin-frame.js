@@ -24,6 +24,8 @@
   var listeners = new Map();  // event -> Set<callback>
   var renderers = new Map();  // "view:<id>" | "widget:<id>" -> render(el)
   var surface = null;         // {kind, id} when this frame exists only to draw one view / widget
+  var page = null;            // in a page: {replaces, route} (`thoughts.page`)
+  var strings = null;         // in a page: the app's own wording in the person's language (`thoughts.i18n`)
   var rendered = false;
   var noop = function () {};
 
@@ -175,6 +177,7 @@
     },
     todos: { list: function () { return call('todos.list'); } },
     ideas: { list: function () { return call('ideas.list'); } },
+    chats: { list: function () { return call('chats.list'); } },
   };
 
   // The machine bridge, for pages and add-ons while full access is on (docs/CUSTOMISING.md). The host
@@ -207,6 +210,19 @@
     list: function (path) { return call('machine.list', [String(path)]); },
     open: function (target, app) { return call('machine.open', [String(target || ''), app == null ? null : String(app)]); },
   };
+  /** `thoughts.i18n`: the app's own words (a key it does not know comes back as it is). */
+  function i18n() {
+    var root = document.documentElement;
+    return {
+      lang: root.lang || 'en', dir: root.dir || 'ltr',
+      t: function (k, vars) {
+        var s = strings && Object.prototype.hasOwnProperty.call(strings, k) ? String(strings[k]) : String(k);
+        if (vars && typeof vars === 'object') Object.keys(vars).forEach(function (n) { s = s.split('{' + n + '}').join(String(vars[n])); });
+        return s;
+      },
+    };
+  }
+  function pageInfo() { return page && surface ? { id: surface.id, replaces: page.replaces || null, route: page.route || null } : null; }
 
   /** Plugin API v1 (with the v1.1 additions) — the only object a plugin receives.
    *  Every call is checked by the host against the permissions the plugin declared. */
@@ -234,6 +250,10 @@
         remove: function (item) { return call('todos.remove', [item]); },
       },
       ideas: { list: data.ideas.list, setStatus: function (path, status) { return call('ideas.setStatus', [path, status]); } },
+      // chats:read — titles and dates, never the messages
+      chats: { list: data.chats.list },
+      page: pageInfo(),
+      i18n: i18n(),
       // storage — one JSON document per plugin (256 KB at most)
       storage: { get: function () { return call('storage.get'); }, set: function (obj) { return call('storage.set', [obj]); } },
       chat: { start: function (prompt) { return call('chat.start', [prompt]); } },
@@ -391,6 +411,8 @@
   function init(m) {
     look(m);
     surface = m.surface || null;
+    page = m.page && typeof m.page === 'object' ? m.page : null;
+    strings = m.strings && typeof m.strings === 'object' ? m.strings : null;
     // On Windows the desktop shell puts its own bridge into every frame. The host then loads this
     // page from an address the shell does not accept commands from (about:srcdoc); if the bridge is
     // here and the address is the app's own, refuse to run anything rather than run beside it.
@@ -407,7 +429,7 @@
         tried.forEach(function (s) { URL.revokeObjectURL(s.url); });
         if (verdict === 'hang') return hung();
         // Read-only subset of the same bridge. The raw protocol works too: parent.postMessage({id, method, args}, '*').
-        window.thoughts = { version: 1, library: data.library, todos: data.todos, ideas: data.ideas, machine: machine, on: on };
+        window.thoughts = { version: 1, library: data.library, todos: data.todos, ideas: data.ideas, chats: data.chats, machine: machine, on: on, page: page ? { id: null, replaces: page.replaces || null, route: page.route || null } : null, i18n: i18n() };
         return runHtml(m.code).then(function () { host.postMessage({ k: key, type: 'loaded' }, '*'); });
       }).catch(crash);
       return;

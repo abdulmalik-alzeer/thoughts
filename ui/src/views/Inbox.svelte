@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Icon from '../lib/Icon.svelte';
+  import PageExtras from './PageExtras.svelte';
+  import Sections from './Sections.svelte';
+  import { pageTitle } from '../lib/pages.svelte';
   import { api, on, post } from '../lib/api';
   import { go, refreshChats, toast, track } from '../lib/store.svelte';
   import { t, tn, fmtDate, fmtNum } from '../lib/i18n';
@@ -136,19 +139,7 @@
   const guide = () => go({ kind: 'help', path: 'PHONE-CAPTURE' });
 </script>
 
-<div class="page">
-  <div class="row head">
-    <div class="grow">
-      <h1>{t('inbox.title')}</h1>
-      <p class="muted sub">{t('inbox.sub')}</p>
-    </div>
-    {#if items.length}
-      <button class="btn primary" disabled={processing} aria-busy={processing} onclick={process} title={t('inbox.processHint')}>
-        <Icon name="chat" size={15} /> {t('inbox.process')}
-      </button>
-    {/if}
-  </div>
-
+{#snippet listS()}
   {#if loading}
     <div class="list sk" aria-busy="true"><div class="skel"></div><div class="skel"></div></div>
   {:else if loadError && !items.length}
@@ -216,6 +207,24 @@
     </ul>
     <p class="muted sm foot"><button class="link" onclick={guide}>{t('inbox.phoneGuide')}</button> · {t('inbox.phoneHint')}</p>
   {/if}
+{/snippet}
+
+<div class="page">
+  <div class="row head">
+    <div class="grow">
+      <h1>{pageTitle('inbox', t('inbox.title'))}</h1>
+      <p class="muted sub">{t('inbox.sub')}</p>
+    </div>
+    {#if items.length}
+      <button class="btn primary" disabled={processing} aria-busy={processing} onclick={process} title={t('inbox.processHint')}>
+        <Icon name="chat" size={15} /> {t('inbox.process')}
+      </button>
+    {/if}
+  </div>
+
+  <PageExtras page="inbox" />
+  <Sections page="inbox" parts={{ list: listS }} />
+  <PageExtras page="inbox" place="bottom" />
 </div>
 
 <style>

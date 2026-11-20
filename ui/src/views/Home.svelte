@@ -16,7 +16,8 @@
   import Emblem from '../lib/Emblem.svelte';
   import { imeKey } from '../lib/ime';
   import { inbox } from '../lib/inbox.svelte';
-  import { ownTitle, pageIntro, pageText, pageTitle, placedElsewhere, shows } from '../lib/pages.svelte';
+  import { homeBoxes, ownTitle, pageIntro, pageText, pageTitle, pageWarnings, placedElsewhere, shows, type Size } from '../lib/pages.svelte';
+  import Sections from './Sections.svelte';
   import UsageTile from './usage/UsageTile.svelte';
   import { surfaceIn } from '../lib/surfaceIn';
 
@@ -98,22 +99,26 @@
   // widgets (`widget:<id>`); anything not mentioned keeps its usual place (suggestions first, widgets, then automate last).
   const SECTIONS = ['stats', 'usage', 'ideas', 'upcoming', 'todos', 'chats', 'projects'];
   const widgetKey = (w: { id: string }) => 'widget:' + w.id;
-  const layout = $derived.by(() => {
+  // Home's usual order (home.json `order` / `hidden` still apply), then `pages.json` `home.sections`
+  // on top (Sections): order, hidden, sizes, a section replaced by an add-on box, boxes between.
+  const homeOrder = $derived.by(() => {
     const hidden = new Set(app.home.hidden);
-    // A box placed on another page (pages.json) shows on Home only when home.json places it here too.
+    // A box placed on another page shows on Home only when Home places it here too.
     const elsewhere = placedElsewhere();
-    const widgets = app.homeWidgets.map(widgetKey).filter((k) => !elsewhere.has(k) || app.home.order.includes(k));
+    const own = homeBoxes();
+    const widgets = app.homeWidgets.map(widgetKey).filter((k) => !elsewhere.has(k) || app.home.order.includes(k) || own.includes(k));
     const known = (k: string) => SECTIONS.includes(k) || k === 'suggestions' || k === 'automate' || widgets.includes(k);
     const asked = app.home.order.filter(known);
-    const order = [...new Set([...(asked.includes('suggestions') ? [] : ['suggestions']), ...asked, ...SECTIONS, ...widgets, 'automate'])].filter((k) => !hidden.has(k));
-    // Todos and chats share a row when they are neighbours.
-    const rows: string[][] = [];
-    for (let i = 0; i < order.length; i++) {
-      const a = order[i], b = order[i + 1];
-      if ((a === 'todos' && b === 'chats') || (a === 'chats' && b === 'todos')) { rows.push([a, b]); i++; } else rows.push([a]);
-    }
-    return rows;
+    return ['hero', ...[...new Set([...(asked.includes('suggestions') ? [] : ['suggestions']), ...asked, ...SECTIONS, ...widgets, 'automate'])].filter((k) => !hidden.has(k))];
   });
+  // Todos and chats share a row when they are neighbours (as Home always had them).
+  const homeSizes = $derived.by(() => {
+    const o = homeOrder, out: Record<string, Size> = {};
+    for (let i = 0; i < o.length - 1; i++) if ((o[i] === 'todos' && o[i + 1] === 'chats') || (o[i] === 'chats' && o[i + 1] === 'todos')) { out.todos = 'half'; out.chats = 'half'; }
+    return out;
+  });
+  const homeParts = $derived(Object.fromEntries(homeOrder.filter((k) => !k.startsWith('widget:')).map((k) => [k, partFor(k)])) as Record<string, any>);
+  const partFor = (k: string) => ({ hero: heroS, stats: statsS, usage: usageS, ideas: ideasS, upcoming: upcomingS, todos: todosS, chats: chatsS, projects: projectsS, suggestions: suggestionsS, automate: automateS } as Record<string, any>)[k];
 
   /** Mounts a plugin's widget frame into the slot. */
   function plug(el: HTMLElement, w: { render: (el: HTMLElement) => any }) {
@@ -413,7 +418,7 @@
   {/if}
 {/snippet}
 
-<div class="home">
+{#snippet heroS()}
   <section class="hero">
     <div class="lead">
       {#if shows('home', 'date')}<div class="eyebrow">{today}</div>{/if}
@@ -435,24 +440,17 @@
     </div>
     {#if shows('home', 'emblem')}<div class="art"><Emblem size={250} /></div>{/if}
   </section>
+{/snippet}
 
-  {#each layout as row (row.join('+'))}
-    {#if row.length === 2}
-      <section class="cols">{#each row as k (k)}{@render panel(k)}{/each}</section>
-    {:else if row[0] === 'todos' || row[0] === 'chats'}
-      <section class="cols one">{@render panel(row[0])}</section>
-    {:else if row[0] === 'stats'}{@render statsS()}
-    {:else if row[0] === 'usage'}<UsageTile />
-    {:else if row[0] === 'ideas'}{@render ideasS()}
-    {:else if row[0] === 'upcoming'}{@render upcomingS()}
-    {:else if row[0] === 'projects'}{@render projectsS()}
-    {:else if row[0] === 'suggestions'}{@render suggestionsS()}
-    {:else if row[0] === 'automate'}
-      <section class="autoq"><button type="button" class="more" onclick={() => go({ kind: 'customise', id: 'automate' })} title={t('auto-ui.homeTip')}><Icon name="ai" size={14} /> {t('auto-ui.suggest')}</button></section>
-    {:else if row[0].startsWith('widget:')}
-      {#each app.homeWidgets.filter((w) => widgetKey(w) === row[0]) as w (w.plugin + ':' + w.id)}{@render widgetS(w)}{/each}
-    {/if}
-  {/each}
+{#snippet todosS()}<section class="cols one">{@render panel('todos')}</section>{/snippet}
+{#snippet chatsS()}<section class="cols one">{@render panel('chats')}</section>{/snippet}
+{#snippet usageS()}<UsageTile />{/snippet}
+{#snippet automateS()}<section class="autoq"><button type="button" class="more" onclick={() => go({ kind: 'customise', id: 'automate' })} title={t('auto-ui.homeTip')}><Icon name="ai" size={14} /> {t('auto-ui.suggest')}</button></section>{/snippet}
+
+<div class="home">
+  {#if pageWarnings('home').length}<p class="muted sm hw" role="status">{t('pgs.unknown', { list: pageWarnings('home').map((w) => `\u2068${w}\u2069`).join(t('ldb.listSep')) })}</p>{/if}
+  <Sections page="home" parts={homeParts} order={homeOrder} sizes={homeSizes} gap="12px" box={widgetS} />
+
 
 </div>
 

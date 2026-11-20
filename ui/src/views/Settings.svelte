@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { sectionPlan } from '../lib/pages.svelte';
   import Icon from '../lib/Icon.svelte';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
   import { askNotify, notifState, notifySettingsUrl, openNotifySettings, testNotify, type NotifState } from '../lib/notifyPerm';
@@ -161,6 +162,9 @@
   const catAll = (c: Cat) => !q || fold(t('set.cat.' + c)).includes(q);
   const vis = (c: Cat, ...keys: string[]) => catAll(c) || keys.some(hit);
   const catShown = (c: Cat) => vis(c, ...basic[c], ...adv[c]);
+  // The categories as the customisation layer arranges them (`pages.json` `settings.sections`:
+  // order and hidden; its safety-relevant ones always stay). A hidden category is still found by search.
+  const arranged = $derived(sectionPlan('settings', [...cats]).map((e) => e.id).filter((c): c is Cat => (cats as readonly string[]).includes(c)));
   const shown = $derived(q ? cats.filter(catShown) : [tab]);
   const tx = (k: string, fallback: string) => { const v = t(k); return v === k ? fallback : v; };
 
@@ -1130,9 +1134,9 @@
       <Icon name="search" size={14} />
       <input type="search" bind:value={query} placeholder={t('set.searchPh')} aria-label={t('set.searchPh')} autocomplete="off" />
     </div>
-    {#each cats as k}
+    {#each q ? cats : arranged as k}
       {#if !q || catShown(k)}
-        <button type="button" class="cat" class:on={!q && tab === k} aria-current={!q && tab === k ? 'page' : undefined} onclick={() => { tab = k; query = ''; }}><span class="ci"><Icon name={catIcon[k]} size={15} /></span>{t('set.cat.' + k)}</button>
+        <button type="button" class="cat" data-slot={"settings." + k} class:on={!q && tab === k} aria-current={!q && tab === k ? 'page' : undefined} onclick={() => { tab = k; query = ''; }}><span class="ci"><Icon name={catIcon[k]} size={15} /></span>{t('set.cat.' + k)}</button>
       {/if}
     {/each}
   </nav>

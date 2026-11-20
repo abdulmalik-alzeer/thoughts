@@ -2452,11 +2452,52 @@ async fn todo_op(State(st): S, Path(op): Path<String>, Query(q): Query<HashMap<S
 
 // ---------- chats ----------
 
-async fn chat_list(State(st): S) -> R {
+async fn chat_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     // Summaries only: no chat's messages are copied to build the list.
     // Chats started in another library wait there: they are listed again when it is opened.
     let scope = wraps::Scope::now(&st).await;
-    Ok(Json(json!(st.chats.list().await.iter().filter(|c| scope.holds(c.library.as_deref())).map(|c| c.summary()).collect::<Vec<_>>())))
+    let list = st.chats.list().await;
+    let held = list.iter().filter(|c| scope.holds(c.library.as_deref()));
+    if !scope_of(&q).plugin {
+        return Ok(Json(json!(held.map(|c| c.summary()).collect::<Vec<_>>())));
+    }
+    // For an add-on (`chats.list`, `chats:read`): only its own declaration grants it; only ordinary
+    // chats; never one that named or attached a file in a private folder (`automations::chat_fact`);
+    // with `read` folders, only chats whose named files all lie inside them. Titles and dates only.
+    let s = st.settings.read().await.clone();
+    let name = q.get("plugin").cloned().unwrap_or_default();
+    let view = q.get("kind").map(String::as_str) == Some("view");
+    let preview = q.get("preview").map_or(false, |v| v == "1");
+    let decl = crate::addons::decl_for(&applayer::Dirs::real(), preview, &name, view);
+    if !decl.as_ref().map_or(false, |d| d["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == "chats:read"))) {
+        return Err(crate::tr::err("addon.permission", &[("name", name.trim_end_matches(".js").trim_end_matches(".html"))]).into());
+    }
+    let reads = crate::addons::reads_of(decl.as_ref());
+    let root = std::path::PathBuf::from(s.library_path.clone().unwrap_or_default());
+    let mut out: Vec<Value> = vec![];
+    for c in held.filter(|c| c.kind == "chat") {
+        // Whether it touches a private folder is read from the chat itself (its messages stay here).
+        let Some(full) = st.chats.get(&c.id).await else { continue };
+        if !plugin_may_see_chat(&full, &root, &s.private_paths, reads.as_deref()) { continue; }
+        let m = c.summary();
+        out.push(json!({"id": m["id"], "title": m["title"], "kind": m["kind"], "updated": m["updated"], "pinned": m["pinned"], "archived": m["archived"],
+               "running": m["running"], "unwrapped": m["unwrapped"], "projectId": m["projectId"], "messageCount": m["messageCount"]}));
+    }
+    Ok(Json(json!(out)))
+}
+
+/// May an add-on see that chat `c` exists? Not when it touches a private folder; with `read`
+/// folders, only when it names files and every one of them is inside those folders.
+fn plugin_may_see_chat(c: &Chat, root: &std::path::Path, private: &[String], reads: Option<&[String]>) -> bool {
+    if crate::automations::chat_fact(c, true, root, private).private { return false; }
+    let Some(dirs) = reads else { return true };
+    let files = crate::automations::chat_files(c);
+    let root_text = root.to_string_lossy().replace('\\', "/");
+    !files.is_empty() && files.iter().all(|f| {
+        let rel = f.replace('\\', "/");
+        let rel = rel.strip_prefix(&format!("{root_text}/")).unwrap_or(&rel).to_string();
+        !paths::is_private(root, &rel, private) && library::inside_folders(root, &rel, dirs)
+    })
 }
 
 #[derive(Deserialize, Default)]
@@ -4484,6 +4525,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_add_on_lists_chats_only_with_chats_read_and_never_ones_touching_private_folders() {
+        let (st, lib) = t::library().await;
+        st.settings.write().await.private_paths = vec!["me".into()];
+        let chat = |title: &str, kind: &str, files: &[&str]| {
+            let mut c = Chat::default();
+            c.title = title.into();
+            c.kind = kind.into();
+            let mut m = Msg::new("user", "hello");
+            m.tool = Some(json!({"mentions": files}));
+            c.messages.push(m);
+            c
+        };
+        for c in [chat("Plain", "chat", &[]), chat("Salary", "chat", &["me/pay.md"]), chat("Acme", "chat", &["clients/acme/README.md"]), chat("Wrap", "wrap", &[])] { st.chats.insert(c).await; }
+        let plugins = crate::applayer::Dirs::real().layer.join("plugins");
+        std::fs::create_dir_all(&plugins).unwrap();
+        let tag = uuid::Uuid::new_v4().simple().to_string()[..8].to_string();
+        let (none, all, narrow) = (format!("none-{tag}.js"), format!("all-{tag}.js"), format!("narrow-{tag}.js"));
+        for (name, decl) in [(&none, r#"{"apiVersion":1,"permissions":["todos:read"]}"#), (&all, r#"{"apiVersion":1,"permissions":["chats:read"]}"#),
+                             (&narrow, r#"{"apiVersion":1,"permissions":["chats:read","library:read"],"read":["clients/"]}"#)] {
+            std::fs::write(plugins.join(name), "export default () => {}\n").unwrap();
+            std::fs::write(plugins.join(name.replace(".js", ".json")), decl).unwrap();
+        }
+        let titles = |v: Value| -> Vec<String> { let mut l: Vec<String> = v.as_array().unwrap().iter().map(|x| x["title"].as_str().unwrap().to_string()).collect(); l.sort(); l };
+        // The person's own app sees every chat.
+        assert_eq!(titles(chat_list(State(st.clone()), q(&[])).await.unwrap().0).len(), 4);
+        // Without chats:read: refused by the service, whatever the page asks.
+        assert!(chat_list(State(st.clone()), q(&[("scope", "plugin"), ("plugin", &none)])).await.is_err());
+        assert!(chat_list(State(st.clone()), q(&[("scope", "plugin")])).await.is_err(), "no add-on named: nothing");
+        // With it: ordinary chats, never one that named a private file, and no messages.
+        let v = chat_list(State(st.clone()), q(&[("scope", "plugin"), ("plugin", &all)])).await.unwrap().0;
+        assert_eq!(titles(v.clone()), ["Acme", "Plain"]);
+        assert!(v[0].get("messages").is_none() && v[0].get("lastMessage").is_none());
+        // With `read` folders: only chats tied to them.
+        assert_eq!(titles(chat_list(State(st.clone()), q(&[("scope", "plugin"), ("plugin", &narrow)])).await.unwrap().0), ["Acme"]);
+        for name in [&none, &all, &narrow] { let _ = std::fs::remove_file(plugins.join(name)); let _ = std::fs::remove_file(plugins.join(name.replace(".js", ".json"))); }
+        std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
+    }
+
+    #[tokio::test]
     async fn an_add_on_with_read_folders_sees_only_them_and_adds_todos_only_to_lists_there() {
         let (st, lib) = t::library().await;
         let idea = |title: &str| format!("---\ntitle: {title}\nstatus: seed\n---\nAbout the invoice.\n");
@@ -4842,13 +4922,13 @@ mod tests {
         let made = chat_create(State(st.clone()), Json(NewChat { by_user: true, kind: Some("customize".into()), ..Default::default() })).await.unwrap().0;
         let custom = made["id"].as_str().unwrap().to_string();
         assert_eq!(st.chats.meta(&custom).await.unwrap().library, None);
-        assert_eq!(listed(chat_list(State(st.clone())).await.unwrap().0).len(), 2);
+        assert_eq!(listed(chat_list(State(st.clone()), Query(Default::default())).await.unwrap().0).len(), 2);
 
         // Another library is opened: the chat waits in its own, and cannot be continued from here.
         let other = lib.parent().unwrap().join("other-library");
         std::fs::create_dir_all(&other).unwrap();
         st.settings.write().await.library_path = Some(other.to_string_lossy().to_string());
-        assert_eq!(listed(chat_list(State(st.clone())).await.unwrap().0), [custom.clone()]);
+        assert_eq!(listed(chat_list(State(st.clone()), Query(Default::default())).await.unwrap().0), [custom.clone()]);
         t::assistant(&st, |_| async { panic!("a chat must not run in a library it was not started in") });
         let e = shown(chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "carry on".into(), ..Default::default() })).await);
         assert_eq!(e.status, 409);
@@ -4857,7 +4937,7 @@ mod tests {
 
         // Back in its library it is there again.
         st.settings.write().await.library_path = Some(lib.to_string_lossy().to_string());
-        assert!(listed(chat_list(State(st.clone())).await.unwrap().0).contains(&chat));
+        assert!(listed(chat_list(State(st.clone()), Query(Default::default())).await.unwrap().0).contains(&chat));
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 

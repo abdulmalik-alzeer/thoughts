@@ -3,7 +3,7 @@
   import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, reloadSettings, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
-  import { loadLayer, reloadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn, newCustomise } from './lib/layer';
+  import { loadLayer, reloadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn, newCustomise, findView } from './lib/layer';
   import { failed } from './lib/errors';
   import { backup, healthWarning, lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
   import { navLabel } from './lib/terms';
@@ -12,7 +12,7 @@
   import { checkAppUpdate, checkLayerUpdates, startAutoUpdateChecks } from './lib/updates';
   import { announceWhatsNew, markWhatsNewSeen } from './lib/whatsnew';
   import { startupChecks } from './lib/maintenance';
-  import { t, tn, ago, fmtDate, fmtNum } from './lib/i18n';
+  import { t, tn, ago, fmtDate, fmtNum, lang } from './lib/i18n';
   import { matchShortcut, keys, tip, isMac, isTyping } from './lib/shortcuts';
   import { confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
@@ -40,6 +40,8 @@
   import UsageBanner from './views/UsageBanner.svelte';
   import PluginView from './views/PluginView.svelte';
   import PageSwap from './views/PageSwap.svelte';
+  import SidebarEdit from './views/SidebarEdit.svelte';
+  import { layoutNav } from './lib/navLayout';
   import { pageSwap } from './lib/pages.svelte';
   import Reorganize from './views/Reorganize.svelte';
   import Tour from './views/Tour.svelte';
@@ -125,11 +127,26 @@
       loadLayer().catch((e) => toast(t('shell.layerFailed'), { kind: 'error', detail: e.message })),
     ]);
     checkLibrary();
+    openStartPage();
     startLibraries();
     startReminders();
     // A change staged earlier (or by an import / app update) is still waiting for a decision
     // (reviewed in the main window: a second one only knows it waits).
     checkPending(!secondary);
+  }
+
+  /** `nav.json` `start`: the page the app opens on (the main window only, and only while nothing
+   *  else was opened yet). An add-on page is waited for a moment while its add-on starts. */
+  async function openStartPage() {
+    const id = app.nav?.start;
+    if (secondary || !id || app.view.kind !== 'home') return;
+    const builtin = allNavItems.find((i) => i.id === id && !i.custom);
+    if (builtin) { builtin.run(); return; }
+    for (let n = 0; n < 15 && app.view.kind === 'home'; n++) {
+      const v = findView(id);
+      if (v) { go({ kind: 'plugin', id: v.id }, { replace: true }); return; }
+      await new Promise((r) => setTimeout(r, 200));
+    }
   }
 
   async function loadProjects() {
@@ -654,7 +671,7 @@
   // `custom`: a page an add-on put there (`from` is the add-on's file, `alias` the short id it chose).
   type NavItem = { id: string; label: string; icon: string; active: boolean; custom?: boolean; alias?: string; from?: string; run: () => void };
   const APP_PAGES = ['home', 'chats', 'ideas', 'todos', 'docs', 'projects', 'inbox', 'me', 'graph'];
-  const navItems = $derived.by((): NavItem[] => {
+  const allNavItems = $derived.by((): NavItem[] => {
     const m = app.settings?.modules ?? {};
     const items: NavItem[] = [];
     const add = (id: string, on = true) => { if (on) items.push({ id, label: navLabel(id), icon: id, active: isActive(id), run: () => { go({ kind: id }); } }); };
@@ -667,16 +684,15 @@
     // the app) can use the same short id; `nav.json` may name it by either.
     for (const v of app.pluginViews) items.push({ id: v.id, alias: v.short && !APP_PAGES.includes(v.short) ? v.short : undefined, from: v.plugin, label: viewLabel(v), icon: v.icon || 'plugin', custom: true, active: app.view.kind === 'plugin' && app.view.id === v.id, run: () => { go({ kind: 'plugin', id: v.id }); } });
     // Customise is where customisations are switched off and undone, so no customisation hides it.
-    items.push({ id: 'customise', label: navLabel('customise', t('layer.customise')), icon: 'palette', active: isActive('customise'), run: () => { go({ kind: 'customise' }); } });
-    const hidden = new Set((app.nav?.hidden ?? []).filter((id) => id !== 'home' && id !== 'customise'));
-    const list = items.filter((i) => !hidden.has(i.id) && !(i.alias && hidden.has(i.alias)));
-    const first: NavItem[] = [];
-    for (const id of app.nav?.order ?? []) {
-      const it = list.find((i) => i.id === id) ?? list.find((i) => i.alias === id && !first.includes(i));
-      if (it && !first.includes(it)) first.push(it);
-    }
-    return [...first, ...list.filter((i) => !first.includes(i))];
+    // Its name and icon stay the app's own too (`nav.fixedLook` in the reference).
+    items.push({ id: 'customise', label: t('layer.customise'), icon: 'palette', active: isActive('customise'), run: () => { go({ kind: 'customise' }); } });
+    return items;
   });
+  // `nav.json` applied: hidden entries, order, icons, groups (lib/navLayout.ts).
+  const navLayout = $derived(layoutNav(allNavItems, app.nav));
+  const navItems = $derived(navLayout.flat);
+  const groupLabel = (l: { en?: string; ar?: string } | null) => (l ? (lang() === 'ar' ? l.ar || l.en : l.en || l.ar) || '' : '');
+  let editingNav = $state(false);
 
   // ---------- focus and announcement on navigation ----------
   // The new view's heading takes focus (so keyboard and screen-reader users land in the content) and the
@@ -743,6 +759,7 @@
     add('updates.check', t('layer.upd.check'), g.act, 'download', { keywords: 'update version تحديث' });
     add('search.focus', t('shell.pal.search'), g.act, 'search');
     add('sidebar.toggle', railed ? t('shell.sidebarShow') : t('shell.sidebarHide'), g.act, 'sidebar');
+    if (!app.safeMode && !secondary) add('sidebar.edit', t('sbe.open'), g.act, 'edit', { keywords: 'sidebar order rename hide icon group start الشريط ترتيب', run: () => { if (railed) toggleSidebar(); editingNav = true; } });
     add('tour', t('shell.pal.tour'), g.act, 'book');
     add('print', t('shell.pal.print'), g.act, 'print');
     add('zoom.in', t('a11y.zoomIn'), g.look, 'zoomIn', { keywords: 'zoom bigger larger text size تكبير' });
@@ -845,8 +862,14 @@
           </div>
         {/if}
       </form>
+      {#if editingNav}
+        <SidebarEdit items={allNavItems} close={() => (editingNav = false)} />
+      {:else}
       <nav aria-label={t('shell.mainNav')}>
-        {#each navItems as it, i (it.id)}
+        {#each navLayout.groups as g (g.id ?? '')}
+        {#if g.id}<div class="navgroup" dir="auto">{groupLabel(g.label)}</div>{/if}
+        {#each g.items as it (it.id)}
+          {@const i = navItems.indexOf(it)}
           <button class="nav" class:active={it.active} aria-current={it.active ? 'page' : undefined} title={tip(it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label, 'nav.' + (i + 1))} onclick={it.run}>
             <Icon name={it.icon} /><span class="grow ell" dir="auto">{it.label}</span>
             {#if it.custom}<span class="addon" aria-hidden="true"><Icon name="plugin" size={12} /></span><span class="sr-only">({addonTag(it.from)})</span>{/if}
@@ -854,7 +877,10 @@
             {#if it.id === 'todos' && app.dueToday > 0}<span class="badge" title={tn('ui.dueNow', app.dueToday)}><span aria-hidden="true">{fmtNum(app.dueToday)}</span><span class="sr-only">{tn('ui.dueNow', app.dueToday)}</span></span>{/if}
           </button>
         {/each}
+        {/each}
+        {#if !app.safeMode && !secondary}<button class="nav editnav" onclick={() => (editingNav = true)}><Icon name="edit" size={14} /><span class="grow ell">{t('sbe.open')}</span></button>{/if}
       </nav>
+      {/if}
 
       {#if interrupted.length}
         <div class="notice" role="status">
@@ -1021,7 +1047,7 @@
       {:else if app.view.kind === 'settings'}<Settings reload={loadProjects} />
       {:else if app.view.kind === 'help'}<Help />
       {:else if app.view.kind === 'reorganize'}<Reorganize id={app.view.id} />
-      {:else if app.view.kind === 'plugin'}{#key app.view.id}<PluginView id={app.view.id!} />{/key}
+      {:else if app.view.kind === 'plugin'}{#key app.view.id + ':' + lang()}<PluginView id={app.view.id!} />{/key}
       {/if}
       {#snippet failed(error, reset)}
         <div class="page missing">
@@ -1092,6 +1118,8 @@
   /* A page an add-on added: a small hollow square in the corner (rail), a small puzzle piece (sidebar). */
   .rmark { position: absolute; bottom: 4px; inset-inline-end: 4px; width: 6px; height: 6px; border: 1.5px solid currentColor; border-radius: 1px; opacity: .8; }
   .nav .addon { flex: none; display: inline-flex; opacity: .75; }
+  .navgroup { font-size: var(--fs-xxs, 11px); font-weight: 600; letter-spacing: .02em; color: var(--muted); padding: 10px 8px 2px; }
+  .nav.editnav { color: var(--muted); font-size: var(--fs-xs); margin-top: 4px; }
   .badge { flex: none; font-size: var(--fs-xxs); font-weight: 600; min-width: 18px; text-align: center; padding: 0 5px; border-radius: 99px; background: var(--accent); color: var(--accent-fg); }
   :global([data-theme="contrast"]) .nav.active .badge { background: var(--accent-fg); color: var(--accent); }
   .sidebar {

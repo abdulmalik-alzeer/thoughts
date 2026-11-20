@@ -3,7 +3,7 @@
 // and sections, the sidebar, todo settings, themes, the look, automatic tasks) and this module words
 // each entry for the review and for the question after an app update. Nothing here is taken from
 // what the assistant or a pack says about the change.
-import { t } from './i18n';
+import { t, lang } from './i18n';
 import { permText } from './layer';
 import { pagesFx } from './pagesFx';
 
@@ -18,7 +18,8 @@ const list = (xs: unknown[]) => xs.map(q).join(t('ldb.listSep'));
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
 const BUILT_IN_PAGES = ['home', 'chats', 'ideas', 'todos', 'docs', 'projects', 'me'];
-function page(id: string): string { return q(BUILT_IN_PAGES.includes(id) ? t(id as any) : id); }
+const OWN_NAMES: Record<string, string> = { graph: 'libf-graph.nav', inbox: 'inbox.nav', usage: 'r10-usage.nav', customise: 'layer.customise' };
+function page(id: string): string { return q(BUILT_IN_PAGES.includes(id) ? t(id as any) : OWN_NAMES[id] ? t(OWN_NAMES[id]) : id); }
 
 function section(id: string): string {
   const known: Record<string, string> = { stats: 'ldb.sec.stats', ideas: 'continueWhere', upcoming: 'home.upcoming', todos: 'todos', chats: 'recentChats', projects: 'projects', suggestions: 'ldb.sec.suggestions' };
@@ -110,6 +111,12 @@ export function fxLine(e: Effect, i = 0): FxLine | null {
         case 'renameRemoved': return line('changed', t('ldb.fx.navRenameRemoved', { what: page(String(e.what)) }));
         case 'order': return line('changed', t('ldb.fx.navOrder', { order: strs(e.order).map(page).join(t('ldb.listSep')) }));
         case 'orderReset': return line('changed', t('ldb.fx.navOrderReset'));
+        case 'icon': return line('changed', t('pgs.fx.navIcon', { what: page(String(e.what)), icon: q(e.icon) }));
+        case 'iconRemoved': return line('changed', t('pgs.fx.navIconRemoved', { what: page(String(e.what)) }));
+        case 'groups': return line('changed', t('pgs.fx.navGroups', { list: (Array.isArray(e.groups) ? e.groups : []).map((g: any) => t('pgs.fx.navGroup', { name: q((lang() === 'ar' ? g.ar || g.en : g.en || g.ar) || g.id), items: strs(g.items).map(page).join(t('ldb.listSep')) })).join('; ') }));
+        case 'groupsRemoved': return line('changed', t('pgs.fx.navGroupsRemoved'));
+        case 'start': return line('changed', t('pgs.fx.navStart', { what: page(String(e.what)) }));
+        case 'startRemoved': return line('changed', t('pgs.fx.navStartRemoved'));
       }
       break;
     case 'todos':

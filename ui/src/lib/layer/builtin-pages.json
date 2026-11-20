@@ -1,0 +1,84 @@
+{
+  "about": "The one list of what a customisation may change on the app's own pages, in the sidebar, and which add-on calls exist. The UI (lib/pages.svelte.ts, lib/layer.ts) and the service (crates/thoughtsd/src/staging/pages.rs, validate.rs, applayer.rs) both read this file, and the reference in the layer's README.md is generated from it. Ids listed here are kept across releases: one that has to change goes into `renamed` (old id -> new id) instead of disappearing. Bump `version` whenever an id is added or renamed.",
+  "version": 2,
+  "sizes": ["full", "wide", "half", "third"],
+  "pages": {
+    "home": {
+      "title": true, "intro": true, "boxes": false, "replace": true,
+      "sections": ["hero", "suggestions", "stats", "usage", "ideas", "upcoming", "todos", "chats", "projects", "automate"],
+      "parts": ["date", "greeting", "intro", "emblem", "todoChip", "noteChip", "checkInChip"],
+      "labels": ["askPlaceholder", "todoChip", "noteChip", "ideasTitle", "ideasIntro", "upcomingTitle", "todosTitle", "chatsTitle", "projectsTitle"]
+    },
+    "chats": {
+      "title": true, "intro": true, "boxes": true, "replace": true,
+      "sections": ["actions", "tools", "list", "keep"],
+      "parts": ["newChat", "folderChats", "search", "select", "filters", "systemChats", "keep"],
+      "labels": ["newChat", "search", "empty"]
+    },
+    "ideas": {
+      "title": true, "intro": true, "boxes": true, "replace": true,
+      "sections": ["capture", "tools", "list"],
+      "parts": ["capture", "areas", "search", "statusFilter", "sort", "count"],
+      "labels": ["capturePlaceholder", "capture", "search"]
+    },
+    "todos": {
+      "title": true, "intro": true, "boxes": true, "replace": true,
+      "sections": ["tools", "quickAdd", "lists", "calendar"],
+      "parts": ["count", "views", "calendarExport", "filters", "grouping", "sorting", "showDone", "moveDone", "quickAdd"],
+      "labels": ["quickAddPlaceholder", "add", "listPlaceholder"]
+    },
+    "docs": {
+      "title": false, "intro": false, "boxes": true, "replace": true,
+      "sections": [],
+      "parts": ["filter"],
+      "labels": ["filter"]
+    },
+    "projects": {
+      "title": true, "intro": true, "boxes": true, "replace": true,
+      "sections": ["linkForm", "list"],
+      "parts": ["intro", "linkForm"],
+      "labels": ["link", "newChat"]
+    },
+    "inbox": {
+      "title": true, "intro": true, "boxes": true, "replace": true,
+      "sections": ["list"], "parts": [], "labels": []
+    },
+    "graph": {
+      "title": true, "intro": true, "boxes": true, "replace": true,
+      "sections": ["graph"], "parts": [], "labels": []
+    },
+    "usage": {
+      "title": true, "intro": true, "boxes": true, "replace": true,
+      "sections": ["plans", "cost"], "parts": [], "labels": []
+    },
+    "settings": {
+      "title": false, "intro": false, "boxes": false, "replace": false,
+      "sections": ["general", "accessibility", "ai", "usage", "git", "privacy", "modules", "daemon", "appLayer", "maintenance"],
+      "locked": ["general", "privacy", "appLayer", "maintenance"],
+      "parts": [], "labels": []
+    }
+  },
+  "outOfReach": ["history", "customise", "review", "rollback", "recovery"],
+  "nav": {
+    "ids": ["home", "chats", "ideas", "todos", "docs", "projects", "graph", "inbox", "usage", "me", "customise"],
+    "neverHidden": ["home", "customise", "settings", "help"],
+    "fixedLook": ["customise"],
+    "maxGroups": 8
+  },
+  "icons": ["home", "chats", "chat", "ideas", "todos", "docs", "projects", "me", "folder", "plugin", "ai", "palette", "modules", "inbox", "calendar", "clock", "book", "edit", "eye", "bell", "keyboard", "filter", "info", "pin", "archive", "usage", "graph", "list", "check", "wrap", "search", "tool", "thinking", "git", "accessibility", "attach", "print", "upload", "download", "copy", "window", "sun", "moon", "help"],
+  "renamed": {},
+  "permissions": ["library:read", "library:write", "todos:read", "todos:write", "ideas:read", "ideas:write", "chats:read", "chat:start", "storage", "files:save", "notify", "assistant:ask"],
+  "viewPermissions": ["library:read", "todos:read", "ideas:read", "chats:read"],
+  "api": {
+    "library.list": "library:read", "library.read": "library:read", "library.search": "library:read",
+    "library.write": "library:write", "library.remove": "library:write",
+    "todos.list": "todos:read", "todos.add": "todos:write", "todos.setDone": "todos:write", "todos.edit": "todos:write", "todos.remove": "todos:write",
+    "ideas.list": "ideas:read", "ideas.setStatus": "ideas:write",
+    "chats.list": "chats:read", "chat.start": "chat:start",
+    "storage.get": "storage", "storage.set": "storage",
+    "assistant.ask": "assistant:ask",
+    "ui.toast": "", "ui.confirm": "", "ui.notify": "notify", "ui.saveFile": "files:save", "ui.print": "", "ui.go": "",
+    "ui.addView": "", "ui.addCommand": "", "ui.addHomeWidget": "", "ui.addHomeChip": "chat:start", "ui.addItemAction": "", "ui.remove": "",
+    "on": "", "off": ""
+  }
+}
