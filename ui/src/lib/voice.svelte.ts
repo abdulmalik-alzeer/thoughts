@@ -3,6 +3,7 @@
 // mode; see src-tauri/src/voice.rs). The window never gets the sound: it asks the desktop app to
 // listen or record and gets words back. Only the Mac app has it; elsewhere nothing here is shown.
 import { inTauri, post } from './api';
+import type { TextBox } from './composer/textBox';
 import { go, refreshChats, toast } from './store.svelte';
 import { t, lang as appLang } from './i18n';
 import { choiceDialog, confirmDialog } from './dialog.svelte';
@@ -205,7 +206,7 @@ export function cancelDictation(): void {
 
 /** Put dictated words into a text box at `at` (the selection when listening started), as one
  *  edit the text box's Undo takes back, with a space on either side where the words need one. */
-export function insertText(el: HTMLTextAreaElement, text: string, at?: [number, number] | null): void {
+export function insertText(el: HTMLTextAreaElement | TextBox, text: string, at?: [number, number] | null): void {
   let words = text.trim();
   if (!words) return;
   const len = el.value.length;
@@ -216,7 +217,8 @@ export function insertText(el: HTMLTextAreaElement, text: string, at?: [number, 
   el.focus();
   el.setSelectionRange(s, e);
   let ok = false;
-  try { ok = document.execCommand('insertText', false, words); } catch { /* not supported */ }
+  // (The formatted message box keeps its own undo: it takes the words directly.)
+  if (el instanceof HTMLTextAreaElement) try { ok = document.execCommand('insertText', false, words); } catch { /* not supported */ }
   if (!ok) {
     el.setRangeText(words, s, e, 'end');
     el.dispatchEvent(new Event('input', { bubbles: true }));

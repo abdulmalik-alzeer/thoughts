@@ -41,6 +41,10 @@
   import { groupSteps, liveLine } from './chat/steps';
   import UsageRing from './usage/UsageRing.svelte';
   import { MAX_FILE_BYTES, copyText, fmtSize, isImageName, notify, prettyName, readAsDataURL } from '../lib/content/util';
+  import Composer from '../lib/composer/Composer.svelte';
+  import { boxElement, type TextBox } from '../lib/composer/textBox';
+  import { composerKey, sendKeys } from '../lib/composer/keys';
+  import { tip } from '../lib/shortcuts';
   import { imeKey } from '../lib/ime';
   import SetupCard from './SetupCard.svelte';
   import { foldMap } from '../lib/search';
@@ -115,7 +119,15 @@
   let dragging = $state(false);
   let dragDepth = 0;
   let scroller = $state<HTMLElement>();
-  let input = $state<HTMLTextAreaElement>();
+  let input = $state<TextBox & { element: HTMLElement }>();
+  // The tall box, for writing at length: Enter makes a new line there, ⌘/Ctrl+Enter sends (lib/composer/keys.ts).
+  let expanded = $state(false);
+  function setExpanded(v: boolean) { expanded = v; tick().then(() => input?.focus({ preventScroll: true })); }
+  $effect(() => {
+    const cmd = (e: Event) => { if ((e as CustomEvent).detail?.id === 'chat.composer.expand' && canCompose && document.contains(boxElement(input))) setExpanded(!expanded); };
+    window.addEventListener('thoughts:command', cmd);
+    return () => window.removeEventListener('thoughts:command', cmd);
+  });
   let escHint = $state(false);   // Esc was pressed once while the assistant is working
   let escTimer: ReturnType<typeof setTimeout> | undefined;
   let announce = $state('');     // one polite line for screen readers when an answer completes
@@ -162,15 +174,8 @@
     if (keep.length !== mentions.length) mentions = keep;
   });
 
-  // The box grows with the text up to about 40% of the window, then scrolls.
-  function grow() {
-    if (!input) return;
-    input.style.height = 'auto';
-    const max = Math.round(window.innerHeight * 0.4);
-    input.style.height = Math.min(input.scrollHeight + 2, max) + 'px';
-    input.style.overflowY = input.scrollHeight + 2 > max ? 'auto' : 'hidden';
-  }
-  $effect(() => { text; input; grow(); });
+  // The box grows with the text up to about 40% of the window, then scrolls (Composer.svelte);
+  // expanded, it is a tall writing area.
 
   function say(msg: string) {
     clearTimeout(announceTimer);
@@ -233,7 +238,7 @@
         if (!['wrap', 'reorganize', 'setup'].includes(c.kind)) {
           await tick();
           const a = document.activeElement as HTMLElement | null;
-          const elsewhere = !!a && a !== document.body && a !== input && !!a.closest('input, textarea, select, [contenteditable="true"]');
+          const elsewhere = !!a && a !== document.body && a !== boxElement(input) && !!a.closest('input, textarea, select, [contenteditable="true"]');
           if (!document.querySelector('[aria-modal="true"]') && !elsewhere) input?.focus({ preventScroll: true });
         }
       }
@@ -292,7 +297,6 @@
 
   onMount(() => {
     load(true);
-    window.addEventListener('resize', grow);
     const off = on((e) => {
       if (e.type === 'resync') { load(); return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
@@ -300,7 +304,7 @@
       fetches.hold(e);
       if (chat) onEvent(e);
     });
-    return () => { gone = true; off(); window.removeEventListener('resize', grow); clearTimeout(escTimer); clearTimeout(announceTimer); clearTimeout(flashTimer); };
+    return () => { gone = true; off(); clearTimeout(escTimer); clearTimeout(announceTimer); clearTimeout(flashTimer); };
   });
 
   // ---- which assistant program answers this chat (Claude Code or Codex), and its own choices ----
@@ -369,7 +373,7 @@
     unsent.set(id, held);
     try { localStorage.setItem(draftKey(id), held); } catch { /* storage unavailable */ }
     if (heldFiles.length) pendingFiles.set(id, heldFiles);
-    text = ''; files = []; mentions = []; mentionQ = null;
+    text = ''; files = []; mentions = []; mentionQ = null; expanded = false;
     const ok = await sendBody(body);
     unsent.delete(id);
     let stored: string | null = null;
@@ -420,7 +424,7 @@
       files: ready.map(({ name, data, size, image }) => ({ name, data, size, image })),
       mentions: mentions.map((m) => ({ ...m })),
     });
-    text = ''; files = files.filter((f) => f.missing); mentions = []; mentionQ = null;
+    text = ''; files = files.filter((f) => f.missing); mentions = []; mentionQ = null; expanded = false;
     say(t('chatc.queue.waits'));
     input?.focus();
   }
@@ -496,8 +500,11 @@
       if (e.key === 'ArrowUp') { e.preventDefault(); mentionIdx = (mentionIdx - 1 + mentionHits.length) % mentionHits.length; return; }
       if ((e.key === 'Enter' || e.key === 'Tab') && !imeKey(e)) { e.preventDefault(); pickMention(mentionHits[mentionIdx]); return; }
     }
+    const act = composerKey(e, expanded);
     if (e.key === 'Escape') {
       if (mentionQ !== null) { e.preventDefault(); mentionQ = null; }
+      // Esc makes the tall box small again; the text stays.
+      else if (act === 'collapse') { e.preventDefault(); setExpanded(false); }
       else if (chat?.running) {
         // One stray Esc must not throw away an answer: the second press within 2 seconds stops it.
         e.preventDefault();
@@ -506,9 +513,10 @@
       }
       return;
     }
-    // Enter sends, Shift+Enter makes a new line (Cmd/Ctrl+Enter also sends). Never while an IME is composing.
-    // While an answer is being written, Enter puts the message in line for when it has finished.
-    if (e.key === 'Enter' && !e.shiftKey && !imeKey(e)) { e.preventDefault(); if (chat?.running || sending) queueMsg(); else send(); }
+    // Enter sends, Shift+Enter makes a new line (Cmd/Ctrl+Enter also sends); in the tall box Enter
+    // makes a new line and only Cmd/Ctrl+Enter sends. Never while an IME is composing.
+    // While an answer is being written, sending puts the message in line for when it has finished.
+    if (act === 'send') { e.preventDefault(); if (chat?.running || sending) queueMsg(); else send(); }
   }
 
   // ---- @-mentions: ideas, notes, other files and folders, found by the name people know them by ----
@@ -951,7 +959,7 @@
         {/if}
         {#if thinking && allSteps}<div class="msg sys muted ell think"><Icon name="thinking" size={13} /> <span class="ell" dir="auto">{thinking.slice(-160)}</span></div>{/if}
         {#if streaming}
-          <div class="msg ai" aria-busy="true"><StreamText text={streaming} onrender={() => scrollDown()} /></div>
+          <div class="msg ai" aria-busy="true"><StreamText text={streaming} onrender={() => scrollDown()} onclick={msgLink} /></div>
         {/if}
         {#if chat.running && !streaming}<div class="msg sys muted working" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> {allSteps ? t('chat.working') : liveLine(chat.messages, !!thinking)}</div>{/if}
       </div>
@@ -984,7 +992,7 @@
       <SetupCard {chat} {stop} reload={() => load()} reply={(s) => { if (!text.trim()) text = s; tick().then(() => input?.focus()); }} />
     {/if}
     {#if canCompose}
-      <div class="composer card">
+      <div class="composer card" class:expanded>
         {#if mentionHits.length}
           <div class="mentions" role="listbox" id="mention-list" aria-label={t('chat.mentionList')}>
             {#each mentionHits as h, i (h.path)}
@@ -1019,9 +1027,13 @@
         {#if queued}
           <QueuedCard q={queued} running={chat.running} onedit={editQueued} oncancel={() => take(id)} onsend={() => sendNowOrAfterStop(id, chat.running)} />
         {/if}
-        <textarea bind:this={input} bind:value={text} {oninput} onkeydown={keydown} {onpaste} rows="2" dir="auto"
-          placeholder={chat.running ? t('chatc.queue.placeholder') : chat.kind === 'customize' && !chat.messages.length ? t('r10-cust-start.placeholder') : t('chatc.placeholder')} aria-label={t('chat.messageLabel')}
-          aria-controls={mentionHits.length ? 'mention-list' : undefined} aria-activedescendant={mentionHits.length ? `mention-${mentionIdx}` : undefined}></textarea>
+        <button type="button" class="btn ghost expand" onclick={() => setExpanded(!expanded)} aria-pressed={expanded}
+          title={tip(t(expanded ? 'chatg.collapse' : 'chatg.expand'), 'chat.composer.expand')} aria-label={t(expanded ? 'chatg.collapse' : 'chatg.expand')}>
+          <Icon name={expanded ? 'collapse' : 'expand'} size={14} /></button>
+        <Composer bind:value={text} bind:box={input} {oninput} onkeydown={keydown} {onpaste} {expanded} class="cbox"
+          placeholder={chat.running ? t('chatc.queue.placeholder') : chat.kind === 'customize' && !chat.messages.length ? t('r10-cust-start.placeholder') : t('chatc.placeholder')} label={t('chat.messageLabel')}
+          describedby={expanded ? 'send-keys-' + id : undefined}
+          controls={mentionHits.length ? 'mention-list' : undefined} activedescendant={mentionHits.length ? `mention-${mentionIdx}` : undefined} />
         <div class="row controls">
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
           <DictateButton target={() => input} />
@@ -1038,6 +1050,7 @@
             </label>
           {/if}
           <span class="grow"></span>
+          {#if expanded}<span class="esc muted" id="send-keys-{id}">{t('chatg.sendHint', { keys: ISOLATE[0] + sendKeys() + ISOLATE[1] })}</span>{/if}
           <span class="esc muted" role="status" aria-live="polite">{#if escHint}{t('chat3.escHint')}{/if}</span>
           <UsageRing chatId={id} provider={chat.provider} running={chat.running} />
           {#if chat.running}
@@ -1147,7 +1160,9 @@
   :global([dir="rtl"]) .jump { transform: translateX(50%); }
 
   .composer { position: relative; padding: 8px; border-radius: 16px; }
-  .composer textarea { border: 0; resize: none; background: transparent; box-shadow: none; display: block; min-height: 56px; max-height: 40vh; overflow-y: hidden; }
+  .composer :global(.cbox) { --composer-min: 56px; --composer-max: 40vh; --composer-tall: max(240px, 55vh); padding-inline-end: 28px; }
+  .composer .expand { position: absolute; top: 6px; inset-inline-end: 6px; z-index: 2; width: 28px; height: 28px; padding: 0; display: grid; place-items: center; color: var(--muted); }
+  .composer .expand:hover { color: var(--fg); }
   .esc { font-size: var(--fs-xs); }
   .composer:focus-within { box-shadow: var(--shadow), 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
   .controls { flex-wrap: wrap; }

@@ -11,10 +11,11 @@
     voice, voiceShell, initVoice, loadVoice, ensurePermission, ensureLang, setVoiceLang, langName,
     startDictation, stopDictation, cancelDictation, insertText, voiceError, voiceCode, type VoiceLang,
   } from '../voice.svelte';
+  import { boxElement, type TextBox } from '../composer/textBox';
 
   let { target, tool = false, tabindex = undefined, place = 'above' }: {
     /** The text box the words go into. */
-    target: () => HTMLTextAreaElement | null | undefined;
+    target: () => HTMLTextAreaElement | TextBox | null | undefined;
     /** Part of a toolbar with arrow-key movement (`data-tool`). */
     tool?: boolean;
     tabindex?: number;
@@ -48,7 +49,7 @@
       await startDictation(use, id);
       // Back to the text box (a question may have taken the focus), where Enter inserts.
       const box = target();
-      if (box && document.activeElement !== box) { box.focus(); if (sel) box.setSelectionRange(sel[0], sel[1]); }
+      if (box && document.activeElement !== boxElement(box)) { box.focus(); if (sel) box.setSelectionRange(sel[0], sel[1]); }
     } catch (e) { voiceError(e); }
     finally { busy = false; }
   }
@@ -114,7 +115,7 @@
   function onKey(e: KeyboardEvent) {
     if (!mine || e.isComposing) return;
     if (e.key === 'Escape' && !document.querySelector('.modal-bg')) { e.preventDefault(); e.stopPropagation(); cancel(); return; }
-    const inBox = document.activeElement === target() || !!(document.activeElement as HTMLElement | null)?.closest?.(`[data-dict="${id}"]`);
+    const inBox = (!!document.activeElement && document.activeElement === boxElement(target())) || !!(document.activeElement as HTMLElement | null)?.closest?.(`[data-dict="${id}"]`);
     if (!inBox) return;
     if (e.key === 'Enter' && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey && (e.target as HTMLElement)?.tagName !== 'SELECT') {
       e.preventDefault(); e.stopPropagation(); finish();
