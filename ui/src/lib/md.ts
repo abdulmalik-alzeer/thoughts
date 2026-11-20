@@ -104,6 +104,12 @@ function render(src: string): string {
     const d = firstStrongDir(el);
     if (d) el.setAttribute('dir', d);
   }
+  // A table runs in the direction of its own words (its columns in the order they were written),
+  // not the page's: an English table in the Arabic app is not mirrored.
+  for (const table of Array.from(frag.querySelectorAll('table'))) {
+    const d = firstStrongDir(table);
+    if (d) table.setAttribute('dir', d);
+  }
   for (const list of Array.from(frag.querySelectorAll('ul, ol'))) {
     const d = list.querySelector(':scope > li')?.getAttribute('dir');
     if (d === 'rtl' || d === 'ltr') list.setAttribute('dir', d);
@@ -140,6 +146,8 @@ function render(src: string): string {
   for (const table of Array.from(frag.querySelectorAll('table'))) {
     const wrap = document.createElement('div');
     wrap.className = 'md-table'; wrap.tabIndex = 0;
+    const d = table.getAttribute('dir');
+    if (d) wrap.setAttribute('dir', d); // (and it sits on the side its words start from)
     table.replaceWith(wrap);
     wrap.append(table);
   }

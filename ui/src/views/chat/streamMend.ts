@@ -13,6 +13,8 @@ const INLINE = new Set(['paragraph', 'heading', 'list', 'blockquote', 'table', '
  * Returns '' when nothing of it should be shown yet.
  */
 export function mendTail(raw: string, type: string): string {
+  // A code block's closing fence half-typed ("``") would show as a line of code for a moment.
+  if (type === 'code') return /^ {0,3}(`{3,}|~{3,})/.test(raw) ? raw.replace(/\n {0,3}(?:`+|~+)[ \t]*$/, '\n') : raw;
   if (!INLINE.has(type)) return raw;
   let s = raw;
   // A last line that may yet become something else: "#" (a heading), "-" or "=" under a paragraph

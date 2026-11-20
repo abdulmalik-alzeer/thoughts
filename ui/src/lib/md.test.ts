@@ -145,6 +145,12 @@ describe('md: wrappers', () => {
     expect(pre.textContent).toBe('const a = 1 < 2;\n');
   });
 
+  it('a table takes the direction of its own words', () => {
+    expect(render('| Step | Cost |\n|---|---|\n| a | 1 |').querySelector('table')?.getAttribute('dir')).toBe('ltr');
+    expect(render('| Step | Cost |\n|---|---|\n| a | 1 |').querySelector('.md-table')?.getAttribute('dir')).toBe('ltr');
+    expect(render('| خطوة | كلفة |\n|---|---|\n| أ | 1 |').querySelector('table')?.getAttribute('dir')).toBe('rtl');
+  });
+
   it('no language, a strange one, or a forged stamp: no name shown', () => {
     expect(render('```\nx\n```').querySelector('.md-lang')?.textContent).toBe('');
     expect(render('```<b>x</b>\nx\n```').querySelector('.md-lang')?.textContent).toBe('');

@@ -52,6 +52,12 @@ describe('mendTail: what is still open is shown finished', () => {
     expect(mendTail(done, 'table')).toBe(done);
   });
 
+  it('a closing fence still being typed is not shown as code', () => {
+    expect(mendTail('```py\nx = 1\n``', 'code')).toBe('```py\nx = 1\n');
+    expect(mendTail('```py\nx = 1\n```', 'code')).toBe('```py\nx = 1\n');
+    expect(mendTail('```py\nx = `a`', 'code')).toBe('```py\nx = `a`');
+  });
+
   it('code and raw HTML are shown as they are', () => {
     expect(mendTail('```js\nconst a = **b', 'code')).toBe('```js\nconst a = **b');
     expect(mendTail('<div>**', 'html')).toBe('<div>**');
