@@ -185,8 +185,15 @@ fn place(app: &AppHandle, w: &tauri::WebviewWindow) {
     };
     let area = m.work_area();
     let x = area.position.x + (area.size.width.saturating_sub(size.width) / 2) as i32;
-    let y = area.position.y + (area.size.height.saturating_sub(size.height) / 4) as i32;
+    // The top edge goes where an empty box would sit, whatever height the box had when it was put
+    // away (a status line, several lines of text): it then always opens at the same place.
+    let y = area.position.y + (area.size.height.saturating_sub(empty_height(size.width)) / 4) as i32;
     let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// The height of the empty box at the zoom `width` was sized for (in the same units as `width`).
+fn empty_height(width: u32) -> u32 {
+    (width as f64 * HEIGHT / WIDTH).round() as u32
 }
 
 /// Put the box away. `give_back`: the user is done (Esc, saved, the shortcut again), so the app
@@ -749,6 +756,13 @@ mod tests {
         assert_eq!(fit(WIDTH, HEIGHT), Some((WIDTH, HEIGHT)));
         // Slim and wide.
         assert!(WIDTH >= 600.0 && WIDTH <= 700.0 && HEIGHT <= 100.0);
+    }
+
+    #[test]
+    fn the_box_opens_at_the_same_height_whatever_it_held() {
+        assert_eq!(empty_height(WIDTH as u32), HEIGHT as u32);
+        // At 125% on a 2x screen the box is 2.5 times as wide, and so is the empty height.
+        assert_eq!(empty_height((WIDTH * 2.5) as u32), (HEIGHT * 2.5) as u32);
     }
 
     #[test]

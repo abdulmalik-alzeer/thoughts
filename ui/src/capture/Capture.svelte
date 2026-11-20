@@ -380,9 +380,11 @@
     flex: 1; min-width: 0; height: 36px; resize: none; font: inherit; font-size: 16px; line-height: 24px; color: var(--fg);
     background: transparent; border: 0; padding: 6px 2px; margin: 0; overflow-y: auto; scrollbar-width: thin;
   }
-  textarea::placeholder { color: var(--muted); opacity: 1; }
+  textarea::placeholder { color: var(--muted); opacity: 1; text-overflow: ellipsis; }
+  /* The hint never wraps: an empty box is always one line. */
+  textarea:placeholder-shown { white-space: nowrap; overflow: hidden; }
   /* The bar is the text box: its keyboard focus shows on the whole bar. */
-  textarea:focus-visible { outline: none; }
+  textarea:focus, textarea:focus-visible { outline: none; background: transparent; box-shadow: none; }
   .bar:has(textarea:focus-visible) { border-color: color-mix(in srgb, var(--accent) 55%, var(--hairline)); }
   .send {
     flex: none; width: 32px; height: 32px; margin-top: 2px; border-radius: 999px; border: 0; cursor: pointer;

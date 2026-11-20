@@ -156,12 +156,32 @@ mod mac {
             }
         });
     }
+
+    /// AppKit adds an "Enter Full Screen" item of its own to a menu called View, in the system's
+    /// language, next to ours. This asks it not to, for this run only (the registration domain is
+    /// never saved). Before the menu bar is put in place.
+    pub(super) fn no_system_item() {
+        use objc2::class;
+        use objc2_foundation::NSString;
+        let key = NSString::from_str("NSFullScreenMenuItemEverywhere");
+        // SAFETY: plain Foundation calls with objects that live through the call.
+        unsafe {
+            let no: *mut AnyObject = msg_send![class!(NSNumber), numberWithBool: false];
+            let dict: *mut AnyObject = msg_send![class!(NSDictionary), dictionaryWithObject: no, forKey: &*key];
+            let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+            let _: () = msg_send![defaults, registerDefaults: dict];
+        }
+    }
 }
 
-/// Esc never leaves full screen (macOS; elsewhere the system does not do that in the first place).
+/// Esc never leaves full screen (macOS; elsewhere the system does not do that in the first place),
+/// and the View menu holds one full-screen item, ours.
 pub(crate) fn install_esc_guard() {
     #[cfg(target_os = "macos")]
-    mac::install();
+    {
+        mac::install();
+        mac::no_system_item();
+    }
 }
 
 #[cfg(test)]
