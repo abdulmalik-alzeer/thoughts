@@ -510,9 +510,26 @@ function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Fra
   return f;
 }
 
+/** What a page is told about where it is (`thoughts.page`). The page kind always; the route's file
+ *  only with `library:read`, never a private one and never outside its `read` folders; a chat's id
+ *  only with `chats:read`; any other id only when it is a plain mode word (`calendar`). Anything
+ *  else the page asks for through its permission-checked calls. */
+export function pageCtx(p: { perms: Set<string>; read: string[] }, ctx?: Partial<PageCtx>): PageCtx {
+  const kind = String(ctx?.route?.kind ?? 'plugin').slice(0, 40);
+  const raw = ctx?.route;
+  let path: string | null = null;
+  if (raw?.path && p.perms.has('library:read')) {
+    try { const clean = cleanPath(raw.path); if (!p.read.length || inFolders(p.read, clean)) path = clean; } catch { /* private or not a library path */ }
+  }
+  const id = raw?.id == null ? null
+    : kind === 'chat' ? (p.perms.has('chats:read') ? String(raw.id).slice(0, 200) : null)
+    : /^[a-z][a-zA-Z-]{0,30}$/.test(String(raw.id)) ? String(raw.id) : null;
+  return { replaces: ctx?.replaces ? String(ctx.replaces).slice(0, 40) : null, route: { kind, id, path } };
+}
+
 /** Mount one of a plugin's surfaces into a slot. Returns the cleanup that removes it. */
 function mountSurface(p: Plugin, surface: Surface, el: HTMLElement, ctx?: Partial<PageCtx>): () => void {
-  if (surface.kind !== 'widget') surface = { ...surface, page: { replaces: ctx?.replaces ?? null, route: { kind: String(ctx?.route?.kind ?? 'plugin'), id: ctx?.route?.id ?? null, path: ctx?.route?.path ?? null } } };
+  if (surface.kind !== 'widget') surface = { ...surface, page: pageCtx(p, ctx) };
   if (p.dead) throw new Error(t('layer.pluginOff', { name: p.name }));
   const slot = { f: createFrame(p, surface, el) };
   slot.f.slot = slot;
@@ -842,8 +859,10 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
     }
     case 'chats.list': {
       // Titles and dates only, never a chat's messages.
-      const list = (await api('/chats')) as any[];
-      return (Array.isArray(list) ? list : []).map((c) => plain({ id: c.id, title: c.title, kind: c.kind, updated: c.updated, pinned: !!c.pinned, archived: !!c.archived, running: !!c.running, unwrapped: !!c.unwrapped, projectId: c.projectId ?? null, messageCount: c.messageCount ?? 0 }));
+      // The service answers an add-on (scope=plugin) only with its own chats:read, leaves out chats that
+      // touch a private folder or lie outside its `read` folders, and gives no messages.
+      const list = (await api(`/chats?${scope}`)) as any[];
+      return (Array.isArray(list) ? list : []).filter((c) => c && c.kind === 'chat').map((c) => plain({ id: c.id, title: c.title, kind: c.kind, updated: c.updated, pinned: !!c.pinned, archived: !!c.archived, running: !!c.running, unwrapped: !!c.unwrapped, projectId: c.projectId ?? null, messageCount: c.messageCount ?? 0 }));
     }
     case 'ideas.list': {
       const list = ((await api(`/library/ideas?${scope}`)) as any[]).filter((x) => !isPrivate(x.path)).map(plain);

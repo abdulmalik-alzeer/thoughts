@@ -59,6 +59,15 @@ describe('the built-in pages reference', () => {
       expect(frame, m).toContain(`'${m}'`);
     }
   });
+  it('every data call made for an add-on carries its scope (the service enforces private and read folders)', () => {
+    const host = here('./layer.ts');
+    const handle = host.slice(host.indexOf('async function handle('), host.indexOf('// Registration is only taken'));
+    for (const call of handle.matchAll(/api\((`[^`]*`|'[^']*')/g)) {
+      const url = call[1];
+      if (url.includes('/layer/')) continue; // the add-on's own storage, keyed by its name
+      expect(url, url).toMatch(/\$\{scope\}/);
+    }
+  });
   it('every permission has words in English and Arabic', async () => {
     const { t } = await import('./i18n');
     const { app } = await import('./store.svelte');

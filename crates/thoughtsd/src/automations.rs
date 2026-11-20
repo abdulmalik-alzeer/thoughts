@@ -131,12 +131,18 @@ fn names_folder(text: &str, dir: &str) -> bool {
     false
 }
 
+/// The files the person named in a chat's messages (@-mentions) or attached to them.
+pub fn chat_files(c: &crate::chats::Chat) -> Vec<String> {
+    let users: Vec<&crate::chats::Msg> = c.messages.iter().filter(|m| m.role == "user").collect();
+    users.iter().flat_map(|m| m.tool.as_ref().and_then(|t| t["mentions"].as_array().cloned()).unwrap_or_default())
+        .filter_map(|v| v.as_str().map(String::from)).chain(users.iter().flat_map(|m| m.attachments.iter().cloned())).collect()
+}
+
 /// What the summary may know of one chat. `root`/`private`: the library and its private folders.
 pub fn chat_fact(c: &crate::chats::Chat, in_library: bool, root: &Path, private: &[String]) -> ChatFact {
     let users: Vec<&crate::chats::Msg> = c.messages.iter().filter(|m| m.role == "user").collect();
     let first_text = users.first().map(|m| m.text.as_str()).unwrap_or_default();
-    let mentioned = users.iter().flat_map(|m| m.tool.as_ref().and_then(|t| t["mentions"].as_array().cloned()).unwrap_or_default())
-        .filter_map(|v| v.as_str().map(String::from)).chain(users.iter().flat_map(|m| m.attachments.iter().cloned()));
+    let mentioned = chat_files(c).into_iter();
     let root_text = root.to_string_lossy().replace('\\', "/");
     let private_hit = mentioned.into_iter().any(|p| crate::paths::is_private(root, &p, private))
         || private.iter().any(|d| names_folder(first_text, d) || names_folder(first_text, &format!("{root_text}/{d}")));

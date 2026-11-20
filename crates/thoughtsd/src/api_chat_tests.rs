@@ -475,7 +475,7 @@ async fn saving_options_answers_with_what_was_saved_and_lists_mark_bypass() {
     assert_eq!(st.chats.meta(&id).await.unwrap().summary()["bypass"], false);
     let v = chat_patch(State(st.clone()), Path(id.clone()), patch("bypassPermissions", true)).await.unwrap().0;
     assert_eq!((v["options"]["permissionMode"].as_str(), v["bypass"].as_bool()), (Some("bypassPermissions"), Some(true)));
-    let listed = chat_list(State(st.clone())).await.unwrap().0;
+    let listed = chat_list(State(st.clone()), Query(Default::default())).await.unwrap().0;
     assert_eq!(listed.as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).unwrap()["bypass"], true);
     // Only an ordinary chat can be in that state, whatever its stored options say.
     let mut wrap = Chat { kind: "wrap".into(), ..Default::default() };
