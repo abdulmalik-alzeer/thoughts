@@ -18,6 +18,7 @@
   import Onboarding from './views/Onboarding.svelte';
   import LibrarySwitcher from './lib/LibrarySwitcher.svelte';
   import FullAccessBadge from './lib/FullAccessBadge.svelte';
+  import { fullAccessOn } from './lib/fullAccess';
   import LibraryAdd from './lib/LibraryAdd.svelte';
   import { libraryPaletteItems, startLibraries } from './lib/libraries.svelte';
   import Chat from './views/Chat.svelte';
@@ -689,7 +690,7 @@
     return items;
   });
   // `nav.json` applied: hidden entries, order, icons, groups (lib/navLayout.ts).
-  const navLayout = $derived(layoutNav(allNavItems, app.nav));
+  const navLayout = $derived(layoutNav(allNavItems, app.nav, fullAccessOn()));
   const navItems = $derived(navLayout.flat);
   const groupLabel = (l: { en?: string; ar?: string } | null) => (l ? (lang() === 'ar' ? l.ar || l.en : l.en || l.ar) || '' : '');
   let editingNav = $state(false);

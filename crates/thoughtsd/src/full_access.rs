@@ -239,3 +239,46 @@ mod run_tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
+
+/// The guards the built-in pages work added (`staging/pages.rs`, `staging/validate.rs` `nav`):
+/// off, refused exactly as before; on, nothing is refused.
+#[cfg(test)]
+mod page_guard_tests {
+    use serde_json::Value;
+
+    fn pages(text: &str) -> Vec<String> {
+        let v: Value = serde_json::from_str(text).unwrap();
+        crate::staging::pages::problems(&v, &std::env::temp_dir()).into_iter().map(|(en, _)| en).collect()
+    }
+    fn nav(text: &str) -> Vec<String> { crate::staging::validate::nav_problems(&serde_json::from_str(text).unwrap(), false) }
+
+    const PAGES: [&str; 5] = [
+        r#"{"settings":{"sections":{"hidden":["appLayer"]}}}"#,          // a locked section hidden
+        r#"{"settings":{"sections":{"replace":{"privacy":"widget:x"}}}}"#, // a locked section replaced
+        r#"{"settings":{"replace":"board"}}"#,                            // `replace: false` page replaced
+        r#"{"customise":{"replace":"board"}}"#,                          // an out-of-reach page
+        r#"{"history":{"replace":"board"}}"#,
+    ];
+    const NAV: [&str; 4] = [
+        r#"{"hidden":["customise"]}"#, r#"{"hidden":["home","settings","help"]}"#,  // never hidden
+        r#"{"labels":{"customise":{"en":"Tweaks"}}}"#, r#"{"icons":{"customise":"folder"}}"#, // fixed look
+    ];
+
+    #[test]
+    fn off_the_page_and_sidebar_guards_refuse_as_before() {
+        super::set_on(false);
+        for p in PAGES { assert!(!pages(p).is_empty(), "{p}"); }
+        for n in NAV { assert!(!nav(n).is_empty(), "{n}"); }
+    }
+
+    #[test]
+    fn with_full_access_on_none_of_them_refuses() {
+        super::set_on(true);
+        for p in PAGES { assert!(pages(p).is_empty(), "{p}: {:?}", pages(p)); }
+        for n in NAV { assert!(nav(n).is_empty(), "{n}: {:?}", nav(n)); }
+        // What is simply wrong is still said (not a guard: a mistake).
+        assert!(!pages(r#"{"todos":{"sections":{"order":["nope"]}}}"#).is_empty());
+        assert!(!nav(r#"{"icons":{"todos":"no-such-icon"}}"#).is_empty());
+        super::set_on(false);
+    }
+}

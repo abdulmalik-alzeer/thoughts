@@ -12,6 +12,7 @@ import { app, type HomeWidget, type PluginView } from './store.svelte';
 import { lang } from './i18n';
 import { navLabel } from './terms';
 import { findView, addonFailure } from './layer';
+import { fullAccessOn } from './fullAccess';
 import REF from './layer/builtin-pages.json';
 
 type Text = { en?: string; ar?: string };
@@ -22,6 +23,8 @@ type RefPage = { title: boolean; intro: boolean; boxes: boolean; replace: boolea
 
 /** The reference (shared with the service). */
 export const REFERENCE = REF as unknown as { version: number; sizes: Size[]; pages: Record<string, RefPage>; outOfReach: string[]; nav: { ids: string[]; neverHidden: string[]; fixedLook: string[]; maxGroups: number }; icons: string[]; renamed: Record<string, string>; permissions: string[]; viewPermissions: string[]; api: Record<string, string> };
+/** May `page` be replaced as a whole? As the reference says; with full access on, any page. */
+export const mayReplace = (page: string): boolean => !!PAGES[page]?.replace || fullAccessOn();
 /** Pages a customisation may change, and what of each (same lists as the service). */
 export const PAGES: Record<string, RefPage> = REFERENCE.pages;
 
@@ -52,7 +55,8 @@ const obj = (v: any) => (v && typeof v === 'object' && !Array.isArray(v) ? v : {
 function sectionsOf(spec: RefPage, v: any, unknown: string[]): Sections {
   const o = obj(v);
   const known = (x: string) => spec.sections.includes(current(x));
-  const locked = (x: string) => (spec.locked ?? []).includes(current(x));
+  // Full access (lib/fullAccess.ts): no section is locked.
+  const locked = (x: string) => !fullAccessOn() && (spec.locked ?? []).includes(current(x));
   const keep = (x: string) => { if (known(x)) return true; unknown.push(x); return false; };
   const order = strs(o.order).filter((x) => WIDGET.test(x) || keep(x)).map(current);
   const hidden = strs(o.hidden).filter((x) => keep(x) && !locked(x)).map(current);
@@ -86,14 +90,21 @@ export function setPages(v: any, builtin: any = []) {
         hidden: strs(c.hidden).filter((x) => spec.parts.includes(x)),
         labels,
         boxes: spec.boxes ? { top: boxList(c.boxes?.top), bottom: boxList(c.boxes?.bottom) } : { top: [], bottom: [] },
-        replace: spec.replace && typeof c.replace === 'string' && /^[\w.:-]{1,120}$/.test(c.replace) ? c.replace : undefined,
+        replace: mayReplace(id) && typeof c.replace === 'string' && /^[\w.:-]{1,120}$/.test(c.replace) ? c.replace : undefined,
         sections: sectionsOf(spec, spec.sections.length ? c.sections : undefined, unknown),
         unknown,
       };
     }
   }
+  // Full access: the pages kept out of reach (History, Customise, Rollback…) may be replaced too.
+  if (fullAccessOn() && v && typeof v === 'object' && !Array.isArray(v)) {
+    for (const id of REFERENCE.outOfReach) {
+      const r = (v as any)[id]?.replace;
+      if (typeof r === 'string' && /^[\w.:-]{1,120}$/.test(r)) cfg[id] = { hidden: [], labels: {}, boxes: { top: [], bottom: [] }, replace: r, sections: { order: [], hidden: [], size: {}, replace: {}, insert: [] }, unknown: [] };
+    }
+  }
   st.cfg = cfg;
-  st.builtin = strs(builtin).filter((p) => PAGES[p]?.replace);
+  st.builtin = strs(builtin).filter((p) => mayReplace(p));
   st.failures = {};
 }
 
@@ -168,7 +179,7 @@ export function sectionPlan(page: string, defaults: string[], sizes: Record<stri
 /** The add-on page shown in place of the app's own, while it is there and loaded. A replacement
  *  that is missing (switched off, removed, failed to start) leaves the app's own page in place. */
 export function pageSwap(page: string): PluginView | undefined {
-  if (app.safeMode || st.original[page] || st.builtin.includes(page) || !PAGES[page]?.replace) return undefined;
+  if (app.safeMode || st.original[page] || st.builtin.includes(page) || !mayReplace(page)) return undefined;
   const id = st.cfg[page]?.replace;
   return id ? findView(id) : undefined;
 }
@@ -189,14 +200,14 @@ export function useSwap(page: string) {
 export const showingOriginal = (page: string): boolean => !!st.original[page];
 export const keptBuiltin = (page: string): boolean => st.builtin.includes(page);
 /** Pages `pages.json` replaces as a whole (for the per-page switch in Customise). */
-export const replacedPages = (): string[] => Object.entries(st.cfg).filter(([id, c]) => c.replace && PAGES[id]?.replace).map(([id]) => id);
+export const replacedPages = (): string[] => Object.entries(st.cfg).filter(([id, c]) => c.replace && mayReplace(id)).map(([id]) => id);
 
 /** Why the replacement of `page` is not on screen although `pages.json` asks for one:
  *  `builtin` (kept as the app made it), `original` (for now), `failed` / `missing` (with `reason`),
  *  or null when it is shown (or none is asked for). */
 export function swapState(page: string): { state: 'builtin' | 'original' | 'failed' | 'missing'; reason: string; name: string } | null {
   const id = swapId(page);
-  if (!id || !PAGES[page]?.replace) return null;
+  if (!id || !mayReplace(page)) return null;
   const v = findView(id);
   const name = v?.title || v?.short || id.replace(/^view:/, '').replace(/\.(js|html)(:.*)?$/, '').replace(/^.*:/, '');
   if (st.builtin.includes(page)) return { state: 'builtin', reason: '', name };

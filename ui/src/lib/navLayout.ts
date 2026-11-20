@@ -7,13 +7,15 @@ import REF from './layer/builtin-pages.json';
 export type NavEntry = { id: string; alias?: string; icon: string };
 export type NavGroup<T> = { id: string | null; label: { en?: string; ar?: string } | null; items: T[] };
 
-const NEVER_HIDDEN: string[] = (REF as any).nav.neverHidden;
-const FIXED: string[] = (REF as any).nav.fixedLook;
+const NEVER_HIDDEN_REF: string[] = (REF as any).nav.neverHidden;
+const FIXED_REF: string[] = (REF as any).nav.fixedLook;
 const ICONS: string[] = (REF as any).icons;
 
 /** `items` in sidebar order with `nav` applied: `flat` (the order shortcuts number them in) and
  *  `groups` (no heading first, then each group of `nav.groups` that has an entry to show). */
-export function layoutNav<T extends NavEntry>(items: T[], nav: NavConfig | null | undefined): { flat: T[]; groups: NavGroup<T>[] } {
+export function layoutNav<T extends NavEntry>(items: T[], nav: NavConfig | null | undefined, full = false): { flat: T[]; groups: NavGroup<T>[] } {
+  // `full`: full access is on (lib/fullAccess.ts): no entry is never-hidden or fixed in look.
+  const NEVER_HIDDEN = full ? [] : NEVER_HIDDEN_REF, FIXED = full ? [] : FIXED_REF;
   const named = (i: T, id: string) => i.id === id || (!!i.alias && i.alias === id);
   const hidden = new Set((nav?.hidden ?? []).filter((id) => !NEVER_HIDDEN.includes(id)));
   const shown = items.filter((i) => NEVER_HIDDEN.includes(i.id) || !(hidden.has(i.id) || (i.alias && hidden.has(i.alias))));

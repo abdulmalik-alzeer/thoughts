@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fullAccessOn } from '../lib/fullAccess';
   // "Edit sidebar": the person arranges the sidebar by hand — order (drag, or the up and down
   // buttons), show or hide, name, icon, group and the start page. Saving writes the layer's
   // `nav.json` through the service (`PUT /api/layer/nav`), which checks it as it checks a reviewed
@@ -17,8 +18,9 @@
   let { items, close }: { items: Item[]; close: () => void } = $props();
 
   const ICONS: string[] = (REF as any).icons;
-  const NEVER_HIDDEN: string[] = (REF as any).nav.neverHidden;
-  const FIXED: string[] = (REF as any).nav.fixedLook;
+  // Full access (lib/fullAccess.ts): nothing is never-hidden or fixed in look.
+  const NEVER_HIDDEN: string[] = fullAccessOn() ? [] : (REF as any).nav.neverHidden;
+  const FIXED: string[] = fullAccessOn() ? [] : (REF as any).nav.fixedLook;
   const MAX_GROUPS: number = (REF as any).nav.maxGroups;
   const L = lang();
   const other = L === 'ar' ? 'en' : 'ar';

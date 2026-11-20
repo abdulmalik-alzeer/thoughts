@@ -354,8 +354,10 @@ fn nav(out: &mut Out, path: &str, v: &Value) {
     let r = super::pages::reference();
     // Locked in the normal mode: the way out of customisations keeps its place in the sidebar,
     // its name and its icon (`nav.neverHidden`, `nav.fixedLook` in the reference).
-    let never_hidden = |id: &str| NAV_ALWAYS.contains(&id.to_lowercase().as_str()) || r.nav.never_hidden.iter().any(|x| x.eq_ignore_ascii_case(id));
-    let fixed_look = |id: &str| r.nav.fixed_look.iter().any(|x| x.eq_ignore_ascii_case(id));
+    // Full access (`full_access.rs`): nothing is locked.
+    let full = crate::full_access::on();
+    let never_hidden = |id: &str| !full && (NAV_ALWAYS.contains(&id.to_lowercase().as_str()) || r.nav.never_hidden.iter().any(|x| x.eq_ignore_ascii_case(id)));
+    let fixed_look = |id: &str| !full && r.nav.fixed_look.iter().any(|x| x.eq_ignore_ascii_case(id));
     for key in o.keys().filter(|k| !NAV_KEYS.contains(&k.as_str())) {
         let k = show_hidden(key, false);
         // A key the app does not read would be kept and then do nothing: say so instead.

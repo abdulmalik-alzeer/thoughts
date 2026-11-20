@@ -382,7 +382,10 @@ pub fn system_prompt_full(d: &Dirs) -> String {
          app reloads), change or remove any built-in page or part of the app, its Recovery menu and Rollback included, change the app's data \
          folder, run git or any other command, and change and rebuild the app's own source code if its folder is named below. Add-ons and pages \
          may use every permission and the machine bridge (`thoughts.machine.*`, see README.md and docs/CUSTOMISING.md). \
-         The validation report the app shows is advice while full access is on; it does not stop a change from being kept.\n\
+         Every built-in page, Settings included, can be rewritten through pages.json (sections, parts, texts, boxes, `replace`) and the sidebar \
+         through nav.json, as README.md describes; where its page reference says a page, section or sidebar entry is out of reach, locked, \
+         never hidden or keeps its look, that limit does not apply while full access is on (History, Customise, Rollback and Recovery \
+         included). The validation report the app shows is advice while full access is on; it does not stop a change from being kept.\n\
          A message may list files the user attached: open each with the Read tool. The user cannot answer interactive tool prompts here — ask \
          questions in plain text.{note}",
         staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d)

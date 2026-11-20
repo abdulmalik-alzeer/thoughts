@@ -144,7 +144,7 @@ fn sections_problems(p: &Page, v: &Value, add: Add) {
         Some(None) => add(format!("`{id}.sections.hidden` must be a list of section ids."), format!("يجب أن تكون `{id}.sections.hidden` قائمة بمعرّفات الأقسام.")),
         Some(Some(l)) => for s in l {
             if widget_key(s) || section_problem(p, "hidden", s, add) { continue; }
-            if p.locked.iter().any(|x| x == current_id(s)) {
+            if !crate::full_access::on() && p.locked.iter().any(|x| x == current_id(s)) {
                 add(format!("The `{s}` section of `{id}` always stays: it can be moved, not hidden."), format!("القسم `{s}` في `{id}` يبقى دائماً: يمكن نقله ولا يمكن إخفاؤه."));
             }
         },
@@ -167,7 +167,7 @@ fn sections_problems(p: &Page, v: &Value, add: Add) {
             None => add(format!("`{id}.sections.replace` must be an object: {{ \"<section>\": \"widget:<id>\" }}."), format!("يجب أن تكون `{id}.sections.replace` كائناً: {{ \"<القسم>\": \"widget:<id>\" }}.")),
             Some(m) => for (s, v) in m {
                 if section_problem(p, "replace", s, add) { continue; }
-                if p.locked.iter().any(|x| x == current_id(s)) {
+                if !crate::full_access::on() && p.locked.iter().any(|x| x == current_id(s)) {
                     add(format!("The `{s}` section of `{id}` cannot be replaced."), format!("لا يمكن استبدال القسم `{s}` في `{id}`."));
                 } else if !v.as_str().map_or(false, widget_key) {
                     add(format!("`{id}.sections.replace.{s}` must be an add-on box, `widget:<id>` (the `id` given to `ui.addHomeWidget`)."),
@@ -209,6 +209,8 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
     for (id, cfg) in map {
         let shown_id = show_hidden(id, false);
         let Some(p) = page(id) else {
+            // Full access (`full_access.rs`): the pages kept out of reach may be replaced too.
+            if r.out_of_reach.iter().any(|x| x == id) && crate::full_access::on() { continue; }
             if r.out_of_reach.iter().any(|x| x == id) {
                 add(format!("`{shown_id}` is where customisations are reviewed, undone or switched off: it always stays as the app made it."),
                     format!("`{shown_id}` هي المكان الذي تُراجَع فيه التخصيصات أو يُتراجع عنها أو تُوقَف: تبقى دائماً كما صنعها التطبيق."));
@@ -293,7 +295,7 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
         }
         if let Some(s) = o.get("sections") { sections_problems(p, s, add); }
         if let Some(rp) = o.get("replace") {
-            if !p.replace {
+            if !p.replace && !crate::full_access::on() {
                 add(format!("The `{id}` page cannot be replaced as a whole: remove `replace`. Arrange its `sections` or change its details instead."),
                     format!("لا يمكن استبدال صفحة `{id}` كاملة: احذف `replace` ورتّب أقسامها `sections` أو غيّر تفاصيلها بدلاً من ذلك."));
             } else {

@@ -522,12 +522,15 @@ function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Fra
 export function pageCtx(p: { perms: Set<string>; read: string[] }, ctx?: Partial<PageCtx>): PageCtx {
   const kind = String(ctx?.route?.kind ?? 'plugin').slice(0, 40);
   const raw = ctx?.route;
+  // Full access (lib/fullAccess.ts): the whole route, whatever the add-on declared.
+  const full = fullAccessOn();
+  const has = (perm: string) => full || p.perms.has(perm);
   let path: string | null = null;
-  if (raw?.path && p.perms.has('library:read')) {
-    try { const clean = cleanPath(raw.path); if (!p.read.length || inFolders(p.read, clean)) path = clean; } catch { /* private or not a library path */ }
+  if (raw?.path && has('library:read')) {
+    try { const clean = cleanPath(raw.path); if (full || !p.read.length || inFolders(p.read, clean)) path = clean; } catch { /* private or not a library path */ }
   }
   const id = raw?.id == null ? null
-    : kind === 'chat' ? (p.perms.has('chats:read') ? String(raw.id).slice(0, 200) : null)
+    : kind === 'chat' ? (has('chats:read') ? String(raw.id).slice(0, 200) : null)
     : /^[a-z][a-zA-Z-]{0,30}$/.test(String(raw.id)) ? String(raw.id) : null;
   return { replaces: ctx?.replaces ? String(ctx.replaces).slice(0, 40) : null, route: { kind, id, path } };
 }
@@ -1106,7 +1109,14 @@ if (typeof window !== 'undefined') {
   });
   // Full access went off: frames made while it was on keep their wider sandbox and device features
   // for as long as they exist, so every one is torn down and made again under the usual limits.
-  onSettingsChanged(() => { if (!fullAccessOn() && hasFullFrames()) rebuildFrames(); });
+  // Either way the layer's pages are read again too (what full access lifts in pages.json and nav.json).
+  let lastFull: boolean | null = null;
+  onSettingsChanged(() => {
+    const now = fullAccessOn();
+    const changed = lastFull !== null && lastFull !== now;
+    lastFull = now;
+    if (changed || (!now && hasFullFrames())) rebuildFrames();
+  });
   new MutationObserver(relook).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-mode', 'dir', 'lang', 'class'] });
 }
 
