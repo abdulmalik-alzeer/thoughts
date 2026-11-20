@@ -822,6 +822,8 @@ pub struct RunInfo {
     /// The session it would have continued, and whether from a copy of it of its own (a branch).
     pub resume: Option<String>,
     pub fork: bool,
+    /// Started with full access on (`full_access.rs`): none of the app's own guards.
+    pub full_access: bool,
 }
 
 /// Stands in for the assistant program: does the "work" of a run and says whether it succeeded.
@@ -1758,6 +1760,7 @@ impl Drop for RunGuard {
 /// Everything that happens once a run is over, however it ended. The run's task drops its end of
 /// the Stop switch before calling this (see `release`).
 pub(crate) async fn finish(state: Arc<AppState>, id: String, ok: bool, record: Option<PathBuf>, touches_library: bool, on_done: Option<OnDone>) {
+    crate::full_access::forget(&id);
     // What this run changed in the library, told apart from what the user or another chat changed
     // meanwhile, becomes its own history entry and a list under its answer (FEAT-06). Worked out
     // while the run still counts as at work, so a save of the user's waiting for it records only theirs.
@@ -1809,6 +1812,8 @@ pub async fn start_run(
     // One run per chat at a time (checked again, for good, when the run takes its Stop switch).
     if state.runs.lock().await.contains_key(&spec.chat_id) { return Err(crate::tr::err("chat.running", &[])); }
     let settings = state.settings.read().await.clone();
+    // Full access (`full_access.rs`): every guard below that the app adds on its own yields.
+    let full = settings.full_access();
     // The library this run works for, from where it works and the library its chat belongs to
     // (`libraries::of_run`, which refuses the two disagreeing). That library's own private folders
     // apply, whichever library is open by the time it starts.
@@ -1823,6 +1828,7 @@ pub async fn start_run(
     for dir in std::iter::once(&spec.cwd).chain(spec.add_dirs.iter()) {
         if *dir == layer || *dir == staging { continue; }
         if *dir == reorg || crate::wraps::is_copy(dir) {
+            if full { continue; }
             // A second checkout of the library (Reorganize's, or a Wrap's). It holds the *recorded*
             // state, which is only as trusted as the folder on disk if its assistant files are the very same ones.
             let lib = library.as_deref().ok_or_else(|| crate::tr::err("library.none", &[]))?;
@@ -1835,7 +1841,7 @@ pub async fn start_run(
             continue;
         }
         refresh_starter_hook(&state, dir).await;
-        crate::trust::require(dir)?;
+        if !full { crate::trust::require(dir)?; }
     }
     let kind = state.chats.with(&spec.chat_id, |c| c.kind.clone()).await.unwrap_or_default();
     // Which program does the work (`assistant::for_run`). Everything decided below holds for both.
@@ -1862,8 +1868,10 @@ pub async fn start_run(
     // can be "bypass permissions". "Ask before changes" is gone: a stored `default` means `plan`.
     let mode = crate::settings::effective_permission_mode(spec.options.permission_mode.as_deref()).to_string();
     // Skipping every permission check is something the user switches on for a chat of their own —
-    // never a wrap, a workflow, a customise run or anything else the app starts itself.
-    if mode == crate::settings::BYPASS && kind != "chat" {
+    // never a wrap, a workflow, a customise run or anything else the app starts itself. With full
+    // access on, every run skips them (one that only plans keeps planning).
+    let mode = if full { crate::full_access::mode_for(&mode) } else { mode };
+    if !full && mode == crate::settings::BYPASS && kind != "chat" {
         return Err(crate::tr::err("bypass.chat_only", &[]));
     }
     let mut deny = private_deny_settings(library.as_deref(), &spec.cwd, &private_paths)?;
@@ -1883,7 +1891,9 @@ pub async fn start_run(
         deny = merge_deny(deny, Some(json!({"permissions": {"deny": spec.extra_deny}}).to_string()));
     }
     // What the run may use besides its files: commands, the web, the user's own set-up, the standing rules.
-    let mut prof = profile(&kind, &mode, spec.options.web);
+    let mut prof = if full { crate::full_access::profile() } else { profile(&kind, &mode, spec.options.web) };
+    // Full access: none of the rules above travel (no rules file at all).
+    if full { deny = None; }
     // Who answers when something needs permission: the user, in the chat (`approvals.rs`), for an
     // ordinary chat whose program can ask that way; nobody (it is refused) for everything else.
     let hook = state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1891,24 +1901,24 @@ pub async fn start_run(
     // refused when its help cannot be read, never started without the flags it gives.)
     let help = if hook.is_some() || on_codex { String::new() } else { run_help(&state).await? };
     // (Codex has no way to ask: its runs never get the prompt tool.)
-    let asks = !on_codex && crate::approvals::wanted(&kind, &mode, &prof)
+    let asks = !full && !on_codex && crate::approvals::wanted(&kind, &mode, &prof)
         && (hook.is_some() || (crate::approvals::supported(&help) && crate::approvals::port() != 0));
     // Strict private folders: commands are put to the user one by one, or closed where nobody can be asked.
-    let strict = crate::approvals::strict_applies(settings.strict_private(), &private_paths, &kind, &mode);
+    let strict = !full && crate::approvals::strict_applies(settings.strict_private(), &private_paths, &kind, &mode);
     if strict { prof = prof.strict(asks); }
     let dirs: Vec<&Path> = std::iter::once(spec.cwd.as_path()).chain(spec.add_dirs.iter().map(PathBuf::as_path)).collect();
-    let (prof_deny, prof_allow) = profile_rules(&prof, &dirs);
+    let (prof_deny, prof_allow) = if full { (vec![], vec![]) } else { profile_rules(&prof, &dirs) };
     if !prof_deny.is_empty() { deny = merge_deny(deny, Some(json!({"permissions": {"deny": prof_deny}}).to_string())); }
     // The copies of this chat's own attached files are outside the folders the run works in, where
     // a read is a question — and a customise run has nobody to answer it. They are opened by rule.
     let mut prof_allow = prof_allow;
     // (Only for the runs that get copies: the ones a message starts, `api::chat_send`.)
-    if matches!(kind.as_str(), "chat" | "customize") { prof_allow.extend(own_copies_allow(&crate::paths::home(), &spec.chat_id)); }
+    if !full && matches!(kind.as_str(), "chat" | "customize") { prof_allow.extend(own_copies_allow(&crate::paths::home(), &spec.chat_id)); }
     let deny = with_allow(deny, &prof_allow);
     let deny = if strict && prof.shell { with_ask(deny, &SHELL_TOOLS) } else { deny };
     // Every command is checked before it runs, in every mode (`shell_guard`). Without the app's
     // own program to check them, a run that may use the shell does not start.
-    let deny = if prof.shell && !on_codex {
+    let deny = if prof.shell && !on_codex && !full {
         let exe = crate::paths::app_exe().map_err(|e| anyhow::anyhow!("the assistant was not started: its command check is missing ({e})"))?;
         crate::shell_guard::with_hooks(deny, &exe, &crate::paths::home())
     } else { deny };
@@ -1935,7 +1945,12 @@ pub async fn start_run(
     // not its to change (all runs but first-time setup), whether CLAUDE.md is, which folders are
     // private (named only when the instructions travel in a private file), not to guess how long its
     // own work takes, and the user's language.
+    let full_note = full.then(|| crate::full_access::run_note(settings.full_access.source_dir.as_deref()));
     let system_text = |named: bool| {
+        if let Some(note) = &full_note {
+            return [spec.append_system.as_deref(), Some(note.as_str()), Some(estimates_note()), Some(language_note(&settings.language))]
+                .into_iter().flatten().collect::<Vec<_>>().join("\n\n");
+        }
         let private = private_note(library.as_deref(), &private_paths, named);
         let (asking, strictly) = (asks.then_some(crate::approvals::NOTE), strict.then(|| crate::approvals::strict_note(prof.shell)));
         [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(estimates_note()), Some(language_note(&settings.language))]
@@ -1943,6 +1958,8 @@ pub async fn start_run(
     };
     let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };
     let id = spec.chat_id.clone();
+    // Remembered, so switching full access off stops this run (`full_access::switched_off`).
+    if full { crate::full_access::note_started(&id); } else { crate::full_access::forget(&id); }
 
     // What the run's questions are asked with, for as long as it runs.
     let ticket = asks.then(|| crate::approvals::open(&state, crate::approvals::RunCtx {
@@ -1954,7 +1971,7 @@ pub async fn start_run(
             .iter().filter_map(|r| r.as_str().map(String::from)).collect() };
         let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: Some(mode.clone()),
             deny: rules("deny"), allow: rules("allow"), ask: rules("ask"), prompt_token: ticket.as_ref().map(|t| t.token().to_string()),
-            profile: prof, system: system_text(true), program, resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some() };
+            profile: prof, system: system_text(true), program, resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some(), full_access: full };
         let mut kill_rx = take_switch(&state, &id).await?;
         state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
         state.ack_interrupted(&id).await;
@@ -1979,7 +1996,8 @@ pub async fn start_run(
 
     if on_codex {
         let launched = crate::codex::launch(state, crate::codex::Launch { spec, kind, mode, profile: prof, standing, record, touches_library, on_done,
-            library, private: settings.private_paths.clone(), language: settings.language.clone() }).await;
+            library, private: settings.private_paths.clone(), language: settings.language.clone(), full_access: full,
+            full_note: full_note.clone() }).await;
         // Started: its end (`finish`) closes the watch on what it changes.
         if launched.is_ok() { if let Some(w) = watching { w.hand_over(); } }
         return launched;
@@ -2048,8 +2066,8 @@ pub async fn start_run(
     let pid = child.id();
     crate::runs::record(pid, &spec.chat_id);
     let started = std::time::Instant::now();
-    crate::log::info(format!("run {} started (pid {}, mode {mode}, profile {}{}{}, in {})", spec.chat_id, pid.unwrap_or(0), prof.name,
-        if asks { ", asks the user" } else { "" }, if strict { ", strict private folders" } else { "" }, spec.cwd.display()));
+    crate::log::info(format!("run {} started (pid {}, mode {mode}, profile {}{}{}{}, in {})", spec.chat_id, pid.unwrap_or(0), prof.name,
+        if asks { ", asks the user" } else { "" }, if strict { ", strict private folders" } else { "" }, if full { ", FULL ACCESS: no app guards" } else { "" }, spec.cwd.display()));
     let prompt = spec.prompt.clone();
     tokio::spawn(async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;

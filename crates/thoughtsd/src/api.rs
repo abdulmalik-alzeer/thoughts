@@ -57,6 +57,10 @@ impl IntoResponse for ApiErr {
 }
 fn ok() -> R { Ok(Json(json!({"ok": true}))) }
 
+/// Tests elsewhere: the HTTP status an error answers with.
+#[cfg(test)]
+pub fn shown_status(e: &ApiErr) -> u16 { crate::tr::classify_in(false, &e.0).status }
+
 /// The last few API errors, for the diagnostics report: `{time, method, path, status, code, error}`.
 fn recent_errors() -> &'static std::sync::Mutex<std::collections::VecDeque<Value>> {
     static E: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<Value>>> = std::sync::OnceLock::new();
@@ -132,7 +136,21 @@ fn plugin_scope_allowed(path: &str, query: &str) -> bool {
     !guarded || PLUGIN_SCOPED.contains(&path)
 }
 
-async fn plugin_gate(req: Request, next: Next) -> Response {
+/// `query` without `scope=plugin` (and the add-on's own words that only mean something with it):
+/// with full access on, a request an add-on makes is the user's own (`full_access.rs`).
+fn unscoped(query: &str) -> String {
+    query.split('&').filter(|kv| !kv.is_empty() && *kv != "scope=plugin").collect::<Vec<_>>().join("&")
+}
+
+async fn plugin_gate(State(st): S, mut req: Request, next: Next) -> Response {
+    if plugin_scoped(req.uri().query().unwrap_or("")) && st.settings.read().await.full_access() {
+        let q = unscoped(req.uri().query().unwrap_or(""));
+        let pq = if q.is_empty() { req.uri().path().to_string() } else { format!("{}?{q}", req.uri().path()) };
+        let mut parts = req.uri().clone().into_parts();
+        if let Ok(v) = pq.parse() { parts.path_and_query = Some(v); }
+        if let Ok(u) = axum::http::Uri::from_parts(parts) { *req.uri_mut() = u; }
+        return next.run(req).await;
+    }
     if !plugin_scope_allowed(req.uri().path(), req.uri().query().unwrap_or("")) {
         return ApiErr(crate::tr::err("plugin.not_allowed", &[("path", req.uri().path())])).into_response();
     }
@@ -263,6 +281,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::tokens::routes())
         .merge(crate::approvals::routes())
         .merge(crate::consent::routes())
+        // full access: what pages may ask of the computer (refused while it is off)
+        .merge(crate::machine::routes())
         // maintenance: self-check, newer version, moving, removing
         .merge(crate::care_api::routes())
         // bringing in notes the user already has
@@ -276,7 +296,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/events", get(events))
         // changes waiting at the main location (a look only, `incoming.rs`)
         .merge(crate::incoming::routes())
-        .layer(middleware::from_fn(plugin_gate))
+        .layer(middleware::from_fn_with_state(state.clone(), plugin_gate))
         .layer(middleware::from_fn_with_state(state.clone(), crate::libraries::gate))
         .layer(middleware::from_fn(note_errors))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
@@ -853,6 +873,15 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
             && crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::SettingsBypass, "")) {
         return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
     }
+    // Full access (`full_access.rs`): never changed by what the body says. Switched on only with the
+    // shell's approval from its own two-step warning (`?confirm=full-access&approval=`); the app
+    // token alone is not a yes. Switched off by `?fullAccess=off`, with nothing else needed.
+    let (full_on, full_off) = (full_access_change(&q, old.full_access.on), q.get("fullAccess").map(String::as_str) == Some("off"));
+    if full_on && !crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::FullAccess, "") {
+        return Err(crate::tr::err("full_access.unconfirmed", &[]).into());
+    }
+    if full_on { new.full_access.on = true; new.full_access.since = Some(chrono::Utc::now().to_rfc3339()); }
+    if full_off { new.full_access.on = false; }
     // The login item goes first: when it is refused (an app run from a download) nothing changes.
     let login_changed = new.daemon.run_at_login != old.daemon.run_at_login;
     if login_changed { login_item(new.daemon.run_at_login)?; }
@@ -865,6 +894,11 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     crate::claude::set_reports(new.assistant_reports);
     *cur = new.clone();
     drop(cur);
+    if full_on { crate::log::warn(format!("full access switched ON by the user, confirmed in the app's own warning, at {}", new.full_access.since.as_deref().unwrap_or(""))); }
+    if full_off && old.full_access.on {
+        let stopped = crate::full_access::switched_off(&st).await;
+        crate::log::warn(format!("full access switched off: every guard holds again; {stopped} run(s) started with it were stopped"));
+    }
     // The same library in a new place (the user said so): its chats follow it.
     if q.get("library").map(String::as_str) == Some("moved") {
         if let (Some(was), Some(now)) = (&old.library_path, &new.library_path) {
@@ -878,6 +912,11 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     st.emit(json!({"type": "settings.changed"}));
     if new.library_id() != old.library_id() { st.emit(json!({"type": "library.switched", "id": new.library_id()})); }
     Ok(Json(serde_json::to_value(new)?))
+}
+
+/// Does this save ask to switch full access on (it is off, and `?confirm=full-access` is sent)?
+fn full_access_change(q: &HashMap<String, String>, on_now: bool) -> bool {
+    !on_now && q.get("confirm").map(String::as_str) == Some(crate::settings::FULL_ACCESS_CONFIRM)
 }
 
 /// Change the settings as one step: the change is made on a copy, saved, and only then swapped in,
