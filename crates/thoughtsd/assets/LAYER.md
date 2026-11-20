@@ -54,9 +54,9 @@ of the layer).
 | `custom.css` | Style overrides, loaded after the built-in theme |
 | `themes.json` | Extra themes listed in the theme picker |
 | `home.json` | Home screen: quick-start chips, hidden sections, order of sections and widgets |
-| `nav.json` | Sidebar: hidden pages, order, labels |
+| `nav.json` | Sidebar: hidden pages, order, names, icons, groups, the start page |
 | `todos.json` | Todos page: grouping, sorting, filter |
-| `pages.json` | Details of the app's own pages: headings, wording, hidden parts, add-on boxes, an add-on page in place of one |
+| `pages.json` | The app's own pages: headings, wording, hidden parts, their sections (order, hidden, size, one replaced, boxes between), an add-on page in place of a whole page |
 | `plugins/<name>.js` | A plugin (ES module) using the Plugin API below |
 | `plugins/<name>.json` | That plugin's declaration: permissions, write folders |
 | `views/<name>.html` | A static page shown in the sidebar, in a sandboxed frame |
@@ -90,10 +90,14 @@ The app validates the staged files before the user can keep them. Any of these b
 - `read` is given without `library:read`, `todos:read` or `ideas:read`, is empty, or names a folder
   that could not be a `write` folder either (same rules as above);
 - a view declares anything but read permissions, or declares `write`;
-- `nav.json` hides `home`, `settings` or `help`;
-- `pages.json` names a page, part, text or place that is not listed in its section, gives a heading
-  to Docs, puts boxes on Home (use `home.json`), replaces Home or Docs, or names in `replace` an
-  add-on file that the change does not have;
+- `nav.json` has a key other than `hidden`, `order`, `labels`, `icons`, `groups`, `start`; hides
+  `home`, `customise`, `settings` or `help`; renames or re-icons `customise`; uses an icon not in the
+  reference; puts a page in two groups; or starts on a hidden page;
+- `pages.json` names a page, part, text, section, size or place that is not in the "Built-in pages
+  reference" below, gives a heading to Docs, puts `boxes` on Home (use `sections`), hides or
+  replaces a section the reference marks as always shown, replaces Settings as a whole, names
+  History, Customise or the change review at all, or names in `replace` an add-on file that the
+  change does not have;
 - a workflow has no `prompt`, an unknown trigger, a time that is not `"HH:MM"`, a monthly `day`
   outside 1–28 / `"last"`, or a `weekday` outside 0–6;
 - a plugin or view file directly in `plugins/` or `views/` has a name that is not plain: use only
@@ -166,6 +170,7 @@ permissions.
 | `todos:write` | `todos.add`, `todos.setDone`, `todos.edit`, `todos.remove` |
 | `ideas:read` | `ideas.list` |
 | `ideas:write` | `ideas.setStatus` — only for items inside the folders declared in `write` (none declared: no item) |
+| `chats:read` | `chats.list` — the list of chats (titles and dates, never their messages) |
 | `chat:start` | `chat.start` |
 | `storage` | `storage.get`, `storage.set` — the plugin's own private document |
 | `files:save` | `ui.saveFile` — hand the user a `.csv`, `.txt`, `.md` or `.json` file in the app's save dialog |
@@ -260,25 +265,38 @@ All three keys are optional. Keep what is already there unless the user asked to
 
 ### nav.json
 
-The sidebar. All keys optional; create the file when you first need it.
+The sidebar. All keys optional; create the file when you first need it. The user can also arrange
+the sidebar by hand (the pencil beside the page list, "Edit sidebar"); that writes this same file,
+so read what is there first and keep it.
 
 ```json
 {
   "hidden": ["projects"],
   "order": ["home", "todos", "chats", "ideas", "docs", "client-intake"],
-  "labels": { "ideas": { "en": "Clients", "ar": "العملاء" } }
+  "labels": { "ideas": { "en": "Clients", "ar": "العملاء" } },
+  "icons": { "ideas": "folder", "client-intake": "edit" },
+  "groups": [
+    { "id": "work", "label": { "en": "Work", "ar": "العمل" }, "items": ["todos", "ideas", "client-intake"] }
+  ],
+  "start": "todos"
 }
 ```
 
-- Page ids: `home`, `chats`, `ideas`, `todos`, `docs`, `projects`, `me`, `graph`, plus the `id` of any page
-  a plugin added with `ui.addView`. A plugin page can also be named `<plugin file>:<id>`
-  (`hours.js:board`), which stays exact when two plugins use the same `id`; an `id` that is also an
-  app page's (`todos`) always means the app's page.
-- `hidden` — pages not shown in the sidebar. `home` can never be hidden, and Settings and Help
-  always stay. Hiding a page deletes nothing; the user's data is untouched.
+- Page ids: the sidebar ids in the reference below (`home`, `chats`, `ideas`, `todos`, `docs`,
+  `projects`, `graph`, `inbox`, `usage`, `me`, `customise`), plus the `id` of any page a plugin
+  added with `ui.addView`. A plugin page can also be named `<plugin file>:<id>` (`hours.js:board`),
+  which stays exact when two plugins use the same `id`; an `id` that is also an app page's
+  (`todos`) always means the app's page.
+- `hidden` — pages not shown in the sidebar. `home` and `customise` can never be hidden, and
+  Settings and Help always stay. Hiding a page deletes nothing; the user's data is untouched.
 - `order` — pages in this order first; the rest follow in their usual order.
 - `labels` — rename a page, e.g. "Ideas" → "Clients" for a lawyer or "Classes" for a teacher.
-  Give both `en` and `ar` when you can (at least one), 40 characters at most.
+  Give both `en` and `ar` when you can (at least one), 40 characters at most. `customise` keeps
+  its name.
+- `icons` — a page's icon, one of the sidebar icons in the reference. `customise` keeps its icon.
+- `groups` — up to 8 headed groups; each page sits in one group at most, in the group's `items`
+  order. Pages in no group come first, under no heading. `order` still sorts within the list.
+- `start` — the page the app opens on (a page id, not a hidden one). Without it, Home.
 
 To hide or rename a page always use `nav.json` — never CSS. To change something *on* a page, use
 `pages.json` (next but one).
@@ -301,10 +319,15 @@ How the Todos page is laid out. All keys optional.
 
 ### pages.json
 
-Details of the app's own pages. Use it whenever the user wants to change something they see on
-Home, Chats, Ideas, Todos, Docs or Folders: "call the Todos page 'Tasks'", "hide the calendar
-button", "put my hours box at the top of Todos", "remove the picture on Home", "change the greeting".
-All keys optional; create the file when you first need it and keep what is already there.
+The app's own pages. **Every built-in page in the reference below can be changed** — its heading,
+wording and parts, the order, visibility and size of its sections, add-on boxes between them, a
+single section replaced by an add-on box, or the whole page replaced by an add-on page. Use it
+whenever the user wants something they see on a page to change: "call the Todos page 'Tasks'",
+"put the lists above the filters", "hide the quick-add box", "make my hours box half as wide and
+put it beside the lists", "redo the Todos page my way". Only History, the change review, Customise,
+Rollback and the Recovery menu are out of reach (they are how customisations are undone), and
+Settings cannot be replaced as a whole. All keys optional; create the file when you first need it
+and keep what is already there.
 
 ```json
 {
@@ -313,59 +336,92 @@ All keys optional; create the file when you first need it and keep what is alrea
     "intro": { "en": "Everything due for my clients", "ar": "كل ما يستحق لعملائي" },
     "hidden": ["calendarExport", "moveDone"],
     "labels": { "quickAddPlaceholder": { "en": "What needs doing?", "ar": "ما الذي يجب إنجازه؟" } },
-    "boxes": { "top": ["widget:hours-month"], "bottom": [] }
+    "boxes": { "top": ["widget:hours-month"], "bottom": [] },
+    "sections": {
+      "order": ["quickAdd", "lists", "tools"],
+      "hidden": ["calendar"],
+      "size": { "lists": "wide", "widget:hours-week": "third" },
+      "replace": { "tools": "widget:my-filters" },
+      "insert": [{ "box": "widget:hours-week", "after": "lists" }]
+    }
   },
-  "home": { "title": { "en": "{greeting}, team", "ar": "{greeting} يا فريق" }, "hidden": ["emblem"] },
+  "home": { "title": { "en": "{greeting}, team", "ar": "{greeting} يا فريق" }, "hidden": ["emblem"],
+            "sections": { "order": ["todos", "chats", "hero"], "hidden": ["stats"], "size": { "todos": "half", "chats": "half" } } },
   "ideas": { "replace": "board.js:board" }
 }
 ```
 
-For each page (`home`, `chats`, `ideas`, `todos`, `docs`, `projects` — the last is the Folders page):
+For each page (the "Built-in pages reference" below lists every id; `projects` is the Folders page):
 
 - `title` — the page's heading, `{ "en", "ar" }`, one line, 60 characters at most. Without it the
   heading follows the sidebar name from `nav.json`, so when the user renames a page, `nav.json`
   alone renames both. On Home the title is the greeting: write `{greeting}` for "Good morning" /
   "Good evening" and `{name}` for the user's name (only use `{name}` when they have set one).
-  Docs has no heading.
 - `intro` — one line (300 characters at most) shown under the heading. On Home and Folders it
-  replaces the app's own line. Not on Docs.
-- `hidden` — parts of the page not to show (only these names):
-
-  | Page | Parts |
-  |---|---|
-  | `home` | `date`, `greeting`, `intro`, `emblem` (the picture), `todoChip`, `noteChip`, `checkInChip` (the buttons under the message box) |
-  | `chats` | `newChat`, `folderChats` (new chat in a folder), `search`, `select`, `filters`, `systemChats` (chats the app started itself), `keep` (how long chats are kept) |
-  | `ideas` | `capture` (the new-idea box), `areas`, `search`, `statusFilter`, `sort`, `count` |
-  | `todos` | `count`, `views` (list / calendar), `calendarExport`, `filters`, `grouping`, `sorting`, `showDone`, `moveDone`, `quickAdd` (the new-todo box at the top) |
-  | `docs` | `filter` (the file filter) |
-  | `projects` | `intro`, `linkForm` (linking a new folder) |
-
-  Home's sections (todos, chats…) are hidden and ordered with `home.json`, not here.
-- `labels` — new wording for these texts, `{ "en", "ar" }`, one line, 60 characters at most:
-
-  | Page | Texts |
-  |---|---|
-  | `home` | `askPlaceholder`, `todoChip`, `noteChip`, `ideasTitle`, `ideasIntro`, `upcomingTitle`, `todosTitle`, `chatsTitle`, `projectsTitle` |
-  | `chats` | `newChat`, `search`, `empty` |
-  | `ideas` | `capturePlaceholder`, `capture`, `search` |
-  | `todos` | `quickAddPlaceholder`, `add`, `listPlaceholder` |
-  | `docs` | `filter` |
-  | `projects` | `link`, `newChat` |
-
+  replaces the app's own line.
+- `hidden` — small parts of the page not to show (the "Parts" column), such as one button.
+- `labels` — new wording for the texts in the "Texts" column, `{ "en", "ar" }`, one line, 60
+  characters at most.
 - `boxes` — add-on boxes at the `top` (under the heading) or `bottom` of the page: up to six
   `widget:<id>` each, where `<id>` is what a plugin gave `ui.addHomeWidget`. A box placed on another
-  page leaves Home unless `home.json` `order` names it too. Not on Home (use `home.json`).
-- `replace` — show an add-on page in place of the app's own: the page's id as `nav.json` knows it
-  (`board`, or exactly `board.js:board`; for an HTML view `view:<name>.html`). Only `chats`, `ideas`,
-  `todos` and `projects`. The usual page stays one press away, and the app shows it by itself
-  whenever the add-on page is missing, switched off or fails — so a replacement can never lock the
-  user out. Prefer changing details over replacing a page; replace only when the user asks for a
-  page of their own design.
+  page leaves Home unless Home's sections place it there too. Not on Home (use `sections`).
+- `sections` — the page's big blocks, by the ids in the "Sections" column:
+  - `order` — sections (and `widget:<id>` boxes) in this order first; the rest follow in their usual
+    order. To move one section, list the sections you want before it.
+  - `hidden` — sections not to show. A section marked "always shown" can be moved but not hidden.
+  - `size` — `full` (the default), `wide` (two thirds), `half` or `third` of the page's width, for a
+    section or a `widget:<id>` box. Neighbours that fit share a row; on a narrow window every
+    section is full width again.
+  - `replace` — `{ "<section>": "widget:<id>" }`: that section is drawn by an add-on box instead.
+    When the box is missing or fails, the app's own section comes back by itself.
+  - `insert` — `[{ "box": "widget:<id>", "before": "<section>" }]` (or `"after"`): an add-on box
+    placed right next to a section, up to 12.
+  On Home, `home.json` `order` / `hidden` still work; `pages.json` `home.sections` does the same and
+  more (sizes, replacing, inserting) and wins where both say something. Home's `hero` is the
+  greeting with the message box.
+- `replace` — show an add-on page in place of the whole page: the page's id as `nav.json` knows it
+  (`board`, or exactly `board.js:board`; for an HTML view `view:<name>.html`). See "Rewriting a
+  built-in page" below. The usual page stays one press away, the user can keep it switched off per
+  page, and the app shows its own page by itself — and says why — whenever the add-on page is
+  missing, switched off or fails. So a replacement can never lock the user out.
 
 The app's questions, warnings and error messages are never parts: they cannot be hidden or
-reworded. Never hide or reword with CSS what `pages.json` can do. To change how one page looks,
-scope `custom.css` to it: the open page is on the document as `data-page`, e.g.
-`[data-page="todos"] main h1 { letter-spacing: 0; }`.
+reworded. Never hide, move or reword with CSS what `pages.json` can do. To change how one page or
+section looks, scope `custom.css` to it: the open page is on the document as `data-page`, and every
+section carries `data-slot="<page>.<section>"`, e.g.
+`[data-page="todos"] [data-slot="todos.lists"] { --radius-lg: 4px; }`. These attributes are stable
+across releases (the app's own class names are not: never select by them).
+
+**After an update.** Section ids are kept from one version to the next; one that has to change is
+listed under "Renamed ids" in the reference and the old id keeps working. Anything in `pages.json`
+this version does not know is ignored and the page says so, so a customisation never silently
+stops working.
+
+#### Rewriting a built-in page
+
+When the user wants a page done their own way ("redo my Todos page as a board"), write a plugin
+page with `ui.addView` and put its id in that page's `replace`. It is a first-class page:
+
+- `thoughts.page` tells it which page it stands in for and the route the app was asked for:
+  `{ "id": "board", "replaces": "todos", "route": { "kind": "todos", "id": "calendar", "path": null } }`
+  (Docs gets the file in `route.path`).
+- The same data the built-in page uses, through the calls in the Plugin API table (todos, ideas,
+  library, chats), with the permissions declared as usual.
+- `thoughts.i18n.t(key, vars)` gives the app's own wording in the user's language
+  (`thoughts.i18n.lang`, `thoughts.i18n.dir`), so the page reads like the app; keys you do not know
+  come back unchanged — write your own words then, in both languages.
+- The app's theme and its own building blocks are already in the page: the tokens, and the classes
+  `btn` (`btn primary`, `btn ghost`), `card`, `surface`, `pill`, `row`, `grow`, `muted`, `seg` /
+  `segb`, `eyebrow`, `display`, `skel`, `sr-only`, plus styled headings, inputs and links.
+- `on('todos.changed', …)` and the other events keep it fresh.
+
+It draws in its own sealed frame like every add-on page. If it throws or never draws, the app
+shows its own page with a note saying what went wrong, and the user can switch the replacement
+off for that page.
+
+## Built-in pages reference
+
+{{BUILTIN_PAGES}}
 
 ### plugins/*.js — Plugin API v1
 
@@ -399,6 +455,7 @@ export default function (thoughts) {
 | `thoughts.todos.edit(item, text)` | Replaces a todo's text (keep or change its ` @due(…)` suffix) | `todos:write` |
 | `thoughts.todos.remove(item)` | Deletes a todo | `todos:write` |
 | `thoughts.ideas.list()` | Promise of `[{ path, area, slug, title, status, summary, tags, updated }]` | `ideas:read` |
+| `thoughts.chats.list()` | Promise of `[{ id, title, kind, updated, pinned, archived, running, unwrapped, projectId, messageCount }]`; open one with `ui.go({ kind: "chat", id })` | `chats:read` |
 | `thoughts.ideas.setStatus(path, status)` | Sets an item's status (`path` exactly as given by `ideas.list()`, inside a folder declared in `write`); statuses are `seed`, `active`, `parked`, `done`, `dropped` | `ideas:write` |
 | `thoughts.storage.get()` | Promise of the plugin's own saved object (`{}` the first time) | `storage` |
 | `thoughts.storage.set(obj)` | Saves `obj` (a plain JSON object, at most 256 KB) in place of what was saved before | `storage` |
@@ -409,12 +466,14 @@ export default function (thoughts) {
 | `thoughts.ui.notify(text)` | A short notice under the plugin's name: in the app, and as a system notification while the app is in the background and the user has notifications on ("Timer finished"). At most one every 20 seconds and 10 an hour | `notify` |
 | `thoughts.ui.saveFile(name, text)` | Opens the save dialog for a file named `name` (`.csv`, `.txt`, `.md` or `.json`, 5 MB at most); the user chooses where. Promise of `{ saved }`. In a `.csv`, a cell that starts with `=`, `+`, `-` or `@` and is not a number is saved with a `'` in front (so no spreadsheet runs it as a formula); in a `.md`, pictures become links and HTML tags are written as text. Only right after the user pressed something of this plugin | `files:save` |
 | `thoughts.ui.print()` | Prints the plugin's page as it is, whole (only from a page, not a Home widget). Only right after the user pressed something of this plugin | none |
-| `thoughts.ui.go(view)` | Opens a page: `"home"`, `"todos"`, `"ideas"`, `"docs"`, `"projects"`, `"settings"`, or the `id` of a view you added. Only right after the user pressed something of this plugin | none |
+| `thoughts.ui.go(view)` | Opens a page: `"home"`, `"todos"`, `"ideas"`, `"docs"`, `"projects"`, `"settings"`, the `id` of a view you added, or `{ kind: "chat", id }` / `{ kind: "docs", path }`. Only right after the user pressed something of this plugin | none |
 | `thoughts.ui.addView({ id, title, icon?, render(el) })` | Adds a page to the sidebar; `render` fills the element `el` | none |
 | `thoughts.ui.addCommand({ id, title, run })` | Adds a command to the command palette | none |
 | `thoughts.ui.addHomeWidget({ id, title, render(el) })` | Adds a box to the Home screen (place it with `widget:<id>` in `home.json`), or to another page with `boxes` in `pages.json` | none |
 | `thoughts.ui.addHomeChip({ id, label, prompt })` | Adds a quick-start chip on Home that fills the prompt box (prefer `home.json` when it is static) | chat:start |
 | `thoughts.ui.addItemAction({ target, id, label, run })` | Adds an action to each todo (`target: "todo"`) or idea (`target: "idea"`); see below | none |
+| `thoughts.page` | In a page: `{ id, replaces, route }` (see "Rewriting a built-in page"); `null` elsewhere | none |
+| `thoughts.i18n` | In a page: `{ lang, dir, t(key, vars) }` — the app's own wording | none |
 | `thoughts.on(event, cb)` | Calls `cb` when something happens; returns a function that stops listening | none |
 
 Events for `on`: `layer.changed` (customisations were kept or undone), `todos.changed`,
@@ -518,8 +577,8 @@ const call = (method, ...args) => new Promise((resolve, reject) => {
 const todos = await call('todos.list');
 ```
 
-Available methods: `library.list`, `library.read`, `library.search`, `todos.list`, `ideas.list`
-(permissions `library:read`, `todos:read`, `ideas:read`). Anything that saves, edits or reacts —
+Available methods: `library.list`, `library.read`, `library.search`, `todos.list`, `ideas.list`,
+`chats.list` (permissions `library:read`, `todos:read`, `ideas:read`, `chats:read`). Anything that saves, edits or reacts —
 a form, a board, a tracker — must be a plugin with `ui.addView`, not an HTML view.
 
 ### workflows/*.json
@@ -1059,3 +1118,27 @@ Keep keys already in either file.
 
 `SUMMARY.md`: "Todos are now called Tasks. The Tasks page no longer shows the calendar buttons,
 and your hours this month sit at the top of it. Open Tasks to see it."
+
+### 9. Rearrange Todos and Home, and tidy the sidebar
+
+"On Todos put the lists first and drop the quick-add box; on Home show my todos and chats side by
+side at the top; call Ideas 'Clients', hide Graph, and open the app on Todos."
+
+`pages.json`
+
+```json
+{
+  "todos": { "sections": { "order": ["lists", "tools"], "hidden": ["quickAdd"] } },
+  "home": { "sections": { "order": ["todos", "chats", "hero"], "size": { "todos": "half", "chats": "half" } } }
+}
+```
+
+`nav.json`
+
+```json
+{ "labels": { "ideas": { "en": "Clients", "ar": "العملاء" } }, "hidden": ["graph"], "start": "todos" }
+```
+
+`SUMMARY.md`: "Todos shows your lists first, without the quick-add box. Home starts with your todos
+and chats side by side. Ideas is now called Clients, Graph is out of the sidebar, and the app opens
+on Todos."

@@ -6,7 +6,7 @@ use crate::applayer::{self, Dirs, Git};
 use crate::state::AppState;
 use crate::{packs, staging, suggestions, updates, usage, workflows};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use chrono::Local;
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -49,6 +49,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/addons/switch", post(addon_switch))
         .route("/api/layer/addons/remove", post(addon_remove))
         .route("/api/layer/addons/permission", post(addon_permission))
+        .route("/api/layer/nav", put(nav_edit))
+        .route("/api/layer/pages/builtin", post(page_builtin))
         .route("/api/layer/addons/data/restore", post(addon_data_restore))
         .route("/api/layer/addons/data/clear", post(addon_data_clear))
         .route("/api/layer/addons/data/forget", post(addon_data_forget))
@@ -464,6 +466,29 @@ async fn addon_permission(State(st): S, Json(a): Json<AddonRef>) -> R {
     let _g = LAYER_LOCK.lock().await;
     let hash = applayer::withdraw_in(Git(Some(&st)), &Dirs::real().layer, &a.path, &a.permission).await?;
     crate::log::info(format!("layer: {} no longer has {}", a.path, a.permission));
+    changed(&st, &hash)
+}
+
+/// `PUT /api/layer/nav` with the whole `nav.json` the user arranged in "Edit sidebar" → `{ok, hash}`.
+/// Checked exactly as a reviewed change is; `{}` removes the file (the usual sidebar). The user made
+/// it here by hand, so it is kept at once, as one history entry they can undo.
+async fn nav_edit(State(st): S, Json(nav): Json<Value>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let ar = arabic(&st).await;
+    let hash = applayer::nav_in(Git(Some(&st)), &Dirs::real().layer, &nav, ar).await?;
+    crate::log::info("layer: the sidebar was edited by hand");
+    changed(&st, &hash)
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct BuiltinRef { page: String, on: bool }
+
+/// `POST /api/layer/pages/builtin {page, on}` → `{ok, hash}`: `on` keeps the app's own page although
+/// a customisation replaces it; `false` uses the replacement again.
+async fn page_builtin(State(st): S, Json(b): Json<BuiltinRef>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let hash = applayer::builtin_in(Git(Some(&st)), &Dirs::real().layer, &b.page, b.on).await?;
     changed(&st, &hash)
 }
 

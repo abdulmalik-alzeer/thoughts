@@ -13,7 +13,16 @@ use std::path::{Path, PathBuf};
 
 /// The contract that teaches the AI how to customise the app. Rewritten into the layer as
 /// `README.md` on every start, so a new app version can teach new abilities.
-pub const CONTRACT: &str = include_str!("../assets/LAYER.md");
+/// The layer contract as written in `assets/LAYER.md`, before the generated reference is filled in.
+const CONTRACT_SOURCE: &str = include_str!("../assets/LAYER.md");
+
+/// The layer contract (the layer's README.md): `assets/LAYER.md` with its "Built-in pages
+/// reference" generated from the reference the UI uses (`staging::pages::reference_markdown`), so
+/// what the assistant reads is exactly what this version accepts.
+pub fn contract() -> &'static str {
+    static C: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    C.get_or_init(|| CONTRACT_SOURCE.replace("{{BUILTIN_PAGES}}", &crate::staging::pages::reference_markdown()))
+}
 
 /// Default layer files shipped with the app (besides README.md, which is always the contract).
 /// App updates merge these three-way against the user's copies (see `updates.rs`).
@@ -140,7 +149,7 @@ pub async fn ensure_in(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
             std::fs::create_dir_all(dir.join(sub))?;
             std::fs::write(dir.join(sub).join(".gitkeep"), "")?;
         }
-        std::fs::write(dir.join("README.md"), CONTRACT)?;
+        std::fs::write(dir.join("README.md"), contract())?;
         for (p, text) in SHIPPED { std::fs::write(dir.join(p), text)?; }
         g.run(dir, &["init", "-q", "-b", "main"]).await?;
         write_exclude(dir);
@@ -149,8 +158,8 @@ pub async fn ensure_in(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
     }
     write_exclude(dir);
     for sub in ["plugins", "views", "workflows"] { let _ = std::fs::create_dir_all(dir.join(sub)); }
-    if std::fs::read_to_string(dir.join("README.md")).ok().as_deref() != Some(CONTRACT) {
-        std::fs::write(dir.join("README.md"), CONTRACT)?;
+    if std::fs::read_to_string(dir.join("README.md")).ok().as_deref() != Some(contract()) {
+        std::fs::write(dir.join("README.md"), contract())?;
         g.run(dir, &["add", "--", "README.md"]).await?;
         if g.run(dir, &["diff", "--cached", "--quiet", "--", "README.md"]).await.is_err() {
             // Only the guide goes into this commit, whatever else is lying around.
@@ -165,10 +174,10 @@ pub async fn ensure_in(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
 pub const API_VERSION: u64 = 1;
 
 /// Every permission a plugin may declare.
-pub const PERMISSIONS: &[&str] = &["library:read", "library:write", "todos:read", "todos:write", "ideas:read", "ideas:write", "chat:start", "storage",
+pub const PERMISSIONS: &[&str] = &["library:read", "library:write", "todos:read", "todos:write", "ideas:read", "ideas:write", "chats:read", "chat:start", "storage",
     "files:save", "notify", "assistant:ask"];
 /// What a sandboxed HTML view may declare (views only ever read).
-pub const VIEW_PERMISSIONS: &[&str] = &["library:read", "todos:read", "ideas:read"];
+pub const VIEW_PERMISSIONS: &[&str] = &["library:read", "todos:read", "ideas:read", "chats:read"];
 /// The permissions that read the library. A `read` list narrows all three to its folders.
 pub const READ_PERMISSIONS: &[&str] = &["library:read", "todos:read", "ideas:read"];
 
@@ -352,6 +361,8 @@ fn manifest_with(dir: &dyn LayerFiles, arabic: bool, off: &BTreeSet<String>) -> 
         "pages": object("pages.json"),
         "workflows": dir.workflows(),
         "off": off.iter().filter(|p| dir.has_file(p)).collect::<Vec<_>>(),
+        // Built-in pages the user chose to keep although a customisation replaces them (`builtin_in`).
+        "builtin": builtin_pages_of(dir),
     })
 }
 
@@ -438,6 +449,65 @@ pub async fn switch_in(g: Git<'_>, dir: &Path, path: &str, on: bool) -> anyhow::
         if on { off.remove(path); } else { off.insert(path.to_string()); }
         write_off(dir, &off)?;
         Ok(vec![ADDONS_FILE.to_string()])
+    }).await
+}
+
+/// Built-in pages the user chose to see as the app made them although `pages.json` replaces them
+/// (`addons.json` `builtin`). Only page ids the reference knows are kept.
+fn builtin_pages_of(dir: &dyn LayerFiles) -> Vec<String> {
+    let v: Value = dir.file(ADDONS_FILE).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+    let mut out: Vec<String> = v["builtin"].as_array().into_iter().flatten().filter_map(Value::as_str)
+        .filter(|p| crate::staging::pages::page(p).map_or(false, |pg| pg.replace)).map(String::from).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// A built-in page's name in a few words, for History.
+pub fn page_words(id: &str, ar: bool) -> String {
+    let w = match (id, ar) {
+        ("home", false) => "Home", ("home", true) => "الرئيسية", ("chats", false) => "Chats", ("chats", true) => "المحادثات",
+        ("ideas", false) => "Ideas", ("ideas", true) => "الأفكار", ("todos", false) => "Todos", ("todos", true) => "المهام",
+        ("docs", false) => "Docs", ("docs", true) => "المستندات", ("projects", false) => "Folders", ("projects", true) => "المجلدات",
+        ("graph", false) => "Graph", ("graph", true) => "الخريطة", ("inbox", false) => "Inbox", ("inbox", true) => "الوارد",
+        ("usage", false) => "Usage", ("usage", true) => "الاستخدام", _ => id,
+    };
+    show_hidden(w, false)
+}
+
+/// Keep showing the app's own `page` although a customisation replaces it (`on = true`), or use
+/// the replacement again. One history entry of its own, undoable like any other.
+pub async fn builtin_in(g: Git<'_>, dir: &Path, page: &str, on: bool) -> anyhow::Result<String> {
+    if !crate::staging::pages::page(page).map_or(false, |p| p.replace) { return Err(anyhow::anyhow!("not a page that can be replaced: {page}")); }
+    let mut list = builtin_pages_of(&dir);
+    if list.iter().any(|p| p == page) == on { return Ok(String::new()); }
+    let act = Act { kind: "builtin".into(), item: page.to_string(), detail: (if on { "on" } else { "off" }).into() };
+    let subject = format!("{} {page}", if on { "Use the built-in page" } else { "Use the replacement page" });
+    app_change(g, dir, &subject, act, |dir| {
+        if on { list.push(page.to_string()); } else { list.retain(|p| p != page); }
+        let mut o = read_object(&dir.join(ADDONS_FILE)).unwrap_or_default();
+        o.insert("builtin".into(), json!(list));
+        write_json(&dir.join(ADDONS_FILE), &Value::Object(o))?;
+        Ok(vec![ADDONS_FILE.to_string()])
+    }).await
+}
+
+/// The sidebar as the user arranged it by hand ("Edit sidebar"): `nav` replaces `nav.json` after the
+/// same checks a reviewed change gets. One history entry, undoable like any other. `Err` carries the
+/// problems in the UI language, one per line.
+pub async fn nav_in(g: Git<'_>, dir: &Path, nav: &Value, arabic: bool) -> anyhow::Result<String> {
+    let problems = crate::staging::validate::nav_problems(nav, arabic);
+    if !problems.is_empty() { return Err(anyhow::anyhow!(problems.join("\n"))); }
+    let act = Act { kind: "sidebar".into(), item: "nav.json".into(), ..Default::default() };
+    app_change(g, dir, "Edit the sidebar", act, |dir| {
+        let empty = nav.as_object().map_or(true, |o| o.is_empty());
+        if empty {
+            if !dir.join("nav.json").exists() { return Ok(vec![]); }
+            std::fs::remove_file(dir.join("nav.json"))?;
+        } else {
+            write_json(&dir.join("nav.json"), nav)?;
+        }
+        Ok(vec!["nav.json".to_string()])
     }).await
 }
 
@@ -695,6 +765,8 @@ fn entry_of(marks: &Marks, hash: &str, parents: &str, stored: &str) -> &'static 
         Some("on") => "on",
         Some("remove") => "remove",
         Some("permission") => "permission",
+        Some("sidebar") => "sidebar",
+        Some("builtin") => "builtin",
         _ if marks.packs.contains_key(hash) => "pack",
         _ => "change",
     }
@@ -715,6 +787,7 @@ pub fn permission_words(p: &str, ar: bool) -> &'static str {
         ("todos:write", false) => "change your todos", ("todos:write", true) => "تعديل مهامك",
         ("ideas:read", false) => "read your ideas", ("ideas:read", true) => "قراءة أفكارك",
         ("ideas:write", false) => "change the status of your ideas", ("ideas:write", true) => "تغيير حالة أفكارك",
+        ("chats:read", false) => "see the list of your chats", ("chats:read", true) => "رؤية قائمة محادثاتك",
         ("chat:start", false) => "start chats", ("chat:start", true) => "بدء المحادثات",
         ("storage", false) => "keep its own saved data", ("storage", true) => "حفظ بياناتها الخاصة",
         (_, false) => "a permission", (_, true) => "صلاحية",
@@ -759,6 +832,14 @@ fn title_of(marks: &Marks, hash: &str, parents: &str, raw: &str, ar: bool, depth
         "permission" => {
             let what = permission_words(&act.detail, ar);
             if ar { format!("سحب صلاحية من «{name}»: {what}") } else { format!("Took a permission away from \u{201c}{name}\u{201d}: {what}") }
+        }
+        "sidebar" => (if ar { "تعديل الشريط الجانبي يدوياً" } else { "Edited the sidebar by hand" }).into(),
+        "builtin" => {
+            let pg = page_words(&act.item, ar);
+            match (act.detail.as_str(), ar) {
+                ("on", false) => format!("Use the app\u{2019}s own {pg} page"), ("on", true) => format!("استخدام صفحة «{pg}» الأصلية في التطبيق"),
+                (_, false) => format!("Use the replacement for the {pg} page again"), (_, true) => format!("العودة إلى الصفحة البديلة لـ«{pg}»"),
+            }
         }
         "pack" => {
             let n = marks.packs.get(hash).map(|p| p.name.clone()).unwrap_or_default();
@@ -944,7 +1025,7 @@ mod tests {
     #[tokio::test]
     async fn creates_layer_and_refreshes_contract() {
         let (st, d) = testutil::layer("ensure").await;
-        assert_eq!(std::fs::read_to_string(d.layer.join("README.md")).unwrap(), CONTRACT);
+        assert_eq!(std::fs::read_to_string(d.layer.join("README.md")).unwrap(), contract());
         let m = manifest_of(&d.layer);
         assert_eq!(m["manifest"]["apiVersion"], 1);
         assert!(m["home"]["chips"].is_array() && m["workflows"].is_array());
@@ -957,6 +1038,58 @@ mod tests {
         assert_eq!(h[0]["files"], json!(["README.md"]));
         ensure_in(st, &d).await.unwrap();
         assert_eq!(history_in(st, &d.layer).await.len(), h.len());
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_sidebar_edited_by_hand_is_one_undoable_change() {
+        let (st, d) = testutil::layer("navhand").await;
+        let nav = json!({"order": ["todos", "home"], "hidden": ["graph"], "labels": {"ideas": {"en": "Clients", "ar": "العملاء"}},
+            "icons": {"ideas": "folder"}, "groups": [{"id": "work", "label": {"en": "Work"}, "items": ["todos", "ideas"]}], "start": "todos"});
+        let hash = nav_in(st, &d.layer, &nav, false).await.unwrap();
+        assert!(!hash.is_empty());
+        assert_eq!(manifest_of(&d.layer)["nav"], nav);
+        let h = history_in(st, &d.layer).await;
+        assert_eq!(h[0]["summary"], "Edited the sidebar by hand");
+        assert_eq!(h[0]["files"], json!(["nav.json"]));
+        assert_eq!(nav_in(st, &d.layer, &nav, false).await.unwrap(), "", "the same sidebar again changes nothing");
+        // What a review would refuse is refused here too, in the user's language, and nothing changes.
+        let e = nav_in(st, &d.layer, &json!({"hidden": ["customise"]}), true).await.unwrap_err().to_string();
+        assert!(e.contains("لا يمكن إخفاء"), "{e}");
+        assert!(nav_in(st, &d.layer, &json!({"labels": {"customise": {"en": "Safe"}}}), false).await.is_err(), "Customise keeps its name");
+        assert!(nav_in(st, &d.layer, &json!({"icons": {"todos": "shield"}}), false).await.is_err(), "only icons from the reference");
+        assert!(nav_in(st, &d.layer, &json!({"start": "graph", "hidden": ["graph"]}), false).await.is_err());
+        assert!(nav_in(st, &d.layer, &json!({"colours": {}}), false).await.is_err(), "a key the sidebar never reads is refused, not kept");
+        assert_eq!(manifest_of(&d.layer)["nav"], nav);
+        revert_in(st, &d.layer, &hash).await.unwrap();
+        assert_eq!(manifest_of(&d.layer)["nav"], Value::Null, "undo gives the usual sidebar back");
+        // `{}` is the usual sidebar: the file goes.
+        nav_in(st, &d.layer, &nav, false).await.unwrap();
+        nav_in(st, &d.layer, &json!({}), false).await.unwrap();
+        assert!(!d.layer.join("nav.json").exists());
+        std::fs::remove_dir_all(&d.home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_replaced_page_can_be_kept_as_the_app_made_it() {
+        let (st, d) = testutil::layer("builtin").await;
+        let hash = builtin_in(st, &d.layer, "todos", true).await.unwrap();
+        assert_eq!(manifest_of(&d.layer)["builtin"], json!(["todos"]));
+        assert_eq!(builtin_in(st, &d.layer, "todos", true).await.unwrap(), "");
+        assert!(builtin_in(st, &d.layer, "settings", true).await.is_err(), "Settings is never replaced, so there is nothing to switch");
+        assert!(builtin_in(st, &d.layer, "../x", true).await.is_err());
+        let h = history_in(st, &d.layer).await;
+        assert!(h[0]["summary"].as_str().unwrap().contains("Todos"), "{}", h[0]["summary"]);
+        // The add-ons switched off in the same file are left alone.
+        std::fs::write(d.layer.join("views/board.html"), "<p>b</p>").unwrap();
+        st.commit_all(&d.layer, "Add a page").await.unwrap();
+        switch_in(st, &d.layer, "views/board.html", false).await.unwrap();
+        let last = builtin_in(st, &d.layer, "ideas", true).await.unwrap();
+        assert_eq!(switched_off(&d.layer).len(), 1);
+        assert_eq!(manifest_of(&d.layer)["builtin"], json!(["ideas", "todos"]));
+        revert_in(st, &d.layer, &last).await.unwrap();
+        assert_eq!(manifest_of(&d.layer)["builtin"], json!(["todos"]));
+        assert!(!hash.is_empty());
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 

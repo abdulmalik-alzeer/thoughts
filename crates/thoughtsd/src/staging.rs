@@ -357,7 +357,12 @@ pub fn system_prompt(d: &Dirs) -> String {
          Open each one with the Read tool and look at it: it is how the user shows you what they mean. Attached files are read-only and \
          are not part of the layer: never point a layer file at one. Whatever you take from one (colours, wording, a list, data) you \
          write into the layer files yourself. The layer is text only, so a picture cannot be copied in; say so if the user asks for that.\n\
-         8. To change something on one of the app's own pages (a heading, a button's wording, hiding a part, an add-on box on it, or an add-on page in its place) use pages.json as README.md describes, not CSS.\n\
+         8. Every built-in page can be changed, not only what is around it: use pages.json to reword it, hide parts, rearrange, hide, \
+         resize or replace its sections, put add-on boxes between them, or replace the whole page with an add-on page (which falls back \
+         to the app's own page if it fails); use nav.json to rename, reorder, hide, group or re-icon sidebar entries and choose the start page. \
+         The exact ids are in the \"Built-in pages reference\" section of README.md, generated from this version of the app: use only those, \
+         never CSS tricks for what these files can do. Only History, the change review, Customise, Rollback and the Recovery menu are out of reach \
+         (and Settings cannot be replaced as a whole). Do not tell the user a built-in page cannot be changed when the reference allows it.\n\
          Nothing you write takes effect until the user previews it and presses Keep, so do not tell them it is already live. \
          The user cannot answer interactive tool prompts here — ask questions in plain text, and keep the change small.{note}",
         staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d)
@@ -1137,7 +1142,7 @@ mod tests {
         assert_eq!(h.len(), before + 1, "one history entry");
         assert_eq!(h[0]["summary"], "Show what's due on Home");
         assert!(d.layer.join("plugins/due.js").exists() && !d.layer.join("themes.json").exists());
-        assert_eq!(std::fs::read_to_string(d.layer.join("README.md")).unwrap(), crate::applayer::CONTRACT, "the guide cannot be changed by a run");
+        assert_eq!(std::fs::read_to_string(d.layer.join("README.md")).unwrap(), crate::applayer::contract(), "the guide cannot be changed by a run");
         assert!(!d.layer.join("notes.txt").exists() && !d.layer.join("SUMMARY.md").exists() && !d.layer.join(".claude").exists());
         assert!(!d.staging.exists());
         assert_eq!(pending(st, &d, false).await["exists"], false);
