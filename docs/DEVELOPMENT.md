@@ -161,6 +161,25 @@ read-only. Earlier versions applied these rules to customise runs only.
 `permissionMode` is allow-listed to `acceptEdits` and `plan`. `default` is still read from old
 settings files and treated as `plan`, because there is no approve/deny UI.
 
+### Full access
+
+`settings.fullAccess` (`full_access.rs`) is the owner's switch for "no app-imposed limits". While it
+is on, `claude::start_run` gives every kind of run `bypassPermissions` (a run in Plan keeps Plan), no
+rules file, no command check (`shell_guard`), no trust check, no strict-private asking and no
+standing-file restore, and the `full` profile; Codex runs get the CLI's own
+`--dangerously-bypass-approvals-and-sandbox` (found in `codex exec --help`, else the
+`danger-full-access` sandbox), no outer sandbox and nothing put back. Runs are told so
+(`full_access::run_note`, `staging::system_prompt_full`, `codex::full_instructions`), with the data
+folder and the source folder (`fullAccess.sourceDir`). The live layer keeps hand edits as a history
+entry instead of setting them aside, validation does not block Keep, add-on requests made with the
+app token lose `scope=plugin` (`api::plugin_gate`; access keys never do), and `/api/machine/*`
+(`machine.rs`) answers only while it is on and never for `?preview=1`.
+
+Switching it on: `PUT /api/settings?confirm=full-access&approval=…` with the shell's approval for
+`consent::Action::FullAccess` (two native dialogs, `src-tauri/src/consent.rs`); the body's
+`fullAccess.on` is never read. Off: `?fullAccess=off`, which also stops every run started with it and
+every bridge command (`full_access::switched_off`).
+
 ### Run profiles
 
 What a run may use besides reading and writing the files of the folders it works in follows from
