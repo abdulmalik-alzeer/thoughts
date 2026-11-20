@@ -121,56 +121,65 @@ async fn read_capped(mut r: impl tokio::io::AsyncRead + Unpin, max: usize) -> St
 async fn run(State(st): S, Json(b): Json<RunBody>) -> R {
     require_on(&st).await?;
     let mut c = command_for(&b)?;
+    // In a group of its own, so that ending it ends everything it started too.
+    crate::proc::own_group(&mut c);
     let mut child = c.spawn().map_err(|e| bad(&e.to_string()))?;
+    let pid = child.id();
     if let (Some(text), Some(mut stdin)) = (b.stdin.clone(), child.stdin.take()) {
         tokio::spawn(async move { let _ = stdin.write_all(text.as_bytes()).await; let _ = stdin.shutdown().await; });
     }
     let (out, err) = (child.stdout.take(), child.stderr.take());
     crate::log::info(format!("machine bridge: started {} ({} argument(s)){}", b.program.trim(), b.args.len(), if b.stream { ", streamed" } else { "" }));
-    if !b.stream {
-        let limit = std::time::Duration::from_secs(b.timeout_secs.unwrap_or(DEFAULT_TIMEOUT).clamp(1, MAX_TIMEOUT));
-        let reading = async {
-            let (o, e) = tokio::join!(
-                async { match out { Some(o) => read_capped(o, OUTPUT_MAX).await, None => String::new() } },
-                async { match err { Some(e) => read_capped(e, OUTPUT_MAX).await, None => String::new() } });
-            (o, e, child.wait().await)
-        };
-        return match tokio::time::timeout(limit, reading).await {
-            Ok((stdout, stderr, status)) => Ok(Json(json!({"code": status.ok().and_then(|s| s.code()), "stdout": stdout, "stderr": stderr, "timedOut": false}))),
-            // Dropping the child ends it (`kill_on_drop`).
-            Err(_) => Ok(Json(json!({"code": null, "stdout": "", "stderr": "", "timedOut": true}))),
-        };
-    }
+    // Every command, waited for or streamed, can be stopped: by `kill`, by full access going off
+    // (`stop_all`, and checked again every few seconds), or by its time running out.
     let id = uuid::Uuid::new_v4().simple().to_string();
     let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
     running().lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), tx);
-    let limit = b.timeout_secs.map(|s| std::time::Duration::from_secs(s.clamp(1, MAX_TIMEOUT)));
-    let (st2, id2) = (st.clone(), id.clone());
+    let limit = match (b.stream, b.timeout_secs) {
+        (_, Some(s)) => Some(std::time::Duration::from_secs(s.clamp(1, MAX_TIMEOUT))),
+        (false, None) => Some(std::time::Duration::from_secs(DEFAULT_TIMEOUT)),
+        (true, None) => None,
+    };
+    type Reader = Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>;
+    let (out, err): (Reader, Reader) = (out.map(|o| Box::new(o) as _), err.map(|e| Box::new(e) as _));
+    let (st2, id2, stream) = (st.clone(), id.clone(), b.stream);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<Value>();
     tokio::spawn(async move {
-        let pump = |r: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>, name: &'static str| {
+        // Streamed: each piece goes out as an event. Waited for: kept (to `OUTPUT_MAX`) for the answer.
+        let pump = |r: Reader, name: &'static str| {
             let (st, id) = (st2.clone(), id2.clone());
             async move {
-                let Some(mut r) = r else { return };
+                let Some(mut r) = r else { return String::new() };
+                if !stream { return read_capped(r, OUTPUT_MAX).await; }
                 let mut buf = vec![0u8; 16 * 1024];
                 while let Ok(n) = r.read(&mut buf).await {
                     if n == 0 { break; }
                     st.emit(json!({"type": "machine.output", "id": id, "stream": name, "data": String::from_utf8_lossy(&buf[..n])}));
                 }
+                String::new()
             }
         };
-        let out: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = out.map(|o| Box::new(o) as _);
-        let err: Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>> = err.map(|e| Box::new(e) as _);
-        let pumps = futures::future::join(pump(out, "stdout"), pump(err, "stderr"));
-        let waited = async { pumps.await; child.wait().await.ok().and_then(|s| s.code()) };
-        let code = tokio::select! {
-            c = waited => c,
-            _ = &mut rx => None,
-            _ = async { match limit { Some(l) => tokio::time::sleep(l).await, None => futures::future::pending::<()>().await } } => None,
-        };
+        let finished = async { let (o, e) = tokio::join!(pump(out, "stdout"), pump(err, "stderr")); (o, e, child.wait().await.ok().and_then(|s| s.code())) };
+        let still_on = async { loop { tokio::time::sleep(std::time::Duration::from_secs(2)).await; if !st2.settings.read().await.full_access() { break; } } };
+        let timer = async { match limit { Some(l) => tokio::time::sleep(l).await, None => futures::future::pending::<()>().await } };
+        // `None`: it was ended before it finished (`timedOut` says whether by its time limit).
+        let ended: Option<(String, String, Option<i32>)>;
+        let mut timed_out = false;
+        tokio::select! {
+            r = finished => { ended = Some(r); }
+            _ = &mut rx => { ended = None; }
+            _ = still_on => { ended = None; }
+            _ = timer => { ended = None; timed_out = true; }
+        }
+        if ended.is_none() { if let Some(pid) = pid { crate::proc::end_tree(pid).await; } }
         running().lock().unwrap_or_else(|e| e.into_inner()).remove(&id2);
-        st2.emit(json!({"type": "machine.exit", "id": id2, "code": code}));
+        let code = ended.as_ref().and_then(|e| e.2);
+        if stream { st2.emit(json!({"type": "machine.exit", "id": id2, "code": code, "timedOut": timed_out})); }
+        let (stdout, stderr) = ended.map(|e| (e.0, e.1)).unwrap_or_default();
+        let _ = done_tx.send(json!({"code": code, "stdout": stdout, "stderr": stderr, "timedOut": timed_out}));
     });
-    Ok(Json(json!({"id": id})))
+    if b.stream { return Ok(Json(json!({"id": id}))); }
+    Ok(Json(done_rx.await.unwrap_or_else(|_| json!({"code": null, "stdout": "", "stderr": "", "timedOut": false}))))
 }
 
 #[derive(Deserialize)]
@@ -320,8 +329,34 @@ mod tests {
         let long = run(State(st.clone()), Json(RunBody { program: "sleep".into(), args: vec!["30".into()], stream: true, ..Default::default() })).await.unwrap().0["id"].as_str().unwrap().to_string();
         assert!(running().lock().unwrap().contains_key(&long));
         stop_all().await;
+        for _ in 0..200 { if !running().lock().unwrap().contains_key(&long) { break; } tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
         assert!(!running().lock().unwrap().contains_key(&long));
+        // …and a command that is waited for, with everything it started (its whole group).
+        let (st3, marker) = (st.clone(), dir.join("child-survived"));
+        let script = format!("(sleep 3; touch '{}') & sleep 30", marker.display());
+        let waited = tokio::spawn(async move { run(State(st3), Json(RunBody { program: "sh".into(), args: vec!["-c".into(), script], timeout_secs: Some(60), ..Default::default() })).await.unwrap().0 });
+        for _ in 0..200 { if !running().lock().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
+        let t0 = std::time::Instant::now();
+        stop_all().await;
+        let r = tokio::time::timeout(std::time::Duration::from_secs(5), waited).await.expect("ended at once").unwrap();
+        assert!(r["code"].is_null() && t0.elapsed() < std::time::Duration::from_secs(5), "{r}");
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        assert!(!marker.exists(), "what the command started was ended too");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Full access is the owner's choice for this app's own window: a program holding an access key
+    /// can neither reach the bridge nor the switch, whatever its scopes.
+    #[test]
+    fn access_keys_never_reach_the_bridge_or_the_switch() {
+        use axum::http::Method;
+        let caller = crate::tokens::Caller { id: "k".into(), scopes: vec![crate::tokens::Scope::Read, crate::tokens::Scope::Capture] };
+        for path in ["/api/machine", "/api/machine/run", "/api/machine/kill", "/api/machine/read", "/api/machine/write", "/api/machine/list",
+                     "/api/machine/open", "/api/settings?confirm=full-access", "/api/settings?fullAccess=off"] {
+            for m in [Method::GET, Method::POST, Method::PUT] {
+                assert!(crate::tokens::admit(&caller, &m, &path.parse().unwrap()).is_none(), "{m} {path}");
+            }
+        }
     }
 
     #[test]

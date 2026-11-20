@@ -155,6 +155,7 @@ impl AppState {
                 BTreeMap::from([(month_key(), if spent > 0.0 { spent } else { 0.0 })])
             }
         };
+        crate::full_access::set_on(settings.full_access());
         Ok(Self {
             token,
             settings: RwLock::new(settings),

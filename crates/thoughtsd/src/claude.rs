@@ -1811,9 +1811,13 @@ pub async fn start_run(
     crate::settings::check_cli_value("session", spec.resume.as_deref())?;
     // One run per chat at a time (checked again, for good, when the run takes its Stop switch).
     if state.runs.lock().await.contains_key(&spec.chat_id) { return Err(crate::tr::err("chat.running", &[])); }
+    // Listed before full access is read, so a switch-off from here on always finds this run
+    // (`full_access::switched_off`); checked again once it holds its Stop switch (`still_full`).
+    crate::full_access::note_started(&spec.chat_id);
     let settings = state.settings.read().await.clone();
     // Full access (`full_access.rs`): every guard below that the app adds on its own yields.
     let full = settings.full_access();
+    if !full { crate::full_access::forget(&spec.chat_id); }
     // The library this run works for, from where it works and the library its chat belongs to
     // (`libraries::of_run`, which refuses the two disagreeing). That library's own private folders
     // apply, whichever library is open by the time it starts.
@@ -1958,8 +1962,6 @@ pub async fn start_run(
     };
     let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };
     let id = spec.chat_id.clone();
-    // Remembered, so switching full access off stops this run (`full_access::switched_off`).
-    if full { crate::full_access::note_started(&id); } else { crate::full_access::forget(&id); }
 
     // What the run's questions are asked with, for as long as it runs.
     let ticket = asks.then(|| crate::approvals::open(&state, crate::approvals::RunCtx {
@@ -1973,6 +1975,7 @@ pub async fn start_run(
             deny: rules("deny"), allow: rules("allow"), ask: rules("ask"), prompt_token: ticket.as_ref().map(|t| t.token().to_string()),
             profile: prof, system: system_text(true), program, resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some(), full_access: full };
         let mut kill_rx = take_switch(&state, &id).await?;
+        if !crate::full_access::still_full(&state, &id, full).await { return Err(crate::tr::err("full_access.off", &[])); }
         state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
         state.ack_interrupted(&id).await;
         if let Some(ch) = state.chats.update(&id, |c| c.running = true).await {
@@ -2062,6 +2065,12 @@ pub async fn start_run(
         Ok(rx) => rx,
         Err(e) => { if let Some(pid) = child.id() { crate::proc::end_tree(pid).await; } let _ = child.start_kill(); return Err(e); }
     };
+    // Full access went off while this run was being started with it: it does not go on.
+    if !crate::full_access::still_full(&state, &id, full).await {
+        if let Some(pid) = child.id() { crate::proc::end_tree(pid).await; }
+        let _ = child.start_kill();
+        return Err(crate::tr::err("full_access.off", &[]));
+    }
     // Remember the process, so a daemon that dies uncleanly can be cleaned up after.
     let pid = child.id();
     crate::runs::record(pid, &spec.chat_id);

@@ -136,14 +136,25 @@ fn plugin_scope_allowed(path: &str, query: &str) -> bool {
     !guarded || PLUGIN_SCOPED.contains(&path)
 }
 
-/// `query` without `scope=plugin` (and the add-on's own words that only mean something with it):
-/// with full access on, a request an add-on makes is the user's own (`full_access.rs`).
+/// The parameters that only mean something on a request made for an add-on (`scope_of`, `addons::reads`).
+const ADDON_PARAMS: [&str; 5] = ["scope", "plugin", "kind", "preview", "allow"];
+
+/// `query` without `scope=plugin` and the add-on's own parameters that only mean something with it:
+/// with full access on, a request one of the app's own pages makes for an add-on is the user's own
+/// (`full_access.rs`).
 fn unscoped(query: &str) -> String {
-    query.split('&').filter(|kv| !kv.is_empty() && *kv != "scope=plugin").collect::<Vec<_>>().join("&")
+    query.split('&').filter(|kv| !kv.is_empty() && !ADDON_PARAMS.contains(&kv.split_once('=').map_or(*kv, |(k, _)| k)))
+        .collect::<Vec<_>>().join("&")
 }
 
+/// Is this request one whose add-on scope full access lifts? Only the app's own window (the app
+/// token): a program holding an access key is always kept to its scope (`tokens::admit` adds
+/// `scope=plugin` for it), full access or not.
+fn lifts_scope(query: &str, access_key: bool, full: bool) -> bool { full && !access_key && plugin_scoped(query) }
+
 async fn plugin_gate(State(st): S, mut req: Request, next: Next) -> Response {
-    if plugin_scoped(req.uri().query().unwrap_or("")) && st.settings.read().await.full_access() {
+    let access_key = req.extensions().get::<crate::tokens::Caller>().is_some();
+    if lifts_scope(req.uri().query().unwrap_or(""), access_key, st.settings.read().await.full_access()) {
         let q = unscoped(req.uri().query().unwrap_or(""));
         let pq = if q.is_empty() { req.uri().path().to_string() } else { format!("{}?{q}", req.uri().path()) };
         let mut parts = req.uri().clone().into_parts();
@@ -892,6 +903,7 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     }
     crate::tr::set_language(&new.language);
     crate::claude::set_reports(new.assistant_reports);
+    crate::full_access::set_on(new.full_access());
     *cur = new.clone();
     drop(cur);
     if full_on { crate::log::warn(format!("full access switched ON by the user, confirmed in the app's own warning, at {}", new.full_access.since.as_deref().unwrap_or(""))); }
@@ -2972,7 +2984,10 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let append = Some("You are running inside the Thoughts desktop app's chat. The user cannot answer interactive tool prompts or \
         AskUserQuestion dialogs here — ask questions in plain text. Wraps are run by the app's Wrap button; don't wrap unless asked.".to_string());
     let kind = chat.kind.clone();
-    let append = if kind == "customize" { Some(crate::staging::system_prompt(&applayer::Dirs::real())) } else { append };
+    let full = s.full_access();
+    let append = if kind == "customize" {
+        Some(if full { crate::staging::system_prompt_full(&applayer::Dirs::real()) } else { crate::staging::system_prompt(&applayer::Dirs::real()) })
+    } else { append };
     // A customise run may only write inside its staging copy, and may not read the app's own secrets.
     let extra_deny = if kind == "customize" { crate::staging::deny_rules(&applayer::Dirs::real(), library.as_deref()) } else { vec![] };
     let spec = |prompt: String, resume: Option<String>| RunSpec { chat_id: id.clone(), prompt, cwd: cwd.clone(), add_dirs: add_dirs.clone(),
@@ -5892,5 +5907,59 @@ mod tests {
         assert!(!git::follow_move(&st, &lib, &moved).await.unwrap());
         std::fs::remove_dir_all(git::history_store(&moved)).unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Full access: only the shell's approval switches it on (never the body, the token, `?confirm=`
+    /// alone, another action's approval or a used one); off needs nothing; setup never switches it.
+    #[tokio::test]
+    async fn full_access_is_switched_on_only_with_the_shells_approval() {
+        use crate::consent::{test_approval, Action};
+        let st = Arc::new(AppState::for_test());
+        let mut wanted = st.settings.read().await.clone();
+        wanted.full_access.on = true;
+        wanted.full_access.since = Some("2000-01-01T00:00:00Z".into());
+        // The body alone changes nothing (the save itself goes through).
+        put_settings(State(st.clone()), none(), Json(wanted.clone())).await.unwrap();
+        assert!(!st.settings.read().await.full_access());
+        let yes = test_approval(Action::FullAccess, "");
+        let fa = crate::settings::FULL_ACCESS_CONFIRM;
+        let other = test_approval(Action::SettingsBypass, "");
+        let stale = crate::consent::mint(crate::consent::test_key(), Action::FullAccess, "", crate::consent::now_ms() - crate::consent::TTL_MS - 1);
+        for query in [vec![("confirm", fa)], vec![("confirm", fa), ("approval", "1.2.3")], vec![("confirm", fa), ("approval", other.as_str())],
+                      vec![("confirm", fa), ("approval", stale.as_str())], vec![("approval", yes.as_str())]] {
+            let r = put_settings(State(st.clone()), q(&query), Json(wanted.clone())).await;
+            if query.len() == 1 && query[0].0 == "approval" { r.unwrap(); } else { assert_eq!(shown(r).code, "confirm_needed", "{query:?}"); }
+            assert!(!st.settings.read().await.full_access(), "{query:?}");
+        }
+        // The real one, once.
+        let both = [("confirm", fa), ("approval", yes.as_str())];
+        let saved = put_settings(State(st.clone()), q(&both), Json(wanted.clone())).await.unwrap().0;
+        assert_eq!(saved["fullAccess"]["on"], true);
+        let since = st.settings.read().await.full_access.since.clone().unwrap();
+        assert_ne!(since, "2000-01-01T00:00:00Z", "the time is the daemon's own");
+        // A save that says nothing about it keeps it on; a body saying off does not switch it off either.
+        wanted.full_access.on = false;
+        put_settings(State(st.clone()), none(), Json(wanted.clone())).await.unwrap();
+        assert!(st.settings.read().await.full_access());
+        // Off: one request, nothing else needed.
+        put_settings(State(st.clone()), q(&[("fullAccess", "off")]), Json(wanted.clone())).await.unwrap();
+        assert!(!st.settings.read().await.full_access());
+        // The approval was spent: it never switches it on again.
+        assert_eq!(shown(put_settings(State(st.clone()), q(&both), Json(wanted.clone())).await).code, "confirm_needed");
+        assert!(!st.settings.read().await.full_access());
+    }
+
+    #[test]
+    fn add_on_requests_lose_their_scope_only_under_full_access() {
+        assert_eq!(unscoped("scope=plugin&plugin=a.js&kind=view&preview=1&allow=a/,b/&path=x"), "path=x");
+        assert_eq!(unscoped("scope=plugin"), "");
+        // Only the app's own pages, and only while it is on: an access key stays in its scope.
+        assert!(lifts_scope("path=a&scope=plugin", false, true));
+        assert!(!lifts_scope("path=a&scope=plugin", true, true), "an access key is never widened");
+        assert!(!lifts_scope("path=a&scope=plugin", false, false));
+        assert!(!lifts_scope("path=a", false, true));
+        // Off, the gate is as before.
+        assert!(!plugin_scope_allowed("/api/library/anything", "scope=plugin"));
+        assert!(plugin_scope_allowed("/api/library/anything", ""));
     }
 }

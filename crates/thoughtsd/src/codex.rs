@@ -1262,6 +1262,13 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         Ok(rx) => rx,
         Err(e) => { if let Some(pid) = pid { crate::proc::end_tree(pid).await; } let _ = child.start_kill(); crate::runs::forget(pid); return Err(e); }
     };
+    // Full access went off while this run was being started with it: it does not go on.
+    if !crate::full_access::still_full(&state, &id, l.full_access).await {
+        if let Some(pid) = pid { crate::proc::end_tree(pid).await; }
+        let _ = child.start_kill();
+        crate::runs::forget(pid);
+        return Err(crate::tr::err("full_access.off", &[]));
+    }
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), l.spec.cwd.clone());
     state.ack_interrupted(&id).await;
     if let Some(ch) = state.chats.update(&id, |c| { c.running = true; c.provider = ID.into(); }).await {

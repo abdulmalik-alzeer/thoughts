@@ -19,28 +19,65 @@
 
 use crate::state::AppState;
 use std::collections::HashSet;
+#[cfg(not(test))]
 use std::sync::{Mutex, OnceLock};
 
+/// Full access as last saved, for the parts of the daemon that hold no settings (the live layer's
+/// guard, `staging::set_aside`; the validation of a change). Set at start and by every save.
+#[cfg(not(test))]
+static ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(not(test))]
+pub fn set_on(on: bool) { ON.store(on, std::sync::atomic::Ordering::SeqCst); }
+/// Is full access on (as last saved)?
+#[cfg(not(test))]
+pub fn on() -> bool { ON.load(std::sync::atomic::Ordering::SeqCst) }
+
+// Tests run side by side in one process: each test's thread keeps its own.
+#[cfg(test)]
+thread_local! { static ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(test)]
+pub fn set_on(on: bool) { ON.with(|c| c.set(on)); }
+#[cfg(test)]
+pub fn on() -> bool { ON.with(|c| c.get()) }
+
 /// The chats whose current run was started with full access.
-fn started() -> &'static Mutex<HashSet<String>> {
+#[cfg(not(test))]
+fn with_started<T>(f: impl FnOnce(&mut HashSet<String>) -> T) -> T {
     static S: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    S.get_or_init(Default::default)
+    f(&mut S.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner()))
+}
+// Tests run side by side in one process: each test's thread keeps its own list.
+#[cfg(test)]
+fn with_started<T>(f: impl FnOnce(&mut HashSet<String>) -> T) -> T {
+    thread_local! { static S: std::cell::RefCell<HashSet<String>> = Default::default(); }
+    S.with(|s| f(&mut s.borrow_mut()))
 }
 
 /// A run of chat `id` started with full access.
-pub fn note_started(id: &str) { started().lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string()); }
+pub fn note_started(id: &str) { with_started(|s| s.insert(id.to_string())); }
 
 /// The run of chat `id` is over (`claude::finish`).
-pub fn forget(id: &str) { started().lock().unwrap_or_else(|e| e.into_inner()).remove(id); }
+pub fn forget(id: &str) { with_started(|s| s.remove(id)); }
 
 /// Was the current run of chat `id` started with full access?
-pub fn run_has_it(id: &str) -> bool { started().lock().unwrap_or_else(|e| e.into_inner()).contains(id) }
+pub fn run_has_it(id: &str) -> bool { with_started(|s| s.contains(id)) }
+
+/// Once a run started with full access (`full`) holds its Stop switch: is it still listed? If
+/// full access was switched off since it was read, it is not (`switched_off` took it off the list,
+/// perhaps before the switch existed to be pressed): the switch is released and the run must not
+/// go on. A run started without full access always goes on.
+pub async fn still_full(state: &AppState, id: &str, full: bool) -> bool {
+    if !full || run_has_it(id) { return true; }
+    state.runs.lock().await.remove(id);
+    crate::log::warn(format!("run {id}: not started — full access was switched off while it was being started"));
+    false
+}
 
 /// Full access was just switched off: every guard holds again for new runs already (they read the
 /// settings when they start). Runs started with it, and commands pages started through the bridge,
 /// are stopped, so nothing keeps working unguarded. Returns how many runs were stopped.
 pub async fn switched_off(state: &AppState) -> usize {
-    let ids: Vec<String> = started().lock().unwrap_or_else(|e| e.into_inner()).drain().collect();
+    let ids: Vec<String> = with_started(|s| s.drain().collect());
     let mut stopped = 0;
     for id in ids {
         if let Some(k) = state.runs.lock().await.remove(&id) { let _ = k.send(()); stopped += 1; }
@@ -106,11 +143,99 @@ mod tests {
         assert!(run_note(None).contains("Settings → Full access"));
     }
 
+    #[tokio::test]
+    async fn a_run_caught_by_a_switch_off_while_starting_does_not_go_on() {
+        let st = AppState::for_test();
+        note_started("racing-run");
+        // Read as on, then switched off before the run holds its Stop switch.
+        assert_eq!(switched_off(&st).await, 0);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        st.runs.lock().await.insert("racing-run".into(), tx);
+        assert!(!still_full(&st, "racing-run", true).await);
+        assert!(!st.runs.lock().await.contains_key("racing-run"), "its switch is released");
+        // A run started without full access is never stopped by this.
+        assert!(still_full(&st, "racing-run", false).await);
+        note_started("listed-run");
+        assert!(still_full(&st, "listed-run", true).await);
+        forget("listed-run");
+    }
+
     #[test]
     fn runs_started_with_it_are_remembered_until_they_end() {
         note_started("abc-full");
         assert!(run_has_it("abc-full"));
         forget("abc-full");
         assert!(!run_has_it("abc-full"));
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use crate::chats::{Chat, RunOptions};
+    use crate::claude::{start_run, RunInfo, RunSpec};
+    use crate::state::AppState;
+    use std::sync::Arc;
+
+    async fn runs_of(full: bool, kinds: &[&str], dir: &std::path::Path) -> Vec<anyhow::Result<RunInfo>> {
+        let st = Arc::new(AppState::for_test());
+        st.settings.write().await.full_access.on = full;
+        let seen = Arc::new(std::sync::Mutex::new(None::<RunInfo>));
+        let log = seen.clone();
+        *st.run_hook.lock().unwrap() = Some(Arc::new(move |info: RunInfo| { *log.lock().unwrap() = Some(info); Box::pin(async { true }) }));
+        let mut out = vec![];
+        for kind in kinds {
+            let chat = Chat { kind: kind.to_string(), ..Default::default() };
+            st.chats.insert(chat.clone()).await;
+            *seen.lock().unwrap() = None;
+            let spec = RunSpec { chat_id: chat.id.clone(), prompt: "hi".into(), cwd: dir.to_path_buf(), add_dirs: vec![],
+                options: RunOptions::default(), resume: None, append_system: None, extra_deny: vec!["Edit(//somewhere)".into()] };
+            match start_run(st.clone(), spec, None).await {
+                Err(e) => out.push(Err(e)),
+                Ok(()) => {
+                    for _ in 0..400 { if seen.lock().unwrap().is_some() && !st.chats.get(&chat.id).await.unwrap().running { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+                    out.push(Ok(seen.lock().unwrap().clone().expect("the run started")));
+                }
+            }
+        }
+        out
+    }
+
+    const KINDS: [&str; 6] = ["chat", "customize", "wrap", "workflow", "module", "reorganize"];
+
+    #[tokio::test]
+    async fn with_full_access_every_kind_of_run_bypasses_with_no_rules_and_is_told_so() {
+        let dir = std::env::temp_dir().join(format!("thoughts-full-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (kind, r) in KINDS.iter().zip(runs_of(true, &KINDS, &dir).await) {
+            let info = r.unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_eq!(info.permission_mode.as_deref(), Some(crate::settings::BYPASS), "{kind}");
+            assert!(info.deny.is_empty() && info.ask.is_empty() && info.prompt_token.is_none(), "{kind}: {:?}", info.deny);
+            assert!(info.full_access && info.profile.name == "full", "{kind}");
+            assert!(info.system.contains("FULL ACCESS IS ON") && !info.system.contains("kept by the Thoughts app"), "{kind}: {}", info.system);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn off_every_run_keeps_its_guards_as_before() {
+        let dir = std::env::temp_dir().join(format!("thoughts-guarded-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (kind, r) in KINDS.iter().zip(runs_of(false, &KINDS, &dir).await) {
+            let info = r.unwrap_or_else(|e| panic!("{kind}: {e}"));
+            assert_ne!(info.permission_mode.as_deref(), Some(crate::settings::BYPASS), "{kind}");
+            assert!(!info.deny.is_empty() && info.deny.iter().any(|d| d == "Edit(//somewhere)"), "{kind}");
+            assert!(!info.full_access && !info.system.contains("FULL ACCESS"), "{kind}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_untrusted_folder_is_refused_off_and_run_in_with_full_access() {
+        let dir = std::env::temp_dir().join(format!("thoughts-untrusted-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".mcp.json"), r#"{"mcpServers":{"x":{"command":"evil"}}}"#).unwrap();
+        assert!(runs_of(false, &["chat"], &dir).await.remove(0).is_err());
+        assert!(runs_of(true, &["chat"], &dir).await.remove(0).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

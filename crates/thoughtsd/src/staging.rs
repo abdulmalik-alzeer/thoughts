@@ -364,6 +364,26 @@ pub fn system_prompt(d: &Dirs) -> String {
     )
 }
 
+/// The system prompt of a customise run while full access is on (`full_access.rs`): the same
+/// staging copy and review for a change the user wants to try first, but nothing is closed — not
+/// the live layer, the app's data, its core, Recovery or Rollback, nor its source code.
+pub fn system_prompt_full(d: &Dirs) -> String {
+    format!(
+        "You are customising the Thoughts desktop app for its user, who has switched on FULL ACCESS: nothing about the app is closed to you.\n\
+         The usual way, still available, is the STAGING copy of the app's customisation layer at {staging}: read README.md there (the layout, the \
+         Plugin API, pages.json), change files there, and write SUMMARY.md (2–5 plain sentences in the user's language; its first line is the title). \
+         The user previews such a change and presses Keep, and Rollback can take it back.\n\
+         With full access you may also go further when the user asks: change the live layer at {layer} directly (it is loaded again when the \
+         app reloads), change or remove any built-in page or part of the app, its Recovery menu and Rollback included, change the app's data \
+         folder, run git or any other command, and change and rebuild the app's own source code if its folder is named below. Add-ons and pages \
+         may use every permission and the machine bridge (`thoughts.machine.*`, see README.md and docs/CUSTOMISING.md). \
+         The validation report the app shows is advice while full access is on; it does not stop a change from being kept.\n\
+         A message may list files the user attached: open each with the Read tool. The user cannot answer interactive tool prompts here — ask \
+         questions in plain text.{note}",
+        staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d)
+    )
+}
+
 // ---------- the live layer only ever holds what was kept ----------
 
 #[derive(Serialize, Deserialize, Default)]
@@ -387,6 +407,12 @@ fn move_file(from: &Path, to: &Path, keep_source: bool) -> std::io::Result<()> {
 /// folder is put back exactly as the last kept change left it. Returns how many files were set aside.
 pub async fn set_aside(g: Git<'_>, d: &Dirs) -> anyhow::Result<usize> {
     if !d.layer.join(".git").exists() { return Ok(0); }
+    // Full access (`full_access.rs`): what reached the live layer without a review stays and takes
+    // effect, recorded as a history entry of its own so Rollback can still take it back.
+    if crate::full_access::on() {
+        if g.commit_all(&d.layer, "Changed directly (full access)").await? { crate::log::warn("layer: changes made directly in the live layer were kept (full access)"); }
+        return Ok(0);
+    }
     let out = g.run(&d.layer, &["status", "--porcelain", "--no-renames", "-uall", "-z"]).await?;
     let found: Vec<(&str, &str)> = out.split('\0').filter(|e| e.len() >= 4).map(|e| (&e[..2], &e[3..])).collect();
     if found.is_empty() { return Ok(0); }
@@ -1020,7 +1046,8 @@ pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) 
         if sig != current { anyhow::bail!("{}", changed_error(arabic)); }
     }
     if p["incomplete"] == true && load_meta(d).map_or(true, |m| m.accepted != current) { anyhow::bail!("{}", incomplete_error(arabic)); }
-    let problems = validate::problems(&d.staging, &files, arabic);
+    // With full access on, the report is advice only: nothing is refused.
+    let problems = if crate::full_access::on() { vec![] } else { validate::problems(&d.staging, &files, arabic) };
     if let Some(first) = problems.first() {
         let (path, msg) = (first["path"].as_str().unwrap_or_default(), first["message"].as_str().unwrap_or_default());
         let detail = if path.is_empty() { msg.to_string() } else { format!("{path}: {msg}") };
