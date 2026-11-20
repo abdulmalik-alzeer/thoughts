@@ -59,7 +59,7 @@
 //   move to another page only right after the person pressed something of its own, and chats have an
 //   hourly ceiling per add-on.
 import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
-import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
+import { app, toast, go, refreshChats, onSettingsChanged, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
 import { confirmDialog, promptDialog, dialogs } from './dialog.svelte';
 import { saveFile as offerFile } from './download';
 import { matchShortcut } from './shortcuts';
@@ -680,8 +680,10 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
   // bridge. Off, the bridge is refused here and, whatever is sent, by the service.
   const full = fullAccessOn();
   if (method.startsWith('machine.')) {
-    if (!full || p.dry) throw Object.assign(new Error('This needs full access, which is off'), { code: 'permission' });
-    return machineHandle(method, Array.isArray(args) ? args : [], (msg) => deliver(f, msg));
+    // Never for a change that is only being tried: the person has not kept it yet (the service
+    // refuses `preview` too).
+    if (!full || p.dry || app.preview) throw Object.assign(new Error(app.preview && full ? 'Preview: the machine bridge is not used while a change is tried' : 'This needs full access, which is off'), { code: app.preview && full ? 'preview' : 'permission' });
+    return machineHandle(method, Array.isArray(args) ? args : [], (msg) => deliver(f, msg), app.preview);
   }
   if (!full && p.kind === 'view' && !READ_ONLY.has(method)) throw new Error(`"${method}" is not available to HTML views`);
   if (p.dry) return dryAnswer(method);
@@ -1031,7 +1033,18 @@ if (typeof window !== 'undefined') {
     const payload = Object.fromEntries(fields.map((k) => [k, e[k]]));
     for (const f of frames) if (f.events.has(e.type) && !f.plugin.dead) deliver(f, { type: 'event', event: e.type, payload });
   });
+  // Full access went off: frames made while it was on keep their wider sandbox and device features
+  // for as long as they exist, so every one is torn down and made again under the usual limits.
+  onSettingsChanged(() => { if (!fullAccessOn() && hasFullFrames()) rebuildFrames(); });
   new MutationObserver(relook).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-mode', 'dir', 'lang', 'class'] });
+}
+
+/** Is any frame still running with what full access gave it (`createFrame`)? */
+export const hasFullFrames = () => [...frames].some((f) => f.el.hasAttribute('allow') || /allow-popups/.test(f.el.getAttribute('sandbox') ?? ''));
+/** Every add-on frame torn down and loaded again (with the sandbox of the moment). */
+export function rebuildFrames() {
+  for (const f of [...frames]) destroyFrame(f);
+  loadLayer(app.preview ? { preview: true } : {}).catch(() => {});
 }
 
 // ---------- loading ----------

@@ -194,7 +194,11 @@ pub(crate) fn ask_text(subject: &Subject, ar: bool) -> Ask {
 
 /// The second, last step before full access is switched on. Its first (default) button keeps it
 /// off, so pressing Enter twice never switches it on: the person has to choose the second button.
-pub(crate) fn full_access_last_step(ar: bool) -> (&'static str, &'static str, [&'static str; 2]) {
+/// The button of `full_access_last_step` that switches it on: neither the first (default) nor the
+/// last (cancel role).
+pub(crate) const FULL_ACCESS_YES: usize = 1;
+
+pub(crate) fn full_access_last_step(ar: bool) -> (&'static str, &'static str, [&'static str; 3]) {
     let pick = |pair: (&'static str, &'static str)| if ar { pair.1 } else { pair.0 };
     (
         pick(("Last step: switch full access on?", "الخطوة الأخيرة: تفعيل الوصول الكامل؟")),
@@ -202,7 +206,7 @@ pub(crate) fn full_access_last_step(ar: bool) -> (&'static str, &'static str, [&
             "Thoughts will stop protecting this computer and itself from the assistant and from pages until you turn full access off again. Choose “Turn on full access” only if you have read the warning and accept the risk.",
             "سيتوقف Thoughts عن حماية هذا الحاسوب وحماية نفسه من المساعد ومن الصفحات إلى أن توقف الوصول الكامل من جديد. اختر «فعّل الوصول الكامل» فقط إن قرأت التحذير وقبلت المخاطرة.",
         )),
-        [pick(("Keep it off", "أبقِه متوقفاً")), pick(("Turn on full access", "فعّل الوصول الكامل"))],
+        [pick(("Keep it off", "أبقِه متوقفاً")), pick(("Turn on full access", "فعّل الوصول الكامل")), pick(("Cancel", "إلغاء"))],
     )
 }
 
@@ -300,13 +304,15 @@ pub async fn approve_action(app: tauri::AppHandle, window: tauri::Window, action
         };
         let Some((shown, signed)) = learn(&i, what, &subject) else { return Err(unknown(what, ar)) };
         let ask = ask_text(&shown, ar);
-        if crate::recovery::choose(&app, MessageDialogKind::Warning, ask.title, &ask.body, &[ask.yes, ask.no]) != 0 {
+        // Only a press of the yes button is a yes: Cancel, Esc and closing the dialog never are.
+        if crate::recovery::choose_exact(&app, MessageDialogKind::Warning, ask.title, &ask.body, &[ask.yes, ask.no]) != Some(0) {
             return Err(DECLINED.to_string());
         }
-        // Full access takes a second, deliberate choice: the default button there keeps it off.
+        // Full access takes a second, deliberate choice: the default (Enter) button keeps it off,
+        // the cancel-role (Esc) button cancels, and only the middle one, pressed, switches it on.
         if what == Action::FullAccess {
-            let (title, body, [keep_off, turn_on]) = full_access_last_step(ar);
-            if crate::recovery::choose(&app, MessageDialogKind::Warning, title, body, &[keep_off, turn_on]) != 1 {
+            let (title, body, buttons) = full_access_last_step(ar);
+            if crate::recovery::choose_exact(&app, MessageDialogKind::Warning, title, body, &buttons) != Some(FULL_ACCESS_YES) {
                 return Err(DECLINED.to_string());
             }
         }
@@ -394,15 +400,34 @@ mod tests {
         for ar in [false, true] {
             let a = ask_text(&Subject::FullAccess, ar);
             let (_, body, buttons) = full_access_last_step(ar);
-            assert!(!body.is_empty() && buttons[0] != buttons[1]);
+            assert!(!body.is_empty() && buttons[0] != buttons[1] && buttons[1] != buttons[2]);
             if !ar {
                 for word in ["read, change or delete", "network", "microphone", "camera", "screen", "devices", "Recovery", "Rollback", "real damage", "no longer stop"] {
                     assert!(a.body.contains(word), "{word}: {}", a.body);
                 }
-                // The default (first) button of the last step keeps it off.
-                assert_eq!(buttons, ["Keep it off", "Turn on full access"]);
+                // The default (first) button keeps it off, the last one cancels, the middle one switches it on.
+                assert_eq!(buttons, ["Keep it off", "Turn on full access", "Cancel"]);
+            }
+            // Only that button, pressed, is a yes: Enter (the default), Esc, closing or anything unknown never is.
+            use tauri_plugin_dialog::MessageDialogResult as M;
+            let yes = |r: M| crate::recovery::exact_choice(r, &buttons) == Some(FULL_ACCESS_YES);
+            assert!(yes(M::Custom(buttons[FULL_ACCESS_YES].to_string())));
+            for no in [M::Ok, M::Yes, M::No, M::Cancel, M::Custom(buttons[0].into()), M::Custom(buttons[2].into()), M::Custom("something else".into())] {
+                assert!(!yes(no), "{ar}");
             }
         }
+    }
+
+    /// Dismissing any consent dialog is never a yes (a two-button dialog's second button has the
+    /// cancel role, which `choose` maps to it).
+    #[test]
+    fn dismissing_a_consent_dialog_is_never_an_answer() {
+        use tauri_plugin_dialog::MessageDialogResult as M;
+        let two = ["Bypass permissions", "Cancel"];
+        assert_eq!(crate::recovery::exact_choice(M::Custom("Bypass permissions".into()), &two), Some(0));
+        assert_eq!(crate::recovery::exact_choice(M::Ok, &two), Some(0));
+        for gone in [M::Cancel, M::No, M::Custom("".into())] { assert_eq!(crate::recovery::exact_choice(gone, &two), None); }
+        assert_eq!(crate::recovery::exact_choice(M::Custom("Cancel".into()), &two), Some(1), "a press of Cancel is Cancel, never a yes");
     }
 
     #[test]

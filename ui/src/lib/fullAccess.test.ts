@@ -52,4 +52,22 @@ describe('machine bridge host', () => {
     expect(await machineHandle('machine.read', ['/etc/hosts'], () => {})).toBe('x');
     await expect(machineHandle('machine.format', [], () => {})).rejects.toThrow();
   });
+  it('a change only being tried says so, and the service refuses it', async () => {
+    post.mockResolvedValue({});
+    await machineHandle('machine.open', ['https://example.com'], () => {}, true);
+    expect(post.mock.calls[0][0]).toBe('/machine/open?preview=1');
+  });
+});
+
+describe('settings watchers', () => {
+  it('run after every save, so frames made under full access can be rebuilt when it goes off', async () => {
+    const { onSettingsChanged, saveSettings } = await import('./store.svelte');
+    const seen: boolean[] = [];
+    const stop = onSettingsChanged(() => seen.push(fullAccessOn()));
+    app.settings = { fullAccess: { on: true } };
+    put.mockResolvedValue({ fullAccess: { on: false } });
+    await saveSettings({}, '?fullAccess=off');
+    stop();
+    expect(seen).toEqual([false]);
+  });
 });

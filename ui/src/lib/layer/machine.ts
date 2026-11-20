@@ -35,24 +35,26 @@ const opts = (v: any) => (v && typeof v === 'object' ? v : {});
 export function forgetFrame(deliver: Deliver) { for (const [id, d] of owners) if (d === deliver) owners.delete(id); }
 
 /** One `machine.*` call from a frame. */
-export async function machineHandle(method: string, a: any[], deliver: Deliver): Promise<any> {
+export async function machineHandle(method: string, a: any[], deliver: Deliver, preview = false): Promise<any> {
+  // A change only being tried says so: the service refuses it (machine.rs `require_on`).
+  const q = preview ? '?preview=1' : '';
   const o = opts(a[2]);
   const body = { program: s(a[0]), args: list(a[1]), cwd: o.cwd ? s(o.cwd) : undefined, stdin: o.stdin == null ? undefined : s(o.stdin),
     env: o.env && typeof o.env === 'object' ? Object.fromEntries(Object.entries(o.env).map(([k, v]) => [k, s(v)])) : undefined,
     timeoutSecs: Number.isFinite(Number(o.timeoutSecs)) && Number(o.timeoutSecs) > 0 ? Number(o.timeoutSecs) : undefined };
   switch (method) {
-    case 'machine.run': return post('/machine/run', body);
+    case 'machine.run': return post('/machine/run' + q, body);
     case 'machine.stream': {
       listen();
-      const r = await post<{ id: string }>('/machine/run', { ...body, stream: true });
+      const r = await post<{ id: string }>('/machine/run' + q, { ...body, stream: true });
       owners.set(r.id, deliver);
       return r;
     }
-    case 'machine.kill': return post('/machine/kill', { id: s(a[0]) });
-    case 'machine.read': { const r = await post('/machine/read', { path: s(a[0]), base64: !!opts(a[1]).base64 }); return r.content; }
-    case 'machine.write': return post('/machine/write', { path: s(a[0]), content: s(a[1]), base64: !!opts(a[2]).base64, append: !!opts(a[2]).append });
-    case 'machine.list': return (await post('/machine/list', { path: s(a[0]) })).entries;
-    case 'machine.open': return post('/machine/open', { target: s(a[0]), app: a[1] == null ? undefined : s(a[1]) });
+    case 'machine.kill': return post('/machine/kill' + q, { id: s(a[0]) });
+    case 'machine.read': { const r = await post('/machine/read' + q, { path: s(a[0]), base64: !!opts(a[1]).base64 }); return r.content; }
+    case 'machine.write': return post('/machine/write' + q, { path: s(a[0]), content: s(a[1]), base64: !!opts(a[2]).base64, append: !!opts(a[2]).append });
+    case 'machine.list': return (await post('/machine/list' + q, { path: s(a[0]) })).entries;
+    case 'machine.open': return post('/machine/open' + q, { target: s(a[0]), app: a[1] == null ? undefined : s(a[1]) });
     default: throw new Error(`"${method}" is not part of the machine bridge`);
   }
 }

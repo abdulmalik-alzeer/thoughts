@@ -20,7 +20,7 @@
 //!   program the system chooses, or in the app named (macOS `open -a`).
 
 use crate::state::AppState;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use base64::Engine;
@@ -55,10 +55,16 @@ pub async fn stop_all() {
     for (_, k) in all { let _ = k.send(()); }
 }
 
-/// The one check every route makes first.
-async fn require_on(st: &AppState) -> anyhow::Result<()> {
-    if st.settings.read().await.full_access() { Ok(()) } else { Err(crate::tr::err("full_access.off", &[])) }
+/// The one check every route makes first: full access is on, and the request is not for a
+/// customisation that is only being tried (`?preview=1`, which the add-on host sends while one is:
+/// the person has not kept it yet).
+async fn require_on(st: &AppState, q: &HashMap<String, String>) -> anyhow::Result<()> {
+    if !st.settings.read().await.full_access() { return Err(crate::tr::err("full_access.off", &[])); }
+    if q.get("preview").is_some_and(|v| !v.is_empty() && v != "0") { return Err(crate::tr::err("machine.preview", &[])); }
+    Ok(())
 }
+
+type Q = Query<HashMap<String, String>>;
 
 fn bad(why: &str) -> anyhow::Error { crate::tr::err("machine.bad_request", &[("why", why)]) }
 
@@ -118,8 +124,8 @@ async fn read_capped(mut r: impl tokio::io::AsyncRead + Unpin, max: usize) -> St
     String::from_utf8_lossy(&out).into_owned()
 }
 
-async fn run(State(st): S, Json(b): Json<RunBody>) -> R {
-    require_on(&st).await?;
+async fn run(State(st): S, Query(q): Q, Json(b): Json<RunBody>) -> R {
+    require_on(&st, &q).await?;
     let mut c = command_for(&b)?;
     // In a group of its own, so that ending it ends everything it started too.
     crate::proc::own_group(&mut c);
@@ -185,8 +191,8 @@ async fn run(State(st): S, Json(b): Json<RunBody>) -> R {
 #[derive(Deserialize)]
 struct IdBody { id: String }
 
-async fn kill(State(st): S, Json(b): Json<IdBody>) -> R {
-    require_on(&st).await?;
+async fn kill(State(st): S, Query(q): Q, Json(b): Json<IdBody>) -> R {
+    require_on(&st, &q).await?;
     let k = running().lock().unwrap_or_else(|e| e.into_inner()).remove(&b.id);
     let found = k.map(|k| k.send(()).is_ok()).is_some();
     Ok(Json(json!({"stopped": found})))
@@ -196,8 +202,8 @@ async fn kill(State(st): S, Json(b): Json<IdBody>) -> R {
 #[serde(default)]
 struct ReadBody { path: String, base64: bool }
 
-async fn read(State(st): S, Json(b): Json<ReadBody>) -> R {
-    require_on(&st).await?;
+async fn read(State(st): S, Query(q): Q, Json(b): Json<ReadBody>) -> R {
+    require_on(&st, &q).await?;
     let p = path_of(&b.path)?;
     let len = tokio::fs::metadata(&p).await.map_err(|e| bad(&e.to_string()))?.len() as usize;
     if len > FILE_MAX { return Err(bad("the file is too large to read in one go").into()); }
@@ -210,8 +216,8 @@ async fn read(State(st): S, Json(b): Json<ReadBody>) -> R {
 #[serde(default)]
 struct WriteBody { path: String, content: String, base64: bool, append: bool }
 
-async fn write(State(st): S, Json(b): Json<WriteBody>) -> R {
-    require_on(&st).await?;
+async fn write(State(st): S, Query(q): Q, Json(b): Json<WriteBody>) -> R {
+    require_on(&st, &q).await?;
     let p = path_of(&b.path)?;
     let bytes = if b.base64 { base64::engine::general_purpose::STANDARD.decode(b.content.trim()).map_err(|e| bad(&e.to_string()))? } else { b.content.into_bytes() };
     if bytes.len() > FILE_MAX { return Err(bad("the content is too large to write in one go").into()); }
@@ -230,8 +236,8 @@ async fn write(State(st): S, Json(b): Json<WriteBody>) -> R {
 #[serde(default)]
 struct ListBody { path: String }
 
-async fn list(State(st): S, Json(b): Json<ListBody>) -> R {
-    require_on(&st).await?;
+async fn list(State(st): S, Query(q): Q, Json(b): Json<ListBody>) -> R {
+    require_on(&st, &q).await?;
     let p = path_of(&b.path)?;
     let mut rd = tokio::fs::read_dir(&p).await.map_err(|e| bad(&e.to_string()))?;
     let mut entries = vec![];
@@ -265,8 +271,8 @@ pub fn open_command(target: &str, app: Option<&str>) -> (String, Vec<String>) {
     }
 }
 
-async fn open(State(st): S, Json(b): Json<OpenBody>) -> R {
-    require_on(&st).await?;
+async fn open(State(st): S, Query(q): Q, Json(b): Json<OpenBody>) -> R {
+    require_on(&st, &q).await?;
     if b.target.trim().is_empty() && b.app.as_deref().map_or(true, |a| a.trim().is_empty()) { return Err(bad("nothing to open was named").into()); }
     if b.target.contains('\0') { return Err(bad("nothing to open was named").into()); }
     let (prog, args) = open_command(b.target.trim(), b.app.as_deref());
@@ -279,20 +285,35 @@ async fn open(State(st): S, Json(b): Json<OpenBody>) -> R {
 mod tests {
     use super::*;
 
+    fn no_q() -> Q { Query(HashMap::new()) }
+    fn preview_q() -> Q { Query(HashMap::from([("preview".to_string(), "1".to_string())])) }
+
+    /// A customisation that is only being tried never reaches the computer, full access or not.
+    #[tokio::test]
+    async fn a_change_being_tried_is_refused_even_with_full_access() {
+        let st = Arc::new(AppState::for_test());
+        st.settings.write().await.full_access.on = true;
+        let code = |r: R| match r { Ok(_) => 200, Err(e) => crate::api::shown_status(&e) };
+        assert_eq!(code(run(State(st.clone()), preview_q(), Json(RunBody { program: "echo".into(), ..Default::default() })).await), 403);
+        assert_eq!(code(read(State(st.clone()), preview_q(), Json(ReadBody { path: "/etc/hosts".into(), base64: false })).await), 403);
+        assert_eq!(code(open(State(st.clone()), preview_q(), Json(OpenBody { target: "https://example.com".into(), app: None })).await), 403);
+        assert_eq!(code(run(State(st.clone()), no_q(), Json(RunBody { program: "true".into(), ..Default::default() })).await), 200);
+    }
+
     #[tokio::test]
     async fn every_route_refuses_while_full_access_is_off() {
         let st = Arc::new(AppState::for_test());
         assert!(!st.settings.read().await.full_access());
         let code = |r: R| match r { Ok(_) => 200, Err(e) => crate::api::shown_status(&e) };
         let run_body = || Json(RunBody { program: "echo".into(), args: vec!["hi".into()], ..Default::default() });
-        assert_eq!(code(run(State(st.clone()), run_body()).await), 403);
-        assert_eq!(code(read(State(st.clone()), Json(ReadBody { path: "/etc/hosts".into(), base64: false })).await), 403);
+        assert_eq!(code(run(State(st.clone()), no_q(), run_body()).await), 403);
+        assert_eq!(code(read(State(st.clone()), no_q(), Json(ReadBody { path: "/etc/hosts".into(), base64: false })).await), 403);
         let target = std::env::temp_dir().join(format!("machine-off-{}", uuid::Uuid::new_v4()));
-        assert_eq!(code(write(State(st.clone()), Json(WriteBody { path: target.to_string_lossy().into(), content: "x".into(), ..Default::default() })).await), 403);
+        assert_eq!(code(write(State(st.clone()), no_q(), Json(WriteBody { path: target.to_string_lossy().into(), content: "x".into(), ..Default::default() })).await), 403);
         assert!(!target.exists(), "nothing was written");
-        assert_eq!(code(list(State(st.clone()), Json(ListBody { path: "/".into() })).await), 403);
-        assert_eq!(code(open(State(st.clone()), Json(OpenBody { target: "https://example.com".into(), app: None })).await), 403);
-        assert_eq!(code(kill(State(st.clone()), Json(IdBody { id: "x".into() })).await), 403);
+        assert_eq!(code(list(State(st.clone()), no_q(), Json(ListBody { path: "/".into() })).await), 403);
+        assert_eq!(code(open(State(st.clone()), no_q(), Json(OpenBody { target: "https://example.com".into(), app: None })).await), 403);
+        assert_eq!(code(kill(State(st.clone()), no_q(), Json(IdBody { id: "x".into() })).await), 403);
         assert_eq!(info(State(st.clone())).await.unwrap().0["on"], false);
     }
 
@@ -301,23 +322,23 @@ mod tests {
     async fn with_full_access_on_it_runs_reads_and_writes() {
         let st = Arc::new(AppState::for_test());
         st.settings.write().await.full_access.on = true;
-        let r = run(State(st.clone()), Json(RunBody { program: "sh".into(), args: vec!["-c".into(), "echo out; echo err >&2; exit 3".into()], ..Default::default() })).await.unwrap().0;
+        let r = run(State(st.clone()), no_q(), Json(RunBody { program: "sh".into(), args: vec!["-c".into(), "echo out; echo err >&2; exit 3".into()], ..Default::default() })).await.unwrap().0;
         assert_eq!((r["code"].as_i64(), r["stdout"].as_str(), r["stderr"].as_str()), (Some(3), Some("out\n"), Some("err\n")));
-        let fed = run(State(st.clone()), Json(RunBody { program: "cat".into(), stdin: Some("typed".into()), ..Default::default() })).await.unwrap().0;
+        let fed = run(State(st.clone()), no_q(), Json(RunBody { program: "cat".into(), stdin: Some("typed".into()), ..Default::default() })).await.unwrap().0;
         assert_eq!(fed["stdout"], "typed");
-        let slow = run(State(st.clone()), Json(RunBody { program: "sleep".into(), args: vec!["5".into()], timeout_secs: Some(1), ..Default::default() })).await.unwrap().0;
+        let slow = run(State(st.clone()), no_q(), Json(RunBody { program: "sleep".into(), args: vec!["5".into()], timeout_secs: Some(1), ..Default::default() })).await.unwrap().0;
         assert_eq!(slow["timedOut"], true);
         let dir = std::env::temp_dir().join(format!("machine-on-{}", uuid::Uuid::new_v4()));
         let f = dir.join("sub/a.txt");
-        let _ = write(State(st.clone()), Json(WriteBody { path: f.to_string_lossy().into(), content: "one".into(), ..Default::default() })).await.unwrap();
-        let _ = write(State(st.clone()), Json(WriteBody { path: f.to_string_lossy().into(), content: "dHdv".into(), base64: true, append: true })).await.unwrap();
-        let back = read(State(st.clone()), Json(ReadBody { path: f.to_string_lossy().into(), base64: false })).await.unwrap().0;
+        let _ = write(State(st.clone()), no_q(), Json(WriteBody { path: f.to_string_lossy().into(), content: "one".into(), ..Default::default() })).await.unwrap();
+        let _ = write(State(st.clone()), no_q(), Json(WriteBody { path: f.to_string_lossy().into(), content: "dHdv".into(), base64: true, append: true })).await.unwrap();
+        let back = read(State(st.clone()), no_q(), Json(ReadBody { path: f.to_string_lossy().into(), base64: false })).await.unwrap().0;
         assert_eq!(back["content"], "onetwo");
-        let ls = list(State(st.clone()), Json(ListBody { path: dir.join("sub").to_string_lossy().into() })).await.unwrap().0;
+        let ls = list(State(st.clone()), no_q(), Json(ListBody { path: dir.join("sub").to_string_lossy().into() })).await.unwrap().0;
         assert_eq!(ls["entries"][0]["name"], "a.txt");
         // A streamed command answers with an id at once; its output and end come as events.
         let mut events = st.events.subscribe();
-        let id = run(State(st.clone()), Json(RunBody { program: "sh".into(), args: vec!["-c".into(), "echo streamed".into()], stream: true, ..Default::default() })).await.unwrap().0["id"].as_str().unwrap().to_string();
+        let id = run(State(st.clone()), no_q(), Json(RunBody { program: "sh".into(), args: vec!["-c".into(), "echo streamed".into()], stream: true, ..Default::default() })).await.unwrap().0["id"].as_str().unwrap().to_string();
         let (mut said, mut code) = (String::new(), None);
         while let Ok(Ok(ev)) = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv()).await {
             if ev["id"] != id.as_str() { continue; }
@@ -326,7 +347,7 @@ mod tests {
         }
         assert_eq!((said.as_str(), code), ("streamed\n", Some(0)));
         // Switching full access off stops what is still running.
-        let long = run(State(st.clone()), Json(RunBody { program: "sleep".into(), args: vec!["30".into()], stream: true, ..Default::default() })).await.unwrap().0["id"].as_str().unwrap().to_string();
+        let long = run(State(st.clone()), no_q(), Json(RunBody { program: "sleep".into(), args: vec!["30".into()], stream: true, ..Default::default() })).await.unwrap().0["id"].as_str().unwrap().to_string();
         assert!(running().lock().unwrap().contains_key(&long));
         stop_all().await;
         for _ in 0..200 { if !running().lock().unwrap().contains_key(&long) { break; } tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
@@ -334,7 +355,7 @@ mod tests {
         // …and a command that is waited for, with everything it started (its whole group).
         let (st3, marker) = (st.clone(), dir.join("child-survived"));
         let script = format!("(sleep 3; touch '{}') & sleep 30", marker.display());
-        let waited = tokio::spawn(async move { run(State(st3), Json(RunBody { program: "sh".into(), args: vec!["-c".into(), script], timeout_secs: Some(60), ..Default::default() })).await.unwrap().0 });
+        let waited = tokio::spawn(async move { run(State(st3), no_q(), Json(RunBody { program: "sh".into(), args: vec!["-c".into(), script], timeout_secs: Some(60), ..Default::default() })).await.unwrap().0 });
         for _ in 0..200 { if !running().lock().unwrap().is_empty() { break; } tokio::time::sleep(std::time::Duration::from_millis(10)).await; }
         let t0 = std::time::Instant::now();
         stop_all().await;

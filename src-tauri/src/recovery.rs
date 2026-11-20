@@ -203,6 +203,34 @@ pub(crate) fn choose(app: &tauri::AppHandle, kind: MessageDialogKind, title: &st
     }
 }
 
+/// Like `choose`, for a question where dismissing must never count as any answer (a consent
+/// dialog): `Some(index)` only for a button the person really pressed — named by its label, or the
+/// default (first) button — and `None` for Cancel, Esc, closing the dialog, or anything unknown.
+/// Three buttons put the last one in the cancel role, so a dangerous choice can sit in the middle,
+/// neither the default nor what Esc presses.
+pub(crate) fn choose_exact(app: &tauri::AppHandle, kind: MessageDialogKind, title: &str, body: &str, buttons: &[&str]) -> Option<usize> {
+    let set = match buttons {
+        [a] => MessageDialogButtons::OkCustom(a.to_string()),
+        [a, b] => MessageDialogButtons::OkCancelCustom(a.to_string(), b.to_string()),
+        [a, b, c] => MessageDialogButtons::YesNoCancelCustom(a.to_string(), b.to_string(), c.to_string()),
+        _ => return None,
+    };
+    let mut dialog = app.dialog().message(body).title(title).kind(kind).buttons(set);
+    if let Some(w) = crate::main_window(app).filter(|w| w.is_visible().unwrap_or(false)) {
+        dialog = dialog.parent(&w);
+    }
+    exact_choice(dialog.blocking_show_with_result(), buttons)
+}
+
+/// What `choose_exact` makes of a dialog's result (see there).
+pub(crate) fn exact_choice(result: MessageDialogResult, buttons: &[&str]) -> Option<usize> {
+    match result {
+        MessageDialogResult::Custom(pressed) => buttons.iter().position(|b| *b == pressed),
+        MessageDialogResult::Ok | MessageDialogResult::Yes => (!buttons.is_empty()).then_some(0),
+        _ => None,
+    }
+}
+
 /// Say something, with one OK button.
 pub(crate) fn tell(app: &tauri::AppHandle, kind: MessageDialogKind, title: &str, body: &str) {
     choose(app, kind, title, body, &[tx(arabic(), "ok")]);
