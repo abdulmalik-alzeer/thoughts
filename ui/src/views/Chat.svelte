@@ -951,7 +951,7 @@
         {/if}
         {#if thinking && allSteps}<div class="msg sys muted ell think"><Icon name="thinking" size={13} /> <span class="ell" dir="auto">{thinking.slice(-160)}</span></div>{/if}
         {#if streaming}
-          <div class="msg ai" aria-busy="true"><StreamText text={streaming} onrender={() => scrollDown()} /></div>
+          <div class="msg ai" aria-busy="true"><StreamText text={streaming} onrender={() => scrollDown()} onclick={msgLink} /></div>
         {/if}
         {#if chat.running && !streaming}<div class="msg sys muted working" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> {allSteps ? t('chat.working') : liveLine(chat.messages, !!thinking)}</div>{/if}
       </div>

@@ -133,6 +133,25 @@ describe('md: wrappers', () => {
     expect(table.getAttribute('tabindex')).toBe('0');
     expect(table.querySelector('table')).not.toBeNull();
   });
+
+  it('a code block names its language in a header beside the copy button', () => {
+    const d = render('```ts\nconst a = 1 < 2;\n```');
+    const head = d.querySelector('div.md-code > div.md-codehead')!;
+    expect(head.querySelector('.md-lang')?.textContent).toBe('ts');
+    expect(head.querySelector('button.md-copy')).not.toBeNull();
+    expect(head.getAttribute('data-md-copy')).toBe('');
+    const pre = d.querySelector('div.md-code > pre')!;
+    expect(pre.hasAttribute('title')).toBe(false);
+    expect(pre.textContent).toBe('const a = 1 < 2;\n');
+  });
+
+  it('no language, a strange one, or a forged stamp: no name shown', () => {
+    expect(render('```\nx\n```').querySelector('.md-lang')?.textContent).toBe('');
+    expect(render('```<b>x</b>\nx\n```').querySelector('.md-lang')?.textContent).toBe('');
+    const forged = render('<pre title="0123456789abcdef01234567:lang:evil">y</pre>');
+    expect(forged.querySelector('.md-lang')?.textContent).toBe('');
+    expect(forged.querySelector('pre')?.getAttribute('title')).toBe('0123456789abcdef01234567:lang:evil');
+  });
 });
 
 describe('hasHiddenText', () => {

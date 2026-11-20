@@ -24,8 +24,20 @@ marked.use({
       const checked = typeof a === 'object' && a ? !!a.checked : !!a;
       return `<span title="${taskMark}:${checked ? 'x' : 'o'}">${checked ? '[x]' : '[ ]'}</span> `;
     },
+    // A code block keeps the language it was written with (`class` is stripped by the sanitiser, so
+    // it rides on a stamped title, like the task markers): its header names it.
+    code(a: any) {
+      const text = String(a?.text ?? '').replace(/\n$/, '') + '\n';
+      const lang = String(a?.lang ?? '').trim().split(/\s+/)[0] ?? '';
+      const stamp = LANG.test(lang) ? ` title="${taskMark}:lang:${lang}"` : '';
+      return `<pre${stamp}><code>${a?.escaped ? text : escapeHtml(text)}</code></pre>\n`;
+    },
   },
 });
+
+/** A language name worth showing over a code block ("ts", "c++", "objective-c", "c#"). */
+const LANG = /^[A-Za-z0-9][\w+#.-]{0,23}$/;
+const escapeHtml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
 /** What may come out of markdown: plain document structure only. Nothing interactive, no frames, no
  *  SVG or MathML, and no `style`, `class`, `id`, `name`, `data-*` or ARIA attributes, so a note can
@@ -104,14 +116,26 @@ function render(src: string): string {
     box.setAttribute('role', 'img');
     box.setAttribute('aria-label', t(m[2] === 'x' ? 'chat3.taskDone' : 'chat3.taskOpen'));
   }
+  // A code block gets a header, as in Claude's own chat: its language and a copy button. The header
+  // carries `data-md-copy` too (empty, so it is never taken for the button): an export or a printout
+  // that drops the copy buttons drops the whole header with them.
   for (const pre of Array.from(frag.querySelectorAll('pre'))) {
+    const m = /^([0-9a-f]{24}):lang:(.+)$/.exec(pre.getAttribute('title') || '');
+    if (pre.hasAttribute('title') && m?.[1] === taskMark) pre.removeAttribute('title');
+    const lang = m && m[1] === taskMark && LANG.test(m[2]) ? m[2] : '';
     const wrap = document.createElement('div');
     wrap.className = 'md-code';
+    const head = document.createElement('div');
+    head.className = 'md-codehead'; head.setAttribute('data-md-copy', '');
+    const name = document.createElement('span');
+    name.className = 'md-lang'; name.dir = 'ltr';
+    name.textContent = lang;
     const btn = document.createElement('button');
     btn.type = 'button'; btn.className = 'md-copy'; btn.setAttribute('data-md-copy', COPY_MARK);
     btn.textContent = t('md.copyCode');
+    head.append(name, btn);
     pre.replaceWith(wrap);
-    wrap.append(btn, pre);
+    wrap.append(head, pre);
   }
   for (const table of Array.from(frag.querySelectorAll('table'))) {
     const wrap = document.createElement('div');
@@ -198,7 +222,7 @@ export function mdClick(e: Event): boolean {
   const btn = (e.target as HTMLElement | null)?.closest?.('[data-md-copy]') as HTMLButtonElement | null;
   if (!btn || btn.tagName !== 'BUTTON' || btn.getAttribute('data-md-copy') !== COPY_MARK) return false;
   e.preventDefault();
-  const code = btn.parentElement?.querySelector('pre')?.innerText ?? '';
+  const code = btn.closest('.md-code')?.querySelector('pre')?.innerText ?? '';
   const done = (ok: boolean) => {
     btn.textContent = t(ok ? 'md.copied' : 'md.copyFailed');
     setTimeout(() => { btn.textContent = t('md.copyCode'); }, 1600);
@@ -212,14 +236,15 @@ if (typeof document !== 'undefined' && !document.getElementById('md-extras')) {
   const s = document.createElement('style');
   s.id = 'md-extras';
   s.textContent = `
-.md-code { position: relative; margin: 0 0 10px; }
-.md-code pre { margin: 0; overflow-x: auto; direction: ltr; text-align: left; }
-.md-copy { position: absolute; top: 6px; inset-inline-end: 6px; font: inherit; font-size: 12px; font-weight: 500; line-height: 1.4;
-  color: var(--muted); background: var(--panel, var(--bg)); border: 1px solid var(--hairline); border-radius: 7px; padding: 2px 8px;
-  cursor: pointer; opacity: 0; transition: opacity .15s; }
-.md-code:hover .md-copy, .md-copy:focus-visible { opacity: 1; }
-.md-copy:hover { color: var(--fg); }
-@media (hover: none) { .md-copy { opacity: 1; } }
+.md-code { position: relative; margin: 0 0 10px; border: var(--border-w, 1px) solid var(--hairline); border-radius: var(--radius); background: var(--code-bg); overflow: hidden; }
+.md-code pre { margin: 0; overflow-x: auto; direction: ltr; text-align: left; border: 0; border-radius: 0; background: none; padding: 4px 12px 12px; }
+.md-codehead { display: flex; align-items: center; justify-content: space-between; gap: 8px; direction: ltr; min-height: 28px;
+  padding: 4px 6px 0 12px; font-size: 12px; color: var(--muted); }
+.md-lang { font-family: var(--mono); font-size: 11.5px; letter-spacing: .01em; }
+.md-copy { font: inherit; font-size: 12px; font-weight: 500; line-height: 1.4;
+  color: var(--muted); background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 2px 8px; cursor: pointer; transition: color .15s, background .15s; }
+.md-copy:hover { color: var(--fg); background: var(--fill); border-color: var(--hairline); }
+@media print { .md-codehead { display: none !important; } }
 .md-table { overflow-x: auto; max-width: 100%; margin: 0 0 10px; }
 .md-table table { min-width: max-content; }
 .md :not(pre) > code[dir] { unicode-bidi: isolate; }
