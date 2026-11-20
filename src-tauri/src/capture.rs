@@ -24,9 +24,15 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 /// The capture window's label (its capability is `capabilities/capture.json`).
 pub(crate) const LABEL: &str = "capture";
-/// Size of the box, in points at 100% zoom.
-const WIDTH: f64 = 580.0;
-const HEIGHT: f64 = 290.0;
+/// The size the window starts at, in points at 100% zoom: a slim, wide bar (the page then asks
+/// for exactly the size it needs, `capture_fit`). On a Mac the window is transparent and the page
+/// draws the rounded bar and its shadow inside a small margin; elsewhere the bar fills the window.
+const WIDTH: f64 = if cfg!(target_os = "macos") { 680.0 } else { 640.0 };
+const HEIGHT: f64 = if cfg!(target_os = "macos") { 100.0 } else { 60.0 };
+/// What the page may ask for (`capture_fit`), in points: never smaller than one line, never taller
+/// than a modest box (beyond that the text scrolls inside it), never wider than a wide bar at 200%.
+const FIT_W: (f64, f64) = (280.0, 1440.0);
+const FIT_H: (f64, f64) = (40.0, 720.0);
 
 /// Text a link wants in the box, and which kind it is (`"todo"` / `"note"`). Taken by the page.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -124,8 +130,8 @@ fn first_ask() -> bool {
 fn build(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let settings = thoughtsd::settings::Settings::load();
     let ar = settings.language.starts_with("ar");
-    // Larger text means a larger box, never one that cuts the text off.
-    let zoom = (settings.accessibility.zoom as f64 / 100.0).clamp(1.0, 2.0);
+    // The page sizes the box to its zoom once drawn; start near that size so nothing jumps.
+    let zoom = (settings.accessibility.zoom as f64 / 100.0).clamp(0.5, 2.0);
     let builder = tauri::WebviewWindowBuilder::new(app, LABEL, tauri::WebviewUrl::App("capture.html".into()))
         .title(if ar { "تدوين سريع — Thoughts" } else { "Quick capture — Thoughts" })
         .inner_size(WIDTH * zoom, HEIGHT * zoom)
@@ -138,14 +144,19 @@ fn build(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
         .visible(false)
         .center()
         .focused(true)
+        // No title bar: the page draws a slim rounded bar of its own and can be dragged by it.
+        .decorations(false)
         // Text dragged in from another app lands in the box instead of being taken as a file drop.
         .disable_drag_drop_handler();
     let builder = match browser_args(&app.config().app.windows) {
         Some(args) => builder.additional_browser_args(&args),
         None => builder,
     };
+    // A Mac draws the window clear, so only the page's rounded bar and its soft shadow show; the
+    // system's own shadow stays off (it would outline the whole clear window, margin included).
+    // Elsewhere the window stays opaque, as transparency there depends on the graphics driver.
     #[cfg(target_os = "macos")]
-    let builder = builder.title_bar_style(tauri::TitleBarStyle::Overlay).hidden_title(true);
+    let builder = builder.transparent(true).shadow(false);
     builder.build()
 }
 
@@ -174,8 +185,15 @@ fn place(app: &AppHandle, w: &tauri::WebviewWindow) {
     };
     let area = m.work_area();
     let x = area.position.x + (area.size.width.saturating_sub(size.width) / 2) as i32;
-    let y = area.position.y + (area.size.height.saturating_sub(size.height) / 4) as i32;
+    // The top edge goes where an empty box would sit, whatever height the box had when it was put
+    // away (a status line, several lines of text): it then always opens at the same place.
+    let y = area.position.y + (area.size.height.saturating_sub(empty_height(size.width)) / 4) as i32;
     let _ = w.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// The height of the empty box at the zoom `width` was sized for (in the same units as `width`).
+fn empty_height(width: u32) -> u32 {
+    (width as f64 * HEIGHT / WIDTH).round() as u32
 }
 
 /// Put the box away. `give_back`: the user is done (Esc, saved, the shortcut again), so the app
@@ -268,6 +286,73 @@ pub(crate) fn capture_show(window: tauri::Window) {
 pub(crate) fn open_capture(window: tauri::Window) {
     if crate::is_main_label(window.label()) {
         from_menu(window.app_handle());
+    }
+}
+
+/// The size the page asks for, in points, kept within sane bounds.
+fn fit(width: f64, height: f64) -> Option<(f64, f64)> {
+    (width.is_finite() && height.is_finite()).then(|| (width.clamp(FIT_W.0, FIT_W.1).round(), height.clamp(FIT_H.0, FIT_H.1).round()))
+}
+
+/// Where the window goes when its size changes from `old` to `size` (x, y, width, height, in the
+/// system's own coordinates): it stays centred where it was, and its top edge stays put, so the box
+/// grows downwards as the text wraps. `y_up`: the y axis points up (macOS), so the top is `y + h`.
+fn refit(old: (f64, f64, f64, f64), size: (f64, f64), y_up: bool) -> (f64, f64, f64, f64) {
+    let (x, y, w, h) = old;
+    let nx = (x + (w - size.0) / 2.0).round();
+    let ny = if y_up { y + h - size.1 } else { y };
+    (nx, ny, size.0, size.1)
+}
+
+/// `capture_fit {width, height}`: the page's content changed size (text wrapped, a status line
+/// appeared, the zoom changed). The window takes that size at once, in one step, keeping its top
+/// edge and its centre where they are.
+#[tauri::command]
+pub(crate) fn capture_fit(window: tauri::Window, width: f64, height: f64) {
+    if !from_capture(&window) {
+        return;
+    }
+    let Some(size) = fit(width, height) else { return };
+    let Some(w) = window.app_handle().get_webview_window(LABEL) else { return };
+    #[cfg(target_os = "macos")]
+    {
+        // One `setFrame:` on the main thread: a size and then a position would show the box for a
+        // moment with its top in the wrong place.
+        let target = w.clone();
+        let _ = w.run_on_main_thread(move || {
+            use objc2::msg_send;
+            use objc2::runtime::AnyObject;
+            use objc2_foundation::{NSPoint, NSRect, NSSize};
+            let Ok(ptr) = target.ns_window() else { return };
+            let ns = ptr as *mut AnyObject;
+            if ns.is_null() {
+                return;
+            }
+            // SAFETY: on the main thread, with the window's own NSWindow.
+            unsafe {
+                let frame: NSRect = msg_send![ns, frame];
+                if (frame.size.width - size.0).abs() < 0.5 && (frame.size.height - size.1).abs() < 0.5 {
+                    return;
+                }
+                let (x, y, w, h) = refit((frame.origin.x, frame.origin.y, frame.size.width, frame.size.height), size, true);
+                let to = NSRect::new(NSPoint::new(x, y), NSSize::new(w, h));
+                let _: () = msg_send![ns, setFrame: to, display: true];
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let scale = w.scale_factor().unwrap_or(1.0);
+        let (Ok(at), Ok(now)) = (w.outer_position(), w.outer_size()) else { return };
+        let old = (at.x as f64 / scale, at.y as f64 / scale, now.width as f64 / scale, now.height as f64 / scale);
+        if (old.2 - size.0).abs() < 0.5 && (old.3 - size.1).abs() < 0.5 {
+            return;
+        }
+        let (x, y, nw, nh) = refit(old, size, false);
+        let _ = w.set_size(tauri::LogicalSize::new(nw, nh));
+        if (x - old.0).abs() >= 0.5 {
+            let _ = w.set_position(tauri::LogicalPosition::new(x, y));
+        }
     }
 }
 
@@ -656,6 +741,43 @@ mod tests {
             assert_eq!(browser_args(&windows), None);
         }
         assert_eq!(browser_args(&[]), None);
+    }
+
+    #[test]
+    fn the_box_takes_the_size_the_page_asks_for_within_bounds() {
+        assert_eq!(fit(680.0, 100.0), Some((680.0, 100.0)));
+        assert_eq!(fit(680.4, 99.6), Some((680.0, 100.0)));
+        // A page that measured nothing, or something absurd, never makes a tiny or a huge window.
+        assert_eq!(fit(0.0, 0.0), Some((FIT_W.0, FIT_H.0)));
+        assert_eq!(fit(1e6, 1e6), Some((FIT_W.1, FIT_H.1)));
+        assert_eq!(fit(f64::NAN, 100.0), None);
+        assert_eq!(fit(600.0, f64::INFINITY), None);
+        // The starting size is one the page could ask for.
+        assert_eq!(fit(WIDTH, HEIGHT), Some((WIDTH, HEIGHT)));
+        // Slim and wide.
+        assert!(WIDTH >= 600.0 && WIDTH <= 700.0 && HEIGHT <= 100.0);
+    }
+
+    #[test]
+    fn the_box_opens_at_the_same_height_whatever_it_held() {
+        assert_eq!(empty_height(WIDTH as u32), HEIGHT as u32);
+        // At 125% on a 2x screen the box is 2.5 times as wide, and so is the empty height.
+        assert_eq!(empty_height((WIDTH * 2.5) as u32), (HEIGHT * 2.5) as u32);
+    }
+
+    #[test]
+    fn the_box_grows_downwards_and_stays_centred() {
+        // macOS (y up): growing from 100 to 160 tall keeps the top edge (y + h) where it was.
+        let (x, y, w, h) = refit((400.0, 700.0, 680.0, 100.0), (680.0, 160.0), true);
+        assert_eq!((x, w, h), (400.0, 680.0, 160.0));
+        assert_eq!(y + h, 800.0);
+        // Shrinking back puts it exactly where it started.
+        assert_eq!(refit((x, y, w, h), (680.0, 100.0), true), (400.0, 700.0, 680.0, 100.0));
+        // Windows / Linux (y down): the top is y itself.
+        assert_eq!(refit((400.0, 200.0, 640.0, 60.0), (640.0, 120.0), false), (400.0, 200.0, 640.0, 120.0));
+        // A wider box (zoom went up) stays centred on the same point.
+        let (x, _, w, _) = refit((400.0, 200.0, 640.0, 60.0), (800.0, 75.0), false);
+        assert_eq!(x + w / 2.0, 400.0 + 320.0);
     }
 
     #[test]

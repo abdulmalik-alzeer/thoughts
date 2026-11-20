@@ -2,7 +2,7 @@
 import { api, inTauri, post, put } from './api';
 import { syncDockIcon } from './logo';
 import { newestOnly, oneAtATime } from './serial';
-import { isSecondary, MAIN_ONLY, showInMain } from './windows';
+import { isSecondary, MAIN_ONLY, showInMain, windowLabel } from './windows';
 
 export type View = { kind: string; id?: string; path?: string };
 
@@ -323,6 +323,9 @@ export function cachedLook(): Look | null {
 }
 
 let menuLang: string | undefined;
+/** The native menus and the Dock icon belong to the main window: never a second one, nor the
+ *  quick capture box (which paints the same look through `applyTheme`). */
+const ownsShell = () => !isSecondary() && windowLabel() !== 'capture';
 
 export function applyTheme() {
   const s = app.settings;
@@ -331,12 +334,12 @@ export function applyTheme() {
   // the window back a step (zoom 110 → 125 → 150 would show 110 again for a moment).
   paint(a11ySaving && painted ? { ...s, accessibility: painted } : s);
   // The native menus are built in the shell: ask it to rebuild them when the language changes.
-  if (menuLang !== undefined && menuLang !== s.language && inTauri() && !isSecondary()) {
+  if (menuLang !== undefined && menuLang !== s.language && inTauri() && ownsShell()) {
     import('@tauri-apps/api/core').then(({ invoke }) => invoke('refresh_menu')).catch(() => {});
   }
   menuLang = s.language;
   ls.set('thoughts.look', JSON.stringify({ theme: s.theme, mode: s.mode, language: s.language, accessibility: s.accessibility ?? null }));
-  if (!isSecondary()) requestAnimationFrame(() => syncDockIcon().catch(() => {}));
+  if (ownsShell()) requestAnimationFrame(() => syncDockIcon().catch(() => {}));
 }
 
 { const look = cachedLook(); if (look) paint(look); }

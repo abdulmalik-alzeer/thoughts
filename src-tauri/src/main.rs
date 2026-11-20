@@ -11,6 +11,7 @@
 mod attention;
 mod capture;
 mod consent;
+mod fullscreen;
 mod ghfeed;
 mod links;
 mod openfile;
@@ -924,7 +925,6 @@ fn std_text(ar: bool, kind: &str) -> Option<&'static str> {
         "hide" => "إخفاء Thoughts",
         "hide_others" => "إخفاء الآخرين",
         "services" => "الخدمات",
-        "fullscreen" => "ملء الشاشة",
         "about" => "حول Thoughts",
         _ => return None,
     })
@@ -956,7 +956,6 @@ fn std_item(h: &tauri::AppHandle, ar: bool, kind: &str) -> tauri::Result<Box<dyn
         "hide" => PredefinedMenuItem::hide(h, text)?,
         "hide_others" => PredefinedMenuItem::hide_others(h, text)?,
         "services" => PredefinedMenuItem::services(h, text)?,
-        "fullscreen" => PredefinedMenuItem::fullscreen(h, text)?,
         _ => PredefinedMenuItem::separator(h)?,
     }))
 }
@@ -1027,7 +1026,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
         ],
     )?;
     let file = Submenu::with_items(h, label(ar, "file"), true, &[&capture_item(h, ar, "capture")?, &PredefinedMenuItem::separator(h)?, &*std_item(h, ar, "close_window")?])?;
-    let view = Submenu::with_items(h, label(ar, "view"), true, &[&*std_item(h, ar, "fullscreen")?])?;
+    let view = Submenu::with_items(h, label(ar, "view"), true, &[&fullscreen::item(h, ar)?])?;
     let window = Submenu::with_id_and_items(
         h,
         WINDOW_SUBMENU_ID,
@@ -1045,7 +1044,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
     Menu::with_items(h, &[&app_menu, &file, &edit_menu(h, ar)?, &view, &window, &recovery::menu(h, ar)?, &help])
 }
 
-/// Windows / Linux: File (Settings…, Close, Quit) · Edit · Window · Recovery · Help.
+/// Windows / Linux: File (Settings…, Close, Quit) · Edit · Window (with Full Screen, F11) · Recovery · Help.
 /// UNTESTED: written on macOS; needs a pass on real Windows and Linux.
 #[cfg(not(target_os = "macos"))]
 fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>> {
@@ -1067,7 +1066,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
         WINDOW_SUBMENU_ID,
         label(ar, "window"),
         true,
-        &[&*std_item(h, ar, "minimize")?, &*std_item(h, ar, "maximize")?],
+        &[&*std_item(h, ar, "minimize")?, &*std_item(h, ar, "maximize")?, &PredefinedMenuItem::separator(h)?, &fullscreen::item(h, ar)?],
     )?;
     let help = Submenu::with_id_and_items(
         h,
@@ -1291,6 +1290,7 @@ fn main() {
             capture::capture_take,
             capture::capture_show,
             capture::capture_hide,
+            capture::capture_fit,
             capture::capture_open_main,
             capture::capture_shortcut,
             capture::set_capture_shortcut,
@@ -1340,6 +1340,8 @@ fn main() {
             }
             let tray = tray.build(app)?;
             let _ = tray.set_visible(keep_running());
+            // Esc never takes a window out of full screen (see fullscreen.rs).
+            fullscreen::install_esc_guard();
             // The quick capture shortcut first: the menus show its keys.
             capture::init(h);
             install_menus(h)?;
@@ -1365,6 +1367,7 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, ev| {
+            fullscreen::on_window_event(window, ev);
             if window.label() == capture::LABEL {
                 capture::on_window_event(window, ev);
                 return;
@@ -1405,6 +1408,7 @@ fn main() {
                 "check-updates" => { show_main(app); let _ = app.emit("check-updates", ()); }
                 "tray-open" => show_main(app),
                 "capture" | "tray-capture" => capture::from_menu(app),
+                fullscreen::ID => fullscreen::toggle(app),
                 // The one action that stops everything, "keep running" or not: asks first.
                 "tray-quit" => quit::request(app, true),
                 "quit" => quit_requested(app),
