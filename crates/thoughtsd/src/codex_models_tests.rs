@@ -390,3 +390,22 @@ async fn the_answer_is_kept_refreshed_in_the_background_and_on_demand() {
     assert_eq!(rx.recv().await.unwrap()["count"], 0);
     std::fs::remove_dir_all(&b).unwrap();
 }
+
+/// Against a real Codex, by hand: `THOUGHTS_REAL_CODEX=/path/to/codex cargo test -p thoughtsd
+/// real_codex -- --ignored --nocapture`. It uses an empty Codex folder of its own (no sign-in);
+/// run it with the proxies pointed at nothing so no request leaves the machine.
+#[cfg(unix)]
+#[tokio::test]
+#[ignore]
+async fn real_codex() {
+    let Some(bin) = std::env::var_os("THOUGHTS_REAL_CODEX").map(PathBuf::from) else { return };
+    let home = base("real");
+    std::fs::create_dir_all(&home).unwrap();
+    let d = detect(&bin, &home).await;
+    println!("version {:?}\nsource {:?}\ntried {:?}\nmodels {:?}", d.version, d.source, outcomes(&d), d.models.iter().map(|m| (&m.id, m.efforts.len(), m.context)).collect::<Vec<_>>());
+    if crate::codex::subcommands(&run(&bin, &home, &["--help"], HELP_LIMIT).await.unwrap_or_default()).iter().any(|c| c == "app-server") {
+        let a = app_server_models(&bin, &home, APP_SERVER_LIMIT).await;
+        println!("app server: {:?}", a.map(|m| m.into_iter().map(|m| m.id).collect::<Vec<_>>()));
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+}
