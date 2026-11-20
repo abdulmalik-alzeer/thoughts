@@ -298,6 +298,7 @@ export type DaemonEvent =
   | { type: 'approval.asked'; chatId: string; id: string; title: string }
   | { type: 'approval.changed'; chatId: string }
   | { type: 'auth.changed'; provider?: string; loggedIn?: boolean }
+  | { type: 'codex.models'; source?: string; count?: number }
   | { type: 'usage.changed'; usage: Usage }
   | { type: 'limit.changed'; planLimit: PlanLimit }
   | { type: 'wrap.changed'; chatId: string; phase: string | null }

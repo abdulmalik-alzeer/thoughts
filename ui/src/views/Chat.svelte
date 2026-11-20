@@ -62,6 +62,7 @@
   import SidePane from './chat/SidePane.svelte';
   import { clickIntent, linkTarget } from './chat/sidePane';
   import type { Chat, DaemonEvent } from '../lib/types';
+  import { effortsFor, modelsNoteKey, versionNumber } from '../lib/codexModels';
   import { canOpenWindows } from '../lib/windows';
   import { openWindow } from '../lib/openWindow';
 
@@ -299,6 +300,8 @@
     load(true);
     const off = on((e) => {
       if (e.type === 'resync') { load(); return; }
+      // Codex answered with its models (asked in the background): the menu takes them in.
+      if (e.type === 'codex.models') { if (optsFor === 'codex') { optsFor = ''; loadOpts('codex'); } return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
       // While the chat is being fetched, events are kept: the copy on its way may or may not include them.
       fetches.hold(e);
@@ -316,6 +319,13 @@
     api(`/ai/${p}/options`).then((o) => { if (optsFor === p) opts = { models: [], efforts: [], permissionModes: [], ...o }; }).catch(() => { if (optsFor === p) optsFor = ''; });
   }
   const onCodex = $derived(chat?.provider === 'codex');
+  /** The efforts the chosen model takes, where Codex's catalog says; else the program's list. */
+  const chatEfforts = $derived(onCodex ? effortsFor(opts, chat?.options?.model) : opts.efforts);
+  /** Said plainly in the model menu when Codex could not list its models (it can still be typed). */
+  const modelNote = $derived.by(() => {
+    const k = onCodex ? modelsNoteKey(opts) : '';
+    return k ? t(k, { version: versionNumber(opts.codexVersion || app.status?.codex?.version) }) : '';
+  });
   const PROGRAMS = [{ id: 'claude', label: 'Claude Code' }, { id: 'codex', label: 'Codex' }];
   /** The two programs, offered in the chat's control once Codex is installed (or the chat already uses it). */
   const programs = $derived(chat?.kind === 'chat' && (app.status?.codex?.installed || onCodex)
@@ -1038,7 +1048,7 @@
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
           <DictateButton target={() => input} />
           <!-- Model, effort and what the assistant may do: one control; the mode is always named on it. -->
-          <ChatOptions options={chat.options} models={opts.models} efforts={opts.efforts} modes={permModes} {label}
+          <ChatOptions options={chat.options} models={opts.models} efforts={chatEfforts} modes={permModes} {label} {modelNote}
             permPrefix={onCodex ? 'codex.perm' : 'chat3.perm'} hintPrefix={onCodex ? 'codex.perm' : 'set.perm'} effortPrefix={onCodex ? 'codex.effort' : 'chat.effort'}
             {programs} program={chat.provider} onprogram={programs.every((p) => p.ok) && !chat.running ? moveProgram : undefined}
             onmodel={modelChanged} extraModel={{ value: MODEL_OTHER, label: t('runc.model.other') }} oneffort={effortChanged}

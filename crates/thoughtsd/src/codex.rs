@@ -1,7 +1,8 @@
 //! Codex provider: the installed Codex CLI, asked the way `claude.rs` asks Claude Code. Nothing
-//! about it is written into the app: the sandbox modes come from `codex exec --help`, the reasoning
-//! efforts from the program's own answer to a value it does not know (`efforts`), the models from
-//! what its runs report. Sign-in is `codex login status` / `codex login`, and every run is
+//! about it is written into the app: the sandbox modes come from `codex exec --help`, the models
+//! and their efforts from the program's own catalog where the installed version has one
+//! (`codex_models`), else the efforts from its answer to a value it does not know (`efforts`) and
+//! the models from its settings and what its runs report. Sign-in is `codex login status` / `codex login`, and every run is
 //! `codex exec --json` with the prompt on stdin (never on the command line).
 //!
 //! Everything a run may do is decided before it gets here, in `claude::start_run` (trust, the
@@ -65,7 +66,7 @@ pub async fn binary(state: &AppState) -> Option<PathBuf> {
     crate::claude::find_binary(&custom, "codex")
 }
 
-fn cmd(bin: &Path) -> Command {
+pub(crate) fn cmd(bin: &Path) -> Command {
     let mut c = crate::proc::command(bin);
     c.env("PATH", crate::claude::shell_path());
     c.env(crate::claude::APP_RUN_ENV, "1");
@@ -201,12 +202,15 @@ const PROBE: &str = "__thoughts_probe__";
 const DEAD_ADDRESS: &str = "http://127.0.0.1:9";
 
 /// The reasoning efforts the installed Codex accepts (`model_reasoning_effort`), cheapest first as
-/// it lists them, or none when it cannot say. Learned by giving it a value it does not know and
-/// reading its refusal. That start can cost nothing and reach no one: it has a fresh, empty Codex
+/// it lists them, or none when it cannot say. From its model catalog when one was read
+/// (`codex_models`; newer versions accept any word here, so only the catalog can tell), else
+/// learned by giving it a value it does not know and reading its refusal. That start can cost nothing and reach no one: it has a fresh, empty Codex
 /// folder (no sign-in, none of the user's settings), no key, and an address nobody answers on.
 pub async fn efforts(state: &AppState) -> Vec<String> {
     static EFFORTS: Cached = std::sync::Mutex::new(None);
     let Some(bin) = binary(state).await else { return vec![] };
+    let listed = crate::codex_models::catalog_efforts(&bin);
+    if !listed.is_empty() { return listed; }
     let b = bin.clone();
     // "None" is remembered too (as a lone space): a program that cannot say is not asked again and again.
     let text = cached(&EFFORTS, &bin, || async move { let v = probe_efforts(&b).await; if v.is_empty() { " ".into() } else { v.join(",") } }).await;
@@ -370,23 +374,41 @@ pub fn sandbox_of(kind: &str, mode: &str, profile: &Profile) -> &'static str {
     if profile.web && !profile.shell { "read-only" } else { run_sandbox(kind, mode) }
 }
 
-/// What `GET /api/ai/codex/options` returns: the models this installation has run with and the
-/// user's own picks, the efforts Codex lists, and the app's permission modes this Codex can enforce
-/// (each with the sandbox it becomes).
+/// What `GET /api/ai/codex/options` returns: the models the installed Codex lists, with where the
+/// list came from (`codex_models::options_part`), the efforts Codex lists, and the app's permission
+/// modes this Codex can enforce (each with the sandbox it becomes). Never waits for the models: a
+/// missing or out-of-date list is asked for in the background (`codex.models` when it is in).
 pub async fn options(state: &AppState) -> Value {
-    if binary(state).await.is_none() { return json!({}) }
+    let Some(bin) = binary(state).await else { return json!({}) };
+    let detected = crate::codex_models::current(&bin, &state.events);
+    options_with(state, &bin, detected).await
+}
+
+/// "Refresh models": ask the installed Codex again now, then the options as `options` gives them.
+pub async fn refresh_models(state: &AppState) -> Value {
+    let Some(bin) = binary(state).await else { return json!({}) };
+    let d = crate::codex_models::refresh(&bin, Some(&state.events), true).await;
+    options_with(state, &bin, Some(d)).await
+}
+
+async fn options_with(state: &AppState, bin: &Path, detected: Option<crate::codex_models::Detected>) -> Value {
     let help = exec_help(state).await;
     let offered = sandboxes(&help);
     let modes: Vec<&str> = crate::settings::PERMISSION_MODES.iter().copied().filter(|m| offered.iter().any(|s| s == sandbox_for(m))).collect();
     let (own, mini) = { let s = state.settings.read().await; (s.ai.codex.model.clone(), s.ai.codex.mini_wrap_model.clone()) };
-    json!({
-        "models": crate::claude::model_choices(vec![], &seen().models, [own, mini]),
+    let config = std::fs::read_to_string(codex_home().join("config.toml")).map(|t| crate::codex_models::config_models(&t)).unwrap_or_default();
+    let refreshing = crate::codex_models::refreshing();
+    let mut models = crate::codex_models::options_part(detected.as_ref().filter(|d| d.key.bin == bin), &config, &seen().models, [own, mini], refreshing);
+    if models["codexVersion"].as_str().map_or(true, str::is_empty) { models["codexVersion"] = json!(version(state).await); }
+    let mut out = json!({
         "efforts": efforts(state).await,
         "permissionModes": modes,
         "sandboxes": modes.iter().map(|m| (m.to_string(), json!(sandbox_for(m)))).collect::<serde_json::Map<String, Value>>(),
         "images": has_flag(&help, "--image"),
         "machineReadable": json_flag(&help).is_some(),
-    })
+    });
+    if let (Some(o), Value::Object(m)) = (out.as_object_mut(), models) { o.extend(m); }
+    out
 }
 
 /// What runs have told about models: their names, and how much each can take in.
@@ -418,11 +440,12 @@ fn note_seen(model: Option<&str>, context: Option<u64>) {
 }
 
 /// How many tokens `model` (or, unnamed, the model Codex last ran with) can take in, as Codex
-/// itself reported it. `None` when no run has said.
+/// itself reported it in a run, else as its model catalog says (`codex_models`). `None` when
+/// neither has said.
 pub fn context_window(model: Option<&str>) -> Option<u64> {
     let s = seen();
-    let m = model.map(String::from).or_else(|| s.models.first().cloned())?;
-    s.context.get(&m).copied()
+    let m = model.map(String::from).or_else(|| s.models.first().cloned());
+    m.as_ref().and_then(|m| s.context.get(m).copied()).or_else(|| crate::codex_models::context_of(m.as_deref()))
 }
 
 // ---------- the command line ----------
@@ -1147,8 +1170,10 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         crate::log::warn(format!("run {id}: not started on Codex — passwords are kept in a plain file it could read"));
         return Err(crate::tr::err("codex.plain_passwords", &[]));
     }
-    // An effort this Codex does not list is left out rather than refused by the program.
-    let listed = efforts(&state).await;
+    // An effort this Codex does not list (for the chosen model, where its catalog says) is left
+    // out rather than refused by the program.
+    let for_model = l.spec.options.model.as_deref().map(|m| crate::codex_models::efforts_for(&bin, m)).unwrap_or_default();
+    let listed = if for_model.is_empty() { efforts(&state).await } else { for_model };
     let effort = l.spec.options.effort.clone().filter(|e| listed.is_empty() || listed.contains(e));
     if l.spec.options.max_budget_usd.is_some() {
         crate::log::warn(format!("run {id}: Codex cannot be held to a spending limit for one run; the task's time limit and the monthly spending limit still apply"));

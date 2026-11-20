@@ -684,6 +684,10 @@ async fn options_status_and_one_shot_answers_come_from_the_program() {
     assert_eq!(o["permissionModes"], json!(["acceptEdits", "plan", "bypassPermissions"]));
     assert_eq!(o["sandboxes"]["plan"], "read-only");
     assert_eq!(o["images"], true);
+    // 0.27.0 has no model catalog: nothing is made up, and the version is named for the screen.
+    assert_eq!((o["modelsDetected"].as_bool(), o["codexVersion"].as_str()), (Some(false), Some("codex-cli 0.27.0")));
+    assert!(matches!(o["modelsSource"].as_str(), Some("seen" | "config" | "none")), "{o}");
+    assert!(o["models"].is_array() && o["modelInfo"] == json!([]));
     let s = status(&st).await;
     assert_eq!((s["installed"].as_bool(), s["loggedIn"].as_bool(), s["method"].as_str(), s["version"].as_str()), (Some(true), Some(true), Some("chatgpt"), Some("codex-cli 0.27.0")));
     std::fs::write(dir.join("login.txt"), "Not logged in").unwrap();

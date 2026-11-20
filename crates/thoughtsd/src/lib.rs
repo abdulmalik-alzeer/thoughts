@@ -22,6 +22,7 @@ pub mod cloud;
 pub mod diffs;
 pub mod gallery;
 pub mod codex;
+pub mod codex_models;
 pub mod git;
 pub mod branch;
 pub mod handoff;
