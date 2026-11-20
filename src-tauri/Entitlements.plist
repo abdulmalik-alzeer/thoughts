@@ -5,5 +5,16 @@
 	<!-- A signed app (hardened runtime) may only use the microphone with this: dictation and meeting recordings. -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Full access: a signed app (hardened runtime) can only be asked for these with them; macOS still asks the person. -->
+	<key>com.apple.security.device.camera</key>
+	<true/>
+	<key>com.apple.security.device.bluetooth</key>
+	<true/>
+	<key>com.apple.security.device.usb</key>
+	<true/>
+	<key>com.apple.security.personal-information.location</key>
+	<true/>
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
 </dict>
 </plist>

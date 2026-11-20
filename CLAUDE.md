@@ -19,8 +19,18 @@
   answer, carries an approval from the desktop shell made with a key the window never sees
   (`consent.rs` in the daemon and in `src-tauri`): the app token alone is not a yes. Runs the app starts itself never use it,
   and a bypass default in settings is only inherited by chats the user starts by hand (`byUser`).
+- Full access (`settings.fullAccess`, `full_access.rs`, Settings › Privacy & cost) is the exception the
+  owner chose: while it is on, every guard the app itself adds yields — every kind of run bypasses
+  permissions (Codex: its own unrestricted mode), no rules file, sandbox, command check, trust check or
+  standing-file restore; the customisation layer may change or remove anything, core, Recovery and
+  Rollback included (history is still recorded); add-ons get every permission and pages get the machine
+  bridge (`machine.rs`, `ui/src/lib/layer/machine.ts`). Every new guard must yield to it the same way,
+  behind one `full_access()` check, and stay exactly as before while it is off. Switching it ON is the
+  guarded step: only through the shell's two-step native warning (`Action::FullAccess`,
+  `?confirm=full-access&approval=`); the body and the token alone never switch it. OFF is
+  `?fullAccess=off`, at once, and stops what was started with it. Access keys never get any of it.
 - Library writes must respect the library's conventions: todos are edited line by line in place,
   and frontmatter is preserved.
 - Anything the user can customise belongs in the app layer, never in core. The Recovery menu and
-  Rollback must stay outside the app layer.
+  Rollback must stay outside the app layer (out of reach unless full access is on).
 - Verify with `cargo test -p thoughtsd`, `npx vite build` and `cargo build -p thoughts`.

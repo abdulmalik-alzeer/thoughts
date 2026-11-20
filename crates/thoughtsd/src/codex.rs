@@ -703,6 +703,21 @@ pub fn instructions(n: &Notes) -> String {
     format!("<thoughts_app_instructions>\n{}\n</thoughts_app_instructions>\n\n", parts.join("\n\n"))
 }
 
+/// `instructions` while full access is on: the caller's own, how the library's standing rules are
+/// read, the full-access note in place of every limit, and the usual notes on time and language.
+pub fn full_instructions(n: &Notes, note: &str) -> String {
+    let mut parts: Vec<String> = vec![];
+    if let Some(a) = n.append.filter(|a| !a.trim().is_empty()) { parts.push(a.to_string()); }
+    parts.push("The folder you work in keeps its standing rules in CLAUDE.md (there may be more CLAUDE.md files in sub-folders). Read the one \
+        at the top before you start and follow it as you would AGENTS.md. Its routines (also called skills) are in .claude/skills/<name>/SKILL.md: \
+        when you are asked to run a routine, or a command such as /wrap, read that file and follow its steps.".into());
+    parts.push(note.to_string());
+    parts.push(crate::claude::estimates_note().to_string());
+    parts.push(crate::claude::language_note(n.language).to_string());
+    parts.push(format!("(Thoughts run {})", n.mark));
+    format!("<thoughts_app_instructions>\n{}\n</thoughts_app_instructions>\n\n", parts.join("\n\n"))
+}
+
 // ---------- reading what a run prints ----------
 
 /// One thing a run reported, whichever of Codex's two output formats it came in: the event stream
@@ -1137,6 +1152,27 @@ pub struct Launch {
     pub library: Option<PathBuf>,
     pub private: Vec<String>,
     pub language: String,
+    /// Full access is on (`full_access.rs`): no sandbox, no outer sandbox, nothing put back.
+    pub full_access: bool,
+    /// What the run is told then, in place of the app's usual limits (`full_access::run_note`).
+    pub full_note: Option<String>,
+}
+
+/// The flag of the installed Codex that skips every approval and the sandbox together, found in
+/// its own help (the one option that names both bypassing and the sandbox), for full access.
+pub fn unrestricted_flag(help: &str) -> Option<String> {
+    help.split(|c: char| c.is_whitespace() || c == ',').map(|w| w.trim_end_matches(|c: char| !c.is_ascii_alphanumeric()))
+        .find(|w| w.starts_with("--") && w.contains("bypass") && w.contains("sandbox")).map(String::from)
+}
+
+/// `args` with the sandbox choice (`--sandbox <mode>`) replaced by `flag` (`unrestricted_flag`).
+pub fn without_sandbox(args: Vec<OsString>, flag: &str) -> Vec<OsString> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut it = args.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--sandbox" { it.next(); out.push(flag.into()); } else { out.push(a); }
+    }
+    out
 }
 
 /// Start a Codex run in the background. Its events go out like Claude Code's; the chat is saved,
@@ -1153,20 +1189,22 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     // commands at all, so such a chat does not run on Codex.
     if l.profile.strict { return Err(crate::tr::err("codex.strict", &[])); }
     let sw = switches(&l.kind, &l.mode, &l.profile);
-    let sandbox = sw.sandbox;
-    if !sandboxes(&help).iter().any(|s| s == sandbox) {
+    // Full access: the program's own unrestricted mode for every kind of run (Plan still reads only).
+    let sandbox = if l.full_access { sandbox_for(&l.mode) } else { sw.sandbox };
+    let unrestricted = (l.full_access && sandbox == sandbox_for(crate::settings::BYPASS)).then(|| unrestricted_flag(&help)).flatten();
+    if unrestricted.is_none() && !sandboxes(&help).iter().any(|s| s == sandbox) {
         crate::log::error(format!("run {id}: not started — this Codex has no {sandbox} sandbox"));
         return Err(crate::tr::err("codex.mode_unavailable", &[]));
     }
     // Codex's own sandbox lets commands read every file: where passwords sit in a plain file, no
     // Codex run starts.
-    let outer = outer_sandbox(sandbox);
+    let outer = !l.full_access && outer_sandbox(sandbox);
     if outer && !Path::new(SANDBOX_EXEC).is_file() {
         crate::log::error(format!("run {id}: not started — {SANDBOX_EXEC} is missing"));
         return Err(crate::tr::err("codex.mode_unavailable", &[]));
     }
     // Bypass included: its sandbox closes the obvious ways, not every one (`outer_profile`).
-    if plain_passwords(&crate::paths::home()) {
+    if !l.full_access && plain_passwords(&crate::paths::home()) {
         crate::log::warn(format!("run {id}: not started on Codex — passwords are kept in a plain file it could read"));
         return Err(crate::tr::err("codex.plain_passwords", &[]));
     }
@@ -1198,14 +1236,18 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     let mark = uuid::Uuid::new_v4().simple().to_string();
     let notes = Notes { kind: &l.kind, profile: &l.profile, sandbox, library: l.library.as_deref(), private: &l.private, language: &l.language,
         append: l.spec.append_system.as_deref(), writable: &writable, mark: &mark };
-    let prompt = format!("{}{}", instructions(&notes), l.spec.prompt);
+    let told = match &l.full_note {
+        Some(note) if l.full_access => full_instructions(&notes, note),
+        _ => instructions(&notes),
+    };
+    let prompt = format!("{}{}", told, l.spec.prompt);
     // Codex can change what a later session runs or obeys in the folders it may write: what was
     // there is put back when it is over (`keep_for`).
     // (This covers everything `claude::start_run` keeps for a run nobody watches, and more; in the
     // read-only sandbox nothing can change.)
     drop(l.standing);
     let mut snapshots: Vec<StandingSnapshot> = vec![];
-    if sandbox != "read-only" {
+    if sandbox != "read-only" && !l.full_access {
         let (keep, scope) = (keep_for(&l.kind, &l.profile), keep_name(&l.kind, &l.profile));
         let mut roots: Vec<PathBuf> = writable.clone();
         roots.insert(0, l.spec.cwd.clone());
@@ -1218,6 +1260,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     }
     let args = exec_args(&Plan { help: &help, sandbox, model: l.spec.options.model.as_deref(), effort: effort.as_deref(), web: sw.web,
         own_setup: sw.own_setup, mcp: sw.mcp, network: sw.network, images: &images, writable: &writable, resume: resume.as_ref() });
+    let args = match &unrestricted { Some(flag) => without_sandbox(args, flag), None => args };
     let mut c = if outer {
         let folders = outer_folders(&crate::paths::home(), dirs::home_dir().as_deref(), &l.spec.cwd, &writable, files.0.as_deref());
         let mut c = cmd(Path::new(SANDBOX_EXEC));
@@ -1234,7 +1277,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     let pid = child.id();
     crate::runs::record(pid, &id);
     let (started, started_at) = (Instant::now(), SystemTime::now());
-    crate::log::info(format!("run {id} started on Codex (pid {}, sandbox {sandbox}, profile {}, in {})", pid.unwrap_or(0), l.profile.name, l.spec.cwd.display()));
+    crate::log::info(format!("run {id} started on Codex (pid {}, sandbox {}, profile {}, in {})", pid.unwrap_or(0), unrestricted.as_deref().unwrap_or(sandbox), l.profile.name, l.spec.cwd.display()));
     tokio::spawn(async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
         let _ = stdin.shutdown().await;
@@ -1244,6 +1287,13 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         Ok(rx) => rx,
         Err(e) => { if let Some(pid) = pid { crate::proc::end_tree(pid).await; } let _ = child.start_kill(); crate::runs::forget(pid); return Err(e); }
     };
+    // Full access went off while this run was being started with it: it does not go on.
+    if !crate::full_access::still_full(&state, &id, l.full_access).await {
+        if let Some(pid) = pid { crate::proc::end_tree(pid).await; }
+        let _ = child.start_kill();
+        crate::runs::forget(pid);
+        return Err(crate::tr::err("full_access.off", &[]));
+    }
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), l.spec.cwd.clone());
     state.ack_interrupted(&id).await;
     if let Some(ch) = state.chats.update(&id, |c| { c.running = true; c.provider = ID.into(); }).await {

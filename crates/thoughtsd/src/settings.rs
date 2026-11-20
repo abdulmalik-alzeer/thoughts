@@ -76,7 +76,30 @@ pub struct Settings {
     /// opened again (see `LibrarySettings`). Server-owned: it changes only through the library
     /// switcher (`libraries.rs`), setup, and choosing another library folder in Settings.
     pub libraries: Vec<Library>,
+    /// Full access (Settings › Full access): while it is on, nothing the app itself adds on top of
+    /// the assistant programs holds any more — no permission mode short of bypass, no rules files,
+    /// no sandbox, no closed folders, no guarded customisation layer, and pages get the machine
+    /// bridge (`machine.rs`). Server-owned: switched on only with the shell's approval, see `FullAccess`.
+    pub full_access: FullAccess,
 }
+
+/// The full-access switch. `on` and `since` are server-owned: a general save never changes them
+/// (`sanitize_update`), `PUT /api/settings` switches it on only with `?confirm=full-access` and the
+/// desktop shell's approval (`consent::Action::FullAccess`), and off with nothing but the saved value.
+/// `source_dir` is the user's own checkout of the app's source, named to runs so they can change and
+/// rebuild it; an ordinary setting.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct FullAccess {
+    pub on: bool,
+    /// When it was last switched on (RFC 3339), for the record.
+    pub since: Option<String>,
+    /// The folder of the app's source code, if the user keeps a checkout and named it.
+    pub source_dir: Option<String>,
+}
+
+/// What a client sends along (`?confirm=…` on `PUT /api/settings`) to switch full access on.
+pub const FULL_ACCESS_CONFIRM: &str = "full-access";
 
 /// What belongs to one library rather than to the app: its backup and history, its private
 /// folders, its line of work, its features, its linked folders and when it was last wrapped. The
@@ -124,6 +147,11 @@ pub struct Library {
     /// fields are its settings), and for one never opened yet (it starts from `for_new`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parked: Option<LibrarySettings>,
+}
+
+impl Settings {
+    /// Is full access on? Every guard that yields to it asks here.
+    pub fn full_access(&self) -> bool { self.full_access.on }
 }
 
 impl Library {
@@ -505,6 +533,7 @@ impl Default for Settings {
             spending: SpendingSettings::default(),
             capture: CaptureSettings::default(),
             libraries: vec![],
+            full_access: FullAccess::default(),
         }
     }
 }
@@ -715,6 +744,18 @@ impl Settings {
         self.projects = old.projects.clone(); // projects change only through the project endpoints
         self.libraries = old.libraries.clone(); // the switcher's list changes only through its own endpoints
         self.chat_retention_days = old.chat_retention_days; // deleting chats automatically is switched only on its own endpoint
+        // Full access is switched only by `PUT /api/settings` itself, after this (see `api::put_settings`).
+        self.full_access.on = old.full_access.on;
+        self.full_access.since = old.full_access.since.clone();
+        self.full_access.source_dir = match self.full_access.source_dir.take().map(|d| d.trim().to_string()).filter(|d| !d.is_empty()) {
+            None => None,
+            Some(d) if Some(&d) == old.full_access.source_dir.as_ref() => Some(d),
+            Some(d) => {
+                let p = crate::paths::expand_tilde(&d)?;
+                if !p.is_absolute() || !p.is_dir() { anyhow::bail!("the app's source folder must be a full path to a folder that exists"); }
+                Some(p.to_string_lossy().to_string())
+            }
+        };
         // The provider address and its key belong together and change only through
         // `claude::set_provider`. A general save can therefore never drop a saved key, and never
         // leave an address behind without one.

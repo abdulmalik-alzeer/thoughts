@@ -174,6 +174,8 @@ export type Settings = {
   spending: { monthlyLimitUsd: number | null; warnPercent: number; wholeComputer: boolean };
   capture: { shortcutOn: boolean; shortcut: string };
   libraries: LibraryEntry[];
+  /** Full access (`settings::FullAccess`): `on` and `since` change only through the shell's approval. */
+  fullAccess?: { on: boolean; since: string | null; sourceDir: string | null };
 };
 
 // ---------- status (`GET /api/status`, api.rs `status`) ----------

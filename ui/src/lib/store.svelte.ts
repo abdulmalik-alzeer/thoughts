@@ -212,6 +212,12 @@ function remindToWrap() {
  *  had not seen yet, and the last to land would undo the other's change. */
 const settingsSaves = oneAtATime();
 
+/** Called after every save or read of the settings has put the new ones in place (full access going
+ *  off rebuilds the add-on frames, lib/layer.ts). */
+const settingsWatchers = new Set<() => void>();
+export function onSettingsChanged(fn: () => void): () => void { settingsWatchers.add(fn); return () => settingsWatchers.delete(fn); }
+const settingsLanded = () => { for (const fn of settingsWatchers) { try { fn(); } catch { /* a watcher's own problem */ } } };
+
 /** Save settings. `patch` is laid over the settings as they are when this save's turn comes (after
  *  any save still running), or is a function that builds the whole object from them. `query`
  *  carries a one-off confirmation (`?confirm=bypassPermissions`). */
@@ -220,6 +226,7 @@ export function saveSettings(patch: Record<string, any> | ((now: any) => Record<
     const body = typeof patch === 'function' ? patch(app.settings) : { ...app.settings, ...patch };
     app.settings = await put('/settings' + query, body);
     applyTheme();
+    settingsLanded();
   });
 }
 
@@ -230,6 +237,7 @@ export function reloadSettings(): Promise<void> {
   return settingsSaves(async () => {
     app.settings = await api('/settings');
     applyTheme();
+    settingsLanded();
   });
 }
 

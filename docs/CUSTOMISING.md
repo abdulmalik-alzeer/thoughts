@@ -185,6 +185,16 @@ For your customisations, Thoughts compares three things: the original, your vers
 
 Whichever you choose can be undone from History.
 
+### Full access: no limits, and the machine bridge
+
+With **Full access** switched on (Settings › Privacy & cost; see [Using Thoughts](USING.md)), none of the limits on this page apply. A customisation may change the live layer directly, change or remove any built-in page, the Recovery menu and Rollback included, and change the app's own source code if you named its folder; the checks shown in the review are advice and do not stop a change from being kept. Every add-on gets every permission, and pages and add-ons get `machine` (`thoughts.machine` in a page, `api.machine` in a plugin):
+
+- `run(program, args, {cwd, stdin, env, timeoutSecs})` → `{code, stdout, stderr, timedOut}`
+- `stream(program, args, opts, (stream, data) => …)` → resolves with `{code, timedOut}`; `.kill()` stops it
+- `read(path, {base64})`, `write(path, content, {base64, append})`, `list(path)`, `open(target, app)`
+
+Frames may also ask for the camera, microphone, screen capture and the other device features the system webview offers (macOS asks you first). Web Bluetooth, serial and USB are not available in the macOS webview: use `machine.run` with a command-line tool instead. A change you are only trying never reaches `machine`. Changes keep being recorded in History, so they can still be undone, unless something removed that too. Everything stops the moment full access is turned off.
+
 ### What is not possible yet
 
 - **Changing the built-in screens beyond the options above.** The app's pages can be changed through the documented options (headings, wording, hidden parts, boxes, todo grouping, the sidebar, Home), and you can add your own pages beside them or in place of some, but the parts of a page cannot be rearranged inside it, and Settings, Help and Docs cannot be replaced.

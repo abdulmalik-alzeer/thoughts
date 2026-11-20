@@ -225,4 +225,8 @@ Give a key only to a program you trust with what the key allows: a reading key l
 4. **Synced copies.** Delete the copy at the location you synced to, using that service.
 5. **The AI provider.** Conversations already sent are handled under your account with the provider; use that account's settings to review or delete them. The assistant's own local session records are in the `.claude` folder in your home folder.
 
+## Full access
+
+**Settings › Privacy & cost › Full access** switches off every protection described on this page that Thoughts adds itself: private folders, the app's own data, the permission modes, the sandbox, the command check, the folder-trust question and the guarded customisation layer. With it on, the assistant and any page can read, change or delete anything your account can reach, use the network, microphone, camera, screen and devices, and pass what it reads anywhere. It is off unless you switch it on, only you can switch it on (two confirmations shown by the app itself), and turning it off restores every protection at once. See [Using Thoughts](USING.md).
+
 Related: [what Thoughts costs to run](COST.md) · [history and undo for your notes](HISTORY.md).

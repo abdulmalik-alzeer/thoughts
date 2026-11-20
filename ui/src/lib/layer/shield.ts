@@ -1,3 +1,4 @@
+import { fullAccessOn } from '../fullAccess';
 // Svelte action that moves an element's content into a shadow root, so the page's stylesheets —
 // including the staged `custom.css` a user is being asked to review — cannot restyle or hide it.
 // Used by the Review panel and the preview banner: the two places where the user decides whether a
@@ -82,6 +83,13 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent);
 @media (prefers-reduced-motion: reduce) { * { animation-duration: 1ms !important; } }
 `;
 
+// * Full access (lib/fullAccess.ts): the customisation layer may restyle or hide even these. The
+//   host is then not pinned, the dialog stays out of the top layer, and the layer's own stylesheet
+//   (`LAYER_CSS_ID`) is mirrored inside the shadow root.
+
+/** The id of the `<style>` that holds the layer's custom.css (lib/layer.ts). */
+export const LAYER_CSS_ID = 'thoughts-layer-css';
+
 let sheet: CSSStyleSheet | null = null;
 
 // Questions a shielded dialog asks itself (Discard this change? Try it anyway?) must show above it.
@@ -108,6 +116,7 @@ export type ShieldOpts = {
 const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
 export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
+  const full = fullAccessOn();
   const prev = document.activeElement as HTMLElement | null;
   const root = node.attachShadow({ mode: 'open' });
   try {
@@ -123,9 +132,19 @@ export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
 
   // `all` first: every property the page could have set on the host is back to its initial value,
   // and stays there. Then the box.
-  for (const d of ('all:initial;display:block;' + (opts.box ?? '')).split(';')) {
+  for (const d of ((full ? 'display:block;' : 'all:initial;display:block;') + (opts.box ?? '')).split(';')) {
     const i = d.indexOf(':');
-    if (i > 0) node.style.setProperty(d.slice(0, i).trim(), d.slice(i + 1).trim(), 'important');
+    if (i > 0) node.style.setProperty(d.slice(0, i).trim(), d.slice(i + 1).trim(), full ? '' : 'important');
+  }
+  // Full access: the layer's stylesheet reaches inside too, and follows its changes.
+  let layerCss: MutationObserver | null = null;
+  if (full) {
+    const mirror = document.createElement('style');
+    root.appendChild(mirror);
+    const copy = () => { mirror.textContent = document.getElementById(LAYER_CSS_ID)?.textContent ?? ''; };
+    copy();
+    layerCss = new MutationObserver(copy);
+    layerCss.observe(document.head, { childList: true, subtree: true, characterData: true });
   }
 
   const html = document.documentElement;
@@ -138,7 +157,7 @@ export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
   mo.observe(html, { attributes: true, attributeFilter: ['data-mode', 'dir'] });
 
   // The top layer, for dialogs (see the notes at the top).
-  const canTop = !!opts.trap && typeof (node as any).showPopover === 'function';
+  const canTop = !full && !!opts.trap && typeof (node as any).showPopover === 'function';
   let onTop = false;
   function layer() {
     if (!canTop || !node.isConnected) return;
@@ -185,6 +204,7 @@ export function shield(node: HTMLElement, opts: ShieldOpts = {}) {
     update(o: ShieldOpts) { opts = { ...opts, ...o }; },
     destroy() {
       mo.disconnect();
+      layerCss?.disconnect();
       onAsk.delete(layer);
       if (onTop) { try { (node as any).hidePopover(); } catch { /* already gone */ } }
       document.removeEventListener('focusin', onDocFocus);

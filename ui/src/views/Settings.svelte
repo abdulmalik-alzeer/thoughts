@@ -23,6 +23,7 @@
   import ThemePicker from './ThemePicker.svelte';
   import CalendarPrefs from '../lib/CalendarPrefs.svelte';
   import QuickCapturePrefs from '../lib/QuickCapturePrefs.svelte';
+  import FullAccessPrefs from '../lib/FullAccessPrefs.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
   import Maintenance from './Maintenance.svelte';
   import IncomingStatus from '../lib/IncomingStatus.svelte';
@@ -45,7 +46,7 @@
     ai: ['codex.set.which', 'set.account', 'codex.set.title', 'codex.set.limitsTitle', 'set.perm', 'set.wrapNag', 'chatc.set.suggest', 'r10-chatview.set.title'],
     usage: ['r10-usage.set.glance', 'r10-usage.set.scopeTitle'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'libf-sync.set.check', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
-    privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'wording.reports.title', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title'],
+    privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'wording.reports.title', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title', 'fullaccess.title', 'fullaccess.switch'],
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'ldc.tab.addons', 'ldc.tab.ready', 'ldc.tab.updates'],
@@ -1050,6 +1051,7 @@
       </div>
     {/if}
     {#if vis(c, 'secb.keys.title')}<AccessKeys />{/if}
+    {#if vis(c, 'fullaccess.title', 'fullaccess.switch')}<FullAccessPrefs />{/if}
   {:else if c === 'modules'}
     <div class="card">
       <p class="muted">{t('set.modulesIntro')} {t('ui.set.modKeeps')}</p>

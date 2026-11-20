@@ -6,5 +6,31 @@
 	<string>Thoughts uses the microphone when you dictate or record a meeting. What you say is turned into text on this Mac; the sound is not sent anywhere.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Thoughts turns your speech into text with the speech recognition built into macOS, on this Mac only. Nothing you say is sent to Apple or anyone else.</string>
+	<!-- Full access (Settings › Privacy & cost): what the assistant or a page may then ask of the Mac.
+	     Without these keys macOS ends the app instead of asking the person. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Thoughts uses the camera only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Thoughts uses Bluetooth only when you have switched on Full access and you, the assistant or one of your pages asks to connect a device.</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>Thoughts uses Bluetooth only when you have switched on Full access and you, the assistant or one of your pages asks to connect a device.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Thoughts reaches devices on your local network only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSLocationUsageDescription</key>
+	<string>Thoughts uses your location only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Thoughts uses your location only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Thoughts controls other apps only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>Thoughts records or captures the screen only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Thoughts reads your contacts only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Thoughts reads your calendars only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSRemindersUsageDescription</key>
+	<string>Thoughts reads your reminders only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Thoughts reads your photos only when you have switched on Full access and you, the assistant or one of your pages asks for it.</string>
 </dict>
 </plist>

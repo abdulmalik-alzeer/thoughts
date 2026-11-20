@@ -58,6 +58,8 @@ pub(crate) enum Subject {
     Default,
     /// A folder to trust: its full path.
     Folder(String),
+    /// Full access (`thoughtsd::full_access`): every limit the app adds, gone. Asked in two steps.
+    FullAccess,
 }
 
 /// The words of the native confirmation.
@@ -167,7 +169,45 @@ pub(crate) fn ask_text(subject: &Subject, ar: bool) -> Ask {
                 no: pick(("Don’t trust", "لا أثق به")),
             }
         }
+        Subject::FullAccess => Ask {
+            title: pick(("Give the assistant and every page full access to this computer?", "منح المساعد وكل صفحة وصولاً كاملاً إلى هذا الحاسوب؟")),
+            body: pick((
+                "With full access on, the assistant and any page or add-on in Thoughts can:\n\
+                 • read, change or delete anything on this computer and in the app — every folder your account can reach, private folders and the app’s own data included;\n\
+                 • run any program and use the network, the microphone, the camera, the screen and connected devices (Bluetooth, Wi-Fi and others);\n\
+                 • change or remove any part of Thoughts, its Recovery menu and Rollback included, so there may be no way back.\n\n\
+                 A mistake, or a malicious instruction hidden in a file, a note or a web page it reads, can cause real damage. Thoughts will no longer stop any of it; only what the assistant program itself refuses stays out of reach.\n\n\
+                 You can turn it off at any time in Settings with one click.",
+                "مع تفعيل الوصول الكامل يستطيع المساعد وأي صفحة أو إضافة في Thoughts أن:\n\
+                 • يقرأ أي شيء على هذا الحاسوب وفي التطبيق أو يغيّره أو يحذفه — كل مجلد يصل إليه حسابك، بما فيها المجلدات الخاصة وبيانات التطبيق نفسه؛\n\
+                 • يشغّل أي برنامج ويستخدم الشبكة والميكروفون والكاميرا والشاشة والأجهزة المتصلة (البلوتوث والواي فاي وغيرها)؛\n\
+                 • يغيّر أي جزء من Thoughts أو يزيله، بما فيه قائمة الاسترداد والتراجع، فقد لا يبقى طريق للعودة.\n\n\
+                 قد يُحدث خطأٌ، أو تعليمات خبيثة مخفية في ملف أو ملاحظة أو صفحة ويب يقرؤها، ضرراً حقيقياً. لن يوقف Thoughts أياً من ذلك بعد الآن؛ ولا يبقى بعيداً إلا ما يرفضه برنامج المساعد نفسه.\n\n\
+                 يمكنك إيقافه في أي وقت من الإعدادات بنقرة واحدة.",
+            ))
+            .to_string(),
+            yes: pick(("Continue…", "متابعة…")),
+            no: cancel,
+        },
     }
+}
+
+/// The second, last step before full access is switched on. Its first (default) button keeps it
+/// off, so pressing Enter twice never switches it on: the person has to choose the second button.
+/// The button of `full_access_last_step` that switches it on: neither the first (default) nor the
+/// last (cancel role).
+pub(crate) const FULL_ACCESS_YES: usize = 1;
+
+pub(crate) fn full_access_last_step(ar: bool) -> (&'static str, &'static str, [&'static str; 3]) {
+    let pick = |pair: (&'static str, &'static str)| if ar { pair.1 } else { pair.0 };
+    (
+        pick(("Last step: switch full access on?", "الخطوة الأخيرة: تفعيل الوصول الكامل؟")),
+        pick((
+            "Thoughts will stop protecting this computer and itself from the assistant and from pages until you turn full access off again. Choose “Turn on full access” only if you have read the warning and accept the risk.",
+            "سيتوقف Thoughts عن حماية هذا الحاسوب وحماية نفسه من المساعد ومن الصفحات إلى أن توقف الوصول الكامل من جديد. اختر «فعّل الوصول الكامل» فقط إن قرأت التحذير وقبلت المخاطرة.",
+        )),
+        [pick(("Keep it off", "أبقِه متوقفاً")), pick(("Turn on full access", "فعّل الوصول الكامل")), pick(("Cancel", "إلغاء"))],
+    )
 }
 
 /// What the window is told when no approval was made because the user said no, or because another
@@ -217,6 +257,7 @@ fn learn(i: &DaemonInfo, what: Action, subject: &str) -> Option<(Subject, String
             Some((Subject::Chat { title, codex: provider == "codex" }, consent::chat_subject(subject, provider)))
         }
         Action::SettingsBypass => Some((Subject::Default, String::new())),
+        Action::FullAccess => Some((Subject::FullAccess, String::new())),
         Action::Trust => {
             let path = get(i, &format!("/library/trust?id={subject}"))?["path"].as_str()?.to_string();
             Some((Subject::Folder(path.clone()), consent::trust_subject(subject, &path)))
@@ -263,8 +304,17 @@ pub async fn approve_action(app: tauri::AppHandle, window: tauri::Window, action
         };
         let Some((shown, signed)) = learn(&i, what, &subject) else { return Err(unknown(what, ar)) };
         let ask = ask_text(&shown, ar);
-        if crate::recovery::choose(&app, MessageDialogKind::Warning, ask.title, &ask.body, &[ask.yes, ask.no]) != 0 {
+        // Only a press of the yes button is a yes: Cancel, Esc and closing the dialog never are.
+        if crate::recovery::choose_exact(&app, MessageDialogKind::Warning, ask.title, &ask.body, &[ask.yes, ask.no]) != Some(0) {
             return Err(DECLINED.to_string());
+        }
+        // Full access takes a second, deliberate choice: the default (Enter) button keeps it off,
+        // the cancel-role (Esc) button cancels, and only the middle one, pressed, switches it on.
+        if what == Action::FullAccess {
+            let (title, body, buttons) = full_access_last_step(ar);
+            if crate::recovery::choose_exact(&app, MessageDialogKind::Warning, title, body, &buttons) != Some(FULL_ACCESS_YES) {
+                return Err(DECLINED.to_string());
+            }
         }
         Ok(consent::mint(key(), what, &signed, consent::now_ms()))
     })
@@ -276,7 +326,8 @@ pub async fn approve_action(app: tauri::AppHandle, window: tauri::Window, action
 mod tests {
     use super::*;
 
-    const ALL: [fn() -> Subject; 4] = [
+    const ALL: [fn() -> Subject; 5] = [
+        || Subject::FullAccess,
         || Subject::Chat { title: "Budget".into(), codex: false },
         || Subject::Chat { title: "Budget".into(), codex: true },
         || Subject::Default,
@@ -295,7 +346,7 @@ mod tests {
             assert!(arabic(ar.title) && arabic(&ar.body) && arabic(ar.yes) && arabic(ar.no), "{ar:?}");
             assert!(!arabic(en.title) && !arabic(&en.body) && !arabic(en.yes) && !arabic(en.no), "{en:?}");
         }
-        for what in [Action::ChatBypass, Action::SettingsBypass, Action::Trust] {
+        for what in [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess] {
             assert_ne!(unknown(what, false), unknown(what, true));
         }
     }
@@ -342,6 +393,41 @@ mod tests {
         let long = format!("start {} the end", "x".repeat(400));
         let first = ask_text(&Subject::Chat { title: long, codex: false }, false).body.lines().next().unwrap().to_string();
         assert!(first.contains("start xx") && first.ends_with("x the end\u{2069}”") && first.contains('…'), "{first}");
+    }
+
+    #[test]
+    fn full_access_says_what_it_allows_and_takes_a_second_deliberate_choice() {
+        for ar in [false, true] {
+            let a = ask_text(&Subject::FullAccess, ar);
+            let (_, body, buttons) = full_access_last_step(ar);
+            assert!(!body.is_empty() && buttons[0] != buttons[1] && buttons[1] != buttons[2]);
+            if !ar {
+                for word in ["read, change or delete", "network", "microphone", "camera", "screen", "devices", "Recovery", "Rollback", "real damage", "no longer stop"] {
+                    assert!(a.body.contains(word), "{word}: {}", a.body);
+                }
+                // The default (first) button keeps it off, the last one cancels, the middle one switches it on.
+                assert_eq!(buttons, ["Keep it off", "Turn on full access", "Cancel"]);
+            }
+            // Only that button, pressed, is a yes: Enter (the default), Esc, closing or anything unknown never is.
+            use tauri_plugin_dialog::MessageDialogResult as M;
+            let yes = |r: M| crate::recovery::exact_choice(r, &buttons) == Some(FULL_ACCESS_YES);
+            assert!(yes(M::Custom(buttons[FULL_ACCESS_YES].to_string())));
+            for no in [M::Ok, M::Yes, M::No, M::Cancel, M::Custom(buttons[0].into()), M::Custom(buttons[2].into()), M::Custom("something else".into())] {
+                assert!(!yes(no), "{ar}");
+            }
+        }
+    }
+
+    /// Dismissing any consent dialog is never a yes (a two-button dialog's second button has the
+    /// cancel role, which `choose` maps to it).
+    #[test]
+    fn dismissing_a_consent_dialog_is_never_an_answer() {
+        use tauri_plugin_dialog::MessageDialogResult as M;
+        let two = ["Bypass permissions", "Cancel"];
+        assert_eq!(crate::recovery::exact_choice(M::Custom("Bypass permissions".into()), &two), Some(0));
+        assert_eq!(crate::recovery::exact_choice(M::Ok, &two), Some(0));
+        for gone in [M::Cancel, M::No, M::Custom("".into())] { assert_eq!(crate::recovery::exact_choice(gone, &two), None); }
+        assert_eq!(crate::recovery::exact_choice(M::Custom("Cancel".into()), &two), Some(1), "a press of Cancel is Cancel, never a yes");
     }
 
     #[test]

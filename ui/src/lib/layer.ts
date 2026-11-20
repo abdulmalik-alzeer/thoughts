@@ -59,11 +59,13 @@
 //   move to another page only right after the person pressed something of its own, and chats have an
 //   hourly ceiling per add-on.
 import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
-import { app, toast, go, refreshChats, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
+import { app, toast, go, refreshChats, onSettingsChanged, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
 import { confirmDialog, promptDialog, dialogs } from './dialog.svelte';
 import { saveFile as offerFile } from './download';
 import { matchShortcut } from './shortcuts';
-import { aboveShield } from './layer/shield';
+import { aboveShield, LAYER_CSS_ID } from './layer/shield';
+import { fullAccessOn } from './fullAccess';
+import { machineHandle, FULL_ACCESS_ALLOW } from './layer/machine';
 import { setPages } from './pages.svelte';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang } from './i18n';
@@ -450,6 +452,9 @@ function createFrame(p: Plugin, surface: Surface | null, into: HTMLElement): Fra
   // allow-forms: without it Chromium (Windows) never raises `submit`. Nothing can be sent anywhere:
   // the frame's policy says `form-action 'none'` and its runtime cancels the browser's own submit.
   el.setAttribute('sandbox', 'allow-scripts allow-forms');
+  // Full access (lib/fullAccess.ts): the devices and features the webview can grant, asked for by
+  // the system; popups, downloads and dialogs too. Never the app's own origin.
+  if (fullAccessOn()) { el.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-downloads allow-modals'); el.setAttribute('allow', FULL_ACCESS_ALLOW); }
   el.setAttribute('referrerpolicy', 'no-referrer');
   el.setAttribute('title', p.description || shortName(p.name));
   el.style.cssText = surface
@@ -503,7 +508,7 @@ function denied(p: Plugin, perm: string): Error {
 
 const str = (v: any, max: number) => String(v ?? '').slice(0, max);
 // Defence in depth only: the daemon enforces private folders for every `scope=plugin` call.
-const isPrivate = (path: string) => { const p = String(path).toLowerCase(); return ((app.settings?.privatePaths ?? []) as string[]).some((x) => { const b = String(x).replace(/\/+$/, '').toLowerCase(); return !!b && (p === b || p.startsWith(b + '/')); }); };
+const isPrivate = (path: string) => { if (fullAccessOn()) return false; const p = String(path).toLowerCase(); return ((app.settings?.privatePaths ?? []) as string[]).some((x) => { const b = String(x).replace(/\/+$/, '').toLowerCase(); return !!b && (p === b || p.startsWith(b + '/')); }); };
 function cleanPath(v: any): string {
   const p = String(v ?? '').replace(/\\/g, '/').replace(/^\.?\/+/, '');
   if (!p || p.split('/').some((s) => s === '..' || s === '.' || s === '') || /^([A-Za-z]:|~)/.test(p)) throw new Error('Invalid path');
@@ -513,6 +518,7 @@ function cleanPath(v: any): string {
 /** A path a plugin wants to create, change or remove: inside one of its declared folders, text files only. */
 function writePath(p: Plugin, v: any): string {
   const path = cleanPath(v);
+  if (fullAccessOn()) return path; // full access: any file, any folder
   if (!WRITE_EXT.test(path)) throw new Error('Add-ons can only write .md, .json, .csv and .txt files');
   if (!inFolders(p.write, path)) throw new Error(p.write.length ? `"${path}" is outside the folders this add-on declared (${p.write.join(', ')})` : 'This add-on declared no "write" folders');
   return path;
@@ -670,13 +676,22 @@ function pressKey(f: Frame, m: any) {
 async function handle(f: Frame, method: string, args: any[], asked = false): Promise<any> {
   const p = f.plugin;
   if (p.dead) throw new Error('This add-on was switched off');
-  if (p.kind === 'view' && !READ_ONLY.has(method)) throw new Error(`"${method}" is not available to HTML views`);
+  // Full access (lib/fullAccess.ts): every permission, every method for pages too, and the machine
+  // bridge. Off, the bridge is refused here and, whatever is sent, by the service.
+  const full = fullAccessOn();
+  if (method.startsWith('machine.')) {
+    // Never for a change that is only being tried: the person has not kept it yet (the service
+    // refuses `preview` too).
+    if (!full || p.dry || app.preview) throw Object.assign(new Error(app.preview && full ? 'Preview: the machine bridge is not used while a change is tried' : 'This needs full access, which is off'), { code: app.preview && full ? 'preview' : 'permission' });
+    return machineHandle(method, Array.isArray(args) ? args : [], (msg) => deliver(f, msg), app.preview);
+  }
+  if (!full && p.kind === 'view' && !READ_ONLY.has(method)) throw new Error(`"${method}" is not available to HTML views`);
   if (p.dry) return dryAnswer(method);
   const perm = NEEDS[method];
-  if (perm && !p.perms.has(perm)) throw denied(p, perm);
+  if (perm && !full && !p.perms.has(perm)) throw denied(p, perm);
   const a = Array.isArray(args) ? args : [];
   const trying = app.preview;
-  asked ||= Date.now() - (pressed.get(p.name) ?? 0) < 10_000;
+  asked ||= full || Date.now() - (pressed.get(p.name) ?? 0) < 10_000;
   /** Something that is only for right after the person pressed something of this add-on. */
   const onlyAsked = (what: string) => { if (!asked) throw Object.assign(new Error(`${what}: only right after the person pressed something in this add-on`), { code: 'limit' }); };
   // Running a command or an item action is the person asking this add-on for something.
@@ -810,8 +825,8 @@ async function handle(f: Frame, method: string, args: any[], asked = false): Pro
       if (!asked) throw refused(p, 'chatUnasked');
       if (trying) throw previewOnly(p, 'chat');
       const started = recent('chat:' + p.name, 3_600_000);
-      if (started.length && Date.now() - started[started.length - 1] < 5000) throw new Error('chat.start: wait a few seconds between chats');
-      if (started.length >= CHATS_PER_HOUR) throw refused(p, 'chatBudget');
+      if (!full && started.length && Date.now() - started[started.length - 1] < 5000) throw new Error('chat.start: wait a few seconds between chats');
+      if (!full && started.length >= CHATS_PER_HOUR) throw refused(p, 'chatBudget');
       started.push(Date.now());
       // Never `byUser`: an add-on's prompt must not inherit a "bypass permissions" default.
       const c = await post('/chats', {});
@@ -1018,7 +1033,18 @@ if (typeof window !== 'undefined') {
     const payload = Object.fromEntries(fields.map((k) => [k, e[k]]));
     for (const f of frames) if (f.events.has(e.type) && !f.plugin.dead) deliver(f, { type: 'event', event: e.type, payload });
   });
+  // Full access went off: frames made while it was on keep their wider sandbox and device features
+  // for as long as they exist, so every one is torn down and made again under the usual limits.
+  onSettingsChanged(() => { if (!fullAccessOn() && hasFullFrames()) rebuildFrames(); });
   new MutationObserver(relook).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'data-mode', 'dir', 'lang', 'class'] });
+}
+
+/** Is any frame still running with what full access gave it (`createFrame`)? */
+export const hasFullFrames = () => [...frames].some((f) => f.el.hasAttribute('allow') || /allow-popups/.test(f.el.getAttribute('sandbox') ?? ''));
+/** Every add-on frame torn down and loaded again (with the sandbox of the moment). */
+export function rebuildFrames() {
+  for (const f of [...frames]) destroyFrame(f);
+  loadLayer(app.preview ? { preview: true } : {}).catch(() => {});
 }
 
 // ---------- loading ----------
@@ -1088,7 +1114,8 @@ function navConfig(v: any): NavConfig | null {
       if (en || ar) labels[String(id).slice(0, 120)] = { ...(en ? { en } : {}), ...(ar ? { ar } : {}) };
     }
   }
-  return { hidden: strings(v.hidden).filter((x) => !['home', 'settings', 'help'].includes(x)).slice(0, 60), order: strings(v.order).slice(0, 60), labels };
+  // With full access even these may be hidden (Settings stays one command away in the palette).
+  return { hidden: strings(v.hidden).filter((x) => fullAccessOn() || !['home', 'settings', 'help'].includes(x)).slice(0, 60), order: strings(v.order).slice(0, 60), labels };
 }
 /** `todos.json` → TodosConfig (null when absent); unknown values are dropped, not guessed. */
 function todosConfig(v: any): TodosConfig | null {
@@ -1127,7 +1154,7 @@ export async function loadLayer(opts: { preview?: boolean; sig?: string } = {}) 
   unload();
   app.preview = !!opts.preview;
   tried = want;
-  styleEl ??= document.head.appendChild(document.createElement('style'));
+  styleEl ??= document.head.appendChild(Object.assign(document.createElement('style'), { id: LAYER_CSS_ID }));
   styleEl.textContent = m.css || '';
   varNames = null;
   app.customThemes = Array.isArray(m.themes) ? m.themes : [];

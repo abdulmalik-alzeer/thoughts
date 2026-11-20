@@ -1,7 +1,8 @@
 //! The user's yes, proven by the desktop shell — not merely claimed by whoever holds the token.
 //!
-//! Three things may only happen after the user agreed to a warning in the app window: switching a
-//! chat to "bypass permissions", making that the default for new chats, and trusting a folder. The
+//! Four things may only happen after the user agreed to a warning in the app window: switching a
+//! chat to "bypass permissions", making that the default for new chats, trusting a folder, and
+//! switching full access on (`settings::FullAccess`). The
 //! app token (daemon.json) is a plain file any program running as the user may read, so a request
 //! carrying it proves nothing about a person having said yes. Each of those requests must also carry
 //! an *approval*: a short-lived, single-use code bound to that one action, made with a key only the
@@ -41,20 +42,22 @@ pub enum Action {
     SettingsBypass,
     /// Trust the folder of one trust question (subject: the question id).
     Trust,
+    /// Switch full access on (no subject): every guard the app adds yields (`settings::FullAccess`).
+    FullAccess,
 }
 
 impl Action {
     pub fn name(self) -> &'static str {
-        match self { Action::ChatBypass => "chat-bypass", Action::SettingsBypass => "settings-bypass", Action::Trust => "trust" }
+        match self { Action::ChatBypass => "chat-bypass", Action::SettingsBypass => "settings-bypass", Action::Trust => "trust", Action::FullAccess => "full-access" }
     }
     pub fn from_name(s: &str) -> Option<Action> {
-        [Action::ChatBypass, Action::SettingsBypass, Action::Trust].into_iter().find(|a| a.name() == s)
+        [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess].into_iter().find(|a| a.name() == s)
     }
     /// Is `subject` the kind of thing this action names? Checked by the shell before it signs.
     pub fn subject_ok(self, subject: &str) -> bool {
         match self {
             Action::ChatBypass => crate::chats::valid_id(subject),
-            Action::SettingsBypass => subject.is_empty(),
+            Action::SettingsBypass | Action::FullAccess => subject.is_empty(),
             Action::Trust => (16..=64).contains(&subject.len()) && subject.bytes().all(|b| b.is_ascii_hexdigit()),
         }
     }
@@ -295,5 +298,7 @@ mod tests {
         assert!(Action::SettingsBypass.subject_ok("") && !Action::SettingsBypass.subject_ok("x"));
         assert_eq!(Action::from_name("trust"), Some(Action::Trust));
         assert_eq!(Action::from_name("anything"), None);
+        assert_eq!(Action::from_name("full-access"), Some(Action::FullAccess));
+        assert!(Action::FullAccess.subject_ok("") && !Action::FullAccess.subject_ok("x"));
     }
 }
