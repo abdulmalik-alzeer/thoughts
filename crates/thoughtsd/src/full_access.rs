@@ -106,11 +106,11 @@ pub fn run_note(source_dir: Option<&str>) -> String {
              and the interface (Svelte, ui/). You may change any of it. The app does not rebuild itself: build it the way that folder's \
              CLAUDE.md and docs/DEVELOPMENT.md describe (for example `npm ci`, `npx vite build`, `cargo build -p thoughts`, or a full app \
              bundle), then tell the user what you built and that they need to quit and reopen the app, or install the new build, to use it."),
-        None => "Where the app's own source code is checked out is not known; the user can name the folder under Settings → Full access. \
+        None => "Where the app's own source code is checked out is not known; the user can name the folder under Settings → Privacy & cost → Full access. \
              Without it, change the app through its customisation layer and its data folder.".to_string(),
     };
     format!(
-        "FULL ACCESS IS ON. The user has knowingly switched off every limit the Thoughts app itself puts on you (Settings → Full access, \
+        "FULL ACCESS IS ON. The user has knowingly switched off every limit the Thoughts app itself puts on you (Settings → Privacy & cost → Full access, \
          confirmed in the app's own warning). The app adds no permission rules, closed folders, sandbox, command checks or protected files \
          to this run: you may read, change or delete anything on this computer that the user's account can reach, run any command or \
          program, use the network, and use the microphone, camera, screen and devices the system lets this user's programs use, including \
@@ -140,7 +140,7 @@ mod tests {
         let n = run_note(Some("/src/thoughts"));
         assert!(n.contains("FULL ACCESS IS ON") && n.contains("/src/thoughts") && n.contains("cargo build") && n.contains("Recovery"), "{n}");
         assert!(n.contains(&crate::paths::home().display().to_string()));
-        assert!(run_note(None).contains("Settings → Full access"));
+        assert!(run_note(None).contains("Settings → Privacy & cost → Full access"));
     }
 
     #[tokio::test]
