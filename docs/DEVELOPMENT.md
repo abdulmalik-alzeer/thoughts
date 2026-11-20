@@ -408,6 +408,16 @@ when Codex is chosen.
   only when the user keeps it. Every applied change can be undone on its own (`revert`,
   `undo-last`) or the whole layer rolled back; the native Recovery menu sits outside the layer
   and cannot be removed by it.
+- **Built-in pages reference.** `ui/src/lib/layer/builtin-pages.json` is the one list of what a
+  customisation may change on the app's own pages (each page's sections, parts, texts, whether it
+  can be replaced), the sidebar ids and icons, the permissions and every Plugin API call with the
+  permission it needs. The UI reads it (`lib/pages.svelte.ts`, `lib/navLayout.ts`, `lib/layer.ts`),
+  the daemon validates against it (`staging/pages.rs`, `staging/validate.rs`) and fills the
+  "Built-in pages reference" of the layer's README from it (`{{BUILTIN_PAGES}}` in
+  `assets/LAYER.md`). Tests hold it to the code: `ui/src/lib/reference.test.ts` (each page draws
+  exactly its sections, every icon and API call exists) and `section_ids_survive_releases` in
+  `pages.rs` (an id may only go away through `renamed`). A page's sections are drawn by
+  `views/Sections.svelte` from snippets, with `data-slot="<page>.<id>"` on each block.
 - **Per-plugin manifests.** Each plugin or view declares itself in a file beside it,
   `plugins/<name>.json` or `views/<name>.json`:
   `{"apiVersion":1,"permissions":[…],"write":["folder/"],"description":"…"}`. Entries in the
