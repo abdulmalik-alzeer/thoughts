@@ -6,7 +6,7 @@
     Puzzle, Bot, GitBranch, Server, Palette, LayoutGrid, X, Inbox, CalendarDays, Clock, BookOpen, Shield,
     Download, Pencil, ExternalLink, CircleQuestionMark, Copy, RotateCw, Printer, Upload, Eye, Lock, Bell, Keyboard,
     PanelLeft, Undo2, Funnel, Info, WifiOff, ChevronLeft, Command, Accessibility, ZoomIn, ZoomOut, Pin, Archive, ArchiveRestore,
-    Gauge, AppWindow, Waypoints, Maximize, List,
+    Gauge, AppWindow, Waypoints, Maximize, List, Maximize2, Minimize2,
   } from '@lucide/svelte';
 
   // One place for every icon the app uses. Plugins can pass any of these names.
@@ -22,7 +22,7 @@
     external: ExternalLink, help: CircleQuestionMark, copy: Copy, retry: RotateCw, print: Printer, upload: Upload,
     eye: Eye, lock: Lock, bell: Bell, keyboard: Keyboard, sidebar: PanelLeft, undo: Undo2, filter: Funnel, info: Info,
     offline: WifiOff, left: ChevronLeft, command: Command, pin: Pin, archive: Archive, unarchive: ArchiveRestore,
-    usage: Gauge, window: AppWindow, graph: Waypoints, fit: Maximize, list: List,
+    usage: Gauge, window: AppWindow, graph: Waypoints, fit: Maximize, list: List, expand: Maximize2, collapse: Minimize2,
   };
 </script>
 

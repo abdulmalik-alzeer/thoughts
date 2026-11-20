@@ -7,7 +7,9 @@
   import { post } from '../../lib/api';
   import { failed, errDetail } from '../../lib/errors';
   import { t, tn } from '../../lib/i18n';
-  import { imeKey } from '../../lib/ime';
+  import Composer from '../../lib/composer/Composer.svelte';
+  import { composerKey } from '../../lib/composer/keys';
+  import type { TextBox } from '../../lib/composer/textBox';
   import { go, refreshChats } from '../../lib/store.svelte';
   import { notify } from '../../lib/content/util';
   import { editNotes, fileName, madeKey } from './branch';
@@ -24,19 +26,14 @@
   let dropped = $state<Record<string, boolean>>({});    // mentions left out, by path
   let busy = $state(false);
   let error = $state('');
-  let box = $state<HTMLTextAreaElement>();
+  let box = $state<TextBox & { element: HTMLElement }>();
   const uid = untrack(() => `edit-${m.id}`);
 
   const notes = $derived(editNotes(chat, m.id));
   const keptFiles = $derived(start.files.filter((p) => !out[p]));
   const ready = $derived(!!text.trim() || keptFiles.length > 0);
 
-  function grow() {
-    if (!box) return;
-    box.style.height = 'auto';
-    box.style.height = Math.min(box.scrollHeight + 2, Math.round(window.innerHeight * 0.4)) + 'px';
-  }
-  $effect(() => { text; grow(); });
+  // The same formatted box as the chat's own (lib/composer); it grows up to 40% of the window.
   onMount(() => { tick().then(() => { box?.focus(); box?.setSelectionRange(text.length, text.length); }); });
 
   async function submit() {
@@ -66,14 +63,13 @@
 
   function keydown(e: KeyboardEvent) {
     if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); if (!busy) onclose(); return; }
-    if (e.key === 'Enter' && !e.shiftKey && !imeKey(e)) { e.preventDefault(); submit(); }
+    if (composerKey(e, false) === 'send') { e.preventDefault(); submit(); }
   }
 </script>
 
 <div class="edit card" role="group" aria-label={t('chatfBranch.editRegion')} aria-busy={busy}>
-  <label class="sr-only" for={uid}>{t('chatfBranch.editLabel')}</label>
-  <textarea id={uid} bind:this={box} bind:value={text} rows="2" dir="auto" disabled={busy} onkeydown={keydown}
-    aria-describedby="{uid}-note {uid}-keys"></textarea>
+  <Composer id={uid} bind:value={text} bind:box label={t('chatfBranch.editLabel')} disabled={busy} onkeydown={keydown}
+    describedby="{uid}-note {uid}-keys" class="ebox" />
   {#if start.files.length}
     <div class="chips" role="group" aria-label={t('chatfBranch.files')}>
       {#each start.files as p (p)}
@@ -123,8 +119,8 @@
 
 <style>
   .edit { width: min(78%, 640px); align-self: flex-end; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: var(--border-w, 1px) solid var(--accent); border-radius: 16px; }
-  textarea { font: inherit; color: var(--fg); background: var(--bg); border: var(--border-w, 1px) solid var(--border); border-radius: var(--radius); padding: 8px 10px; resize: none; min-height: 44px; overflow-y: auto; }
-  textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .edit :global(.ebox) { --composer-min: 44px; color: var(--fg); background: var(--bg); border: var(--border-w, 1px) solid var(--border); border-radius: var(--radius); padding: 2px 6px; }
+  .edit :global(.ebox:focus-within) { outline: 2px solid var(--accent); outline-offset: 1px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .chip { font: inherit; font-size: var(--fs-xs); display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 3px 8px; border-radius: 999px; border: var(--border-w, 1px) solid var(--border); background: var(--fill); color: var(--fg); cursor: pointer; }
   .chip:hover:not(:disabled) { border-color: var(--accent); }

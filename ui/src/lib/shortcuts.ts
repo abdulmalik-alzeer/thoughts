@@ -10,6 +10,7 @@
 //   palette               sidebar.toggle  theme.<id>  mode.<light|dark|system>
 //   back / forward        through the views visited this session   history (notes history)
 //   zoom.in / zoom.out / zoom.reset   size of everything in the window (Settings › Accessibility)
+//   chat.composer.expand  the open chat's message box made tall, or small again (views/Chat.svelte)
 //   plugin:<command id>   a command registered by a plugin was run
 
 export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent);
@@ -49,6 +50,7 @@ export const shortcuts: Shortcut[] = [
   { id: 'zoom.out', label: 'a11y.sc.zoomOut', code: 'Minus', key: '-', mod: true },
   { id: 'zoom.out', label: 'a11y.sc.zoomOut', code: 'NumpadSubtract', key: '-', mod: true, hidden: true },
   { id: 'zoom.reset', label: 'a11y.sc.zoomReset', code: 'Digit0', key: '0', mod: true },
+  { id: 'chat.composer.expand', label: 'chatg.sc.expand', code: 'KeyE', key: 'E', mod: true, shift: true },
   { id: 'escape', label: 'shell.sc.escape', code: 'Escape', key: 'Esc' },
 ];
 
