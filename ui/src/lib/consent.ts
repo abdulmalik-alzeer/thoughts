@@ -10,7 +10,7 @@
 
 import { isSecondary, showInMain } from './windows';
 
-export type ConsentAction = 'chat-bypass' | 'settings-bypass' | 'trust';
+export type ConsentAction = 'chat-bypass' | 'settings-bypass' | 'trust' | 'full-access';
 
 /** The approval, `null` when the user said no in the shell's dialog (or one was already open: say
  *  nothing then either), `undefined` outside the desktop app. Throws only for a real problem. */

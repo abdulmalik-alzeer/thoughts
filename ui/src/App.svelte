@@ -17,6 +17,7 @@
   import { confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
   import LibrarySwitcher from './lib/LibrarySwitcher.svelte';
+  import FullAccessBadge from './lib/FullAccessBadge.svelte';
   import LibraryAdd from './lib/LibraryAdd.svelte';
   import { libraryPaletteItems, startLibraries } from './lib/libraries.svelte';
   import Chat from './views/Chat.svelte';
@@ -808,6 +809,7 @@
         <button class="iconbtn" aria-label={t('shell.sidebarHide')} title={tip(t('shell.sidebarHide'), 'sidebar.toggle')} onclick={() => command('sidebar.toggle')}><Icon name="sidebar" class="flip-rtl" /></button>
       </div>
       <LibrarySwitcher />
+      <FullAccessBadge />
       <form class="search" role="search" onsubmit={submitSearch}
         onfocusout={(e) => { if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) closeSearch(); }}>
         <Icon name="search" size={14} />
@@ -924,6 +926,7 @@
     <aside class="rail no-print" aria-label={t('shell.sidebar')} in:railFade={{ into: true }} out:railFade>
       <div class="drag" data-tauri-drag-region></div>
       <button class="iconbtn" aria-label={t('shell.sidebarShow')} title={tip(t('shell.sidebarShow'), 'sidebar.toggle')} onclick={() => command('sidebar.toggle')}><Icon name="sidebar" class="flip-rtl" /></button>
+      <FullAccessBadge compact />
       <nav aria-label={t('shell.mainNav')}>
         {#each navItems as it, i (it.id)}
           <button class="iconbtn rb" class:on={it.active} aria-current={it.active ? 'page' : undefined} aria-label={it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label} title={tip(it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label, 'nav.' + (i + 1))} onclick={it.run}>
