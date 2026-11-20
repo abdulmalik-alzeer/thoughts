@@ -1044,7 +1044,7 @@
       {:else if app.view.kind === 'settings'}<Settings reload={loadProjects} />
       {:else if app.view.kind === 'help'}<Help />
       {:else if app.view.kind === 'reorganize'}<Reorganize id={app.view.id} />
-      {:else if app.view.kind === 'plugin'}{#key app.view.id}<PluginView id={app.view.id!} />{/key}
+      {:else if app.view.kind === 'plugin'}{#key app.view.id + ':' + lang()}<PluginView id={app.view.id!} />{/key}
       {/if}
       {#snippet failed(error, reset)}
         <div class="page missing">

@@ -18,7 +18,8 @@ const list = (xs: unknown[]) => xs.map(q).join(t('ldb.listSep'));
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
 const BUILT_IN_PAGES = ['home', 'chats', 'ideas', 'todos', 'docs', 'projects', 'me'];
-function page(id: string): string { return q(BUILT_IN_PAGES.includes(id) ? t(id as any) : id); }
+const OWN_NAMES: Record<string, string> = { graph: 'libf-graph.nav', inbox: 'inbox.nav', usage: 'r10-usage.nav', customise: 'layer.customise' };
+function page(id: string): string { return q(BUILT_IN_PAGES.includes(id) ? t(id as any) : OWN_NAMES[id] ? t(OWN_NAMES[id]) : id); }
 
 function section(id: string): string {
   const known: Record<string, string> = { stats: 'ldb.sec.stats', ideas: 'continueWhere', upcoming: 'home.upcoming', todos: 'todos', chats: 'recentChats', projects: 'projects', suggestions: 'ldb.sec.suggestions' };

@@ -4,7 +4,7 @@
   // cannot be shown. The page is told what it stands in for; of the route only what its permissions
   // allow (lib/layer.ts `pageCtx` filters it before anything reaches the frame).
   import PluginView from './PluginView.svelte';
-  import { t } from '../lib/i18n';
+  import { t, lang } from '../lib/i18n';
   import { app } from '../lib/store.svelte';
   import { pageSwap, showOriginal } from '../lib/pages.svelte';
   let { page }: { page: string } = $props();
@@ -13,7 +13,8 @@
 </script>
 
 {#if view}
-  {#key view.id}
+  <!-- A new language starts the page again, so it is drawn with the app's words in that language. -->
+  {#key view.id + ':' + lang()}
     <PluginView id={view.id} {ctx} onfail={(why) => showOriginal(page, why || t('pgs.why.noDraw'))}>
       <span class="sep" aria-hidden="true">·</span>
       <span>{t('pgs.standsIn')}</span>
