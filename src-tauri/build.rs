@@ -40,6 +40,7 @@ const COMMANDS: &[&str] = &[
     "capture_take",
     "capture_show",
     "capture_hide",
+    "capture_fit",
     "capture_open_main",
     "capture_shortcut",
     "set_capture_shortcut",

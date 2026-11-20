@@ -1290,6 +1290,7 @@ fn main() {
             capture::capture_take,
             capture::capture_show,
             capture::capture_hide,
+            capture::capture_fit,
             capture::capture_open_main,
             capture::capture_shortcut,
             capture::set_capture_shortcut,

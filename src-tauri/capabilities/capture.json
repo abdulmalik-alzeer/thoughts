@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "capture",
-  "description": "The quick capture box. It hears that it was opened again, can be dragged by its top edge, and may call only the few app commands it needs to connect, fill, show, hide and hand over to the app window (see src-tauri/build.rs).",
+  "description": "The quick capture box. It hears that it was opened again, can be dragged by its bar, sizes itself to what it shows, follows the app's zoom, and may call only the few app commands it needs to connect, fill, show, hide, size and hand over to the app window (see src-tauri/build.rs).",
   "windows": [
     "capture"
   ],
@@ -11,9 +11,11 @@
     "allow-capture-take",
     "allow-capture-show",
     "allow-capture-hide",
+    "allow-capture-fit",
     "allow-capture-open-main",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
-    "core:window:allow-start-dragging"
+    "core:window:allow-start-dragging",
+    "core:webview:allow-set-webview-zoom"
   ]
 }
