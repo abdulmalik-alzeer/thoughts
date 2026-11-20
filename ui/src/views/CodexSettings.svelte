@@ -5,11 +5,12 @@
   // the Settings page, which saves them like any other setting.
   import Icon from '../lib/Icon.svelte';
   import { onMount } from 'svelte';
-  import { api, post } from '../lib/api';
+  import { api, on, post } from '../lib/api';
   import { app, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { copyText } from '../lib/content/util';
+  import { modelsNoteKey, versionNumber } from '../lib/codexModels';
 
   let { ai = $bindable(), part, vis, readOnly = false }: {
     ai: any; part: 'which' | 'codex' | 'advanced';
@@ -28,7 +29,26 @@
   let copied = $state('');
 
   function loadOpts() { api('/ai/codex/options').then((o) => (opts = { models: [], efforts: [], ...o })).catch(() => {}); }
-  onMount(() => { if (codex.installed && part !== 'which') loadOpts(); });
+  onMount(() => {
+    if (codex.installed && part !== 'which') loadOpts();
+    // The models are asked of Codex in the background; the list comes in when it has answered.
+    return on((e) => { if (e.type === 'codex.models' && part !== 'which' && codex.installed) loadOpts(); });
+  });
+
+  /** "Refresh models": ask the installed Codex again now. */
+  async function refreshModels() {
+    if (busy.models) return;
+    busy.models = true;
+    try { opts = { models: [], efforts: [], ...(await post('/ai/codex/models/refresh')) }; }
+    catch (e) { failed(t('codex.models.refreshFailed'), e); }
+    finally { busy.models = false; }
+  }
+  const modelsLooking = $derived(!!busy.models || (!!opts.modelsRefreshing && !opts.modelsDetected));
+  /** Said plainly when Codex could not list its models: an old version, or no answer just now. */
+  const modelsNote = $derived.by(() => {
+    const k = modelsNoteKey(opts, modelsLooking);
+    return k ? t(k, { version: versionNumber(opts.codexVersion || codex.version) }) : '';
+  });
 
   async function check() {
     if (busy.check) return;
@@ -129,6 +149,11 @@
     <input id="st-cx-model" dir="ltr" list="st-cx-models" bind:value={ai.codex.model} placeholder={t('codex.set.auto')} autocomplete="off" />
     <datalist id="st-cx-models">{#each opts.models as m (m)}<option value={m}></option>{/each}</datalist>
     <p class="muted sm">{t('codex.set.modelHint')}</p>
+    <div class="row wrap models-src" aria-live="polite">
+      <span class="muted sm">{modelsLooking ? t('codex.models.refreshing') : opts.modelsSource ? t('codex.models.source.' + opts.modelsSource) : ''}</span>
+      <button type="button" class="btn ghost tiny" disabled={modelsLooking} aria-busy={modelsLooking} onclick={refreshModels}><Icon name="sync" size={12} /> {t('codex.models.refresh')}</button>
+    </div>
+    {#if modelsNote}<p class="sm note-old" role="status"><Icon name="info" size={13} /> <span>{modelsNote}</span></p>{/if}
   {/if}
   {#if vis('codex.set.effort') && opts.efforts.length}
     <label for="st-cx-effort">{t('codex.set.effort')}</label>
@@ -164,6 +189,9 @@
   .cmds code { font-family: var(--mono); padding: 2px 6px; border-radius: 6px; background: var(--panel); }
   .tiny { font-size: var(--fs-xs); padding: 2px 8px; }
   .limits-title { margin: 12px 0 4px; }
+  .models-src { gap: 8px; align-items: center; margin: 2px 0 6px; }
+  .note-old { display: flex; gap: 6px; align-items: flex-start; margin: 0 0 8px; padding: 8px 10px; border-radius: var(--radius); background: var(--fill); color: var(--fg); }
+  .note-old :global(.icon) { flex: none; margin-top: 2px; }
   .limits { margin: 0; padding-inline-start: 20px; display: grid; gap: 4px; }
   .limits .warn { list-style: none; margin-inline-start: -20px; display: flex; gap: 6px; align-items: flex-start; }
   .limits .warn :global(.icon) { flex: none; margin-top: 2px; color: var(--danger); }

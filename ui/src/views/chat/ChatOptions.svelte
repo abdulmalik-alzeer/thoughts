@@ -6,7 +6,7 @@
   import Icon from '../../lib/Icon.svelte';
   import { t } from '../../lib/i18n';
 
-  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram }: {
+  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram, modelNote = '' }: {
     options: { model?: string | null; effort?: string | null; permissionMode?: string | null };
     models: string[]; efforts: string[]; modes: string[];
     /** Where the names of the modes and efforts are (Codex has names of its own for them). */
@@ -20,6 +20,8 @@
     /** One more entry at the end of the model menu (typing a model's name). */
     extraModel?: { value: string; label: string };
     oneffort: (v: string | null) => void; onperm: (v: string) => void;
+    /** Said under the model menu when the program could not list its models. */
+    modelNote?: string;
   } = $props();
 
   const BYPASS = 'bypassPermissions';
@@ -95,6 +97,7 @@
           </label>
         {/if}
       </div>
+      {#if modelNote}<p class="sm note model-note" role="status">{modelNote}</p>{/if}
       <p class="muted sm note">{t('chatc.opt.modelHint')}</p>
     </div>
   {/if}
@@ -124,6 +127,7 @@
   .field, .lbl { margin: 0; }
   .field select { width: 100%; font-size: var(--fs-xs); padding: 4px 6px; }
   .note { margin: 0; }
+  .model-note { margin-bottom: 6px; padding: 6px 8px; border-radius: var(--radius); background: var(--fill); color: var(--fg); }
   .progs { display: flex; gap: 4px; flex-wrap: wrap; }
   .prog { flex: 1 1 120px; }
   .prog.on { background: var(--fill); }
