@@ -3,12 +3,13 @@
   // (the strip saying whose page this is, the "not available" notice) is drawn by the app.
   import Icon from '../lib/Icon.svelte';
   import { app } from '../lib/store.svelte';
-  import { findView, SURFACE_DRAWN } from '../lib/layer';
+  import { addonFailure, findView, SURFACE_DRAWN } from '../lib/layer';
   import { t } from '../lib/i18n';
   import type { Snippet } from 'svelte';
   // `onfail`: called when the page cannot be shown (an add-on page standing in for one of the app's
   // own then gives way to it); `children`: more in the strip saying whose page this is.
-  let { id, onfail, children }: { id: string; onfail?: () => void; children?: Snippet } = $props();
+  // `ctx`: for a page standing in for one of the app's own, which one and the route (`thoughts.page`).
+  let { id, ctx, onfail, children }: { id: string; ctx?: { replaces?: string | null; route?: { kind: string; id: string | null; path: string | null } }; onfail?: (why: string) => void; children?: Snippet } = $props();
   let el = $state<HTMLElement>();
   let problem = $state('');
   // The page as it is registered right now. Reloading the customisations (Try it, Keep, Stop preview,
@@ -29,7 +30,7 @@
     into.addEventListener(SURFACE_DRAWN, show);
     const timer = setTimeout(show, 600);
     let cleanup: any;
-    try { cleanup = v.render(into); } catch (e: any) { problem = e?.message ?? String(e); show(); }
+    try { cleanup = v.render(into, ctx); } catch (e: any) { problem = e?.message ?? String(e); show(); }
     return () => {
       clearTimeout(timer);
       into.removeEventListener(SURFACE_DRAWN, show);
@@ -43,7 +44,7 @@
     const timer = setTimeout(() => (gone = true), 1500);
     return () => clearTimeout(timer);
   });
-  $effect(() => { if ((gone || problem) && onfail) onfail(); });
+  $effect(() => { if ((gone || problem) && onfail) onfail(problem || addonFailure(id)); });
   const from = $derived(view?.plugin ? String(view.plugin).replace(/\.(js|html)$/i, '') : '');
 </script>
 

@@ -6,6 +6,7 @@
   import { confirmDialog } from '../lib/dialog.svelte';
   import { t } from '../lib/i18n';
   import PageExtras from './PageExtras.svelte';
+  import Sections from './Sections.svelte';
   import { pageIntro, pageText, pageTitle, shows } from '../lib/pages.svelte';
 
   let { projects, reload, newChat }: { projects: any[]; reload: () => Promise<void>; newChat: (pid: string) => void } = $props();
@@ -48,12 +49,7 @@
   }
 </script>
 
-<div class="page">
-  <h1>{pageTitle('projects')}</h1>
-  {#if shows('projects', 'intro')}<p class="muted" dir="auto">{pageIntro('projects') || t('proj.intro')}</p>{/if}
-  <PageExtras page="projects" intro={false} />
-  <p class="note"><Icon name="warning" size={15} /> <span>{t('proj.access')}</span></p>
-
+{#snippet linkFormS()}
   {#if shows('projects', 'linkForm')}
   <form class="card" onsubmit={(e) => { e.preventDefault(); add(); }}>
     <label for="pj-name">{t('proj.name')}</label>
@@ -70,6 +66,9 @@
   </form>
   {/if}
 
+{/snippet}
+
+{#snippet listS()}
   <div class="list">
     {#each projects as p (p.id)}
       {@const chats = app.chats.filter((c) => c.projectId === p.id)}
@@ -84,6 +83,15 @@
       <div class="empty"><Icon name="projects" size={22} /><b>{t('proj.emptyTitle')}</b><span class="muted">{t('proj.emptyBody')}</span></div>
     {/each}
   </div>
+{/snippet}
+
+<div class="page">
+  <h1>{pageTitle('projects')}</h1>
+  {#if shows('projects', 'intro')}<p class="muted" dir="auto">{pageIntro('projects') || t('proj.intro')}</p>{/if}
+  <PageExtras page="projects" intro={false} />
+  <p class="note"><Icon name="warning" size={15} /> <span>{t('proj.access')}</span></p>
+
+  <Sections page="projects" parts={{ linkForm: linkFormS, list: listS }} />
   <PageExtras page="projects" place="bottom" />
 </div>
 

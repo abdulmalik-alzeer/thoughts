@@ -3,6 +3,9 @@
   // by model — with what they would cost at API prices.
   import { onMount, untrack } from 'svelte';
   import Icon from '../../lib/Icon.svelte';
+  import PageExtras from '../PageExtras.svelte';
+  import Sections from '../Sections.svelte';
+  import { pageTitle } from '../../lib/pages.svelte';
   import { app, go } from '../../lib/store.svelte';
   import { ago, fmtDate, fmtNum, t, tn } from '../../lib/i18n';
   import { costText, followMeter, fmtTokens, loadMeter, meter, providerName, providerState, PROVIDERS, type Use } from '../../lib/meter.svelte';
@@ -53,17 +56,7 @@
   const kindLabel = (k: string) => (k && k !== 'chat' ? t(`chat.kind.${k}`) : '');
 </script>
 
-<div class="page usage">
-  <div class="row head">
-    <div class="grow">
-      <h1>{t('r10-usage.title')}</h1>
-      <p class="muted sub">{t('r10-usage.sub')}</p>
-    </div>
-    <div class="seg" role="group" aria-label={t('r10-usage.period')}>
-      {#each PERIODS as p (p)}<button type="button" class="segb" aria-pressed={days === p} onclick={() => (days = p)}>{tn('r10-usage.days', p)}</button>{/each}
-    </div>
-  </div>
-
+{#snippet plansS()}
   <section aria-labelledby="u-plans">
     <h2 id="u-plans">{t('r10-usage.plans')}</h2>
     <p class="muted sm">{t('r10-usage.plansHint')}</p>
@@ -74,6 +67,9 @@
     </div>
   </section>
 
+{/snippet}
+
+{#snippet costS()}
   {#if loading && !data}
     <div class="skel big" aria-busy="true"><span class="sr-only" role="status">{t('shell.loading')}</span></div>
   {:else if error && !data}
@@ -205,6 +201,22 @@
       </p>
     </section>
   {/if}
+{/snippet}
+
+<div class="page usage">
+  <div class="row head">
+    <div class="grow">
+      <h1>{pageTitle('usage', t('r10-usage.title'))}</h1>
+      <p class="muted sub">{t('r10-usage.sub')}</p>
+    </div>
+    <div class="seg" role="group" aria-label={t('r10-usage.period')}>
+      {#each PERIODS as p (p)}<button type="button" class="segb" aria-pressed={days === p} onclick={() => (days = p)}>{tn('r10-usage.days', p)}</button>{/each}
+    </div>
+  </div>
+
+  <PageExtras page="usage" />
+  <Sections page="usage" parts={{ plans: plansS, cost: costS }} />
+  <PageExtras page="usage" place="bottom" />
 </div>
 
 <style>

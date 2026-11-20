@@ -10,6 +10,7 @@
   import { fold } from '../lib/CommandPalette.svelte';
   import { openItem } from '../lib/item';
   import PageExtras from './PageExtras.svelte';
+  import Sections from './Sections.svelte';
   import { pageText, pageTitle, shows } from '../lib/pages.svelte';
 
   let ideas = $state<any[]>([]);
@@ -88,9 +89,7 @@
   }
 </script>
 
-<div class="page">
-  <h1>{pageTitle('ideas')}</h1>
-  <PageExtras page="ideas" />
+{#snippet captureS()}
   {#if shows('ideas', 'capture')}
   <form class="row" onsubmit={(e) => { e.preventDefault(); capture(); }}>
     <input class="grow" placeholder={pageText('ideas', 'capturePlaceholder', term('newPlaceholder'))} aria-label={pageText('ideas', 'capturePlaceholder', term('newPlaceholder'))} bind:value={newIdea} dir="auto" />
@@ -98,14 +97,10 @@
   </form>
   {/if}
 
-  {#if loading}
-    <div class="grid sk" aria-busy="true"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
-  {:else if loadError && !ideas.length}
-    <div class="state" role="alert"><Icon name="warning" size={24} /><p>{t('idea.loadFailed')}</p><p class="muted sm" dir="auto">{loadError}</p>
-      <button class="btn primary" onclick={() => { loading = true; load(); }}><Icon name="retry" size={14} /> {t('idea.tryAgain')}</button></div>
-  {:else if !ideas.length}
-    <div class="state"><Icon name="ideas" size={28} /><h2>{term('emptyTitle')}</h2><p class="muted">{term('emptyBody')}</p><p class="muted sm">{t('ui.idea.emptyTip')}</p></div>
-  {:else}
+{/snippet}
+
+{#snippet toolsS()}
+  {#if !loading && ideas.length}
     {#if allAreas.length > 1 && shows('ideas', 'areas')}
       <div class="row tabs" role="group" aria-label={t('todoa.work.areas')}>
         <button class="tab" aria-pressed={!area} onclick={() => (area = '')}>{t('idea.all')}</button>
@@ -131,6 +126,18 @@
       {/if}
       {#if shows('ideas', 'count')}<span class="muted sm" role="status">{tn(isWork ? 'todoa.work.count' : 'idea.count', shown.length)}</span>{/if}
     </div>
+  {/if}
+{/snippet}
+
+{#snippet listS()}
+  {#if loading}
+    <div class="grid sk" aria-busy="true"><div class="skel"></div><div class="skel"></div><div class="skel"></div></div>
+  {:else if loadError && !ideas.length}
+    <div class="state" role="alert"><Icon name="warning" size={24} /><p>{t('idea.loadFailed')}</p><p class="muted sm" dir="auto">{loadError}</p>
+      <button class="btn primary" onclick={() => { loading = true; load(); }}><Icon name="retry" size={14} /> {t('idea.tryAgain')}</button></div>
+  {:else if !ideas.length}
+    <div class="state"><Icon name="ideas" size={28} /><h2>{term('emptyTitle')}</h2><p class="muted">{term('emptyBody')}</p><p class="muted sm">{t('ui.idea.emptyTip')}</p></div>
+  {:else}
     {#if !shown.length}
       <div class="state">
         <Icon name="search" size={24} />
@@ -164,6 +171,12 @@
       </div>
     {/each}
   {/if}
+{/snippet}
+
+<div class="page">
+  <h1>{pageTitle('ideas')}</h1>
+  <PageExtras page="ideas" />
+  <Sections page="ideas" parts={{ capture: captureS, tools: toolsS, list: listS }} />
   <PageExtras page="ideas" place="bottom" />
 </div>
 

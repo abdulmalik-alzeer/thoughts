@@ -13,6 +13,7 @@
   import { loadLibraryWeek, nextWeekDay, showHijri } from '../lib/weekPrefs.svelte';
   import { compose, doneGroupOf, inSentence, REPEATS } from '../lib/todoline';
   import PageExtras from './PageExtras.svelte';
+  import Sections from './Sections.svelte';
   import { pageText, pageTitle, shows } from '../lib/pages.svelte';
   import { isAt, reanchor, refOf, type TodoRef } from '../lib/todoref';
   import { editLost, todoFailed } from '../lib/todofail';
@@ -415,6 +416,99 @@
   </div>
 {/snippet}
 
+{#snippet calendarS()}
+    <TodoCalendar {lists} add={(text, due) => addTo(GENERAL, text, due)} toggle={(l, it, box) => toggle(l, it, box)} setDue={(l, it, due) => setDue(l, it, due)} />
+{/snippet}
+
+{#snippet toolsS()}
+    <div class="row tools">
+      {#if shows('todos', 'filters')}
+      <div class="seg" role="group" aria-label={t('todo.filterLabel')}>
+        {#each FILTERS as f}
+          <button class="segb" aria-pressed={filter === f} onclick={() => { filter = f; remember(); }}>
+            {#if f === 'overdue' && nOverdue}<Icon name="warning" size={12} />{/if}
+            {t(`todo.filter.${f}`)}
+            {#if f === 'soon' && nSoon}<span class="n">{fmtNum(nSoon)}</span>{/if}
+            {#if f === 'overdue' && nOverdue}<span class="n">{fmtNum(nOverdue)}</span>{/if}
+          </button>
+        {/each}
+      </div>
+      {/if}
+      <span class="grow"></span>
+      {#if shows('todos', 'grouping')}
+      <label class="row inl" for="todo-group">{t('ui.todo.groupLabel')}</label>
+      <select id="todo-group" bind:value={groupBy} onchange={remember}>
+        {#each GROUPS as g}<option value={g}>{t('ui.todo.groupBy.' + g)}</option>{/each}
+      </select>
+      {/if}
+      {#if shows('todos', 'sorting')}
+      <label class="row inl" for="todo-sort">{t('todo.sortLabel')}</label>
+      <select id="todo-sort" bind:value={sort} onchange={remember}>
+        <option value="list">{t('todo.sort.list')}</option>
+        <option value="due">{t('todo.sort.due')}</option>
+      </select>
+      {/if}
+      {#if shows('todos', 'showDone')}<label class="row inl"><input type="checkbox" bind:checked={showDone} onchange={remember} /> {t('todo.showDone')}</label>{/if}
+      {#if shows('todos', 'moveDone')}<label class="row inl" title={t('todob.moveDoneHint')}><input type="checkbox" bind:checked={moveDone} onchange={remember} /> {t('todob.moveDone')}</label>{/if}
+      {#if app.todosCfg && hasOwn()}<button class="btn ghost sm" onclick={resetView} title={t('ui.todo.resetViewHint')}>{t('ui.todo.resetView')}</button>{/if}
+    </div>
+
+{/snippet}
+
+{#snippet quickAddS()}
+    {#if shows('todos', 'quickAdd')}
+    <form class="row add quick" onsubmit={(e) => { e.preventDefault(); addTop(); }}>
+      <input class="grow" placeholder={pageText('todos', 'quickAddPlaceholder', t('todob.addPlaceholder'))} aria-label={t('addTodo')} bind:value={drafts[GENERAL]} dir="auto" />
+      <label class="inl" for="todo-target">{t('todob.addIn')}</label>
+      <select id="todo-target" class="sel" bind:value={target}>
+        <option value="">{t('todo.general')}</option>
+        {#each places as p (p.label)}
+          <optgroup label={p.label}>
+            {#each p.options.filter((o) => o.file !== lists.find((x) => !x.idea)?.file || o.group) as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
+          </optgroup>
+        {/each}
+      </select>
+      <button class="btn primary sm" disabled={!drafts[GENERAL]?.trim()}>{pageText('todos', 'add', t('todo.add'))}</button>
+    </form>
+    {/if}
+
+{/snippet}
+
+{#snippet listsS()}
+    {#if !anyVisible && (filter !== 'all' || open === 0)}
+      <div class="state">
+        <Icon name={filter === 'all' ? 'check' : 'filter'} size={24} />
+        <p>{t(filter === 'overdue' ? 'todo.noneOverdue' : filter === 'soon' ? 'todo.noneSoon' : 'todo.allDone')}</p>
+        {#if filter !== 'all'}<button class="btn" onclick={() => { filter = 'all'; remember(); }}>{t('todo.showAll')}</button>{/if}
+      </div>
+    {/if}
+
+    {#each sections as sec (sec.id)}
+      {@const l = sec.list}
+      {#if sec.rows.length || (l && filter === 'all')}
+        <section class="card list" aria-label={sec.title}>
+          <div class="row head">
+            <b class="grow" dir="auto">{#if sec.overdue}<Icon name="warning" size={13} /> {/if}{sec.title}{#if !l} <span class="muted n">{tn('ui.todo.count', sec.rows.length)}</span>{/if}</b>
+            {#if l && l.groups?.length && finishedOutside(l)}<button class="btn ghost sm" onclick={() => archiveList(l)} title={t('todob.archiveHint')}>{tn('todob.archive', finishedOutside(l))}</button>{/if}
+            {#if l}<button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: l.idea ? `${l.idea}/README.md` : l.file })} title={t('todo.openSource')}>{t('wording.todo.openList')}</button>{/if}
+          </div>
+          {#each sec.rows as r, idx (key(r.l, r.it))}
+            {#if l && sort === 'list' && r.it.group && (idx === 0 || r.it.group !== sec.rows[idx - 1]?.it.group)}<div class="group" dir="auto">{r.it.group}</div>{/if}
+            {@render row(r.l, r.it, !l)}
+          {:else}
+            <p class="muted none">{t('todo.listEmpty')}</p>
+          {/each}
+          {#if l}
+            <form class="row add" onsubmit={(e) => { e.preventDefault(); add(l.file); }}>
+              <input class="grow" placeholder={pageText('todos', 'listPlaceholder', t('addTodo'))} aria-label={t('todo.addTo', { list: listName(l) })} bind:value={drafts[l.file]} dir="auto" />
+              {#if drafts[l.file]?.trim()}<button class="btn primary sm">{pageText('todos', 'add', t('todo.add'))}</button>{/if}
+            </form>
+          {/if}
+        </section>
+      {/if}
+    {/each}
+{/snippet}
+
 <div class="page">
   <div class="row top">
     <h1 class="grow">{pageTitle('todos')}{#if shows('todos', 'count')} <span class="pill count" aria-label={t('todo.openCount', { n: fmtNum(open) })}>{fmtNum(open)}</span>{/if}</h1>
@@ -448,89 +542,10 @@
         <button class="btn primary" disabled={!first.trim()}><Icon name="plus" size={14} /> {t('todo.add')}</button>
       </form>
     </div>
-  {:else if mode === 'calendar'}
-    <TodoCalendar {lists} add={(text, due) => addTo(GENERAL, text, due)} toggle={(l, it, box) => toggle(l, it, box)} setDue={(l, it, due) => setDue(l, it, due)} />
   {:else}
-    <div class="row tools">
-      {#if shows('todos', 'filters')}
-      <div class="seg" role="group" aria-label={t('todo.filterLabel')}>
-        {#each FILTERS as f}
-          <button class="segb" aria-pressed={filter === f} onclick={() => { filter = f; remember(); }}>
-            {#if f === 'overdue' && nOverdue}<Icon name="warning" size={12} />{/if}
-            {t(`todo.filter.${f}`)}
-            {#if f === 'soon' && nSoon}<span class="n">{fmtNum(nSoon)}</span>{/if}
-            {#if f === 'overdue' && nOverdue}<span class="n">{fmtNum(nOverdue)}</span>{/if}
-          </button>
-        {/each}
-      </div>
-      {/if}
-      <span class="grow"></span>
-      {#if shows('todos', 'grouping')}
-      <label class="row inl" for="todo-group">{t('ui.todo.groupLabel')}</label>
-      <select id="todo-group" bind:value={groupBy} onchange={remember}>
-        {#each GROUPS as g}<option value={g}>{t('ui.todo.groupBy.' + g)}</option>{/each}
-      </select>
-      {/if}
-      {#if shows('todos', 'sorting')}
-      <label class="row inl" for="todo-sort">{t('todo.sortLabel')}</label>
-      <select id="todo-sort" bind:value={sort} onchange={remember}>
-        <option value="list">{t('todo.sort.list')}</option>
-        <option value="due">{t('todo.sort.due')}</option>
-      </select>
-      {/if}
-      {#if shows('todos', 'showDone')}<label class="row inl"><input type="checkbox" bind:checked={showDone} onchange={remember} /> {t('todo.showDone')}</label>{/if}
-      {#if shows('todos', 'moveDone')}<label class="row inl" title={t('todob.moveDoneHint')}><input type="checkbox" bind:checked={moveDone} onchange={remember} /> {t('todob.moveDone')}</label>{/if}
-      {#if app.todosCfg && hasOwn()}<button class="btn ghost sm" onclick={resetView} title={t('ui.todo.resetViewHint')}>{t('ui.todo.resetView')}</button>{/if}
-    </div>
-
-    {#if !anyVisible && (filter !== 'all' || open === 0)}
-      <div class="state">
-        <Icon name={filter === 'all' ? 'check' : 'filter'} size={24} />
-        <p>{t(filter === 'overdue' ? 'todo.noneOverdue' : filter === 'soon' ? 'todo.noneSoon' : 'todo.allDone')}</p>
-        {#if filter !== 'all'}<button class="btn" onclick={() => { filter = 'all'; remember(); }}>{t('todo.showAll')}</button>{/if}
-      </div>
-    {/if}
-
-    {#if shows('todos', 'quickAdd')}
-    <form class="row add quick" onsubmit={(e) => { e.preventDefault(); addTop(); }}>
-      <input class="grow" placeholder={pageText('todos', 'quickAddPlaceholder', t('todob.addPlaceholder'))} aria-label={t('addTodo')} bind:value={drafts[GENERAL]} dir="auto" />
-      <label class="inl" for="todo-target">{t('todob.addIn')}</label>
-      <select id="todo-target" class="sel" bind:value={target}>
-        <option value="">{t('todo.general')}</option>
-        {#each places as p (p.label)}
-          <optgroup label={p.label}>
-            {#each p.options.filter((o) => o.file !== lists.find((x) => !x.idea)?.file || o.group) as o (o.value)}<option value={o.value}>{o.label}</option>{/each}
-          </optgroup>
-        {/each}
-      </select>
-      <button class="btn primary sm" disabled={!drafts[GENERAL]?.trim()}>{pageText('todos', 'add', t('todo.add'))}</button>
-    </form>
-    {/if}
-
-    {#each sections as sec (sec.id)}
-      {@const l = sec.list}
-      {#if sec.rows.length || (l && filter === 'all')}
-        <section class="card list" aria-label={sec.title}>
-          <div class="row head">
-            <b class="grow" dir="auto">{#if sec.overdue}<Icon name="warning" size={13} /> {/if}{sec.title}{#if !l} <span class="muted n">{tn('ui.todo.count', sec.rows.length)}</span>{/if}</b>
-            {#if l && l.groups?.length && finishedOutside(l)}<button class="btn ghost sm" onclick={() => archiveList(l)} title={t('todob.archiveHint')}>{tn('todob.archive', finishedOutside(l))}</button>{/if}
-            {#if l}<button class="btn ghost sm" onclick={() => go({ kind: 'docs', path: l.idea ? `${l.idea}/README.md` : l.file })} title={t('todo.openSource')}>{t('wording.todo.openList')}</button>{/if}
-          </div>
-          {#each sec.rows as r, idx (key(r.l, r.it))}
-            {#if l && sort === 'list' && r.it.group && (idx === 0 || r.it.group !== sec.rows[idx - 1]?.it.group)}<div class="group" dir="auto">{r.it.group}</div>{/if}
-            {@render row(r.l, r.it, !l)}
-          {:else}
-            <p class="muted none">{t('todo.listEmpty')}</p>
-          {/each}
-          {#if l}
-            <form class="row add" onsubmit={(e) => { e.preventDefault(); add(l.file); }}>
-              <input class="grow" placeholder={pageText('todos', 'listPlaceholder', t('addTodo'))} aria-label={t('todo.addTo', { list: listName(l) })} bind:value={drafts[l.file]} dir="auto" />
-              {#if drafts[l.file]?.trim()}<button class="btn primary sm">{pageText('todos', 'add', t('todo.add'))}</button>{/if}
-            </form>
-          {/if}
-        </section>
-      {/if}
-    {/each}
+    <!-- The page's sections (layer/builtin-pages.json): a customisation may reorder, hide, resize or
+         replace them, and put add-on boxes between them. -->
+    <Sections page="todos" parts={{ tools: toolsS, quickAdd: quickAddS, lists: listsS, calendar: calendarS }} order={mode === 'calendar' ? ['calendar'] : ['tools', 'quickAdd', 'lists']} />
   {/if}
   <PageExtras page="todos" place="bottom" />
 </div>

@@ -31,7 +31,7 @@ export type ToastLogItem = { id: number; text: string; kind: 'info' | 'success' 
 
 /** `render(el)` mounts the plugin's sandboxed frame into `el` and returns a cleanup function. */
 /** `id` is unique in the app (it carries the add-on's file name); `short` is the id the add-on chose. */
-export type PluginView = { id: string; short?: string; title: string; icon?: string; plugin?: string; render: (el: HTMLElement) => any };
+export type PluginView = { id: string; short?: string; title: string; icon?: string; plugin?: string; render: (el: HTMLElement, ctx?: { replaces?: string | null; route?: { kind: string; id: string | null; path: string | null } }) => any };
 export type PluginCommand = { id: string; short?: string; title: string; icon?: string; plugin?: string; run: () => void };
 export type HomeWidget = { id: string; title: string; plugin: string; render: (el: HTMLElement) => any };
 export type HomeChip = { id: string; label: string; prompt: string; plugin?: string };
@@ -48,7 +48,15 @@ export type PendingChange = {
   [extra: string]: any;
 };
 /** `nav.json` from the customisation layer: hide, reorder and relabel sidebar items. */
-export type NavConfig = { hidden: string[]; order: string[]; labels: Record<string, { en?: string; ar?: string }> };
+export type NavConfig = {
+  hidden: string[]; order: string[]; labels: Record<string, { en?: string; ar?: string }>;
+  /** Sidebar icon by page id (names from the reference). */
+  icons?: Record<string, string>;
+  /** Headed groups of sidebar entries, in this order. */
+  groups?: { id: string; label: { en?: string; ar?: string }; items: string[] }[];
+  /** The page the app opens on. */
+  start?: string;
+};
 /** `todos.json` from the customisation layer: default grouping, order and filter of the Todos view. */
 export type TodosConfig = { groupBy?: 'list' | 'due' | 'tag' | 'none'; sort?: 'list' | 'due'; filter?: 'all' | 'soon' | 'overdue'; showDone?: boolean; moveDone?: boolean };
 
