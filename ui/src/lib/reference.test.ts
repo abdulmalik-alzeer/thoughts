@@ -3,19 +3,18 @@
 // the reference names, every icon exists, every API call is handled by the host and offered by the
 // frame runtime, and every permission has words in both languages.
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import REF from './layer/builtin-pages.json';
 
 window.matchMedia ??= ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as any;
 
-const here = (p: string) => readFileSync(fileURLToPath(new URL(p, import.meta.url)), 'utf8');
+const SOURCES = import.meta.glob(['../views/*.svelte', '../views/usage/*.svelte', './layer.ts', './Icon.svelte', '../../public/plugin-frame.js'], { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+const here = (p: string): string => { const s = SOURCES[p]; if (typeof s !== 'string') throw new Error('not bundled for the test: ' + p); return s; };
 const ref = REF as any;
 
 /** The keys of `parts={{ a: x, b: y }}` given to <Sections page="…"> in a page's source. */
 function sectionsIn(src: string, page: string): string[] {
   const m = src.match(new RegExp(`<Sections page="${page}" parts=\\{\\{([^}]*)\\}\\}`));
-  return m ? m[1].split(',').map((x) => x.split(':')[0].trim()).filter(Boolean) : [];
+  return m ? m[1].split(',').map((x: string) => x.split(':')[0].trim()).filter(Boolean) : [];
 }
 
 describe('the built-in pages reference', () => {
@@ -30,11 +29,11 @@ describe('the built-in pages reference', () => {
     const src = here('../views/Home.svelte');
     const m = src.match(/const partFor = \(k: string\) => \(\{([^}]*)\}/);
     expect(m).toBeTruthy();
-    expect(m![1].split(',').map((x) => x.split(':')[0].trim()).filter(Boolean).sort()).toEqual([...ref.pages.home.sections].sort());
+    expect(m![1].split(',').map((x: string) => x.split(':')[0].trim()).filter(Boolean).sort()).toEqual([...ref.pages.home.sections].sort());
   });
   it('Settings categories are its sections', () => {
     const m = here('../views/Settings.svelte').match(/const cats = \[([^\]]*)\]/);
-    expect(m![1].split(',').map((x) => x.trim().replace(/'/g, ''))).toEqual(ref.pages.settings.sections);
+    expect(m![1].split(',').map((x: string) => x.trim().replace(/'/g, ''))).toEqual(ref.pages.settings.sections);
   });
   it('every part the reference lists is used by its page', () => {
     const files2: Record<string, string> = { ...files, home: '../views/Home.svelte', docs: '../views/Docs.svelte' };
