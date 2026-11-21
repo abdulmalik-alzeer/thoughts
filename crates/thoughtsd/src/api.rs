@@ -310,6 +310,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/events", get(events))
         // changes waiting at the main location (a look only, `incoming.rs`)
         .merge(crate::incoming::routes())
+        .merge(crate::mado_design::routes())
         .layer(middleware::from_fn_with_state(state.clone(), plugin_gate))
         .layer(middleware::from_fn_with_state(state.clone(), crate::libraries::gate))
         .layer(middleware::from_fn(note_errors))

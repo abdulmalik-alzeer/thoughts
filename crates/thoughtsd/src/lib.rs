@@ -80,6 +80,7 @@ pub mod voice;
 pub mod watch;
 pub mod workflows;
 pub mod wraps;
+pub mod mado_design;
 #[cfg(test)]
 mod upgrade_tests;
 
