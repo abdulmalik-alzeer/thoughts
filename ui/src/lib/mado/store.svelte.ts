@@ -5,13 +5,14 @@ import { ApiError } from '../api';
 import { madoApi, type DocName, type MadoApi } from './api';
 import { changeRequest, GRAPH_FILES, STEP_DOCS, STEP_GRAPHS, type PendingOps } from './comments/batch';
 import type {
-  BuildState, Comment, CommentStatus, CommentTarget, GraphDoc, GraphName, GraphOp, MadoEvent, MadoOverview, PlanDoc,
+  BuildView, Comment, CommentStatus, CommentTarget, GraphDoc, GraphName, GraphOp, MadoEvent, MadoOverview, PlanDoc,
   Pos, Review, StepId, StepState, StepStatus,
 } from './types';
 import { STEPS } from './types';
 
-/** Kinds of problem that make a plan impossible to build: Approve stays off while one exists. */
-export const BLOCKING: readonly string[] = ['cycle', 'missing-dep', 'bad-path'];
+/** Kinds of problem that make a plan impossible to build: Approve stays off while one exists.
+ *  The same list as the service's (`mado_review::blocks`), which refuses the approval anyway. */
+export const BLOCKING: readonly string[] = ['cycle', 'missing-dep', 'bad-path', 'bad-command', 'empty-acceptance', 'unknown-feature'];
 
 // ---------- the rules of the steps (plain functions, tested on their own) ----------
 
@@ -24,9 +25,11 @@ export const canReopen = (step: StepId, s: StepStatus) => step !== 'build' && s 
 export const isEditable = (s: StepStatus) => s === 'ready' || s === 'review' || s === 'stale';
 export const blockingProblems = (r: Review | null) => (r?.problems ?? []).filter((p) => BLOCKING.includes(p.kind));
 
-/** May this step be approved now? The review step also needs a plan that can be built. */
-export function canApprove(step: StepId, s: StepStatus, review: Review | null = null): boolean {
+/** May this step be approved now? The review step also needs a plan that can be built; no step
+ *  while its last run changed files outside the plan folder that the user has not looked at (`strayed`). */
+export function canApprove(step: StepId, s: StepStatus, review: Review | null = null, strayed: string[] | undefined = undefined): boolean {
   if (step === 'build') return false;
+  if (strayed?.length) return false;
   if (step === 'review') return (s === 'ready' || s === 'review' || s === 'stale') && !!review && !!review.planHash && blockingProblems(review).length === 0;
   return s === 'review' || s === 'stale';
 }
@@ -56,7 +59,7 @@ export class MadoStore {
   graphs = $state<Partial<Record<GraphName, GraphDoc | null>>>({});
   plan = $state<PlanDoc | null | undefined>(undefined);
   review = $state<Review | null | undefined>(undefined);
-  build = $state<BuildState | null | undefined>(undefined);
+  build = $state<BuildView | null | undefined>(undefined);
   comments = $state<Comment[]>([]);
   /** Diagram edits the user made and has not sent, per diagram file. Kept across tabs and steps. */
   pendingOps = $state<PendingOps>({});
@@ -210,6 +213,8 @@ export class MadoStore {
     return 'approved';
   }
   async reopen(step: StepId): Promise<void> { await this.api.reopen(step); await this.refreshOverview(); }
+  /** The user looked at the files the step's last run changed outside the plan folder. */
+  async dismissStrayed(step: StepId): Promise<void> { await this.api.dismissStrayed(step); await this.refreshOverview(); }
 
   /** The user's own edit of a document. */
   async saveDoc(name: DocName, text: string): Promise<void> {
@@ -242,8 +247,10 @@ export class MadoStore {
   }
   opsOf(name: GraphName): GraphOp[] { return this.pendingOps[GRAPH_FILES[name]] ?? []; }
 
-  /** Where the user put the nodes: presentation only, saved directly. */
+  /** Where the user put the nodes: presentation only, saved directly. Never for the tasks diagram,
+   *  which the service makes from the plan each time (it refuses positions for it). */
   async savePositions(name: GraphName, positions: Record<string, Pos>): Promise<void> {
+    if (name === 'tasks') return;
     const g = this.graphs[name];
     if (g) for (const n of g.nodes) if (positions[n.id]) n.pos = { ...positions[n.id] };
     await this.api.savePositions(name, positions);

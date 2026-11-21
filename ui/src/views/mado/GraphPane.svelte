@@ -48,7 +48,7 @@
     {/if}
   </div>
   <div class="stage">
-    <MadoGraph {doc} {comments} {editable} pendingOps={ops} onops={(list) => store.setOps(name, list)} onpositions={positions} oncomment={comment} />
+    <MadoGraph {doc} {comments} {editable} pendingOps={ops} onops={(list) => store.setOps(name, list)} onpositions={name === 'tasks' ? undefined : positions} oncomment={comment} />
   </div>
 {/if}
 

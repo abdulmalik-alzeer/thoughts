@@ -108,13 +108,13 @@ describe('what may be done in a step', () => {
 
 describe('the review gate', () => {
   it('Approve is off while a problem that makes the plan unbuildable exists', () => {
-    for (const kind of ['cycle', 'missing-dep', 'bad-path'] as ProblemKind[]) {
+    for (const kind of ['cycle', 'missing-dep', 'bad-path', 'bad-command', 'empty-acceptance', 'unknown-feature'] as ProblemKind[]) {
       expect(canApprove('review', 'ready', review([kind])), kind).toBe(false);
       expect(canApprove('review', 'ready', review(['overlap', kind, 'untraced-screen'])), kind).toBe(false);
     }
   });
   it('other problems are shown but do not stop the approval', () => {
-    const soft: ProblemKind[] = ['overlap', 'untraced-feature', 'untraced-screen', 'unknown-feature', 'empty-acceptance'];
+    const soft: ProblemKind[] = ['overlap', 'untraced-feature', 'untraced-screen'];
     expect(canApprove('review', 'ready', review(soft))).toBe(true);
     expect(blockingProblems(review(soft))).toEqual([]);
     expect(blockingProblems(review(['cycle', 'overlap', 'bad-path'])).map((p) => p.kind)).toEqual(['cycle', 'bad-path']);

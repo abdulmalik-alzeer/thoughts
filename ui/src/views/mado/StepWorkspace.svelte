@@ -2,7 +2,7 @@
   // One step's workspace: what it is for, what can be done now (write it, send changes, approve,
   // reopen), its documents and diagrams in tabs, and beside them the step's chat and its comments.
   import { untrack } from 'svelte';
-  import { Sparkles, Send, Check, Undo2, Lock, MessageSquareText, MessagesSquare, StickyNote, RotateCw } from '@lucide/svelte';
+  import { Sparkles, Send, Check, Undo2, Lock, MessageSquareText, MessagesSquare, StickyNote, RotateCw, FileWarning } from '@lucide/svelte';
   import { t, tn } from '../../lib/i18n';
   import { failed } from '../../lib/errors';
   import { toast } from '../../lib/store.svelte';
@@ -132,7 +132,9 @@
   }
   const reopen = () => act('reopen', () => store.reopen(step), 'mado.act.reopenFailed');
   const runLabel = $derived(step === 'brief' && status === 'ready' && !chatId ? 'mado.act.interview' : status === 'ready' ? 'mado.act.run' : 'mado.act.rerun');
-  const approvable = $derived(canApprove(step, status, store.review ?? null));
+  const strayed = $derived(store.step(step).strayed ?? []);
+  const approvable = $derived(canApprove(step, status, store.review ?? null, strayed));
+  const dismissStrayed = () => act('dismiss', () => store.dismissStrayed(step), 'mado.strayed.dismissFailed');
 </script>
 
 <section class="ws" aria-labelledby="mado-step-title">
@@ -159,7 +161,7 @@
           {#if canReopen(step, status)}<button type="button" class="btn" onclick={reopen} disabled={!!busy} aria-busy={busy === 'reopen'}><Undo2 size={14} aria-hidden="true" /> {t('mado.act.reopen')}</button>{/if}
         {:else if !drafting && (isDrafted(step) ? status !== 'ready' : true)}
           <button type="button" class="btn" class:primary={approvable && !changes} onclick={approve} disabled={!!busy || !approvable} aria-busy={busy === 'approve'}
-            title={step === 'review' && !approvable ? t('mado.act.fixFirst') : undefined}><Check size={15} aria-hidden="true" /> {t('mado.act.approve')}</button>
+            title={strayed.length ? t('mado.strayed.approveTip') : step === 'review' && !approvable ? t('mado.act.fixFirst') : undefined}><Check size={15} aria-hidden="true" /> {t('mado.act.approve')}</button>
         {/if}
       </div>
     {/if}
@@ -169,6 +171,19 @@
     <div class="noterow" id="mado-note">
       <label for="mado-note-in">{t('mado.act.noteLabel')}</label>
       <input id="mado-note-in" dir="auto" bind:value={note} placeholder={t('mado.act.notePh')} autocomplete="off" maxlength="2000" />
+    </div>
+  {/if}
+
+  {#if strayed.length && !drafting}
+    <div class="banner warn strayed" role="alert">
+      <FileWarning size={15} aria-hidden="true" />
+      <div class="grow">
+        <b>{t('mado.strayed.title')}</b>
+        <span>{t('mado.strayed.body')}</span>
+        <ul class="strayedlist">{#each strayed.slice(0, 50) as f}<li><code dir="ltr">{f}</code></li>{/each}</ul>
+        {#if strayed.length > 50}<span class="muted">{tn('mado.strayed.more', strayed.length - 50)}</span>{/if}
+      </div>
+      <button type="button" class="btn" onclick={dismissStrayed} disabled={!!busy} aria-busy={busy === 'dismiss'}>{t('mado.strayed.dismiss')}</button>
     </div>
   {/if}
 
@@ -296,4 +311,8 @@
     .cols { grid-template-columns: 1fr; }
     .side { position: static; height: auto; max-height: 70vh; }
   }
+  .strayed { align-items: flex-start; }
+  .strayed .grow { display: grid; gap: 4px; min-width: 0; }
+  .strayedlist { margin: 4px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; max-height: 160px; overflow: auto; }
+  .strayedlist code { font-size: var(--fs-xs); overflow-wrap: anywhere; }
 </style>

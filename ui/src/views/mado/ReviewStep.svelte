@@ -12,6 +12,10 @@
   const name = (id: string) => titles.get(id) ?? id;
   const blocking = $derived(blockingProblems(review ?? null));
   const laneCount = $derived((review?.waves ?? []).reduce((n, w) => Math.max(n, w.lanes.length), 0));
+  // Setup commands first (they run before any task), then the checks, each group as the service listed it.
+  const setupSet = $derived(new Set(plan?.setup ?? []));
+  const setupCmds = $derived((review?.commands ?? []).filter((c) => setupSet.has(c)));
+  const checkCmds = $derived((review?.commands ?? []).filter((c) => !setupSet.has(c)));
 </script>
 
 {#if review === undefined}
@@ -94,8 +98,16 @@
       <h3 id="rv-commands"><Terminal size={17} aria-hidden="true" /> {t('mado.review.commands')}</h3>
       <p class="warn"><TriangleAlert size={16} aria-hidden="true" /> <span>{t('mado.review.commandsWarn')}</span></p>
       {#if review.commands.length}
-        <ol class="cmdlist" aria-label={t('mado.review.commands')}>
-          {#each review.commands as c}<li><code dir="ltr">{c}</code></li>{/each}
+        {#if setupCmds.length}
+          <h4 class="cmdgroup">{t('mado.review.setupCmds')}</h4>
+          <p class="muted sub">{t('mado.review.setupCmdsSub')}</p>
+          <ol class="cmdlist" aria-label={t('mado.review.setupCmds')}>
+            {#each setupCmds as c}<li><code dir="ltr">{c}</code></li>{/each}
+          </ol>
+          <h4 class="cmdgroup">{t('mado.review.checkCmds')}</h4>
+        {/if}
+        <ol class="cmdlist" aria-label={setupCmds.length ? t('mado.review.checkCmds') : t('mado.review.commands')} style:counter-reset="cmd {setupCmds.length}">
+          {#each checkCmds as c}<li><code dir="ltr">{c}</code></li>{/each}
         </ol>
         <p class="muted sub foot">{tn('mado.review.commandCount', review.commands.length)}</p>
       {:else}
@@ -140,6 +152,7 @@
   .warn { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0 12px; padding: 10px 12px; border-radius: var(--radius); background: color-mix(in srgb, var(--accent-2) 12%, transparent); font-size: 13.5px; font-weight: 500; }
   .warn :global(svg) { flex: none; margin-top: 2px; color: var(--accent-2); }
   :global([data-theme="contrast"]) .warn { background: var(--panel); border: var(--border-w) solid var(--border); }
+  .cmdgroup { margin: 10px 0 4px; font-size: 13.5px; font-weight: 600; }
   .cmdlist { margin: 0; padding: 0; list-style: none; counter-reset: cmd; display: grid; gap: 4px; }
   .cmdlist li { counter-increment: cmd; display: grid; grid-template-columns: 28px 1fr; align-items: baseline; }
   .cmdlist li::before { content: counter(cmd); color: var(--muted); font-size: var(--fs-xs); text-align: end; padding-inline-end: 8px; }

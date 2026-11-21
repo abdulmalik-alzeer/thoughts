@@ -39,6 +39,7 @@ function fake(init: { overview: MadoOverview; comments?: Comment[] }) {
       set(step, 'approved'); return {};
     }) as any),
     reopen: rec('reopen', ((step: StepId) => { set(step, 'review'); return {}; }) as any),
+    dismissStrayed: rec('dismissStrayed', ((step: StepId) => { delete (db.overview.state!.steps[step] as any).strayed; return {}; }) as any),
     comments: rec('comments', () => db.comments),
     addComment: rec('addComment', ((target: any, body: string) => { const c = { id: 'new' + db.comments.length, target, body, createdAt: 'now', status: 'open' as const }; db.comments.push(c); return c; }) as any),
     editComment: rec('editComment', ((id: string, change: any) => Object.assign(db.comments.find((c) => c.id === id)!, change)) as any),
@@ -300,5 +301,52 @@ describe('approving the review is tied to the plan that was shown', () => {
     expect(planChanged(new ApiError('x', 400, 'PLAN_CHANGED'))).toBe(true);
     expect(planChanged(new ApiError('x', 500))).toBe(false);
     expect(planChanged(new Error('x'))).toBe(false);
+  });
+});
+
+describe('what the core adds to a step and to the build', () => {
+  it('files changed outside the plan folder keep the step from being approved until dismissed', async () => {
+    const { canApprove } = await import('./store.svelte');
+    const f = fake({ overview: overview({ brief: 'approved', spec: 'review' }) });
+    (f.db.overview.state!.steps.spec as any).strayed = ['src/app.ts'];
+    const s = new MadoStore(PID, f.api);
+    await s.load();
+    expect(s.step('spec').strayed).toEqual(['src/app.ts']);
+    expect(canApprove('spec', s.status('spec'), null, s.step('spec').strayed)).toBe(false);
+    await s.dismissStrayed('spec');
+    expect(f.calls).toContain('dismissStrayed spec');
+    expect(s.step('spec').strayed).toBeUndefined();
+    expect(canApprove('spec', s.status('spec'), null, s.step('spec').strayed)).toBe(true);
+  });
+
+  it('a bad-command problem blocks the review like the service says', async () => {
+    const { blockingProblems } = await import('./store.svelte');
+    for (const kind of ['bad-command', 'empty-acceptance', 'unknown-feature'] as const)
+      expect(blockingProblems(review('h1', { problems: [{ kind, message: 'x' }] })).length, kind).toBe(1);
+  });
+
+  it('never saves positions for the tasks diagram, which the service makes from the plan', async () => {
+    const f = fake({ overview: overview({ plan: 'review' }) });
+    const s = new MadoStore(PID, f.api);
+    await s.load();
+    f.calls.length = 0;
+    await s.savePositions('tasks', { a: { x: 1, y: 2 } });
+    expect(f.calls).toEqual([]);
+    await s.savePositions('flow', { home: { x: 1, y: 2 } });
+    expect(f.calls[0]).toMatch(/^savePositions flow/);
+  });
+
+  it('keeps what GET /build says beyond the shape: why a start is refused, the message, tries, checked rounds', async () => {
+    const f = fake({ overview: overview({ review: 'approved', build: 'ready' }) });
+    (f.api as any).build = async () => ({ version: 1, status: 'idle', branch: '', base: '', waves: [{ status: 'done', checked: true, fixChatId: 'c9', lanes: [{ id: 'w1-l1', status: 'done', fixChatId: 'c8', tasks: [{ id: 'a', status: 'done', attempts: 2 }] }] }],
+      governor: { maxParallel: 3, running: 0, holding: false }, plan_hash: 'h1', blocked: 'This project has changes that are not committed yet', message: 'waiting' });
+    const s = new MadoStore(PID, f.api);
+    await s.load();
+    await s.refreshBuild();
+    expect(s.build!.blocked).toContain('not committed');
+    expect(s.build!.message).toBe('waiting');
+    expect(s.build!.waves[0].checked && s.build!.waves[0].fixChatId).toBe('c9');
+    expect(s.build!.waves[0].lanes[0].fixChatId).toBe('c8');
+    expect(s.build!.waves[0].lanes[0].tasks[0].attempts).toBe(2);
   });
 });

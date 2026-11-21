@@ -3,7 +3,7 @@
 // they go into an address, so nothing typed or read from a file can reach another route.
 import { api, del, patch, post, put } from '../api';
 import type {
-  BuildState, Comment, CommentStatus, CommentTarget, DesignTokens, GraphDoc, GraphName, GraphOp, MadoOverview,
+  BuildView, Comment, CommentStatus, CommentTarget, DesignTokens, GraphDoc, GraphName, GraphOp, MadoOverview,
   PlanDoc, Pos, Review, ScreenInfo, StepId, StyleCandidate,
 } from './types';
 import { STEPS } from './types';
@@ -45,6 +45,8 @@ export function madoApi(projectId: string) {
     /** Approving the review names the plan that was shown (`planHash`): the service refuses if the plan changed since. */
     approve: (s: StepId, planHash?: string) => post<unknown>(`${base}/steps/${step(s)}/approve`, s === 'review' ? { planHash: String(planHash ?? '') } : {}),
     reopen: (s: StepId) => post<unknown>(`${base}/steps/${step(s)}/reopen`),
+    /** The user has looked at the files the last run changed outside `mado/`: the step may be approved again. */
+    dismissStrayed: (s: StepId) => post<unknown>(`${base}/steps/${step(s)}/strayed/dismiss`),
 
     comments: async (): Promise<Comment[]> => {
       // The contract's file shape is `{version, comments}`; a bare list is accepted too.
@@ -70,7 +72,7 @@ export function madoApi(projectId: string) {
     screens: () => api<ScreenInfo[]>(`${base}/design/screens`),
     screen: (id: string) => api<{ html: string }>(`${base}/design/screens/${seg(id, 'screen')}`),
 
-    build: () => api<BuildState>(`${base}/build`),
+    build: () => api<BuildView>(`${base}/build`),
     buildStart: (maxParallel?: number) => post<unknown>(`${base}/build/start`, maxParallel ? { maxParallel: clampParallel(maxParallel) } : {}),
     buildPause: () => post<unknown>(`${base}/build/pause`),
     buildResume: () => post<unknown>(`${base}/build/resume`),

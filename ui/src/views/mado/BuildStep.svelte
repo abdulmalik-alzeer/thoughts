@@ -2,7 +2,7 @@
   // The build: the app does the planned work itself, on a copy of the project, a few pieces side
   // by side. This view shows where it stands, lets the user start, pause, resume or stop it, try a
   // failed piece again, and — only once everything is done — bring the result into their own branch.
-  import { Play, Pause, Square, RotateCw, GitMerge, Hourglass, CircleCheck, TriangleAlert, Hammer, MessageCircle, Minus, Plus } from '@lucide/svelte';
+  import { Play, Pause, Square, RotateCw, GitMerge, Hourglass, CircleCheck, TriangleAlert, Hammer, MessageCircle, Minus, Plus, Wrench, ListChecks } from '@lucide/svelte';
   import { t, tn, fmtDate, fmtNum } from '../../lib/i18n';
   import { failed } from '../../lib/errors';
   import { go, toast } from '../../lib/store.svelte';
@@ -15,6 +15,9 @@
   const build = $derived(store.build);
   const status = $derived(build?.status ?? 'idle');
   const reviewed = $derived(store.status('review') === 'approved');
+  /** Why a start would be refused right now (not a repository, uncommitted changes…), from the service. */
+  const blocked = $derived(build?.blocked ?? '');
+  const openChat = (id: string) => go({ kind: 'chat', id });
   const titles = $derived(new Map((store.plan?.tasks ?? []).map((x) => [x.id, x.title])));
   const all = $derived((build?.waves ?? []).flatMap((w) => w.lanes.flatMap((l) => l.tasks)));
   const done = $derived(all.filter((x) => x.status === 'done' || x.status === 'skipped').length);
@@ -71,12 +74,17 @@
           <button type="button" class="btn primary" onclick={resume} disabled={!!busy}><Play size={14} aria-hidden="true" /> {t('mado.build.resume')}</button>
           <button type="button" class="btn danger" onclick={stop} disabled={!!busy}><Square size={13} aria-hidden="true" /> {t('mado.build.stop')}</button>
         {:else if status === 'waiting'}
+          <button type="button" class="btn primary" onclick={resume} disabled={!!busy} aria-busy={busy === 'resume'} title={t('mado.build.resumeWaitingTip')}><Play size={14} aria-hidden="true" /> {t('mado.build.resume')}</button>
           <button type="button" class="btn danger" onclick={stop} disabled={!!busy}><Square size={13} aria-hidden="true" /> {t('mado.build.stop')}</button>
         {:else if status === 'done'}
           <button type="button" class="btn primary" onclick={land} disabled={!!busy} aria-busy={busy === 'land'}><GitMerge size={15} aria-hidden="true" /> {t('mado.build.land')}</button>
         {/if}
       </div>
     </div>
+
+    {#if build?.message && status !== 'idle'}
+      <p class="note" class:bad={status === 'failed' || status === 'waiting'} role="status"><TriangleAlert size={15} aria-hidden="true" /> <span class="msg" dir="auto">{build.message}</span></p>
+    {/if}
 
     {#if all.length}
       <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax={all.length} aria-valuenow={done} aria-label={t('mado.build.progress', { done: fmtNum(done), all: fmtNum(all.length) })}>
@@ -113,8 +121,11 @@
             </div>
             <span class="muted sm">{t('mado.build.parallelWhat')}</span>
           </div>
-          <button type="button" class="btn primary big" onclick={start} disabled={!!busy} aria-busy={busy === 'start'}><Play size={15} aria-hidden="true" /> {t(status === 'idle' ? 'mado.build.start' : 'mado.build.startAgain')}</button>
+          <button type="button" class="btn primary big" onclick={start} disabled={!!busy || !!blocked} aria-busy={busy === 'start'} aria-describedby={blocked ? 'mado-blocked' : undefined}><Play size={15} aria-hidden="true" /> {t(status === 'idle' ? 'mado.build.start' : 'mado.build.startAgain')}</button>
         </div>
+        {#if blocked}
+          <p class="note bad" id="mado-blocked" role="status"><TriangleAlert size={15} aria-hidden="true" /> <span><b>{t('mado.build.blocked')}</b> <span dir="auto">{blocked}</span></span></p>
+        {/if}
         <p class="muted sm needs">{t('mado.build.needsGit')}</p>
       {/if}
     {/if}
@@ -126,16 +137,19 @@
       {#each build.waves as w, i}
         <li class="wave">
           <div class="wh"><b>{t('mado.review.round', { n: i + 1 })}</b> <span class="st t-{TONE[w.status]}">{t(`mado.task.${w.status}`)}</span>
-            {#if w.lanes.length > 1}<span class="muted sm">{tn('mado.review.together', w.lanes.length)}</span>{/if}</div>
+            {#if w.lanes.length > 1}<span class="muted sm">{tn('mado.review.together', w.lanes.length)}</span>{/if}
+            {#if w.checked}<span class="st t-ok" title={t('mado.build.checkedTip')}><ListChecks size={13} aria-hidden="true" /> {t('mado.build.checked')}</span>{/if}
+            {#if w.fixChatId}<button type="button" class="btn ghost sm" onclick={() => openChat(w.fixChatId!)} title={t('mado.build.waveFixTip')}><Wrench size={13} aria-hidden="true" /> {t('mado.build.waveFix')}</button>{/if}</div>
           <div class="lanes">
             {#each w.lanes as lane (lane.id)}
               <ul class="lane" aria-label={t('mado.build.lane')}>
+                {#if lane.fixChatId}<li class="lanefix"><button type="button" class="btn ghost sm" onclick={() => openChat(lane.fixChatId!)} title={t('mado.build.laneFixTip')}><Wrench size={13} aria-hidden="true" /> {t('mado.build.laneFix')}</button></li>{/if}
                 {#each lane.tasks as task (task.id)}
                   <li class="task t-{TONE[task.status]}">
                     <span class="dot" aria-hidden="true"></span>
                     <span class="tt">
                       <span class="name" dir="auto">{titles.get(task.id) ?? task.id}</span>
-                      <span class="st t-{TONE[task.status]}">{t(`mado.task.${task.status}`)}{#if task.commit} · <code dir="ltr">{task.commit.slice(0, 8)}</code>{/if}</span>
+                      <span class="st t-{TONE[task.status]}">{t(`mado.task.${task.status}`)}{#if (task.attempts ?? 0) > 1} · {t('mado.build.attempt', { n: fmtNum(task.attempts ?? 0) })}{/if}{#if task.commit} · <code dir="ltr">{task.commit.slice(0, 8)}</code>{/if}</span>
                       {#if task.note}<span class="tnote muted" dir="auto">{task.note}</span>{/if}
                       {#if task.status === 'failed' || task.status === 'conflict'}<button type="button" class="btn again" onclick={() => retry(task)} disabled={!!busy}><RotateCw size={13} aria-hidden="true" /> {t('mado.build.retry')}</button>{/if}
                     </span>
@@ -199,6 +213,9 @@
   .st { font-size: var(--fs-xs); color: var(--muted); }
   .st.t-run { color: var(--on-tint); font-weight: 600; } .st.t-ok { color: var(--ok); } .st.t-bad { color: var(--danger); font-weight: 600; }
   :global([data-theme="contrast"]) .st.t-run { color: var(--fg); }
+  .msg { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+  .lanefix { list-style: none; }
+  .btn.sm { padding: 2px 8px; font-size: var(--fs-xs); }
   .tnote { font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .ta { gap: 4px; }
   .again { justify-self: start; margin-top: 6px; }

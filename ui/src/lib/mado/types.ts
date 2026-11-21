@@ -66,9 +66,13 @@ export interface Review {
 
 export type BuildStatus = 'idle' | 'running' | 'paused' | 'waiting' | 'failed' | 'done' | 'stopped';
 export type TaskStatus = 'pending' | 'running' | 'checking' | 'done' | 'failed' | 'conflict' | 'skipped';
-export interface BuildTask { id: string; status: TaskStatus; chatId?: string; commit?: string; note?: string }
-export interface BuildLane { id: string; status: TaskStatus; tasks: BuildTask[] }
-export interface BuildWave { status: TaskStatus; lanes: BuildLane[] }
+/** `attempts`: tries started so far. */
+export interface BuildTask { id: string; status: TaskStatus; chatId?: string; commit?: string; note?: string; attempts?: number }
+/** `fixChatId`: the run that settled (or tried to settle) a clash when the lane was merged. */
+export interface BuildLane { id: string; status: TaskStatus; tasks: BuildTask[]; fixChatId?: string }
+/** `checked`: every task's checks passed again in the build's own copy after the lanes were merged;
+ *  `fixChatId`: the run that fixed what those checks found. */
+export interface BuildWave { status: TaskStatus; lanes: BuildLane[]; checked?: boolean; fixChatId?: string }
 export interface BuildState {
   version: 1;
   status: BuildStatus;
@@ -78,6 +82,16 @@ export interface BuildState {
   waves: BuildWave[];
   governor: { maxParallel: number; running: number; holding: boolean; reason?: string };
   plan_hash: string;
+  /** The build's number (`mado/build-<n>`). */
+  number?: number;
+  /** The commit of the user's branch the build started from. */
+  baseCommit?: string;
+  /** Why the build waits or failed, in words for the user. */
+  message?: string;
+  /** When the finished build was brought into the user's branch. */
+  landedAt?: string;
 }
+/** `GET /build`: the build, plus (while none is under way) why a start would be refused now. */
+export interface BuildView extends BuildState { blocked?: string }
 
 export interface MadoEvent { type: 'mado'; projectId: string; what: 'state' | 'doc' | 'graph' | 'comments' | 'design' | 'build' }
