@@ -9,6 +9,8 @@ description = "Thoughts — a second-brain workstation"
 # Only for `scripts/release/rehearse-update.mjs`: lets a throwaway copy be pointed at a pretend
 # GitHub on this computer and update itself without anyone clicking. No release is built with it.
 rehearsal = []
+# Only for checking the screen check by hand (src/screen_check.rs `probe`): one check at start-up, then quit.
+screen-check-probe = []
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -58,6 +58,7 @@ const COMMANDS: &[&str] = &[
     "voice_transcribe_cancel",
     "voice_result",
     "voice_result_clear",
+    "mado_screen_check",
 ];
 
 /// The command names in `generate_handler![…]` of `main_rs`: the last part of each path.
