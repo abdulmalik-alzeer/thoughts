@@ -114,6 +114,27 @@ pub struct PlanTask {
     pub feature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screens: Option<Vec<String>>,
+    /// Round 0.4.0: `contracts`, `tests` or `feature` (absent = feature). Checked by `mado_validate::plan`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+}
+
+impl PlanTask {
+    /// A `contracts` or `tests` task: what it owns is locked once it is done (`mado_build`).
+    pub fn locks(&self) -> bool { matches!(self.kind.as_deref(), Some("contracts" | "tests")) }
+}
+
+/// One screen of the flow at a concrete address of the running product (`path` starts with `/`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlanScreen { pub id: String, pub path: String }
+
+/// How to start the product and where each screen is (round 0.4.0).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlanRun {
+    pub start: String,
+    pub url: String,
+    #[serde(default)]
+    pub screens: Vec<PlanScreen>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -124,6 +145,21 @@ pub struct PlanDoc {
     /// dependencies, say). Checked like acceptance commands, shown first in the review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup: Option<Vec<String>>,
+    /// Round 0.4.0: commands run in the build's merged copy after every wave (checked like acceptance commands).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<Vec<String>>,
+    /// Round 0.4.0: how to start the product, and one address per screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<PlanRun>,
+}
+
+impl PlanDoc {
+    /// Every command of the plan the build may run, in the order the review lists them: set-up,
+    /// acceptance, `verify`, then `run.start` (blank ones left out, untrimmed).
+    pub fn all_commands(&self) -> Vec<&String> {
+        self.setup.iter().flatten().chain(self.tasks.iter().flat_map(|t| t.acceptance.iter())).chain(self.verify.iter().flatten())
+            .chain(self.run.as_ref().map(|r| &r.start)).filter(|c| !c.trim().is_empty()).collect()
+    }
 }
 
 /// What a comment is about.

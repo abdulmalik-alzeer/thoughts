@@ -12,6 +12,10 @@ pub const MAX_EDGES: usize = 1200;
 pub const MAX_TASKS: usize = 400;
 const MAX_LABEL: usize = 300;
 const MAX_LIST: usize = 100;
+/// The most entries of `run.screens` (round 0.4.0).
+pub const MAX_SCREENS: usize = 200;
+/// The longest `run.screens[].path`.
+pub const MAX_PATH: usize = 300;
 /// The most problems listed for one file (the rest are summed up).
 const MAX_PROBLEMS: usize = 40;
 
@@ -112,6 +116,26 @@ pub fn escaped(c: &str) -> String {
     c.chars().map(|ch| if (' '..='~').contains(&ch) { ch.to_string() } else { format!("\\u{{{:x}}}", ch as u32) }).collect()
 }
 
+/// `run.url` of a plan: exactly `http://localhost:<port>` or `http://127.0.0.1:<port>` (a `/` after
+/// it allowed), nothing else (no other host, no user, no path, no query). The port, when it is one.
+pub fn url_port(url: &str) -> Option<u16> {
+    let rest = url.strip_prefix("http://localhost:").or_else(|| url.strip_prefix("http://127.0.0.1:"))?;
+    let digits = rest.strip_suffix('/').unwrap_or(rest);
+    if digits.is_empty() || digits.len() > 5 || !digits.bytes().all(|b| b.is_ascii_digit()) || digits.starts_with('0') { return None; }
+    digits.parse::<u16>().ok().filter(|p| *p > 0)
+}
+
+/// `run.screens[].path`: starts with one `/` (never `//`, which would name another host), at most
+/// `MAX_PATH` characters of printable ASCII without spaces or backslashes. It is only ever put
+/// after the plan's own `url`, so it cannot lead anywhere else.
+pub fn screen_path_ok(path: &str) -> bool {
+    path.starts_with('/') && !path.starts_with("//") && path.len() <= MAX_PATH
+        && path.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'\\')
+}
+
+/// A task's `kind`: absent, `contracts`, `tests` or `feature`.
+pub fn kind_ok(kind: Option<&str>) -> bool { matches!(kind, None | Some("contracts" | "tests" | "feature")) }
+
 /// The plan, parsed and checked for its shape (dependencies, traceability and the like are the
 /// review's: `mado_review`).
 pub fn plan(bytes: &[u8]) -> Result<PlanDoc, Vec<String>> {
@@ -124,8 +148,23 @@ pub fn plan(bytes: &[u8]) -> Result<PlanDoc, Vec<String>> {
     let setup = plan.setup.as_deref().unwrap_or_default();
     if setup.len() > MAX_LIST { p.push(format!("\"setup\" has more than {MAX_LIST} entries")); }
     if setup.iter().any(|c| c.trim().is_empty() || c.len() > 1000 || c.contains(['\n', '\r'])) { p.push("every \"setup\" command is one non-empty line (at most 1000 characters)".into()); }
+    let verify = plan.verify.as_deref().unwrap_or_default();
+    if verify.len() > MAX_LIST { p.push(format!("\"verify\" has more than {MAX_LIST} entries")); }
+    if verify.iter().any(|c| c.trim().is_empty() || c.len() > 1000 || c.contains(['\n', '\r'])) { p.push("every \"verify\" command is one non-empty line (at most 1000 characters)".into()); }
+    if let Some(run) = &plan.run {
+        if run.start.trim().is_empty() || run.start.len() > 1000 || run.start.contains(['\n', '\r']) { p.push("\"run.start\" is one non-empty command line (at most 1000 characters)".into()); }
+        if url_port(&run.url).is_none() { p.push(format!("\"run.url\" \"{}\" must be exactly http://localhost:<port> or http://127.0.0.1:<port>", run.url.chars().take(100).collect::<String>())); }
+        if run.screens.len() > MAX_SCREENS { p.push(format!("\"run.screens\" has more than {MAX_SCREENS} entries")); }
+        let mut seen = HashSet::new();
+        for (i, sc) in run.screens.iter().enumerate().take(MAX_SCREENS) {
+            if !id_ok(&sc.id) { p.push(format!("run.screens[{i}].id \"{}\" is not a screen id", sc.id.chars().take(70).collect::<String>())); }
+            else if !seen.insert(sc.id.as_str()) { p.push(format!("run.screens: screen \"{}\" is listed twice", sc.id)); }
+            if !screen_path_ok(&sc.path) { p.push(format!("run.screens[{i}].path must start with a single \"/\" and be at most {MAX_PATH} printable characters without spaces (like /customers/1)")); }
+        }
+    }
     let mut ids = HashSet::new();
     for (i, t) in plan.tasks.iter().enumerate() {
+        if !kind_ok(t.kind.as_deref()) { p.push(format!("task \"{}\": \"kind\" must be \"contracts\", \"tests\" or \"feature\"", t.id)); }
         if !id_ok(&t.id) { p.push(format!("tasks[{i}].id \"{}\" must match ^[a-z0-9][a-z0-9-]{{0,63}}$", t.id)); }
         if !ids.insert(t.id.as_str()) { p.push(format!("task id \"{}\" is used twice", t.id)); }
         if !text_ok(&t.title, MAX_LABEL) { p.push(format!("task \"{}\" needs a non-empty \"title\"", t.id)); }
