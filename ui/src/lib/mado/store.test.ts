@@ -350,3 +350,32 @@ describe('what the core adds to a step and to the build', () => {
     expect(s.build!.waves[0].lanes[0].tasks[0].attempts).toBe(2);
   });
 });
+
+describe('temporary keys of new nodes', () => {
+  it('the diagram\'s new:<n> ops reach POST /changes exactly as the diagram made them', async () => {
+    const { pushOp } = await import('./graph/ops');
+    const flow = { version: 1 as const, kind: 'flow' as const, title: 'Flow', nodes: [{ id: 'home', label: 'Home', kind: 'screen' }], edges: [] };
+    // What the diagram does: add a node beside Home, link to it, name a field on it, label the link.
+    let ops = pushOp(flow, [], { op: 'add-node', label: 'Pay', kind: 'screen', near: 'home' });
+    ops = pushOp(flow, ops, { op: 'add-edge', from: 'home', to: 'new:1', label: 'checkout' });
+    ops = pushOp(flow, ops, { op: 'set-prop', id: 'new:1', key: 'note', value: 'card only' });
+    expect(JSON.stringify(ops)).toContain('new:1');
+    const f = fake({ overview: overview({ brief: 'approved', spec: 'review' }) });
+    let sent: any = null;
+    (f.api as any).changes = async (req: any) => { sent = JSON.parse(JSON.stringify(req)); return { chatId: "c1" }; };
+    const s = new MadoStore(PID, f.api);
+    await s.load();
+    s.setOps('flow', ops);
+    expect(await s.sendChanges('spec')).toBe(true);
+    expect(sent.graphOps).toEqual([{ file: 'flow.graph.json', ops }]);
+    // …and through the client's own body building, unchanged too.
+    const { madoApi } = await import('./api');
+    const body: any[] = [];
+    const real = madoApi(PID);
+    const api = await import('../api');
+    const spy = vi.spyOn(api, 'post').mockImplementation(async (_p: string, b: any) => { body.push(b); return { chatId: 'c2' } as any; });
+    await real.changes({ step: 'spec', commentIds: [], graphOps: [{ file: 'flow.graph.json', ops }] });
+    spy.mockRestore();
+    expect(body[0].graphOps[0].ops).toEqual(ops);
+  });
+});
