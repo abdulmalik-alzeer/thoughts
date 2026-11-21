@@ -850,6 +850,43 @@ fn record_if(key: &str, decide: impl FnOnce(Option<&Stored>) -> Option<Entry>) -
     Ok(true)
 }
 
+/// Under the store's lock: drop every record whose key `gone` names. Returns whether any went.
+/// (A store that cannot be read is left alone: nothing is written over it.)
+fn forget_where(gone: impl Fn(&str) -> bool) -> std::io::Result<bool> {
+    let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut m = load();
+    let before = m.len();
+    m.retain(|k, _| !gone(k));
+    if m.len() == before { return Ok(false); }
+    let text = serde_json::to_string_pretty(&m).map_err(std::io::Error::other)?;
+    crate::paths::write_atomic(&store(), text.as_bytes(), true)?;
+    Ok(true)
+}
+
+/// Drop the record of a folder the app made itself and is removing (a build's worktree), under
+/// the name it was recorded with (call it while the folder is still there) and as given.
+pub fn forget(p: &Path) -> std::io::Result<bool> {
+    let (real, given) = (canon(p), p.to_string_lossy().to_string());
+    forget_where(|k| k == real || k == given)
+}
+
+/// Drop the records of folders under `root` (the app's own, never the root itself) that are gone:
+/// what an earlier version left behind for worktrees it removed.
+pub fn forget_missing_under(root: &Path) -> std::io::Result<bool> {
+    let roots = [canon(root), root.to_string_lossy().to_string()];
+    forget_where(|k| {
+        let k = Path::new(k);
+        roots.iter().any(|r| k.starts_with(r) && k != Path::new(r)) && std::fs::symlink_metadata(k).is_err()
+    })
+}
+
+/// Under test: the folders on record under `root`.
+#[cfg(test)]
+pub fn recorded_under(root: &Path) -> Vec<String> {
+    let r = canon(root);
+    load().into_keys().filter(|k| Path::new(k).starts_with(&r)).collect()
+}
+
 /// Does the record on file trust the folder as `scan` saw it — the way `check` judges the whole
 /// folder once a 0.0.8 record has been carried over? Nothing to trust counts as trusted.
 fn trusts(stored: Option<&Stored>, scan: &Scan) -> bool {
@@ -1238,6 +1275,27 @@ mod tests {
     /// What is on record for a folder, as text (to see that it did not change).
     fn recorded(d: &Path) -> Option<String> { load().get(&canon(d)).map(|s| format!("{s:?}")) }
     fn settings_of(d: &Path) -> String { std::fs::read_to_string(d.join(".claude/settings.json")).unwrap() }
+
+    #[test]
+    fn a_folder_the_app_removes_leaves_no_record_behind() {
+        let root = tmp("forget");
+        let (a, b) = (root.join("lane-1-1"), root.join("lane-1-2"));
+        for d in [&a, &b] { put(d, ".claude/skills/deploy/SKILL.md", RISKY_SKILL); trust(d).unwrap(); }
+        trust(&root).unwrap();
+        assert!(recorded(&a).is_some() && recorded(&b).is_some());
+        assert!(forget(&a).unwrap());
+        assert!(recorded(&a).is_none() && recorded(&b).is_some(), "only that one");
+        assert!(!forget(&a).unwrap(), "nothing left to drop");
+        // Records an earlier version left for folders that are gone: dropped; the rest stay.
+        trust(&a).unwrap();
+        std::fs::remove_dir_all(&a).unwrap();
+        assert!(forget_missing_under(&root).unwrap());
+        assert_eq!(recorded_under(&root).len(), 2, "{:?}", recorded_under(&root));
+        assert!(recorded(&b).is_some() && recorded(&root).is_some(), "what is still there, and the root itself, stay");
+        assert!(!forget_missing_under(&root).unwrap());
+        assert!(forget(&root).unwrap() && forget(&b).unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn a_library_from_an_older_version_gets_the_new_session_hook_without_being_asked_again() {

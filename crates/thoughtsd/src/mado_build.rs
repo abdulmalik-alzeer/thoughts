@@ -321,6 +321,8 @@ async fn next_number(state: &AppState, project: &Path, previous: u32) -> u32 {
 async fn remove_worktree(state: &AppState, project: &Path, pid: &str, wt: &Path) {
     let Ok(root) = engine_dir(pid) else { return };
     if !wt.starts_with(&root) || wt == root { return; }
+    // Its trust record (made for every run in it) goes with it, by the name it was recorded under.
+    crate::log::ok_or_warn("mado build: could not drop a removed worktree's trust record", crate::trust::forget(wt));
     if std::fs::symlink_metadata(wt).is_ok() {
         if let Err(e) = git(state, project, &["worktree", "remove", "--force", &s(wt)]).await {
             crate::log::warn(format!("mado build: git could not remove a worktree ({e}); removing the folder"));
@@ -329,6 +331,8 @@ async fn remove_worktree(state: &AppState, project: &Path, pid: &str, wt: &Path)
     }
     let _ = std::fs::remove_file(setup_marker(wt));
     let _ = git(state, project, &["worktree", "prune"]).await;
+    // And any record an earlier version left for a worktree of this project that is gone.
+    crate::log::ok_or_warn("mado build: could not drop old worktrees' trust records", crate::trust::forget_missing_under(&root));
 }
 
 /// Where the engine notes that a worktree's set-up commands ran (beside it, never inside it).

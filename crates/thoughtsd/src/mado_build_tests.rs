@@ -441,6 +441,7 @@ async fn stopping_ends_the_running_task_and_removes_the_worktrees() {
     assert_eq!(b.status, BuildStatus::Stopped);
     for _ in 0..500 { if lanes_left(&p.pid).is_empty() && t::sh(&p.dir, &["branch", "--list", "mado/*"]).is_empty() { break; } tokio::time::sleep(Duration::from_millis(20)).await; }
     assert!(lanes_left(&p.pid).is_empty(), "{:?}", lanes_left(&p.pid));
+    assert!(crate::trust::recorded_under(&engine_dir(&p.pid).unwrap()).is_empty(), "the removed worktrees' trust records went with them");
     assert_eq!(p.st.chats.with(&chat, |c| c.running).await, Some(false), "its run was stopped");
     let b = load_build(&p.dir).unwrap().unwrap();
     assert_eq!((find(&b, "a").status, find(&b, "b").status), (TaskStatus::Pending, TaskStatus::Pending));
