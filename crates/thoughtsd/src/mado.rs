@@ -212,7 +212,8 @@ pub const DIR: &str = "mado";
 /// Files only the daemon writes: no run may change them.
 pub const DAEMON_FILES: [&str; 3] = ["state.json", "comments.json", "build.json"];
 /// The documents (`GET/PUT /doc/:name`).
-pub const DOCS: [(&str, &str); 4] = [("brief", "brief.md"), ("spec", "spec.md"), ("tech", "tech.md"), ("design", "design.md")];
+/// `conventions` is the tech step's and optional: a plan made before 0.4.0 has none (`step_optional`).
+pub const DOCS: [(&str, &str); 5] = [("brief", "brief.md"), ("spec", "spec.md"), ("tech", "tech.md"), ("design", "design.md"), ("conventions", "conventions.md")];
 /// The diagrams (`GET /graph/:name`): name, file, kind. `tasks` is derived from `plan.json`.
 pub const GRAPHS: [(&str, &str, &str); 3] = [("flow", "flow.graph.json", "flow"), ("architecture", "architecture.graph.json", "architecture"), ("schema", "schema.graph.json", "erd")];
 pub const PLAN: &str = "plan.json";
@@ -235,9 +236,18 @@ pub fn step_outputs(step: &str) -> &'static [&'static str] {
     }
 }
 
+/// The files a step's run writes that a step may be approved without: plans approved before they
+/// existed stay approved and valid. When one is there it is checked and shown like the others.
+pub fn step_optional(step: &str) -> &'static [&'static str] {
+    match step {
+        "tech" => &["conventions.md"],
+        _ => &[],
+    }
+}
+
 /// The step a file belongs to.
 pub fn step_of_file(rel: &str) -> Option<&'static str> {
-    RUN_STEPS.iter().copied().find(|s| step_outputs(s).contains(&rel)).or_else(|| (rel.starts_with("design/")).then_some("design"))
+    RUN_STEPS.iter().copied().find(|s| step_outputs(s).contains(&rel) || step_optional(s).contains(&rel)).or_else(|| (rel.starts_with("design/")).then_some("design"))
 }
 
 /// The linked project's folder, as it really is on disk.
@@ -659,6 +669,14 @@ pub fn check_step(mado: &Path, step: &str, full: bool) -> (Vec<String>, Vec<Stri
         let problems = crate::mado_validate::file(rel, &bytes);
         wrong.extend(problems.into_iter().map(|p| format!("{rel}: {p}")));
     }
+    // A file a step may do without (`step_optional`) is held to its shape whenever it is there.
+    for f in RUN_STEPS.iter().flat_map(|s| step_optional(s).iter().copied()) {
+        match read_in(mado, f, full, DOC_MAX) {
+            Ok(Some(b)) => wrong.extend(crate::mado_validate::file(f, &b).into_iter().map(|p| format!("{f}: {p}"))),
+            Ok(None) => {}
+            Err(e) => wrong.push(format!("{f}: {}", crate::tr::classify_in(false, &e).message)),
+        }
+    }
     // Every file a run may have touched besides its own is still checked (a change request edits several).
     for (_, f, k) in GRAPHS {
         if outputs.iter().any(|o| o == f) { continue; }
@@ -898,6 +916,11 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
     let ctx = crate::mado_prompts::Context::read(&mado, full);
     let step_text = crate::mado_prompts::system(&role.step, &ctx);
     spec.append_system = Some(match spec.append_system.take() { Some(a) => format!("{step_text}\n\n{a}"), None => step_text });
+    // The model and the effort are the plan's own (`/options`), whatever the step's chat was made with.
+    let (model, effort) = planning_options(state, &role.project_id).await;
+    spec.options.model = model.clone();
+    spec.options.effort = effort.clone();
+    state.chats.update(&spec.chat_id, |c| { c.options.model = model; c.options.effort = effort; }).await;
     // Drafting from now on; how things stood is kept, for a run that ends having changed nothing.
     let before = { let st = load_state(&role.project_id, &mado, full)?.unwrap_or_default(); st.steps.get(&role.step).map(|s| s.status.clone()).unwrap_or_default() };
     let prints = fingerprint(&mado);
@@ -1106,7 +1129,9 @@ async fn run_step(state: &Arc<AppState>, project_id: &str, step: &str, text: Str
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/api/mado", get(plans))
         .route("/api/mado/:project", get(overview))
+        .route("/api/mado/:project/options", get(options_get).put(options_put))
         .route("/api/mado/:project/start", post(start))
         .route("/api/mado/:project/doc/:name", get(doc_get).put(doc_put))
         .route("/api/mado/:project/graph/:name", get(graph_get))
@@ -1196,12 +1221,14 @@ async fn doc_put(State(st): S, UrlPath((pid, name)): UrlPath<(String, String)>, 
     let file = doc_file(&name).ok_or_else(|| crate::tr::err("mado.unknown_name", &[("name", &name)]))?;
     if b.text.len() > DOC_MAX { return Err(crate::tr::err("mado.too_large", &[("path", file)]).into()); }
     let state = load_state(&pid, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
-    if let Some(chat) = state.steps.get(&name).and_then(|s| s.chat_id.clone()) {
+    // The step the document belongs to (`conventions` is the tech step's).
+    let step = step_of_file(file).unwrap_or(name.as_str()).to_string();
+    if let Some(chat) = state.steps.get(&step).and_then(|s| s.chat_id.clone()) {
         if st.chats.with(&chat, |c| c.running).await == Some(true) { return Err(crate::tr::err("mado.busy", &[]).into()); }
     }
     write_in(&mado, file, b.text.as_bytes(), full)?;
     with_state(&st, &pid, |s| {
-        if let Some(e) = s.steps.get_mut(&name) { if e.status == "approved" || e.status == "stale" { e.status = "review".into(); e.approved_at = None; } }
+        if let Some(e) = s.steps.get_mut(&step) { if e.status == "approved" || e.status == "stale" { e.status = "review".into(); e.approved_at = None; } }
         Ok(())
     }).await?;
     crate::mado_comments::reanchor_project(&st, &pid).await?;
@@ -1435,9 +1462,124 @@ pub fn check_ops(ops: &[GraphOp]) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ---------- the model and the effort of a project's runs ----------
+
+/// What the user chose for every run of this project's plan and build (`null` = the app's default).
+/// Kept beside the approval record, in the app's own folder: never in the project.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct Options { pub model: Option<String>, pub effort: Option<String> }
+
+const OPTIONS_FILE: &str = "options.json";
+
+/// A value of the options as it may be kept and used: a plain token (`settings::check_cli_value`,
+/// the check every chat's model and effort pass), nothing for an empty one.
+fn option_value(what: &str, v: Option<String>) -> anyhow::Result<Option<String>> {
+    let v = v.map(|v| v.trim().to_string()).filter(|v| !v.is_empty());
+    crate::settings::check_cli_value(what, v.as_deref()).map_err(|_| crate::tr::err("mado.options.value", &[]))?;
+    Ok(v)
+}
+
+/// The options on record. Anything that is not the plain file the daemon wrote, or holds a value
+/// that would not be accepted today, counts as not chosen.
+pub fn options_in(project_id: &str) -> Options {
+    let Some(f) = record_dir(project_id).map(|d| d.join(OPTIONS_FILE)) else { return Options::default() };
+    let plain = std::fs::symlink_metadata(&f).map_or(false, |m| m.is_file() && m.len() <= 4096);
+    if !plain { return Options::default(); }
+    let o: Options = std::fs::read(&f).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    Options { model: option_value("model", o.model).unwrap_or(None), effort: option_value("effort", o.effort).unwrap_or(None) }
+}
+
 /// The model and the effort every run of this project's plan and build uses (`None` = the app's
-/// default). Round 0.4.0: a stand-in until the options record exists (docs/mado-spec.md).
-pub async fn run_options(_state: &AppState, _project_id: &str) -> (Option<String>, Option<String>) { (None, None) }
+/// default): what `PUT /options` recorded. The build engine calls this for its runs.
+pub async fn run_options(_state: &AppState, project_id: &str) -> (Option<String>, Option<String>) {
+    let o = options_in(project_id);
+    (o.model, o.effort)
+}
+
+/// `run_options` for a planning run, with the app's default (Settings) wherever nothing was chosen.
+async fn planning_options(state: &AppState, project_id: &str) -> (Option<String>, Option<String>) {
+    let (model, effort) = run_options(state, project_id).await;
+    let (dm, de) = crate::assistant::chat_defaults(&*state.settings.read().await, crate::assistant::Program::Claude);
+    (model.or(dm), effort.or(de))
+}
+
+async fn options_get(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
+    project_dir(&st, &pid).await?;
+    Ok(Json(serde_json::to_value(options_in(&pid))?))
+}
+
+/// A field of `PUT /options`: left out = keep what is on record, `null` (or "") = the app's default.
+fn given<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D::Error> { Option::<String>::deserialize(d).map(Some) }
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct OptionsBody {
+    #[serde(deserialize_with = "given")] model: Option<Option<String>>,
+    #[serde(deserialize_with = "given")] effort: Option<Option<String>>,
+}
+
+/// `PUT /options {model?, effort?}` → the options as kept. Checked like a chat's (plain tokens), and
+/// the effort against the levels the installed assistant program lists, when it lists any: no list
+/// of models or levels is written into the app.
+async fn options_put(State(st): S, UrlPath(pid): UrlPath<String>, Json(b): Json<OptionsBody>) -> R {
+    project_dir(&st, &pid).await?;
+    let lock = lock_of(&pid);
+    let _held = lock.lock().await;
+    let mut o = options_in(&pid);
+    if let Some(m) = b.model { o.model = option_value("model", m)?; }
+    if let Some(e) = b.effort {
+        o.effort = option_value("effort", e)?;
+        if let Some(e) = &o.effort {
+            let known = crate::claude::options(&st).await;
+            let levels: Vec<&str> = known["efforts"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+            if !effort_known(e, &levels) { return Err(crate::tr::err("mado.options.effort", &[("levels", &levels.join(", "))]).into()); }
+        }
+    }
+    write_record(&pid, OPTIONS_FILE, &serde_json::to_vec_pretty(&o)?)?;
+    Ok(Json(serde_json::to_value(o)?))
+}
+
+/// Is `effort` one of the `levels` the assistant program lists? With no list to hold it against
+/// (the program is not installed, or its help names none) a plain token is all that can be asked.
+pub fn effort_known(effort: &str, levels: &[&str]) -> bool { levels.is_empty() || levels.contains(&effort) }
+
+// ---------- the plans there are ----------
+
+/// `GET /api/mado` → `[{projectId, name, step, stepStatus, build?, updatedAt}]`: every linked project
+/// whose plan was started, newest first. A project that is gone, broken or not this app's to believe
+/// is left out; the list itself never fails. Only files are read: no git, no other program.
+async fn plans(State(st): S) -> R {
+    let s = st.settings.read().await.clone();
+    let full = s.full_access();
+    let mut out: Vec<Value> = s.projects.iter().filter_map(|p| plan_entry(&s, p, full)).collect();
+    out.sort_by(|a, b| b["updatedAt"].as_str().cmp(&a["updatedAt"].as_str()));
+    Ok(Json(Value::Array(out)))
+}
+
+/// One project's line of the list, or `None` when it has no plan this app started. "Trusted" is
+/// told without looking through the folder (that would run git): the plan's `state.json` is the
+/// very one this daemon last wrote (its fingerprint, kept outside the project), and a plan is only
+/// ever started in a folder the user trusted.
+fn plan_entry(s: &crate::settings::Settings, p: &crate::settings::Project, full: bool) -> Option<Value> {
+    let dir = project_dir_in(s, &p.id).ok()?;
+    let mado = mado_dir_of(&dir, full).ok()?;
+    let bytes = read_in(&mado, "state.json", full, DOC_MAX).ok()??;
+    if state_seen(&p.id).as_deref() != Some(plan_hash(&bytes).as_str()) { return None; }
+    let state = load_state(&p.id, &mado, full).ok()??;
+    let step = STEPS.iter().copied().find(|k| !is_approved(&state, k)).unwrap_or("build");
+    let status = state.steps.get(step).map(|e| e.status.clone()).unwrap_or_default();
+    // The build's status as the engine recorded it: one plain word, or nothing.
+    let build = read_in(&mado, "build.json", full, DOC_MAX).ok().flatten()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v["status"].as_str().map(String::from))
+        .filter(|w| !w.is_empty() && w.len() <= 20 && w.bytes().all(|c| c.is_ascii_lowercase()) && w != "idle");
+    let changed = ["state.json", "build.json"].iter()
+        .filter_map(|f| std::fs::metadata(mado.join(f)).ok()?.modified().ok()).max()?;
+    let mut v = json!({"projectId": p.id, "name": p.name.chars().take(200).collect::<String>(), "step": step, "stepStatus": status,
+        "updatedAt": chrono::DateTime::<chrono::Utc>::from(changed).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)});
+    if let Some(b) = build { v["build"] = json!(b); }
+    Some(v)
+}
 
 /// What the Final check says about the project's git repository (`mado_build::repo_findings`), as
 /// problems of the review: the build needs a repository, and says what it will commit first.
