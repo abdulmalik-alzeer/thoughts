@@ -527,11 +527,11 @@ async fn invalid_output_gets_one_repair_turn_then_the_user_is_told() {
     assert!(c.messages.iter().any(|m| m.role == "error" && m.text.contains("nowhere")), "the user is told");
     assert_eq!(status_of(&pid, &dir, "spec"), "review");
     // It cannot be approved while it is invalid, and the diagram is never handed out.
-    assert!(step_approve(State(st.clone()), UrlPath((pid.clone(), "spec".into())), None).await.is_err());
+    assert!(step_approve(State(st.clone()), UrlPath((pid.clone(), "spec".into())), Default::default(), None).await.is_err());
     assert!(graph_get(State(st.clone()), UrlPath((pid.clone(), "flow".into()))).await.is_err());
     // Fixed by hand: approvable.
     std::fs::write(mado.join("flow.graph.json"), FLOW).unwrap();
-    let _ = step_approve(State(st.clone()), UrlPath((pid.clone(), "spec".into())), None).await.unwrap();
+    let _ = step_approve(State(st.clone()), UrlPath((pid.clone(), "spec".into())), Default::default(), None).await.unwrap();
     assert_eq!((status_of(&pid, &dir, "spec"), status_of(&pid, &dir, "tech")), ("approved".into(), "ready".into()));
     // Positions only: the window's save keeps everything else.
     let mut pos = HashMap::new();
@@ -560,7 +560,10 @@ async fn approving_the_review_is_bound_to_the_plan_the_user_was_shown() {
     let shown = r["planHash"].as_str().unwrap().to_string();
     assert_eq!(shown, plan_hash(&std::fs::read(mado.join("plan.json")).unwrap()));
     assert_eq!(r["commands"].as_array().unwrap().len(), 2);
-    let approve = |h: Option<String>| step_approve(State(st.clone()), UrlPath((pid.clone(), "review".into())), Some(Json(ApproveBody { plan_hash: h })));
+    // With the desktop shell's yes for exactly that plan (its dialog listed the commands).
+    let with = |h: Option<String>, a: Option<String>| step_approve(State(st.clone()), UrlPath((pid.clone(), "review".into())),
+        axum::extract::Query(a.map(|a| HashMap::from([("approval".to_string(), a)])).unwrap_or_default()), Some(Json(ApproveBody { plan_hash: h })));
+    let approve = |h: Option<String>| { let a = h.as_ref().map(|h| crate::consent::test_mado_approval(&pid, h)); with(h, a) };
     // Without the hash: refused.
     let e = approve(None).await.unwrap_err();
     assert_eq!(crate::api::shown_status(&e), 409);
@@ -573,9 +576,18 @@ async fn approving_the_review_is_bound_to_the_plan_the_user_was_shown() {
     assert!(load_state(&pid, &mado, false).unwrap().unwrap().plan_hash.is_none());
     // Shown again, approved with that hash, which is kept.
     let now = review_get(State(st.clone()), UrlPath(pid.clone())).await.unwrap().0["planHash"].as_str().unwrap().to_string();
-    let _ = approve(Some(now.clone())).await.unwrap();
+    // The app token alone is not a yes: without the shell's approval, with one for another plan, or a spent one, nothing is approved.
+    for a in [None, Some(crate::consent::test_mado_approval(&pid, &"0".repeat(64))), Some(crate::consent::test_approval(crate::consent::Action::FullAccess, "")), Some("1.2.3".to_string())] {
+        let e = with(Some(now.clone()), a).await.unwrap_err();
+        assert_eq!(crate::api::shown_status(&e), 403);
+    }
+    assert_eq!(status_of(&pid, &dir, "review"), "ready");
+    let yes = crate::consent::test_mado_approval(&pid, &now);
+    let _ = with(Some(now.clone()), Some(yes.clone())).await.unwrap();
     let s = load_state(&pid, &mado, false).unwrap().unwrap();
     assert_eq!((s.steps["review"].status.as_str(), s.plan_hash.as_deref()), ("approved", Some(now.as_str())));
+    // (A used approval never passes again.)
+    assert!(!crate::consent::verify(Some(&yes), crate::consent::Action::MadoApprove, &crate::consent::mado_subject(&pid, &now)));
     // The approval that allows commands is the daemon's, outside the project.
     let rec = approved_plan(&st, &pid).await.expect("an approval record");
     assert!(approval_matches(&rec, &std::fs::read(mado.join("plan.json")).unwrap()));
@@ -893,10 +905,10 @@ async fn strays(git: bool) {
     assert!(std::fs::read_to_string(dir.join("README.md")).unwrap().contains("rewritten by the run"));
     // Approve refused until dismissed.
     assert_eq!(status_of(&pid, &dir, "brief"), "review");
-    let e = step_approve(State(st.clone()), UrlPath((pid.clone(), "brief".into())), None).await.unwrap_err();
+    let e = step_approve(State(st.clone()), UrlPath((pid.clone(), "brief".into())), Default::default(), None).await.unwrap_err();
     assert_eq!(crate::api::shown_status(&e), 409);
     let _ = strayed_dismiss(State(st.clone()), UrlPath((pid.clone(), "brief".into()))).await.unwrap();
-    let _ = step_approve(State(st.clone()), UrlPath((pid.clone(), "brief".into())), None).await.unwrap();
+    let _ = step_approve(State(st.clone()), UrlPath((pid.clone(), "brief".into())), Default::default(), None).await.unwrap();
     assert_eq!(status_of(&pid, &dir, "brief"), "approved");
     std::fs::remove_dir_all(dir).unwrap();
 }

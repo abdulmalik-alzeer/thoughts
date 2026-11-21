@@ -44,20 +44,27 @@ pub enum Action {
     Trust,
     /// Switch full access on (no subject): every guard the app adds yields (`settings::FullAccess`).
     FullAccess,
+    /// Approve a MADO plan's Final check, which lets the build run its commands (subject from the
+    /// window: `<projectId>/<planHash>`; signed over `mado_subject`).
+    MadoApprove,
+    /// Switch off the confinement of a MADO build's commands (no subject; `spending.confineCommands`).
+    ConfineOff,
 }
 
 impl Action {
     pub fn name(self) -> &'static str {
-        match self { Action::ChatBypass => "chat-bypass", Action::SettingsBypass => "settings-bypass", Action::Trust => "trust", Action::FullAccess => "full-access" }
+        match self { Action::ChatBypass => "chat-bypass", Action::SettingsBypass => "settings-bypass", Action::Trust => "trust", Action::FullAccess => "full-access",
+            Action::MadoApprove => "mado-approve", Action::ConfineOff => "confine-off" }
     }
     pub fn from_name(s: &str) -> Option<Action> {
-        [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess].into_iter().find(|a| a.name() == s)
+        [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess, Action::MadoApprove, Action::ConfineOff].into_iter().find(|a| a.name() == s)
     }
     /// Is `subject` the kind of thing this action names? Checked by the shell before it signs.
     pub fn subject_ok(self, subject: &str) -> bool {
         match self {
             Action::ChatBypass => crate::chats::valid_id(subject),
-            Action::SettingsBypass | Action::FullAccess => subject.is_empty(),
+            Action::SettingsBypass | Action::FullAccess | Action::ConfineOff => subject.is_empty(),
+            Action::MadoApprove => mado_parts(subject).is_some(),
             Action::Trust => (16..=64).contains(&subject.len()) && subject.bytes().all(|b| b.is_ascii_hexdigit()),
         }
     }
@@ -154,6 +161,20 @@ pub fn chat_subject(id: &str, provider: &str) -> String {
     format!("{id}\nprovider:{provider}")
 }
 
+/// The project id and plan hash of a `MadoApprove` subject as the window sends it (`<projectId>/<planHash>`).
+pub fn mado_parts(subject: &str) -> Option<(&str, &str)> {
+    let (pid, hash) = subject.split_once('/')?;
+    let pid_ok = !pid.is_empty() && pid.len() <= 64 && pid.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    let hash_ok = hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (pid_ok && hash_ok).then_some((pid, hash))
+}
+
+/// What a Final-check approval is signed over: the project and the exact plan (its hash) whose
+/// commands the shell's dialog listed.
+pub fn mado_subject(project_id: &str, plan_hash: &str) -> String {
+    format!("{project_id}\nplan:{plan_hash}")
+}
+
 /// What a trust approval is signed over: the question and the folder the shell's dialog named, as
 /// `GET /api/library/trust?id=` gives it.
 pub fn trust_subject(id: &str, path: &str) -> String {
@@ -199,6 +220,12 @@ pub fn test_approval(action: Action, subject: &str) -> String {
 #[cfg(test)]
 pub fn test_chat_approval(id: &str) -> String {
     test_approval(Action::ChatBypass, &chat_subject(id, "claude"))
+}
+
+/// Tests: the shell's yes to the Final check of project `pid` with plan hash `hash`.
+#[cfg(test)]
+pub fn test_mado_approval(pid: &str, hash: &str) -> String {
+    test_approval(Action::MadoApprove, &mado_subject(pid, hash))
 }
 
 /// Tests: the shell's yes to trust question `id`, naming the folder the daemon asked about.
@@ -300,5 +327,19 @@ mod tests {
         assert_eq!(Action::from_name("anything"), None);
         assert_eq!(Action::from_name("full-access"), Some(Action::FullAccess));
         assert!(Action::FullAccess.subject_ok("") && !Action::FullAccess.subject_ok("x"));
+        let h = "a".repeat(64);
+        assert!(Action::MadoApprove.subject_ok(&format!("p-1/{h}")));
+        for bad in ["", "p-1", &format!("p-1/{}", "A".repeat(64)), &format!("../x/{h}"), &format!("p 1/{h}"), &format!("p-1/{h}0"), &format!("/{h}")] { assert!(!Action::MadoApprove.subject_ok(bad), "{bad}"); }
+        assert_eq!(Action::from_name("mado-approve"), Some(Action::MadoApprove));
+        assert_eq!(Action::from_name("confine-off"), Some(Action::ConfineOff));
+        assert!(Action::ConfineOff.subject_ok("") && !Action::ConfineOff.subject_ok("x"));
+        // A Final-check approval names one project and one plan.
+        let now = now_ms();
+        let mut used = Used::new();
+        let a = mint(&K, Action::MadoApprove, &mado_subject("p-1", &h), now);
+        assert!(!verify_with(Some(&K), &mut used, Some(&a), Action::MadoApprove, &mado_subject("p-1", &"b".repeat(64)), now));
+        assert!(!verify_with(Some(&K), &mut used, Some(&a), Action::MadoApprove, &mado_subject("p-2", &h), now));
+        assert!(!verify_with(Some(&K), &mut used, Some(&a), Action::FullAccess, "", now));
+        assert!(verify_with(Some(&K), &mut used, Some(&a), Action::MadoApprove, &mado_subject("p-1", &h), now));
     }
 }

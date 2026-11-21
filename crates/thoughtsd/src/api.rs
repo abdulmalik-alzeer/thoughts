@@ -890,6 +890,11 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
             && crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::SettingsBypass, "")) {
         return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
     }
+    // The confinement of a MADO build's commands: switching it off needs the shell's yes (`?confirm=confine-off&approval=`); on is free.
+    if old.spending.confine_commands() && !new.spending.confine_commands()
+        && !(q.get("confirm").map(String::as_str) == Some("confine-off") && crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::ConfineOff, "")) {
+        return Err(crate::tr::err("mado.confine_unconfirmed", &[]).into());
+    }
     // Full access (`full_access.rs`): never changed by what the body says. Switched on only with the
     // shell's approval from its own two-step warning (`?confirm=full-access&approval=`); the app
     // token alone is not a yes. Switched off by `?fullAccess=off`, with nothing else needed.
@@ -6012,6 +6017,29 @@ mod tests {
         assert!(!git::follow_move(&st, &lib, &moved).await.unwrap());
         std::fs::remove_dir_all(git::history_store(&moved)).unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The confinement of a MADO build's commands: off only with the shell's approval; on is free.
+    #[tokio::test]
+    async fn the_build_commands_confinement_is_switched_off_only_with_the_shells_approval() {
+        use crate::consent::{test_approval, Action};
+        let st = Arc::new(AppState::for_test());
+        let mut off = st.settings.read().await.clone();
+        off.spending.confine_commands = Some(false);
+        let other = test_approval(Action::FullAccess, "");
+        for query in [vec![], vec![("confirm", "confine-off")], vec![("confirm", "confine-off"), ("approval", "1.2.3")], vec![("confirm", "confine-off"), ("approval", other.as_str())]] {
+            let r = put_settings(State(st.clone()), q(&query), Json(off.clone())).await;
+            assert_eq!(crate::api::shown_status(&r.unwrap_err()), 403, "{query:?}");
+            assert!(st.settings.read().await.spending.confine_commands(), "{query:?}");
+        }
+        let yes = test_approval(Action::ConfineOff, "");
+        put_settings(State(st.clone()), q(&[("confirm", "confine-off"), ("approval", yes.as_str())]), Json(off.clone())).await.unwrap();
+        assert!(!st.settings.read().await.spending.confine_commands());
+        // On again: nothing needed.
+        let mut on = off.clone();
+        on.spending.confine_commands = Some(true);
+        put_settings(State(st.clone()), none(), Json(on)).await.unwrap();
+        assert!(st.settings.read().await.spending.confine_commands());
     }
 
     /// Full access: only the shell's approval switches it on (never the body, the token, `?confirm=`

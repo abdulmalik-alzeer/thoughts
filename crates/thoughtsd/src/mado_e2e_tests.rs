@@ -225,7 +225,10 @@ async fn a_project_goes_from_brief_to_landed_over_http() {
     // Without the hash shown, or with another, nothing is approved.
     assert_eq!(w.post("/steps/review/approve", json!({})).await.0, 409);
     assert_eq!(w.post("/steps/review/approve", json!({"planHash": "0".repeat(64)})).await.0, 409);
-    let (s, v) = w.post("/steps/review/approve", json!({"planHash": r["planHash"]})).await;
+    // The app token alone is not a yes: the desktop shell's approval for this plan goes with it.
+    assert_eq!(w.post("/steps/review/approve", json!({"planHash": r["planHash"]})).await.0, 403);
+    let yes = crate::consent::test_mado_approval(&w.pid, r["planHash"].as_str().unwrap());
+    let (s, v) = w.post(&format!("/steps/review/approve?approval={yes}"), json!({"planHash": r["planHash"]})).await;
     assert_eq!(s, 200, "{v}");
     assert_eq!(w.status("review").await, "approved");
     assert!(crate::mado::approved_plan_in(&w.pid).is_some(), "the approval is recorded outside the project");

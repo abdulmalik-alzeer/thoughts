@@ -1167,7 +1167,7 @@ struct ApproveBody { plan_hash: Option<String> }
 /// review takes `{planHash}`, the hash its `GET /review` answer carried: it must be the hash of
 /// `plan.json` now (else the plan changed after the user saw it, and nothing is approved), and it is
 /// kept as `state.plan_hash` (what allows the build to run the commands the user was shown).
-async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, String)>, body: Option<Json<ApproveBody>>) -> R {
+async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, String)>, q: axum::extract::Query<HashMap<String, String>>, body: Option<Json<ApproveBody>>) -> R {
     let shown = body.and_then(|b| b.0.plan_hash).filter(|h| !h.is_empty());
     let (_, mado, full) = ctx(&st, &pid).await?;
     if !STEPS.contains(&step.as_str()) { return Err(crate::tr::err("mado.unknown_name", &[("name", &step)]).into()); }
@@ -1190,6 +1190,11 @@ async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, Strin
         if !blocking.is_empty() { return Err(crate::tr::err_detail("mado.review_blocked", &[], blocking.join("\n")).into()); }
         let now = plan_hash(&bytes);
         if shown.as_deref() != Some(now.as_str()) { return Err(crate::tr::err("mado.plan_changed", &[]).into()); }
+        // Approving lets the build run these commands: the user's yes in the desktop shell's own
+        // dialog, which listed them, for exactly this plan (`?approval=`). The app token alone is not a yes.
+        if !full && !crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::MadoApprove, &crate::consent::mado_subject(&pid, &now)) {
+            return Err(crate::tr::err("mado.approve_unconfirmed", &[]).into());
+        }
         hash = Some((now, r.commands.clone()));
     } else {
         let (missing, wrong) = check_step(&mado, &step, full);
