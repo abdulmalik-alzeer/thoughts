@@ -18,6 +18,7 @@ mod openfile;
 mod pdf;
 mod quit;
 mod recovery;
+mod screen_check;
 mod voice;
 mod windows;
 
@@ -1322,6 +1323,8 @@ fn main() {
         .plugin(
             tauri::plugin::Builder::<tauri::Wry>::new("nav-guard")
                 .on_navigation(|w, url| {
+                    // A screen window's own, stricter check already passed (screen_check.rs).
+                    if screen_check::is_label(w.label()) { return true; }
                     let dev = if tauri::is_dev() { w.config().build.dev_url.clone() } else { None };
                     nav_allowed(url, dev.as_ref())
                 })
@@ -1378,7 +1381,8 @@ fn main() {
             voice::voice_transcribe,
             voice::voice_transcribe_cancel,
             voice::voice_result,
-            voice::voice_result_clear
+            voice::voice_result_clear,
+            screen_check::mado_screen_check
         ])
         // A page that starts loading holds nothing unsaved yet, whatever the last one reported.
         .on_page_load(|webview, payload| {
@@ -1402,6 +1406,8 @@ fn main() {
             attention::watch_clicks(h);
             #[cfg(feature = "rehearsal")]
             rehearsal::start(h);
+            #[cfg(feature = "screen-check-probe")]
+            screen_check::probe::start(h);
 
             // Tray icon: the only visible handle on the app once its window is closed
             // while the background service keeps running.
@@ -1450,6 +1456,7 @@ fn main() {
             if !is_main_label(window.label()) {
                 return;
             }
+            screen_check::main_window_event(ev);
             match ev {
                 // With "keep running in the background" on, closing the window hides it and leaves
                 // the tray icon. Otherwise closing quits and stops the daemon, and like every real

@@ -66,6 +66,7 @@
         { "url": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone" },
         { "url": "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition" }
       ]
-    }
+    },
+    "allow-mado-screen-check"
   ]
 }
