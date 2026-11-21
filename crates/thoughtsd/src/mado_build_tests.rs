@@ -1571,3 +1571,134 @@ async fn the_guide_reads_only_the_projects_own_readme_within_bounds() {
     assert!(fin::api_guide(State(p.st.clone()), UrlPath("nope".into())).await.is_err());
     p.done();
 }
+
+// ---------- locked files hold on every fix path ----------
+
+fn contracts_task() -> Value {
+    let mut c = task("api", &["contracts/**"], &[], &["test -f contracts/api.json"]);
+    c["kind"] = json!("contracts");
+    c
+}
+
+/// A stand-in assistant for a plan whose first task writes the contract: every run of kind `breaker`
+/// does `work` and also "fixes" the contract; tasks write `src/<id>.txt` (and `shared.txt` with `clash`).
+fn breaking_assistant(p: &P, breaker: &'static str, clash: bool, work: &'static [(&'static str, &'static str)]) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let (s2, st) = (seen.clone(), Arc::downgrade(&p.st));
+    t::assistant(&p.st, move |info: RunInfo| {
+        let (seen, st) = (s2.clone(), st.clone());
+        async move {
+            let id = task_of(&info);
+            let round = round_of(&info.prompt);
+            seen.lock().unwrap().push(id.clone());
+            if id == breaker {
+                for (f, text) in work { put(&info.cwd, f, text); }
+                put(&info.cwd, "contracts/api.json", "{\"broken\":true}");
+                put(&info.cwd, "contracts/new.json", "{}");
+            }
+            match id.as_str() {
+                "api" => put(&info.cwd, "contracts/api.json", "{\"ok\":true}"),
+                "review" => if let Some(st) = st.upgrade() {
+                    let text = if breaker == "review-fix" && round == 1 { findings(&[("must", "src/a.txt", "Fix it.")]) } else { findings(&[]) };
+                    answer(&st, &info.chat_id, &text).await;
+                },
+                "wave" | "fix" | "gate" | "review-fix" => {}
+                _ => { put(&info.cwd, &format!("src/{id}.txt"), &id); if clash { put(&info.cwd, "shared.txt", &format!("from {id}\n")); } }
+            }
+            true
+        }
+    });
+    seen
+}
+
+fn contract_kept(p: &P) {
+    assert_eq!(t::sh(&p.dir, &["show", "mado/build-1:contracts/api.json"]), "{\"ok\":true}", "the contract was changed");
+    assert!(!t::sh(&p.dir, &["ls-tree", "-r", "--name-only", "mado/build-1"]).contains("contracts/new.json"));
+}
+
+#[tokio::test]
+async fn a_waves_fix_run_cannot_change_a_locked_file() {
+    let together = "test -f src/fixed || test $(ls src | wc -l) -lt 2";
+    let p = project_plan(json!({"version": 1, "tasks": [contracts_task(), task("a", &["src/a.txt"], &["api"], &[together]), task("b", &["src/b.txt"], &["api"], &["test -f src/b.txt"])]})).await;
+    let seen = breaking_assistant(&p, "wave", false, &[("src/fixed", "y")]);
+    start(&p.st, &p.pid, None).await.unwrap();
+    let b = until(&p, "done", |b| b.status == BuildStatus::Done).await;
+    assert!(seen.lock().unwrap().contains(&"wave".to_string()) && b.waves[1].fix_chat_id.is_some());
+    assert!(t::sh(&p.dir, &["ls-tree", "-r", "--name-only", "mado/build-1"]).contains("src/fixed"));
+    contract_kept(&p);
+    p.done();
+}
+
+#[tokio::test]
+async fn settling_a_clash_by_changing_a_locked_file_fails_and_undoes_the_merge() {
+    let p = project_plan(json!({"version": 1, "tasks": [contracts_task(), task("a", &["src/a.txt"], &["api"], &["test -f src/a.txt"]), task("b", &["src/b.txt"], &["api"], &["test -f src/b.txt"])]})).await;
+    breaking_assistant(&p, "fix", true, &[("shared.txt", "from a\nfrom b\n")]);
+    start(&p.st, &p.pid, None).await.unwrap();
+    let b = until(&p, "waiting", |b| b.status == BuildStatus::Waiting).await;
+    let stuck: Vec<&BuildTask> = b.waves[1].lanes.iter().flat_map(|l| l.tasks.iter()).filter(|t| t.status == TaskStatus::Conflict).collect();
+    assert_eq!(stuck.len(), 1, "{b:?}");
+    assert!(stuck[0].note.as_deref().unwrap().starts_with(tr("mado_build.locked", &[]).split('{').next().unwrap()), "{:?}", stuck[0].note);
+    assert!(t::sh(&build_wt(&p.pid).unwrap(), &["status", "--porcelain"]).lines().all(|l| l.contains("mado/")), "the merge was undone");
+    contract_kept(&p);
+    let _ = stop(&p.st, &p.pid).await;
+    p.done();
+}
+
+#[tokio::test]
+async fn a_verify_fix_run_cannot_change_a_locked_file() {
+    let p = project_plan(json!({"version": 1, "verify": ["test -f src/gate-ok"], "tasks": [contracts_task(), task("a", &["src/a.txt"], &["api"], &["test -f src/a.txt"])]})).await;
+    // (The contract task's own wave fails verify too: its first fix writes gate-ok, so later waves pass.)
+    breaking_assistant(&p, "gate", false, &[("src/gate-ok", "y")]);
+    start(&p.st, &p.pid, None).await.unwrap();
+    let b = until(&p, "done", |b| b.status == BuildStatus::Done).await;
+    assert!(b.waves.iter().all(|w| w.verified) && b.waves[0].gate_fix_chat_id.is_some());
+    contract_kept(&p);
+    p.done();
+}
+
+#[tokio::test]
+async fn a_review_fix_run_cannot_change_a_locked_file() {
+    let p = project_plan(json!({"version": 1, "verify": ["test -f contracts/api.json"], "tasks": [contracts_task(), task("a", &["src/a.txt"], &["api"], &["test -f src/a.txt"])]})).await;
+    breaking_assistant(&p, "review-fix", false, &[("src/fixed", "y")]);
+    start(&p.st, &p.pid, None).await.unwrap();
+    let b = until(&p, "done", |b| b.status == BuildStatus::Done).await;
+    let r = b.review.unwrap();
+    assert_eq!((r.status, r.round), (ReviewStatus::Passed, 2), "{r:?}");
+    assert!(t::sh(&p.dir, &["ls-tree", "-r", "--name-only", "mado/build-1"]).contains("src/fixed"));
+    contract_kept(&p);
+    p.done();
+}
+
+#[tokio::test]
+async fn a_features_marker_under_a_tests_tasks_folder_is_its_own_when_the_plan_names_it() {
+    let mut tests = task("tests", &["tests/**"], &[], &["test -f tests/f1.test"]);
+    tests["kind"] = json!("tests");
+    let p = project_plan(json!({"version": 1, "tasks": [tests, task("f", &["src/**", "tests/built/F1"], &["tests"], &["test -f tests/built/F1"])]})).await;
+    let st = Arc::downgrade(&p.st);
+    t::assistant(&p.st, move |info: RunInfo| { let st = st.clone(); async move {
+        match task_of(&info).as_str() {
+            "tests" => put(&info.cwd, "tests/f1.test", "skip until tests/built/F1"),
+            "f" => { put(&info.cwd, "src/f.txt", "f"); put(&info.cwd, "tests/built/F1", ""); }
+            "review" => if let Some(st) = st.upgrade() { answer(&st, &info.chat_id, &findings(&[])).await; },
+            _ => {}
+        }
+        true
+    } });
+    start(&p.st, &p.pid, None).await.unwrap();
+    let b = until(&p, "done", |b| b.status == BuildStatus::Done).await;
+    assert_eq!((find(&b, "f").status, find(&b, "f").attempts), (TaskStatus::Done, 1));
+    assert!(t::sh(&p.dir, &["ls-tree", "-r", "--name-only", "mado/build-1"]).contains("tests/built/F1"));
+    p.done();
+}
+
+#[tokio::test]
+async fn the_projects_model_is_never_handed_to_codex() {
+    let st = AppState::for_test();
+    TEST_OPTIONS.lock().unwrap().push(("codex-guard".into(), (Some("opus".into()), Some("high".into()))));
+    assert_eq!(options_for(&st, "codex-guard").await.0.as_deref(), Some("opus"));
+    st.settings.write().await.ai.primary = "codex".into();
+    assert_eq!(options_for(&st, "codex-guard").await.0.as_deref(), Some("opus"), "without full access a build run is Claude Code's");
+    st.settings.write().await.full_access.on = true;
+    assert_eq!(options_for(&st, "codex-guard").await, (None, None), "under full access it runs on Codex, with Codex's own defaults");
+    TEST_OPTIONS.lock().unwrap().retain(|(p, _)| p != "codex-guard");
+}

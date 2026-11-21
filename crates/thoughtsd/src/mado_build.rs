@@ -1060,8 +1060,9 @@ async fn run_task(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSta
         if status_now(project) == BuildStatus::Stopped { return Ok(TaskEnd::Stopped); }
         // Files of a `contracts` or `tests` task that is done are locked: a later task may not change
         // them. Its changes to them are undone, and it goes back to the assistant like a failed check.
-        let locked = load_build(project)?.map(|b| finish::locked_by(plan, &b, Some(&task.id))).unwrap_or_default();
-        let touched = finish::undo_locked(state, wt, &locked).await?;
+        let locked = load_build(project)?.map(|b| finish::locked_by(plan, &b, &[&task.id])).unwrap_or_default();
+        let named: Vec<String> = task.owns.iter().filter(|o| !o.contains(['*', '?', '['])).map(|o| o.trim().trim_start_matches("./").to_string()).collect();
+        let touched = finish::undo_locked(state, wt, &locked, &named).await?;
         if !touched.is_empty() {
             note_fail(pid, project, at, &finish::locked_note(&touched)).await?;
             mado::tell(state, pid, "build").await;
@@ -1141,12 +1142,12 @@ static TEST_OPTIONS: std::sync::Mutex<Vec<(String, (Option<String>, Option<Strin
 
 /// The model and effort of every run of this project's build (`mado::run_options`).
 async fn options_for(state: &AppState, pid: &str) -> (Option<String>, Option<String>) {
-    #[cfg(test)]
-    if let Some(o) = TEST_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == pid).map(|(_, o)| o.clone()) { return o; }
     // A build's run is Claude Code's (`assistant::for_run`), except under full access, where it is the
     // program chosen in Settings: the project's choice (a Claude Code model and effort) is never
     // handed to another program, which then uses its own defaults.
     { let s = state.settings.read().await; if s.full_access() && crate::assistant::primary(&s) != crate::assistant::Program::Claude { return (None, None); } }
+    #[cfg(test)]
+    if let Some(o) = TEST_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == pid).map(|(_, o)| o.clone()) { return o; }
     mado::run_options(state, pid).await
 }
 
@@ -1672,6 +1673,11 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
         Commit nothing: the app runs the checks again and commits the result.\n\n{}", crate::mado_prompts::block(&clip_note(&out)), crate::mado_prompts::DATA_NOTE);
     let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, None, deny_for(project, pid, &b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { reset_wt(state, project, &bwt).await; return Ok(()); }
+    // The fix may not change what a done `contracts` or `tests` task agreed on: that is undone, and
+    // the checks below run on what is left.
+    let locked = finish::locked_by(&plan, &load_build(project)?.unwrap_or_default(), &[]);
+    let undone = finish::undo_locked(state, &bwt, &locked, &[]).await?;
+    if !undone.is_empty() { crate::log::warn(format!("mado build: a wave's fix changed {} locked file(s); they were put back", undone.len())); }
     let again = match ended { Err(why) => Err(why), Ok(()) => wave_checks(state, pid, project, &b.plan_hash, &plan, &ids, &bwt).await.map_err(|(_, e)| e.text()) };
     if let Err(why) = again {
         reset_wt(state, project, &bwt).await;
@@ -1743,6 +1749,12 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, None, deny_for(project, pid, b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { let _ = git(state, &bwt, &["merge", "--abort"]).await; return Ok(LaneEnd::Stopped); }
     if let Err(why) = ended { return fix_failed(state, project, pid, &bwt, wi, li, &why).await; }
+    // Settling a clash may not change what a done `contracts` or `tests` task of another lane agreed
+    // on (the lane being merged brings its own tasks' files): such a fix fails, and the merge is undone.
+    let mine: Vec<&str> = lane.tasks.iter().map(|t| t.id.as_str()).collect();
+    let locked = finish::locked_by(plan, &load_build(project)?.unwrap_or_default(), &mine);
+    let undone = finish::undo_locked(state, &bwt, &locked, &[]).await?;
+    if !undone.is_empty() { return fix_failed(state, project, pid, &bwt, wi, li, &finish::locked_note(&undone)).await; }
     if !git_ok(state, &bwt, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).await || clash.iter().any(|f| has_marks(&bwt.join(f))) {
         return fix_failed(state, project, pid, &bwt, wi, li, &tr("mado_build.fix_failed", &[("files", &shown)])).await;
     }

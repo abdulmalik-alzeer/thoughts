@@ -222,21 +222,24 @@ pub fn conventions(project: &Path, full: bool) -> Option<String> {
 // ---------- locked files ----------
 
 /// The `owns` patterns locked now: those of every `contracts` or `tests` task of the plan that is
-/// done in this build, `except` the task asking (a task may change its own files).
-pub fn locked_by(plan: &PlanDoc, b: &BuildState, except: Option<&str>) -> Vec<String> {
+/// done in this build, `except` the tasks asking (a task may change its own files; a lane being
+/// merged brings its own tasks' files).
+pub fn locked_by(plan: &PlanDoc, b: &BuildState, except: &[&str]) -> Vec<String> {
     let done: HashSet<&str> = b.waves.iter().flat_map(|w| w.lanes.iter()).flat_map(|l| l.tasks.iter()).filter(|t| t.status == TaskStatus::Done).map(|t| t.id.as_str()).collect();
-    plan.tasks.iter().filter(|t| t.locks() && done.contains(t.id.as_str()) && Some(t.id.as_str()) != except).flat_map(|t| t.owns.iter().cloned()).collect()
+    plan.tasks.iter().filter(|t| t.locks() && done.contains(t.id.as_str()) && !except.contains(&t.id.as_str())).flat_map(|t| t.owns.iter().cloned()).collect()
 }
 
 /// In worktree `wt`, the changes (against its last commit) to files under `locked` are undone:
 /// changed files are put back, new ones removed. Returns the files that were touched (at most 200).
-/// Nothing is asked of git when nothing is locked (a 0.3.x plan never gets here).
-pub async fn undo_locked(state: &AppState, wt: &Path, locked: &[String]) -> anyhow::Result<Vec<String>> {
+/// A path in `exempt` is never touched: the exact files (not patterns) the task at hand owns by name
+/// in the approved plan, such as the marker a feature's last task writes (`tests/built/F2`) under a
+/// folder a tests task owns. Nothing is asked of git when nothing is locked (a 0.3.x plan never gets here).
+pub async fn undo_locked(state: &AppState, wt: &Path, locked: &[String], exempt: &[String]) -> anyhow::Result<Vec<String>> {
     if locked.is_empty() { return Ok(vec![]); }
     git_safe(state, wt).await?;
     git(state, wt, &["add", "-A", "--", ".", ":(exclude)mado"]).await?;
     let changed = git(state, wt, &["diff", "--cached", "--name-only", "-z", "--no-renames"]).await?;
-    let hit: Vec<String> = changed.split('\0').filter(|f| !f.is_empty() && locked.iter().any(|p| glob_match(p, f))).take(200).map(String::from).collect();
+    let hit: Vec<String> = changed.split('\0').filter(|f| !f.is_empty() && !exempt.iter().any(|e| e == f) && locked.iter().any(|p| glob_match(p, f))).take(200).map(String::from).collect();
     for f in &hit {
         let spec = format!(":(literal){f}");
         let _ = git(state, wt, &["reset", "-q", "--", &spec]).await;
@@ -321,8 +324,8 @@ pub async fn verify_gate(state: &Arc<AppState>, pid: &str, project: &Path, b: &B
         if status_now(project) == BuildStatus::Stopped { reset_wt(state, project, bwt).await; return Ok(()); }
         if let Err(why) = ended { crate::log::warn(format!("mado build: a verify fix run ended without finishing ({})", one_line(&why, 200))); }
         // A fix may not change what a `contracts` or `tests` task agreed on either.
-        let locked = locked_by(plan, &load_build(project)?.unwrap_or_default(), None);
-        undone = undo_locked(state, bwt, &locked).await?;
+        let locked = locked_by(plan, &load_build(project)?.unwrap_or_default(), &[]);
+        undone = undo_locked(state, bwt, &locked, &[]).await?;
     }
     Ok(())
 }
@@ -852,8 +855,8 @@ async fn fix_round(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSt
     let brief = prompts::review_fix(&musts, conventions(project, full).as_deref());
     let ended = run_and_wait(state, project, pid, &chat, bwt, &brief, None, deny_for(project, pid, b, bwt)).await;
     if status_now(project) != BuildStatus::Reviewing { reset_wt(state, project, bwt).await; return Ok(()); }
-    let locked = locked_by(plan, &load_build(project)?.unwrap_or_default(), None);
-    let undone = undo_locked(state, bwt, &locked).await?;
+    let locked = locked_by(plan, &load_build(project)?.unwrap_or_default(), &[]);
+    let undone = undo_locked(state, bwt, &locked, &[]).await?;
     if !undone.is_empty() { crate::log::warn(format!("mado build: a review fix changed {} locked file(s); they were put back", undone.len())); }
     let failed = match ended {
         Err(why) => Some(why),

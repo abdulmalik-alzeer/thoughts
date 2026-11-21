@@ -338,3 +338,32 @@ record of the project (never in the project). `crate::mado::run_options(state, p
   project whose plan was started. The sidebar's chats area shows them under **Plans**; one opens the Plan view.
 - The Plan view's header has the model and the effort (the app's existing pickers; lists are never
   hard-coded) and the usage ring the chats have.
+
+### Build engine, as built (daemon side, round 0.4.0)
+
+- The phases after the last wave run only for a plan that has any of this round's fields (`verify`, `run`, a task
+  `kind`); a 0.3.x plan ends `done` right after its last wave, exactly as before. `checking` only with `run`.
+- `Review.commands` lists set-up, acceptance, `verify`, then `run.start`; `start` refuses a plan any of whose
+  commands is not in the approval record (an approval made before 0.4.0 of a plan with `verify` is refused).
+- `unchecked-screen` is given only when `run` exists (without it, `no-run` says it once).
+- The `verify` gate: up to 3 fix runs in the build copy (one chat, its session resumed); still failing, the fixes
+  are undone and the build waits; resume runs the gate again with 3 fresh tries.
+- Locked files: a change to them is undone by the daemon (put back from the last commit, new files removed) and the
+  task goes back to the assistant with the files named. A file the task's own `owns` names exactly (not a pattern,
+  e.g. the marker `tests/built/F2`) is not locked for that task. The rule holds on every fix path too: a wave's fix,
+  the `verify` fix and a review fix have such changes undone before their checks run; settling a merge clash by
+  changing a locked file of another lane fails the fix (the merge is undone, the lane waits).
+- Screen check: the address is checked again (never the daemon's port), nothing else may already answer there,
+  and what answers must be in the started program's process group (`lsof`; where it cannot be told the check is
+  skipped, unless full access is on). The daemon asks each path itself (only `127.0.0.1`/`::1`, no redirects,
+  status line only). "Nobody looked": no window listens to the events socket, the 120 s pass, or the window posts
+  an empty `results`. The started program (its whole process group) is stopped at the end, on pause and stop, when
+  the daemon exits, and after a restart (`<home>/mado/<projectId>/app.pid`, only if the process still has the
+  recorded start time). Results are kept beside it (`screens.json`, closed to the build's commands) for the review.
+- Review: Claude Code's `plan` mode (the app's read-only mode) plus deny rules on the build copy; anything it
+  changed anyway is put back. Findings come from the last fenced `json` block of its answer
+  (`{"findings":[…]}`, at most 50, texts cleaned and bounded); none readable: `review.status = 'failed'`.
+  A fix round whose `verify` then fails is undone and ends the review. `BuildReview` also carries `finished` and
+  `note` (why the review or its fix did not go as planned).
+- Model and effort (`mado::run_options`) go to every build, fix and review run and are recorded on its chat; under
+  full access with Codex as the chosen program, none is handed over (Codex uses its own defaults).
