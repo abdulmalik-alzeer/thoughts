@@ -235,6 +235,7 @@ export default {
     'shell.help.diagBasic': 'Basic details copied (the full log isn’t available in this version).',
     'shell.help.diagManual': 'Couldn’t copy automatically. Select the text below and copy it.',
     'shell.help.version': 'Thoughts version {v}',
+    'shell.help.creditFlow': 'Diagrams are drawn with Svelte Flow (xyflow), MIT, and laid out with dagre, MIT.',
   },
   ar: {
     'shell.loading': 'جارٍ التحميل…',
@@ -472,5 +473,6 @@ export default {
     'shell.help.diagBasic': 'نُسخت التفاصيل الأساسية (السجلّ الكامل غير متاح في هذه النسخة).',
     'shell.help.diagManual': 'تعذّر النسخ تلقائياً. حدّد النص أدناه وانسخه.',
     'shell.help.version': 'إصدار Thoughts: {v}',
+    'shell.help.creditFlow': 'تُرسم المخططات بمكتبة Svelte Flow ‏(xyflow) بترخيص MIT، وتُرتَّب بمكتبة dagre بترخيص MIT.',
   },
 };

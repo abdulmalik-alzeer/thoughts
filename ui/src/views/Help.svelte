@@ -159,6 +159,7 @@
     </div>
     <div class="row wrap"><button class="btn" onclick={() => go({ kind: 'help', id: 'whatsnew' })}><Icon name="info" size={15} /> {t('help.new.btn')}</button></div>
     <p class="muted sm">{t('shell.help.version', { v: APP_VERSION })}{#if app.status?.version && app.status.version !== APP_VERSION} — {t('ver.mismatch', { app: APP_VERSION, service: app.status.version })}{/if}</p>
+    <p class="muted sm">{t('shell.help.creditFlow')}</p>
   </section>
 {/if}
 </div>
