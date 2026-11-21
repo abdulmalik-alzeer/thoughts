@@ -547,6 +547,19 @@ async fn a_confined_command_writes_only_in_its_worktree_temporary_files_and_cach
         let cmd = if path.is_dir() { format!("ls '{}' >/dev/null 2>&1", path.display()) } else { format!("head -c 0 '{}' 2>/dev/null", path.display()) };
         assert!(run(cmd).await.is_err(), "{f} was readable");
     }
+    // The cache and the worktree cannot be swapped for a link from inside…
+    std::fs::write(cache.join("x"), "x").unwrap();
+    let r = run(format!("rm -rf '{0}' && ln -s \"$HOME\" '{0}'", cache.display())).await;
+    assert!(r.is_err());
+    assert!(std::fs::symlink_metadata(&cache).unwrap().file_type().is_dir(), "the cache is still the build's own folder");
+    assert!(run(format!("mv '{0}' '{0}.gone'", wt.display())).await.is_err());
+    assert!(std::fs::symlink_metadata(&wt).unwrap().file_type().is_dir());
+    // …and a link planted from outside stops the next command.
+    std::fs::remove_dir_all(&cache).unwrap();
+    std::os::unix::fs::symlink(&p.root, &cache).unwrap();
+    match run("true".into()).await { Err(CheckErr::Unapproved(t)) => assert!(t.contains("not a plain folder") || t.contains("no longer a plain folder"), "{t}"), other => panic!("{:?}", other.map_err(|e| e.text())) }
+    std::fs::remove_file(&cache).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
     // Toolchains on the PATH still run.
     for (tool, cmd) in [("node", "node -e 'process.exit(0)'"), ("npm", "npm --version"), ("git", "git --version")] {
         if std::process::Command::new("sh").args(["-c", &format!("command -v {tool}")]).env("PATH", claude::shell_path()).output().map_or(false, |o| o.status.success()) {

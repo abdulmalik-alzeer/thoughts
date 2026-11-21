@@ -1176,6 +1176,21 @@ fn real(p: &Path) -> PathBuf {
     match (p.parent(), p.file_name()) { (Some(par), Some(n)) if par != p => real(par).join(n), _ => p.to_path_buf() }
 }
 
+/// `p` with its folders resolved and its last part as it is (never followed: it may be a link someone planted).
+fn in_place(p: &Path) -> PathBuf {
+    match (p.parent(), p.file_name()) { (Some(par), Some(n)) => real(par).join(n), _ => p.to_path_buf() }
+}
+
+/// `p` as a regular expression of the sandbox's (`#"…"`), every special character escaped.
+fn sb_regex(p: &Path) -> String {
+    p.to_string_lossy().chars().map(|c| if ".[]{}()*+?^$|\\".contains(c) { format!("\\{c}") } else if c == '"' { "\\x22".into() } else { c.to_string() }).collect()
+}
+
+/// Are `wt` and `cache` real folders, not links (checked before every command a build runs confined)?
+fn real_dirs(wt: &Path, cache: &Path) -> bool {
+    [wt, cache].iter().all(|p| std::fs::symlink_metadata(p).map_or(false, |m| m.file_type().is_dir()))
+}
+
 fn sb_str(p: &Path) -> String {
     let t = p.to_string_lossy();
     format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
@@ -1244,16 +1259,29 @@ pub fn sandbox_profile(wt: &Path, project: &Path, cache: &Path, user_home: Optio
     out.push_str(")\n(allow file-read*");
     for p in &back { out.push_str(&format!(" (subpath {})", q(p))); }
     out.push_str(")\n");
+    // The worktree's and the cache's contents (never the folders themselves, nor the folder they are in:
+    // they cannot be removed, renamed or swapped for a link). Their places come from the engine's own
+    // folder, resolved; their last part is not followed.
+    let (wt_at, cache_at) = (in_place(wt), in_place(cache));
+    out.push_str(&format!("(allow file-read* file-write* (regex #\"^{}/\") (regex #\"^{}/\"))\n", sb_regex(&wt_at), sb_regex(&cache_at)));
+    out.push_str(&format!("(allow file-read* (literal {}) (literal {}))\n", sb_str(&wt_at), sb_str(&cache_at)));
+    let mut fixed = vec![wt_at.clone(), cache_at.clone(), wt_at.join(".git")];
+    if let Some(p) = wt_at.parent() { fixed.push(p.to_path_buf()); }
+    if let Some(p) = cache_at.parent() { if !fixed.iter().any(|f| f == p) { fixed.push(p.to_path_buf()); } }
+    out.push_str("(deny file-write*");
+    for p in &fixed { out.push_str(&format!(" (literal {})", sb_str(p))); }
+    out.push_str(")\n");
+    // Last, so they win whatever the paths above resolve to: credentials and the user's own files.
     if let Some(h) = user_home {
         let mut secrets: Vec<PathBuf> = SECRETS_IN_HOME.iter().map(|c| h.join(c)).collect();
         if let Ok(c) = std::env::var("CLAUDE_CONFIG_DIR") { if Path::new(&c).is_absolute() { secrets.push(PathBuf::from(c)); } }
-        out.push_str("(deny file-read*");
+        out.push_str("(deny file-read* file-write*");
         for p in &secrets { out.push_str(&format!(" (subpath {})", q(p))); }
         out.push_str(")\n");
     }
-    out.push_str(&format!("(allow file-read* file-write* (subpath {}) (subpath {}))\n", q(wt), q(cache)));
-    // The worktree's own `.git` (a file naming git's folder for it, inside the project's `.git`) stays closed to writing.
-    out.push_str(&format!("(deny file-write* (literal {}))\n", q(&wt.join(".git"))));
+    // The app's records (the approval, the plan the build was started with) beside the worktrees.
+    out.push_str(&format!("(deny file-read* file-write* (regex #\"^{}/[^/]+\\.(json|sha256|setup)$\"))\n", sb_regex(&real(&crate::paths::home()))));
+    if let Some(p) = wt_at.parent() { out.push_str(&format!("(deny file-read* file-write* (regex #\"^{}/[^/]+\\.(json|sha256|setup)$\"))\n", sb_regex(p))); }
     if port != 0 { out.push_str(&format!("(deny network-outbound (remote ip \"localhost:{port}\"))\n")); }
     // The keychain (the assistant's key is kept there). TLS checks do not need it (tried: git and curl over https).
     out.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd.xpc\"))\n");
@@ -1296,6 +1324,12 @@ pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &
     let unconfined = || CheckErr::Unapproved(tr("mado_build.no_sandbox", &[("cmd", &one_line(cmd, 300))]));
     let mut c = if how.confined {
         if !Path::new(SANDBOX_EXEC).is_file() { return Err(unconfined()); }
+        // The worktree and the cache are the engine's real folders, never links (a command could have planted one).
+        if !how.cache.as_os_str().is_empty() && std::fs::symlink_metadata(&how.cache).is_err() { let _ = std::fs::create_dir_all(&how.cache); }
+        if how.cache.as_os_str().is_empty() || !real_dirs(cwd, &how.cache) {
+            crate::log::warn("mado build: a worktree or the build's cache is not a plain folder; the command was not run");
+            return Err(CheckErr::Unapproved(tr("mado_build.not_plain_dirs", &[("cmd", &one_line(cmd, 300))])));
+        }
         let profile = sandbox_profile(cwd, project, &how.cache, crate::paths::user_home().ok().as_deref(), how.port);
         let mut c = crate::proc::command(SANDBOX_EXEC);
         c.arg("-p").arg(profile).arg(&prog).args(&args);
@@ -1305,7 +1339,7 @@ pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &
         c.args(&args);
         c
     };
-    if !how.cache.as_os_str().is_empty() { let _ = std::fs::create_dir_all(&how.cache); }
+    if !how.confined && !how.cache.as_os_str().is_empty() { let _ = std::fs::create_dir_all(&how.cache); }
     c.env_clear().envs(command_env(&how.cache)).current_dir(cwd)
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     crate::proc::own_group(&mut c);
