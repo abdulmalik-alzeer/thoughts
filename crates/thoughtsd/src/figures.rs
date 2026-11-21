@@ -250,15 +250,65 @@ pub async fn render(source: &str) -> Result<String, Refused> {
     let program = tokio::task::spawn_blocking(move || program(&h)).await.ok().and_then(Result::ok).ok_or_else(|| refused("failed"))?;
     let _slot = SLOTS.acquire().await.map_err(|_| refused("failed"))?;
     let work = crate::paths::run_tmp_dir().join(format!("figure-{}", uuid::Uuid::new_v4().simple()));
-    let made = crate::paths::create_private_dir(&crate::paths::run_tmp_dir()).and_then(|_| crate::paths::create_private_dir(&work))
-        .and_then(|_| std::fs::write(work.join("diagram.json"), serde_json::to_vec(&doc).unwrap_or_default()));
+    let mut doc = doc;
+    let made = crate::paths::create_private_dir(&crate::paths::run_tmp_dir()).and_then(|_| crate::paths::create_private_dir(&work));
     if let Err(e) = made { let _ = std::fs::remove_dir_all(&work); return Err(Refused { code: "failed", detail: e.to_string() }); }
-    let result = run(&node, &program, &work, &kind, &home).await;
+    let mut repairs = 0;
+    let result = loop {
+        if let Err(e) = std::fs::write(work.join("diagram.json"), serde_json::to_vec(&doc).unwrap_or_default()) { break Err(Refused { code: "failed", detail: e.to_string() }); }
+        match run(&node, &program, &work, &kind).await {
+            // A caption that sits on a box, or a name wider than its box: Archify says how far to
+            // move or widen, so that is done and the drawing tried again, a few times at most.
+            Err(r) if r.code == "invalid" && repairs < MAX_REPAIRS && repair(&mut doc, &r.detail) => repairs += 1,
+            Err(r) => break Err(Refused { code: r.code, detail: if r.code == "invalid" { tidy(&r.detail, &[&work, &program, &home]) } else { r.detail } }),
+            Ok(page) => break Ok(page),
+        }
+    };
     let _ = std::fs::remove_dir_all(&work);
     result
 }
 
-async fn run(node: &Path, program: &Path, work: &Path, kind: &str, home: &Path) -> Result<String, Refused> {
+/// How often one document is corrected and drawn again.
+const MAX_REPAIRS: usize = 3;
+
+/// Apply the corrections Archify itself suggests for an architecture diagram's layout, as it
+/// printed them: `Label "SQL" overlaps component … Suggested fix: … set labelDy 24 (below)` moves
+/// that caption, `widen component "worker" to at least 124px` widens that box. True when
+/// something was changed (the document is then worth drawing again). Nothing else is touched: a
+/// document that is wrong in what it says is shown with its message, not guessed at.
+pub fn repair(doc: &mut Value, printed: &str) -> bool {
+    use std::sync::OnceLock;
+    static MOVE: OnceLock<regex::Regex> = OnceLock::new();
+    static WIDEN: OnceLock<regex::Regex> = OnceLock::new();
+    let mv = MOVE.get_or_init(|| regex::Regex::new(r#"(?m)^- Label "([^"\n]+)" overlaps[^\n]*\n(?:[^\n]*\n){0,3}?\s*Suggested fix:[^\n]*?set labelDy (-?\d{1,4})\b"#).unwrap());
+    let wd = WIDEN.get_or_init(|| regex::Regex::new(r#"widen component "([^"\n]+)" to at least (\d{2,4})px"#).unwrap());
+    if doc["diagram_type"] != "architecture" { return false; }
+    let mut changed = false;
+    for c in mv.captures_iter(printed) {
+        let (label, dy) = (&c[1], c[2].parse::<i64>().unwrap_or(0));
+        for conn in doc["connections"].as_array_mut().into_iter().flatten().filter_map(Value::as_object_mut) {
+            if conn.get("label").and_then(Value::as_str) == Some(label) && conn.get("labelDy").and_then(Value::as_i64) != Some(dy) && !conn.contains_key("labelAt") {
+                conn.insert("labelDy".into(), json!(dy));
+                changed = true;
+            }
+        }
+    }
+    for c in wd.captures_iter(printed) {
+        let (id, w) = (&c[1], c[2].parse::<i64>().unwrap_or(0).min(400) + 8);
+        for comp in doc["components"].as_array_mut().into_iter().flatten().filter_map(Value::as_object_mut) {
+            if comp.get("id").and_then(Value::as_str) != Some(id) { continue; }
+            let h = comp.get("size").and_then(|s| s.get(1)).and_then(Value::as_i64).unwrap_or(60);
+            if comp.get("size").and_then(|s| s.get(0)).and_then(Value::as_i64).map_or(true, |have| have < w) {
+                comp.insert("size".into(), json!([w, h]));
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// One try. A refusal of the document comes back with what Archify printed, as printed.
+async fn run(node: &Path, program: &Path, work: &Path, kind: &str) -> Result<String, Refused> {
     let mut c = crate::proc::command(node);
     c.arg(program.join("bin").join("archify.mjs")).args(["render", kind, "diagram.json", "diagram.html"])
         .current_dir(work).env_clear()
@@ -274,8 +324,7 @@ async fn run(node: &Path, program: &Path, work: &Path, kind: &str, home: &Path) 
         Err(e) => return Err(Refused { code: "failed", detail: e.to_string() }),
     };
     if !out.status.success() {
-        let detail = tidy(&String::from_utf8_lossy(&out.stderr), &[work, program, home]);
-        return Err(Refused { code: "invalid", detail });
+        return Err(Refused { code: "invalid", detail: String::from_utf8_lossy(&out.stderr).to_string() });
     }
     let page = work.join("diagram.html");
     match std::fs::symlink_metadata(&page) {
@@ -421,6 +470,23 @@ mod tests {
         assert!(tidy(&"é".repeat(5000), &[]).ends_with('…'));
     }
 
+    #[test]
+    fn a_caption_on_a_box_and_a_name_too_wide_are_corrected_as_archify_suggests() {
+        let printed = "Architecture layout validation failed:\n- Label \"Notifications worker\" (~132px) is wider than component \"worker\" (120px) — shorten the label or widen size.\n- Label \"SQL\" overlaps component \"orders\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [530, 230, 30, 14]\n  component \"orders\" rect: [480, 190, 130, 60]\n  Suggested fix: set labelAt [545, 264] or set labelDy 24 (below); or set labelAt [545, 182] or set labelDy -58 (above)\n[architecture/component-label-overflow] Fix: shorten component \"worker\" label; or widen component \"worker\" to at least 124px.\n";
+        let mut doc = json!({"diagram_type": "architecture", "components": [{"id": "worker", "label": "Notifications worker"}, {"id": "orders", "size": [130, 70]}],
+            "connections": [{"id": "a", "label": "SQL"}, {"id": "b", "label": "REST"}, {"id": "c", "label": "SQL", "labelAt": [1, 2]}]});
+        assert!(repair(&mut doc, printed));
+        assert_eq!(doc["connections"][0]["labelDy"], 24);
+        assert!(doc["connections"][1].get("labelDy").is_none() && doc["connections"][2].get("labelDy").is_none());
+        assert_eq!(doc["components"][0]["size"], json!([132, 60]));
+        assert_eq!(doc["components"][1]["size"], json!([130, 70]));
+        // The same advice a second time changes nothing more, so the tries end.
+        assert!(!repair(&mut doc, printed));
+        // Other kinds of diagram, and other messages, are left alone.
+        assert!(!repair(&mut json!({"diagram_type": "tree", "connections": [{"label": "SQL"}]}), printed));
+        assert!(!repair(&mut doc, "architecture schema validation failed:\n  /components/0/type must be equal to one of the allowed values"));
+    }
+
     /// The whole way, with the Node.js of this machine (skipped where there is none): every worked
     /// example the guide names is drawn, and a document with a mistake comes back with Archify's words.
     #[tokio::test]
@@ -437,6 +503,12 @@ mod tests {
         let r = render(&bad).await.unwrap_err();
         assert_eq!(r.code, "invalid");
         assert!(r.detail.contains("allowed values") && !r.detail.contains("run-tmp"), "{}", r.detail);
+        // A caption that lands on a box is moved as Archify suggests, and the diagram is drawn.
+        let near = r#"{"schema_version":1,"diagram_type":"architecture","meta":{"title":"Small SaaS"},"layout":{"mode":"grid","gapX":110,"gapY":70},
+            "components":[{"id":"gateway","type":"backend","label":"API gateway","row":0,"col":0},{"id":"auth","type":"security","label":"Auth service","row":1,"col":0},
+              {"id":"orders","type":"backend","label":"Orders","row":0,"col":1}],
+            "connections":[{"id":"a","from":"gateway","to":"auth","label":"verify","variant":"security"},{"id":"b","from":"gateway","to":"orders","label":"REST"}]}"#;
+        assert!(render(near).await.unwrap_or_else(|r| panic!("{} {}", r.code, r.detail)).contains("data-node-id"));
         // Nothing is left behind.
         let left: Vec<_> = std::fs::read_dir(crate::paths::run_tmp_dir()).map(|d| d.flatten().collect()).unwrap_or_default();
         assert!(left.is_empty(), "{left:?}");
