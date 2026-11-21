@@ -310,7 +310,7 @@ fn css_that_loads_or_runs_goes_and_the_rest_stays_as_written() {
     // Rules nested without end are cut, not followed.
     let deep = format!("{}color:red{}", "@media screen{".repeat(5000), "}".repeat(5000));
     assert!(sheet(&deep).len() < 400);
-    let deep = format!(".a{{width:calc{}1{}}}", "(".repeat(100_000), ")".repeat(100_000));
+    let deep = format!(".a{{width:calc{}1{}}}", "(".repeat(50_000), ")".repeat(50_000));
     assert_eq!(sheet(&deep), deep);
 }
 
@@ -378,7 +378,7 @@ fn a_page_past_a_limit_is_refused_while_it_is_read() {
     }
     // The clock: with no time at all, any page of more than one piece is refused.
     assert_eq!(clean_within(&"<p>x</p>".repeat(1_000), std::time::Duration::ZERO), Err(Refused::TooSlow));
-    assert!(clean_within("<p>x</p>", std::time::Duration::ZERO).is_ok());
+    assert_eq!(clean_within("<p>x</p>", std::time::Duration::ZERO), Err(Refused::TooSlow));
 }
 
 #[test]
@@ -396,7 +396,6 @@ fn a_style_sheet_can_never_close_its_element_or_open_a_comment() {
         ".a{content:'<!<!----'}",
         ".a{content:'<!-<!--- x'}",
         ".a{content:'</STYLE>'}",
-        ".a{content:'<\\/style>'}",
         ".a{content:'<!doctype html>'}",
         ".a{content:'<![CDATA['}",
         "<!-- .a{color:red} -->",
@@ -406,13 +405,36 @@ fn a_style_sheet_can_never_close_its_element_or_open_a_comment() {
         let low = out.to_ascii_lowercase();
         assert!(!low.contains("</") && !low.contains("<!") && !low.contains("-->"), "{css} → {out}");
         // And inside a page: the result holds exactly the style element and the body, nothing more.
-        let page = cleaned(&format!("<style>{}</style><p>ok</p>", css.replace("</style>", "").replace("</STYLE>", "")));
+        assert_eq!(out, "", "{css}");
+        // And inside a page: no style element is left to hold it.
+        // (The parser ends the element at a literal `</style>`, so that one is tried without it.)
+        let inner = css.replace("</style>", "").replace("</STYLE>", "");
+        let page = cleaned(&format!("<style>{inner}</style><p>ok</p>"));
         assert!(page.ends_with("<body><p>ok</p></body>") && !page.contains("<script") && !page.contains("alert"), "{css} → {page}");
-        assert_eq!(page.matches("</style>").count(), page.matches("<style>").count(), "{css} → {page}");
+        assert!(inner != css || !page.contains("<style"), "{css} → {page}");
     }
-    // The ordinary case still reads as it was written, with only the `/` escaped.
-    assert_eq!(sheet(".a::after{content:'</b>'}"), ".a::after{content:'<\\/b>'}");
+    // Nothing is rewritten: such a sheet is not shown at all, and a lone `<` is only a character.
+    assert_eq!(sheet(".a::after{content:'</b>'}"), "");
+    assert_eq!(sheet(".a{color:red} .b::after{content:'-->'}"), "");
     assert_eq!(sheet(".a{content:'a < b'}"), ".a{content:'a < b'}");
+    assert_eq!(sheet(".a{content:'<\\/style>'}"), ".a{content:'<\\/style>'}", "an escaped slash is not the end of an element");
+    assert_eq!(sheet("@media (400px <= width) { .a { color: red } }"), "@media (400px <= width) { .a { color: red } }");
+    // Input made to grow the work of a remove-and-look-again loop: one pass, and done.
+    for css in [format!(".a{{content:'{}{}'}}", "<!".repeat(60_000), "--".repeat(30_000)), format!(".a{{content:'{}{}'}}", "<".repeat(90_000), "!--".repeat(30_000)),
+        format!(".a{{content:'{}'}}", "-<!--->".repeat(27_000)), format!(".a{{content:'{}'}}", "<!-<!---".repeat(24_000))] {
+        let t = std::time::Instant::now();
+        assert_eq!(sheet(&css), "");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+    }
+    // A sheet longer than any real one is not read.
+    assert_eq!(sheet(&".a{color:red}".repeat(MAX_CSS / 13 + 1)), "");
+    assert_eq!(sheet(&".a{color:red}".repeat(100)).len(), 1300);
+    // The CSS and the writing-out share the page's clock: with none left, the page is refused, not shown half.
+    let page = format!("<style>{}</style>{}", ".a{color:red}".repeat(2_000), "<p style='color:red'>x</p>".repeat(2_000));
+    assert_eq!(clean_within(&page, std::time::Duration::ZERO), Err(Refused::TooSlow));
+    assert!(clean(&page).is_ok());
+    let late = Clock::until(std::time::Instant::now() - std::time::Duration::from_secs(1));
+    assert_eq!(clean_css_by(".a{color:red}", true, &late), "");
 }
 
 #[test]
@@ -436,7 +458,9 @@ fn a_large_hostile_page_is_dealt_with_in_bounded_time() {
         ("drawing", "<svg><g>".repeat(50_000)), ("formatting", "<b><i><u>".repeat(44_000)), ("tables", "<table><td>".repeat(36_000)),
         ("attrs", format!("<p {}>", (0..40_000).map(|i| format!("a{i}=1 ")).collect::<String>())),
         ("same attrs", format!("<p {}>", "a=1 ".repeat(100_000))),
-        ("css", format!("<style>{}</style>", ".a{color:red}".repeat(30_000))), ("brackets", format!("<p style='{}'>", "(".repeat(390_000))),
+        ("css", format!("<style>{}</style>", ".a{color:red}".repeat(15_000))), ("css too long", format!("<style>{}</style>", ".a{color:red}".repeat(30_000))),
+        ("css comment marks", format!("<style>.a{{content:'{}{}'}}</style>", "<!".repeat(60_000), "--".repeat(30_000))),
+        ("styled", "<p style='color:red;margin:0'>x</p>".repeat(11_000)), ("brackets", format!("<p style='{}'>", "(".repeat(390_000))),
         ("entities", "&amp;&lt;&#x41;&notanentity;".repeat(14_000)), ("comments", "<!-- x --><!x><?y>".repeat(22_000)),
         ("p in p", "<p><table><p>".repeat(30_000)), ("misnested", "<b><p></b></p>".repeat(28_000)), ("selects", "<select><option>".repeat(25_000)),
         ("fostered", "<table><div>".repeat(33_000)), ("unclosed quote", format!("<p title=\"{}", "<div>".repeat(79_000))),

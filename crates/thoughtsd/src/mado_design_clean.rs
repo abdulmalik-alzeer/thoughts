@@ -323,9 +323,9 @@ fn free_name(n: &str) -> bool {
         && n[5..].chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') && n.len() > 5
 }
 
-struct Writer { out: String, styles: Vec<String>, elements: usize }
+struct Writer<'c> { out: String, styles: Vec<String>, elements: usize, clock: &'c Clock }
 
-impl Writer {
+impl Writer<'_> {
     fn attr(&mut self, name: &str, value: &str) {
         self.out.push(' ');
         self.out.push_str(name);
@@ -344,7 +344,7 @@ impl Writer {
             if name.starts_with("on") || seen.contains(&name) { continue; }
             if !(HTML_ANY.contains(&name) || own.contains(&name) || free_name(name)) { continue; }
             let kept: Option<String> = match name {
-                "style" => Some(clean_css(value, false)).filter(|s| !s.trim().is_empty() && value.len() <= MAX_STYLE_ATTR),
+                "style" => (value.len() <= MAX_STYLE_ATTR).then(|| clean_css_by(value, false, self.clock)).filter(|s| !s.trim().is_empty()),
                 "href" => is_fragment(value).then(|| value.trim().to_string()),
                 "src" => is_data_image(value).then(|| value.trim().to_string()),
                 "dir" => matches!(value.to_ascii_lowercase().as_str(), "ltr" | "rtl" | "auto").then(|| value.to_ascii_lowercase()),
@@ -367,7 +367,7 @@ impl Writer {
             if name.to_ascii_lowercase().starts_with("on") || seen.contains(&name) { continue; }
             if !(SVG_ATTRS.contains(&name) || free_name(name)) { continue; }
             let kept = match name {
-                "style" => Some(clean_css(value, false)).filter(|s| !s.trim().is_empty() && value.len() <= MAX_STYLE_ATTR),
+                "style" => (value.len() <= MAX_STYLE_ATTR).then(|| clean_css_by(value, false, self.clock)).filter(|s| !s.trim().is_empty()),
                 "class" | "id" | "role" => (value.len() <= MAX_ATTR).then(|| value.to_string()),
                 n if free_name(n) => (value.len() <= MAX_ATTR).then(|| value.to_string()),
                 "d" | "points" => (value.len() <= 60_000 && svg_value_ok_long(value)).then(|| value.to_string()),
@@ -387,7 +387,7 @@ impl Writer {
         match &node.data {
             Data::Text(t) => esc_text(&t.borrow(), &mut self.out),
             Data::Element { name, attrs, .. } => {
-                if depth > MAX_DEPTH || self.elements >= MAX_ELEMENTS { return; }
+                if depth > MAX_DEPTH || self.elements >= MAX_ELEMENTS || self.clock.late() { return; }
                 let local: &str = &name.local;
                 if name.ns == ns!(svg) {
                     // Only inside a drawing that starts with <svg>, and only the listed shapes.
@@ -404,7 +404,7 @@ impl Writer {
                 } else if name.ns == ns!(html) && !in_svg {
                     if local == "style" {
                         let css: String = node.children.borrow().iter().filter_map(|c| match &c.data { Data::Text(t) => Some(t.borrow().to_string()), _ => None }).collect();
-                        let css = clean_css(&css, true);
+                        let css = clean_css_by(&css, true, self.clock);
                         if !css.trim().is_empty() { self.styles.push(css); }
                         return;
                     }
@@ -471,11 +471,13 @@ fn clean_within(html: &str, time: std::time::Duration) -> Result<String, Refused
         parser.process(StrTendril::from_slice(&html[at..end]));
         at = end;
         if let Some(why) = stop.get() { return Err(why); }
-        if at < html.len() && started.elapsed() > time { return Err(Refused::TooSlow); }
+        if started.elapsed() > time { return Err(Refused::TooSlow); }
     }
     let document = parser.finish();
     if let Some(why) = stop.get() { return Err(why); }
-    let mut w = Writer { out: String::new(), styles: vec![], elements: 0 };
+    // Writing the page out and reading its CSS run on the same clock as the parsing did.
+    let clock = Clock::until(started + time);
+    let mut w = Writer { out: String::new(), styles: vec![], elements: 0, clock: &clock };
     let root = child_named(&document, "html");
     let (head, body) = match &root { Some(r) => (child_named(r, "head"), child_named(r, "body")), None => (None, None) };
 
@@ -489,7 +491,7 @@ fn clean_within(html: &str, time: std::time::Duration) -> Result<String, Refused
 
     let mut open = String::from("<body");
     if let Some(body) = &body {
-        let mut bw = Writer { out: String::new(), styles: vec![], elements: 0 };
+        let mut bw = Writer { out: String::new(), styles: vec![], elements: 0, clock: &clock };
         let mut attrs: Vec<Attribute> = match &body.data { Data::Element { attrs, .. } => attrs.borrow().clone(), _ => vec![] };
         // The page's language and direction are usually written on <html>.
         if let Some(Data::Element { attrs: on_root, .. }) = root.as_ref().map(|r| &r.data) {
@@ -513,6 +515,8 @@ fn clean_within(html: &str, time: std::time::Duration) -> Result<String, Refused
     out.push_str(&open);
     out.push_str(&w.out);
     out.push_str("</body>");
+    // Out of time anywhere on the way: a page written half is not shown.
+    if clock.late_now() { return Err(Refused::TooSlow); }
     Ok(out)
 }
 
@@ -755,8 +759,10 @@ fn css_skip_block(toks: &[Token], mut i: usize, open: char) -> (usize, bool) {
 
 /// One list of rules or declarations, from token `i` to the `}` that ends the list (or the end):
 /// each item runs to its `;` or to the end of its `{…}`. Returns the index after the list.
-fn css_items(src: &str, toks: &[Token], mut i: usize, out: &mut String, depth: usize, blocks: bool) -> usize {
+fn css_items(src: &str, toks: &[Token], mut i: usize, out: &mut String, depth: usize, blocks: bool, clock: &Clock) -> usize {
     loop {
+        // Out of time: nothing more is read (the caller then shows none of it).
+        if clock.late() { return toks.len(); }
         let first = i;
         let mut bad = false;
         loop {
@@ -783,7 +789,7 @@ fn css_items(src: &str, toks: &[Token], mut i: usize, out: &mut String, depth: u
                     } else {
                         out.push_str(&src[toks[first].start..t.start]);
                         out.push('{');
-                        i = css_items(src, toks, i + 1, out, depth + 1, blocks);
+                        i = css_items(src, toks, i + 1, out, depth + 1, blocks, clock);
                         out.push('}');
                     }
                     break;
@@ -796,32 +802,52 @@ fn css_items(src: &str, toks: &[Token], mut i: usize, out: &mut String, depth: u
     }
 }
 
+/// The longest style sheet or `style` attribute read at all.
+const MAX_CSS: usize = 200_000;
+
+/// The moment by which a page must be done, asked now and then (asking costs a system call).
+struct Clock { end: std::time::Instant, asked: Cell<u32>, over: Cell<bool> }
+impl Clock {
+    fn until(end: std::time::Instant) -> Clock { Clock { end, asked: Cell::new(0), over: Cell::new(false) } }
+    fn late(&self) -> bool {
+        if self.over.get() { return true; }
+        self.asked.set(self.asked.get().wrapping_add(1));
+        if self.asked.get() % 64 == 0 && std::time::Instant::now() > self.end { self.over.set(true); }
+        self.over.get()
+    }
+    fn late_now(&self) -> bool {
+        if std::time::Instant::now() > self.end { self.over.set(true); }
+        self.over.get()
+    }
+}
+
 /// CSS with everything that loads or runs something left out. `blocks`: a style sheet (rules with
 /// `{…}`); otherwise the declarations of a `style` attribute, where a block is not expected and is
 /// left out. A declaration or rule is kept exactly as written, or not at all.
 pub fn clean_css(css: &str, blocks: bool) -> String {
+    clean_css_by(css, blocks, &Clock::until(std::time::Instant::now() + MAX_TIME))
+}
+
+/// The same, within a page's time. Nothing here changes the text it keeps: every step is one
+/// pass over it, and whatever cannot be shown as written is not shown.
+fn clean_css_by(css: &str, blocks: bool, clock: &Clock) -> String {
+    if css.len() > MAX_CSS || clock.late_now() { return String::new(); }
     // What the standard does before reading: one kind of line end, no NUL. The browser is then
     // given this very text, so both read the same characters.
     let src = css.replace("\r\n", "\n").replace(['\r', '\u{c}'], "\n").replace('\0', "\u{fffd}");
     // A backslash as the very last character would escape whatever is written after it.
     let src = src.trim_end_matches('\\').to_string();
     let toks = css_tokens(&src);
+    if clock.late_now() { return String::new(); }
     let mut out = String::new();
-    css_items(&src, &toks, 0, &mut out, 0, blocks);
-    // The text sits inside <style>…</style>: it can never hold the end of that element, nor the
-    // start of a comment. Deletions first and until nothing is left to delete (taking `<!--` out
-    // of `<<!--/style>` makes a new `</`), the escaping of `</` last, when nothing moves any more.
-    let mut out = out;
-    loop {
-        let next = out.replace("<!--", "").replace("-->", "");
-        if next == out { break; }
-        out = next;
-    }
-    let out = out.replace("</", "<\\/");
-    // Then no `<` may be followed by `/`, `!`, `?` or a letter anywhere (nothing that could start a
-    // tag or a comment, should the element ever end early), or none of it is shown.
+    css_items(&src, &toks, 0, &mut out, 0, blocks, clock);
+    if clock.late_now() { return String::new(); }
+    // The text sits inside <style>…</style>: it must never hold the end of that element, nor the
+    // start or end of a comment or of any tag. Nothing is taken out or rewritten to make it so (a
+    // deletion can form the very thing it removes): a sheet with `<` before `/`, `!`, `?` or a
+    // letter, or with `-->`, is not shown at all. A mock-up's styles have no use for them.
     let b = out.as_bytes();
-    if b.windows(2).any(|w| w[0] == b'<' && (matches!(w[1], b'/' | b'!' | b'?') || w[1].is_ascii_alphabetic())) || out.to_ascii_lowercase().contains("</style") { return String::new(); }
+    if b.windows(2).any(|w| w[0] == b'<' && (matches!(w[1], b'/' | b'!' | b'?') || w[1].is_ascii_alphabetic())) || out.contains("-->") { return String::new(); }
     // A second, blunt look at the result, in case this reading and the browser's ever disagree:
     // if anything forbidden can still be read out of it, none of it is shown.
     if css_still_bad(&out) { return String::new(); }
