@@ -172,7 +172,7 @@ pub fn assistant_styles(text: &str) -> (Vec<Value>, usize) {
         (!s.is_empty() && s.chars().count() <= max).then_some(s)
     };
     for c in list {
-        let id = c.get("id").and_then(Value::as_str).filter(|id| crate::mado_design::shim::valid_id(id) && !id.starts_with("app-"));
+        let id = c.get("id").and_then(Value::as_str).filter(|id| crate::mado_design::valid_id(id) && !id.starts_with("app-"));
         let name = plain(c.get("name"), 80);
         let description = c.get("description").map_or(Some(String::new()), |d| plain(Some(d), 400).or_else(|| d.as_str().filter(|s| s.trim().is_empty()).map(|_| String::new())));
         let tokens = c.get("tokens").and_then(|t| Tokens::parse(t).ok());
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(styles.len(), 8);
         let mut ids = std::collections::HashSet::new();
         for (id, t) in &styles {
-            assert!(crate::mado_design::shim::valid_id(id) && id.starts_with("app-") && ids.insert(id.clone()), "{id}");
+            assert!(crate::mado_design::valid_id(id) && id.starts_with("app-") && ids.insert(id.clone()), "{id}");
             assert_eq!(&Tokens::parse(&t.json()).unwrap_or_else(|e| panic!("{id}: {e}")), t, "{id}");
             let c = &t.color;
             // WCAG AA for running text: 4.5 to 1.

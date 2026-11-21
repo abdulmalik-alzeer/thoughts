@@ -22,7 +22,7 @@ contract in TypeScript. If you must deviate, say so in your report; do not silen
 
 | File | Written by | What |
 |---|---|---|
-| `state.json` | daemon only | `MadoState` |
+| `state.json` | daemon only (the core, `mado.rs`) | `MadoState`; `style` is the style picked at the design step, set through `mado::set_style` (the design routes never write this file) |
 | `brief.md` | step `brief` | the project brief from the interview |
 | `spec.md` | step `spec` | product spec. Features are headings `### F<n> — <name>` (ids `F1`, `F2`, …) |
 | `flow.graph.json` | step `spec` | `GraphDoc` kind `flow`: screens (`kind: "screen"`), decisions, actions, journeys as edges |
@@ -123,9 +123,9 @@ Core (`mado.rs`):
 - `GET /review` → `Review`
 
 Design (`mado_design.rs`):
-- `GET /design/styles` → `{styles: StyleCandidate[], picked?: string}` (the app's own examples first, then the assistant's)
-- `POST /design/style {id}` picks one and writes `design/tokens.json`
-- `GET /design/tokens` · `PUT /design/tokens DesignTokens` (direct, no run)
+- `GET /design/styles` → `{styles: StyleCandidate[], picked?: string, dropped: number}` (the app's own examples first, then the assistant's; `picked` is `state.style`)
+- `POST /design/style {id}` → `{picked, tokens}`: writes `design/tokens.json` and records the pick in `state.json` `style` through the core (`mado::set_style`)
+- `GET /design/tokens` (`null` before a pick) · `PUT /design/tokens DesignTokens` (direct, no run). Both changes are refused (409) while the design step is approved, as the core's state says.
 - `GET /design/screens` → `[{id, label, hasMock}]` · `GET /design/screens/:id` → `{html}` (cleaned, see below)
 
 Build (`mado_build.rs`):

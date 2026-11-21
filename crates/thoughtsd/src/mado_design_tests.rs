@@ -14,6 +14,8 @@ async fn fixture() -> Fixture {
     let project = crate::paths::canonical(&root).unwrap();
     let id = uuid::Uuid::new_v4().to_string();
     st.settings.write().await.projects.push(crate::settings::Project { id: id.clone(), name: "Shop".into(), path: project.to_string_lossy().into() });
+    // Planning started: the core's own state (a state file the daemon did not write is not believed).
+    crate::mado::save_state(&id, &project.join("mado"), &crate::mado::MadoState::default(), false).unwrap();
     Fixture { st, id, mado: project.join("mado"), project }
 }
 
@@ -24,7 +26,13 @@ impl Fixture {
         std::fs::write(p, text).unwrap();
     }
     fn read(&self, rel: &str) -> Option<String> { std::fs::read_to_string(self.mado.join(rel)).ok() }
-    fn state(&self, design: &str) { self.put("state.json", &json!({"version": 1, "steps": {"design": {"status": design}}}).to_string()); }
+    /// The core's state with the design step at `design`, saved the way the core saves it.
+    fn state(&self, design: &str) {
+        let mut st = crate::mado::MadoState::default();
+        st.steps.get_mut("design").unwrap().status = design.into();
+        crate::mado::save_state(&self.id, &self.mado, &st, false).unwrap();
+    }
+    fn style(&self) -> Option<String> { crate::mado::load_state(&self.id, &self.mado, false).unwrap().unwrap().style }
     fn s(&self) -> S { State(self.st.clone()) }
     fn p(&self) -> UrlPath<String> { UrlPath(self.id.clone()) }
 }
@@ -50,7 +58,7 @@ async fn only_a_linked_project_with_a_plan_is_answered() {
         assert_eq!(answer(screen(f.s(), UrlPath((id.into(), "home".into()))).await).await.0, 404, "{id}");
     }
     // A linked project whose plan was never started.
-    std::fs::remove_dir(&f.mado).unwrap();
+    std::fs::remove_dir_all(&f.mado).unwrap();
     for r in [list_styles(f.s(), f.p()).await, get_tokens(f.s(), f.p()).await, screens(f.s(), f.p()).await,
         put_tokens(f.s(), f.p(), Json(good_tokens())).await, pick(f.s(), f.p(), Json(json!({"id": "app-calm"}))).await] {
         assert_eq!(answer(r).await.0, 404);
@@ -105,17 +113,20 @@ async fn picking_a_style_writes_its_settings_and_tells_the_window() {
     assert_eq!((status, body["picked"].as_str()), (200, Some("harbour")));
     let saved: Value = serde_json::from_str(&f.read("design/tokens.json").unwrap()).unwrap();
     assert_eq!(saved, styles::app_tokens()[3].1.json());
-    assert_eq!(events.try_recv().unwrap(), json!({"type": "mado", "projectId": f.id, "what": "design"}));
+    let seen: Vec<Value> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    assert!(seen.contains(&json!({"type": "mado", "projectId": f.id, "what": "design"})), "{seen:?}");
     assert_eq!(answer(list_styles(f.s(), f.p()).await).await.1["picked"], "harbour");
+    // The pick lives in the core's state (one home), not in a file of the design step's own.
+    assert_eq!(f.style().as_deref(), Some("harbour"));
+    assert!(f.read("design/picked.json").is_none());
     assert_eq!(answer(get_tokens(f.s(), f.p()).await).await.1, saved);
 
     // One of the app's own.
     assert_eq!(answer(pick(f.s(), f.p(), Json(json!({"id": "app-luxury"}))).await).await.0, 200);
     assert_eq!(answer(list_styles(f.s(), f.p()).await).await.1["picked"], "app-luxury");
-    // The core's record wins when it keeps one.
+    assert_eq!(f.style().as_deref(), Some("app-luxury"));
+    // A state file the daemon did not write is not believed: its style is not shown.
     f.put("state.json", &json!({"version": 1, "steps": {}, "style": "harbour"}).to_string());
-    assert_eq!(answer(list_styles(f.s(), f.p()).await).await.1["picked"], "harbour");
-    f.put("state.json", &json!({"version": 1, "steps": {}, "style": "../../etc"}).to_string());
     assert_eq!(answer(list_styles(f.s(), f.p()).await).await.1.get("picked"), None);
 }
 
@@ -157,8 +168,10 @@ async fn settings_are_validated_saved_whole_and_closed_while_approved() {
         f.state(status);
         assert_eq!(answer(put_tokens(f.s(), f.p(), Json(mine.clone())).await).await.0, 200, "{status}");
     }
-    // The state file is exactly what the core wrote.
-    assert_eq!(f.read("state.json").unwrap(), json!({"version": 1, "steps": {"design": {"status": "drafting"}}}).to_string());
+    // The state file is exactly what the core wrote: saving settings does not touch it.
+    let before = f.read("state.json").unwrap();
+    assert_eq!(answer(put_tokens(f.s(), f.p(), Json(mine.clone())).await).await.0, 200);
+    assert_eq!(f.read("state.json").unwrap(), before);
 
     // What a run left in the file is not handed on unchecked.
     f.put("design/tokens.json", "{\"color\": \"</style><script>alert(1)</script>\"}");
@@ -172,14 +185,18 @@ async fn settings_are_validated_saved_whole_and_closed_while_approved() {
 async fn screens_come_from_the_flow_and_mock_ups_come_cleaned() {
     let f = fixture().await;
     assert_eq!(answer(screens(f.s(), f.p()).await).await, (200, json!([])));
+    // A flow that is not valid (bad ids, a twin) is not used at all: no screens from it.
     f.put("flow.graph.json", &json!({"version": 1, "kind": "flow", "title": "Flow", "edges": [], "nodes": [
         {"id": "home", "label": "Home", "kind": "screen"},
-        {"id": "pay", "label": "Pay\u{0007}ment", "kind": "screen"},
-        {"id": "is-member", "label": "Member?", "kind": "decision"},
         {"id": "../../secret", "label": "Path", "kind": "screen"},
-        {"id": "Home", "label": "Upper", "kind": "screen"},
         {"id": "home", "label": "Twice", "kind": "screen"},
-        {"id": "empty", "kind": "screen"},
+    ]}).to_string());
+    assert_eq!(answer(screens(f.s(), f.p()).await).await, (200, json!([])));
+    f.put("flow.graph.json", &json!({"version": 1, "kind": "flow", "title": "Flow", "edges": [], "nodes": [
+        {"id": "home", "label": "Home", "kind": "screen"},
+        {"id": "pay", "label": "Payment", "kind": "screen"},
+        {"id": "is-member", "label": "Member?", "kind": "decision"},
+        {"id": "empty", "label": "empty", "kind": "screen"},
     ]}).to_string());
     f.put("design/screens/home.html", "<!doctype html><title>t</title><style>h1{color:var(--mado-color-primary);background:url(//evil/x)}</style>\
         <h1 onclick=\"alert(1)\">Home</h1><script>alert(1)</script><img src=\"https://evil.example/p.gif\"><a href=\"javascript:alert(1)\">go</a>");
@@ -219,7 +236,7 @@ async fn a_link_leading_out_of_the_plan_folder_is_refused() {
     std::fs::write(outside.join("secret.html"), "<p>secret</p>").unwrap();
     std::fs::write(outside.join("screens/away.html"), "<p>secret</p>").unwrap();
     std::fs::write(outside.join("tokens.json"), good_tokens().to_string()).unwrap();
-    f.put("flow.graph.json", &json!({"nodes": [{"id": "home", "label": "Home", "kind": "screen"}, {"id": "away", "label": "Away", "kind": "screen"}]}).to_string());
+    f.put("flow.graph.json", &json!({"version": 1, "kind": "flow", "title": "Flow", "edges": [], "nodes": [{"id": "home", "label": "Home", "kind": "screen"}, {"id": "away", "label": "Away", "kind": "screen"}]}).to_string());
 
     // A mock-up that is a link to a file outside.
     std::fs::create_dir_all(f.mado.join("design/screens")).unwrap();

@@ -452,7 +452,7 @@ fn state_seen(project_id: &str) -> Option<String> {
 }
 
 /// A state.json the daemon did not write: nothing past a draft is believed. Steps with a run go
-/// back to review (their files stay), the review and the build are closed, chats and the plan hash
+/// back to review (their files stay), the review and the build are closed, chats, the picked style and the plan hash
 /// are forgotten.
 pub fn distrust(st: &mut MadoState) {
     for (k, e) in st.steps.iter_mut() {
@@ -463,6 +463,7 @@ pub fn distrust(st: &mut MadoState) {
         } else { e.status = "locked".into(); }
     }
     st.plan_hash = None;
+    st.style = None;
     normalize(st);
 }
 
@@ -511,6 +512,13 @@ pub async fn with_state<T>(state: &AppState, project_id: &str, f: impl FnOnce(&m
     drop(_held);
     tell(state, project_id, "state").await;
     Ok(out)
+}
+
+/// The style picked at the design step, kept in `state.json` (`style`): the design step calls this,
+/// so the core stays the only writer of `state.json`. `id` must be a well-formed id.
+pub async fn set_style(state: &AppState, project_id: &str, id: &str) -> anyhow::Result<()> {
+    if !crate::mado_validate::id_ok(id) { return Err(crate::tr::err("mado.bad_request", &[])); }
+    with_state(state, project_id, |st| { st.style = Some(id.to_string()); Ok(()) }).await
 }
 
 // ---------- reading what a run wrote ----------

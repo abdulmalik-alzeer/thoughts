@@ -10,8 +10,10 @@
 //! access like every other guard; validation and cleaning do not, because they are what makes the
 //! files drawable at all.
 //!
-//! This module never writes `state.json`. It reads it to refuse direct changes while the step is
-//! approved. Which style was picked is kept in `design/picked.json` (see `picked`).
+//! This module never writes `state.json`: it reads the core's state (`mado::load_state`, which
+//! distrusts a state file the daemon did not write) to refuse direct changes while the step is
+//! approved, and records the picked style through the core (`mado::set_style`). Paths are resolved
+//! by the core's own `mado::resolve_in` / `read_in` / `write_in`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -23,13 +25,11 @@ use crate::state::AppState;
 
 #[path = "mado_design_clean.rs"]
 pub mod clean;
-#[path = "mado_design_shim.rs"]
-pub mod shim;
 #[path = "mado_design_styles.rs"]
 pub mod styles;
 
 use clean::clean;
-use shim::{self as core, valid_id};
+use crate::mado as core;
 use styles::{app_styles, assistant_styles, Tokens};
 
 pub use styles::{font_names, FONTS};
@@ -45,7 +45,6 @@ const MAX_TOKENS: u64 = 16 * 1024;
 
 const STYLES: &str = "design/styles.json";
 const TOKENS: &str = "design/tokens.json";
-const PICKED: &str = "design/picked.json";
 
 /// One change to a project's design files at a time.
 static WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -59,10 +58,44 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/mado/:project/design/screens/:id", get(screen))
 }
 
+/// Graph, screen and style ids (the contract's pattern).
+pub fn valid_id(id: &str) -> bool { crate::mado_validate::id_ok(id) }
+
+fn full() -> bool { crate::full_access::on() }
+
+/// `<project>/mado` of a linked, trusted project (trust yields to full access), which must exist.
+async fn mado_dir(state: &AppState, project_id: &str) -> anyhow::Result<std::path::PathBuf> {
+    let project = core::project_dir(state, project_id).await?;
+    if !full() { crate::trust::require(&project)?; }
+    let mado = core::mado_dir_of(&project, full())?;
+    if !mado.is_dir() { return Err(crate::tr::err("mado.design.not_started", &[])); }
+    Ok(mado)
+}
+
+/// A file of the plan folder as text, refused above `max` bytes. `Ok(None)`: no such file.
+fn read_text(mado: &Path, rel: &str, max: u64) -> anyhow::Result<Option<String>> {
+    Ok(core::read_in(mado, rel, full(), max as usize)?.map(|b| String::from_utf8_lossy(&b).into_owned()))
+}
+
+/// Is `rel` an ordinary file really inside the plan folder?
+fn has_file(mado: &Path, rel: &str) -> bool {
+    core::resolve_in(mado, rel, full()).map_or(false, |p| std::fs::symlink_metadata(&p).map_or(false, |m| m.is_file()))
+}
+
+/// The core's state of the project, as the core believes it (`None` before planning started).
+fn core_state(project_id: &str, mado: &Path) -> Option<core::MadoState> {
+    core::load_state(project_id, mado, full()).ok().flatten()
+}
+
+/// The flow's screens, in its order (none while the flow is missing or not valid).
+fn flow_screens(mado: &Path) -> Vec<(String, String)> {
+    core::read_graph(mado, "flow.graph.json", "flow", full()).ok().flatten().map(|g| core::screens_of(&g)).unwrap_or_default()
+}
+
 /// The app's examples first, then the assistant's valid candidates; how many were left out.
 fn candidates(mado: &Path) -> (Vec<Value>, usize) {
     let mut all = app_styles();
-    let dropped = match core::read_text(mado, STYLES, MAX_STYLES) {
+    let dropped = match read_text(mado, STYLES, MAX_STYLES) {
         Ok(Some(text)) => { let (mine, dropped) = assistant_styles(&text); all.extend(mine); dropped }
         Ok(None) => 0,
         // Too large, or not a file inside the folder: nothing of it is shown.
@@ -71,58 +104,52 @@ fn candidates(mado: &Path) -> (Vec<Value>, usize) {
     (all, dropped)
 }
 
-/// The id of the picked style: the core's record (`state.json`, `style`) when it keeps one,
-/// otherwise the design step's own note beside the settings. An id is only ever an id.
-fn picked(mado: &Path) -> Option<String> {
-    let from_state = core::state_json(mado).get("style").and_then(Value::as_str).map(str::to_string);
-    from_state.or_else(|| {
-        let text = core::read_text(mado, PICKED, 1024).ok().flatten()?;
-        serde_json::from_str::<Value>(&text).ok()?.get("id")?.as_str().map(str::to_string)
-    }).filter(|id| valid_id(id))
+/// The id of the picked style: the core's record (`state.json`, `style`). An id is only ever an id.
+fn picked(project_id: &str, mado: &Path) -> Option<String> {
+    core_state(project_id, mado)?.style.filter(|id| valid_id(id))
 }
 
 fn write_json(mado: &Path, rel: &str, v: &Value) -> anyhow::Result<()> {
-    let path = core::place_for_write(mado, rel)?;
     let mut text = serde_json::to_string_pretty(v)?;
     text.push('\n');
-    crate::paths::write_atomic(&path, text.as_bytes(), false)?;
-    Ok(())
+    core::write_in(mado, rel, text.as_bytes(), full())
 }
 
 /// Direct changes are closed while the step is approved: the user reopens it first, so that what
 /// was approved is what gets built.
-fn require_open(mado: &Path) -> anyhow::Result<()> {
-    if core::design_approved(mado) { return Err(crate::tr::err("mado.design.approved", &[])); }
+fn require_open(project_id: &str, mado: &Path) -> anyhow::Result<()> {
+    let approved = core_state(project_id, mado).and_then(|s| s.steps.get("design").map(|e| e.status == "approved")).unwrap_or(false);
+    if approved { return Err(crate::tr::err("mado.design.approved", &[])); }
     Ok(())
 }
 
 /// `GET /design/styles` → `{styles: StyleCandidate[], picked?: id, dropped: n}`.
 async fn list_styles(State(st): S, UrlPath(project): UrlPath<String>) -> R {
-    let mado = core::mado_dir(&st, &project).await?;
+    let mado = mado_dir(&st, &project).await?;
     let (styles, dropped) = candidates(&mado);
     let mut out = json!({"styles": styles, "dropped": dropped});
-    if let Some(id) = picked(&mado) { out["picked"] = json!(id); }
+    if let Some(id) = picked(&project, &mado) { out["picked"] = json!(id); }
     Ok(Json(out))
 }
 
 /// `POST /design/style {id}`: pick a style; its settings become `design/tokens.json`.
 async fn pick(State(st): S, UrlPath(project): UrlPath<String>, Json(body): Json<Value>) -> R {
     let id = body.get("id").and_then(Value::as_str).filter(|id| valid_id(id)).ok_or_else(|| crate::tr::err("mado.design.bad_id", &[]))?.to_string();
-    let mado = core::mado_dir(&st, &project).await?;
+    let mado = mado_dir(&st, &project).await?;
     let _g = WRITE.lock().await;
-    require_open(&mado)?;
+    require_open(&project, &mado)?;
     let (all, _) = candidates(&mado);
     let style = all.into_iter().find(|s| s["id"] == id.as_str()).ok_or_else(|| crate::tr::err("mado.design.no_style", &[]))?;
     write_json(&mado, TOKENS, &style["tokens"])?;
-    write_json(&mado, PICKED, &json!({"version": 1, "id": id}))?;
-    core::tell(&st, &project, "design");
+    core::set_style(&st, &project, &id).await?;
+    core::tell(&st, &project, "design").await;
     Ok(Json(json!({"picked": id, "tokens": style["tokens"]})))
 }
 
 /// `GET /design/tokens` → `DesignTokens`, or `null` while no style has been picked.
 async fn get_tokens(State(st): S, UrlPath(project): UrlPath<String>) -> R {
-    let mado = core::mado_dir(&st, &project).await?;
-    let Some(text) = core::read_text(&mado, TOKENS, MAX_TOKENS)? else { return Ok(Json(Value::Null)) };
+    let mado = mado_dir(&st, &project).await?;
+    let Some(text) = read_text(&mado, TOKENS, MAX_TOKENS)? else { return Ok(Json(Value::Null)) };
     let tokens = serde_json::from_str::<Value>(&text).map_err(|e| e.to_string()).and_then(|v| Tokens::parse(&v))
         .map_err(|why| crate::tr::err_detail("mado.design.saved_bad", &[], why))?;
     Ok(Json(tokens.json()))
@@ -131,11 +158,11 @@ async fn get_tokens(State(st): S, UrlPath(project): UrlPath<String>) -> R {
 /// `PUT /design/tokens DesignTokens`: the user's own change, saved at once without a run.
 async fn put_tokens(State(st): S, UrlPath(project): UrlPath<String>, Json(body): Json<Value>) -> R {
     let tokens = Tokens::parse(&body).map_err(|why| crate::tr::err_detail("mado.design.bad_tokens", &[], why))?;
-    let mado = core::mado_dir(&st, &project).await?;
+    let mado = mado_dir(&st, &project).await?;
     let _g = WRITE.lock().await;
-    require_open(&mado)?;
+    require_open(&project, &mado)?;
     write_json(&mado, TOKENS, &tokens.json())?;
-    core::tell(&st, &project, "design");
+    core::tell(&st, &project, "design").await;
     Ok(Json(tokens.json()))
 }
 
@@ -143,10 +170,10 @@ fn mock_path(id: &str) -> String { format!("design/screens/{id}.html") }
 
 /// `GET /design/screens` → `[{id, label, hasMock}]`, the flow's screens in its order.
 async fn screens(State(st): S, UrlPath(project): UrlPath<String>) -> R {
-    let mado = core::mado_dir(&st, &project).await?;
-    let list: Vec<Value> = core::screens(&mado).into_iter().map(|s| {
-        let has = matches!(core::inside(&mado, &mock_path(&s.id)), Ok(Some(_)));
-        json!({"id": s.id, "label": s.label, "hasMock": has})
+    let mado = mado_dir(&st, &project).await?;
+    let list: Vec<Value> = flow_screens(&mado).into_iter().map(|(id, label)| {
+        let has = has_file(&mado, &mock_path(&id));
+        json!({"id": id, "label": label, "hasMock": has})
     }).collect();
     Ok(Json(json!(list)))
 }
@@ -154,8 +181,8 @@ async fn screens(State(st): S, UrlPath(project): UrlPath<String>) -> R {
 /// `GET /design/screens/:id` → `{html}`: the mock-up, cleaned. Never the file as written.
 async fn screen(State(st): S, UrlPath((project, id)): UrlPath<(String, String)>) -> R {
     if !valid_id(&id) { return Err(crate::tr::err("mado.design.bad_id", &[]).into()); }
-    let mado = core::mado_dir(&st, &project).await?;
-    let raw = core::read_text(&mado, &mock_path(&id), MAX_MOCK)?.ok_or_else(|| crate::tr::err("mado.design.no_mock", &[]))?;
+    let mado = mado_dir(&st, &project).await?;
+    let raw = read_text(&mado, &mock_path(&id), MAX_MOCK)?.ok_or_else(|| crate::tr::err("mado.design.no_mock", &[]))?;
     // Parsing a large page takes a moment: not on the threads that answer everything else.
     // A page that passes a limit while being read is not shown at all.
     let html = tokio::task::spawn_blocking(move || clean(&raw)).await?.map_err(|why| crate::tr::err_detail("mado.design.too_complex", &[], format!("{why:?}")))?;
