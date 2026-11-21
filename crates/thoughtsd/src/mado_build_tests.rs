@@ -816,3 +816,15 @@ async fn git_settings_read_from_elsewhere_are_refused_not_followed() {
     let _ = stop(&p.st, &p.pid).await;
     p.done();
 }
+
+#[test]
+fn a_build_runs_shell_drops_keys_and_tokens_before_each_command() {
+    let script = crate::claude::BUILD_SHELL_SCRUB;
+    let out = std::process::Command::new("/bin/bash").arg("-c").arg(format!("{script}\nenv"))
+        .env("ANTHROPIC_API_KEY", "k").env("CLAUDE_CODE_OAUTH_TOKEN", "t").env("GITHUB_TOKEN", "g").env("THOUGHTS_HOME", "h").env("db_password", "p")
+        .env("KEEP_ME", "yes").output().unwrap();
+    let env = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success());
+    for gone in ["ANTHROPIC_API_KEY=", "CLAUDE_CODE_OAUTH_TOKEN=", "GITHUB_TOKEN=", "THOUGHTS_HOME=", "db_password="] { assert!(!env.lines().any(|l| l.starts_with(gone)), "{gone}"); }
+    assert!(env.lines().any(|l| l == "KEEP_ME=yes") && env.lines().any(|l| l.starts_with("PATH=")));
+}

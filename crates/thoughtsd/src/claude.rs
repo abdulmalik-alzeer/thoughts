@@ -1344,6 +1344,12 @@ enum Passed<'a> { Inline(&'a str), File(&'a Path) }
 /// Short-lived private files handed to one assistant run (its rules, and on Windows its extra
 /// instructions). They are removed when this is dropped: when the run is over, could not start,
 /// or is cut off by the daemon stopping.
+/// Run before each shell command of a `mado-build` run: every variable that carries a sign-in, a key,
+/// a token, a password or the app's own settings is unset (the assistant itself keeps them).
+pub const BUILD_SHELL_SCRUB: &str = "for __thoughts_v in $(env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p'); do\n\
+  case \"$__thoughts_v\" in ANTHROPIC_*|CLAUDE_CODE_OAUTH*|THOUGHTS_*|*TOKEN*|*Token*|*token*|*KEY*|*Key*|*key*|*SECRET*|*Secret*|*secret*|*PASSWORD*|*Password*|*password*) unset \"$__thoughts_v\" 2>/dev/null;; esac\n\
+done\nunset __thoughts_v\n";
+
 #[derive(Default)]
 struct TempFiles(Vec<PathBuf>);
 
@@ -2077,6 +2083,12 @@ pub async fn start_run(
         None => { c.args(profile_flags(&prof, &help)); }
     }
     provider.apply(&mut c);
+    // A build task's own commands do not see the sign-in or any key: Claude Code reads its own
+    // environment, and runs this script before each of its shell commands (`CLAUDE_ENV_FILE`).
+    if kind == "mado-build" && !full {
+        let f = temp.add(&tmp_dir, "bash-env.sh", BUILD_SHELL_SCRUB)?;
+        c.env("CLAUDE_ENV_FILE", f);
+    }
     c.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
