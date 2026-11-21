@@ -109,13 +109,23 @@
     if (await store.sendChanges(step, note)) { note = ''; showNote = false; side = 'chat'; toast(t('mado.act.sent'), { kind: 'success' }); }
   }, 'mado.act.sendFailed');
   async function approve() {
+    if (busy) return;
     if (changes > 0 && !(await confirmDialog({ title: t('mado.act.unsentTitle'), body: tn('mado.act.unsentBody', changes), confirmLabel: t('mado.act.approveAnyway') }))) return;
-    if (step === 'review') {
-      const cmds = store.review?.commands ?? [];
-      const ok = await confirmDialog({ title: t('mado.act.approveReviewTitle'), body: t('mado.review.commandsWarn'), list: cmds.slice(0, 40), note: cmds.length > 40 ? tn('mado.act.moreCommands', cmds.length - 40) : undefined, confirmLabel: t('mado.act.approveReview') });
-      if (!ok) return;
-    }
+    if (step === 'review') return approveReview();
     act('approve', async () => { await store.approve(step); toast(t('mado.act.approved', { step: t(`mado.step.${step}`) }), { kind: 'success' }); }, 'mado.act.approveFailed');
+  }
+  /** The review is approved as it is NOW: fetched again, every command shown, and the approval
+   *  names that very plan — the service refuses it if the plan changed in between. */
+  function approveReview() {
+    return act('approve', async () => {
+      const shown = await store.freshReview();
+      if (!shown || !canApprove('review', store.status('review'), shown)) { toast(t('mado.act.fixFirst'), { kind: 'error' }); return; }
+      const ok = await confirmDialog({ title: t('mado.act.approveReviewTitle'), body: t('mado.review.commandsWarn'), list: [...shown.commands], note: tn('mado.review.commandCount', shown.commands.length), confirmLabel: t('mado.act.approveReview') });
+      if (!ok) return;
+      const said = await store.approveReview(shown);
+      if (said === 'approved') toast(t('mado.act.approved', { step: t('mado.step.review') }), { kind: 'success' });
+      else toast(t(said === 'changed' ? 'mado.act.planChanged' : 'mado.act.fixFirst'), { kind: 'error' });
+    }, 'mado.act.approveFailed');
   }
   const reopen = () => act('reopen', () => store.reopen(step), 'mado.act.reopenFailed');
   const runLabel = $derived(step === 'brief' && status === 'ready' && !chatId ? 'mado.act.interview' : status === 'ready' ? 'mado.act.run' : 'mado.act.rerun');

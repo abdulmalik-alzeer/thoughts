@@ -42,7 +42,8 @@ export function madoApi(projectId: string) {
     plan: () => api<PlanDoc>(`${base}/plan`),
 
     run: (s: StepId, note?: string) => post<{ chatId: string }>(`${base}/steps/${step(s)}/run`, note?.trim() ? { note: note.trim() } : {}),
-    approve: (s: StepId) => post<unknown>(`${base}/steps/${step(s)}/approve`),
+    /** Approving the review names the plan that was shown (`planHash`): the service refuses if the plan changed since. */
+    approve: (s: StepId, planHash?: string) => post<unknown>(`${base}/steps/${step(s)}/approve`, s === 'review' ? { planHash: String(planHash ?? '') } : {}),
     reopen: (s: StepId) => post<unknown>(`${base}/steps/${step(s)}/reopen`),
 
     comments: async (): Promise<Comment[]> => {

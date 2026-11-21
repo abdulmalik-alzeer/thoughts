@@ -27,7 +27,7 @@ export const blockingProblems = (r: Review | null) => (r?.problems ?? []).filter
 /** May this step be approved now? The review step also needs a plan that can be built. */
 export function canApprove(step: StepId, s: StepStatus, review: Review | null = null): boolean {
   if (step === 'build') return false;
-  if (step === 'review') return (s === 'ready' || s === 'review' || s === 'stale') && !!review && blockingProblems(review).length === 0;
+  if (step === 'review') return (s === 'ready' || s === 'review' || s === 'stale') && !!review && !!review.planHash && blockingProblems(review).length === 0;
   return s === 'review' || s === 'stale';
 }
 
@@ -40,6 +40,8 @@ export function firstOpenStep(o: MadoOverview | null): StepId {
 }
 
 const gone = (e: unknown) => e instanceof ApiError && e.status === 404;
+/** The service refused an approval because plan.json is not the plan that was shown. */
+export const planChanged = (e: unknown) => e instanceof ApiError && (e.status === 409 || e.status === 412 || /^(PLAN_CHANGED|plan_changed|CHANGED|CONFLICT)$/.test(e.code));
 
 export class MadoStore {
   readonly projectId: string;
@@ -97,7 +99,12 @@ export class MadoStore {
     }
   }
 
-  refreshOverview() { return this.latest('overview', () => this.api.overview(), (v) => { if (v) this.overview = v; }); }
+  /** Unlike a document, the overview is never "not there yet": a project the service does not know is an error. */
+  async refreshOverview(): Promise<void> {
+    const ticket = (this.tickets.overview = (this.tickets.overview ?? 0) + 1);
+    const v = await this.api.overview();
+    if (this.tickets.overview === ticket && v) this.overview = v;
+  }
   refreshComments() { return this.latest('comments', () => this.api.comments(), (v) => { this.comments = v ?? []; }); }
   refreshDoc(name: DocName) { return this.latest('doc:' + name, () => this.api.doc(name), (v) => { this.docs[name] = v ? String(v.text ?? '') : null; }); }
   refreshGraph(name: GraphName) { return this.latest('graph:' + name, () => this.api.graph(name), (v) => { this.graphs[name] = v; }); }
@@ -171,7 +178,35 @@ export class MadoStore {
     this.refreshOverview().catch(() => {});
     return r?.chatId ?? '';
   }
-  async approve(step: StepId): Promise<void> { await this.api.approve(step); await this.refreshOverview(); }
+  async approve(step: StepId): Promise<void> {
+    if (step === 'review') throw new Error('MADO: the review is approved with approveReview');
+    await this.api.approve(step);
+    await this.refreshOverview();
+  }
+
+  /** The review as the service has it NOW, for showing right before it is approved. */
+  async freshReview(): Promise<Review | null> {
+    const ticket = (this.tickets.review = (this.tickets.review ?? 0) + 1);
+    const r = await this.api.review();
+    if (this.tickets.review === ticket) this.review = r;
+    return r ?? null;
+  }
+
+  /** Approve the review the user was just shown. Only that one: its plan hash goes along, a review
+   *  with problems that block the build is never sent, and when the service says the plan is no
+   *  longer the one shown, the new review is fetched and 'changed' comes back (nothing approved). */
+  async approveReview(shown: Review): Promise<'approved' | 'changed' | 'blocked'> {
+    if (!shown?.planHash || blockingProblems(shown).length) return 'blocked';
+    try { await this.api.approve('review', shown.planHash); }
+    catch (e) {
+      if (!planChanged(e)) throw e;
+      await this.freshReview().catch(() => {});
+      this.refreshPlan().catch(() => {});
+      return 'changed';
+    }
+    await this.refreshOverview();
+    return 'approved';
+  }
   async reopen(step: StepId): Promise<void> { await this.api.reopen(step); await this.refreshOverview(); }
 
   /** The user's own edit of a document. */

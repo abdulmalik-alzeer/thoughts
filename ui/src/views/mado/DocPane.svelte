@@ -6,7 +6,6 @@
   import { tick } from 'svelte';
   import { MessageSquarePlus, Pencil, FileText } from '@lucide/svelte';
   import { md, mdClick } from '../../lib/md';
-  import { inTauri } from '../../lib/api';
   import { t } from '../../lib/i18n';
   import { failed } from '../../lib/errors';
   import { toast } from '../../lib/store.svelte';
@@ -17,7 +16,7 @@
   import type { Comment, CommentTarget } from '../../lib/mado/types';
   import { createAnchor, findAnchor, onPage, project } from '../../lib/mado/anchor';
   import { DOC_FILES, commentsOnDoc } from '../../lib/mado/comments/batch';
-  import { commentAt, paint, pageText, pickedIn, unpaint, type Highlight, type PagePick } from '../../lib/mado/comments/dom';
+  import { commentAt, docClick, paint, pageText, pickedIn, unpaint, type Highlight, type PagePick } from '../../lib/mado/comments/dom';
 
   let { store, name, canEdit, canComment, focusId = null, oncomment, onpick }: {
     store: MadoStore;
@@ -97,20 +96,12 @@
     pick = null;
   }
 
-  async function click(e: MouseEvent) {
+  // Links are left alone here: the app's own guard (App.svelte, `guardLinks`) takes every link
+  // click in the window, and asks before opening one that goes somewhere other than it says.
+  function click(e: MouseEvent) {
     if (mdClick(e)) return;
-    const id = commentAt(e);
-    if (id) { onpick(id); return; }
-    const a = (e.target as Element | null)?.closest?.('a');
-    if (!a) return;
-    // A link in a planning document never takes the window away: web addresses open outside.
-    e.preventDefault();
-    const href = a.getAttribute('href') ?? '';
-    if (!/^(https?:|mailto:)/i.test(href)) return;
-    try {
-      if (inTauri()) { const { openUrl } = await import('@tauri-apps/plugin-opener'); await openUrl(href); }
-      else window.open(href, '_blank', 'noopener,noreferrer');
-    } catch { /* nothing to open it with */ }
+    const id = docClick(e);
+    if (id) onpick(id);
   }
   function key(e: KeyboardEvent) {
     if (e.key !== 'Enter' && e.key !== ' ') return;

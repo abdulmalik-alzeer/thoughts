@@ -58,6 +58,8 @@ export interface Review {
   problems: Problem[];
   waves: Wave[];
   commands: string[];
+  /** The hash of plan.json this review was worked out from; sent back with the approval. */
+  planHash: string;
 }
 
 export type BuildStatus = 'idle' | 'running' | 'paused' | 'waiting' | 'failed' | 'done' | 'stopped';

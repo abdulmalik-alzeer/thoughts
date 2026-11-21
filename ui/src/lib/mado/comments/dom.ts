@@ -103,7 +103,8 @@ export function paint(root: HTMLElement, marks: Highlight[], label: (id: string)
       let j = i;
       while (j + 1 < end && page.nodeAt[j + 1] === k) j++;
       const list = perNode.get(k) ?? [];
-      list.push({ from: page.offAt[i], to: page.offAt[j] + 1, m });
+      // A passage that runs on into the next node takes the spaces at the joint with it.
+      list.push({ from: i === start ? page.offAt[i] : 0, to: j + 1 === end ? page.offAt[j] + 1 : page.nodes[k].length, m });
       perNode.set(k, list);
       i = j + 1;
     }
@@ -131,4 +132,12 @@ export function paint(root: HTMLElement, marks: Highlight[], label: (id: string)
 export function commentAt(e: Event): string | null {
   const el = (e.target as HTMLElement | null)?.closest?.(`mark.${MARK}`) as HTMLElement | null;
   return el?.dataset.madoComment ?? null;
+}
+
+/** A click inside a rendered document: the comment whose mark was clicked, or null. It never
+ *  opens, stops or otherwise handles a link — a click on one (also one inside a mark) is left
+ *  untouched for the app's own link guard, which confirms where a link really goes. */
+export function docClick(e: Event): string | null {
+  if ((e.target as Element | null)?.closest?.('a, area')) return null;
+  return commentAt(e);
 }
