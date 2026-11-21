@@ -1132,9 +1132,9 @@ fn deny_for(project: &Path, pid: &str, b: &BuildState, wt: &Path) -> Vec<String>
 }
 
 /// The permission mode of a build's run: edits are accepted (they are confined by the deny rules
-/// and the worktree), except for a run that only reads, which gets Claude Code's `default` (an
-/// edit would have to be asked for, and nobody can be asked).
-fn mode_of(read_only: bool) -> &'static str { if read_only { "default" } else { "acceptEdits" } }
+/// and the worktree), except for a run that only reads (the review), which plans: Claude Code's
+/// read-only mode, kept even under full access (`full_access::mode_for`).
+fn mode_of(read_only: bool) -> &'static str { if read_only { "plan" } else { "acceptEdits" } }
 
 #[cfg(test)]
 static TEST_OPTIONS: std::sync::Mutex<Vec<(String, (Option<String>, Option<String>))>> = std::sync::Mutex::new(Vec::new());
@@ -1143,6 +1143,10 @@ static TEST_OPTIONS: std::sync::Mutex<Vec<(String, (Option<String>, Option<Strin
 async fn options_for(state: &AppState, pid: &str) -> (Option<String>, Option<String>) {
     #[cfg(test)]
     if let Some(o) = TEST_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == pid).map(|(_, o)| o.clone()) { return o; }
+    // A build's run is Claude Code's (`assistant::for_run`), except under full access, where it is the
+    // program chosen in Settings: the project's choice (a Claude Code model and effort) is never
+    // handed to another program, which then uses its own defaults.
+    { let s = state.settings.read().await; if s.full_access() && crate::assistant::primary(&s) != crate::assistant::Program::Claude { return (None, None); } }
     mado::run_options(state, pid).await
 }
 

@@ -268,6 +268,7 @@ const SNAPSHOT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 /// `shut_down`, with `end` ending the assistant processes (and saying how many there were).
 pub(crate) async fn stop(state: &Arc<AppState>, end: impl FnOnce() -> usize, wait: std::time::Duration) {
     state.stopping.store(true, std::sync::atomic::Ordering::SeqCst);
+    mado_build::end_apps(); // a product the build's screen check started stops with the daemon
     // A run dropped from here on, before it put its standing files back, leaves that to the next start.
     let going: Vec<String> = state.runs.lock().await.keys().cloned().collect();
     snapshots::hold(&going);

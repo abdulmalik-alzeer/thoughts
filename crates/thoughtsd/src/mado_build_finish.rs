@@ -432,6 +432,8 @@ fn register_app(pid: &str, n: u32) {
 /// process group). Under the registry's lock, so the process cannot have been reaped (and its
 /// number reused) while it is ended. Nothing when none runs.
 pub async fn end_app(pid: &str) {
+    // Nobody is asked to look any more either.
+    drop_offer(pid);
     let pid = pid.to_string();
     let _ = tokio::task::spawn_blocking(move || end_app_now(&pid)).await;
 }
@@ -803,7 +805,7 @@ async fn review_run(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     mado::tell(state, pid, "build").await;
     let full = full(state).await;
     let brief = prompts::review(round, conventions(project, full).is_some(), &comments_text(project, full), &screens_text(pid), if round > 1 { &earlier } else { &[] });
-    // It only reads: Claude Code's default mode with nobody to ask, and no edit of its folder either.
+    // It only reads: Claude Code's plan mode (`mode_of`), and no edit of its folder either.
     let mut deny = deny_for(project, pid, b, bwt);
     let own = claude::rule_path(bwt);
     deny.extend([format!("Edit({own})"), format!("Edit({own}/**)")]);
@@ -912,3 +914,8 @@ pub async fn api_guide(State(st): State<Arc<AppState>>, UrlPath(pid): UrlPath<St
     if let Some(t) = readme(&project, full) { v["readme"] = json!(t); }
     Ok(Json(v))
 }
+
+#[cfg(test)]
+pub fn test_register(pid: &str, n: u32) { register_app(pid, n) }
+#[cfg(test)]
+pub fn test_forget(pid: &str) { APPS.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| p != pid) }

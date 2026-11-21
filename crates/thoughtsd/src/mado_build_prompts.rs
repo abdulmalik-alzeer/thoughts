@@ -20,8 +20,8 @@ pub const LOCKING_TASK: &str = "\nWhat this task writes is the agreement the oth
 
 /// The first fix run of a failed `verify` in the build's copy.
 pub fn gate_fix(output: &str, conventions_text: Option<&str>) -> String {
-    let mut out = format!("This folder holds the build so far: the work of every task up to now, put together. The plan's checks of the whole \
-        product (its test suite, type check and linter) now fail here. What they printed:\n{}\n\n\
+    let mut out = format!("Checks of the whole product: this folder holds the build so far, the work of every task up to now put together, and the plan's \
+        checks of the whole product (its test suite, type check and linter) now fail here. What they printed:\n{}\n\n\
         Fix the code so that these checks pass, keeping the work of every task. Change only what the failure needs. \
         Files written by a contracts or tests task are agreed and locked: make the code fit them, never the other way round \
         (changes to them are undone). You cannot run commands: the app runs the checks again when you finish. \
