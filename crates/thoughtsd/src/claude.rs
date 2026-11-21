@@ -1105,6 +1105,12 @@ pub fn profile(kind: &str, mode: &str, web: bool) -> Profile {
         "workflow" => Profile { name: "unattended", own_setup: false, mcp: false, shell: false, web: false, standing_rules: false, strict: false },
         // Adding a feature writes its paragraph into CLAUDE.md; a Wrap never changes it (its routine says so too).
         "module" => Profile { name: "upkeep", own_setup: false, mcp: false, shell: false, web: false, standing_rules: true, strict: false },
+        // MADO (`mado.rs`): a planning step reads the project and writes only its `mado/` folder — no
+        // commands, no connected tools, the web only when its chat has web lookups on.
+        "mado" => Profile { name: "mado", own_setup: false, mcp: false, shell: false, web, standing_rules: false, strict: false },
+        // One task of a MADO build, in its lane's own copy of the project: commands, but nobody can be
+        // asked, so only that task's approved acceptance commands run (`mado::build_allow`).
+        "mado-build" => Profile { name: "build", own_setup: false, mcp: false, shell: true, web: false, standing_rules: false, strict: false },
         _ => Profile { name: "upkeep", own_setup: false, mcp: false, shell: false, web: false, standing_rules: false, strict: false },
     }
 }
@@ -1383,6 +1389,8 @@ pub fn run_limits(kind: &str) -> RunLimits {
     match kind {
         "chat" | "customize" => RunLimits { idle: None, total: None, after_result: AFTER_RESULT },
         "workflow" => RunLimits { idle: Some(IDLE_LIMIT), total: None, after_result: AFTER_RESULT },
+        // A MADO step's run is watched in its chat (Stop is there), but its step waits on it.
+        "mado" => RunLimits { idle: Some(IDLE_LIMIT), total: None, after_result: AFTER_RESULT },
         _ => RunLimits { idle: Some(IDLE_LIMIT), total: Some(TOTAL_LIMIT), after_result: AFTER_RESULT },
     }
 }
@@ -1780,6 +1788,8 @@ pub(crate) async fn finish(state: Arc<AppState>, id: String, ok: bool, record: O
         state.emit(json!({"type": "chat.done", "chatId": id, "ok": ok, "title": ch.title, "chat": ch.summary()}));
     }
     if let Some(f) = on_done { f(state.clone(), ok).await; }
+    // A MADO step's files are checked, its comments settled (`mado::after_run`).
+    crate::mado::after_run(state.clone(), id.clone(), ok).await;
 }
 
 /// Before anything runs in `dir`: a library made with 0.0.8 or earlier still has the kit's old
@@ -1848,6 +1858,8 @@ pub async fn start_run(
         if !full { crate::trust::require(dir)?; }
     }
     let kind = state.chats.with(&spec.chat_id, |c| c.kind.clone()).await.unwrap_or_default();
+    // A MADO run: its step's instructions, its folder and its own rules (`mado::prepare_run`).
+    let (spec, mado_allow) = crate::mado::prepare_run(&state, &kind, spec, full).await?;
     // Which program does the work (`assistant::for_run`). Everything decided below holds for both.
     let program = crate::assistant::for_run(&state, &spec.chat_id, &kind, spec.resume.is_some()).await;
     let on_codex = program == crate::assistant::Program::Codex;
@@ -1918,6 +1930,7 @@ pub async fn start_run(
     let mut prof_allow = prof_allow;
     // (Only for the runs that get copies: the ones a message starts, `api::chat_send`.)
     if !full && matches!(kind.as_str(), "chat" | "customize") { prof_allow.extend(own_copies_allow(&crate::paths::home(), &spec.chat_id)); }
+    if !full { prof_allow.extend(mado_allow); }
     let deny = with_allow(deny, &prof_allow);
     let deny = if strict && prof.shell { with_ask(deny, &SHELL_TOOLS) } else { deny };
     // Every command is checked before it runs, in every mode (`shell_guard`). Without the app's

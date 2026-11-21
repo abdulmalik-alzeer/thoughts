@@ -41,6 +41,12 @@ pub async fn for_run(state: &AppState, chat_id: &str, kind: &str, resumes: bool)
         if own != CUSTOMIZE { state.chats.update(chat_id, |c| c.provider = CUSTOMIZE.name().into()).await; }
         return CUSTOMIZE;
     }
+    // MADO's planning runs are Claude Code's: its rules keep them to `mado/`, where Codex's sandbox
+    // would let them write the whole project and run commands (`mado.rs`). Full access lifts that.
+    if kind == "mado" && !state.settings.read().await.full_access() {
+        if own != Program::Claude { state.chats.update(chat_id, |c| c.provider = Program::Claude.name().into()).await; }
+        return Program::Claude;
+    }
     if kind == "chat" || resumes { return own; }
     let chosen = primary(&*state.settings.read().await);
     if chosen != own { state.chats.update(chat_id, |c| c.provider = chosen.name().into()).await; }
