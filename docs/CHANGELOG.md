@@ -1,5 +1,15 @@
 # What's new in Thoughts
 
+## 0.3.3
+
+One repair: the "Look and screens" step of planning a project (MADO) could not be opened in 0.3.0 to 0.3.2.
+
+### Fixed
+- **The design step loads.** It showed "The design could not be loaded" and blamed the background service for every project. The step was asking at the wrong address. Now the looks, the colours and fonts, and the picture of every screen appear.
+
+### Before you rely on it
+- **Found in the first real use, like 0.3.2's repair.** The fixed step was opened in a browser against a real plan: the looks and the screens load, a look can be picked and a colour change is saved. It has not yet been seen in the app window itself, where the screen pictures are shown in their sealed frame. Work plan, Final check and Build have still never been run with a real assistant.
+
 ## 0.3.2
 
 One repair: planning a project (MADO) could not save anything in 0.3.0 and 0.3.1. Take this update before you try it.
