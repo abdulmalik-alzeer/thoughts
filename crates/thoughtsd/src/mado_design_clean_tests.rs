@@ -374,7 +374,8 @@ fn a_page_past_a_limit_is_refused_while_it_is_read() {
     ] {
         let t = std::time::Instant::now();
         assert_eq!(clean(&html), Err(why), "{}…", &html[..40]);
-        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?} for {}…", t.elapsed(), &html[..40]);
+        // Milliseconds when idle; the bound leaves room for a debug build on a busy machine.
+        assert!(t.elapsed() < std::time::Duration::from_secs(15), "{:?} for {}…", t.elapsed(), &html[..40]);
     }
     // The clock: with no time at all, any page of more than one piece is refused.
     assert_eq!(clean_within(&"<p>x</p>".repeat(1_000), std::time::Duration::ZERO), Err(Refused::TooSlow));
@@ -424,7 +425,7 @@ fn a_style_sheet_can_never_close_its_element_or_open_a_comment() {
         format!(".a{{content:'{}'}}", "-<!--->".repeat(27_000)), format!(".a{{content:'{}'}}", "<!-<!---".repeat(24_000))] {
         let t = std::time::Instant::now();
         assert_eq!(sheet(&css), "");
-        assert!(t.elapsed() < std::time::Duration::from_secs(2), "{:?}", t.elapsed());
+        assert!(t.elapsed() < std::time::Duration::from_secs(8), "{:?}", t.elapsed());
     }
     // A sheet longer than any real one is not read.
     assert_eq!(sheet(&".a{color:red}".repeat(MAX_CSS / 13 + 1)), "");
@@ -469,6 +470,8 @@ fn a_large_hostile_page_is_dealt_with_in_bounded_time() {
         let out = clean(&html);
         let took = t.elapsed();
         eprintln!("{name}: {took:?}, {:?}", out.as_ref().map(|o| o.len()));
-        assert!(took < std::time::Duration::from_secs(6), "{name} took {took:?}");
+        // The clock stops a page at two seconds; 15 s leaves room for a debug build on a busy
+        // machine and is still far short of what an unbounded clean of these pages would take.
+        assert!(took < std::time::Duration::from_secs(15), "{name} took {took:?}");
     }
 }

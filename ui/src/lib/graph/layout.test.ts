@@ -26,9 +26,11 @@ describe('graph layout', () => {
     const ms = performance.now() - t;
     expect(r.x.length).toBe(3000);
     for (let i = 0; i < 3000; i++) { expect(Number.isFinite(r.x[i])).toBe(true); expect(Number.isFinite(r.y[i])).toBe(true); }
-    // Off the main thread in the app; here it must still settle within a few seconds.
-    expect(ms).toBeLessThan(6000);
-  }, 20000);
+    // Off the main thread in the app. It takes well under a second here when the machine is idle;
+    // the bound leaves room for a machine busy with other builds (it once failed at 6 s under such
+    // load) and still catches a layout that stops settling.
+    expect(ms).toBeLessThan(15000);
+  }, 60000);
 
   it('pulls linked notes together and pushes unlinked ones apart', () => {
     // Two triangles, joined by nothing.

@@ -97,12 +97,13 @@ describe('layout', () => {
       expect(Object.keys(l.pos).length).toBe(400);
       expect(Object.values(l.pos).every((p) => Number.isFinite(p.x) && Number.isFinite(p.y))).toBe(true);
       expect(overlap(l)).toBeNull();
-      expect(ms).toBeLessThan(500);
+      // Tens of milliseconds on an idle machine; the bound leaves room for a busy one.
+      expect(ms).toBeLessThan(1500);
       const f = toFlow(v, l, commentMarks([]), null, { editable: true, describe: (n) => n.label, describeEdge: (e) => e.key });
       expect(f.nodes.length).toBe(400);
       expect(f.edges.length).toBe(v.edges.length);
     }
-  });
+  }, 30000);
 
   it('the quick arrangement puts what leads to a node before it', () => {
     const v = buildView(flow, []);

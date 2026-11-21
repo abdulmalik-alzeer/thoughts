@@ -381,7 +381,10 @@ describe('docx', () => {
   });
 });
 
-describe('budgets against files built to blow up', () => {
+// These build pages from files made to blow up; under a busy machine the biggest takes several
+// times its idle second, past vitest's default five-second limit. What they check is the budget
+// (sizes and counts), never the time.
+describe('budgets against files built to blow up', { timeout: 30_000 }, () => {
   it('odt: repeated rows and columns inside nested tables stop at the page budget', async () => {
     // Each level: one row repeated 50 times holding one cell repeated 50 times, nested 4 deep:
     // 2,500^4 cells if expanded in full.

@@ -203,8 +203,21 @@ pub fn all_efforts(models: &[Model]) -> Vec<String> {
 
 // ---------- asking the program ----------
 
-/// A probe's time limit (short under test, where the stand-ins answer at once or never).
-fn lim(normal: Duration) -> Duration { if cfg!(test) { Duration::from_secs(4) } else { normal } }
+#[cfg(test)]
+tokio::task_local! {
+    /// Under test: a rung whose stand-in hangs on purpose, and the shorter limit it gets.
+    pub static CUT: (&'static str, Duration);
+}
+
+/// A probe's time limit: `normal`, under test too, so a busy machine cannot make a quick answer
+/// look like a hang. A test that makes one rung hang on purpose cuts that rung's limit (`CUT`),
+/// and only that one, so it does not wait the full time.
+fn lim(rung: &str, normal: Duration) -> Duration {
+    #[cfg(test)]
+    if let Ok((cut, short)) = CUT.try_with(|c| *c) { if !rung.is_empty() && cut == rung { return short; } }
+    let _ = rung;
+    normal
+}
 
 /// `home` is the user's own Codex folder: their sign-in and settings decide which models they have.
 fn probe_cmd(bin: &Path, home: &Path, dir: &Path) -> tokio::process::Command {
@@ -219,11 +232,12 @@ fn probe_dir() -> Option<PathBuf> {
     crate::paths::create_private_dir(&d).ok().map(|_| d)
 }
 
-async fn run(bin: &Path, home: &Path, args: &[&str], limit: Duration) -> Result<String, &'static str> {
+/// Run one probe. `rung` names the rung it asks for models (empty for the help and version probes).
+async fn run(bin: &Path, home: &Path, rung: &str, args: &[&str], limit: Duration) -> Result<String, &'static str> {
     let Some(dir) = probe_dir() else { return Err(FAILED) };
     let mut c = probe_cmd(bin, home, &dir);
     c.args(args);
-    let out = crate::proc::output_timeout(&mut c, lim(limit)).await;
+    let out = crate::proc::output_timeout(&mut c, lim(rung, limit)).await;
     let _ = std::fs::remove_dir_all(&dir);
     match out {
         Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).to_string()),
@@ -278,7 +292,7 @@ pub async fn app_server_models(bin: &Path, home: &Path, limit: Duration) -> Resu
         }
         Ok::<_, &'static str>(all)
     };
-    let r = tokio::time::timeout(lim(limit), talk).await.unwrap_or(Err(TIMED_OUT));
+    let r = tokio::time::timeout(lim(APP_SERVER, limit), talk).await.unwrap_or(Err(TIMED_OUT));
     if let Some(p) = pid { crate::proc::end_tree(p).await; }
     let _ = child.kill().await;
     let _ = std::fs::remove_dir_all(&dir);
@@ -314,20 +328,20 @@ pub fn key_for(bin: &Path, home: &Path) -> Key {
 /// Climb the ladder once (see the top of this file).
 pub async fn detect(bin: &Path, home: &Path) -> Detected {
     let mut d = Detected { key: key_for(bin, home), checked_at: now(), ..Default::default() };
-    d.version = run(bin, home, &["--version"], HELP_LIMIT).await.map(|s| s.trim().to_string()).unwrap_or_default();
-    let top = run(bin, home, &["--help"], HELP_LIMIT).await.unwrap_or_default();
+    d.version = run(bin, home, "", &["--version"], HELP_LIMIT).await.map(|s| s.trim().to_string()).unwrap_or_default();
+    let top = run(bin, home, "", &["--help"], HELP_LIMIT).await.unwrap_or_default();
     let top_cmds = crate::codex::subcommands(&top);
     let tried = |rung: &str, outcome: &str, d: &mut Detected| d.tried.push(Tried { rung: rung.into(), outcome: outcome.into() });
     // 1. codex debug models (then --bundled)
-    let debug = if top_cmds.iter().any(|c| c == "debug") { run(bin, home, &["debug", "--help"], HELP_LIMIT).await.unwrap_or_default() } else { String::new() };
+    let debug = if top_cmds.iter().any(|c| c == "debug") { run(bin, home, "", &["debug", "--help"], HELP_LIMIT).await.unwrap_or_default() } else { String::new() };
     if crate::codex::subcommands(&debug).iter().any(|c| c == "models") {
-        match run(bin, home, &["debug", "models"], DEBUG_LIMIT).await.and_then(|t| parse_catalog(&t)) {
+        match run(bin, home, DEBUG_MODELS, &["debug", "models"], DEBUG_LIMIT).await.and_then(|t| parse_catalog(&t)) {
             Ok(m) => { tried(DEBUG_MODELS, OK, &mut d); d.source = DEBUG_MODELS.into(); d.models = m; return d; }
             Err(e) => tried(DEBUG_MODELS, e, &mut d),
         }
-        let help = run(bin, home, &["debug", "models", "--help"], HELP_LIMIT).await.unwrap_or_default();
+        let help = run(bin, home, "", &["debug", "models", "--help"], HELP_LIMIT).await.unwrap_or_default();
         if crate::codex::has_flag(&help, "--bundled") {
-            match run(bin, home, &["debug", "models", "--bundled"], BUNDLED_LIMIT).await.and_then(|t| parse_catalog(&t)) {
+            match run(bin, home, BUNDLED, &["debug", "models", "--bundled"], BUNDLED_LIMIT).await.and_then(|t| parse_catalog(&t)) {
                 Ok(m) => { tried(BUNDLED, OK, &mut d); d.source = BUNDLED.into(); d.models = m; return d; }
                 Err(e) => tried(BUNDLED, e, &mut d),
             }

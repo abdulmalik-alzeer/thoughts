@@ -196,12 +196,14 @@ async fn a_catalog_that_cannot_refresh_falls_back_to_the_bundled_one() {
     std::fs::create_dir_all(&home).unwrap();
     let bin = stand_in(&dir, "codex-cli 0.171.0\n", HELP_0_171, DEBUG_HELP_0_171);
     std::fs::write(dir.join("catalog.json"), CATALOG_0_140).unwrap();
-    // The refresh hangs (no network) until its time limit; the bundled catalog answers.
-    std::fs::write(dir.join("dm.sh"), "sleep 30\n").unwrap();
+    // The refresh hangs (no network) until its time limit; the bundled catalog answers. Only the
+    // hanging rung's limit is cut (to 3 s); the bound below leaves room for a busy machine and is
+    // still far short of the hang.
+    std::fs::write(dir.join("dm.sh"), "sleep 300\n").unwrap();
     std::fs::write(dir.join("bundled.sh"), format!("cat '{}/catalog.json'\n", dir.display())).unwrap();
     let started = std::time::Instant::now();
-    let d = detect(&bin, &home).await;
-    assert!(started.elapsed() < Duration::from_secs(10), "the hanging probe was ended at its limit");
+    let d = CUT.scope((DEBUG_MODELS, Duration::from_secs(3)), detect(&bin, &home)).await;
+    assert!(started.elapsed() < Duration::from_secs(90), "the hanging probe was ended at its limit");
     assert_eq!((d.source.as_str(), ids(&d.models)), (BUNDLED, vec!["gpt-5.5", "gpt-5.4-mini"]));
     assert_eq!(outcomes(&d), [(DEBUG_MODELS, TIMED_OUT), (BUNDLED, OK)]);
     std::fs::remove_dir_all(&b).unwrap();
@@ -254,7 +256,7 @@ async fn the_app_server_is_asked_for_every_page() {
 #[tokio::test]
 async fn an_app_server_that_hangs_or_refuses_leaves_the_cache_on_disk() {
     for (case, script, outcome) in [
-        ("hang", "read a; sleep 30\n".to_string(), TIMED_OUT),
+        ("hang", "read a; sleep 300\n".to_string(), TIMED_OUT),
         ("refuse", "read a; echo '{\"id\":1,\"result\":{}}'; read b; read c; echo '{\"id\":2,\"error\":{\"code\":-32600,\"message\":\"no\"}}'\n".into(), FAILED),
         ("bad", "read a; echo '{\"id\":1,\"result\":{}}'; read b; read c; echo '{\"id\":2,\"result\":{\"rows\":[]}}'\n".into(), MALFORMED),
         ("empty", "read a; echo '{\"id\":1,\"result\":{}}'; read b; read c; echo '{\"id\":2,\"result\":{\"data\":[]}}'\n".into(), EMPTY),
@@ -269,8 +271,10 @@ async fn an_app_server_that_hangs_or_refuses_leaves_the_cache_on_disk() {
         std::fs::write(home.join("models_cache.json"), CATALOG_0_140).unwrap();
         std::fs::write(home.join("models_cache.other.json"), "{not json").unwrap();
         let started = std::time::Instant::now();
-        let d = detect(&bin, &home).await;
-        assert!(started.elapsed() < Duration::from_secs(10), "{case}");
+        // Only the app server's limit is cut; the bound leaves room for a busy machine and is still
+        // far short of the hang.
+        let d = CUT.scope((APP_SERVER, Duration::from_secs(3)), detect(&bin, &home)).await;
+        assert!(started.elapsed() < Duration::from_secs(90), "{case}");
         assert_eq!(d.source, CACHE, "{case}");
         assert_eq!(ids(&d.models), ["gpt-5.5", "gpt-5.4-mini"], "{case}");
         let o = outcomes(&d);
@@ -403,7 +407,7 @@ async fn real_codex() {
     std::fs::create_dir_all(&home).unwrap();
     let d = detect(&bin, &home).await;
     println!("version {:?}\nsource {:?}\ntried {:?}\nmodels {:?}", d.version, d.source, outcomes(&d), d.models.iter().map(|m| (&m.id, m.efforts.len(), m.context)).collect::<Vec<_>>());
-    if crate::codex::subcommands(&run(&bin, &home, &["--help"], HELP_LIMIT).await.unwrap_or_default()).iter().any(|c| c == "app-server") {
+    if crate::codex::subcommands(&run(&bin, &home, "", &["--help"], HELP_LIMIT).await.unwrap_or_default()).iter().any(|c| c == "app-server") {
         let a = app_server_models(&bin, &home, APP_SERVER_LIMIT).await;
         println!("app server: {:?}", a.map(|m| m.into_iter().map(|m| m.id).collect::<Vec<_>>()));
     }
