@@ -267,19 +267,24 @@ pub fn mado_dir_of(project: &Path, full: bool) -> anyhow::Result<PathBuf> {
 
 /// The most entries `odd_entry` looks through (a `mado/` folder holds a few dozen files).
 pub const ENTRY_CAP: usize = 5000;
+/// The deepest `odd_entry` looks; anything deeper is refused, never taken as plain.
+pub const ENTRY_DEPTH: usize = 12;
 
 /// The first entry of `mado/` that is not a plain folder or a plain file of its own: a symbolic link,
 /// a device, pipe or socket, or a file with more than one hard link (it is also a file somewhere
-/// else, say `~/.zshrc`). A folder too large to look through counts too. `None`: every entry is plain.
+/// else, say `~/.zshrc`). A folder too large or too deep to look through all of counts too (it fails
+/// closed: what was not looked at is never taken as plain). `None`: every entry is plain.
 pub fn odd_entry(mado: &Path) -> Option<String> {
     let Ok(m) = std::fs::symlink_metadata(mado) else { return None };
     if !m.is_dir() { return Some(DIR.into()); }
     let mut n = 0usize;
-    for e in walkdir::WalkDir::new(mado).follow_links(false).min_depth(1).max_depth(12) {
+    // One level more than allowed: any entry found there is refused.
+    for e in walkdir::WalkDir::new(mado).follow_links(false).min_depth(1).max_depth(ENTRY_DEPTH + 1) {
         n += 1;
         let rel = |p: &Path| format!("{DIR}/{}", p.strip_prefix(mado).unwrap_or(p).to_string_lossy().replace('\\', "/"));
         if n > ENTRY_CAP { return Some(format!("{DIR}/… ({ENTRY_CAP}+)")); }
         let e = match e { Ok(e) => e, Err(err) => return Some(err.path().map(rel).unwrap_or_else(|| DIR.into())) };
+        if e.depth() > ENTRY_DEPTH { return Some(rel(e.path())); }
         let ft = e.file_type();
         if ft.is_dir() { continue; }
         if !ft.is_file() { return Some(rel(e.path())); }

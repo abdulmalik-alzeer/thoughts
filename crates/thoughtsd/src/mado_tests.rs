@@ -935,6 +935,24 @@ async fn links_and_shared_files_inside_mado_are_refused_before_start_and_every_r
     assert_eq!(odd_entry(&mado).as_deref(), Some("mado/design/pipe"));
     std::fs::remove_file(mado.join("design/pipe")).unwrap();
     assert_eq!(odd_entry(&mado), None);
+    // Too deep to look through all of: refused, even with nothing odd in it.
+    let mut deep = mado.join("d");
+    for i in 0..ENTRY_DEPTH { deep = deep.join(format!("{i}")); }
+    std::fs::create_dir_all(&deep).unwrap();
+    assert!(odd_entry(&mado).is_some(), "an entry below the depth limit is never taken as plain");
+    std::fs::remove_dir_all(mado.join("d")).unwrap();
+    let mut ok = mado.join("d");
+    for i in 0..(ENTRY_DEPTH - 2) { ok = ok.join(format!("{i}")); }
+    std::fs::create_dir_all(&ok).unwrap();
+    std::fs::write(ok.join("f.md"), "x").unwrap();
+    assert_eq!(odd_entry(&mado), None, "at the limit it is still looked at");
+    std::fs::remove_dir_all(mado.join("d")).unwrap();
+    // Too many entries: refused.
+    std::fs::create_dir_all(mado.join("many")).unwrap();
+    for i in 0..ENTRY_CAP { std::fs::write(mado.join(format!("many/{i}")), "").unwrap(); }
+    assert!(odd_entry(&mado).unwrap().contains(&format!("{ENTRY_CAP}+")));
+    std::fs::remove_dir_all(mado.join("many")).unwrap();
+    assert_eq!(odd_entry(&mado), None);
     // `mado` itself a link.
     let real = tmp("links-real");
     std::fs::remove_dir_all(&mado).unwrap();
