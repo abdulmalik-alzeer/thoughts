@@ -221,6 +221,8 @@ The window refetches; it does not trust the event's payload.
 - Governor: before starting a lane, look at the usage the app already meters. Above the threshold
   (setting, default 80 % of the current window) it holds new lanes (`holding: true`, with the reason) and resumes by itself.
 - Survives a restart of the daemon: `build.json` plus git are the truth; a task that was `running` is started again.
+  Every linked project of every listed library is picked up, whichever library is open, and the build goes on
+  while another library is open; starting, stopping and landing stay with the open library's projects.
 - `land`: only when `done`, only into a clean working tree, fast-forward if possible, otherwise a merge commit;
   on conflict nothing is changed and the user is told.
 

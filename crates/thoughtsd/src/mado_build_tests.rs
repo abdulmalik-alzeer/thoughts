@@ -318,6 +318,33 @@ async fn after_a_restart_a_task_that_was_running_starts_again_and_the_build_fini
 }
 
 #[tokio::test]
+async fn after_a_restart_a_build_of_a_library_that_is_not_open_is_picked_up_too() {
+    let p = project(vec![task("a", &["src/a.txt"], &[], &["test -f src/a.txt"])]).await;
+    let never = Arc::new(tokio::sync::Notify::new());
+    let n2 = never.clone();
+    t::assistant(&p.st, move |_info: RunInfo| { let never = n2.clone(); async move { never.notified().await; true } });
+    start(&p.st, &p.pid, None).await.unwrap();
+    until(&p, "a running", |b| find(b, "a").status == TaskStatus::Running).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    // The next daemon has another library open; the project is linked to the one that is not.
+    let st2 = Arc::new(AppState::for_test());
+    {
+        let mut s = st2.settings.write().await;
+        let parked = crate::settings::LibrarySettings { projects: p.st.settings.read().await.projects.clone(), ..Default::default() };
+        s.projects.clear();
+        s.libraries.push(crate::settings::Library { id: "other".into(), name: "Other".into(), path: p.root.to_string_lossy().into(), parked: Some(parked) });
+    }
+    assert!(mado::project_dir(&st2, &p.pid).await.is_err(), "the routes still see only the open library's projects");
+    t::assistant(&st2, |info: RunInfo| async move { put(&info.cwd, "src/a.txt", "a"); true });
+    resume(st2.clone());
+    let p2 = P { st: st2, pid: p.pid.clone(), dir: p.dir.clone(), root: p.root.clone() };
+    until(&p2, "done", |b| b.status == BuildStatus::Done).await;
+    assert_eq!(t::sh(&p.dir, &["show", "mado/build-1:src/a.txt"]), "a");
+    drop(p);
+    p2.done();
+}
+
+#[tokio::test]
 async fn a_start_is_refused_on_a_dirty_tree_an_unapproved_review_a_changed_plan_and_outside_git() {
     let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
     t::assistant(&p.st, |_| async { true });

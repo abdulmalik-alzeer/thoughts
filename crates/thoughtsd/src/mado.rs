@@ -244,6 +244,25 @@ pub fn project_dir_in(s: &crate::settings::Settings, project_id: &str) -> anyhow
     Ok(crate::paths::canonical(&dir)?)
 }
 
+/// Every project linked to any listed library: the open one's first, then those of the libraries
+/// that are not open (their parked settings). For the build engine, which goes on with a build
+/// whatever library is open; the routes keep to the open library's projects (`project_dir`).
+pub fn all_linked_projects(s: &crate::settings::Settings) -> Vec<crate::settings::Project> {
+    let mut out: Vec<crate::settings::Project> = s.projects.clone();
+    for p in s.libraries.iter().filter_map(|l| l.parked.as_ref()).flat_map(|l| l.projects.iter()) {
+        if !out.iter().any(|q| q.id == p.id) { out.push(p.clone()); }
+    }
+    out
+}
+
+/// `project_dir_in` over every linked project of every listed library (`all_linked_projects`).
+pub fn any_project_dir_in(s: &crate::settings::Settings, project_id: &str) -> anyhow::Result<PathBuf> {
+    let p = all_linked_projects(s).into_iter().find(|p| p.id == project_id).ok_or_else(|| crate::tr::err("not_found.project", &[]))?;
+    let dir = PathBuf::from(&p.path);
+    if !dir.is_absolute() || !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &p.path)])); }
+    Ok(crate::paths::canonical(&dir)?)
+}
+
 /// The project's folder, only for a project the user linked (`Settings::projects`).
 pub async fn project_dir(state: &AppState, project_id: &str) -> anyhow::Result<PathBuf> {
     project_dir_in(&*state.settings.read().await, project_id)
@@ -807,7 +826,8 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
     if kind != "mado" && kind != "mado-build" { return Ok((spec, vec![])); }
     let meta = state.chats.with(&spec.chat_id, |c| c.meta.clone()).await.unwrap_or(Value::Null);
     let Some(role) = role_of(&meta) else { return Err(crate::tr::err("mado.not_a_step", &[])) };
-    let project = project_dir(state, &role.project_id).await?;
+    // A build goes on whatever library is open (the engine started it); a planning step is the open library's.
+    let project = if kind == "mado-build" { any_project_dir_in(&*state.settings.read().await, &role.project_id)? } else { project_dir(state, &role.project_id).await? };
     if kind == "mado-build" {
         // Only ever in one of the engine's own worktrees (`<home>/mado/<projectId>/build` or
         // `…/lane-<w>-<l>`), with no other folder: never the user's project, never the records beside them.

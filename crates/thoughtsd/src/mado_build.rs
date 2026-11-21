@@ -464,6 +464,15 @@ async fn project_of(state: &AppState, pid: &str) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
+/// `project_of` for the engine itself (picking a build up after a restart, and every step after
+/// it): a project linked to any listed library, so a build goes on while another library is open.
+/// The same trust check; what the user starts, stops or lands still goes through `project_of`.
+async fn engine_project_of(state: &AppState, pid: &str) -> anyhow::Result<PathBuf> {
+    let dir = mado::any_project_dir_in(&*state.settings.read().await, pid)?;
+    if !full(state).await { crate::trust::require(&dir)?; }
+    Ok(dir)
+}
+
 pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) -> anyhow::Result<BuildState> {
     let project = project_of(state, pid).await?;
     let root = engine_dir(pid)?;
@@ -687,7 +696,7 @@ pub fn tick(state: Arc<AppState>, pid: String) -> BoxFuture<'static, ()> {
 }
 
 async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
-    let project = project_of(state, pid).await?;
+    let project = engine_project_of(state, pid).await?;
     let mut spawn: Vec<(usize, usize)> = vec![];
     let mut check_wave: Option<usize> = None;
     let (mut recheck, mut finished) = (false, None);
@@ -1617,13 +1626,14 @@ async fn fix_failed(state: &AppState, project: &Path, pid: &str, bwt: &Path, wi:
 /// where `build.json` and git say it was. A task that was running starts again from its lane's last commit.
 pub fn resume(state: Arc<AppState>) {
     tokio::spawn(async move {
-        let ids: Vec<String> = state.settings.read().await.projects.iter().map(|p| p.id.clone()).collect();
+        // Every linked project of every listed library, not only the open one's.
+        let ids: Vec<String> = mado::all_linked_projects(&*state.settings.read().await).into_iter().map(|p| p.id).collect();
         for pid in ids { if let Err(e) = recover(&state, &pid).await { crate::log::warn(format!("mado build: could not pick up a build ({e:#})")); } }
     });
 }
 
 pub async fn recover(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
-    let Ok(project) = project_of(state, pid).await else { return Ok(()) };
+    let Ok(project) = engine_project_of(state, pid).await else { return Ok(()) };
     let Ok(Some(b)) = load_build(&project) else { return Ok(()) };
     if !matches!(b.status, BuildStatus::Running | BuildStatus::Paused | BuildStatus::Waiting | BuildStatus::Failed) { return Ok(()); }
     // A build goes on only under the approval it was started with (the daemon's own record, never `state.json`).
