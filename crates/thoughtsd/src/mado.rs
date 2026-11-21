@@ -1274,7 +1274,7 @@ struct ApproveBody { plan_hash: Option<String> }
 /// kept as `state.plan_hash` (what allows the build to run the commands the user was shown).
 async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, String)>, q: axum::extract::Query<HashMap<String, String>>, body: Option<Json<ApproveBody>>) -> R {
     let shown = body.and_then(|b| b.0.plan_hash).filter(|h| !h.is_empty());
-    let (_, mado, full) = ctx(&st, &pid).await?;
+    let (project, mado, full) = ctx(&st, &pid).await?;
     if !STEPS.contains(&step.as_str()) { return Err(crate::tr::err("mado.unknown_name", &[("name", &step)]).into()); }
     let state = load_state(&pid, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
     if !approvable(&state, &step) { return Err(crate::tr::err("mado.not_approvable", &[]).into()); }
@@ -1293,7 +1293,8 @@ async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, Strin
         let plan = crate::mado_validate::plan(&bytes).map_err(|l| crate::tr::err_detail("mado.invalid", &[("path", PLAN)], l.join("\n")))?;
         let spec = read_text(&mado, "spec.md", full)?.unwrap_or_default();
         let flow = read_graph(&mado, "flow.graph.json", "flow", full).ok().flatten();
-        let r = review(&spec, flow.as_ref(), &plan);
+        let mut r = review(&spec, flow.as_ref(), &plan);
+        r.problems.extend(repo_problems(&st, &project).await);
         let blocking: Vec<String> = r.problems.iter().filter(|p| crate::mado_review::blocks(p)).map(|p| p.message.clone()).collect();
         if !blocking.is_empty() { return Err(crate::tr::err_detail("mado.review_blocked", &[], blocking.join("\n")).into()); }
         let now = plan_hash(&bytes);
@@ -1434,14 +1435,22 @@ pub fn check_ops(ops: &[GraphOp]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What the Final check says about the project's git repository (`mado_build::repo_findings`), as
+/// problems of the review: the build needs a repository, and says what it will commit first.
+async fn repo_problems(st: &AppState, project: &Path) -> Vec<Problem> {
+    crate::mado_build::repo_findings(st, project).await.into_iter()
+        .map(|(kind, key, files)| crate::mado_review::problem(crate::tr::arabic(), kind, key, &[("files", &files)], vec![])).collect()
+}
+
 async fn review_get(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
-    let (_, mado, full) = ctx(&st, &pid).await?;
+    let (project, mado, full) = ctx(&st, &pid).await?;
     // The hash is of the very bytes the review is computed from.
     let bytes = read_in(&mado, PLAN, full, DOC_MAX)?.ok_or_else(|| crate::tr::err("mado.missing", &[("path", PLAN)]))?;
     let plan = crate::mado_validate::plan(&bytes).map_err(|l| crate::tr::err_detail("mado.invalid", &[("path", PLAN)], l.join("\n")))?;
     let spec = read_text(&mado, "spec.md", full)?.unwrap_or_default();
     let flow = read_graph(&mado, "flow.graph.json", "flow", full).ok().flatten();
     let mut r = review(&spec, flow.as_ref(), &plan);
+    r.problems.extend(repo_problems(&st, &project).await);
     r.plan_hash = plan_hash(&bytes);
     Ok(Json(serde_json::to_value(r)?))
 }

@@ -12,7 +12,7 @@ import { STEPS } from './types';
 
 /** Kinds of problem that make a plan impossible to build: Approve stays off while one exists.
  *  The same list as the service's (`mado_review::blocks`), which refuses the approval anyway. */
-export const BLOCKING: readonly string[] = ['cycle', 'missing-dep', 'bad-path', 'bad-command', 'empty-acceptance', 'unknown-feature'];
+export const BLOCKING: readonly string[] = ['cycle', 'missing-dep', 'bad-path', 'bad-command', 'empty-acceptance', 'unknown-feature', 'no-repo', 'no-branch'];
 
 // ---------- the rules of the steps (plain functions, tested on their own) ----------
 

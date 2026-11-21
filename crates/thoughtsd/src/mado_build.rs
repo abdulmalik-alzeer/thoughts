@@ -427,7 +427,10 @@ fn plan_problem(plan: &PlanDoc) -> Option<String> {
 struct Ready { plan: PlanDoc, bytes: Vec<u8>, hash: String, branch: String, head: String }
 
 /// Everything a build needs before it may start, in the order the user would fix it.
-async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Result<Ready> {
+/// `commit`: the build is starting, so what is not committed yet is committed first (`commit_pending`).
+/// Without it (the view asking whether a build could start) nothing is changed, and pending changes
+/// or a repository with no commit yet are not a reason to refuse: the start takes care of them.
+async fn check_ready(state: &AppState, pid: &str, project: &Path, commit: bool) -> anyhow::Result<Ready> {
     // A repository of its own, the project's folder at its top.
     let top = git(state, project, &["rev-parse", "--show-toplevel"]).await.ok().map(|t| PathBuf::from(t.trim()));
     let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
@@ -449,6 +452,10 @@ async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Res
     }
     let branch = crate::git::current_branch(state, project).await.map_err(|_| crate::tr::err("mado_build.no_branch", &[]))?;
     if branch.starts_with("mado/") { return Err(crate::tr::err("mado_build.no_branch", &[])); }
+    if !commit { return Ok(Ready { plan, bytes, hash, branch, head: crate::git::head(state, project).await.unwrap_or_default() }); }
+    // The build's first step: the user's pending changes become a commit, so the build starts from
+    // everything that is in the folder now (the plan in `mado/` included).
+    commit_pending(state, project).await?;
     let head = crate::git::head(state, project).await.ok_or_else(|| crate::tr::err("mado_build.no_commit", &[]))?;
     let dirty = dirty_files(state, project).await?;
     if !dirty.is_empty() {
@@ -457,6 +464,44 @@ async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Res
         return Err(crate::tr::err("mado_build.dirty", &[("files", &shown.join(", "))]));
     }
     Ok(Ready { plan, bytes, hash, branch, head })
+}
+
+/// The message of the commit a build makes of the user's pending changes before it starts.
+pub const PENDING_COMMIT: &str = "Before the MADO build";
+
+/// Commits everything that is not committed yet (new files too; what `.gitignore` leaves out stays
+/// out, and so does the app's own `mado/` folder, as for `dirty_files`), on the user's own branch. A repository with no commit yet gets its first one, empty if
+/// there is nothing in it. Nothing to commit: nothing is done. No hook of the project runs
+/// (`git::git` switches them off), and with no git identity on this machine the commit is the app's.
+async fn commit_pending(state: &AppState, project: &Path) -> anyhow::Result<()> {
+    let first = crate::git::head(state, project).await.is_none();
+    if !first && dirty_files(state, project).await?.is_empty() { return Ok(()); }
+    // (Not the app's own `mado/` folder: it is never part of the user's history unless they put it there.)
+    git(state, project, &["add", "-A", "--", ".", ":(exclude,top)mado"]).await?;
+    let mut args = vec!["commit", "-q", "-m", PENDING_COMMIT];
+    if first { args.push("--allow-empty"); }
+    crate::git::git_ident(state, project, &args).await?;
+    Ok(())
+}
+
+/// What the Final check says about the project's repository, as `(kind, message key, files)`:
+/// `no-repo` (not a repository of its own) and `no-branch` keep a build from starting;
+/// `uncommitted` only tells what the build will commit first (up to five names, then `…`).
+pub async fn repo_findings(state: &AppState, project: &Path) -> Vec<(&'static str, &'static str, String)> {
+    let top = git(state, project, &["rev-parse", "--show-toplevel"]).await.ok().map(|t| PathBuf::from(t.trim()));
+    let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
+    if !same { return vec![("no-repo", "mado_build.not_repo", String::new())]; }
+    let mut out = vec![];
+    // (A repository with no commit yet names its branch all the same.)
+    let branch = git(state, project, &["symbolic-ref", "--short", "-q", "HEAD"]).await.map(|b| b.trim().to_string()).unwrap_or_default();
+    if branch.is_empty() || branch.starts_with("mado/") { out.push(("no-branch", "mado_build.no_branch", String::new())); }
+    let dirty = dirty_files(state, project).await.unwrap_or_default();
+    if !dirty.is_empty() || crate::git::head(state, project).await.is_none() {
+        let mut shown: Vec<String> = dirty.iter().take(5).cloned().collect();
+        if dirty.len() > 5 { shown.push("…".into()); }
+        out.push(("uncommitted", if shown.is_empty() { "mado.p.first_commit" } else { "mado.p.uncommitted" }, shown.join(", ")));
+    }
+    out
 }
 
 // ---------- start, pause, resume, stop, retry, land ----------
@@ -485,7 +530,7 @@ pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) 
         let _g = l.lock().await;
         let old = load_build(&project)?;
         if old.as_ref().map_or(false, BuildState::under_way) || !live_of(pid).is_empty() { return Err(crate::tr::err("mado_build.busy", &[])); }
-        let r = check_ready(state, pid, &project).await?;
+        let r = check_ready(state, pid, &project, true).await?;
         let gl = lock_of(&GIT_LOCKS, pid);
         let _gg = gl.lock().await;
         // Whatever an earlier build left behind under the engine's folder goes first.
@@ -1726,7 +1771,7 @@ async fn api_get(State(st): State<Arc<AppState>>, UrlPath(pid): UrlPath<String>)
     // Whether the build's own commands run confined (never on other systems than macOS: the window says so).
     v["confined"] = json!(confinement(&st).await.confined);
     if !b.under_way() {
-        if let Err(e) = check_ready(&st, &pid, &project).await { v["blocked"] = json!(crate::tr::classify(&e).message); }
+        if let Err(e) = check_ready(&st, &pid, &project, false).await { v["blocked"] = json!(crate::tr::classify(&e).message); }
     }
     Ok(Json(v))
 }

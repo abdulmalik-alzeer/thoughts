@@ -191,7 +191,7 @@ The window refetches; it does not trust the event's payload.
 
 ## Build engine
 
-- Needs the project to be a git repository with a clean working tree; the view says so and offers nothing else.
+- Needs the project to be a git repository of its own, on a branch that is not `mado/*`. `GET /review` adds what it finds to `problems`: `no-repo` and `no-branch` (both block approval), and `uncommitted` (told only). `start` first commits the user's pending changes on their branch (`git add -A` without `mado/`, message “Before the MADO build”; a repository with no commit gets its first one), then branches from that commit. The build view's `blocked` no longer names pending changes.
 - Refuses to start unless the daemon's approval record exists and matches `plan.json` now (`approval_matches`).
   The review step shows every acceptance command verbatim; approving it is what allows the daemon to run them.
 - Works on a branch of its own (`mado/build-<n>`, from the user's current branch) in worktrees under

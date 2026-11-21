@@ -345,14 +345,45 @@ async fn after_a_restart_a_build_of_a_library_that_is_not_open_is_picked_up_too(
 }
 
 #[tokio::test]
-async fn a_start_is_refused_on_a_dirty_tree_an_unapproved_review_a_changed_plan_and_outside_git() {
+async fn a_start_commits_what_is_pending_first_and_the_final_check_says_so() {
     let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
     t::assistant(&p.st, |_| async { true });
-    // Changes of the user's that are not committed (the app's own `mado/` does not count).
+    // Nothing pending: nothing to say, and asking changes nothing.
+    let before = t::sh(&p.dir, &["rev-parse", "HEAD"]);
     put(&p.dir, "notes.txt", "mine");
-    let e = start(&p.st, &p.pid, None).await.unwrap_err();
-    assert!(says(&e, "mado_build.dirty") && crate::tr::classify_in(false, &e).message.contains("notes.txt"), "{e}");
-    std::fs::remove_file(p.dir.join("notes.txt")).unwrap();
+    let found = repo_findings(&p.st, &p.dir).await;
+    assert!(found.iter().any(|(k, key, files)| *k == "uncommitted" && *key == "mado.p.uncommitted" && files.contains("notes.txt")), "{found:?}");
+    // The view asking whether a build could start is not told "no", and commits nothing.
+    let v = api_get(State(p.st.clone()), UrlPath(p.pid.clone())).await.unwrap().0;
+    assert_eq!(v.get("blocked"), None, "{v}");
+    assert_eq!(t::sh(&p.dir, &["rev-parse", "HEAD"]), before);
+    // The start commits it on the user's own branch, and the build begins from that commit.
+    let b = start(&p.st, &p.pid, None).await.unwrap();
+    assert_eq!(t::sh(&p.dir, &["log", "-1", "--format=%s"]).trim(), PENDING_COMMIT);
+    assert_ne!(t::sh(&p.dir, &["rev-parse", "HEAD"]), before);
+    assert!(t::sh(&p.dir, &["show", "--stat", "--format=", "HEAD"]).contains("notes.txt"));
+    assert_eq!(t::sh(&p.dir, &["rev-parse", &format!("mado/build-{}~0", b.number)]).len(), before.len());
+    assert!(dirty_files(&p.st, &p.dir).await.unwrap().is_empty());
+    let _ = stop(&p.st, &p.pid).await;
+    p.done();
+}
+
+#[tokio::test]
+async fn the_final_check_names_a_folder_that_is_not_a_repository() {
+    let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
+    assert!(repo_findings(&p.st, &p.dir).await.is_empty());
+    std::fs::remove_dir_all(p.dir.join(".git")).unwrap();
+    let found = repo_findings(&p.st, &p.dir).await;
+    assert_eq!(found.iter().map(|f| f.0).collect::<Vec<_>>(), ["no-repo"]);
+    assert!(crate::mado_review::blocks(&crate::mado_review::problem(false, "no-repo", found[0].1, &[], vec![])));
+    assert!(!crate::mado_review::blocks(&crate::mado_review::problem(false, "uncommitted", "mado.p.uncommitted", &[("files", "x")], vec![])));
+    p.done();
+}
+
+#[tokio::test]
+async fn a_start_is_refused_on_an_unapproved_review_a_changed_plan_and_outside_git() {
+    let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
+    t::assistant(&p.st, |_| async { true });
     // No approval on record: a `state.json` in the project that says "approved" is not one.
     let record = engine_dir(&p.pid).unwrap().join("approval.json");
     let kept = std::fs::read(&record).unwrap();
@@ -861,7 +892,7 @@ async fn a_project_whose_git_settings_start_programs_is_not_built_or_landed() {
     assert!(!p.dir.join("mado/build.json").exists());
     // Full access lets it through, as every guard.
     p.st.settings.write().await.full_access.on = true;
-    assert!(check_ready(&p.st, &p.pid, &p.dir).await.is_ok());
+    assert!(check_ready(&p.st, &p.pid, &p.dir, false).await.is_ok());
     p.st.settings.write().await.full_access.on = false;
     t::sh(&p.dir, &["config", "--local", "--remove-section", "filter.evil"]);
     t::sh(&p.dir, &["config", "--local", "--remove-section", "diff.evil"]);

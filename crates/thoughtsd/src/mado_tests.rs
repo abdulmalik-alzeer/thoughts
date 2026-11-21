@@ -555,9 +555,42 @@ async fn invalid_output_gets_one_repair_turn_then_the_user_is_told() {
 }
 
 #[tokio::test]
+async fn the_final_check_says_what_git_needs_and_a_folder_outside_git_cannot_be_approved() {
+    let (st, pid, dir) = with_project("review-git").await;
+    let mado = dir.join("mado");
+    let _ = start(State(st.clone()), UrlPath(pid.clone())).await.unwrap();
+    std::fs::write(mado.join("spec.md"), SPEC).unwrap();
+    std::fs::write(mado.join("flow.graph.json"), FLOW).unwrap();
+    let mut plan = PlanDoc { version: 1, setup: None, tasks: vec![task("t-a", &["src/a/**"], &[], "F1"), task("t-b", &["src/b/**"], &["t-a"], "F2")] };
+    plan.tasks[0].screens = Some(vec!["sign-in".into(), "orders".into()]);
+    std::fs::write(mado.join("plan.json"), serde_json::to_vec_pretty(&plan).unwrap()).unwrap();
+    with_state(&st, &pid, |s| { for k in ["brief", "spec", "tech", "design", "plan"] { s.steps.get_mut(k).unwrap().status = "approved".into(); } Ok(()) }).await.unwrap();
+    let kinds = |v: &serde_json::Value| v["problems"].as_array().unwrap().iter().map(|p| p["kind"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    // Not a repository: said in the review, and approving is refused before anybody is asked.
+    let r = review_get(State(st.clone()), UrlPath(pid.clone())).await.unwrap().0;
+    assert!(kinds(&r).contains(&"no-repo".to_string()), "{r}");
+    let hash = r["planHash"].as_str().unwrap().to_string();
+    let body = Some(Json(ApproveBody { plan_hash: Some(hash.clone()) }));
+    let e = step_approve(State(st.clone()), UrlPath((pid.clone(), "review".into())), axum::extract::Query(HashMap::from([("approval".to_string(), crate::consent::test_mado_approval(&pid, &hash))])), body).await.unwrap_err();
+    assert_eq!(crate::api::shown_status(&e), 409);
+    assert_ne!(status_of(&pid, &dir, "review"), "approved");
+    // A repository with no commit yet, then one with a file of the user's waiting: both are only told.
+    crate::wraps::testutil::sh(&dir, &["init", "-q", "-b", "main"]);
+    let r = review_get(State(st.clone()), UrlPath(pid.clone())).await.unwrap().0;
+    assert_eq!(kinds(&r), ["uncommitted"], "{r}");
+    assert!(r["problems"][0]["message"].as_str().unwrap().contains("README.md"), "{r}");
+    std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+    let r = review_get(State(st.clone()), UrlPath(pid.clone())).await.unwrap().0;
+    assert!(r["problems"][0]["message"].as_str().unwrap().contains("notes.txt"), "{r}");
+    assert!(!crate::mado_review::blocks(&serde_json::from_value(r["problems"][0].clone()).unwrap()));
+}
+
+#[tokio::test]
 async fn approving_the_review_is_bound_to_the_plan_the_user_was_shown() {
     let (st, pid, dir) = with_project("review").await;
     let mado = dir.join("mado");
+    // (The Final check refuses a folder that is not a git repository of its own: see below.)
+    crate::wraps::testutil::sh(&dir, &["init", "-q", "-b", "main"]);
     let _ = start(State(st.clone()), UrlPath(pid.clone())).await.unwrap();
     std::fs::write(mado.join("spec.md"), SPEC).unwrap();
     std::fs::write(mado.join("flow.graph.json"), FLOW).unwrap();

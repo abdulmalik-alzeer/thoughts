@@ -50,7 +50,7 @@ export interface DesignTokens {
 export interface StyleCandidate { id: string; name: string; description: string; tokens: DesignTokens; source: 'app' | 'assistant' }
 export interface ScreenInfo { id: string; label: string; hasMock: boolean }
 
-export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path' | 'bad-command';
+export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path' | 'bad-command' | 'no-repo' | 'no-branch' | 'uncommitted';
 export interface Problem { kind: ProblemKind; message: string; tasks?: string[] }
 export interface Lane { id: string; tasks: string[] }
 export interface Wave { lanes: Lane[] }

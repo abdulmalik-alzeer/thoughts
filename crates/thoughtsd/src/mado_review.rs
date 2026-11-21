@@ -130,7 +130,7 @@ fn in_cycles(plan: &PlanDoc) -> Vec<String> {
     plan.tasks.iter().filter(|t| left.contains(t.id.as_str())).map(|t| t.id.clone()).collect()
 }
 
-fn problem(ar: bool, kind: &str, key: &str, args: &[(&str, &str)], tasks: Vec<String>) -> Problem {
+pub(crate) fn problem(ar: bool, kind: &str, key: &str, args: &[(&str, &str)], tasks: Vec<String>) -> Problem {
     Problem { kind: kind.into(), message: crate::tr::text_in(ar, key, args), tasks: (!tasks.is_empty()).then_some(tasks) }
 }
 
@@ -138,8 +138,10 @@ fn problem(ar: bool, kind: &str, key: &str, args: &[(&str, &str)], tasks: Vec<St
 /// built; a bad path could reach outside the project; a task without a check cannot be called done;
 /// a task for a feature the spec does not have traces to nothing; a command with shell or pattern
 /// syntax could run more than the user was shown. Untraced features and screens are
-/// for the user to judge, and overlapping tasks simply run one after another.
-pub fn blocks(p: &Problem) -> bool { matches!(p.kind.as_str(), "cycle" | "missing-dep" | "bad-path" | "bad-command" | "empty-acceptance" | "unknown-feature") }
+/// for the user to judge, and overlapping tasks simply run one after another. A folder that is not a
+/// git repository of its own, or not on a branch, cannot be built at all (`mado::repo_problems`);
+/// changes not committed yet are only told: the build commits them first.
+pub fn blocks(p: &Problem) -> bool { matches!(p.kind.as_str(), "cycle" | "missing-dep" | "bad-path" | "bad-command" | "empty-acceptance" | "unknown-feature" | "no-repo" | "no-branch") }
 
 /// `review_in` in the UI language.
 pub fn review(spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) -> Review { review_in(crate::tr::arabic(), spec, flow, plan) }
