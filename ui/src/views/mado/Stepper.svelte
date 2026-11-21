@@ -6,8 +6,8 @@
   import type { MadoOverview, StepId } from '../../lib/mado/types';
   import { neighbour, stepperItems } from './steps';
 
-  let { overview, current, onpick }: { overview: MadoOverview | null; current: StepId; onpick: (s: StepId) => void } = $props();
-  const items = $derived(stepperItems(overview, current));
+  let { overview, current, onpick, build = null }: { overview: MadoOverview | null; current: StepId; onpick: (s: StepId) => void; build?: { status?: string; landedAt?: string } | null } = $props();
+  const items = $derived(stepperItems(overview, current, build));
   let list = $state<HTMLOListElement>();
 
   function onkey(e: KeyboardEvent) {

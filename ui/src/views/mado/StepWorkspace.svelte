@@ -152,7 +152,7 @@
 <section class="ws" aria-labelledby="mado-step-title">
   <header class="head">
     <div class="grow titles">
-      <div class="row"><h2 id="mado-step-title">{t(`mado.step.${step}`)}</h2><span class="pill st-{status}" role="status">{t(statusKey(step, status))}</span></div>
+      <div class="row"><h2 id="mado-step-title">{t(`mado.step.${step}`)}</h2><span class="pill st-{status}" role="status">{t(statusKey(step, status, store.build))}</span></div>
       <p class="muted what">{t(`mado.stepWhat.${step}`)}</p>
     </div>
     {#if !locked && step !== 'build'}

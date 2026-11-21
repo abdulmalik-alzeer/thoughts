@@ -94,7 +94,7 @@
       </div>
     </section>
   {:else}
-    <div class="stepper"><Stepper overview={store.overview} {current} onpick={(s) => (current = s)} /></div>
+    <div class="stepper"><Stepper overview={store.overview} {current} build={store.build} onpick={(s) => (current = s)} /></div>
     {#key current}
       <StepWorkspace {store} step={current} onstep={(s) => (current = s)} bind:tab={() => tabs[current] ?? '', (v) => { tabs[current] = v; }} />
     {/key}

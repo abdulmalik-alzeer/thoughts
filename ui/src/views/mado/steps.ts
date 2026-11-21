@@ -24,17 +24,24 @@ export interface StepperItem {
 }
 
 /** `review` reads differently for the steps nobody drafts: there it is simply the user's turn. */
-export function statusKey(step: StepId, status: StepStatus): string {
+/** `build`: the build's own state, when there is one. The Build step is never "approved" by anybody,
+ *  so what it says comes from the build: under way, finished, or brought into the user's branch. */
+export function statusKey(step: StepId, status: StepStatus, build?: { status?: string; landedAt?: string } | null): string {
+  if (step === 'build' && status !== 'locked' && build) {
+    if (build.landedAt) return 'mado.status.landed';
+    if (['running', 'checking', 'reviewing', 'paused', 'waiting'].includes(build.status ?? '')) return 'mado.status.building';
+    if (build.status === 'done') return 'mado.status.built';
+  }
   if (step === 'build') return status === 'locked' ? 'mado.status.locked' : status === 'approved' ? 'mado.status.built' : 'mado.status.buildReady';
   if (step === 'review' && (status === 'ready' || status === 'review')) return 'mado.status.check';
   if (step === 'brief' && status === 'ready') return 'mado.status.briefReady';
   return `mado.status.${status}`;
 }
 
-export function stepperItems(o: MadoOverview | null, current: StepId): StepperItem[] {
+export function stepperItems(o: MadoOverview | null, current: StepId, build?: { status?: string; landedAt?: string } | null): StepperItem[] {
   return STEPS.map((id, i) => {
     const status = statusOf(o, id);
-    return { id, n: i + 1, status, tone: TONE[status], nameKey: `mado.step.${id}`, statusKey: statusKey(id, status), locked: status === 'locked', current: id === current };
+    return { id, n: i + 1, status, tone: TONE[status], nameKey: `mado.step.${id}`, statusKey: statusKey(id, status, build), locked: status === 'locked', current: id === current };
   });
 }
 

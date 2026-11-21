@@ -50,6 +50,8 @@ export default {
     'mado.status.stale': 'Needs another look',
     'mado.status.buildReady': 'Ready to build',
     'mado.status.built': 'Built',
+    'mado.status.building': 'Building…',
+    'mado.status.landed': 'Built and in your branch',
 
     'mado.locked.title': 'This step is not open yet',
     'mado.locked.brief': 'Start the plan to open it.',
@@ -392,6 +394,8 @@ export default {
     'mado.status.stale': 'تحتاج نظرة أخرى',
     'mado.status.buildReady': 'جاهز للبناء',
     'mado.status.built': 'تمّ البناء',
+    'mado.status.building': 'البناء جارٍ…',
+    'mado.status.landed': 'بُني وصار في فرعك',
 
     'mado.locked.title': 'هذه الخطوة لم تُفتح بعد',
     'mado.locked.brief': 'ابدأ الخطة لتفتحها.',

@@ -40,6 +40,12 @@ describe('the stepper', () => {
     expect(statusKey('review', 'ready')).toBe('mado.status.check');
     expect(statusKey('brief', 'ready')).toBe('mado.status.briefReady');
     expect(statusKey('build', 'approved')).toBe('mado.status.built');
+    // The build's own state speaks for the Build step: nobody approves it.
+    expect(statusKey('build', 'ready', { status: 'running' })).toBe('mado.status.building');
+    expect(statusKey('build', 'ready', { status: 'done' })).toBe('mado.status.built');
+    expect(statusKey('build', 'ready', { status: 'done', landedAt: '2026-11-21T00:00:00Z' })).toBe('mado.status.landed');
+    expect(statusKey('build', 'locked', { status: 'done', landedAt: 'x' })).toBe('mado.status.locked');
+    expect(statusKey('build', 'ready', { status: 'idle' })).toBe('mado.status.buildReady');
     expect(statusKey('spec', 'stale')).toBe('mado.status.stale');
   });
 
