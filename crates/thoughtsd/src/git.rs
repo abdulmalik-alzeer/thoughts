@@ -378,14 +378,27 @@ pub fn runs_program(key: &str, value: &str) -> bool {
     }
 }
 
-/// The keys of the repository's own configuration (`.git/config`, with what it includes) that make
-/// git start a program of its choosing (`runs_program`), in order, each once.
+/// The settings of the repository's own configuration (`.git/config`, read from `dir`, a worktree's
+/// too) that make git start a program of its choosing (`runs_program`), or that make git read
+/// settings from somewhere else, which differ by worktree and branch and could not be checked here
+/// (`include.path`, `includeIf.<condition>.path`, `extensions.worktreeConfig`, a `config.worktree`
+/// file of any worktree). In order, each once. Nothing is followed: what git would include is refused, not read.
 pub async fn program_keys(state: &AppState, dir: &Path) -> anyhow::Result<Vec<String>> {
-    let out = git(state, dir, &["config", "--local", "--includes", "--list", "-z"]).await.unwrap_or_default();
+    let out = git(state, dir, &["config", "--local", "--no-includes", "--list", "-z"]).await?;
     let mut keys: Vec<String> = vec![];
+    let mut add = |k: &str| if !keys.iter().any(|x| x.eq_ignore_ascii_case(k)) { keys.push(k.to_string()); };
     for rec in out.split('\0').filter(|r| !r.is_empty()) {
         let (k, v) = rec.split_once('\n').unwrap_or((rec, ""));
-        if runs_program(k, v) && !keys.iter().any(|x| x.eq_ignore_ascii_case(k)) { keys.push(k.to_string()); }
+        let l = k.to_ascii_lowercase();
+        let elsewhere = l == "include.path" || (l.starts_with("includeif.") && l.ends_with(".path")) || l == "extensions.worktreeconfig";
+        if elsewhere || runs_program(k, v) { add(k); }
+    }
+    // A worktree's own settings file, whether or not the extension is on now.
+    if let Ok(common) = git(state, dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"]).await {
+        let common = std::path::PathBuf::from(common.trim());
+        let mut files = vec![common.join("config.worktree")];
+        if let Ok(rd) = std::fs::read_dir(common.join("worktrees")) { files.extend(rd.flatten().take(1000).map(|e| e.path().join("config.worktree"))); }
+        if files.iter().any(|f| std::fs::symlink_metadata(f).is_ok()) { add("config.worktree"); }
     }
     Ok(keys)
 }

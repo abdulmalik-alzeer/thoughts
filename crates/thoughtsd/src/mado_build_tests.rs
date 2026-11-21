@@ -694,3 +694,46 @@ async fn a_project_whose_git_settings_start_programs_is_not_built_or_landed() {
     assert!(p.dir.join("src/a.txt").exists());
     p.done();
 }
+
+#[tokio::test]
+async fn git_settings_read_from_elsewhere_are_refused_not_followed() {
+    let p = project(vec![task("a", &["src/**"], &[], &["test -f src/a.txt"])]).await;
+    let other = p.root.join("other.gitconfig");
+    std::fs::write(&other, "[filter \"evil\"]\n\tclean = touch /tmp/never\n").unwrap();
+    let refused = |p: &P| { let (st, pid, dir) = (p.st.clone(), p.pid.clone(), p.dir.clone()); async move {
+        crate::trust::trust(&dir).unwrap();
+        let e = crate::tr::classify_in(false, &start(&st, &pid, None).await.unwrap_err()).message;
+        assert!(!dir.join("mado/build.json").exists());
+        e
+    } };
+    // includeIf on a branch: what it includes differs by worktree and branch; it is refused, not read.
+    t::sh(&p.dir, &["config", "--local", "includeIf.onbranch:mado/**.path", &other.to_string_lossy()]);
+    let e = refused(&p).await;
+    assert!(e.contains("includeIf.onbranch:mado/**.path") || e.contains("includeif.onbranch:mado/**.path"), "{e}");
+    t::sh(&p.dir, &["config", "--local", "--remove-section", "includeIf.onbranch:mado/**"]);
+    // A plain include.
+    t::sh(&p.dir, &["config", "--local", "include.path", &other.to_string_lossy()]);
+    assert!(refused(&p).await.contains("include.path"));
+    t::sh(&p.dir, &["config", "--local", "--unset", "include.path"]);
+    // Per-worktree settings.
+    t::sh(&p.dir, &["config", "--local", "extensions.worktreeConfig", "true"]);
+    assert!(refused(&p).await.to_lowercase().contains("extensions.worktreeconfig"));
+    t::sh(&p.dir, &["config", "--local", "--unset", "extensions.worktreeConfig"]);
+    std::fs::write(p.dir.join(".git/config.worktree"), "[core]\n\tpager = evil\n").unwrap();
+    assert!(refused(&p).await.contains("config.worktree"));
+    std::fs::remove_file(p.dir.join(".git/config.worktree")).unwrap();
+    crate::trust::trust(&p.dir).unwrap();
+    // Clean again: the build runs; a setting that appears in a worktree mid-build stops its commit.
+    let dir = p.dir.clone();
+    t::assistant(&p.st, move |info: RunInfo| { let dir = dir.clone(); async move {
+        put(&info.cwd, "src/a.txt", "a");
+        t::sh(&dir, &["config", "--local", "filter.late.smudge", "touch /tmp/never"]);
+        true
+    } });
+    start(&p.st, &p.pid, None).await.unwrap();
+    let b = until(&p, "the lane stops", |b| matches!(b.status, BuildStatus::Failed | BuildStatus::Waiting)).await;
+    assert!(b.message.as_deref().unwrap_or_default().contains("filter.late.smudge"), "{b:?}");
+    assert!(find(&b, "a").commit.is_none(), "nothing was committed");
+    let _ = stop(&p.st, &p.pid).await;
+    p.done();
+}

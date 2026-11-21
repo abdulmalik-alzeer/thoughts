@@ -279,6 +279,13 @@ async fn no_git_programs(state: &AppState, project: &Path) -> anyhow::Result<()>
     Err(crate::tr::err("mado_build.git_programs", &[("keys", &shown.join(", "))]))
 }
 
+/// `no_git_programs` for `dir` (the project or one of the engine's worktrees), right before the
+/// engine's own git changes files there; it yields to full access.
+async fn git_safe(state: &AppState, dir: &Path) -> anyhow::Result<()> {
+    if full(state).await { return Ok(()); }
+    no_git_programs(state, dir).await
+}
+
 /// Changes in the project's working tree, the app's own `mado/` folder aside.
 async fn dirty_files(state: &AppState, dir: &Path) -> anyhow::Result<Vec<String>> {
     let out = git(state, dir, &["status", "--porcelain=v1", "-z"]).await?;
@@ -329,6 +336,7 @@ async fn delete_branch(state: &AppState, project: &Path, branch: &str, force: bo
 /// Put a worktree of the engine's back to its last commit, then copy the plan's documents in again.
 async fn reset_wt(state: &AppState, project: &Path, wt: &Path) {
     if !wt.join(".git").exists() { return; }
+    if let Err(e) = git_safe(state, wt).await { crate::log::warn(format!("mado build: a worktree was not reset: {e}")); return; }
     if git_ok(state, wt, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).await { let _ = git(state, wt, &["merge", "--abort"]).await; }
     let _ = git(state, wt, &["reset", "-q", "--hard", "HEAD"]).await;
     let _ = git(state, wt, &["clean", "-fdq", "-e", "/mado/"]).await;
@@ -412,7 +420,7 @@ async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Res
     let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
     if !same { return Err(crate::tr::err("mado_build.not_repo", &[])); }
     if !full(state).await { crate::trust::require_git(project)?; }
-    if !full(state).await { no_git_programs(state, project).await?; }
+    git_safe(state, project).await?;
     // No link or shared file in `mado/` (a cloned repository can ship `mado/spec.md -> ~/.zshrc`).
     mado::require_plain(&mado_dir(project)?, full(state).await)?;
     // The Review step approved exactly the plan that is there now (its commands are what will run).
@@ -607,7 +615,8 @@ pub async fn land(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState
     let mut b = load_build(&project)?.ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
     if b.landed_at.is_some() { return Err(crate::tr::err("mado_build.landed", &[])); }
     if b.status != BuildStatus::Done { return Err(crate::tr::err("mado_build.not_done", &[])); }
-    if !full(state).await { crate::trust::require_git(&project)?; no_git_programs(state, &project).await?; }
+    if !full(state).await { crate::trust::require_git(&project)?; }
+    git_safe(state, &project).await?;
     let here = crate::git::current_branch(state, &project).await.unwrap_or_default();
     if here != b.base { return Err(crate::tr::err("mado_build.wrong_branch", &[("branch", &b.base)])); }
     let dirty = dirty_files(state, &project).await?;
@@ -809,6 +818,7 @@ async fn ensure_lane_wt(state: &AppState, project: &Path, pid: &str, b: &BuildSt
     let _g = gl.lock().await;
     if wt.join(".git").exists() { return Ok(wt); }
     remove_worktree(state, project, pid, &wt).await;
+    git_safe(state, project).await?;
     let br = lane_branch(b.number, wi, li);
     if git_ok(state, project, &["rev-parse", "-q", "--verify", &format!("refs/heads/{br}")]).await {
         git(state, project, &["worktree", "add", "-q", &s(&wt), &br]).await?;
@@ -926,6 +936,7 @@ async fn note_fail(pid: &str, project: &Path, at: (usize, usize, usize), why: &s
 
 /// A run that switched its worktree to another branch: back onto the lane's (its changes stay).
 async fn reset_lane_head(state: &AppState, wt: &Path, branch: &str) {
+    if let Err(e) = git_safe(state, wt).await { crate::log::warn(format!("mado build: a worktree was not put back on its branch: {e}")); return; }
     let _ = git(state, wt, &["checkout", "-q", "-f", branch]).await;
 }
 
@@ -1149,6 +1160,7 @@ pub fn glob_match(pattern: &str, path: &str) -> bool {
 /// Commit what the task changed in its lane's worktree (the copied documents aside). Returns the
 /// commit and the files it holds. A task that needed no change still gets its (empty) commit.
 async fn commit_task(state: &AppState, wt: &Path, n: u32, task: &PlanTask) -> anyhow::Result<(String, Vec<String>)> {
+    git_safe(state, wt).await?;
     git(state, wt, &["add", "-A", "--", ".", ":(exclude)mado"]).await?;
     let changed: Vec<String> = git(state, wt, &["diff", "--cached", "--name-only", "-z", "--no-renames"]).await?.split('\0').filter(|f| !f.is_empty()).map(String::from).collect();
     let msg = format!("MADO: {}\n\nTask {} of build {}, made by the Thoughts app.\n\nMado-Task: {}", one_line(&task.title, 100), task.id, n, task.id);
@@ -1175,6 +1187,7 @@ async fn ensure_build_wt(state: &AppState, project: &Path, pid: &str, b: &BuildS
         let gl = lock_of(&GIT_LOCKS, pid);
         let _g = gl.lock().await;
         remove_worktree(state, project, pid, &bwt).await;
+        git_safe(state, project).await?;
         git(state, project, &["worktree", "add", "-q", &s(&bwt), &b.branch]).await?;
         copy_docs(project, &bwt, full(state).await)?;
     }
@@ -1257,6 +1270,7 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
         reset_wt(state, project, &bwt).await;
         return hold_waiting(state, pid, project, None, &tr("mado_build.wave_failed", &[("output", &why)])).await;
     }
+    git_safe(state, &bwt).await?;
     git(state, &bwt, &["add", "-A", "--", ".", ":(exclude)mado"]).await?;
     if !git_ok(state, &bwt, &["diff", "--cached", "--quiet"]).await {
         crate::git::git_ident(state, &bwt, &["commit", "-q", "-m", &format!("MADO: wave {}, fixed after its checks", wi + 1)]).await?;
@@ -1284,6 +1298,7 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     let lane = b.waves[wi].lanes[li].clone();
     let names = lane.tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", ");
     let msg = format!("MADO: wave {} lane {} ({names})", wi + 1, li + 1);
+    git_safe(state, &bwt).await?;
     let merged = crate::git::git_ident(state, &bwt, &["merge", "-q", "--no-ff", "--no-edit", "-m", &msg, &br]).await;
     let e = match merged { Ok(_) => { drop_lane(state, project, pid, wi, li, &br).await; return Ok(LaneEnd::Merged); } Err(e) => e };
     let clash = crate::git::unmerged(state, &bwt).await;
@@ -1323,6 +1338,7 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     }
     let cmds: Vec<String> = lane.tasks.iter().filter_map(|t| plan.tasks.iter().find(|p| p.id == t.id)).flat_map(|t| t.acceptance.clone()).collect();
     if let Err(why) = run_checks(state, pid, &b.plan_hash, &cmds, &bwt, project).await { return fix_failed(state, project, pid, &bwt, wi, li, &why.text()).await; }
+    git_safe(state, &bwt).await?;
     git(state, &bwt, &["add", "-A", "--", ".", ":(exclude)mado"]).await?;
     if let Err(e) = crate::git::git_ident(state, &bwt, &["commit", "-q", "--no-edit"]).await { return fix_failed(state, project, pid, &bwt, wi, li, &e.to_string()).await; }
     update(pid, project, |b| if let Some(l) = b.lane_mut(wi, li) {

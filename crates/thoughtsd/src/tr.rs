@@ -1529,8 +1529,8 @@ const TABLE: &[Entry] = &[
         "A build task runs only in the app's own copy of the project, with no other folders; this one was asked to run somewhere else, so it was not started.",
         "لا تعمل مهمة البناء إلا في نسخة التطبيق الخاصة من المشروع، دون أي مجلدات أخرى؛ وقد طُلب تشغيل هذه في مكان آخر، فلم تبدأ."),
     e("mado_build.git_programs", "forbidden", 403, "",
-        "This project's own git settings make git start other programs ({keys}), so the app will not build or bring a build in here: those programs would run with every step. Remove these settings from the project's .git/config (for example with “git config --local --unset <name>”) and try again.",
-        "إعدادات git الخاصة بهذا المشروع تجعل git يشغّل برامج أخرى ({keys})، فلن يبني التطبيق هنا ولن يدمج بناءً: إذ ستعمل تلك البرامج مع كل خطوة. احذف هذه الإعدادات من ملف ‎.git/config في المشروع (مثلاً بالأمر «git config --local --unset <الاسم>») ثم حاول مرة أخرى."),
+        "This project's own git settings make git start other programs or read settings from another file ({keys}), so the app will not build or bring a build in here: those programs could run with every step. Remove these settings from the project's .git folder (for example with “git config --local --unset <name>”) and try again.",
+        "إعدادات git الخاصة بهذا المشروع تجعل git يشغّل برامج أخرى أو يقرأ إعدادات من ملف آخر ({keys})، فلن يبني التطبيق هنا ولن يدمج بناءً: إذ قد تعمل تلك البرامج مع كل خطوة. احذف هذه الإعدادات من مجلد ‎.git في المشروع (مثلاً بالأمر «git config --local --unset <الاسم>») ثم حاول مرة أخرى."),
 ];
 
 fn entry(key: &str) -> &'static Entry {
