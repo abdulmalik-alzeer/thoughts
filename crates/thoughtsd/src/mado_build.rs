@@ -375,20 +375,23 @@ fn plan_problem(plan: &PlanDoc) -> Option<String> {
 struct Ready { plan: PlanDoc, bytes: Vec<u8>, hash: String, branch: String, head: String }
 
 /// Everything a build needs before it may start, in the order the user would fix it.
-async fn check_ready(state: &AppState, project: &Path) -> anyhow::Result<Ready> {
+async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Result<Ready> {
     // A repository of its own, the project's folder at its top.
     let top = git(state, project, &["rev-parse", "--show-toplevel"]).await.ok().map(|t| PathBuf::from(t.trim()));
     let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
     if !same { return Err(crate::tr::err("mado_build.not_repo", &[])); }
     if !full(state).await { crate::trust::require_git(project)?; }
     // The Review step approved exactly the plan that is there now (its commands are what will run).
-    let st: mado::MadoState = read_mado(project, "state.json")?.and_then(|b| serde_json::from_slice(&b).ok()).ok_or_else(|| crate::tr::err("mado_build.not_approved", &[]))?;
-    if st.steps.get("review").map_or(true, |s| s.status != "approved") { return Err(crate::tr::err("mado_build.not_approved", &[])); }
+    // The approval is the daemon's own record, never anything in the project (`state.json` could be forged).
+    let approval = mado::approved_plan(state, pid).await.ok_or_else(|| crate::tr::err("mado_build.not_approved", &[]))?;
     let bytes = read_mado(project, "plan.json")?.ok_or_else(|| crate::tr::err("mado_build.not_approved", &[]))?;
     let hash = mado::plan_hash(&bytes);
-    if st.plan_hash.as_deref() != Some(hash.as_str()) { return Err(crate::tr::err("mado_build.plan_changed", &[])); }
+    if !mado::approval_matches(&approval, &bytes) { return Err(crate::tr::err("mado_build.plan_changed", &[])); }
     let plan: PlanDoc = serde_json::from_slice(&bytes).map_err(|_| crate::tr::err("mado_build.plan_invalid", &[("why", "plan.json")]))?;
     if let Some(why) = plan_problem(&plan) { return Err(crate::tr::err("mado_build.plan_invalid", &[("why", &why)])); }
+    if plan.tasks.iter().flat_map(|t| t.acceptance.iter()).filter(|c| !c.trim().is_empty()).any(|c| !approval.commands.contains(c)) {
+        return Err(crate::tr::err("mado_build.plan_changed", &[]));
+    }
     let branch = crate::git::current_branch(state, project).await.map_err(|_| crate::tr::err("mado_build.no_branch", &[]))?;
     if branch.starts_with("mado/") { return Err(crate::tr::err("mado_build.no_branch", &[])); }
     let head = crate::git::head(state, project).await.ok_or_else(|| crate::tr::err("mado_build.no_commit", &[]))?;
@@ -403,15 +406,22 @@ async fn check_ready(state: &AppState, project: &Path) -> anyhow::Result<Ready> 
 
 // ---------- start, pause, resume, stop, retry, land ----------
 
+/// The linked project's folder, which must still be trusted (a guard: it yields to full access).
+async fn project_of(state: &AppState, pid: &str) -> anyhow::Result<PathBuf> {
+    let dir = mado::project_dir(state, pid).await?;
+    if !full(state).await { crate::trust::require(&dir)?; }
+    Ok(dir)
+}
+
 pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) -> anyhow::Result<BuildState> {
-    let project = mado::project_dir(state, pid).await?;
+    let project = project_of(state, pid).await?;
     let root = engine_dir(pid)?;
     let b = {
         let l = lock_of(&STATE_LOCKS, pid);
         let _g = l.lock().await;
         let old = load_build(&project)?;
         if old.as_ref().map_or(false, BuildState::under_way) || !live_of(pid).is_empty() { return Err(crate::tr::err("mado_build.busy", &[])); }
-        let r = check_ready(state, &project).await?;
+        let r = check_ready(state, pid, &project).await?;
         let gl = lock_of(&GIT_LOCKS, pid);
         let _gg = gl.lock().await;
         // Whatever an earlier build left behind under the engine's folder goes first.
@@ -448,7 +458,7 @@ pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) 
 }
 
 pub async fn pause(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState> {
-    let project = mado::project_dir(state, pid).await?;
+    let project = project_of(state, pid).await?;
     let r = update(pid, &project, |b| if b.status == BuildStatus::Running { b.status = BuildStatus::Paused; true } else { false }).await?
         .ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
     if !r { return Err(not_now(&project)); }
@@ -458,7 +468,7 @@ pub async fn pause(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildStat
 
 /// Paused (or failed as a whole): go on.
 pub async fn resume_build(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState> {
-    let project = mado::project_dir(state, pid).await?;
+    let project = project_of(state, pid).await?;
     let r = update(pid, &project, |b| if matches!(b.status, BuildStatus::Paused | BuildStatus::Failed) { b.status = BuildStatus::Running; b.message = None; true } else { false }).await?
         .ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
     if !r { return Err(not_now(&project)); }
@@ -474,7 +484,7 @@ fn not_now(project: &Path) -> anyhow::Error {
 
 /// Stop the build: its runs are stopped the usual way, its worktrees removed.
 pub async fn stop(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState> {
-    let project = mado::project_dir(state, pid).await?;
+    let project = project_of(state, pid).await?;
     let chats = update(pid, &project, |b| {
         if !b.under_way() && b.status != BuildStatus::Failed { return None; }
         b.status = BuildStatus::Stopped;
@@ -520,7 +530,7 @@ async fn cleanup(state: &AppState, project: &Path, pid: &str, b: &BuildState, st
 
 /// Try a failed or clashing task again (the build waits for this).
 pub async fn retry(state: &Arc<AppState>, pid: &str, task: &str) -> anyhow::Result<BuildState> {
-    let project = mado::project_dir(state, pid).await?;
+    let project = project_of(state, pid).await?;
     let found = update(pid, &project, |b| {
         if !matches!(b.status, BuildStatus::Waiting | BuildStatus::Failed | BuildStatus::Running | BuildStatus::Paused) { return Err(crate::tr::err("mado_build.retry_bad", &[])); }
         let n = b.number;
@@ -557,7 +567,7 @@ pub async fn retry(state: &Arc<AppState>, pid: &str, task: &str) -> anyhow::Resu
 /// Bring the finished build into the user's branch: fast-forward when possible, else a merge
 /// commit. A clash changes nothing.
 pub async fn land(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState> {
-    let project = mado::project_dir(state, pid).await?;
+    let project = project_of(state, pid).await?;
     let l = lock_of(&STATE_LOCKS, pid);
     let _g = l.lock().await;
     let mut b = load_build(&project)?.ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
@@ -614,7 +624,7 @@ pub fn tick(state: Arc<AppState>, pid: String) -> BoxFuture<'static, ()> {
 }
 
 async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
-    let project = mado::project_dir(state, pid).await?;
+    let project = project_of(state, pid).await?;
     let mut spawn: Vec<(usize, usize)> = vec![];
     let (mut recheck, mut finished) = (false, None);
     {
@@ -828,7 +838,7 @@ async fn run_task(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSta
             mado::tell(state, pid, "build").await;
             return Ok(TaskEnd::Failed);
         }
-        let chat = new_chat(state, pid, &format!("{} — {}", tr("mado_build.chat_title", &[]), one_line(&task.title, 80))).await;
+        let chat = new_chat(state, pid, &task.id, &format!("{} — {}", tr("mado_build.chat_title", &[]), one_line(&task.title, 80))).await;
         update(pid, project, |b| if let Some(t) = b.task_mut(wi, li, ti) { t.attempts += 1; t.status = TaskStatus::Running; t.chat_id = Some(chat.clone()); t.commit = None; }).await?;
         mado::tell(state, pid, "build").await;
         let ended = run_and_wait(state, project, pid, &chat, wt, &task_brief(task, plan, failure.as_deref()), deny_for(project, pid, b, wt)).await;
@@ -839,7 +849,16 @@ async fn run_task(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSta
         if head.trim() != format!("refs/heads/{}", lane_branch(b.number, wi, li)) { note_fail(pid, project, at, &tr("mado_build.left_branch", &[])).await?; reset_lane_head(state, wt, &lane_branch(b.number, wi, li)).await; continue; }
         update(pid, project, |b| if let Some(t) = b.task_mut(wi, li, ti) { t.status = TaskStatus::Checking; }).await?;
         mado::tell(state, pid, "build").await;
-        if let Err(why) = run_checks(state, &task.acceptance, wt, project).await { note_fail(pid, project, at, &why).await?; continue; }
+        match run_checks(state, pid, &b.plan_hash, &task.acceptance, wt, project).await {
+            Ok(()) => {}
+            Err(CheckErr::Failed(why)) => { note_fail(pid, project, at, &why).await?; continue; }
+            // Not an approved command: no further try, the build waits for the user.
+            Err(CheckErr::Unapproved(why)) => {
+                update(pid, project, |b| if let Some(t) = b.task_mut(wi, li, ti) { t.note = Some(why.clone()); t.status = TaskStatus::Failed; t.attempts = MAX_ATTEMPTS; }).await?;
+                mado::tell(state, pid, "build").await;
+                return Ok(TaskEnd::Failed);
+            }
+        }
         if status_now(project) == BuildStatus::Stopped { return Ok(TaskEnd::Stopped); }
         let (sha, changed) = commit_task(state, wt, b.number, task).await?;
         let outside: Vec<String> = changed.iter().filter(|f| !task.owns.iter().any(|p| glob_match(p, f))).take(10).cloned().collect();
@@ -865,9 +884,12 @@ async fn reset_lane_head(state: &AppState, wt: &Path, branch: &str) {
 
 fn one_line(s: &str, n: usize) -> String { s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(n).collect() }
 
-async fn new_chat(state: &AppState, pid: &str, title: &str) -> String {
+/// A chat of kind `mado-build` for task `task_id`: its `meta.mado` tells `mado::prepare_run` whose
+/// approved acceptance commands the run may use.
+async fn new_chat(state: &AppState, pid: &str, task_id: &str, title: &str) -> String {
     let c = Chat { kind: "mado-build".into(), title: title.to_string(), project_id: Some(pid.to_string()),
-        options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, ..Default::default() };
+        options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() },
+        meta: json!({"mado": {"projectId": pid, "taskId": task_id}}), ..Default::default() };
     let id = c.id.clone();
     state.chats.insert(c).await;
     id
@@ -951,12 +973,30 @@ async fn run_and_wait(state: &Arc<AppState>, project: &Path, pid: &str, chat: &s
 
 // ---------- acceptance commands ----------
 
+/// Why a check did not pass: it failed (worth another try), or it was refused because it is not
+/// a command the user approved for this build's plan (no try can change that: the build waits).
+pub enum CheckErr { Failed(String), Unapproved(String) }
+
+impl CheckErr { fn text(self) -> String { match self { CheckErr::Failed(t) | CheckErr::Unapproved(t) => t } } }
+
+/// Is `cmd` one the user approved for the plan this build runs (hash `hash`), and is the project's
+/// plan still that one? Asked again right before every command (correctness: it holds under full access too).
+async fn approved_now(state: &AppState, pid: &str, project: &Path, hash: &str, cmd: &str) -> bool {
+    let Some(a) = mado::approved_plan(state, pid).await else { return false };
+    let Ok(Some(bytes)) = read_mado(project, "plan.json") else { return false };
+    a.plan_hash == hash && mado::approval_matches(&a, &bytes) && a.commands.iter().any(|c| c == cmd)
+}
+
 /// Each command, in order, from `cwd`; the first that fails ends it, with what it printed.
-async fn run_checks(state: &AppState, cmds: &[String], cwd: &Path, project: &Path) -> Result<(), String> {
+async fn run_checks(state: &AppState, pid: &str, hash: &str, cmds: &[String], cwd: &Path, project: &Path) -> Result<(), CheckErr> {
     let full = full(state).await;
     for cmd in cmds.iter().filter(|c| !c.trim().is_empty()) {
-        if status_now(project) == BuildStatus::Stopped { return Err(tr("mado_build.stopped_note", &[])); }
-        run_check(cmd, cwd, full).await?;
+        if status_now(project) == BuildStatus::Stopped { return Err(CheckErr::Failed(tr("mado_build.stopped_note", &[]))); }
+        if !approved_now(state, pid, project, hash, cmd).await {
+            crate::log::warn("mado build: a check was refused, it is not an approved command of this plan");
+            return Err(CheckErr::Unapproved(tr("mado_build.check_unapproved", &[("cmd", &one_line(cmd, 300))])));
+        }
+        run_check(cmd, cwd, full).await.map_err(CheckErr::Failed)?;
     }
     Ok(())
 }
@@ -1112,7 +1152,8 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     }
     if hit.is_empty() && !lane.tasks.is_empty() { hit.push(lane.tasks.len() - 1); }
     let shown = clash.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
-    let fix = new_chat(state, pid, &format!("{} — {}", tr("mado_build.chat_title_fix", &[]), lane.id)).await;
+    let first = hit.first().and_then(|ti| lane.tasks.get(*ti)).map(|t| t.id.clone()).unwrap_or_default();
+    let fix = new_chat(state, pid, &first, &format!("{} — {}", tr("mado_build.chat_title_fix", &[]), lane.id)).await;
     update(pid, project, |b| {
         if let Some(l) = b.lane_mut(wi, li) {
             l.fix_chat_id = Some(fix.clone());
@@ -1132,7 +1173,7 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
         return fix_failed(state, project, pid, &bwt, wi, li, &tr("mado_build.fix_failed", &[("files", &shown)])).await;
     }
     let cmds: Vec<String> = lane.tasks.iter().filter_map(|t| plan.tasks.iter().find(|p| p.id == t.id)).flat_map(|t| t.acceptance.clone()).collect();
-    if let Err(why) = run_checks(state, &cmds, &bwt, project).await { return fix_failed(state, project, pid, &bwt, wi, li, &why).await; }
+    if let Err(why) = run_checks(state, pid, &b.plan_hash, &cmds, &bwt, project).await { return fix_failed(state, project, pid, &bwt, wi, li, &why.text()).await; }
     git(state, &bwt, &["add", "-A", "--", ".", ":(exclude)mado"]).await?;
     if let Err(e) = crate::git::git_ident(state, &bwt, &["commit", "-q", "--no-edit"]).await { return fix_failed(state, project, pid, &bwt, wi, li, &e.to_string()).await; }
     update(pid, project, |b| if let Some(l) = b.lane_mut(wi, li) {
@@ -1172,9 +1213,20 @@ pub fn resume(state: Arc<AppState>) {
 }
 
 pub async fn recover(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
-    let Ok(project) = mado::project_dir(state, pid).await else { return Ok(()) };
+    let Ok(project) = project_of(state, pid).await else { return Ok(()) };
     let Ok(Some(b)) = load_build(&project) else { return Ok(()) };
     if !matches!(b.status, BuildStatus::Running | BuildStatus::Paused | BuildStatus::Waiting | BuildStatus::Failed) { return Ok(()); }
+    // A build goes on only under the approval it was started with (the daemon's own record, never `state.json`).
+    let approved = match (mado::approved_plan(state, pid).await, read_mado(&project, "plan.json")) {
+        (Some(a), Ok(Some(bytes))) => a.plan_hash == b.plan_hash && mado::approval_matches(&a, &bytes),
+        _ => false,
+    };
+    if !approved && b.status == BuildStatus::Running {
+        update(pid, &project, |b| { b.status = BuildStatus::Waiting; b.message = Some(crate::tr::text("mado_build.plan_changed", &[])); }).await?;
+        crate::log::warn(format!("mado build {}: not picked up after a restart, its plan is no longer the approved one", b.number));
+        mado::tell(state, pid, "build").await;
+        return Ok(());
+    }
     // Nobody works on this build any more (this is a fresh daemon).
     LIVE.lock().unwrap_or_else(|e| e.into_inner()).retain(|(p, _)| p != pid);
     {
@@ -1243,13 +1295,13 @@ fn shown(b: &BuildState) -> R { Ok(Json(serde_json::to_value(b)?)) }
 /// → `BuildState` (an idle one before the first build), plus `blocked`: why a build could not
 /// start right now, in words for the user, while none is under way.
 async fn api_get(State(st): State<Arc<AppState>>, UrlPath(pid): UrlPath<String>) -> R {
-    let project = mado::project_dir(&st, &pid).await?;
+    let project = project_of(&st, &pid).await?;
     engine_dir(&pid)?;
     let mut b = load_build(&project)?.unwrap_or_default();
     b.governor.running = live_of(&pid).len() as u32;
     let mut v = serde_json::to_value(&b)?;
     if !b.under_way() {
-        if let Err(e) = check_ready(&st, &project).await { v["blocked"] = json!(crate::tr::classify(&e).message); }
+        if let Err(e) = check_ready(&st, &pid, &project).await { v["blocked"] = json!(crate::tr::classify(&e).message); }
     }
     Ok(Json(v))
 }

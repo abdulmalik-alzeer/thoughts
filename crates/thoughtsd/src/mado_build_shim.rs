@@ -8,41 +8,28 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanTask {
     pub id: String,
     pub title: String,
-    #[serde(default)]
     pub description: String,
-    #[serde(default)]
     pub owns: Vec<String>,
-    #[serde(default)]
     pub depends_on: Vec<String>,
-    #[serde(default)]
     pub acceptance: Vec<String>,
-    #[serde(default)]
     pub feature: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screens: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct PlanDoc {
-    pub version: u32,
-    pub tasks: Vec<PlanTask>,
-}
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlanDoc { pub version: u32, pub tasks: Vec<PlanTask> }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct Lane {
-    pub id: String,
-    pub tasks: Vec<String>,
-}
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Lane { pub id: String, pub tasks: Vec<String> }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct Wave {
-    pub lanes: Vec<Lane>,
-}
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Wave { pub lanes: Vec<Lane> }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -57,7 +44,6 @@ pub struct StepState {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct MadoState {
     pub version: u32,
-    #[serde(default)]
     pub steps: BTreeMap<String, StepState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,
@@ -135,19 +121,37 @@ pub fn plan_hash(bytes: &[u8]) -> String {
     sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The folder of the linked project `project_id`, as recorded (its real location). The folder must
-/// still be trusted (unless full access is on).
+/// The folder of the linked project `project_id`, as it really is on disk (as `mado::project_dir`:
+/// no trust check here; the engine checks trust itself).
 pub async fn project_dir(state: &AppState, project_id: &str) -> anyhow::Result<PathBuf> {
-    let (path, full) = {
-        let s = state.settings.read().await;
-        let p = s.projects.iter().find(|p| p.id == project_id).ok_or_else(|| crate::tr::err("not_found.project", &[]))?;
-        (PathBuf::from(&p.path), s.full_access())
-    };
-    let real = crate::paths::canonical(&path).map_err(|_| crate::tr::err("not_found.folder", &[("path", &path.display().to_string())]))?;
-    if !real.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &path.display().to_string())])); }
-    if !full { crate::trust::require(&real)?; }
-    Ok(real)
+    let s = state.settings.read().await;
+    let p = s.projects.iter().find(|p| p.id == project_id).ok_or_else(|| crate::tr::err("not_found.project", &[]))?;
+    let dir = PathBuf::from(&p.path);
+    if !dir.is_absolute() || !dir.is_dir() { return Err(crate::tr::err("not_found.folder", &[("path", &p.path)])); }
+    Ok(crate::paths::canonical(&dir)?)
 }
+
+/// The user's approval of a plan at the Review step, kept by the daemon outside the project
+/// (`<thoughts home>/mado/<projectId>/approval.json`), so nothing in the project can forge it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval {
+    pub plan_hash: String,
+    pub commands: Vec<String>,
+    pub approved_at: String,
+}
+
+/// The approval on record for `project_id`, if any.
+pub async fn approved_plan(_state: &AppState, project_id: &str) -> Option<Approval> {
+    if project_id.is_empty() || project_id.len() > 64 || !project_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return None; }
+    let p = crate::paths::home().join("mado").join(project_id).join("approval.json");
+    let m = std::fs::symlink_metadata(&p).ok()?;
+    if !m.is_file() || m.len() > 1024 * 1024 { return None; }
+    serde_json::from_slice(&std::fs::read(&p).ok()?).ok()
+}
+
+/// Is `a` the approval of exactly these plan bytes?
+pub fn approval_matches(a: &Approval, plan_bytes: &[u8]) -> bool { a.plan_hash == plan_hash(plan_bytes) }
 
 /// Tell the window something about a project's MADO changed (it refetches).
 pub async fn tell(state: &AppState, project_id: &str, what: &str) {
@@ -159,7 +163,8 @@ mod tests {
     use super::*;
 
     fn t(id: &str, owns: &[&str], deps: &[&str]) -> PlanTask {
-        PlanTask { id: id.into(), title: id.into(), owns: owns.iter().map(|s| s.to_string()).collect(), depends_on: deps.iter().map(|s| s.to_string()).collect(), ..Default::default() }
+        PlanTask { id: id.into(), title: id.into(), description: String::new(), owns: owns.iter().map(|s| s.to_string()).collect(), depends_on: deps.iter().map(|s| s.to_string()).collect(),
+            acceptance: vec![], feature: "F1".into(), screens: None }
     }
 
     #[test]
