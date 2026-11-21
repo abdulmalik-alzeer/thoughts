@@ -51,11 +51,11 @@ enum Data {
     Other,
 }
 
-struct Node { parent: Cell<Option<Weak<Node>>>, children: RefCell<Vec<Handle>>, data: Data }
+struct Node { parent: Cell<Option<Weak<Node>>>, children: RefCell<Vec<Handle>>, data: Data, depth: Cell<usize> }
 type Handle = Rc<Node>;
 
 impl Node {
-    fn new(data: Data) -> Handle { Rc::new(Node { parent: Cell::new(None), children: RefCell::new(vec![]), data }) }
+    fn new(data: Data) -> Handle { Rc::new(Node { parent: Cell::new(None), children: RefCell::new(vec![]), data, depth: Cell::new(0) }) }
 }
 
 impl Drop for Node {
@@ -90,9 +90,17 @@ fn append_to(parent: &Handle, child: Handle) {
     parent.children.borrow_mut().push(child);
 }
 
-struct Sink { document: Handle }
+struct Sink { document: Handle, stop: Rc<Cell<Option<Refused>>>, created: Cell<usize> }
 
 impl Sink {
+    /// A node took its place under `parent`: how deep it lies is the measure of how many elements
+    /// are open at once. (A template's contents continue its depth, see `get_template_contents`.)
+    fn placed(&self, parent: &Handle, child: &Handle) {
+        let depth = parent.depth.get() + 1;
+        child.depth.set(depth);
+        if depth > MAX_OPEN && self.stop.get().is_none() { self.stop.set(Some(Refused::TooDeep)); }
+    }
+
     /// Text joins the text node before it, so `<scr` + `ipt>` style splits never matter later.
     fn text_or_node(&self, child: NodeOrText<Handle>, before: Option<&Handle>) -> Option<Handle> {
         match child {
@@ -122,7 +130,11 @@ impl TreeSink for Sink {
 
     fn get_template_contents(&self, target: &Handle) -> Handle {
         match &target.data {
-            Data::Element { template, .. } => template.borrow().clone().expect("not a template"),
+            Data::Element { template, .. } => {
+                let contents = template.borrow().clone().expect("not a template");
+                contents.depth.set(target.depth.get());
+                contents
+            }
             _ => panic!("not a template"),
         }
     }
@@ -132,6 +144,13 @@ impl TreeSink for Sink {
     }
 
     fn create_element(&self, name: QualName, attrs: Vec<Attribute>, flags: ElementFlags) -> Handle {
+        // The limits, counted where the parser itself does the work. Passing one only raises a
+        // flag: `clean` looks at it after every piece of the page and stops there.
+        self.created.set(self.created.get() + 1);
+        if self.stop.get().is_none() {
+            if attrs.len() > MAX_ATTRS { self.stop.set(Some(Refused::TooManyAttributes)); }
+            else if self.created.get() > MAX_CREATED { self.stop.set(Some(Refused::TooMany)); }
+        }
         Node::new(Data::Element {
             name, attrs: RefCell::new(attrs),
             template: RefCell::new(flags.template.then(|| Node::new(Data::Document))),
@@ -143,7 +162,7 @@ impl TreeSink for Sink {
 
     fn append(&self, parent: &Handle, child: NodeOrText<Handle>) {
         let last = parent.children.borrow().last().cloned();
-        if let Some(n) = self.text_or_node(child, last.as_ref()) { append_to(parent, n); }
+        if let Some(n) = self.text_or_node(child, last.as_ref()) { self.placed(parent, &n); append_to(parent, n); }
     }
 
     fn append_before_sibling(&self, sibling: &Handle, child: NodeOrText<Handle>) {
@@ -155,6 +174,7 @@ impl TreeSink for Sink {
             // Detaching may have moved the sibling (the node came from the same parent).
             let at = parent.children.borrow().iter().position(|c| Rc::ptr_eq(c, sibling)).unwrap_or(0);
             n.parent.set(Some(Rc::downgrade(&parent)));
+            self.placed(&parent, &n);
             parent.children.borrow_mut().insert(at, n);
         }
     }
@@ -177,6 +197,7 @@ impl TreeSink for Sink {
     fn reparent_children(&self, node: &Handle, new_parent: &Handle) {
         let kids = std::mem::take(&mut *node.children.borrow_mut());
         for k in kids {
+            self.placed(new_parent, &k);
             k.parent.set(Some(Rc::downgrade(new_parent)));
             new_parent.children.borrow_mut().push(k);
         }
@@ -416,60 +437,44 @@ fn child_named(parent: &Handle, local: &str) -> Option<Handle> {
     parent.children.borrow().iter().find(|c| matches!(&c.data, Data::Element { name, .. } if name.ns == ns!(html) && &*name.local == local)).cloned()
 }
 
-/// Elements left open at once before the rest of the page is cut off. The parser looks back over
-/// every open element for each new one, so a page of nothing but opening tags would cost the
-/// square of its length. (Elements that need no closing tag, like `<li>`, count as open here, so
-/// the limit is far above any real page's.)
-const MAX_OPEN: usize = 2_500;
-/// Attributes on one tag before the rest of the page is cut off (see `readable_part`).
+/// How deep elements may lie in one another before reading is abandoned. The parser
+/// looks back over every open element for each new one, so a page of nothing but opening tags
+/// would cost the square of its length. Measured on the tree the parser builds, not predicted from the text.
+const MAX_OPEN: usize = 1_000;
+/// Elements a page may create before reading is abandoned.
+const MAX_CREATED: usize = 30_000;
+/// Attributes on one element before reading is abandoned.
 const MAX_ATTRS: usize = 400;
+/// The page is handed to the parser in pieces of this many bytes; the limits and the clock are
+/// looked at between pieces.
+const PIECE: usize = 2_048;
+/// The longest the reading of one page may take.
+const MAX_TIME: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Where to stop reading: the place where more than `MAX_OPEN` opening tags are unanswered by
-/// closing tags, or the end. A plain count over the text, deliberately not the parser's own.
-fn readable_part(html: &str) -> &str {
-    const VOID: &[&str] = &["br", "hr", "img", "input", "col", "wbr", "meta", "link", "base", "area", "source", "track", "embed", "param"];
-    let b = html.as_bytes();
-    let (mut open, mut i) = (0usize, 0usize);
-    while i + 1 < b.len() {
-        if b[i] == b'<' {
-            if b[i + 1].is_ascii_alphabetic() {
-                let end = b[i + 1..].iter().position(|c| !c.is_ascii_alphanumeric()).map_or(b.len(), |n| i + 1 + n);
-                if !VOID.iter().any(|v| html[i + 1..end].eq_ignore_ascii_case(v)) {
-                    open += 1;
-                    if open > MAX_OPEN { return &html[..i]; }
-                }
-                // The parser also compares every attribute of a tag with all before it: a tag with
-                // more attributes than any real one ends the reading as well. Counted as the gaps
-                // between words up to the tag's `>`, quoted values (after `=`) stepped over.
-                let (mut j, mut gaps, mut after_eq) = (end, 0usize, false);
-                while j < b.len() && b[j] != b'>' {
-                    let c = b[j];
-                    if after_eq && (c == b'"' || c == b'\'') {
-                        j = b[j + 1..].iter().position(|x| *x == c).map_or(b.len(), |n| j + 1 + n);
-                        after_eq = false;
-                    } else if c.is_ascii_whitespace() {
-                        if j > 0 && !b[j - 1].is_ascii_whitespace() { gaps += 1; }
-                        if gaps > MAX_ATTRS { return &html[..i]; }
-                    } else {
-                        after_eq = c == b'=';
-                    }
-                    j += 1;
-                }
-                i = j;
-                continue;
-            }
-            if b[i + 1] == b'/' && b.get(i + 2).map_or(false, u8::is_ascii_alphabetic) { open = open.saturating_sub(1); }
-        }
-        i += 1;
-    }
-    html
-}
+/// Why a mock-up was not cleaned: it is not shown at all.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Refused { TooDeep, TooMany, TooManyAttributes, TooSlow }
 
 /// The mock-up, made safe to put in the sealed frame: `<style>` blocks, then one `<body>`.
-pub fn clean(html: &str) -> String {
-    let html = readable_part(html);
+/// `Err`: the page passed a limit while it was being read (see `Refused`); nothing of it is shown.
+pub fn clean(html: &str) -> Result<String, Refused> { clean_within(html, MAX_TIME) }
+
+fn clean_within(html: &str, time: std::time::Duration) -> Result<String, Refused> {
+    let started = std::time::Instant::now();
     let opts = ParseOpts { tree_builder: html5ever::tree_builder::TreeBuilderOpts { scripting_enabled: false, ..Default::default() }, ..Default::default() };
-    let document = parse_document(Sink { document: Node::new(Data::Document) }, opts).one(html);
+    let stop: Rc<Cell<Option<Refused>>> = Rc::new(Cell::new(None));
+    let mut parser = parse_document(Sink { document: Node::new(Data::Document), stop: stop.clone(), created: Cell::new(0) }, opts);
+    let mut at = 0;
+    while at < html.len() {
+        let mut end = (at + PIECE).min(html.len());
+        while !html.is_char_boundary(end) { end += 1; }
+        parser.process(StrTendril::from_slice(&html[at..end]));
+        at = end;
+        if let Some(why) = stop.get() { return Err(why); }
+        if started.elapsed() > time { return Err(Refused::TooSlow); }
+    }
+    let document = parser.finish();
+    if let Some(why) = stop.get() { return Err(why); }
     let mut w = Writer { out: String::new(), styles: vec![], elements: 0 };
     let root = child_named(&document, "html");
     let (head, body) = match &root { Some(r) => (child_named(r, "head"), child_named(r, "body")), None => (None, None) };
@@ -508,7 +513,7 @@ pub fn clean(html: &str) -> String {
     out.push_str(&open);
     out.push_str(&w.out);
     out.push_str("</body>");
-    out
+    Ok(out)
 }
 
 // ---------- CSS ----------
@@ -803,8 +808,20 @@ pub fn clean_css(css: &str, blocks: bool) -> String {
     let toks = css_tokens(&src);
     let mut out = String::new();
     css_items(&src, &toks, 0, &mut out, 0, blocks);
-    // The text sits inside <style>…</style>: it can never hold the end of that element.
-    let out = out.replace("</", "<\\/").replace("<!--", "").replace("-->", "");
+    // The text sits inside <style>…</style>: it can never hold the end of that element, nor the
+    // start of a comment. Deletions first and until nothing is left to delete (taking `<!--` out
+    // of `<<!--/style>` makes a new `</`), the escaping of `</` last, when nothing moves any more.
+    let mut out = out;
+    loop {
+        let next = out.replace("<!--", "").replace("-->", "");
+        if next == out { break; }
+        out = next;
+    }
+    let out = out.replace("</", "<\\/");
+    // Then no `<` may be followed by `/`, `!`, `?` or a letter anywhere (nothing that could start a
+    // tag or a comment, should the element ever end early), or none of it is shown.
+    let b = out.as_bytes();
+    if b.windows(2).any(|w| w[0] == b'<' && (matches!(w[1], b'/' | b'!' | b'?') || w[1].is_ascii_alphabetic())) || out.to_ascii_lowercase().contains("</style") { return String::new(); }
     // A second, blunt look at the result, in case this reading and the browser's ever disagree:
     // if anything forbidden can still be read out of it, none of it is shown.
     if css_still_bad(&out) { return String::new(); }

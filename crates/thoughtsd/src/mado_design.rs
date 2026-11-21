@@ -157,7 +157,8 @@ async fn screen(State(st): S, UrlPath((project, id)): UrlPath<(String, String)>)
     let mado = core::mado_dir(&st, &project).await?;
     let raw = core::read_text(&mado, &mock_path(&id), MAX_MOCK)?.ok_or_else(|| crate::tr::err("mado.design.no_mock", &[]))?;
     // Parsing a large page takes a moment: not on the threads that answer everything else.
-    let html = tokio::task::spawn_blocking(move || clean(&raw)).await?;
+    // A page that passes a limit while being read is not shown at all.
+    let html = tokio::task::spawn_blocking(move || clean(&raw)).await?.map_err(|why| crate::tr::err_detail("mado.design.too_complex", &[], format!("{why:?}")))?;
     Ok(Json(json!({"html": html})))
 }
 

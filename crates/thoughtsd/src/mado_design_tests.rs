@@ -200,6 +200,10 @@ async fn screens_come_from_the_flow_and_mock_ups_come_cleaned() {
     assert_eq!(answer(screen(f.s(), UrlPath((f.id.clone(), "pay".into()))).await).await.0, 413);
     f.put("design/screens/pay.html", &"x".repeat(MAX_MOCK as usize));
     assert_eq!(answer(screen(f.s(), UrlPath((f.id.clone(), "pay".into()))).await).await.0, 200);
+    // A page that passes a limit while being read is refused whole, in plain words.
+    f.put("design/screens/pay.html", &"<div>".repeat(50_000));
+    let (status, err) = answer(screen(f.s(), UrlPath((f.id.clone(), "pay".into()))).await).await;
+    assert_eq!((status, err["code"].as_str(), err["detail"].as_str()), (422, Some("validation"), Some("TooDeep")));
     // Not text at all.
     std::fs::write(f.mado.join("design/screens/empty.html"), [0xffu8, 0xfe, 0x00, b'<', b's', b'c', b'r', b'i', b'p', b't', b'>']).unwrap();
     let (status, body) = answer(screen(f.s(), UrlPath((f.id.clone(), "empty".into()))).await).await;

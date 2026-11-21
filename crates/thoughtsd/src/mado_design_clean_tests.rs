@@ -34,10 +34,10 @@ fn assert_inert(out: &str) {
 }
 
 fn cleaned(html: &str) -> String {
-    let out = clean(html);
+    let out = clean(html).unwrap_or_else(|why| panic!("refused ({why:?}): {html}"));
     assert_inert(&out);
     // Cleaning what is already clean changes nothing: the output is stable when read again.
-    assert_eq!(clean(&out), out, "not stable for: {html}");
+    assert_eq!(clean(&out).unwrap(), out, "not stable for: {html}");
     out
 }
 
@@ -305,7 +305,7 @@ fn css_that_loads_or_runs_goes_and_the_rest_stays_as_written() {
     assert_eq!(decls("width: expression(alert(1))"), "");
     assert_eq!(decls("background: url(data:image/gif;base64,AA) no-repeat"), "background: url(data:image/gif;base64,AA) no-repeat");
     // The text can never close the <style> element it sits in, and line ends are made one kind.
-    assert_eq!(sheet(".a::after{content:'</style><script>alert(1)</script>'}"), ".a::after{content:'<\\/style><script>alert(1)<\\/script>'}");
+    assert_eq!(sheet(".a::after{content:'</style><script>alert(1)</script>'}"), "");
     assert_eq!(sheet(".a{color:red}\r\n.b{color:blue}\r"), ".a{color:red}\n.b{color:blue}\n");
     // Rules nested without end are cut, not followed.
     let deep = format!("{}color:red{}", "@media screen{".repeat(5000), "}".repeat(5000));
@@ -331,35 +331,88 @@ fn css_inside_a_page_is_filtered_where_it_stands() {
 
 #[test]
 fn size_and_depth_have_limits() {
-    // 80 000 nested elements (400 kB): no stack overflow, and the page is cut at a depth.
-    let deep = format!("{}x", "<div>".repeat(80_000));
-    let out = cleaned(&deep);
+    // Deep, but a page a person could have written: cut at a depth, not refused, and dropped without a deep recursion.
+    let out = cleaned(&format!("{}x", "<div>".repeat(MAX_OPEN - 10)));
     assert_eq!(out.matches("<div>").count(), MAX_DEPTH);
-    // Just under the number of open elements where reading stops: still cut at the depth, and dropped without a deep recursion.
-    let out = cleaned(&format!("{}x", "<div>".repeat(MAX_OPEN)));
-    assert_eq!(out.matches("<div>").count(), MAX_DEPTH);
-    // Reading stops where too much is open; what came before is shown.
-    let out = cleaned(&format!("<p>first</p>{}<p>never</p>", "<span>".repeat(MAX_OPEN + 5)));
-    assert!(out.contains("<p>first</p>") && !out.contains("never"));
-    // Elements that are closed, or need no closing, do not count up.
-    let long = format!("{}{}<p>last</p>", "<div><br><img>x</div>".repeat(5_000), "<li>item".repeat(MAX_OPEN - 10));
-    assert!(cleaned(&long).contains("<p>last</p>"));
-    let deep = format!("{}x", "<template>".repeat(40_000));
-    assert_eq!(cleaned(&deep), "<body></body>");
-    // A tag with more attributes than any real one ends the reading; quoted values do not count as attributes.
-    let many: String = (0..MAX_ATTRS + 50).map(|i| format!("data-a{i}=1 ")).collect();
-    assert_eq!(cleaned(&format!("<p>first</p><p {many}>never</p>")), "<body><p>first</p></body>");
-    let quoted = format!("<p>first</p><p class=\"{}\" title = '{}'>shown</p>", "a b ".repeat(MAX_ATTRS), "> x ".repeat(100));
-    assert!(cleaned(&quoted).contains(">shown</p>"));
-    let deep = format!("{}x", "<svg><g>".repeat(30_000));
-    assert!(cleaned(&deep).matches("<g>").count() <= MAX_DEPTH);
+    assert!(cleaned(&format!("{}x", "<svg><g>".repeat(400))).matches("<g>").count() <= MAX_DEPTH);
     // Very many elements: the page is cut, not refused.
-    let wide = "<i>x</i>".repeat(60_000);
+    let wide = "<i>x</i>".repeat(MAX_ELEMENTS + 5_000);
     assert_eq!(cleaned(&wide).matches("<i>").count(), MAX_ELEMENTS);
+    // Elements that are closed, or need no closing tag, are not "open": a long page is fine.
+    let long = format!("{}<ul>{}</ul><p>last</p>", "<div><br><img>x</div>".repeat(3_000), "<li>item".repeat(3_000));
+    assert!(cleaned(&long).contains("<p>last</p>"));
     // Long attribute values are left out.
     let out = cleaned(&format!("<p title='{}' class='c'>ok</p>", "t".repeat(MAX_ATTR + 1)));
     assert_eq!(out, "<body><p class=\"c\">ok</p></body>");
     assert_eq!(cleaned(&format!("<p style='color:red;{}'>ok</p>", " ".repeat(MAX_STYLE_ATTR))), "<body><p>ok</p></body>");
+    // Many attributes, under the limit; quoted values full of spaces and `>` are one attribute each.
+    let some: String = (0..MAX_ATTRS).map(|i| format!("data-a{i}=1 ")).collect();
+    assert!(cleaned(&format!("<p {some}>shown</p>")).contains(">shown</p>"));
+    assert!(cleaned(&format!("<p class=\"{}\" title = '{}'>shown</p>", "a b ".repeat(2_000), "> x ".repeat(400))).contains(">shown</p>"));
+}
+
+#[test]
+fn a_page_past_a_limit_is_refused_while_it_is_read() {
+    // The limits are counted by the parser's own calls, so no way of writing a tag gets around them.
+    for (why, html) in [
+        (Refused::TooDeep, "<div>".repeat(80_000)),
+        (Refused::TooDeep, format!("<p>first</p>{}", "<span>".repeat(MAX_OPEN + 5))),
+        (Refused::TooDeep, "<template>".repeat(40_000)),
+        (Refused::TooDeep, "<svg><g>".repeat(30_000)),
+        (Refused::TooDeep, "<b><i><u>".repeat(44_000)),
+        (Refused::TooDeep, "<table><td>".repeat(36_000)),
+        // Tags a text scan would misjudge: a `>` inside a quoted value, a quote that opens nothing, upper case, a slash.
+        (Refused::TooDeep, "<div title=\">\">".repeat(MAX_OPEN + 5)),
+        (Refused::TooDeep, "<div a=b\"c>".repeat(MAX_OPEN + 5)),
+        (Refused::TooDeep, "<DIV\n/x>".repeat(MAX_OPEN + 5)),
+        (Refused::TooDeep, "<x<b>".repeat(MAX_OPEN + 5)),
+        (Refused::TooMany, "<i>x</i>".repeat(MAX_CREATED + 5)),
+        (Refused::TooMany, "<br>".repeat(MAX_CREATED + 5)),
+        (Refused::TooManyAttributes, format!("<p {}>x</p>", (0..MAX_ATTRS + 5).map(|i| format!("a{i}=1 ")).collect::<String>())),
+        (Refused::TooManyAttributes, format!("<p {}>x</p>", (0..MAX_ATTRS + 5).map(|i| format!("a{i}=\"> <p \"\n")).collect::<String>())),
+        (Refused::TooManyAttributes, format!("<svg><path {}/></svg>", (0..MAX_ATTRS + 5).map(|i| format!("A{i} ")).collect::<String>())),
+    ] {
+        let t = std::time::Instant::now();
+        assert_eq!(clean(&html), Err(why), "{}…", &html[..40]);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "{:?} for {}…", t.elapsed(), &html[..40]);
+    }
+    // The clock: with no time at all, any page of more than one piece is refused.
+    assert_eq!(clean_within(&"<p>x</p>".repeat(1_000), std::time::Duration::ZERO), Err(Refused::TooSlow));
+    assert!(clean_within("<p>x</p>", std::time::Duration::ZERO).is_ok());
+}
+
+#[test]
+fn a_style_sheet_can_never_close_its_element_or_open_a_comment() {
+    let sheet = |css: &str| clean_css(css, true);
+    // Each of these re-forms `</style>` or `<!--` when one replacement is done before another.
+    for css in [
+        ".a{content:'<<!--/style><script>alert(1)</script>'}",
+        ".a{content:'<<!--<!--/style>'}",
+        ".a{content:'<<!<!----/style>'}",
+        ".a{content:'<--><!--/style>'}",
+        ".a{content:'<-<!--->/style>'}",
+        ".a{content:'<<!---->/style>'}",
+        ".a{content:'<<!--\\/style>'}",
+        ".a{content:'<!<!----'}",
+        ".a{content:'<!-<!--- x'}",
+        ".a{content:'</STYLE>'}",
+        ".a{content:'<\\/style>'}",
+        ".a{content:'<!doctype html>'}",
+        ".a{content:'<![CDATA['}",
+        "<!-- .a{color:red} -->",
+        "</style><script>alert(1)</script>",
+    ] {
+        let out = sheet(css);
+        let low = out.to_ascii_lowercase();
+        assert!(!low.contains("</") && !low.contains("<!") && !low.contains("-->"), "{css} → {out}");
+        // And inside a page: the result holds exactly the style element and the body, nothing more.
+        let page = cleaned(&format!("<style>{}</style><p>ok</p>", css.replace("</style>", "").replace("</STYLE>", "")));
+        assert!(page.ends_with("<body><p>ok</p></body>") && !page.contains("<script") && !page.contains("alert"), "{css} → {page}");
+        assert_eq!(page.matches("</style>").count(), page.matches("<style>").count(), "{css} → {page}");
+    }
+    // The ordinary case still reads as it was written, with only the `/` escaped.
+    assert_eq!(sheet(".a::after{content:'</b>'}"), ".a::after{content:'<\\/b>'}");
+    assert_eq!(sheet(".a{content:'a < b'}"), ".a{content:'a < b'}");
 }
 
 #[test]
@@ -375,19 +428,23 @@ fn nothing_and_nonsense_give_an_empty_page() {
 }
 
 #[test]
-fn a_large_hostile_page_is_cleaned_in_reasonable_time() {
-    // Each of these is as large as a mock-up may be (400 kB). The limit is generous for a debug build;
-    // what it catches is work that grows with the square of the size.
+fn a_large_hostile_page_is_dealt_with_in_bounded_time() {
+    // Each of these is as large as a mock-up may be (400 kB). Cleaned or refused, never slow:
+    // the bound is the clock's two seconds plus room for a debug build.
     for (name, html) in [
         ("deep", "<div>".repeat(80_000)), ("wide", "<i>x</i>".repeat(50_000)), ("templates", "<template>".repeat(40_000)),
         ("drawing", "<svg><g>".repeat(50_000)), ("formatting", "<b><i><u>".repeat(44_000)), ("tables", "<table><td>".repeat(36_000)),
         ("attrs", format!("<p {}>", (0..40_000).map(|i| format!("a{i}=1 ")).collect::<String>())),
+        ("same attrs", format!("<p {}>", "a=1 ".repeat(100_000))),
         ("css", format!("<style>{}</style>", ".a{color:red}".repeat(30_000))), ("brackets", format!("<p style='{}'>", "(".repeat(390_000))),
+        ("entities", "&amp;&lt;&#x41;&notanentity;".repeat(14_000)), ("comments", "<!-- x --><!x><?y>".repeat(22_000)),
+        ("p in p", "<p><table><p>".repeat(30_000)), ("misnested", "<b><p></b></p>".repeat(28_000)), ("selects", "<select><option>".repeat(25_000)),
+        ("fostered", "<table><div>".repeat(33_000)), ("unclosed quote", format!("<p title=\"{}", "<div>".repeat(79_000))),
     ] {
         let t = std::time::Instant::now();
         let out = clean(&html);
         let took = t.elapsed();
-        eprintln!("{name}: {took:?}, {} bytes out", out.len());
-        assert!(took < std::time::Duration::from_secs(20), "{name} took {took:?}");
+        eprintln!("{name}: {took:?}, {:?}", out.as_ref().map(|o| o.len()));
+        assert!(took < std::time::Duration::from_secs(6), "{name} took {took:?}");
     }
 }
