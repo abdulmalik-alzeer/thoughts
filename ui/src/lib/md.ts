@@ -12,6 +12,12 @@ function secret(): string {
 }
 /** Marks the copy buttons md() adds, so a button-like thing in a note can never pass for one. */
 const COPY_MARK = secret();
+/** Marks the wrapper of a code block that is a diagram or a chart (`archify`, `chart`): the part of
+ *  the app that draws them (figures/hydrate.ts) only touches wrappers carrying it. */
+const FIG_MARK = secret();
+/** The languages of a code block that the app draws instead of showing. */
+export const FIGURE_LANGS = ['archify', 'chart'];
+let figuresStarted = false;
 /** Changes on every md() call; the task-list renderer stamps it on its markers (see below). */
 let taskMark = '';
 
@@ -89,6 +95,7 @@ const MEMO_MAX_CHARS = 100_000;
 
 function render(src: string): string {
   const body = src.replace(/^---\n[\s\S]*?\n---\n?/, '');
+  let hasFigure = false;
   taskMark = secret();
   // Sanitise to a DOM fragment, then add the wrappers with DOM APIs (never by editing the HTML string).
   const frag = DOMPurify.sanitize(marked.parse(body, { async: false }) as string, PURIFY) as DocumentFragment;
@@ -142,6 +149,13 @@ function render(src: string): string {
     head.append(name, btn);
     pre.replaceWith(wrap);
     wrap.append(head, pre);
+    // A diagram or a chart: stamped here, on the sanitised tree, and drawn once it is on the page.
+    if (FIGURE_LANGS.includes(lang.toLowerCase())) {
+      wrap.classList.add('md-fig');
+      wrap.setAttribute('data-md-fig', FIG_MARK);
+      wrap.setAttribute('data-fig-kind', lang.toLowerCase());
+      hasFigure = true;
+    }
   }
   for (const table of Array.from(frag.querySelectorAll('table'))) {
     const wrap = document.createElement('div');
@@ -153,6 +167,11 @@ function render(src: string): string {
   }
   const host = document.createElement('div');
   host.append(frag);
+  // The code that draws figures is only loaded once a text has one.
+  if (hasFigure && !figuresStarted) {
+    figuresStarted = true;
+    void import('./figures/hydrate').then((m) => m.startFigures(FIG_MARK), () => { figuresStarted = false; });
+  }
   return host.innerHTML;
 }
 

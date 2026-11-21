@@ -402,16 +402,40 @@ async fn save_pack(app: tauri::AppHandle, window: tauri::Window, name: String, c
 /// only document formats that cannot run when opened, within a sensible size, and a Word document
 /// only when it really is one (a ZIP package, as every .docx is).
 fn export_file(name: &str, bytes: &[u8]) -> Result<(String, String), String> {
-    const SAFE: &[&str] = &["html", "ics", "json", "md", "txt", "csv", "docx"];
+    const SAFE: &[&str] = &["html", "ics", "json", "md", "txt", "csv", "docx", "svg", "drawio"];
     let p = std::path::Path::new(name);
     let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     if !SAFE.contains(&ext.as_str()) { return Err("this kind of file cannot be saved from Thoughts".into()); }
     let limit = if ext == "docx" { 32 << 20 } else { 16 << 20 };
     if bytes.len() > limit { return Err("file is too large".into()); }
     if ext == "docx" && !bytes.starts_with(b"PK\x03\x04") { return Err("this is not a Word document".into()); }
+    // A drawing the app made (a diagram or a chart): a picture and nothing else. An SVG that could
+    // run something when opened in a browser is not one of the app's.
+    if ext == "svg" && !plain_svg(bytes) { return Err("this kind of file cannot be saved from Thoughts".into()); }
+    if ext == "drawio" && !bytes.starts_with(b"<mxfile") { return Err("this kind of file cannot be saved from Thoughts".into()); }
     let stem: String = p.file_stem().and_then(|e| e.to_str()).unwrap_or("export").chars()
         .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')).take(80).collect();
     Ok((format!("{}.{ext}", if stem.trim().is_empty() { "export" } else { stem.trim() }), ext))
+}
+
+/// Is this an SVG picture that can run nothing: no script, no page inside it, no handler, no link
+/// that is a program, nothing fetched from elsewhere?
+fn plain_svg(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else { return false };
+    let t = text.to_lowercase();
+    if !t.trim_start().starts_with("<svg") { return false; }
+    if ["<script", "<foreignobject", "<iframe", "<object", "<embed", "javascript:", "<!entity", "<?xml-stylesheet", "@import"].iter().any(|bad| t.contains(bad)) { return false; }
+    // An event handler: ` onload=`, ` onclick =` … on any element.
+    let b = t.as_bytes();
+    for i in 0..b.len().saturating_sub(3) {
+        if b[i].is_ascii_whitespace() && b[i + 1] == b'o' && b[i + 2] == b'n' {
+            let rest = &t[i + 3..];
+            let name = rest.bytes().take_while(|c| c.is_ascii_alphabetic()).count();
+            if name > 0 && rest[name..].trim_start().starts_with('=') { return false; }
+        }
+    }
+    // Anything fetched: only what is inside the file (`#id`, `data:` fonts) is allowed.
+    !["href=\"http", "href='http", "href=\"//", "url(http", "url(\"http", "url('http", "url(//"].iter().any(|bad| t.contains(bad))
 }
 
 /// Save a file the app generated (an exported document, a calendar file, a Word document). Like
@@ -1485,6 +1509,16 @@ mod tests {
         assert_eq!(export_file("calendar.ics", b"BEGIN:VCALENDAR"), Ok(("calendar.ics".into(), "ics".into())));
         assert_eq!(export_file("../../etc/evil.md", b"x"), Ok(("evil.md".into(), "md".into())));
         assert_eq!(export_file("<>.html", b"x"), Ok(("export.html".into(), "html".into())));
+        // A drawing: an SVG that is only a picture, or a draw.io file.
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><style>@font-face{font-family:'M';src:url(data:font/woff2;base64,AA==)}</style><rect fill="url(#g)" width="10" height="10"/><text font-family="M">on = off</text></svg>"##;
+        assert_eq!(export_file("Sales by region.svg", svg), Ok(("Sales by region.svg".into(), "svg".into())));
+        assert_eq!(export_file("flow.drawio", b"<mxfile host=\"Thoughts\"></mxfile>"), Ok(("flow.drawio".into(), "drawio".into())));
+        assert!(export_file("flow.drawio", b"<html>").is_err());
+        for bad in [&b"<html><svg/></html>"[..], b"<svg><script>alert(1)</script></svg>", b"<svg onload=\"x()\"/>", b"<svg><rect ONCLICK = 'x()'/></svg>",
+            b"<svg><a href=\"javascript:x()\"/></svg>", b"<svg><foreignObject/></svg>", b"<svg><image href=\"https://x/y.png\"/></svg>",
+            b"<svg><style>@import url(https://x/y.css)</style></svg>", b"<svg><rect fill=\"url(https://x/#a)\"/></svg>", b"\xff\xfe"] {
+            assert!(export_file("x.svg", bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
         // Kinds that can run, and names without a kind.
         for bad in ["run.exe", "macro.docm", "page.htm", "script.sh", "app.command", "noext", "x.docx.exe"] {
             assert!(export_file(bad, docx).is_err(), "{bad}");
