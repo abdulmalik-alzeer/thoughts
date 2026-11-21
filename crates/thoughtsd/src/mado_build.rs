@@ -951,18 +951,21 @@ do not ask questions, do the work the task describes, and end with a short plain
 Work only in the current folder. Do not run git commands that change branches or history and do not commit: the app checks and commits your work itself.";
 
 fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>) -> String {
-    let mut out = format!("Task {}: {}\n\n{}\n", task.id, one_line(&task.title, 200), task.description.chars().take(8000).collect::<String>());
-    let list = |v: &[String]| v.iter().map(|x| format!("- {}", one_line(x, 400))).collect::<Vec<_>>().join("\n");
+    // The task's words come from plan.json: quoted as data, apart from the app's own instructions.
+    let mut out = format!("Task {}: {}\n\nWhat the task is (from the plan):\n{}\n", task.id,
+        crate::mado_prompts::inline(&one_line(&task.title, 200)), crate::mado_prompts::block(&task.description.chars().take(8000).collect::<String>()));
+    let list = |v: &[String]| v.iter().map(|x| format!("- {}", crate::mado_prompts::inline(&one_line(x, 400)))).collect::<Vec<_>>().join("\n");
     out.push_str(&format!("\nFiles you own:\n{}\n", if task.owns.is_empty() { "- (none named)".into() } else { list(&task.owns) }));
     if !task.acceptance.is_empty() { out.push_str(&format!("\nWhen you are done, these commands must pass when run from this folder:\n{}\n", list(&task.acceptance))); }
-    let deps: Vec<String> = task.depends_on.iter().filter_map(|d| plan.tasks.iter().find(|t| &t.id == d)).map(|t| format!("{} ({})", t.id, one_line(&t.title, 100))).collect();
+    let deps: Vec<String> = task.depends_on.iter().filter_map(|d| plan.tasks.iter().find(|t| &t.id == d)).map(|t| format!("{} ({})", t.id, crate::mado_prompts::inline(&one_line(&t.title, 100)))).collect();
     if !deps.is_empty() { out.push_str(&format!("\nIt builds on work already done: {}.\n", deps.join(", "))); }
     out.push_str("\nRead first, for context (copies of the plan's documents; do not change them): mado/brief.md, mado/spec.md, mado/tech.md, mado/design.md, mado/plan.json, and mado/design/ for the look.\n");
     out.push_str("\nStay inside the files you own; if you must touch another file, say so in your final message.\n");
     out.push_str("Commit nothing: the app commits your work after the commands pass.\n");
     if let Some(f) = failure.filter(|f| !f.trim().is_empty()) {
-        out.push_str(&format!("\nThe previous try of this task did not succeed. What went wrong:\n```\n{}\n```\nFix that this time.\n", clip_note(f)));
+        out.push_str(&format!("\nThe previous try of this task did not succeed. What went wrong (what the app and the commands printed):\n{}\nFix that this time.\n", crate::mado_prompts::block(&clip_note(f))));
     }
+    out.push_str(&format!("\n{}\n", crate::mado_prompts::DATA_NOTE));
     out
 }
 
@@ -1227,9 +1230,9 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
     let fix = new_chat(state, pid, &task, &format!("{} — {}", tr("mado_build.chat_title_wave", &[]), wi + 1)).await;
     update(pid, project, |b| if let Some(w) = b.waves.get_mut(wi) { w.fix_chat_id = Some(fix.clone()); }).await?;
     mado::tell(state, pid, "build").await;
-    let brief = format!("This folder holds the build so far: the work of several tasks, just put together. One of their checks now fails here:\n```\n{}\n```\n\
+    let brief = format!("This folder holds the build so far: the work of several tasks, just put together. One of their checks now fails here (what it printed):\n{}\n\
         Fix the code so that every task's checks pass, keeping the work of every task. Stay with the files that need it. \
-        Commit nothing: the app runs the checks again and commits the result.", clip_note(&out));
+        Commit nothing: the app runs the checks again and commits the result.\n\n{}", crate::mado_prompts::block(&clip_note(&out)), crate::mado_prompts::DATA_NOTE);
     let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, deny_for(project, pid, &b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { reset_wt(state, project, &bwt).await; return Ok(()); }
     let again = match ended { Err(why) => Err(why), Ok(()) => wave_checks(state, pid, project, &b.plan_hash, &plan, &ids, &bwt).await.map_err(|(_, e)| e.text()) };
@@ -1290,11 +1293,11 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
         }
     }).await?;
     mado::tell(state, pid, "build").await;
-    let titles: Vec<String> = lane.tasks.iter().filter_map(|t| plan.tasks.iter().find(|p| p.id == t.id)).map(|t| format!("{} ({})", t.id, one_line(&t.title, 100))).collect();
+    let titles: Vec<String> = lane.tasks.iter().filter_map(|t| plan.tasks.iter().find(|p| p.id == t.id)).map(|t| format!("{} ({})", t.id, crate::mado_prompts::inline(&one_line(&t.title, 100)))).collect();
     let brief = format!("Two parts of this build changed the same files, and git could not combine them. Files with conflicts:\n{}\n\n\
         Settle every conflict in those files (the lines between <<<<<<<, ======= and >>>>>>>) so that the work of both sides is kept. \
-        The side being merged in is: {}. Do not change other files. Commit nothing: the app checks and commits the result.",
-        clash.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n"), titles.join("; "));
+        The side being merged in is: {}. Do not change other files. Commit nothing: the app checks and commits the result.\n\n{}",
+        clash.iter().map(|f| format!("- {}", crate::mado_prompts::inline(f))).collect::<Vec<_>>().join("\n"), titles.join("; "), crate::mado_prompts::DATA_NOTE);
     let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, deny_for(project, pid, b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { let _ = git(state, &bwt, &["merge", "--abort"]).await; return Ok(LaneEnd::Stopped); }
     if let Err(why) = ended { return fix_failed(state, project, pid, &bwt, wi, li, &why).await; }

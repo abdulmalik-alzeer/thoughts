@@ -253,9 +253,11 @@ pub fn anchor(text: &str, quote: &str, prefix: &str, suffix: &str, heading: Opti
 
 // ---------- the change request ----------
 
+use crate::mado_prompts::inline;
+
 fn node_desc(g: Option<&GraphDoc>, id: &str) -> String {
     match g.and_then(|g| g.nodes.iter().find(|n| n.id == id)) {
-        Some(n) => format!("`{id}` ({:?}, kind {})", n.label, n.kind),
+        Some(n) => format!("`{id}` ({}, kind {})", inline(&n.label), if crate::mado_validate::id_ok(&n.kind) { n.kind.clone() } else { inline(&n.kind) }),
         None => format!("`{id}`"),
     }
 }
@@ -263,29 +265,33 @@ fn node_desc(g: Option<&GraphDoc>, id: &str) -> String {
 fn edge_desc(g: Option<&GraphDoc>, id: &str) -> String {
     match g.and_then(|gr| gr.edges.iter().find(|e| e.id == id).map(|e| (gr, e))) {
         Some((gr, e)) => format!("`{id}` (from {} to {}{})", node_desc(Some(gr), &e.from), node_desc(Some(gr), &e.to),
-            e.label.as_ref().map(|l| format!(", labelled {l:?}")).unwrap_or_default()),
+            e.label.as_ref().map(|l| format!(", labelled {}", inline(l))).unwrap_or_default()),
         None => format!("`{id}`"),
     }
 }
 
-fn quoted(text: &str) -> String { text.lines().map(|l| format!("   > {l}")).collect::<Vec<_>>().join("\n") }
+/// A passage of a file, quoted line by line inside a data block.
+fn quoted(text: &str) -> String { crate::mado_prompts::block(&text.lines().map(|l| format!("   > {l}")).collect::<Vec<_>>().join("\n")) }
+
+/// The user's comment, as a data block.
+fn said(body: &str) -> String { format!("   Comment (the user's words):\n{}", crate::mado_prompts::block(body)) }
 
 /// One comment as an instruction line.
 fn comment_line(m: &Path, full: bool, c: &Comment) -> String {
-    let body = c.body.trim();
+    let body = said(c.body.trim());
     match &c.target {
         CommentTarget::Text { file, quote, prefix, suffix, heading } => {
-            let under = heading.as_ref().map(|h| format!(", under the heading {h:?}")).unwrap_or_default();
-            format!("On `{file}`{under}, the passage:\n{}\n   (in context: {:?} [passage] {:?})\n   Comment: {body}", quoted(quote), format!("…{prefix}"), format!("{suffix}…"))
+            let under = heading.as_ref().map(|h| format!(", under the heading {}", inline(h))).unwrap_or_default();
+            format!("On `{file}`{under}, the passage (the file's text):\n{}\n   (in context: {} [passage] {})\n{body}", quoted(quote), inline(&format!("…{prefix}")), inline(&format!("{suffix}…")))
         }
-        CommentTarget::Node { file, node_id } => format!("On node {} of `{file}`:\n   Comment: {body}", node_desc(graph(m, file, full).as_ref(), node_id)),
-        CommentTarget::Edge { file, edge_id } => format!("On edge {} of `{file}`:\n   Comment: {body}", edge_desc(graph(m, file, full).as_ref(), edge_id)),
-        CommentTarget::Token { token_path } => format!("On the design token `{token_path}` (design/tokens.json and the style it came from in design/styles.json):\n   Comment: {body}"),
-        CommentTarget::Screen { screen_id, x, y } => format!("On the mock-up of screen {} (`design/screens/{screen_id}.html`), at the spot {:.0}% from the left and {:.0}% from the top:\n   Comment: {body}",
+        CommentTarget::Node { file, node_id } => format!("On node {} of `{file}`:\n{body}", node_desc(graph(m, file, full).as_ref(), node_id)),
+        CommentTarget::Edge { file, edge_id } => format!("On edge {} of `{file}`:\n{body}", edge_desc(graph(m, file, full).as_ref(), edge_id)),
+        CommentTarget::Token { token_path } => format!("On the design token `{token_path}` (design/tokens.json and the style it came from in design/styles.json):\n{body}"),
+        CommentTarget::Screen { screen_id, x, y } => format!("On the mock-up of screen {} (`design/screens/{screen_id}.html`), at the spot {:.0}% from the left and {:.0}% from the top:\n{body}",
             node_desc(graph(m, "flow.graph.json", full).as_ref(), screen_id), x * 100.0, y * 100.0),
         CommentTarget::Task { task_id } => {
-            let title = mado::read_plan(m, full).ok().flatten().and_then(|p| p.tasks.into_iter().find(|t| &t.id == task_id)).map(|t| format!(" ({:?})", t.title)).unwrap_or_default();
-            format!("On task `{task_id}`{title} of `plan.json`:\n   Comment: {body}")
+            let title = mado::read_plan(m, full).ok().flatten().and_then(|p| p.tasks.into_iter().find(|t| &t.id == task_id)).map(|t| format!(" ({})", inline(&t.title))).unwrap_or_default();
+            format!("On task `{task_id}`{title} of `plan.json`:\n{body}")
         }
     }
 }
@@ -294,7 +300,7 @@ fn comment_line(m: &Path, full: bool, c: &Comment) -> String {
 fn ref_desc(g: Option<&GraphDoc>, ops: &[GraphOp], r: &str) -> String {
     let added: Vec<&String> = ops.iter().filter_map(|o| match o { GraphOp::AddNode { label, .. } => Some(label), _ => None }).collect();
     match mado::new_ref(r, added.len()) {
-        Some(n) => format!("the new node \u{201c}{}\u{201d}", added[n - 1]),
+        Some(n) => format!("the new node \u{201c}{}\u{201d}", added[n - 1].split_whitespace().collect::<Vec<_>>().join(" ").chars().filter(|c| !matches!(c, '\u{201c}' | '\u{201d}' | '<' | '>') && !c.is_control()).take(200).collect::<String>()),
         None => node_desc(g, r),
     }
 }
@@ -302,15 +308,15 @@ fn ref_desc(g: Option<&GraphDoc>, ops: &[GraphOp], r: &str) -> String {
 fn op_line(g: Option<&GraphDoc>, ops: &[GraphOp], op: &GraphOp) -> String {
     let n = |r: &str| ref_desc(g, ops, r);
     match op {
-        GraphOp::Rename { id, label } => format!("rename node {} to {label:?}", node_desc(g, id)),
-        GraphOp::AddNode { label, kind, near } => format!("add a node {label:?} of kind {kind}{} (give it a proper id)", near.as_ref().map(|x| format!(", next to {}", n(x))).unwrap_or_default()),
+        GraphOp::Rename { id, label } => format!("rename node {} to {}", node_desc(g, id), inline(label)),
+        GraphOp::AddNode { label, kind, near } => format!("add a node {} of kind {kind}{} (give it a proper id)", inline(label), near.as_ref().map(|x| format!(", next to {}", n(x))).unwrap_or_default()),
         GraphOp::RemoveNode { id } => format!("remove node {} and the edges that touch it", node_desc(g, id)),
         GraphOp::AddEdge { from, to, label, kind } => format!("add an edge from {} to {}{}{}", n(from), n(to),
-            label.as_ref().filter(|l| !l.is_empty()).map(|l| format!(" labelled {l:?}")).unwrap_or_default(),
-            kind.as_ref().filter(|k| !k.is_empty()).map(|k| format!(", of kind {k:?}")).unwrap_or_default()),
+            label.as_ref().filter(|l| !l.is_empty()).map(|l| format!(" labelled {}", inline(l))).unwrap_or_default(),
+            kind.as_ref().filter(|k| !k.is_empty()).map(|k| format!(", of kind {}", inline(k))).unwrap_or_default()),
         GraphOp::RemoveEdge { id } => format!("remove edge {}", edge_desc(g, id)),
-        GraphOp::RelabelEdge { id, label } => format!("relabel edge {} to {label:?}", edge_desc(g, id)),
-        GraphOp::SetProp { id, key, value } => format!("set the property {key:?} of {} to {}", n(id), serde_json::to_string(value).unwrap_or_default()),
+        GraphOp::RelabelEdge { id, label } => format!("relabel edge {} to {}", edge_desc(g, id), inline(label)),
+        GraphOp::SetProp { id, key, value } => format!("set the property {} of {} to {}", inline(key), n(id), inline(&serde_json::to_string(value).unwrap_or_default())),
     }
 }
 
@@ -330,6 +336,9 @@ pub fn change_prompt(m: &Path, full: bool, comments: &[Comment], ops: &[OpsOnFil
         - Every file must still have the exact shape your instructions give for it.\n\
         - When you are done, answer with one short line per request: what you changed and where (file and section or id). If a request cannot \
         be applied as asked, say why instead of guessing.\n");
+    out.push_str(&format!("- {}\n", crate::mado_prompts::DATA_NOTE));
+    // Only comments whose target has the shape the app gives them (a `comments.json` it did not write is not believed).
+    let comments: Vec<&Comment> = comments.iter().filter(|c| clean_target(c.target.clone()).is_ok()).collect();
     if !comments.is_empty() {
         out.push_str("\n## Comments\n\n");
         for (i, c) in comments.iter().enumerate() { out.push_str(&format!("{}. {}\n\n", i + 1, comment_line(m, full, c))); }
