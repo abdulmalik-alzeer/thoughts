@@ -1,5 +1,31 @@
 # What's new in Thoughts
 
+## 0.3.0
+
+Plan and build a project: Thoughts can take a software idea from a first conversation to working code in seven steps, with you reading and approving each one. Read "Before you rely on it" below: the new parts have been tested automatically and in a browser, but not yet in the real app window or with a real assistant run.
+
+### New
+- **Plan and build a project (MADO).** Open **Projects**, pick a project folder you linked, and choose **Plan**. Seven steps, in order: **Brief**, **What it does**, **How it's built**, **Look and screens**, **Work plan**, **Final check**, **Build**. Each step has its own chat, and a step opens once the steps before it are approved. Everything the plan says is kept in a `mado` folder inside the project.
+- **Comments are how you ask for changes.** Comment on a passage of a document, a box or a line of a diagram, a colour or another design setting, or a spot on a screen. Collect as many as you like, then **Send changes**: the assistant gets them all as one request and changes the documents and the diagrams together.
+- **Diagrams you can edit.** The screens and the paths between them, the parts of the system, the data tables and the work plan are drawn as diagrams you can move around and zoom. In the first three you can rename a box, add one, draw a line, delete something or fill in a table's fields; your edits go to the assistant with **Send changes**. The work plan's diagram is drawn from the plan and is for reading.
+- **The design step.** Eight ready looks, and the assistant's own suggestions. Pick one, then change any colour, font, corner or spacing and see it at once. Thoughts warns when text becomes hard to read, and **Fix contrast** repairs it. A first picture of every screen is shown in a sealed frame that runs nothing and loads nothing from outside, and you can pin a comment to a spot on it.
+- **The Final check.** The app checks that every feature and every screen has work planned for it, and lists every command the build would run. Approving it allows those commands to run on this computer, so Thoughts asks you itself, in a dialog of its own that names the project and lists the commands. If the plan changed after you looked, the approval is refused.
+- **The build.** The app does the work on a separate copy of the project, on a branch of its own, a few tasks side by side; your own branch is not touched while it works. The assistant only reads and edits files; the app runs each task's check itself and sends a failed check back to the assistant, up to three times. The build holds by itself when your usage is high (Settings › Privacy & cost sets where). You can pause or stop it at any time. When everything is done, **Bring the finished build into my branch** merges it.
+- Help › "Working with notes, chats and files" has a section, "Plan and build a project (MADO)", on all of this.
+
+### Safer
+- **The build's commands are kept to their copy of the project** on a Mac: they can change files only there, in temporary files and in the build's own download cache, and cannot read your own files, your saved sign-ins or keys, or the app's data. They can still use the network. The switch is in Settings › Privacy & cost, on unless you turn it off; Thoughts asks before it goes off.
+- The commands run code the assistant wrote during the build (a test command runs the project's tests, whatever they contain). Read the list before you approve it.
+- A planning run may write only the `mado` folder. Anything it changes elsewhere is listed in the step, and the step cannot be approved until you have looked.
+- A build does not start while the `mado` folder holds a link or a special file, or while the project's own git settings would start other programs; the message names what it found.
+
+### Before you rely on it
+- **Not yet seen for real.** The new parts of this version have been tested automatically and looked at in a browser. They have not yet been seen in the real app window, and no plan or build has yet been run with a real assistant. Expect rough edges, and try it first on a project you can afford to redo.
+- Planning and build runs use Claude Code only, not Codex.
+- The build needs the project to be a git repository with nothing uncommitted.
+- While the build's commands are kept to their copy, installing packages from a private registry with your saved credentials fails.
+- Thoughts is released for macOS only, and the build's commands are kept to their copy only there.
+
 ## 0.2.0
 
 Chats read your Excel, Word and PowerPoint files, answers can hold diagrams and charts that you save as SVG or draw.io files, and the built-in pages can be rearranged. This version also brings a dangerous **Full access** switch, off unless you turn it on.
