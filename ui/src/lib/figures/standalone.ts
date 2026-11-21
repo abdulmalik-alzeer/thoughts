@@ -20,6 +20,30 @@ const DEFAULTS: Record<string, string[]> = {
   'font-style': ['normal'], 'text-anchor': ['start'], 'dominant-baseline': ['auto'], 'letter-spacing': ['normal', '0px'],
 };
 
+/** What a drawing is made of. Anything else in it is dropped before it is shown or saved, and the
+ *  desktop shell refuses to save an SVG holding anything else (`plain_svg` in src-tauri/src/main.rs:
+ *  keep the two lists the same). */
+export const DRAWN = new Set(['svg', 'g', 'defs', 'title', 'desc', 'style', 'rect', 'circle', 'ellipse', 'line', 'polyline', 'polygon', 'path', 'text', 'tspan', 'marker', 'pattern']);
+
+/** Leave only a picture: the elements above, no handler, link, inline style or namespaced attribute,
+ *  and no reference to anything outside the drawing. */
+export function keepPlain(svg: Element): void {
+  for (const el of Array.from(svg.querySelectorAll('*'))) {
+    if (!el.isConnected && el !== svg) continue;
+    if (!DRAWN.has(el.localName) || el.namespaceURI !== 'http://www.w3.org/2000/svg') { el.remove(); continue; }
+  }
+  for (const el of [svg, ...Array.from(svg.querySelectorAll('*'))]) {
+    for (const a of Array.from(el.attributes)) {
+      const name = a.name.toLowerCase();
+      if (name === 'xmlns') continue;
+      if (a.prefix || name.includes(':') || name.startsWith('on') || name === 'style' || name.includes('href') || name === 'src') { el.removeAttributeNode(a); continue; }
+      const v = a.value.toLowerCase().replace(/[\s"']/g, '');
+      if (v.includes('\\') || v.includes('/*') || v.includes('javascript:') || v.includes('expression(') || v.includes('@import')
+        || Array.from(v.matchAll(/url\(/g)).some((m) => v[m.index! + 4] !== '#')) el.removeAttributeNode(a);
+    }
+  }
+}
+
 /** The drawing in a parsed Archify page: its largest SVG that is not an icon inside a control. */
 export function pickDrawing(page: Document): SVGSVGElement | null {
   let best: SVGSVGElement | null = null, size = 0;
@@ -79,14 +103,15 @@ export function inlineLooks(svg: SVGSVGElement, view: Window): void {
     el.removeAttribute('data-animate');
   }
   for (const s of Array.from(svg.querySelectorAll('style, script'))) s.remove();
-  for (const el of all) for (const a of Array.from(el.attributes)) if (/^on/i.test(a.name)) el.removeAttribute(a.name);
+  keepPlain(svg);
 }
 
 /** The `@font-face` rules of the page whose family the drawing uses, to travel inside the SVG. */
 function fontRules(page: Document, used: Set<string>): string {
   const css = Array.from(page.querySelectorAll('style')).map((s) => s.textContent || '').join('\n');
   const rules = css.match(/@font-face\s*\{[^}]*\}/g) ?? [];
-  return rules.filter((r) => { const f = /font-family:\s*["']?([^;"']+)/.exec(r)?.[1]?.trim().toLowerCase(); return !!f && used.has(f) && /url\(\s*["']?data:/.test(r); }).join('\n');
+  const carried = (r: string) => { const urls = r.match(/url\(\s*["']?[^)]{0,12}/gi) ?? []; return urls.length > 0 && urls.every((u) => /^url\(\s*["']?data:font\//i.test(u)) && !/\\|\/\*|@import/i.test(r); };
+  return rules.filter((r) => { const f = /font-family:\s*["']?([^;"']+)/.exec(r)?.[1]?.trim().toLowerCase(); return !!f && used.has(f) && carried(r); }).join('\n');
 }
 
 /** A hidden frame that lays out `html` and cannot run scripts. Resolves once it has loaded. */

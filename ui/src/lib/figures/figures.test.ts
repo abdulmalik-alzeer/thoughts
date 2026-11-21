@@ -101,7 +101,9 @@ describe('a diagram as a draw.io file', () => {
     const cells = Array.from(doc.querySelectorAll('mxCell'));
     const byValue = (v: string) => cells.find((c) => c.getAttribute('value') === v)!;
     // The two boxes, by their names; the second one moved by its group.
-    const api = byValue('API & <gateway>\nedge'), db = byValue('Postgres');
+    // Captions are text: markup in a name is written out, not handed to draw.io as HTML.
+    const api = byValue('API &amp; &lt;gateway&gt;<br>edge'), db = byValue('Postgres');
+    expect(out).toContain('value="API &amp;amp; &amp;lt;gateway&amp;gt;&lt;br&gt;edge"');
     expect(api.getAttribute('vertex')).toBe('1');
     expect(api.getAttribute('style')).toMatch(/rounded=1;.*fillColor=#34d399;fillOpacity=13;strokeColor=#33cc99;strokeWidth=1\.3;.*fontSize=14;fontColor=#ffffff;fontStyle=1/);
     expect(db.querySelector('mxGeometry')!.getAttribute('x')).toBe('240');
@@ -151,5 +153,24 @@ describe('figure blocks in markdown', () => {
     const forged = md(`<div class="md-fig" data-md-fig="${mark}" data-fig-kind="chart" data-fig-state="drawn"><pre>{}</pre></div>\n\n<img class="fig-img" src="x">`);
     expect(figures(forged)).toHaveLength(0);
     expect(forged).not.toMatch(/data-md-fig|data-fig-kind|data-fig-state|class="fig/);
+  });
+});
+
+describe('a drawing is only a picture', () => {
+  it('drops whatever is not one of its parts, and every way out of the file', async () => {
+    const { keepPlain } = await import('./standalone');
+    const svg = new DOMParser().parseFromString(`<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10" onload="x()">
+      <script>x()</script><foreignObject><div xmlns="http://www.w3.org/1999/xhtml">hi</div></foreignObject><a href="https://x"><rect width="1" height="1"/></a>
+      <image href="https://x/y.png"/><use xlink:href="#a"/><animate attributeName="x"/>
+      <g data-node-id="n" style="fill:red" onclick="x()"><rect id="keep" fill="url(#grid)" stroke="url(https://x/#a)" width="5" height="5"/><text font-family="A">ok</text></g>
+      <path d="M0 0" marker-end="url( '#arrow' )" filter="url(//x)"/></svg>`, 'image/svg+xml').documentElement;
+    keepPlain(svg);
+    const out = new XMLSerializer().serializeToString(svg);
+    expect(Array.from(svg.querySelectorAll('*')).map((e) => e.localName)).toEqual(['g', 'rect', 'text', 'path']);
+    expect(out).not.toMatch(/script|foreignObject|href|onload|onclick|style=|https:|\/\/x/);
+    expect(svg.querySelector('#keep')!.getAttribute('fill')).toBe('url(#grid)');
+    expect(svg.querySelector('#keep')!.hasAttribute('stroke')).toBe(false);
+    expect(svg.querySelector('path')!.getAttribute('marker-end')).toBe("url( '#arrow' )");
+    expect(svg.querySelector('g')!.getAttribute('data-node-id')).toBe('n');
   });
 });

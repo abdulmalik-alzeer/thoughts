@@ -57,7 +57,7 @@ function diagram(source: string): Promise<Drawn> {
     let kind = '';
     try { kind = String(JSON.parse(source)?.diagram_type ?? ''); } catch { /* the service says so */ }
     try {
-      const r = await post<{ ok: boolean; html?: string; code?: string; detail?: string }>('/api/figures/archify', { source });
+      const r = await post<{ ok: boolean; html?: string; code?: string; detail?: string }>('/figures/archify', { source });
       if (!r.ok || !r.html) return { ok: false as const, code: r.code || 'failed', detail: r.detail || '' };
       const d = await archifyDrawing(r.html, dark);
       return { ok: true as const, svg: d.svg, title: d.title, kind };
@@ -172,7 +172,9 @@ function scan() {
   queued = false;
   for (const w of Array.from(document.querySelectorAll<HTMLElement>(`.md-fig:not([${STATE}])`))) hydrate(w);
 }
-const later = () => { if (!queued) { queued = true; requestAnimationFrame(scan); } };
+// (A timer, not an animation frame: a window that is hidden or minimised gets no frames, and an
+// answer that arrives meanwhile should be drawn by the time it is looked at.)
+const later = () => { if (!queued) { queued = true; setTimeout(scan, 30); } };
 
 let started = false;
 /** Start watching the page for figures (once). `figMark` is the stamp `md()` puts on its wrappers. */

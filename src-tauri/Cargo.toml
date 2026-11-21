@@ -14,6 +14,8 @@ rehearsal = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# Reading a drawing before it is saved (`plain_svg`): a small XML parser that refuses document types. MIT OR Apache-2.0.
+roxmltree = "0.20"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 tauri-plugin-updater = "2"

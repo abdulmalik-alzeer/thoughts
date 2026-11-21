@@ -88,6 +88,9 @@ export function colourOf(value: string | null | undefined): { hex: string; alpha
 }
 
 const xml = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/\n/g, '&#10;');
+/** A caption as a cell's value. draw.io reads values as HTML (that is what lets them wrap), so the
+ *  text is escaped as HTML first: whatever a diagram's label says, it is shown, never interpreted. */
+const label = (s: string) => xml(s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>'));
 const n1 = (n: number) => String(Math.round(n * 10) / 10);
 const numAttr = (el: Element, name: string, fallback = 0) => { const v = parseFloat(el.getAttribute(name) || ''); return Number.isFinite(v) ? v : fallback; };
 
@@ -159,7 +162,7 @@ export function svgToDrawio(svgText: string, name = 'Diagram'): string {
 
   const vertex = (value: string, style: string[], b: Box, at: Place = PAGE) => {
     const cid = id();
-    cells.push(`<mxCell id="${cid}" value="${xml(value)}" style="${style.join(';')};" vertex="1" parent="${at.parent}"><mxGeometry x="${n1(b.x - at.ox)}" y="${n1(b.y - at.oy)}" width="${n1(b.w)}" height="${n1(b.h)}" as="geometry"/></mxCell>`);
+    cells.push(`<mxCell id="${cid}" value="${label(value)}" style="${xml(style.join(';'))};" vertex="1" parent="${at.parent}"><mxGeometry x="${n1(b.x - at.ox)}" y="${n1(b.y - at.oy)}" width="${n1(b.w)}" height="${n1(b.h)}" as="geometry"/></mxCell>`);
     return cid;
   };
   const boxOf = (el: Element, m: M): Box | null => {
@@ -252,7 +255,7 @@ export function svgToDrawio(svgText: string, name = 'Diagram'): string {
     const pt = ([x, y]: [number, number], as = '') => `<mxPoint x="${n1(x - at.ox)}" y="${n1(y - at.oy)}"${as ? ` as="${as}"` : ''}/>`;
     const mid = p.slice(1, -1).map((q) => pt(q)).join('');
     const attach = (src ? ` source="${src}"` : '') + (dst ? ` target="${dst}"` : '');
-    cells.push(`<mxCell id="${id()}" value="${xml(ends.label || '')}" style="${style.join(';')};" edge="1" parent="${at.parent}"${attach}><mxGeometry relative="1" as="geometry">${pt(a, 'sourcePoint')}${pt(z, 'targetPoint')}${mid ? `<Array as="points">${mid}</Array>` : ''}</mxGeometry></mxCell>`);
+    cells.push(`<mxCell id="${id()}" value="${label(ends.label || '')}" style="${xml(style.join(';'))};" edge="1" parent="${at.parent}"${attach}><mxGeometry relative="1" as="geometry">${pt(a, 'sourcePoint')}${pt(z, 'targetPoint')}${mid ? `<Array as="points">${mid}</Array>` : ''}</mxGeometry></mxCell>`);
   };
   const linePoints = (el: Element): { points: [number, number][]; curved: boolean; closed: boolean } | null => {
     const tag = el.nodeName.toLowerCase();

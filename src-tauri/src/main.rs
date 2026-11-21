@@ -412,30 +412,77 @@ fn export_file(name: &str, bytes: &[u8]) -> Result<(String, String), String> {
     // A drawing the app made (a diagram or a chart): a picture and nothing else. An SVG that could
     // run something when opened in a browser is not one of the app's.
     if ext == "svg" && !plain_svg(bytes) { return Err("this kind of file cannot be saved from Thoughts".into()); }
-    if ext == "drawio" && !bytes.starts_with(b"<mxfile") { return Err("this kind of file cannot be saved from Thoughts".into()); }
+    if ext == "drawio" && !drawio_file(bytes) { return Err("this kind of file cannot be saved from Thoughts".into()); }
     let stem: String = p.file_stem().and_then(|e| e.to_str()).unwrap_or("export").chars()
         .filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ' | '.')).take(80).collect();
     Ok((format!("{}.{ext}", if stem.trim().is_empty() { "export" } else { stem.trim() }), ext))
 }
 
-/// Is this an SVG picture that can run nothing: no script, no page inside it, no handler, no link
-/// that is a program, nothing fetched from elsewhere?
+/// Is this an SVG picture and nothing else? Decided on the parsed document, never on its text:
+/// only the elements a drawing of the app's is made of, no handler, no link, no inline style, no
+/// document type or processing instruction, nothing referred to outside the file (a paint or a
+/// marker by `#id`, a font carried inside a `<style>` as `data:font/…`).
 fn plain_svg(bytes: &[u8]) -> bool {
+    const SVG: &str = "http://www.w3.org/2000/svg";
+    const ELEMENTS: &[&str] = &["svg", "g", "defs", "title", "desc", "style", "rect", "circle", "ellipse", "line", "polyline", "polygon", "path",
+        "text", "tspan", "marker", "pattern"];
     let Ok(text) = std::str::from_utf8(bytes) else { return false };
-    let t = text.to_lowercase();
-    if !t.trim_start().starts_with("<svg") { return false; }
-    if ["<script", "<foreignobject", "<iframe", "<object", "<embed", "javascript:", "<!entity", "<?xml-stylesheet", "@import"].iter().any(|bad| t.contains(bad)) { return false; }
-    // An event handler: ` onload=`, ` onclick =` … on any element.
-    let b = t.as_bytes();
-    for i in 0..b.len().saturating_sub(3) {
-        if b[i].is_ascii_whitespace() && b[i + 1] == b'o' && b[i + 2] == b'n' {
-            let rest = &t[i + 3..];
-            let name = rest.bytes().take_while(|c| c.is_ascii_alphabetic()).count();
-            if name > 0 && rest[name..].trim_start().starts_with('=') { return false; }
+    // (A document type, and so every entity of its own making, is refused by the parser.)
+    let Ok(doc) = roxmltree::Document::parse(text) else { return false };
+    if doc.root_element().tag_name().name() != "svg" { return false; }
+    for n in doc.descendants() {
+        if n.is_pi() { return false; }
+        if !n.is_element() { continue; }
+        let name = n.tag_name();
+        if name.namespace() != Some(SVG) || !ELEMENTS.contains(&name.name()) { return false; }
+        for a in n.attributes() {
+            let key = a.name().to_ascii_lowercase();
+            if a.namespace().is_some() || key.starts_with("on") || key == "style" || key.contains("href") || key == "src" { return false; }
+            if !local_refs(a.value()) { return false; }
+        }
+        if name.name() == "style" {
+            let css: String = n.children().filter_map(|c| c.text()).collect();
+            if n.children().any(|c| c.is_element()) || !fonts_only(&css) { return false; }
         }
     }
-    // Anything fetched: only what is inside the file (`#id`, `data:` fonts) is allowed.
-    !["href=\"http", "href='http", "href=\"//", "url(http", "url(\"http", "url('http", "url(//"].iter().any(|bad| t.contains(bad))
+    true
+}
+
+/// A value as it is compared: lower case, without blanks, quotes or the characters CSS lets a name hide behind.
+fn squeezed(v: &str) -> Option<String> {
+    if v.contains('\\') || v.contains("/*") { return None; }
+    Some(v.chars().filter(|c| !c.is_whitespace() && !c.is_control() && *c != '"' && *c != '\'').flat_map(char::to_lowercase).collect())
+}
+
+/// Does an attribute's value refer to nothing but parts of the same file (`url(#id)`)?
+fn local_refs(v: &str) -> bool {
+    let Some(t) = squeezed(v) else { return false };
+    if t.contains("javascript:") || t.contains("expression(") || t.contains("@import") { return false; }
+    t.match_indices("url(").all(|(i, _)| t[i + 4..].starts_with('#'))
+}
+
+/// Is a style sheet only fonts carried inside it: `@font-face` rules whose every `url()` is `data:font/…`?
+fn fonts_only(css: &str) -> bool {
+    let Some(t) = squeezed(css) else { return false };
+    if t.contains("@import") || t.contains("expression(") || t.contains("javascript:") { return false; }
+    if !t.match_indices("url(").all(|(i, _)| t[i + 4..].starts_with("data:font/")) { return false; }
+    let mut rest = t.as_str();
+    while !rest.is_empty() {
+        let Some(body) = rest.strip_prefix("@font-face{") else { return false };
+        let Some(end) = body.find('}') else { return false };
+        if body[..end].contains('{') { return false; }
+        rest = &body[end + 1..];
+    }
+    true
+}
+
+/// Is this a draw.io file: an `mxfile` holding a graph model and nothing else?
+fn drawio_file(bytes: &[u8]) -> bool {
+    const ELEMENTS: &[&str] = &["mxfile", "diagram", "mxGraphModel", "root", "mxCell", "mxGeometry", "mxPoint", "Array"];
+    let Ok(text) = std::str::from_utf8(bytes) else { return false };
+    let Ok(doc) = roxmltree::Document::parse(text) else { return false };
+    doc.root_element().tag_name().name() == "mxfile"
+        && doc.descendants().all(|n| !n.is_pi() && (!n.is_element() || (n.tag_name().namespace().is_none() && ELEMENTS.contains(&n.tag_name().name()))))
 }
 
 /// Save a file the app generated (an exported document, a calendar file, a Word document). Like
@@ -1510,15 +1557,36 @@ mod tests {
         assert_eq!(export_file("../../etc/evil.md", b"x"), Ok(("evil.md".into(), "md".into())));
         assert_eq!(export_file("<>.html", b"x"), Ok(("export.html".into(), "html".into())));
         // A drawing: an SVG that is only a picture, or a draw.io file.
-        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><style>@font-face{font-family:'M';src:url(data:font/woff2;base64,AA==)}</style><rect fill="url(#g)" width="10" height="10"/><text font-family="M">on = off</text></svg>"##;
+        let svg = br##"<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" role="img" aria-label="x" data-node-ui=""><style>@font-face { font-family: 'M'; src: url("data:font/woff2;base64,AA==") format('woff2'); } @font-face{font-family:'N';src:url(data:font/woff2;base64,AA==)}</style><defs><marker id="a"><polygon points="0 0"/></marker><pattern id="g"><path d="M0 0"/></pattern></defs><title>t</title><desc>d</desc><g data-node-id="n" tabindex="0"><rect fill="url(#g)" width="10" height="10"/><circle r="1"/><ellipse rx="1"/><line x1="0"/><polyline points="0,0"/><path d="M0 0" marker-end="url(#a)"/><text font-family="M" direction="rtl">onload=alert(1) &lt;script&gt; javascript: <tspan x="1">on = off</tspan></text></g></svg>"##;
         assert_eq!(export_file("Sales by region.svg", svg), Ok(("Sales by region.svg".into(), "svg".into())));
         assert_eq!(export_file("flow.drawio", b"<mxfile host=\"Thoughts\"></mxfile>"), Ok(("flow.drawio".into(), "drawio".into())));
         assert!(export_file("flow.drawio", b"<html>").is_err());
-        for bad in [&b"<html><svg/></html>"[..], b"<svg><script>alert(1)</script></svg>", b"<svg onload=\"x()\"/>", b"<svg><rect ONCLICK = 'x()'/></svg>",
-            b"<svg><a href=\"javascript:x()\"/></svg>", b"<svg><foreignObject/></svg>", b"<svg><image href=\"https://x/y.png\"/></svg>",
-            b"<svg><style>@import url(https://x/y.css)</style></svg>", b"<svg><rect fill=\"url(https://x/#a)\"/></svg>", b"\xff\xfe"] {
-            assert!(export_file("x.svg", bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        assert!(export_file("flow.drawio", b"<mxfile><diagram><script/></diagram></mxfile>").is_err());
+        assert!(export_file("flow.drawio", b"<mxfile><diagram name=\"a\"><mxGraphModel><root><mxCell id=\"0\"/><mxCell id=\"2\" value=\"A &amp;lt;b&amp;gt;\" vertex=\"1\"><mxGeometry x=\"1\" as=\"geometry\"><Array as=\"points\"><mxPoint x=\"1\"/></Array></mxGeometry></mxCell></root></mxGraphModel></diagram></mxfile>").is_ok());
+        // Not a picture and nothing else: every way an SVG can run or fetch something, however it is spelled.
+        let ns = "xmlns=\"http://www.w3.org/2000/svg\"";
+        for bad in [
+            "<html><svg/></html>".to_string(), "<svg/>".to_string(), "not xml".to_string(),
+            format!("<svg {ns}><script>alert(1)</script></svg>"), format!("<svg {ns}><SCRIPT/></svg>"),
+            format!("<svg {ns} onload=\"x()\"/>"), format!("<svg {ns}><rect ONCLICK='x()'/></svg>"), format!("<svg {ns}><rect\nonmouseover\n=\n'x()'/></svg>"),
+            format!("<svg {ns}><a href=\"javascript:x()\"/></svg>"), format!("<svg {ns}><foreignObject/></svg>"),
+            format!("<svg {ns}><image href=\"https://x/y.png\"/></svg>"), format!("<svg {ns}><use href=\"#a\"/></svg>"),
+            format!("<svg {ns} xmlns:xlink=\"http://www.w3.org/1999/xlink\"><rect xlink:href=\"#a\"/></svg>"),
+            format!("<svg {ns}><animate attributeName=\"x\"/></svg>"), format!("<svg {ns}><set/></svg>"),
+            format!("<svg {ns}><rect style=\"background:url(https://x/y)\"/></svg>"),
+            format!("<svg {ns}><rect fill=\"url(https://x/#a)\"/></svg>"), format!("<svg {ns}><rect fill=\"u&#114;l( 'HTTPS://x/#a')\"/></svg>"),
+            format!("<svg {ns}><rect fill=\"url(data:image/svg+xml,x)\"/></svg>"), format!("<svg {ns}><rect fill=\"u\\72l(//x)\"/></svg>"),
+            format!("<svg {ns}><style>@import url(https://x/y.css);</style></svg>"), format!("<svg {ns}><style>@im/**/port 'x';</style></svg>"),
+            format!("<svg {ns}><style>rect{{fill:red}}</style></svg>"), format!("<svg {ns}><style>@font-face{{src:url(https://x/f.woff2)}}</style></svg>"),
+            format!("<svg {ns}><style>@font-face{{src:url(data:font/woff2;base64,AA==)}}*{{background:url(//x)}}</style></svg>"),
+            format!("<svg {ns}><style><![CDATA[@font-face{{}}]]><script/></style></svg>"),
+            format!("<?xml-stylesheet href=\"https://x/y.css\"?><svg {ns}/>"), format!("<svg {ns}><?php x ?></svg>"),
+            format!("<!DOCTYPE svg [<!ENTITY x \"y\">]><svg {ns}/>"), format!("<x:svg xmlns:x=\"http://www.w3.org/1999/xhtml\"/>"),
+            format!("<svg {ns}><h:script xmlns:h=\"http://www.w3.org/1999/xhtml\"/></svg>"),
+        ] {
+            assert!(export_file("x.svg", bad.as_bytes()).is_err(), "{bad}");
         }
+        assert!(export_file("x.svg", b"\xff\xfe").is_err());
         // Kinds that can run, and names without a kind.
         for bad in ["run.exe", "macro.docm", "page.htm", "script.sh", "app.command", "noext", "x.docx.exe"] {
             assert!(export_file(bad, docx).is_err(), "{bad}");
