@@ -321,18 +321,20 @@ async fn reset_wt(state: &AppState, project: &Path, wt: &Path) {
     if git_ok(state, wt, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).await { let _ = git(state, wt, &["merge", "--abort"]).await; }
     let _ = git(state, wt, &["reset", "-q", "--hard", "HEAD"]).await;
     let _ = git(state, wt, &["clean", "-fdq", "-e", "/mado/"]).await;
-    copy_docs(project, wt);
+    crate::log::ok_or_warn("mado build: the plan's documents were not copied", copy_docs(project, wt, full(state).await));
 }
 
 /// The documents of the plan, copied into a worktree's `mado/` for the runs to read (they are
-/// never part of the build's commits).
-fn copy_docs(project: &Path, wt: &Path) {
-    let Ok(src) = mado_dir(project) else { return };
+/// never part of the build's commits). Refused while `mado/` holds a link or a shared file (unless
+/// full access is on): nothing is copied from behind one.
+fn copy_docs(project: &Path, wt: &Path, full: bool) -> anyhow::Result<()> {
+    let Ok(src) = mado_dir(project) else { return Ok(()) };
+    mado::require_plain(&src, full)?;
     let dst = wt.join("mado");
     // A `mado` in the repository that is a link (or a file) is left alone: nothing is written through it.
     match std::fs::symlink_metadata(&dst) {
-        Ok(m) if !m.is_dir() => return,
-        Err(_) => if std::fs::create_dir(&dst).is_err() { return },
+        Ok(m) if !m.is_dir() => return Ok(()),
+        Err(_) => if std::fs::create_dir(&dst).is_err() { return Ok(()) },
         _ => {}
     }
     let mut names: Vec<String> = ["brief.md", "spec.md", "tech.md", "design.md", "plan.json", "flow.graph.json", "architecture.graph.json", "schema.graph.json",
@@ -356,6 +358,7 @@ fn copy_docs(project: &Path, wt: &Path) {
         if std::fs::symlink_metadata(&to).map_or(false, |m| !m.is_file()) { continue; }
         let _ = std::fs::copy(&from, &to);
     }
+    Ok(())
 }
 
 // ---------- may a build start? ----------
@@ -398,6 +401,8 @@ async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Res
     let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
     if !same { return Err(crate::tr::err("mado_build.not_repo", &[])); }
     if !full(state).await { crate::trust::require_git(project)?; }
+    // No link or shared file in `mado/` (a cloned repository can ship `mado/spec.md -> ~/.zshrc`).
+    mado::require_plain(&mado_dir(project)?, full(state).await)?;
     // The Review step approved exactly the plan that is there now (its commands are what will run).
     // The approval is the daemon's own record, never anything in the project (`state.json` could be forged).
     let approval = mado::approved_plan(state, pid).await.ok_or_else(|| crate::tr::err("mado_build.not_approved", &[]))?;
@@ -454,7 +459,7 @@ pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) 
             delete_branch(state, &project, &branch, true).await;
             return Err(e);
         }
-        copy_docs(&project, &build_wt(pid)?);
+        crate::log::ok_or_warn("mado build: the plan's documents were not copied", copy_docs(&project, &build_wt(pid)?, full(state).await));
         let waves = mado::waves(&r.plan).into_iter().map(|w| BuildWave {
             status: TaskStatus::Pending, checked: false, fix_chat_id: None,
             lanes: w.lanes.into_iter().map(|l| BuildLane { id: l.id, status: TaskStatus::Pending, fix_chat_id: None,
@@ -798,7 +803,7 @@ async fn ensure_lane_wt(state: &AppState, project: &Path, pid: &str, b: &BuildSt
     } else {
         git(state, project, &["worktree", "add", "-q", "-b", &br, &s(&wt), &b.branch]).await?;
     }
-    copy_docs(project, &wt);
+    copy_docs(project, &wt, full(state).await)?;
     Ok(wt)
 }
 
@@ -1159,7 +1164,7 @@ async fn ensure_build_wt(state: &AppState, project: &Path, pid: &str, b: &BuildS
         let _g = gl.lock().await;
         remove_worktree(state, project, pid, &bwt).await;
         git(state, project, &["worktree", "add", "-q", &s(&bwt), &b.branch]).await?;
-        copy_docs(project, &bwt);
+        copy_docs(project, &bwt, full(state).await)?;
     }
     Ok(bwt)
 }

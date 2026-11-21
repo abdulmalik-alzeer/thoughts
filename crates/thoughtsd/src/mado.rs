@@ -265,6 +265,42 @@ pub fn mado_dir_of(project: &Path, full: bool) -> anyhow::Result<PathBuf> {
     Ok(d)
 }
 
+/// The most entries `odd_entry` looks through (a `mado/` folder holds a few dozen files).
+pub const ENTRY_CAP: usize = 5000;
+
+/// The first entry of `mado/` that is not a plain folder or a plain file of its own: a symbolic link,
+/// a device, pipe or socket, or a file with more than one hard link (it is also a file somewhere
+/// else, say `~/.zshrc`). A folder too large to look through counts too. `None`: every entry is plain.
+pub fn odd_entry(mado: &Path) -> Option<String> {
+    let Ok(m) = std::fs::symlink_metadata(mado) else { return None };
+    if !m.is_dir() { return Some(DIR.into()); }
+    let mut n = 0usize;
+    for e in walkdir::WalkDir::new(mado).follow_links(false).min_depth(1).max_depth(12) {
+        n += 1;
+        let rel = |p: &Path| format!("{DIR}/{}", p.strip_prefix(mado).unwrap_or(p).to_string_lossy().replace('\\', "/"));
+        if n > ENTRY_CAP { return Some(format!("{DIR}/… ({ENTRY_CAP}+)")); }
+        let e = match e { Ok(e) => e, Err(err) => return Some(err.path().map(rel).unwrap_or_else(|| DIR.into())) };
+        let ft = e.file_type();
+        if ft.is_dir() { continue; }
+        if !ft.is_file() { return Some(rel(e.path())); }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            match std::fs::symlink_metadata(e.path()) { Ok(m) if m.nlink() <= 1 => {} _ => return Some(rel(e.path())) }
+        }
+    }
+    None
+}
+
+/// `odd_entry` as a guard: refused with the entry named, unless full access is on.
+pub fn require_plain(mado: &Path, full: bool) -> anyhow::Result<()> {
+    if full { return Ok(()); }
+    match odd_entry(mado) {
+        Some(p) => Err(crate::tr::err("mado.odd_entry", &[("path", &p.chars().take(200).collect::<String>())])),
+        None => Ok(()),
+    }
+}
+
 /// A name inside `mado/` is plain: segments of letters, digits, `.`, `_` and `-`, none starting with a dot.
 pub fn clean_rel(rel: &str) -> bool {
     !rel.is_empty() && rel.len() <= 200 && rel.split('/').all(|seg| {
@@ -791,6 +827,7 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
             // approval (never by what state.json says), and only while plan.json is that plan.
             let task = meta["mado"]["taskId"].as_str().unwrap_or_default().to_string();
             let mado = mado_dir_of(&project, full)?;
+            require_plain(&mado, full)?;
             let bytes = read_in(&mado, PLAN, full, DOC_MAX)?.unwrap_or_default();
             if let Some(a) = approved_plan_in(&role.project_id).filter(|a| approval_matches(a, &bytes)) {
                 if let Ok(plan) = crate::mado_validate::plan(&bytes) {
@@ -804,6 +841,8 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
         return Ok((spec, allow));
     }
     if !RUN_STEPS.contains(&role.step.as_str()) { return Err(crate::tr::err("mado.not_a_step", &[])); }
+    // No link or shared file in `mado/` that a write of the run would go through.
+    require_plain(&project.join(DIR), full)?;
     let mut allowed = vec![];
     if !full {
         // Its folder is the project, and nothing besides it.
@@ -1023,6 +1062,7 @@ async fn overview(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
 async fn start(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
     let (project, mado, full) = ctx(&st, &pid).await?;
     if !full { crate::trust::require(&project)?; }
+    require_plain(&mado, full)?;
     let lock = lock_of(&pid);
     let held = lock.lock().await;
     let state = match load_state(&pid, &mado, full)? {

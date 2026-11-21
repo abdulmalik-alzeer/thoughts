@@ -898,3 +898,48 @@ async fn what_a_run_changed_outside_mado_is_told_in_a_git_repository() { strays(
 
 #[tokio::test]
 async fn what_a_run_changed_outside_mado_is_told_outside_git() { strays(false).await }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn links_and_shared_files_inside_mado_are_refused_before_start_and_every_run() {
+    let (st, pid, dir) = with_project("links").await;
+    let mado = dir.join("mado");
+    std::fs::create_dir_all(mado.join("design")).unwrap();
+    std::fs::write(mado.join("brief.md"), "# Brief\n").unwrap();
+    assert_eq!(odd_entry(&mado), None);
+    let outside = tmp("links-outside");
+    std::fs::write(outside.join("zshrc"), "export X=1\n").unwrap();
+    // A symbolic link (a cloned repository can ship `mado/spec.md -> ../../.zshrc`).
+    std::os::unix::fs::symlink(outside.join("zshrc"), mado.join("spec.md")).unwrap();
+    assert_eq!(odd_entry(&mado).as_deref(), Some("mado/spec.md"));
+    let e = start(State(st.clone()), UrlPath(pid.clone())).await.unwrap_err();
+    assert_eq!(crate::api::shown_status(&e), 403);
+    let why = require_plain(&mado, false).unwrap_err();
+    assert!(crate::tr::classify_in(false, &why).message.contains("“mado/spec.md” in the project's mado folder is a link"), "{why}");
+    // …and a step run is refused before it starts.
+    std::fs::remove_file(mado.join("spec.md")).unwrap();
+    let _ = start(State(st.clone()), UrlPath(pid.clone())).await.unwrap();
+    let seen = hook(&st, |_| {});
+    std::os::unix::fs::symlink(&outside, mado.join("design/screens")).unwrap();
+    assert!(step_run(State(st.clone()), UrlPath((pid.clone(), "brief".into())), None).await.is_err());
+    assert!(seen.lock().unwrap().is_empty(), "no run started");
+    std::fs::remove_file(mado.join("design/screens")).unwrap();
+    // A hard link: the same file as one outside the project.
+    std::fs::hard_link(outside.join("zshrc"), mado.join("tech.md")).unwrap();
+    assert_eq!(odd_entry(&mado).as_deref(), Some("mado/tech.md"));
+    assert!(require_plain(&mado, false).is_err());
+    assert!(require_plain(&mado, true).is_ok(), "it yields to full access");
+    std::fs::remove_file(mado.join("tech.md")).unwrap();
+    // A pipe.
+    assert!(std::process::Command::new("mkfifo").arg(mado.join("design/pipe")).status().unwrap().success());
+    assert_eq!(odd_entry(&mado).as_deref(), Some("mado/design/pipe"));
+    std::fs::remove_file(mado.join("design/pipe")).unwrap();
+    assert_eq!(odd_entry(&mado), None);
+    // `mado` itself a link.
+    let real = tmp("links-real");
+    std::fs::remove_dir_all(&mado).unwrap();
+    std::os::unix::fs::symlink(&real, &mado).unwrap();
+    assert_eq!(odd_entry(&mado).as_deref(), Some("mado"));
+    std::fs::remove_file(&mado).unwrap();
+    for d in [dir, outside, real] { std::fs::remove_dir_all(d).unwrap(); }
+}

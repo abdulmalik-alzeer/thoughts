@@ -1518,6 +1518,10 @@ const TABLE: &[Entry] = &[
     e("mado.style.app-luxury.desc", "mado", 400, "",
         "Deep espresso, ivory text and muted gold, with fine corners and elegant headlines.",
         "بنّي عميق ونص عاجي وذهبي هادئ، بزوايا دقيقة وعناوين أنيقة."),
+    // --- MADO: what the security review asked for ---
+    e("mado.odd_entry", "forbidden", 403, "",
+        "“{path}” in the project's mado folder is a link, a special file or a file shared with another place, so the app will not use the folder. Replace it with a plain file and try again.",
+        "«{path}» في مجلد mado بالمشروع رابطٌ أو ملفٌّ خاص أو ملفٌّ مشترك مع مكان آخر، فلن يستعمل التطبيق المجلد. ضع مكانه ملفاً عادياً ثم حاول مرة أخرى."),
 ];
 
 fn entry(key: &str) -> &'static Entry {

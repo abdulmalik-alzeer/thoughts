@@ -627,3 +627,25 @@ fn a_tasks_words_and_a_checks_output_reach_the_run_only_as_quoted_data() {
     assert_eq!(b.matches("<<<").count(), 2 + 1, "only the blocks and the note: {b}");
     assert!(b.contains("quoted data"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_link_inside_mado_keeps_a_build_from_starting_and_nothing_is_copied_through_it() {
+    let p = project(vec![task("a", &["src/**"], &[], &["touch ran.txt"])]).await;
+    let secret = p.root.join("secret.txt");
+    std::fs::write(&secret, "secret\n").unwrap();
+    std::os::unix::fs::symlink(&secret, p.dir.join("mado/brief.md")).unwrap();
+    assert!(crate::tr::classify_in(false, &start(&p.st, &p.pid, None).await.unwrap_err()).message.contains("“mado/brief.md” in the project's mado folder"));
+    assert!(!p.dir.join("mado/build.json").exists());
+    std::fs::remove_file(p.dir.join("mado/brief.md")).unwrap();
+    std::fs::hard_link(&secret, p.dir.join("mado/brief.md")).unwrap();
+    assert!(crate::tr::classify_in(false, &start(&p.st, &p.pid, None).await.unwrap_err()).message.contains("“mado/brief.md” in the project's mado folder"));
+    let wt = p.root.join("copy");
+    std::fs::create_dir_all(&wt).unwrap();
+    assert!(copy_docs(&p.dir, &wt, false).is_err());
+    assert!(!wt.join("mado/brief.md").exists() && !wt.join("mado/plan.json").exists(), "nothing was copied");
+    copy_docs(&p.dir, &wt, true).unwrap();
+    assert!(wt.join("mado/plan.json").exists(), "full access copies");
+    assert_eq!(t::sh(&p.dir, &["branch", "--list", "mado/*"]), "");
+    p.done();
+}
