@@ -199,10 +199,9 @@
     {/if}
   {:else}
     <div class="top">
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <div class="seg" role="tablist" aria-label={t('madoDesign.tabs')} onkeydown={tabKeys}>
+      <div class="seg" role="tablist" aria-label={t('madoDesign.tabs')}>
         {#each TABS as k (k)}
-          <button type="button" class="segb" role="tab" id="mdd-tab-{k}" aria-selected={tab === k} aria-controls="mdd-panel" tabindex={tab === k ? 0 : -1} onclick={() => (tab = k)}>
+          <button type="button" class="segb" role="tab" id="mdd-tab-{k}" aria-selected={tab === k} aria-controls="mdd-panel" tabindex={tab === k ? 0 : -1} onclick={() => (tab = k)} onkeydown={tabKeys}>
             <Icon name={k === 'style' ? 'palette' : k === 'tune' ? 'tool' : 'window'} size={14} />
             {t(`madoDesign.tab.${k}`)}
             {#if k === 'screens' && screens.length}<span class="count">{drawn.length}/{screens.length}</span>{/if}
@@ -262,7 +261,7 @@
   .top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
   .count { font-size: var(--fs-xxs); font-variant-numeric: tabular-nums; opacity: .8; }
   .lock { margin: 0; font-size: var(--fs-sm); color: var(--muted); display: flex; align-items: center; gap: 6px; }
-  .panel { min-width: 0; animation: mdd-in .22s ease both; }
+  .panel { min-width: 0; animation: mdd-in .22s ease backwards; }
   @keyframes mdd-in { from { opacity: 0; transform: translateY(6px); } }
   .split { display: grid; grid-template-columns: minmax(330px, 440px) minmax(0, 1fr); gap: 20px; align-items: start; }
   @container (max-width: 820px) { .split { grid-template-columns: minmax(0, 1fr); } }
