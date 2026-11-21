@@ -656,21 +656,53 @@ pub fn run_mode(kind: &str, mode: String, full: bool) -> String {
     if kind == "mado" && !full && mode != "plan" && mode != crate::settings::BYPASS { "default".into() } else { mode }
 }
 
-/// The rules of a run of kind `mado`, as `(deny, allow)`: edits are allowed under `mado/` only
-/// (in the default mode, everything else would ask, and is refused); the daemon's own files there
-/// are denied (a deny wins over an allow). `.claude`, `.git` and `.mcp.json` stay closed by the
-/// rules every run gets (`claude::protective_deny`).
+/// The rules of a run of kind `mado`, as `(deny, allow)`, in three layers:
+/// 1. allow: edits under `mado/` only (in the default mode with nobody to ask, anything else is refused);
+///    the run loads none of the user's or the project's own Claude Code settings (`Profile::setting_sources`),
+///    so no allow rule of theirs can widen this;
+/// 2. deny: everything at the top of the project that is not `mado` (`write_deny`) — a deny wins over any
+///    allow, wherever that allow comes from — and the daemon's own files inside `mado/`;
+/// 3. afterwards, the stray check (`mado_stray`) tells the user what changed outside `mado/` anyway.
+/// `.claude`, `.git` and `.mcp.json` stay closed by the rules every run gets (`claude::protective_deny`).
 pub fn write_rules(project: &Path) -> (Vec<String>, Vec<String>) {
     let p = crate::claude::rule_path(project);
     let mut allow = vec![format!("Edit({p}/{DIR}/**)"), format!("Edit(./{DIR}/**)")];
-    let mut deny = vec![];
+    let mut deny = write_deny(project);
     for f in DAEMON_FILES {
         deny.push(format!("Edit({p}/{DIR}/{f})"));
         deny.push(format!("Edit(./{DIR}/{f})"));
     }
     crate::claude::every_case(&mut deny);
     crate::claude::every_case(&mut allow);
+    let mut seen = std::collections::HashSet::new();
+    deny.retain(|r| seen.insert(r.clone()));
     (deny, allow)
+}
+
+/// Deny rules closing every name at the top of the project that is not `mado`: each entry there now,
+/// and, for names made during the run, `*.*`, every name of 1–3 and of 5 or more characters, and every
+/// four-letter name differing from `mado` in one of its letters. Each also with `/**` (everything under
+/// it, should it be a folder), absolute and relative to the project.
+pub fn write_deny(project: &Path) -> Vec<String> {
+    use crate::claude::{glob_escape, rule_path};
+    let p = rule_path(project);
+    let mut names: Vec<String> = ["*.*", "?", "??", "???", "?????*"].iter().map(|s| s.to_string()).collect();
+    if let Ok(rd) = std::fs::read_dir(project) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.eq_ignore_ascii_case(DIR) { continue; }
+            names.push(glob_escape(&name));
+        }
+    }
+    // A new four-letter name that is not `mado`: one of its letters differs. (Written with plain
+    // classes: a negated one such as `[!m]` is not read the same way by every rule reader.)
+    const NAME_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ -.";
+    for (i, c) in DIR.chars().enumerate() {
+        let class: String = NAME_CHARS.chars().filter(|x| !x.eq_ignore_ascii_case(&c)).collect();
+        let pat: String = (0..4).map(|j| if j == i { format!("[{class}]") } else { "?".to_string() }).collect();
+        names.push(pat);
+    }
+    names.iter().flat_map(|n| [format!("Edit({p}/{n})"), format!("Edit({p}/{n}/**)"), format!("Edit(./{n})"), format!("Edit(./{n}/**)")]).collect()
 }
 
 /// The commands a build task may run without asking: its own acceptance commands that are among

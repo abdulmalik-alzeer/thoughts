@@ -195,6 +195,8 @@ to the rules alone.
 | `shaping` | first-time set-up, Reorganize | what accept-edits allows on its own (moving, deleting, read-only commands) | denied | not loaded | denied | may change (Reorganize's diff is reviewed) | `--permission-prompts none --setting-sources project,local --strict-mcp-config` |
 | `upkeep` | Wrap (preview and apply), adding a feature | denied (`Bash`, `PowerShell`) | denied | not loaded | denied | Wrap: denied, and put back if changed anyway; adding a feature: may change | `--permission-prompts none --setting-sources project,local --restricted --strict-mcp-config` |
 | `unattended` | automatic task | denied | denied | not loaded | denied | denied, and put back if changed anyway | as `upkeep`, plus `--max-budget-usd` and the time limits |
+| `mado` | a MADO planning step or change request (`mado.rs`) | denied | only when its chat has web lookups on | not loaded, and neither are the project's own settings | denied | denied | `--permission-prompts none --setting-sources "" --restricted --strict-mcp-config`; mode `default` with allow rules for `mado/**` only, deny rules for every other name at the top of the project |
+| `build` | one task of a MADO build (`mado_build.rs`), in its own worktree | only the task's approved acceptance and setup commands (allow rules; nobody can be asked) | denied | not loaded, and neither are the project's own settings | denied | denied | `--permission-prompts none --setting-sources "" --strict-mcp-config` |
 | one-shot | titles, mini-wraps, routine drafts, the provider test | no tools (`--tools ""`) | no | none: `--safe-mode` (no CLAUDE.md, skills, plugins, hooks, MCP servers) | none | — | `--safe-mode --strict-mcp-config --disable-slash-commands --disallowedTools mcp__* --permission-prompts none` |
 
 - **The rules are the lock that is always there; each flag is a second one.** Denied commands are
@@ -202,7 +204,7 @@ to the rules alone.
   tools `mcp__*` — whatever the user's own allow rules say. Each flag is added whenever the profile
   needs it and the CLI lists it, independently of the others (`profile_flags_never_fail_open` tests
   every profile against every mix): `--setting-sources project,local` for every profile without
-  the user's own settings, `--restricted` on top of it when there are no commands either (it also
+  the user's own settings (`--setting-sources ""`, no source at all, for `mado` and `build`), `--restricted` on top of it when there are no commands either (it also
   removes every other code-running tool and keeps the file tools inside the run's folders), and
   `--strict-mcp-config` whenever connected tools are denied.
 - **Standing files** are what every later session follows: `CLAUDE.md` and `CLAUDE.local.md` in

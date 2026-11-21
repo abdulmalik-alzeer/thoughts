@@ -824,6 +824,8 @@ pub struct RunInfo {
     pub fork: bool,
     /// Started with full access on (`full_access.rs`): none of the app's own guards.
     pub full_access: bool,
+    /// The `--setting-sources` it would be started with (`None`: the user's own set-up, all sources).
+    pub setting_sources: Option<String>,
 }
 
 /// Stands in for the assistant program: does the "work" of a run and says whether it succeeded.
@@ -1116,6 +1118,14 @@ pub fn profile(kind: &str, mode: &str, web: bool) -> Profile {
 }
 
 impl Profile {
+    /// Which of Claude Code's own setting sources the run loads (`--setting-sources`); `None`: all of
+    /// them (the user's own set-up stays). Runs without the user's set-up load only the project's
+    /// (`project,local`); MADO runs (`mado`, `build`) load none at all, so neither the user's nor the
+    /// project's own allow rules can widen what the daemon allows them (only the rules file applies).
+    pub fn setting_sources(&self) -> Option<&'static str> {
+        if self.own_setup { None } else if matches!(self.name, "mado" | "build") { Some("") } else { Some("project,local") }
+    }
+
     /// Are the standing files put back after the run when it changed them anyway (`StandingSnapshot`)?
     /// For runs nobody watches while they write: Wrap and automatic tasks.
     pub fn restores_standing(&self) -> bool { !self.standing_rules && self.name != "chat" }
@@ -1189,13 +1199,13 @@ pub fn budget_arg(max: Option<f64>, help: &str) -> anyhow::Result<Option<String>
 /// Each is a second lock on top of the rules (which hold without any of them):
 /// - nobody can answer a permission question inside the app: what would ask is refused;
 /// - without the user's own set-up, their personal settings are never loaded
-///   (`--setting-sources project,local`), and with no commands either, `--restricted` also drops
+///   (`--setting-sources project,local`; none at all for MADO runs), and with no commands either, `--restricted` also drops
 ///   every code-running tool and keeps the file tools inside the folders the run works in;
 /// - without connected tools, no MCP server is started.
 pub fn profile_flags(p: &Profile, help: &str) -> Vec<String> {
     let mut a: Vec<String> = vec![];
     if supports(help, "--permission-prompts") { a.extend(["--permission-prompts".into(), "none".into()]); }
-    if !p.own_setup && supports(help, "--setting-sources") { a.extend(["--setting-sources".into(), "project,local".into()]); }
+    if let Some(src) = p.setting_sources().filter(|_| supports(help, "--setting-sources")) { a.extend(["--setting-sources".into(), src.into()]); }
     if !p.own_setup && !p.shell && supports(help, "--restricted") { a.push("--restricted".into()); }
     if !p.mcp && supports(help, "--strict-mcp-config") { a.push("--strict-mcp-config".into()); }
     a
@@ -1990,7 +2000,8 @@ pub async fn start_run(
             .iter().filter_map(|r| r.as_str().map(String::from)).collect() };
         let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: Some(mode.clone()),
             deny: rules("deny"), allow: rules("allow"), ask: rules("ask"), prompt_token: ticket.as_ref().map(|t| t.token().to_string()),
-            profile: prof, system: system_text(true), program, resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some(), full_access: full };
+            profile: prof, system: system_text(true), program, resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some(), full_access: full,
+            setting_sources: prof.setting_sources().map(String::from) };
         let mut kill_rx = take_switch(&state, &id).await?;
         if !crate::full_access::still_full(&state, &id, full).await { return Err(crate::tr::err("full_access.off", &[])); }
         state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
@@ -3685,7 +3696,7 @@ pub(crate) mod tests {
     #[test]
     fn profile_flags_never_fail_open() {
         let flags = ["--permission-prompts", "--setting-sources", "--restricted", "--strict-mcp-config"];
-        let profiles = [("chat", false), ("chat", true), ("customize", false), ("setup", false), ("reorganize", false), ("wrap", false), ("module", false), ("workflow", false)];
+        let profiles = [("chat", false), ("chat", true), ("customize", false), ("setup", false), ("reorganize", false), ("wrap", false), ("module", false), ("workflow", false), ("mado", false), ("mado", true), ("mado-build", false)];
         for mask in 0..(1u32 << flags.len()) {
             let help: String = flags.iter().enumerate().filter(|(i, _)| mask & (1 << i) != 0).map(|(_, f)| format!("  {f} <x>   what it does\n")).collect();
             let on = |f: &str| flags.iter().position(|x| *x == f).map_or(false, |i| mask & (1 << i) != 0);
@@ -3695,7 +3706,8 @@ pub(crate) mod tests {
                 let at = |f: &str| a.iter().position(|x| x == f);
                 let case = format!("{kind} web={web} help={mask:04b}: {a:?}");
                 assert_eq!(at("--permission-prompts").map(|i| a[i + 1].as_str()), on("--permission-prompts").then_some("none"), "{case}");
-                assert_eq!(at("--setting-sources").map(|i| a[i + 1].as_str()), (!p.own_setup && on("--setting-sources")).then_some("project,local"), "{case}");
+                let sources = if matches!(kind, "mado" | "mado-build") { "" } else { "project,local" };
+                assert_eq!(at("--setting-sources").map(|i| a[i + 1].as_str()), (!p.own_setup && on("--setting-sources")).then_some(sources), "{case}");
                 assert_eq!(at("--restricted").is_some(), !p.own_setup && !p.shell && on("--restricted"), "{case}");
                 assert_eq!(at("--strict-mcp-config").is_some(), !p.mcp && on("--strict-mcp-config"), "{case}");
                 // Nothing else, and nothing the program does not list.

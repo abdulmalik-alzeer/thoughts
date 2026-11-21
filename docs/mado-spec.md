@@ -140,7 +140,10 @@ The window refetches; it does not trust the event's payload.
 - Kind `mado` (planning steps and change requests): cwd is the project, may read the project, may write only
   `mado/**` minus the daemon-only files; no shell, no MCP, no web unless the chat has it on. Writes are confined by
   allowing, not by denying: the run uses Claude Code's `default` mode (an edit is not accepted by itself), nobody can
-  be asked, and the only allow rules are `Edit(<project>/mado/**)`; the daemon files are denied. As a backstop the
+  be asked, and the only allow rules are `Edit(<project>/mado/**)`; the run loads none of the user's or the project's
+  own Claude Code settings (`--setting-sources ""`), so no allow rule of theirs widens it. Second layer: deny rules
+  for every name at the top of the project that is not `mado` (each entry there, `*.*`, names of 1–3 and 5+ characters,
+  four-letter names differing from `mado` in a letter; `mado::write_deny`), and for the daemon files. As a third, the
   daemon notes what changed outside `mado/` during the run (`git status` in a repository, else a walk of sizes and
   times capped at 20 000 entries, said when the cap is hit), tells the user in the step's chat and puts it on the step
   as `strayed`. Nothing is put back. Always Claude Code (unless full access). One chat per step,
@@ -150,7 +153,8 @@ The window refetches; it does not trust the event's payload.
   rules for unattended work allow (questions surface in the build view). Never bypass, except under full access.
   Nobody can be asked, so a command runs only if allowed: the allow rules are exactly the task's acceptance commands
   and the plan's setup commands that pass the `bad-command` check and are in the approval record, while `plan.json`
-  matches it. Edits of the user's own project folder and of the approval records are denied. The chat carries
+  matches it. Edits of the user's own project folder and of the approval records are denied. Like `mado` runs, it
+  loads none of the user's or the project's own Claude Code settings. The chat carries
   `meta.mado = {projectId, taskId}`. Always Claude Code (unless full access).
 - Every guard MADO adds yields to `full_access()` exactly like the existing ones, and behaves as written here while it is off.
 

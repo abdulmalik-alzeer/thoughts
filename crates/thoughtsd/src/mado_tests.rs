@@ -35,6 +35,24 @@ async fn with_project(name: &str) -> (Arc<AppState>, String, PathBuf) {
     (st, id, dir)
 }
 
+/// One path segment against a rule's pattern segment (`?`, `*`, `[class]`, `\` escapes), as gitignore reads it.
+fn seg_match(pat: &str, name: &str) -> bool {
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.first() {
+            None => n.is_empty(),
+            Some('*') => (0..=n.len()).any(|i| go(&p[1..], &n[i..])),
+            Some('?') => !n.is_empty() && go(&p[1..], &n[1..]),
+            Some('[') => {
+                let Some(end) = p.iter().position(|c| *c == ']') else { return false };
+                !n.is_empty() && p[1..end].contains(&n[0]) && go(&p[end + 1..], &n[1..])
+            }
+            Some('\\') if p.len() > 1 => !n.is_empty() && n[0] == p[1] && go(&p[2..], &n[1..]),
+            Some(c) => !n.is_empty() && n[0] == *c && go(&p[1..], &n[1..]),
+        }
+    }
+    go(&pat.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
+}
+
 // ---------- the state machine ----------
 
 #[test]
@@ -401,6 +419,18 @@ async fn a_step_run_may_write_only_mado_and_has_no_commands_tools_or_bypass() {
         assert!(info.deny.contains(&rule), "{rule} missing from {:?}", info.deny);
     }
     assert!(!info.deny.iter().any(|d| d == &format!("Edit({p}/mado/**)") || d == &format!("Edit({p}/**)")));
+    // Layer 1 holds alone: none of the user's or the project's own Claude Code settings are loaded,
+    // so no allow rule of theirs (say `Edit` in ~/.claude/settings.json) can widen the run.
+    assert_eq!(info.setting_sources.as_deref(), Some(""));
+    // Layer 2: a deny wins over any allow, wherever it came from — everything at the top of the
+    // project that is not `mado`, what is there now and what a run could make.
+    for rule in [format!("Edit({p}/README.md)"), format!("Edit({p}/src/**)"), format!("Edit({p}/*.*)"), format!("Edit({p}/?????*)"), format!("Edit({p}/???)"), "Edit(./src/**)".into()] {
+        assert!(info.deny.contains(&rule), "{rule} missing from the deny layer");
+    }
+    // None of the top-level patterns names `mado` (in any case); each other four-letter name is closed.
+    let tops: Vec<String> = info.deny.iter().filter_map(|d| d.strip_prefix(&format!("Edit({p}/"))).map(|r| r.trim_end_matches(')').trim_end_matches("/**").to_string()).filter(|r| !r.contains('/')).collect();
+    for name in ["mado", "MADO", "Mado"] { assert!(!tops.iter().any(|t| seg_match(t, name)), "{name} is closed by {:?}", tops.iter().find(|t| seg_match(t, name))); }
+    for name in ["made", "xado", "m-do", "mad0", "docs", "a", "ab.c", "longer", "src"] { assert!(tops.iter().any(|t| seg_match(t, name)), "{name} is left open"); }
     assert!(info.system.contains("This step: the BRIEF") && info.system.contains("You write only inside `mado/`"), "{}", info.system);
     assert!(info.system.contains("interface language is English"), "the language note is there");
     assert_eq!(st.chats.get(&chat).await.unwrap().kind, "mado");

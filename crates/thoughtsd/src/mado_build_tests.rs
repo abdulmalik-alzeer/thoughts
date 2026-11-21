@@ -129,6 +129,8 @@ async fn a_two_wave_plan_builds_in_parallel_lanes_without_touching_the_users_bra
         assert!(info.cwd.starts_with(engine_dir(&p.pid).unwrap()), "{:?}", info.cwd);
         assert!(info.deny.contains(&format!("Edit({}/**)", claude::rule_path(&p.dir))), "{:?}", info.deny);
         assert_eq!(info.permission_mode.as_deref(), Some("acceptEdits"));
+        // None of the user's or the project's own Claude Code settings: only the daemon's rules apply.
+        assert_eq!(info.setting_sources.as_deref(), Some(""));
     }
     // Nothing happened to the user's branch or folder; the build branch has it all, without `mado/`.
     assert_eq!(t::sh(&p.dir, &["rev-parse", "HEAD"]), before);
