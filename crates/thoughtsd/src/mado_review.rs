@@ -160,6 +160,12 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
     for c in plan.setup.iter().flatten().filter(|c| !crate::mado_validate::command_ok(c)) {
         problems.push(problem(ar, "bad-command", "mado.p.bad_setup", &[("command", &crate::mado_validate::escaped(c.trim()))], vec![]));
     }
+    for c in plan.verify.iter().flatten().filter(|c| !crate::mado_validate::command_ok(c)) {
+        problems.push(problem(ar, "bad-command", "mado.p.bad_verify", &[("command", &crate::mado_validate::escaped(c.trim()))], vec![]));
+    }
+    if let Some(r) = plan.run.as_ref().filter(|r| !crate::mado_validate::command_ok(&r.start)) {
+        problems.push(problem(ar, "bad-command", "mado.p.bad_start", &[("command", &crate::mado_validate::escaped(r.start.trim()))], vec![]));
+    }
     let cyc = in_cycles(plan);
     if !cyc.is_empty() { problems.push(problem(ar, "cycle", "mado.p.cycle", &[("tasks", &cyc.join(", "))], cyc.clone())); }
     for t in &plan.tasks {
@@ -193,6 +199,16 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
     for s in screen_traces.iter().filter(|s| s.tasks.is_empty()) {
         problems.push(problem(ar, "untraced-screen", "mado.p.untraced_screen", &[("screen", &s.label)], vec![]));
     }
+    // Round 0.4.0, worth a look (none blocks): how the joined product is checked.
+    if plan.verify.iter().flatten().all(|c| c.trim().is_empty()) { problems.push(problem(ar, "no-verify", "mado.p.no_verify", &[], vec![])); }
+    match &plan.run {
+        None => problems.push(problem(ar, "no-run", "mado.p.no_run", &[], vec![])),
+        Some(r) => for s in screens.iter().filter(|(id, _)| !r.screens.iter().any(|x| &x.id == id)) {
+            problems.push(problem(ar, "unchecked-screen", "mado.p.unchecked_screen", &[("screen", &s.1)], vec![]));
+        },
+    }
+    if plan.tasks.len() > 1 && !plan.tasks.iter().any(|t| t.kind.as_deref() == Some("contracts")) { problems.push(problem(ar, "no-contracts", "mado.p.no_contracts", &[], vec![])); }
+    if !plan.tasks.iter().any(|t| t.kind.as_deref() == Some("tests")) { problems.push(problem(ar, "no-tests", "mado.p.no_tests", &[], vec![])); }
     let ws = waves(plan);
     for (n, w) in ws.iter().enumerate() {
         for l in w.lanes.iter().filter(|l| l.tasks.len() > 1) {
@@ -202,8 +218,9 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
         }
     }
     let mut seen = HashSet::new();
-    // The setup commands first: they run first, in every fresh working copy.
-    let commands: Vec<String> = plan.setup.iter().flatten().chain(plan.tasks.iter().flat_map(|t| t.acceptance.iter())).map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && seen.insert(c.clone()))
+    // The setup commands first: they run first, in every fresh working copy; then the tasks' checks,
+    // the checks of the joined product (`verify`) and the command that starts it (`run.start`).
+    let commands: Vec<String> = plan.all_commands().into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && seen.insert(c.clone()))
         // A refused command is shown escaped (it blocks approval, so it never reaches an approval record).
         .map(|c| if crate::mado_validate::command_ok(&c) { c } else { crate::mado_validate::escaped(&c) }).collect();
     Review { features, screens: screen_traces, problems, waves: ws, commands, plan_hash: String::new() }
