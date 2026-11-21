@@ -303,6 +303,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::meter::routes())
         // several libraries: the switcher
         .merge(crate::libraries::routes())
+        // diagrams in answers and notes, drawn by Archify (`figures.rs`)
+        .merge(crate::figures::routes())
         .route("/api/extensions", get(extensions))
         .route("/api/extensions/search/:op", post(search_ext))
         .route("/api/events", get(events))

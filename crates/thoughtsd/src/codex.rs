@@ -697,6 +697,7 @@ pub fn instructions(n: &Notes) -> String {
     if !n.writable.is_empty() {
         parts.push(format!("Besides this folder you may also change files in: {}.", n.writable.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(", ")));
     }
+    parts.push(crate::figures::note(crate::figures::guide(&crate::paths::home()).ok().as_deref()));
     parts.push(crate::claude::estimates_note().to_string());
     parts.push(crate::claude::language_note(n.language).to_string());
     parts.push(format!("(Thoughts run {})", n.mark));
@@ -712,6 +713,7 @@ pub fn full_instructions(n: &Notes, note: &str) -> String {
         at the top before you start and follow it as you would AGENTS.md. Its routines (also called skills) are in .claude/skills/<name>/SKILL.md: \
         when you are asked to run a routine, or a command such as /wrap, read that file and follow its steps.".into());
     parts.push(note.to_string());
+    parts.push(crate::figures::note(crate::figures::guide(&crate::paths::home()).ok().as_deref()));
     parts.push(crate::claude::estimates_note().to_string());
     parts.push(crate::claude::language_note(n.language).to_string());
     parts.push(format!("(Thoughts run {})", n.mark));

@@ -1950,14 +1950,16 @@ pub async fn start_run(
     // private (named only when the instructions travel in a private file), not to guess how long its
     // own work takes, and the user's language.
     let full_note = full.then(|| crate::full_access::run_note(settings.full_access.source_dir.as_deref()));
+    // How diagrams and charts are written so that the app draws them (`figures.rs`).
+    let figures_note = crate::figures::run_note().await;
     let system_text = |named: bool| {
         if let Some(note) = &full_note {
-            return [spec.append_system.as_deref(), Some(note.as_str()), Some(estimates_note()), Some(language_note(&settings.language))]
+            return [spec.append_system.as_deref(), Some(note.as_str()), Some(figures_note.as_str()), Some(estimates_note()), Some(language_note(&settings.language))]
                 .into_iter().flatten().collect::<Vec<_>>().join("\n\n");
         }
         let private = private_note(library.as_deref(), &private_paths, named);
         let (asking, strictly) = (asks.then_some(crate::approvals::NOTE), strict.then(|| crate::approvals::strict_note(prof.shell)));
-        [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(estimates_note()), Some(language_note(&settings.language))]
+        [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(figures_note.as_str()), Some(estimates_note()), Some(language_note(&settings.language))]
             .into_iter().flatten().collect::<Vec<_>>().join("\n\n")
     };
     let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };

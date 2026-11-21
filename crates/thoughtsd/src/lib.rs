@@ -20,6 +20,7 @@ pub mod consent;
 pub mod claude;
 pub mod cloud;
 pub mod diffs;
+pub mod figures;
 pub mod full_access;
 pub mod gallery;
 pub mod codex;

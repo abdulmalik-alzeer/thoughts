@@ -28,7 +28,7 @@ pub const DATA_FILES: &[&str] = &[
 /// Folders the app keeps directly in its data folder.
 pub const DATA_DIRS: &[&str] = &[
     "chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "run-tmp",
-    "plugin-data", "app-layer", "app-layer-staging", "app-layer-held", "chats-set-aside",
+    "plugin-data", "app-layer", "app-layer-staging", "app-layer-held", "chats-set-aside", "archify",
     // Earlier versions of libraries that carry no repository of their own (`git::history_store`):
     // the notes themselves are in the library and stay.
     "history",
