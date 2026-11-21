@@ -664,33 +664,62 @@ pub fn run_mode(kind: &str, mode: String, full: bool) -> String {
 ///    allow, wherever that allow comes from — and the daemon's own files inside `mado/`;
 /// 3. afterwards, the stray check (`mado_stray`) tells the user what changed outside `mado/` anyway.
 /// `.claude`, `.git` and `.mcp.json` stay closed by the rules every run gets (`claude::protective_deny`).
-pub fn write_rules(project: &Path) -> (Vec<String>, Vec<String>) {
+pub fn write_rules(project: &Path) -> (Vec<String>, Vec<String>) { write_rules_for(project, ignores_case(project)) }
+
+/// `write_rules` for a volume that ignores letter case (`folded`: every rule also in every letter
+/// case, as for every other run) or that tells cases apart (rules exactly as written: a folded
+/// allow would let a run write a sibling `MADO/`, and every other spelling of `mado` is denied).
+pub fn write_rules_for(project: &Path, folded: bool) -> (Vec<String>, Vec<String>) {
     let p = crate::claude::rule_path(project);
     let mut allow = vec![format!("Edit({p}/{DIR}/**)"), format!("Edit(./{DIR}/**)")];
-    let mut deny = write_deny(project);
+    let mut deny = write_deny(project, folded);
     for f in DAEMON_FILES {
         deny.push(format!("Edit({p}/{DIR}/{f})"));
         deny.push(format!("Edit(./{DIR}/{f})"));
     }
-    crate::claude::every_case(&mut deny);
-    crate::claude::every_case(&mut allow);
+    if folded {
+        crate::claude::every_case(&mut deny);
+        crate::claude::every_case(&mut allow);
+    }
     let mut seen = std::collections::HashSet::new();
     deny.retain(|r| seen.insert(r.clone()));
     (deny, allow)
 }
 
+/// Does the volume holding `dir` ignore letter case (macOS and Windows by default)? Probed: an entry
+/// of `dir` (or `dir` itself) looked up with its letters' case flipped is the same file. Nothing to
+/// probe with, or the probe fails: it is taken to tell cases apart, the stricter choice for the rules.
+pub fn ignores_case(dir: &Path) -> bool {
+    fn flip(n: &str) -> String { n.chars().map(|c| if c.is_ascii_lowercase() { c.to_ascii_uppercase() } else { c.to_ascii_lowercase() }).collect() }
+    fn same(a: &Path, b: &Path) -> bool {
+        let (Ok(x), Ok(y)) = (std::fs::symlink_metadata(a), std::fs::symlink_metadata(b)) else { return false };
+        #[cfg(unix)] { use std::os::unix::fs::MetadataExt; x.dev() == y.dev() && x.ino() == y.ino() }
+        #[cfg(not(unix))] { let _ = (x, y); crate::paths::canonical(a).ok().is_some() && crate::paths::canonical(a).ok() == crate::paths::canonical(b).ok() }
+    }
+    let lettered = |n: &str| n.chars().any(|c| c.is_ascii_alphabetic());
+    let entries = std::fs::read_dir(dir).into_iter().flatten().flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| lettered(n)).take(8).collect::<Vec<_>>();
+    if let Some(n) = entries.first() { return same(&dir.join(n), &dir.join(flip(n))); }
+    match (dir.parent(), dir.file_name().and_then(|n| n.to_str()).filter(|n| lettered(n))) {
+        (Some(parent), Some(n)) => same(dir, &parent.join(flip(n))),
+        _ => false,
+    }
+}
+
 /// Deny rules closing every name at the top of the project that is not `mado`: each entry there now,
 /// and, for names made during the run, `*.*`, every name of 1–3 and of 5 or more characters, and every
 /// four-letter name differing from `mado` in one of its letters. Each also with `/**` (everything under
-/// it, should it be a folder), absolute and relative to the project.
-pub fn write_deny(project: &Path) -> Vec<String> {
+/// it, should it be a folder), absolute and relative to the project. On a volume that tells letter
+/// cases apart (`!folded`) only the entry spelled exactly `mado` is left open, and every other spelling
+/// of it (`Mado`, `MADO`…) is denied too; on one that ignores case those are the same folder.
+pub fn write_deny(project: &Path, folded: bool) -> Vec<String> {
     use crate::claude::{glob_escape, rule_path};
     let p = rule_path(project);
     let mut names: Vec<String> = ["*.*", "?", "??", "???", "?????*"].iter().map(|s| s.to_string()).collect();
+    let is_ours = |n: &str| if folded { n.eq_ignore_ascii_case(DIR) } else { n == DIR };
     if let Ok(rd) = std::fs::read_dir(project) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().to_string();
-            if name.eq_ignore_ascii_case(DIR) { continue; }
+            if is_ours(&name) { continue; }
             names.push(glob_escape(&name));
         }
     }
@@ -702,7 +731,17 @@ pub fn write_deny(project: &Path) -> Vec<String> {
         let pat: String = (0..4).map(|j| if j == i { format!("[{class}]") } else { "?".to_string() }).collect();
         names.push(pat);
     }
-    names.iter().flat_map(|n| [format!("Edit({p}/{n})"), format!("Edit({p}/{n}/**)"), format!("Edit(./{n})"), format!("Edit(./{n}/**)")]).collect()
+    if !folded {
+        // Every other letter case of `mado`, which the classes above leave open.
+        let chars: Vec<char> = DIR.chars().collect();
+        for mask in 1..(1u32 << chars.len()) {
+            names.push(chars.iter().enumerate().map(|(i, c)| if mask & (1 << i) != 0 { c.to_ascii_uppercase() } else { *c }).collect());
+        }
+    }
+    let mut out: Vec<String> = names.iter().flat_map(|n| [format!("Edit({p}/{n})"), format!("Edit({p}/{n}/**)"), format!("Edit(./{n})"), format!("Edit(./{n}/**)")]).collect();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|r| seen.insert(r.clone()));
+    out
 }
 
 /// The commands a build task may run without asking: its own acceptance commands that are among
