@@ -18,7 +18,7 @@ import { assemble, changelogSection, notesFor, updaterManifest } from './assembl
 import { decide, verdict } from './ci-status.mjs';
 import { collect } from './collect.mjs';
 import { GitHub, PLATFORMS, ROOT, Stop } from './lib.mjs';
-import { ALWAYS_ASK_ACCOUNT, commitsByOthers, findKey, findPassword, keychainPath, KEYCHAIN_SERVICE, preflightProblems, publicEndpoint, repoFromRemote, TESTS, workflowsToSwitch } from './local.mjs';
+import { ALWAYS_ASK_ACCOUNT, checkInstalled, commitsByOthers, findKey, findPassword, installProblem, keychainPath, KEYCHAIN_SERVICE, preflightProblems, publicEndpoint, repoFromRemote, TESTS, workflowsToSwitch } from './local.mjs';
 import { executable, MANIFEST, pack, place } from './compiled.mjs';
 import { checkSignature } from './minisign.mjs';
 import { plan } from './plan.mjs';
@@ -593,6 +593,48 @@ test('local release: every test suite runs before the build, the UI tests includ
   const main = source.slice(source.indexOf('if (isMain(import.meta.url))'));
   assert.match(main, /for \(const \[cmd, cmdArgs\] of TESTS\) sh\(cmd, cmdArgs\)/);
   assert.ok(main.indexOf('of TESTS') < main.indexOf('built = build(f)'), 'the tests come before the build');
+});
+
+test('local release: node_modules that does not match the lock file stops it before anything runs', () => {
+  const lock = {
+    lockfileVersion: 3,
+    packages: {
+      '': { name: 'thoughts' },
+      'node_modules/vite': { version: '8.3.6', dev: true },
+      'node_modules/@dagrejs/dagre': { version: '3.1.3' },
+      'node_modules/@tauri-apps/cli-linux-x64-gnu': { version: '2.12.4', optional: true },
+      'node_modules/a/node_modules/b': { version: '1.0.0' },
+    },
+  };
+  const disk = { 'node_modules/vite': '8.3.6', 'node_modules/@dagrejs/dagre': '3.1.3', 'node_modules/a/node_modules/b': '1.0.0' };
+  const installed = (over = {}) => (path) => ({ ...disk, ...over })[path] ?? null;
+  assert.equal(installProblem({ lock, installed: installed() }), null, 'an optional package for another platform may be absent');
+  assert.equal(installProblem({ lock, hidden: { packages: Object.fromEntries(Object.keys(disk).map((k) => [k, {}])) }, installed: installed() }), null);
+
+  const missing = installProblem({ lock, installed: installed({ 'node_modules/@dagrejs/dagre': null }) });
+  assert.match(missing, /do not match package-lock\.json/);
+  assert.match(missing, /@dagrejs\/dagre is missing/);
+  assert.match(missing, /Run: npm ci/);
+  assert.match(installProblem({ lock, installed: installed({ 'node_modules/vite': '8.3.5' }) }), /vite is 8\.3\.5, the lock file says 8\.3\.6/, 'a dev package counts: the build needs it');
+  assert.match(installProblem({ lock, installed: installed({ 'node_modules/a/node_modules/b': '0.9.0' }) }), /a\/node_modules\/b is 0\.9\.0/, 'nested copies are checked too');
+  assert.match(installProblem({ lock, installed: installed({ 'node_modules/@tauri-apps/cli-linux-x64-gnu': '2.11.0' }) }), /cli-linux-x64-gnu is 2\.11\.0/, 'an optional package that is there must be the right one');
+  assert.match(installProblem({ lock, hidden: { packages: { 'node_modules/left-pad': {} } }, installed: installed() }), /left-pad is installed but no longer in the lock file/);
+  assert.match(installProblem({ lock: { lockfileVersion: 1, dependencies: {} }, installed: installed() }), /lockfileVersion 2 or later/);
+  const many = { packages: Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`node_modules/p${i}`, { version: '1.0.0' }])) };
+  assert.match(installProblem({ lock: many, installed: () => null }), /… and 4 more/);
+
+  // On a real folder: nothing installed, then the lock file moving ahead of what is installed.
+  const root = mkdtempSync(join(tmpdir(), 'release-install-'));
+  writeFileSync(join(root, 'package-lock.json'), JSON.stringify(lock));
+  assert.match(checkInstalled(root), /no node_modules folder\. Run: npm ci/);
+  for (const [path, version] of Object.entries(disk)) {
+    mkdirSync(join(root, path), { recursive: true });
+    writeFileSync(join(root, path, 'package.json'), JSON.stringify({ version }));
+  }
+  assert.equal(checkInstalled(root), null);
+  lock.packages['node_modules/@xyflow/svelte'] = { version: '2.0.2' };
+  writeFileSync(join(root, 'package-lock.json'), JSON.stringify(lock));
+  assert.match(checkInstalled(root), /@xyflow\/svelte is missing/);
 });
 
 test('local release: the repository, the key and the workflows are found where they are', () => {

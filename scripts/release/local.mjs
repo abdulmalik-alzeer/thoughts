@@ -125,6 +125,58 @@ export function preflightProblems({ branch, dirty, version, head, tagAt, key, pa
   return problems;
 }
 
+/** Whether node_modules holds exactly what package-lock.json asks for. A release built from a
+ *  checkout whose packages are older than its lock file fails late, or builds with the wrong
+ *  code, so this is checked first, without installing anything.
+ *
+ *  Every package the lock file lists must be in its folder at that version (read from the
+ *  folder's own package.json, which is what Node loads), except optional ones, which npm skips
+ *  on platforms they are not for (an optional package that is there must still be at that
+ *  version). `hidden` is node_modules/.package-lock.json, npm's record of what it installed:
+ *  a package in it the lock file no longer lists is left over. `installed(path)` answers the
+ *  version in `<path>/package.json`, or null when there is none (the tests pass a fake).
+ *  Returns the problem in plain words, or null. */
+export function installProblem({ lock, hidden = null, installed }) {
+  const wanted = lock && typeof lock.packages === 'object' ? lock.packages : null;
+  if (!wanted) return 'package-lock.json lists no packages (lockfileVersion 2 or later is needed). Run: npm install, and commit the lock file.';
+  const off = [];
+  for (const [path, entry] of Object.entries(wanted)) {
+    if (!path || !path.startsWith('node_modules/') || !entry) continue;
+    const has = installed(path);
+    if (entry.link) {
+      if (has === null) off.push(`${path.slice(13)} is missing`);
+      continue;
+    }
+    if (has === null) {
+      if (!entry.optional) off.push(`${path.slice(13)} is missing`);
+    } else if (entry.version && has !== entry.version) {
+      off.push(`${path.slice(13)} is ${has}, the lock file says ${entry.version}`);
+    }
+  }
+  for (const path of Object.keys(hidden?.packages ?? {})) {
+    if (path.startsWith('node_modules/') && !(path in wanted)) off.push(`${path.slice(13)} is installed but no longer in the lock file`);
+  }
+  if (!off.length) return null;
+  const shown = off.slice(0, 8).map((x) => `    ${x}`).join('\n');
+  const more = off.length > 8 ? `\n    … and ${off.length - 8} more` : '';
+  return `The installed packages (node_modules) do not match package-lock.json:\n${shown}${more}\n  Run: npm ci   (it installs exactly what the lock file lists), then run this again.`;
+}
+
+/** installProblem for this checkout. */
+export function checkInstalled(root = ROOT) {
+  const read = (file) => {
+    try {
+      return JSON.parse(readFileSync(file, 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+  const lock = read(join(root, 'package-lock.json'));
+  if (!existsSync(join(root, 'node_modules'))) return 'There is no node_modules folder. Run: npm ci, then run this again.';
+  const hidden = read(join(root, 'node_modules', '.package-lock.json'));
+  return installProblem({ lock, hidden, installed: (path) => read(join(root, path, 'package.json'))?.version ?? null });
+}
+
 /** The tests run before a release is built (unless --skip-tests), in this order: the daemon, the
  *  desktop shell, the UI type checks, the UI's own tests, and the tests of these scripts. */
 export const TESTS = [
@@ -403,6 +455,11 @@ if (isMain(import.meta.url)) {
     const unknown = [...args].filter((a) => !['--draft', '--publish', '--skip-tests', '--include-others'].includes(a));
     if (unknown.length || (args.has('--draft') && args.has('--publish'))) stop('usage: local.mjs [--draft | --publish] [--skip-tests] [--include-others]');
     if (process.platform !== 'darwin') stop('This command builds the macOS release, so it runs on a Mac.');
+    // Before anything else: the key check below already runs the Tauri CLI from node_modules.
+    if (!args.has('--publish')) {
+      const stale = checkInstalled();
+      if (stale) stop(stale);
+    }
 
     const f = facts({ withKey: !args.has('--publish') });
     if (!f.repo) stop('The origin remote is not a GitHub repository.');

@@ -186,7 +186,11 @@ Before it:
    without both.
 3. Commit, on `main`.
 
-**What it checks before building:** a clean tree on `main`; a version that is not tagged on
+**What it checks before building:** first, that `node_modules` holds exactly what
+`package-lock.json` lists (every package at its locked version, read from its own folder;
+optional packages for other platforms may be absent; nothing left over that the lock file no
+longer lists). If not, it stops at once and asks you to run `npm ci`: it never installs anything
+itself. Then a clean tree on `main`; a version that is not tagged on
 another commit; the updater's private key and its password; `src-tauri/updater.pub`, and that
 the private key really belongs to it (it signs a few bytes and checks them); both changelog
 entries; the kit history; the tests — `cargo test -p thoughtsd`, `cargo test -p thoughts`, `npm run check`
