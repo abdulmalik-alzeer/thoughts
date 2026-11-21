@@ -141,7 +141,8 @@
   const reopen = () => act('reopen', () => store.reopen(step), 'mado.act.reopenFailed');
   const runLabel = $derived(step === 'brief' && status === 'ready' && !chatId ? 'mado.act.interview' : status === 'ready' ? 'mado.act.run' : 'mado.act.rerun');
   const strayed = $derived(store.step(step).strayed ?? []);
-  const approvable = $derived(canApprove(step, status, store.review ?? null, strayed));
+  const unchecked = $derived(store.step(step).strayUnchecked === true);
+  const approvable = $derived(canApprove(step, status, store.review ?? null, strayed, unchecked));
   const dismissStrayed = () => act('dismiss', () => store.dismissStrayed(step), 'mado.strayed.dismissFailed');
 </script>
 
@@ -169,7 +170,7 @@
           {#if canReopen(step, status)}<button type="button" class="btn" onclick={reopen} disabled={!!busy} aria-busy={busy === 'reopen'}><Undo2 size={14} aria-hidden="true" /> {t('mado.act.reopen')}</button>{/if}
         {:else if !drafting && (isDrafted(step) ? status !== 'ready' : true)}
           <button type="button" class="btn" class:primary={approvable && !changes} onclick={approve} disabled={!!busy || !approvable} aria-busy={busy === 'approve'}
-            title={strayed.length ? t('mado.strayed.approveTip') : step === 'review' && !approvable ? t('mado.act.fixFirst') : undefined}><Check size={15} aria-hidden="true" /> {t('mado.act.approve')}</button>
+            title={strayed.length || unchecked ? t('mado.strayed.approveTip') : step === 'review' && !approvable ? t('mado.act.fixFirst') : undefined}><Check size={15} aria-hidden="true" /> {t('mado.act.approve')}</button>
         {/if}
       </div>
     {/if}
@@ -182,13 +183,19 @@
     </div>
   {/if}
 
-  {#if strayed.length && !drafting}
+  {#if (strayed.length || unchecked) && !drafting}
     <div class="banner warn strayed" role="alert">
       <FileWarning size={15} aria-hidden="true" />
       <div class="grow">
+        {#if unchecked}
+          <b>{t('mado.strayUnchecked.title')}</b>
+          <span>{t('mado.strayUnchecked.body')}</span>
+        {/if}
+        {#if strayed.length}
         <b>{t('mado.strayed.title')}</b>
         <span>{t('mado.strayed.body')}</span>
-        <ul class="strayedlist">{#each strayed.slice(0, 50) as f}<li><code dir="ltr">{f}</code></li>{/each}</ul>
+        {/if}
+        {#if strayed.length}<ul class="strayedlist">{#each strayed.slice(0, 50) as f}<li><code dir="ltr">{f}</code></li>{/each}</ul>{/if}
         {#if strayed.length > 50}<span class="muted">{tn('mado.strayed.more', strayed.length - 50)}</span>{/if}
       </div>
       <button type="button" class="btn" onclick={dismissStrayed} disabled={!!busy} aria-busy={busy === 'dismiss'}>{t('mado.strayed.dismiss')}</button>

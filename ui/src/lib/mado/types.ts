@@ -3,7 +3,7 @@
 export const STEPS = ['brief', 'spec', 'tech', 'design', 'plan', 'review', 'build'] as const;
 export type StepId = (typeof STEPS)[number];
 export type StepStatus = 'locked' | 'ready' | 'drafting' | 'review' | 'approved' | 'stale';
-export interface StepState { status: StepStatus; chatId?: string; approvedAt?: string; /** paths the last run changed outside mado/; blocks approval until dismissed */ strayed?: string[] }
+export interface StepState { status: StepStatus; chatId?: string; approvedAt?: string; /** paths the last run changed outside mado/; blocks approval until dismissed */ strayed?: string[]; /** that check could not be made; blocks approval until dismissed too */ strayUnchecked?: boolean }
 export interface MadoState { version: 1; steps: Record<StepId, StepState>; style?: string; plan_hash?: string }
 export interface MadoOverview { project: { id: string; name: string; path: string }; exists: boolean; state: MadoState | null; files: string[] }
 

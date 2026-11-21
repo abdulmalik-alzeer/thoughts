@@ -26,10 +26,11 @@ export const isEditable = (s: StepStatus) => s === 'ready' || s === 'review' || 
 export const blockingProblems = (r: Review | null) => (r?.problems ?? []).filter((p) => BLOCKING.includes(p.kind));
 
 /** May this step be approved now? The review step also needs a plan that can be built; no step
- *  while its last run changed files outside the plan folder that the user has not looked at (`strayed`). */
-export function canApprove(step: StepId, s: StepStatus, review: Review | null = null, strayed: string[] | undefined = undefined): boolean {
+ *  while its last run changed files outside the plan folder that the user has not looked at (`strayed`),
+ *  or that check could not be made (`unchecked`). */
+export function canApprove(step: StepId, s: StepStatus, review: Review | null = null, strayed: string[] | undefined = undefined, unchecked = false): boolean {
   if (step === 'build') return false;
-  if (strayed?.length) return false;
+  if (strayed?.length || unchecked) return false;
   if (step === 'review') return (s === 'ready' || s === 'review' || s === 'stale') && !!review && !!review.planHash && blockingProblems(review).length === 0;
   return s === 'review' || s === 'stale';
 }

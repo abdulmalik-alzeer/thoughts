@@ -71,9 +71,12 @@ Limits: a graph has at most 400 nodes and 1200 edges; a mock-up at most 400 kB; 
 See `ui/src/lib/mado/types.ts` for the exact fields. In short:
 
 - `MadoState { version: 1, steps: Record<StepId, StepState>, style?: string, plan_hash?: string }`
-  `StepState { status: 'locked'|'ready'|'drafting'|'review'|'approved'|'stale', chatId?: string, approvedAt?: string, strayed?: string[] }`
+  `StepState { status: 'locked'|'ready'|'drafting'|'review'|'approved'|'stale', chatId?: string, approvedAt?: string, strayed?: string[], strayUnchecked?: boolean }`
   `strayed`: project-relative paths the step's last run changed outside `mado/` (see Runs); while it is there the step
   cannot be approved; `POST /steps/:step/strayed/dismiss` clears it, and so does the next run that strays nowhere.
+  `strayUnchecked`: that check could not be made (the kept "before" is missing, unreadable, over 64 MB or not the one
+  whose SHA-256 the run's chat recorded in `meta.mado.strayCheck`): it fails closed, blocking approval the same way
+  until dismissed.
   Order is fixed. A step is `ready` when the one before it is `approved` (`design` and `tech` both open after
   `spec`; `plan` needs both). Approving again after a change marks every later approved step `stale`
   (not locked: its files stay, the user re-runs or re-approves).
@@ -170,7 +173,7 @@ The window refetches; it does not trust the event's payload.
   times capped at 20 000 entries, said when the cap is hit), tells the user in the step's chat and puts it on the step
   as `strayed`. Nothing is put back. The "before" is kept beside the approval record
   (`<home>/mado/<projectId>/stray-before-<chatId>.json`), so a run a daemon restart cut off is checked on the next
-  start (`mado::check_cut_off_runs`). Always Claude Code (unless full access). One chat per step,
+  start (`mado::check_cut_off_runs`). The run is denied Read and Edit on that record folder. Always Claude Code (unless full access). One chat per step,
   kept in `state.steps[step].chatId`, so the user can talk in it (the brief is an interview: the assistant asks,
   the user answers in that chat). Never bypass, except under full access like every other kind.
 - Kind `mado-build` (one task of a lane): cwd is the lane's worktree, may read and edit only there, and has **no shell**

@@ -44,6 +44,10 @@ pub struct StepState {
     /// from being approved until the user dismisses it (`mado_stray`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub strayed: Option<Vec<String>>,
+    /// The last run's check for changes outside `mado/` could not be made (its kept "before" was
+    /// missing or not the one recorded): approval waits for a dismiss, as for `strayed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stray_unchecked: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -418,8 +422,9 @@ pub fn normalize(st: &mut MadoState) {
     for s in STEPS {
         let e = st.steps.entry(s.to_string()).or_default();
         if !["locked", "ready", "drafting", "review", "approved", "stale"].contains(&e.status.as_str()) { e.status = "locked".into(); }
-        if RUN_STEPS.iter().all(|r| *r != s) { e.chat_id = None; e.strayed = None; }
+        if RUN_STEPS.iter().all(|r| *r != s) { e.chat_id = None; e.strayed = None; e.stray_unchecked = None; }
         if e.strayed.as_ref().map_or(false, |l| l.is_empty()) { e.strayed = None; }
+        if e.stray_unchecked == Some(false) { e.stray_unchecked = None; }
         // The review and the build have no run: nothing for them to be drafting.
         if (s == "review" || s == "build") && e.status == "drafting" { e.status = "ready".into(); }
     }
@@ -871,8 +876,19 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
         let (deny, allow) = write_rules(&project);
         spec.extra_deny.extend(deny);
         allowed = allow;
+        // The records beside the approval (the approval itself, the fingerprint, the strays check's
+        // "before") are not the run's to read or change.
+        if let Some(d) = record_dir(&role.project_id) {
+            let mut rules = vec![];
+            for r in [crate::claude::rule_path(&d), crate::claude::rule_path(&crate::paths::canonical(&d).unwrap_or_else(|_| d.clone()))] {
+                for tool in ["Edit", "Read"] { for at in [r.clone(), format!("{r}/**")] { let rule = format!("{tool}({at})"); if !rules.contains(&rule) { rules.push(rule); } } }
+            }
+            crate::claude::every_case(&mut rules);
+            spec.extra_deny.extend(rules);
+        }
         // The backstop: what changes outside `mado/` while it runs is told to the user afterwards.
-        crate::mado_stray::before_run(state, &role.project_id, &spec.chat_id, &project).await;
+        // The run's chat records that it was watched, and what was kept: the check fails closed.
+        watch_run(state, &role.project_id, &spec.chat_id, &project).await;
     }
     let mado = mado_dir_of(&project, full)?;
     std::fs::create_dir_all(&mado)?;
@@ -910,8 +926,13 @@ pub fn after_run(state: Arc<AppState>, chat_id: String, ok: bool) -> futures::fu
 
 /// What a planning run changed outside `mado/` (the deny rules should have made that impossible):
 /// said in the chat and kept on the step. Nothing is put back. A repair turn adds to its first turn's list.
-async fn report_strays(state: &AppState, chat_id: &str, role: &ChatRole, repairing: bool, found: Option<(Vec<String>, bool)>) -> anyhow::Result<()> {
-    if let Some((list, capped)) = found {
+async fn report_strays(state: &AppState, chat_id: &str, role: &ChatRole, repairing: bool, found: Option<crate::mado_stray::Found>) -> anyhow::Result<()> {
+    if found == Some(crate::mado_stray::Found::Unchecked) {
+        crate::claude::push(state, chat_id, crate::chats::Msg::new("error", crate::tr::text("mado.stray_unchecked", &[]))).await;
+        let step = role.step.clone();
+        return with_state(state, &role.project_id, |st| { if let Some(e) = st.steps.get_mut(&step) { e.stray_unchecked = Some(true); } Ok(()) }).await;
+    }
+    if let Some(crate::mado_stray::Found::Checked(list, capped)) = found {
         if !list.is_empty() || capped {
             let mut text = String::new();
             if !list.is_empty() {
@@ -928,11 +949,26 @@ async fn report_strays(state: &AppState, chat_id: &str, role: &ChatRole, repairi
                 for p in list { if !all.contains(&p) { all.push(p); } }
                 all.truncate(crate::mado_stray::LIST_CAP);
                 e.strayed = (!all.is_empty()).then_some(all);
+                // A check that could be made clears an earlier one that could not (a repair turn keeps it).
+                if !repairing { e.stray_unchecked = None; }
             }
             Ok(())
         }).await?;
     }
     Ok(())
+}
+
+/// Keep how the project stands before a planning run, and record in its chat that it was watched
+/// and what was kept (`mado_stray::META_KEY`), so its check fails closed.
+async fn watch_run(state: &AppState, project_id: &str, chat_id: &str, project: &Path) {
+    let kept = crate::mado_stray::before_run(state, project_id, chat_id, project).await;
+    state.chats.update(chat_id, |c| { c.meta["mado"][crate::mado_stray::META_KEY] = json!({"sha256": kept}); }).await;
+}
+
+/// The hash of the "before" a run's chat recorded (`None`: the run was not watched).
+fn kept_hash(meta: &Value) -> Option<String> {
+    let v = meta["mado"].get(crate::mado_stray::META_KEY)?;
+    Some(v["sha256"].as_str().unwrap_or_default().to_string())
 }
 
 /// At the start of the daemon: planning runs a restart cut off still had their "before" kept
@@ -955,7 +991,7 @@ pub async fn check_cut_off_runs(state: &AppState, only: Option<&str>) {
         };
         let Ok(project) = project_dir(state, &pid).await else { continue };
         let repairing = meta["mado"]["repair"].as_bool().unwrap_or(false);
-        let found = crate::mado_stray::after_run(state, &pid, &chat, &project).await;
+        let found = crate::mado_stray::after_run(state, &pid, &chat, &project, kept_hash(&meta).as_deref()).await;
         if let Err(e) = report_strays(state, &chat, &role, repairing, found).await {
             crate::log::warn(format!("mado: the check of a run cut off by a restart ({chat}): {e:#}"));
         }
@@ -967,7 +1003,7 @@ async fn settle(state: &Arc<AppState>, chat_id: &str, role: &ChatRole, meta: &Va
     let project = project_dir(state, &role.project_id).await?;
     let mado = mado_dir_of(&project, full)?;
     let repairing = meta["mado"]["repair"].as_bool().unwrap_or(false);
-    let found = crate::mado_stray::after_run(state, &role.project_id, chat_id, &project).await;
+    let found = crate::mado_stray::after_run(state, &role.project_id, chat_id, &project, kept_hash(meta).as_deref()).await;
     report_strays(state, chat_id, role, repairing, found).await?;
     let before = meta["mado"]["before"]["status"].as_str().unwrap_or_default().to_string();
     let before_files: BTreeMap<String, String> = serde_json::from_value(meta["mado"]["before"]["files"].clone()).unwrap_or_default();
@@ -1229,6 +1265,9 @@ async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, Strin
     if let Some(list) = state.steps.get(&step).and_then(|s| s.strayed.clone()).filter(|l| !l.is_empty()) {
         return Err(crate::tr::err_detail("mado.strayed_block", &[], list.join("\n")).into());
     }
+    if state.steps.get(&step).and_then(|s| s.stray_unchecked) == Some(true) {
+        return Err(crate::tr::err("mado.stray_unchecked_block", &[]).into());
+    }
     if let Some(chat) = state.steps.get(&step).and_then(|s| s.chat_id.clone()) {
         if st.chats.with(&chat, |c| c.running).await == Some(true) { return Err(crate::tr::err("mado.busy", &[]).into()); }
     }
@@ -1281,7 +1320,7 @@ async fn step_reopen(State(st): S, UrlPath((pid, step)): UrlPath<(String, String
 /// `POST /steps/:step/strayed/dismiss`: the user has seen what the run changed outside `mado/`.
 async fn strayed_dismiss(State(st): S, UrlPath((pid, step)): UrlPath<(String, String)>) -> R {
     if !RUN_STEPS.contains(&step.as_str()) { return Err(crate::tr::err("mado.unknown_name", &[("name", &step)]).into()); }
-    let out = with_state(&st, &pid, move |state| { if let Some(e) = state.steps.get_mut(&step) { e.strayed = None; } Ok(state.clone()) }).await?;
+    let out = with_state(&st, &pid, move |state| { if let Some(e) = state.steps.get_mut(&step) { e.strayed = None; e.stray_unchecked = None; } Ok(state.clone()) }).await?;
     Ok(Json(json!({"ok": true, "state": out})))
 }
 

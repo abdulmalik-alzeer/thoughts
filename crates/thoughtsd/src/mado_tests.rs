@@ -463,6 +463,11 @@ async fn a_step_run_may_write_only_mado_and_has_no_commands_tools_or_bypass() {
         assert!(info.deny.contains(&rule), "{rule} missing from {:?}", info.deny);
     }
     assert!(!info.deny.iter().any(|d| d == &format!("Edit({p}/mado/**)") || d == &format!("Edit({p}/**)")));
+    // The records beside the approval (the strays check's "before" among them) are out of its reach.
+    let r = crate::claude::rule_path(&record_dir(&pid).unwrap());
+    for rule in [format!("Edit({r})"), format!("Edit({r}/**)"), format!("Read({r})"), format!("Read({r}/**)")] {
+        assert!(info.deny.contains(&rule), "{rule} missing from {:?}", info.deny);
+    }
     // Layer 1 holds alone: none of the user's or the project's own Claude Code settings are loaded,
     // so no allow rule of theirs (say `Edit` in ~/.claude/settings.json) can widen the run.
     assert_eq!(info.setting_sources.as_deref(), Some(""));
@@ -875,7 +880,7 @@ async fn a_run_cut_off_by_a_restart_is_checked_for_strays_on_the_next_start() {
     let _ = start(State(st.clone()), UrlPath(pid.clone())).await.unwrap();
     let chat = step_chat(&st, &pid, "brief").await.unwrap();
     // The run started (its "before" kept on disk beside the approval record), then the daemon stopped under it.
-    crate::mado_stray::before_run(&st, &pid, &chat, &dir).await;
+    watch_run(&st, &pid, &chat, &dir).await;
     let kept = record_dir(&pid).unwrap().join(format!("stray-before-{chat}.json"));
     assert!(kept.is_file());
     std::fs::write(dir.join("README.md"), "# Shop, rewritten by the run\n").unwrap();
@@ -899,6 +904,53 @@ async fn a_run_cut_off_by_a_restart_is_checked_for_strays_on_the_next_start() {
     crate::mado_stray::before_run(&st, &pid, "0000-gone", &dir).await;
     check_cut_off_runs(&st, Some(&pid)).await;
     assert!(mine().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+/// A watched run whose kept "before" is missing, changed or too large is never taken for a clean
+/// one: the step says the check could not be made and waits for a dismiss.
+#[tokio::test]
+async fn a_strays_check_that_cannot_be_made_fails_closed() {
+    let (st, pid, dir) = with_project("stray-closed").await;
+    let _ = start(State(st.clone()), UrlPath(pid.clone())).await.unwrap();
+    let chat = step_chat(&st, &pid, "brief").await.unwrap();
+    let kept = record_dir(&pid).unwrap().join(format!("stray-before-{chat}.json"));
+    let unchecked = || load_state(&pid, &dir.join("mado"), false).unwrap().unwrap().steps["brief"].stray_unchecked;
+    for case in ["missing", "tampered", "oversized", "fine"] {
+        watch_run(&st, &pid, &chat, &dir).await;
+        let meta = st.chats.with(&chat, |c| c.meta.clone()).await.unwrap();
+        assert_eq!(meta["mado"]["strayCheck"]["sha256"].as_str().map(str::len), Some(64), "{case}: the chat records what was kept");
+        match case {
+            "missing" => std::fs::remove_file(&kept).unwrap(),
+            // Another snapshot, well-formed: one that would hide a stray.
+            "tampered" => std::fs::write(&kept, serde_json::to_vec(&crate::mado_stray::Snapshot::default()).unwrap()).unwrap(),
+            "oversized" => { let f = std::fs::OpenOptions::new().append(true).open(&kept).unwrap(); f.set_len(64 * 1024 * 1024 + 1).unwrap(); }
+            _ => {}
+        }
+        let role = role_of(&meta).unwrap();
+        let found = crate::mado_stray::after_run(&st, &pid, &chat, &dir, kept_hash(&meta).as_deref()).await;
+        assert!(!kept.exists(), "{case}: the kept file is gone afterwards");
+        report_strays(&st, &chat, &role, false, found.clone()).await.unwrap();
+        if case == "fine" {
+            assert_eq!(found, Some(crate::mado_stray::Found::Checked(vec![], false)));
+            assert_eq!(unchecked(), None, "a check that could be made clears the notice");
+            continue;
+        }
+        assert_eq!(found, Some(crate::mado_stray::Found::Unchecked), "{case}");
+        assert_eq!(unchecked(), Some(true), "{case}");
+        let e = step_approve(State(st.clone()), UrlPath((pid.clone(), "brief".into())), Default::default(), None).await.unwrap_err();
+        assert_eq!(crate::api::shown_status(&e), 409, "{case}");
+        if case == "missing" {
+            let c = st.chats.get(&chat).await.unwrap();
+            assert!(c.messages.iter().any(|m| m.role == "error" && m.text.contains("could not check")), "the user is told in the chat");
+            let _ = strayed_dismiss(State(st.clone()), UrlPath((pid.clone(), "brief".into()))).await.unwrap();
+            assert_eq!(unchecked(), None, "dismissed");
+        }
+    }
+    // A run that was not watched (full access): nothing to say, whatever file lies there.
+    std::fs::write(&kept, "{}").unwrap();
+    assert_eq!(crate::mado_stray::after_run(&st, &pid, &chat, &dir, None).await, None);
+    assert!(!kept.exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 

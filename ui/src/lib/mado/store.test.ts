@@ -320,6 +320,13 @@ describe('what the core adds to a step and to the build', () => {
     expect(canApprove('spec', s.status('spec'), null, s.step('spec').strayed)).toBe(true);
   });
 
+  it('a run whose check for such files could not be made keeps the step waiting too', async () => {
+    const { canApprove } = await import('./store.svelte');
+    expect(canApprove('spec', 'review', null, [], true)).toBe(false);
+    expect(canApprove('spec', 'review', null, undefined, true)).toBe(false);
+    expect(canApprove('spec', 'review', null, [], false)).toBe(true);
+  });
+
   it('a bad-command problem blocks the review like the service says', async () => {
     const { blockingProblems } = await import('./store.svelte');
     for (const kind of ['bad-command', 'empty-acceptance', 'unknown-feature'] as const)

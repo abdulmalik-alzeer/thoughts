@@ -101,17 +101,44 @@ fn kept_file(project_id: &str, chat_id: &str) -> Option<std::path::PathBuf> {
     Some(crate::mado::record_dir(project_id)?.join(format!("{PREFIX}{chat_id}.json")))
 }
 
-/// Read back (and remove) what the run found when it started. `None` when the run was not watched.
-fn take(project_id: &str, chat_id: &str) -> Option<Snapshot> {
-    let f = kept_file(project_id, chat_id)?;
-    let m = std::fs::symlink_metadata(&f).ok()?;
-    let s = if m.is_file() && m.len() <= MAX_KEPT { std::fs::read(&f).ok().and_then(|b| serde_json::from_slice(&b).ok()) } else { None };
-    crate::log::ok_or_warn("mado: could not remove a run's kept snapshot", std::fs::remove_file(&f));
-    s
+/// What a run's check comes to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Found {
+    /// Compared: what changed outside `mado/`, and whether a walk stopped at its cap.
+    Checked(Vec<String>, bool),
+    /// The run was watched, but its "before" is missing, unreadable, too large or not the one
+    /// recorded: nothing can be said, so the step waits as it would for real strays.
+    Unchecked,
+}
+
+/// What a watched run records in its chat (`meta.mado.strayCheck`): the SHA-256 of its kept
+/// "before" (empty when it could not be kept). Its absence means the run was not watched.
+pub const META_KEY: &str = "strayCheck";
+
+/// Read back (and remove) what the run found when it started, against the hash its chat recorded.
+/// `expected`: `None` = the run was not watched (nothing to check; any file is dropped unread).
+/// Fails closed: a watched run whose file is missing, odd, too large, unreadable or another one
+/// than recorded is `Err(())`.
+fn take(project_id: &str, chat_id: &str, expected: Option<&str>) -> Option<Result<Snapshot, ()>> {
+    let f = kept_file(project_id, chat_id);
+    let read = || -> Result<Snapshot, ()> {
+        let f = f.as_ref().ok_or(())?;
+        let m = std::fs::symlink_metadata(f).map_err(|_| ())?;
+        if !m.is_file() || m.len() > MAX_KEPT { return Err(()); }
+        let bytes = std::fs::read(f).map_err(|_| ())?;
+        let want = expected.filter(|h| !h.is_empty()).ok_or(())?;
+        if crate::mado_review::plan_hash(&bytes) != want { return Err(()); }
+        serde_json::from_slice(&bytes).map_err(|_| ())
+    };
+    let out = expected.map(|_| read());
+    if let Some(f) = &f {
+        if std::fs::symlink_metadata(f).is_ok() { crate::log::ok_or_warn("mado: could not remove a run's kept snapshot", std::fs::remove_file(f)); }
+    }
+    out
 }
 
 /// Drop what was kept for a run that will never be checked (its chat is gone).
-pub fn discard(project_id: &str, chat_id: &str) { let _ = take(project_id, chat_id); }
+pub fn discard(project_id: &str, chat_id: &str) { let _ = take(project_id, chat_id, None); }
 
 /// Every run whose "before" is still kept: (project id, chat id). At the start of the daemon these
 /// are the runs a restart cut off.
@@ -131,26 +158,29 @@ pub fn kept_runs() -> Vec<(String, String)> {
     out
 }
 
-pub async fn before_run(state: &AppState, project_id: &str, chat_id: &str, dir: &Path) {
+/// Note how the project stands before a run, on disk. Returns the SHA-256 of what was kept, for the
+/// run's chat (`META_KEY`); empty when it could not be kept, which makes the check fail closed.
+pub async fn before_run(state: &AppState, project_id: &str, chat_id: &str, dir: &Path) -> String {
     let s = snapshot(state, dir).await;
-    let Some(f) = kept_file(project_id, chat_id) else { return };
-    let write = || -> anyhow::Result<()> {
+    let Some(f) = kept_file(project_id, chat_id) else { return String::new() };
+    let write = || -> anyhow::Result<String> {
+        let bytes = serde_json::to_vec(&s)?;
         if let Some(d) = f.parent() { crate::paths::create_private_dir(d)?; }
-        crate::paths::write_atomic(&f, &serde_json::to_vec(&s)?, true)?;
-        Ok(())
+        crate::paths::write_atomic(&f, &bytes, true)?;
+        Ok(crate::mado_review::plan_hash(&bytes))
     };
-    crate::log::ok_or_warn("mado: could not keep what the project looked like before a run", write());
+    crate::log::ok_or_warn("mado: could not keep what the project looked like before a run", write()).unwrap_or_default()
 }
 
-/// After the run: what changed outside `mado/` (`None` when the run was not watched), and whether
-/// the walk stopped at its cap.
-pub async fn after_run(state: &AppState, project_id: &str, chat_id: &str, dir: &Path) -> Option<(Vec<String>, bool)> {
-    let before = take(project_id, chat_id)?;
+/// After the run: what changed outside `mado/` (`None` when the run was not watched, `expected`
+/// being the hash its chat recorded, see `take`).
+pub async fn after_run(state: &AppState, project_id: &str, chat_id: &str, dir: &Path, expected: Option<&str>) -> Option<Found> {
+    let Ok(before) = take(project_id, chat_id, expected)? else { return Some(Found::Unchecked) };
     let after = snapshot(state, dir).await;
     let capped = before.capped || after.capped;
     // A repository made or removed meanwhile: the two cannot be compared, which is said as such.
-    if before.git != after.git { return Some((vec![], true)); }
+    if before.git != after.git { return Some(Found::Checked(vec![], true)); }
     let mut list = changed(&before, &after);
     list.truncate(LIST_CAP);
-    Some((list, capped))
+    Some(Found::Checked(list, capped))
 }
