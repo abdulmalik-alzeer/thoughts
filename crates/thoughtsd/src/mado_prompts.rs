@@ -34,9 +34,6 @@ impl Context {
     }
 }
 
-/// The fonts a design may name (system stacks the app ships; no downloads). Kept in step with the
-/// design module's own list (`mado_design::FONTS`).
-pub const FONT_NAMES: [&str; 13] = ["System", "Humanist", "Geometric", "Grotesque", "Classical", "Rounded", "Condensed", "Old Style", "Transitional", "Didone", "Slab", "Mono", "Typewriter"];
 
 const COMMON: &str = r##"You are the planning partner for a software project, working inside the Thoughts app's planner, MADO. MADO takes a project through seven steps — brief, spec, tech, design, plan, review, build — and this chat is one of them. The user reviews what you write in the app: documents as formatted text, diagrams drawn from your JSON, mock-ups in a sealed frame. They comment on passages, nodes and spots, ask for changes, and approve the step; the next steps build on it. The build itself happens later: the app gives each task of plan.json to a separate run and checks it with the task's acceptance commands.
 
@@ -257,7 +254,10 @@ Kinds: "client", "service", "worker", "store", "queue", "external" (a service ou
 
 /// The design step, which names the fonts the app ships.
 fn design_text() -> String {
-    let fonts = FONT_NAMES.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", ");
+    let quoted = |v: Vec<&str>| v.iter().map(|f| format!("\"{f}\"")).collect::<Vec<_>>().join(", ");
+    let fonts = quoted(crate::mado_design::font_names());
+    let monos = quoted(crate::mado_design::styles::mono_font_names());
+    let vars = crate::mado_design::styles::CSS_VARS.iter().map(|v| format!("`{v}`")).collect::<Vec<_>>().join(", ");
     format!(r##"This step: the DESIGN — `mado/design.md`, `mado/design/styles.json`, and one mock-up per screen in `mado/design/screens/`
 Read `mado/brief.md` (the feel), `mado/spec.md` (the screens and their states) and `mado/flow.graph.json` (the screen ids) first. If `mado/design/tokens.json` exists, the user already picked and adjusted a style: use those tokens and do not rewrite that file.
 
@@ -271,15 +271,16 @@ Read `mado/brief.md` (the feel), `mado/spec.md` (the screens and their states) a
               "radius": 8, "spacing": 8, "density": "regular", "shadow": "soft"}}}}
 ]}}
 ```
-   Colours are "#rrggbb". Text on bg and surface, and onPrimary on primary, must be easy to read (contrast at least 4.5 : 1). Fonts are names from this list only (system fonts, nothing is downloaded): {fonts}. "radius" is the corner radius in pixels (0–32), "spacing" the base step in pixels (2–16), "density" "compact" | "regular" | "roomy", "shadow" "none" | "soft" | "strong".
+   Colours are "#rrggbb". Text on bg and surface, and onPrimary on primary, must be easy to read (contrast at least 4.5 : 1). Fonts are names from this list only (system fonts, nothing is downloaded): {fonts}; "mono" must be a fixed-width one: {monos}. "radius" is the corner radius in pixels (0–32), "spacing" the base step in pixels (2–16), "density" "compact" | "regular" | "roomy", "shadow" "none" | "soft" | "strong".
 
 2. `mado/design.md` — the design direction in words: the feel and why it fits the brief; layout (navigation, grid, how screens are built); type (sizes and weights of headings, body, small text); colour use (what primary, accent, muted are for; how success, warning and danger look); components (buttons, fields, lists, tables, cards, dialogs, empty states, error messages) and their states (hover, focus, disabled, loading); right-to-left and language notes; accessibility (contrast, focus, sizes you can tap). Then one line per candidate style on what sets it apart.
 
 3. `mado/design/screens/<screen-id>.html` — one mock-up for EVERY node of kind "screen" in the flow, named by its id ({screens}). Each is a self-contained HTML document of the screen as the primary user sees it:
    - Only HTML and CSS, in one file, styles in a `<style>` element. No scripts, no addresses on the web, no images from files or the web, no web fonts, no `@import`. (Small inline SVG icons are fine.) Anything else is taken out before it is shown.
-   - Every colour, font, corner radius, space and shadow comes from these CSS variables, which the app sets from the style the user picks — never a fixed value: `--mado-color-bg`, `--mado-color-surface`, `--mado-color-text`, `--mado-color-muted`, `--mado-color-primary`, `--mado-color-on-primary`, `--mado-color-accent`, `--mado-color-border`, `--mado-color-success`, `--mado-color-warning`, `--mado-color-danger`, `--mado-font-heading`, `--mado-font-body`, `--mado-font-mono`, `--mado-radius`, `--mado-spacing`, `--mado-shadow`. (`--mado-radius` and `--mado-spacing` carry their unit: use `calc(var(--mado-spacing) * 2)` for larger steps.) The same screen must look right in every candidate style.
+   - Every colour, font, corner radius, space and shadow comes from these CSS variables, which the app sets from the style the user picks — never a fixed value: {vars}. (`--mado-radius` and `--mado-spacing` carry their unit: use `calc(var(--mado-spacing) * 2)` for larger steps; `--mado-shadow` is a whole box-shadow value; `--mado-density` is a plain number, 1 for regular, smaller for compact and larger for roomy, to multiply spacing by: `calc(var(--mado-spacing) * var(--mado-density))`.) The same screen must look right in every candidate style.
    - It must look genuinely designed: a clear hierarchy (one main action per screen), generous and consistent spacing on the spacing scale, aligned edges, real sample content in the user's language (believable names, numbers, dates — never lorem ipsum), the navigation the design describes, and the screen's states: show the main state, and the empty, error or loading state of the spec as a smaller variant beside or below it where the screen has one.
    - Lay it out for the main platform of the brief (a phone screen about 390 px wide, or a desktop window about 1280 px wide), and let it work right to left when the brief asks for an RTL language (`dir="rtl"` on the html element, logical properties such as margin-inline-start).
+   - One screen tall: the app shows each mock-up in a sealed frame of one screen's height that cannot scroll, so put what matters in the first screen.
    - At most 400 kB each.
 
 Write the styles first, then design.md, then the mock-ups, one screen at a time."##, screens = "{screens}")

@@ -8,7 +8,7 @@ import { contrast, fixContrast, fromHsl, hsl, isHex, luminance, readableOn } fro
 import { FONTS, fontStack } from './fonts';
 import { History } from './history';
 import { DEVICES, MOCK_CSP, looksClean, pinAt, scaleFor, sealedPage } from './srcdoc';
-import { COLOR_ROLES, FALLBACK, HARMONIES, fixAll, fixed, harmony, inlineVars, lowRoles, reading, rootVars, same, sane, setToken, tokenVars } from './tokens';
+import { COLOR_ROLES, CSS_VARS, FALLBACK, HARMONIES, fixAll, fixed, harmony, inlineVars, lowRoles, reading, rootVars, same, sane, setToken, tokenVars } from './tokens';
 
 const good: DesignTokens = JSON.parse(JSON.stringify(FALLBACK));
 
@@ -109,7 +109,8 @@ describe('design settings as CSS variables', () => {
     const vars = Object.fromEntries(tokenVars(good));
     expect(vars['--mado-color-bg']).toBe('#f7f7f5');
     expect(vars['--mado-color-on-primary']).toBe('#ffffff');
-    expect(vars['--mado-color-onPrimary']).toBe('#ffffff');
+    expect(vars['--mado-color-onPrimary']).toBeUndefined();
+    expect(tokenVars(good).map(([k]) => k)).toEqual([...CSS_VARS]);
     expect(vars['--mado-font-heading']).toBe(fontStack('System'));
     expect(vars['--mado-font-mono']).toBe(fontStack('Mono'));
     expect(vars['--mado-radius']).toBe('8px');

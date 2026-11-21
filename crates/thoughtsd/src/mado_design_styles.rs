@@ -29,6 +29,17 @@ pub const FONTS: &[Font] = &[
 
 /// The names an assistant may use for fonts (for the prompt of the design step).
 pub fn font_names() -> Vec<&'static str> { FONTS.iter().map(|f| f.name).collect() }
+/// The fixed-width fonts (the only ones `font.mono` may name).
+pub fn mono_font_names() -> Vec<&'static str> { FONTS.iter().filter(|f| f.kind == "mono").map(|f| f.name).collect() }
+
+/// The CSS variables the window sets on a mock-up from the picked style (`tokens.ts`, `tokenVars`),
+/// in their order: what the design prompt names. One spelling each (`onPrimary` is `--mado-color-on-primary`).
+pub const CSS_VARS: [&str; 18] = [
+    "--mado-color-bg", "--mado-color-surface", "--mado-color-text", "--mado-color-muted", "--mado-color-primary",
+    "--mado-color-on-primary", "--mado-color-accent", "--mado-color-border", "--mado-color-success", "--mado-color-warning",
+    "--mado-color-danger", "--mado-font-heading", "--mado-font-body", "--mado-font-mono", "--mado-radius", "--mado-spacing",
+    "--mado-shadow", "--mado-density",
+];
 
 /// Corner radius, in pixels.
 pub const RADIUS: (f64, f64) = (0.0, 32.0);
@@ -294,6 +305,19 @@ mod tests {
         let many: Vec<Value> = (0..12).map(|i| json!({"id": format!("s{i}"), "name": format!("S{i}"), "description": "", "tokens": good})).collect();
         let (styles, dropped) = assistant_styles(&json!({"styles": many}).to_string());
         assert_eq!((styles.len(), dropped), (8, 4));
+    }
+
+    #[test]
+    fn the_window_sets_exactly_the_variables_the_prompt_names() {
+        let ts = include_str!("../../../ui/src/lib/mado/design/tokens.ts");
+        let start = ts.find("export const CSS_VARS = [").expect("tokens.ts has CSS_VARS");
+        let list = &ts[start..start + ts[start..].find("] as const").unwrap()];
+        let names: Vec<&str> = list.split('\'').skip(1).step_by(2).collect();
+        assert_eq!(names, CSS_VARS, "tokens.ts CSS_VARS and the daemon's CSS_VARS differ");
+        let prompt = crate::mado_prompts::system("design", &crate::mado_prompts::Context::default());
+        for v in CSS_VARS { assert!(prompt.contains(&format!("`{v}`")), "the design prompt does not name {v}"); }
+        assert!(!prompt.contains("onPrimary`") && !prompt.contains("--mado-color-onPrimary"));
+        for f in FONTS { assert!(prompt.contains(&format!("\"{}\"", f.name)), "the design prompt does not name the font {}", f.name); }
     }
 
     #[test]

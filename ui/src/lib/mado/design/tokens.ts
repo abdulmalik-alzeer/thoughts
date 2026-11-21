@@ -54,14 +54,20 @@ export function sane(t: unknown): DesignTokens {
 
 export const same = (a: DesignTokens | null, b: DesignTokens | null) => (a && b ? JSON.stringify(sane(a)) === JSON.stringify(sane(b)) : a === b);
 
-/** The variables of the contract (`--mado-color-bg` …), in a fixed order. `onPrimary` is written
- *  both as `--mado-color-on-primary` and `--mado-color-onPrimary`; `--mado-density` (a scale,
- *  1 = regular) is an addition a mock-up may use. */
+/** The variables of the contract, in their order: exactly what the daemon's design prompt names
+ *  (`mado_design_styles::CSS_VARS`; a Rust test compares the two lists). One spelling each:
+ *  `onPrimary` is `--mado-color-on-primary`; `--mado-density` is a scale, 1 = regular. */
+export const CSS_VARS = [
+  '--mado-color-bg', '--mado-color-surface', '--mado-color-text', '--mado-color-muted', '--mado-color-primary',
+  '--mado-color-on-primary', '--mado-color-accent', '--mado-color-border', '--mado-color-success', '--mado-color-warning',
+  '--mado-color-danger', '--mado-font-heading', '--mado-font-body', '--mado-font-mono', '--mado-radius', '--mado-spacing',
+  '--mado-shadow', '--mado-density',
+] as const;
+
 export function tokenVars(t: unknown): [string, string][] {
   const s = sane(t);
   const out: [string, string][] = [];
   for (const r of COLOR_ROLES) out.push([`--mado-color-${kebab(r)}`, s.color[r]]);
-  out.push(['--mado-color-onPrimary', s.color.onPrimary]);
   for (const r of FONT_ROLES) out.push([`--mado-font-${r}`, fontStack(s.font[r], r)]);
   out.push(['--mado-radius', `${s.radius}px`], ['--mado-spacing', `${s.spacing}px`], ['--mado-shadow', SHADOW_CSS[s.shadow]], ['--mado-density', DENSITY_SCALE[s.density]]);
   return out;
