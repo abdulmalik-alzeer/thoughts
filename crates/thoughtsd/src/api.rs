@@ -310,6 +310,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/events", get(events))
         // changes waiting at the main location (a look only, `incoming.rs`)
         .merge(crate::incoming::routes())
+        .merge(crate::mado::routes())
         .layer(middleware::from_fn_with_state(state.clone(), plugin_gate))
         .layer(middleware::from_fn_with_state(state.clone(), crate::libraries::gate))
         .layer(middleware::from_fn(note_errors))
@@ -2914,7 +2915,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         ("customize", _) => (crate::staging::prepare_run(&st, &id).await?, library.clone().into_iter().collect()),
         (_, Some(pid)) => {
             let p = s.projects.iter().find(|p| &p.id == pid).ok_or_else(|| crate::tr::err("not_found.project", &[]))?;
-            (std::path::PathBuf::from(&p.path), library.clone().into_iter().collect())
+            // A MADO step works in the project alone (`mado::prepare_run`).
+            (std::path::PathBuf::from(&p.path), if chat.kind == "mado" { vec![] } else { library.clone().into_iter().collect() })
         }
         _ => (lib(&st).await?, vec![]),
     };
@@ -3072,6 +3074,11 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     }
     started?;
     ok()
+}
+
+/// MADO (`mado.rs`) sends the messages of its step chats the way the window does.
+pub(crate) async fn send_text(st: Arc<AppState>, id: String, text: String) -> anyhow::Result<()> {
+    chat_send(State(st), Path(id), Json(SendBody { text, ..Default::default() })).await.map(|_| ()).map_err(|e| e.0)
 }
 
 /// Stop the chat's answer, if one is being written, and wait for it to end.
