@@ -1637,6 +1637,13 @@ const TABLE: &[Entry] = &[
     e("mado_build.review_fix_undone", "text", 422, "",
         "The fixes of what the review found were undone: afterwards the checks of the whole product failed, or the work did not finish. {output}",
         "أُلغيت إصلاحات ما وجدته المراجعة: فبعدها فشلت فحوص المنتج كاملاً، أو لم يكتمل العمل. {output}"),
+    // mado: the model and the effort of a project's runs (round 0.4.0, v040-plan)
+    e("mado.options.value", "validation", 422, "",
+        "That model or effort level cannot be used: it must be a plain name, without spaces.",
+        "لا يمكن استعمال هذا النموذج أو مستوى الجهد: يجب أن يكون اسماً بسيطاً بلا مسافات."),
+    e("mado.options.effort", "validation", 422, "",
+        "The assistant does not offer that effort level. It offers: {levels}.",
+        "المساعد لا يقدّم مستوى الجهد هذا. المستويات المتاحة: {levels}."),
 ];
 
 fn entry(key: &str) -> &'static Entry {

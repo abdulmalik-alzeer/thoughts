@@ -22,6 +22,30 @@ pub struct Context {
     pub screens: Vec<(String, String)>,
     /// The spec's features: (id, name).
     pub features: Vec<(String, String)>,
+    /// What the user said in comments: (settled, where, the words), oldest first, at most `COMMENTS_MAX`.
+    pub comments: Vec<(bool, String, String)>,
+    /// Comments left out of `comments` because there were too many.
+    pub more_comments: usize,
+}
+
+/// The most comments a step's instructions carry, and the most characters of each.
+pub const COMMENTS_MAX: usize = 80;
+pub const COMMENT_CHARS: usize = 1500;
+
+/// Where a comment was made, in a few words (every name from the project quoted as data).
+fn place(t: &crate::mado::CommentTarget) -> String {
+    use crate::mado::CommentTarget as T;
+    match t {
+        T::Text { file, quote, heading, .. } => {
+            let under = heading.as_deref().map(|h| format!(", under {}", inline(h))).unwrap_or_default();
+            format!("on the passage {} of {}{under}", inline(&quote.chars().take(160).collect::<String>()), inline(file))
+        }
+        T::Node { file, node_id } => format!("on the node {} of {}", inline(node_id), inline(file)),
+        T::Edge { file, edge_id } => format!("on the edge {} of {}", inline(edge_id), inline(file)),
+        T::Token { token_path } => format!("on the design token {}", inline(token_path)),
+        T::Screen { screen_id, .. } => format!("on the mock-up of the screen {}", inline(screen_id)),
+        T::Task { task_id } => format!("on the task {}", inline(task_id)),
+    }
 }
 
 impl Context {
@@ -33,7 +57,33 @@ impl Context {
             .into_iter().filter(|(id, _)| crate::mado_validate::id_ok(id)).collect();
         let features = crate::mado::read_text(mado, "spec.md", full).ok().flatten().map(|s| crate::mado_validate::features(&s)).unwrap_or_default()
             .into_iter().filter(|(id, _)| crate::mado_validate::feature_ok(id)).collect();
-        Context { files, screens, features }
+        // The user's comments, whatever step they were made at: what was decided through them must
+        // reach the plan. (`comments.json` is the daemon's own file; its words are still only data.)
+        // (Only those whose target has the shape the app gives them: a file it did not write is not believed.)
+        let all: Vec<crate::mado::Comment> = crate::mado_comments::load(mado, full).map(|c| c.comments).unwrap_or_default()
+            .into_iter().filter(|c| crate::mado_comments::clean_target(c.target.clone()).is_ok()).collect();
+        let more_comments = all.len().saturating_sub(COMMENTS_MAX);
+        let comments = all.iter().take(COMMENTS_MAX).map(|c| (c.status == "resolved", place(&c.target), c.body.chars().take(COMMENT_CHARS).collect())).collect();
+        Context { files, screens, features, comments, more_comments }
+    }
+
+    /// The comments as a part of the plan step's instructions ("" when there are none).
+    fn comments_text(&self) -> String {
+        if self.comments.is_empty() { return String::new(); }
+        let list = |settled: bool| self.comments.iter().filter(|(s, _, _)| *s == settled).enumerate()
+            .map(|(i, (_, at, body))| format!("{}. {at}:\n{}", i + 1, block(body))).collect::<Vec<_>>().join("\n");
+        let (done, open) = (list(true), list(false));
+        let mut t = String::from("\n\nThe user's comments\nWhat the user said about the earlier steps, as quoted data. A comment is a decision of the user's: the documents may already carry it, and the plan must carry it into the code.");
+        if !done.is_empty() {
+            t.push_str("\nSettled comments — for EACH one, the description of the task that builds the thing it is about says what the user asked for, in plain words (\"The user asked that …\"), so the run that builds the task cannot miss it. A comment that changes nothing in what is built (the wording of a document, say) is named in your summary with that reason. None may be left out silently:\n");
+            t.push_str(&done);
+        }
+        if !open.is_empty() {
+            t.push_str("\nComments not settled yet — do not build them in as if decided, and do not ignore them: list them in your summary so the user can settle them before the build:\n");
+            t.push_str(&open);
+        }
+        if self.more_comments > 0 { t.push_str(&format!("\n{} more comments are in `mado/comments.json` (read it; never write it): treat those marked \"resolved\" the same way.", self.more_comments)); }
+        t
     }
 }
 
@@ -221,7 +271,7 @@ The gap lenses — apply every one before you finish, and record the result unde
 - At most 400 nodes and 1200 edges; node and edge ids follow the id pattern and are unique.
 - props of a screen: "roles" (who can open it), "features" (feature ids), "route" if the product has addresses, "states" (one short line each)."##;
 
-const TECH: &str = r##"This step: the TECHNICAL DESIGN — `mado/tech.md`, `mado/architecture.graph.json`, `mado/schema.graph.json`
+const TECH: &str = r##"This step: the TECHNICAL DESIGN — `mado/tech.md`, `mado/conventions.md`, `mado/architecture.graph.json`, `mado/schema.graph.json`
 Read `mado/brief.md` and `mado/spec.md` first, and look at the code: an existing project's stack, structure and conventions are facts, not choices — describe them and extend them. For a new project: if the brief names a stack, use it; if not, propose one that fits the brief (platforms, scale, hosting, the user's own comfort), give the reason in one or two lines, and ask in your summary whether it is right. Name versions only where the project files state them.
 
 `mado/tech.md` — markdown:
@@ -251,7 +301,8 @@ Read `mado/brief.md` and `mado/spec.md` first, and look at the code: an existing
 <languages and right-to-left, accessibility, performance targets, offline or not, logging>
 
 ## How the work is checked
-<the exact commands that install, build, lint, type-check and run the tests in this stack, from the project root — the plan's acceptance commands use these>
+<the exact commands, from the project root, that install, build, run the whole test suite, run one folder of tests, run the type check and run the linter in this stack — the plan's commands are taken from here, word for word>
+<the command that starts the product with its sample data on a fixed local port, and that address — the app opens every screen there after the build>
 
 ## Decisions and risks
 - <decision — why — what it costs>
@@ -260,6 +311,39 @@ Read `mado/brief.md` and `mado/spec.md` first, and look at the code: an existing
 ## Assumptions
 - …
 ```
+
+Static checks, by default. Choose a type check and a linter for this stack (the ones the project already has; for a new project the usual ones of the stack) and write their commands under "How the work is checked". They are tools of the build only: development dependencies that are never part of what is shipped or deployed, set up strictly enough to catch a wrong shape passed between two parts (a value that may be missing, a wrong field name, a call with the wrong arguments). Only when the brief rules them out (it names the tools and these are not among them, or says to add none), leave them out, and say so in one sentence in tech.md under "How the work is checked" and in conventions.md under "Static checks".
+
+`mado/conventions.md` — the one way things are done in this project. The build gives each task to a separate run that knows nothing of the others; this file is handed to every one of them, and it is what makes their work fit together. So it is exact, short, and leaves no choice open: where two ways would work, pick one. For an existing project, write down what the code already does (look, do not invent); for a new one, decide. Markdown:
+```
+# <Project name> — Conventions
+<one line: every task follows this file; where it and a task's own habit disagree, this file is right>
+
+## Names
+<files, folders, components, functions, tables and columns, routes, test files: the pattern, and one real example of each>
+
+## A screen
+<the one way a screen is built here: where its file goes, how it gets its data, how it shows its loading, empty, error and forbidden states, how a form validates and submits, how it moves on to another screen — with a short skeleton in this stack that a task can copy>
+
+## Calling the API
+<the one way a screen calls the API (or one module calls another): the helper to use, and never a direct call beside it; where each address is written, once; the exact shape of every answer — one record, a list (with its paging, if any), nothing found, an error — with a small example of each, down to the field names>
+
+## Errors
+<the one way an error is raised where it happens, carried in an answer, and shown to the user; what is logged and what is never shown>
+
+## Shared helpers
+| Helper | Where | Call it exactly like this | What comes back | Never |
+|---|---|---|---|---|
+<one row per shared helper (the API caller, formatting of money and dates, translation, permission checks, form handling…): its file, its exact signature with a real call, what it returns in each case (a value, a list, nothing), and the mistake that must not be made with it>
+
+## Tests
+<where tests go and how they are named; how a test sets up its data; how a test reads an example answer from the contract files instead of writing its own; the commands>
+
+## Static checks
+<the type check and the linter, their commands, and the rules that matter — or the one sentence saying the brief ruled them out>
+```
+- A helper that does not exist yet is still decided here: its name, file, signature and what it returns, so the task that writes it and the tasks that call it agree before either is built.
+- Everything here agrees with tech.md (the same commands, the same interfaces) and with the spec's screen states. Keep it under about two pages: it is read by every task.
 
 `mado/architecture.graph.json` — the parts and how they talk:
 ```json
@@ -320,34 +404,71 @@ Write the styles first, then design.md, then the mock-ups, one screen at a time.
 }
 
 const PLAN: &str = r##"This step: the PLAN — `mado/plan.json`
-Read every earlier file first: `mado/brief.md`, `mado/spec.md`, `mado/flow.graph.json`, `mado/tech.md`, `mado/architecture.graph.json`, `mado/schema.graph.json`, `mado/design.md`, and the code that is there. The plan is what the app builds: it gives each task to a separate run, several at once where they do not touch the same files, and calls a task done only when its acceptance commands pass and its work is committed.
+Read every earlier file first: `mado/brief.md`, `mado/spec.md`, `mado/flow.graph.json`, `mado/tech.md`, `mado/conventions.md` (if it is there), `mado/architecture.graph.json`, `mado/schema.graph.json`, `mado/design.md`, and the code that is there. The plan is what the app builds: it gives each task to a separate run, several at once where they do not touch the same files, and calls a task done only when its acceptance commands pass and its work is committed.
+
+What goes wrong, and what this plan is for. Each run sees only its own task. Left alone, each builds and tests its own piece, every test passes, and the product is still broken where two pieces meet: a screen expects a list and the API answers with an object; a shared helper is called in two different ways; a screen is built before the API it calls and guesses its answers. A plan is good when those meeting points are decided and tested before anything is built on them. That is what the contracts task, the tests tasks, "verify", "run" and the last task below are for.
 
 `mado/plan.json`:
 ```json
 {"version": 1,
  "setup": ["npm ci"],
+ "verify": ["npm test", "npm run typecheck", "npm run lint"],
+ "run": {"start": "npm run start:sample", "url": "http://localhost:4173",
+         "screens": [{"id": "sign-in", "path": "/sign-in"}, {"id": "order-detail", "path": "/orders/1001"}]},
  "tasks": [
-  {"id": "t-setup", "title": "Project skeleton and test runner",
-   "description": "What to build, precisely enough for someone who has read only the spec and tech.md: the files to create or change, the behaviour, the rules, the edge cases, and which spec acceptance criteria this task satisfies.",
-   "owns": ["package.json", "src/app/**", "tests/setup/**"],
-   "dependsOn": [],
-   "acceptance": ["npm ci", "npm test -- tests/setup"],
-   "feature": "F1",
-   "screens": ["sign-in"]}
+  {"id": "t-contracts", "kind": "contracts", "title": "Example answers of every endpoint",
+   "description": "Write one file per answer of every endpoint in tech.md's Interfaces …",
+   "owns": ["contracts/**"], "dependsOn": [],
+   "acceptance": ["node contracts/check.mjs"], "feature": "F1"},
+  {"id": "t-setup", "title": "Project skeleton, test runner, sample data",
+   "description": "What to build, precisely enough for someone who has read only the spec, tech.md and conventions.md: the files to create or change, the behaviour, the rules, the edge cases, and which spec acceptance criteria this task satisfies.",
+   "owns": ["package.json", "src/app/**", "tests/setup/**"], "dependsOn": ["t-contracts"],
+   "acceptance": ["npm test -- tests/setup"], "feature": "F1"},
+  {"id": "t-orders-tests", "kind": "tests", "title": "Acceptance tests of F2 Orders",
+   "description": "One test per line of F2's Acceptance list in spec.md, the failure paths included …",
+   "owns": ["tests/acceptance/f2/**"], "dependsOn": ["t-setup"],
+   "acceptance": ["npm run lint -- tests/acceptance/f2"], "feature": "F2"},
+  {"id": "t-orders-api", "title": "Orders API",
+   "description": "…", "owns": ["src/api/orders/**"], "dependsOn": ["t-orders-tests"],
+   "acceptance": ["npm test -- src/api/orders"], "feature": "F2"},
+  {"id": "t-orders-screens", "title": "Order list and order detail screens",
+   "description": "…", "owns": ["src/screens/orders/**", "tests/built/F2"], "dependsOn": ["t-orders-api"],
+   "acceptance": ["test -f tests/built/F2", "npm test -- tests/acceptance/f2"], "feature": "F2",
+   "screens": ["order-list", "order-detail"]},
+  {"id": "t-journeys", "title": "Whole journeys across features",
+   "description": "…", "owns": ["tests/journeys/**"], "dependsOn": ["t-orders-screens"],
+   "acceptance": ["npm test -- tests/journeys"], "feature": "F1"}
 ]}
 ```
-Setup
-- "setup": the commands that make a fresh copy of the project ready to build and test — above all installing its dependencies (`npm ci`, `pip install -r requirements.txt`, `bundle install`, `composer install`, `cargo fetch`… whatever this stack uses). The build works in fresh copies of the repository where nothing ignored by git exists: no installed packages, no build output, no local settings files. The app runs these once in each copy before any task. Same rules as acceptance commands (one plain command per entry). Leave it out or empty only when nothing needs installing.
+(The commands above are one stack's, to show the shape. Use this project's own, exactly as tech.md gives them.)
 
-Rules for the tasks
+Commands (setup, verify, run.start, acceptance)
+- Every command is a real command of THIS project's stack, run from the project root, taken from tech.md. Each entry is ONE plain command — no `&&`, `;`, pipes, redirections, `$`, backticks, globs (`*`, `?`, `[ ]`), parentheses or braces (the app refuses those): several commands are several entries, run in order. No interactive commands, nothing that needs a network service the project does not set up, nothing that deletes outside the project. The user sees every command before the build and approves them.
+- "setup": the commands that make a fresh copy of the project ready to build and test — above all installing its dependencies (`npm ci`, `pip install -r requirements.txt`, `bundle install`, `composer install`, `cargo fetch`… whatever this stack uses). The build works in fresh copies of the repository where nothing ignored by git exists: no installed packages, no build output, no local settings files. The app runs these once in each copy before any task. Leave it out or empty only when nothing needs installing.
+- "verify": the commands that check the WHOLE project, which the app runs on the joined work every time a group of tasks has been merged: the whole test suite (never narrowed to a folder), the type check, and the linter — the static checks tech.md chose. Leave a static check out only if tech.md says the brief ruled it out. These must pass after every merge, from the first to the last; see "Tests written first" for what that asks of the tests.
+- "run": how the app starts the finished product and looks at every screen. "start" is the one command that starts it with its sample data, on a fixed port, staying in the foreground; "url" is where it then answers, and must be `http://localhost:<port>` or `http://127.0.0.1:<port>` and nothing else. "screens" has one entry for EVERY screen of the flow: its id and a concrete "path" (starting with `/`) that opens that very screen — with real ids from the sample data, never a placeholder (`/orders/1001`, not `/orders/:id`). So a task must create that sample data, and the screens must open at these paths without a sign-in the app cannot do: say in that task's description how the sample start lets a screen behind sign-in be opened (a sample session, say), and that it exists only in the sample start. Leave "run" out only when the product has no screens at all (a library, a command-line tool), and say so in your summary.
+
+The kinds of task
+- "kind" is "contracts", "tests" or "feature"; leave it out for a feature task (every ordinary task).
+- The contracts task. The FIRST task of the plan has "kind": "contracts", depends on nothing, and every task that provides or calls an interface depends on it (directly or through another task). It writes, as files in a folder of its own (`contracts/**`, or where conventions.md says), one real example of EVERY answer of EVERY endpoint in tech.md's Interfaces — the success answer, the empty list, not found, not allowed, invalid input — each with exactly the field names, nesting and types the real answer will have (a list as a list, an object as an object, a missing value as it will really be missing). For a product without an API, the same for every boundary between two modules that different tasks build. Its description lists every file it writes and what each is an example of; its acceptance command passes when every file is there and well formed. After this task its files are locked: no later task may change them. So every later description says, by file name, which contract files the task must produce (a provider: its tests compare its real answers with these files) or read (a consumer: its tests feed it these files, never an answer made up in the test). If a contract turns out wrong, that is a change request to the plan, not something a task quietly works around.
+- Tests tasks. For each feature of the spec there is one task with "kind": "tests" that writes the feature's acceptance tests BEFORE the feature is built: one test for every line of the feature's Acceptance list in spec.md — the passing cases and the failing ones (invalid input, not allowed, not found, double submit) — going through the feature the way a user does (through the screen or the endpoint, with the contract files as the answers), not through one function. Its description names each criterion and the test that covers it. It owns only its test files (a folder of its own per feature), and they are locked once it is done: the tasks that build the feature may not edit them, so they cannot bend a test to fit what they built. Every feature task of that feature depends on its tests task (directly or through another task of the feature).
+- Tests written first, and "verify". The whole suite must pass after every merge, also while tests exist whose feature is not built yet, and nobody may edit a locked test file to switch it on. So tests written first are switched on by the feature itself: each such test skips, with the reason "not built yet", while a marker file of its feature is missing (`tests/built/F2`, or the place conventions.md gives), and runs for real once it is there. The small helper that reads the marker is written by the first task that sets up the tests. The LAST feature task of the feature owns the marker file, creates it, and has two acceptance commands in this order: one that fails while the marker is missing (`test -f tests/built/F2`), then the feature's acceptance tests. That way a feature cannot pass by leaving its tests asleep. (If this stack has a cleaner way that keeps all three — the test files never edited, the suite green before the feature, the feature's acceptance failing unless its tests really ran — use it and describe it in the tasks.) A tests task's own acceptance command is one that passes with only the tests written: the linter or the type check on its folder, or the test runner's own listing of the tests.
+- Feature tasks build the product. Each still writes the small tests of its own functions, and its acceptance commands run them; the last one of a feature also runs the feature's acceptance tests, as above.
+- The last task. The plan ENDS with one task that depends on the last task of every feature and proves whole journeys: for each main journey of the flow (from where the user starts, through several screens and more than one feature, to the result — sign in, create a record, find it in the list, open it, change it, see the change), one test that walks it through the real joined product: the real screens against the real API with the sample data, nothing stood in for. Its description lists the journeys by the flow's screen ids. It owns only its own tests; its acceptance command runs them.
+
+Rules for every task
 - Size: one task is one coherent change a single run can finish and test in one go — a model and its migration, an endpoint with its tests, a screen with its states. Not a whole feature at once, not a one-line change.
-- "owns": the project-relative paths or globs (`src/auth/**`, `src/routes/orders.ts`) the task creates or changes. Make tasks that can be built side by side own different files: put shared things (the app shell, the database setup, shared types, the router, translations) in early tasks that others depend on, and give each later task its own folders and files. Tasks whose "owns" overlap are built one after another. Never own anything under `mado/` or `.git/`; no absolute paths, no `..`.
+- "description": everything the run needs, since it has read only the spec, tech.md and conventions.md: the files to create or change, the behaviour, the rules, the edge cases, which spec acceptance criteria it satisfies, which contract files it produces or reads, and which shared helpers of conventions.md it must use (by name: it calls them exactly as conventions.md says and writes no second helper for the same job).
+- "owns": the project-relative paths or globs (`src/auth/**`, `src/routes/orders.ts`) the task creates or changes. Make tasks that can be built side by side own different files: put shared things (the app shell, the database setup, shared types, the shared helpers of conventions.md, the router, translations) in early tasks that others depend on, and give each later task its own folders and files. Tasks whose "owns" overlap are built one after another. No feature task owns a file of a contracts or tests task. Never own anything under `mado/` or `.git/`; no absolute paths, no `..`.
 - "dependsOn": the ids of the tasks that must be finished first — only real needs, so that as much as possible can run at the same time. No cycles. Every id named must exist.
-- "acceptance": real shell commands for THIS project's stack, run from the project root, that pass only when the task is done — the test, lint, type-check or build commands of tech.md, narrowed to what the task touched where the tools allow it. Each task has at least one, and each task's tests are written by that task. Each entry is ONE plain command — no `&&`, `;`, pipes, redirections, `$`, backticks, globs (`*`, `?`, `[ ]`), parentheses or braces (the app refuses those): several commands are several entries, run in order. No interactive commands, nothing that needs a network service the project does not set up, nothing that deletes outside the project. The user sees every command before the build and approves them.
-- "feature": the F-id of the spec feature the task serves (the skeleton and shared tasks: the feature they mainly serve, usually F1). "screens": the screen ids of the flow the task builds, if any.
-- Traceability: every feature of the spec has at least one task; every screen of the flow is built by at least one task; every task traces to a feature. The first tasks set up what the tests need, so that every later task's acceptance commands can run.
-- Order the tasks in the file the way they would be built. Ids follow the id pattern and say what the task is (`t-orders-api`).
-In your summary, say how many tasks there are, how many can run side by side at most, and anything the plan had to assume about the stack's commands."##;
+- Provider before consumer. A task that calls something (a screen calling an endpoint, a module calling another, anything using a shared helper) depends on the task that provides it, so the screen is built after the API it calls and is tested against the real thing. The one exception: a consumer may be built beside its provider, without depending on it, only when its description says it builds and tests against the contract files alone — and then a later task that depends on both (the feature's last task, or the journeys task) runs them together.
+- "acceptance": commands that pass only when the task is done — tech.md's test, lint or type-check commands, narrowed to what the task touched where the tools allow it. Each task has at least one.
+- "feature": the F-id of the spec feature the task serves (the contracts, skeleton, shared and journeys tasks: the feature they mainly serve, usually F1). "screens": the screen ids of the flow the task builds, if any.
+- Traceability: every feature of the spec has a tests task and at least one feature task; every screen of the flow is built by at least one task and has its entry in "run"."screens"; every task traces to a feature. The first tasks set up what the tests need, so that every later task's acceptance commands can run.
+- Order the tasks in the file the way they would be built: the contracts task first, the journeys task last. Ids follow the id pattern and say what the task is (`t-orders-api`).
+
+Before you finish, check the plan against this list and fix what fails: the first task is the contracts task and it covers every endpoint of tech.md; every feature has its tests task and its feature tasks depend on it; no screen comes before the API it calls unless its description says it builds against the contract files; "verify" has the whole suite and the static checks; "run" has every screen of the flow with a concrete path; the last task walks whole journeys; every settled comment of the user is in a task's description.
+In your summary, say how many tasks there are, how many can run side by side at most, anything the plan had to assume about the stack's commands, and what you did with each of the user's comments (one line each)."##;
 
 /// The instructions of `step`'s run, with what is known of the project now.
 pub fn system(step: &str, ctx: &Context) -> String {
@@ -360,7 +481,7 @@ pub fn system(step: &str, ctx: &Context) -> String {
                 else { ctx.screens.iter().map(|(id, l)| format!("`{id}` — {}", inline(l))).collect::<Vec<_>>().join(", ") };
             design_text().replace("{screens}", &list)
         }
-        "plan" => PLAN.to_string(),
+        "plan" => format!("{PLAN}{}", ctx.comments_text()),
         _ => String::new(),
     };
     let files = if ctx.files.is_empty() { "none yet".to_string() } else { ctx.files.iter().map(|f| format!("`mado/{f}`")).collect::<Vec<_>>().join(", ") };
