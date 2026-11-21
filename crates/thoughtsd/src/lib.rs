@@ -90,6 +90,8 @@ pub mod mado_validate;
 pub mod mado_build;
 pub mod mado_design;
 #[cfg(test)]
+mod mado_e2e_tests;
+#[cfg(test)]
 mod upgrade_tests;
 
 pub use state::AppState;
