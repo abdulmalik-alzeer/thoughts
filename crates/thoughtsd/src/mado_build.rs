@@ -22,7 +22,7 @@
 use crate::chats::{Chat, Msg, RunOptions};
 use crate::claude::{self, RunSpec};
 // Until the planning core (`mado.rs`) is merged: the same names, from a stand-in.
-use crate::mado_build_shim as mado;
+use crate::mado;
 use crate::state::AppState;
 use axum::extract::{Path as UrlPath, State};
 use axum::routing::{get, post};
@@ -406,7 +406,7 @@ async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Res
     if !mado::approval_matches(&approval, &bytes) { return Err(crate::tr::err("mado_build.plan_changed", &[])); }
     let plan: PlanDoc = serde_json::from_slice(&bytes).map_err(|_| crate::tr::err("mado_build.plan_invalid", &[("why", "plan.json")]))?;
     if let Some(why) = plan_problem(&plan) { return Err(crate::tr::err("mado_build.plan_invalid", &[("why", &why)])); }
-    if plan.setup.iter().chain(plan.tasks.iter().flat_map(|t| t.acceptance.iter())).filter(|c| !c.trim().is_empty()).any(|c| !approval.commands.contains(c)) {
+    if plan.setup.iter().flatten().chain(plan.tasks.iter().flat_map(|t| t.acceptance.iter())).filter(|c| !c.trim().is_empty()).any(|c| !approval.commands.contains(c)) {
         return Err(crate::tr::err("mado_build.plan_changed", &[]));
     }
     let branch = crate::git::current_branch(state, project).await.map_err(|_| crate::tr::err("mado_build.no_branch", &[]))?;
@@ -1164,10 +1164,10 @@ async fn ensure_build_wt(state: &AppState, project: &Path, pid: &str, b: &BuildS
 /// The plan's set-up commands (`npm ci`…), once per fresh worktree, before any task or check there.
 /// They are approved commands like the checks, and go through the same re-check before each one.
 async fn ensure_setup(state: &AppState, pid: &str, project: &Path, hash: &str, plan: &PlanDoc, wt: &Path) -> Result<(), String> {
-    if plan.setup.iter().all(|c| c.trim().is_empty()) { return Ok(()); }
+    if plan.setup.iter().flatten().all(|c| c.trim().is_empty()) { return Ok(()); }
     let marker = setup_marker(wt);
     if std::fs::read_to_string(&marker).ok().as_deref() == Some(hash) { return Ok(()); }
-    run_checks(state, pid, hash, &plan.setup, wt, project).await.map_err(|e| tr("mado_build.setup_failed", &[("output", &e.text())]))?;
+    run_checks(state, pid, hash, plan.setup.as_deref().unwrap_or(&[]), wt, project).await.map_err(|e| tr("mado_build.setup_failed", &[("output", &e.text())]))?;
     crate::log::ok_or_warn("mado build: could not note that a worktree was set up", std::fs::write(&marker, hash));
     Ok(())
 }

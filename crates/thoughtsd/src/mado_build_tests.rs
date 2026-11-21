@@ -448,9 +448,9 @@ fn owns_patterns_match_files_folders_and_globs() {
     assert!(glob_match("**/*.md", "docs/a.md") && glob_match("**/*.md", "a.md"));
     let pt = |id: &str, deps: &[&str]| PlanTask { id: id.into(), title: id.into(), description: String::new(), owns: vec![], depends_on: deps.iter().map(|d| d.to_string()).collect(),
         acceptance: vec![], feature: "F1".into(), screens: None };
-    assert!(plan_problem(&PlanDoc { version: 1, setup: vec![], tasks: vec![pt("a", &["b"]), pt("b", &["a"])] }).is_some());
-    assert!(plan_problem(&PlanDoc { version: 1, setup: vec![], tasks: vec![pt("A", &[])] }).is_some());
-    assert!(plan_problem(&PlanDoc { version: 1, setup: vec![], tasks: vec![pt("a", &[]), pt("b", &["a"])] }).is_none());
+    assert!(plan_problem(&PlanDoc { version: 1, setup: None, tasks: vec![pt("a", &["b"]), pt("b", &["a"])] }).is_some());
+    assert!(plan_problem(&PlanDoc { version: 1, setup: None, tasks: vec![pt("A", &[])] }).is_some());
+    assert!(plan_problem(&PlanDoc { version: 1, setup: None, tasks: vec![pt("a", &[]), pt("b", &["a"])] }).is_none());
 }
 
 #[tokio::test]
