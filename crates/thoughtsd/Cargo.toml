@@ -28,6 +28,16 @@ dunce = "1"
 base64 = "0.23"
 # Noticing changes other programs make to the library (watch.rs): FSEvents, inotify, ReadDirectoryChanges. CC0-1.0.
 notify = "8"
+# Text versions of attached office files for the assistant (as_text.rs). All MIT or MIT/Apache-2.0, and
+# zip, quick-xml and encoding_rs were already built for the desktop shell.
+calamine = "0.38"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
+encoding_rs = "0.8"
+
+[dev-dependencies]
+# Builds the old-format (.xls, .ppt) test files of as_text.rs. MIT.
+cfb = "0.14"
 
 # Linux: the kernel keyring alone forgets everything at reboot, so secrets also go to the desktop's
 # Secret Service (GNOME Keyring / KWallet). libdbus is built in, so no system package is needed.

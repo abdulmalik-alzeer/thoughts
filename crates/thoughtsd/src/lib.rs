@@ -52,6 +52,7 @@ pub mod release;
 pub mod removal;
 pub mod repair;
 pub mod runs;
+pub mod as_text;
 pub mod run_files;
 pub mod search;
 pub mod secrets;
