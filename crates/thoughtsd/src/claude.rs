@@ -826,6 +826,12 @@ pub struct RunInfo {
     pub full_access: bool,
     /// The `--setting-sources` it would be started with (`None`: the user's own set-up, all sources).
     pub setting_sources: Option<String>,
+    /// The model and effort the run carries (`spec.options`), whichever program does the work.
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    /// Claude Code's command line for it (`run_args`, without the rules and instructions files);
+    /// empty when another program would have done the work.
+    pub args: Vec<String>,
 }
 
 /// Stands in for the assistant program: does the "work" of a run and says whether it succeeded.
@@ -2003,7 +2009,12 @@ pub async fn start_run(
         let info = RunInfo { chat_id: id.clone(), cwd: spec.cwd.clone(), prompt: spec.prompt.clone(), permission_mode: Some(mode.clone()),
             deny: rules("deny"), allow: rules("allow"), ask: rules("ask"), prompt_token: ticket.as_ref().map(|t| t.token().to_string()),
             profile: prof, system: system_text(true), program, resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some(), full_access: full,
-            setting_sources: prof.setting_sources().map(String::from) };
+            setting_sources: prof.setting_sources().map(String::from),
+            model: spec.options.model.clone(), effort: spec.options.effort.clone(),
+            args: if on_codex { vec![] } else {
+                run_args(&spec.options, &mode, None, spec.resume.as_deref(), &spec.add_dirs, None, Passed::Inline(""))
+                    .into_iter().map(|a| a.to_string_lossy().into_owned()).collect()
+            } };
         let mut kill_rx = take_switch(&state, &id).await?;
         if !crate::full_access::still_full(&state, &id, full).await { return Err(crate::tr::err("full_access.off", &[])); }
         state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());

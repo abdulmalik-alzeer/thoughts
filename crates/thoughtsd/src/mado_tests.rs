@@ -1303,6 +1303,22 @@ async fn no_program(st: &AppState) { st.settings.write().await.ai.claude.binary 
 fn options_body(v: Value) -> Json<OptionsBody> { Json(serde_json::from_value(v).unwrap()) }
 
 #[tokio::test]
+async fn a_run_takes_the_plans_choice_else_the_apps_default_and_never_hands_a_claude_choice_to_codex() {
+    let (st, pid, dir) = with_project("run-options").await;
+    no_program(&st).await;
+    { let mut s = st.settings.write().await; s.ai.claude.model = Some("sonnet".into()); s.ai.claude.effort = Some("low".into()); s.ai.codex.model = Some("gpt-x".into()); }
+    assert_eq!(options_for_run(&st, &pid).await, (Some("sonnet".into()), Some("low".into())), "nothing chosen: Settings' default");
+    options_put(State(st.clone()), UrlPath(pid.clone()), options_body(json!({"model": "opus"}))).await.unwrap();
+    assert_eq!(options_for_run(&st, &pid).await, (Some("opus".into()), Some("low".into())), "the plan's choice, the default for the rest");
+    st.settings.write().await.ai.primary = "codex".into();
+    assert_eq!(options_for_run(&st, &pid).await.0.as_deref(), Some("opus"), "without full access every MADO run is Claude Code's");
+    st.settings.write().await.full_access.on = true;
+    assert_eq!(options_for_run(&st, &pid).await, (Some("gpt-x".into()), None), "on Codex: Codex's own defaults, never the Claude choice");
+    std::fs::remove_dir_all(dir).unwrap();
+    std::fs::remove_dir_all(record_dir(&pid).unwrap()).unwrap();
+}
+
+#[tokio::test]
 async fn the_model_and_effort_of_a_plan_are_kept_by_the_app_and_checked() {
     let (st, pid, dir) = with_project("options").await;
     no_program(&st).await;

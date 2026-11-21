@@ -1140,15 +1140,17 @@ fn mode_of(read_only: bool) -> &'static str { if read_only { "plan" } else { "ac
 #[cfg(test)]
 static TEST_OPTIONS: std::sync::Mutex<Vec<(String, (Option<String>, Option<String>))>> = std::sync::Mutex::new(Vec::new());
 
-/// The model and effort of every run of this project's build (`mado::run_options`).
+/// The model and effort of every run of this project's build (`mado::options_for_run`: the project's
+/// choice, else the app's default; never a Claude Code choice for another program).
 async fn options_for(state: &AppState, pid: &str) -> (Option<String>, Option<String>) {
-    // A build's run is Claude Code's (`assistant::for_run`), except under full access, where it is the
-    // program chosen in Settings: the project's choice (a Claude Code model and effort) is never
-    // handed to another program, which then uses its own defaults.
-    { let s = state.settings.read().await; if s.full_access() && crate::assistant::primary(&s) != crate::assistant::Program::Claude { return (None, None); } }
     #[cfg(test)]
-    if let Some(o) = TEST_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == pid).map(|(_, o)| o.clone()) { return o; }
-    mado::run_options(state, pid).await
+    {
+        let under_other = { let s = state.settings.read().await; s.full_access() && crate::assistant::primary(&s) != crate::assistant::Program::Claude };
+        if !under_other {
+            if let Some(o) = TEST_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == pid).map(|(_, o)| o.clone()) { return o; }
+        }
+    }
+    mado::options_for_run(state, pid).await
 }
 
 const SYSTEM: &str = "This run is one task of a build the Thoughts app runs by itself from a plan the user approved. Nobody is watching it: \
@@ -1920,7 +1922,7 @@ async fn api_retry(State(st): State<Arc<AppState>>, UrlPath((pid, id)): UrlPath<
 /// Round 0.4.0: the `verify` gate, locked files, and what follows the last wave (the screen check,
 /// the review and its fixes), with their routes and the guide.
 #[path = "mado_build_finish.rs"]
-mod finish;
+pub(crate) mod finish;
 /// The instructions of the runs `finish` starts (the app's own words; the project's text goes in as data).
 #[path = "mado_build_prompts.rs"]
 mod prompts;

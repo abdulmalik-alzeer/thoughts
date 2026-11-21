@@ -953,7 +953,7 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
     let step_text = crate::mado_prompts::system(&role.step, &ctx);
     spec.append_system = Some(match spec.append_system.take() { Some(a) => format!("{step_text}\n\n{a}"), None => step_text });
     // The model and the effort are the plan's own (`/options`), whatever the step's chat was made with.
-    let (model, effort) = planning_options(state, &role.project_id).await;
+    let (model, effort) = options_for_run(state, &role.project_id).await;
     spec.options.model = model.clone();
     spec.options.effort = effort.clone();
     state.chats.update(&spec.chat_id, |c| { c.options.model = model; c.options.effort = effort; }).await;
@@ -1532,8 +1532,18 @@ pub async fn run_options(_state: &AppState, project_id: &str) -> (Option<String>
     (o.model, o.effort)
 }
 
-/// `run_options` for a planning run, with the app's default (Settings) wherever nothing was chosen.
-async fn planning_options(state: &AppState, project_id: &str) -> (Option<String>, Option<String>) {
+/// The model and effort a planning or build run of this project is started with: the project's
+/// choice (`run_options`, a Claude Code model and effort), with the app's default (Settings) wherever
+/// nothing was chosen. MADO's runs are Claude Code's (`assistant::for_run`), except under full access,
+/// where they go to the program chosen in Settings: the project's Claude Code choice is never handed
+/// to another program, which gets that program's own defaults from Settings instead.
+pub(crate) async fn options_for_run(state: &AppState, project_id: &str) -> (Option<String>, Option<String>) {
+    let other = {
+        let s = state.settings.read().await;
+        let p = crate::assistant::primary(&s);
+        (s.full_access() && p != crate::assistant::Program::Claude).then(|| crate::assistant::chat_defaults(&s, p))
+    };
+    if let Some(d) = other { return d; }
     let (model, effort) = run_options(state, project_id).await;
     let (dm, de) = crate::assistant::chat_defaults(&*state.settings.read().await, crate::assistant::Program::Claude);
     (model.or(dm), effort.or(de))
