@@ -150,6 +150,7 @@
     if (!whole(s.wrapNagThreshold)) e.wrapNagThreshold = t('set.errWhole');
     if (permValue === '') e.permission = t('set.errPerm');
     const sp = s.spending;
+    if (sp && sp.buildHoldPercent != null && !(Number.isInteger(Number(sp.buildHoldPercent)) && sp.buildHoldPercent >= 10 && sp.buildHoldPercent <= 100)) e.buildHold = t('runc.build.err');
     if (sp && sp.monthlyLimitUsd != null && !(Number(sp.monthlyLimitUsd) >= 1 && Number(sp.monthlyLimitUsd) <= 100000 && Number.isInteger(Number(sp.warnPercent)) && sp.warnPercent >= 50 && sp.warnPercent <= 95)) e.spending = t('runc.spend.err');
     if (syncKind === 'git' && inCloud && !s.sync.allowCloud && !cloudAlready) e.sync = t('hista.online.cloudClash');
     return e;
@@ -1047,7 +1048,7 @@
           <p class="muted sm">{t('set.costNone')}</p>
         {/if}
         <p class="muted sm">{t('set.costHint')}</p>
-        {#if vis(c, 'runc.spend.title')}<SpendingGuard bind:value={s.spending} disabled={readOnly} error={errors.spending ?? ''} />{/if}
+        {#if vis(c, 'runc.spend.title')}<SpendingGuard bind:value={s.spending} disabled={readOnly} error={errors.spending ?? ''} buildError={errors.buildHold ?? ''} />{/if}
         {#if vis(c, 'ui.set.showCost')}
           <label class="check"><input type="checkbox" checked={app.settings?.showCost ?? app.showCost} disabled={readOnly} onchange={(e) => { const el = e.currentTarget; setShowCost(el.checked).catch((err) => { el.checked = !el.checked; failed(t('ui.set.saveFailed'), err); }); }} aria-describedby="st-cost-hint" /> {t('ui.set.showCost')}</label>
           <p class="muted sm" id="st-cost-hint">{t('ui.set.showCostHint')}</p>

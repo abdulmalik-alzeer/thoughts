@@ -171,7 +171,7 @@ export type Settings = {
   calendar: { weekStart: number | null; weekend: number[] | null; dates: string; alarm: string | null };
   releaseCheck: boolean;
   assistantReports: boolean;
-  spending: { monthlyLimitUsd: number | null; warnPercent: number; wholeComputer: boolean };
+  spending: { monthlyLimitUsd: number | null; warnPercent: number; wholeComputer: boolean; /** A MADO build holds new builders at this share of the usage window (10–100; absent = 80). */ buildHoldPercent?: number };
   capture: { shortcutOn: boolean; shortcut: string };
   libraries: LibraryEntry[];
   /** Full access (`settings::FullAccess`): `on` and `since` change only through the shell's approval. */

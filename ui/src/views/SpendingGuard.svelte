@@ -4,7 +4,9 @@
   import { app } from '../lib/store.svelte';
   import { fmtMoney, t } from '../lib/i18n';
 
-  let { value = $bindable(), disabled = false, error = '' }: { value: { monthlyLimitUsd: number | null; warnPercent: number }; disabled?: boolean; error?: string } = $props();
+  let { value = $bindable(), disabled = false, error = '', buildError = '' }: { value: { monthlyLimitUsd: number | null; warnPercent: number; buildHoldPercent?: number }; disabled?: boolean; error?: string; buildError?: string } = $props();
+  // The MADO build's hold (`spending.buildHoldPercent`): shown at its default until the user changes it.
+  const hold = { get v() { return value.buildHoldPercent ?? 80; }, set v(n: number) { value.buildHoldPercent = n; } };
   const on = $derived(value.monthlyLimitUsd != null);
   const usage = $derived(app.status?.usage);
 
@@ -36,8 +38,19 @@
   {/if}
 {/if}
 
+<h3 class="buildh">{t('runc.build.title')}</h3>
+<p class="muted sm" id="st-build-hint">{t('runc.build.hint')}</p>
+<div class="fields">
+  <div>
+    <label for="st-build-hold">{t('runc.build.hold')}</label>
+    <input id="st-build-hold" class="num" type="number" inputmode="numeric" min="10" max="100" step="5" dir="ltr" bind:value={hold.v} {disabled} aria-invalid={!!buildError} aria-describedby="st-build-hint" />
+  </div>
+</div>
+{#if buildError}<p class="err" role="alert">{buildError}</p>{/if}
+
 <style>
   .fields { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
   .fields > div { display: grid; gap: 4px; }
   .num { width: 9em; }
+  .buildh { margin-top: 20px; }
 </style>
