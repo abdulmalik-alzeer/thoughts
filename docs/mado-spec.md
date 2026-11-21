@@ -251,119 +251,146 @@ The window refetches; it does not trust the event's payload.
 - Components with a fixed interface (the Plan view mounts them; their owners build them):
   `ui/src/lib/mado/graph/MadoGraph.svelte` and `ui/src/lib/mado/design/DesignStep.svelte` (props in the files).
 
-## Round 0.4.0: better projects, and the plan in reach
+## Round 0.4.0: better projects, and the plan in reach (as built)
 
 Why: the first real build (mini-crm) passed 227 tests with three broken screens. Every fault was where one
 task's work met another's, and nothing looked at the joined product. Everything below is additive: a plan
-or build written by 0.3.x stays valid.
+or build written by 0.3.x stays valid and builds exactly as before (see "Old plans").
 
 ### `plan.json` additions (version stays 1; all optional)
 
-- `verify: string[]` — commands the engine runs in the build's own merged copy **after every wave is merged**
-  (the whole test suite, the type check, the linter). Validated like acceptance commands; part of the
-  review's `commands`, so approved with them. A failure goes to a fix run in the build copy (as a failed
-  wave check does today), up to 3 tries, then the build waits for the user.
-- `run: { start: string, url: string, screens: [{ id: string, path: string }] }` — how to start the product
-  and one concrete address per screen of the flow (`path` starts with `/`, uses ids that exist in the sample
-  data). `start` is validated like a command and is part of `commands`. `url` must be `http://localhost:<port>`
-  or `http://127.0.0.1:<port>`, nothing else.
-- task `kind?: "contracts" | "tests" | "feature"` (absent = feature).
-  - A `contracts` task comes first and writes, as files, an example of every answer of every endpoint (or
-    module boundary). Providers' tests must produce exactly these; consumers' tests must read exactly these.
-  - A `tests` task writes the acceptance tests of a feature from `spec.md` before the feature is built.
-  - Files owned by a `contracts` or `tests` task are **locked**: after that task is done, a later task whose
-    commit changes one of them fails with a plain message (and goes back to the assistant like a failed check).
-- Review problems, all non-blocking ("worth a look"): `no-verify`, `no-run`, `no-contracts` (more than one
-  task and none of kind contracts), `no-tests` (no task of kind tests), `unchecked-screen` (a screen of the
-  flow with no entry in `run.screens`).
+- `verify: string[]` — commands the engine runs in the build's merged copy **after every wave is merged** (the
+  whole test suite, the type check, the linter). At most 100, each one line of at most 1000 characters, and
+  plain like every command (`mado_validate::command_ok`); part of the review's `commands`, so approved with them.
+- `run: { start, url, screens: [{ id, path }] }` — how to start the product and one concrete address per screen.
+  `start` is a plain command and part of `commands`. `url` is exactly `http://localhost:<port>` or
+  `http://127.0.0.1:<port>` (an optional trailing `/`; port 1–65535 without a leading zero; no path, query or user).
+  `path` (`mado_validate::screen_path_ok`): one leading `/` (never `//`), at most 300 printable ASCII characters
+  without spaces or backslashes, no `.`/`..` part (also percent-encoded) and never the shell's report address
+  `/__thoughts_screen_check__` — exactly what the desktop shell will open. At most 200 screens, ids unique.
+- task `kind?: "contracts" | "tests" | "feature"` (absent = feature). Files owned by a `contracts` or `tests` task
+  are **locked** once it is done: a later commit that changes one is undone by the daemon (put back from the last
+  commit, new files removed) and the task goes back to the assistant like a failed check, naming the files. A file
+  the task's own `owns` names exactly (not a pattern) is that task's, so a feature's marker file stays writable.
+  The rule holds on every fix path (wave fix, `verify` fix, review fix: undone before their checks; a merge-clash
+  fix that changes another lane's locked file fails and the merge is undone).
+- Review problems, all non-blocking ("worth a look"): `no-verify`, `no-run` (once), `no-contracts` (more than one
+  task, none of kind contracts), `no-tests`, `unchecked-screen` (a flow screen without a `run.screens` entry; only
+  when `run` exists). A 0.3.x plan now gets the first four as advice.
 
-### Tech step
+### Planning
 
-- Also writes `mado/conventions.md`: the one way this project builds a screen, handles an error, names things,
-  talks to its API, and which shared helpers exist and how they must be called. Optional file (old plans have
-  none). When present, every build task is given it.
-- Static checks by default: a type check and a linter as build-time-only tools, wired into `verify`, unless
-  the brief rules them out, in which case `tech.md` says so in a sentence.
+- **Tech step** also writes `mado/conventions.md` (names, a screen, calling the API, errors, a table of shared
+  helpers with the exact call and what comes back, tests, static checks). Optional (`mado::step_optional("tech")`):
+  never required, so a 0.3.x tech step stays approved; when present it is validated, size-limited, listed in
+  `files`, served and saved by `GET/PUT /doc/conventions` (`{text, exists}`), commentable, and an edit reopens the
+  tech step. Static checks by default: a type check and a linter as build-only tools, unless the brief rules them
+  out (then tech.md and conventions.md say so).
+- **Plan step** (`mado_prompts::PLAN`): `verify`, `run` with one concrete path per screen, a first `contracts`
+  task (an example file of every answer of every endpoint), one `tests` task per feature written from spec.md's
+  Acceptance lists before the feature tasks (which depend on it), provider before consumer (unless a consumer
+  builds against the contract files only), and a last task that walks whole journeys. **Tests first vs. `verify`
+  after every wave** is settled in the prompt, not the engine: tests written first skip while a marker file of the
+  feature (`tests/built/F2`) is missing; the feature's last task owns and creates the marker and its acceptance is
+  `test -f tests/built/F2` then the feature's tests. The example plan in the prompt is checked by a test against
+  the engine's validation, review and lock rules.
+- The user's comments reach the plan step as data blocks (settled ones must be named in a task or in the summary;
+  unsettled ones listed in the summary): at most 80, 1500 characters each.
+
+### Model and effort
+
+`GET/PUT /api/mado/:project/options` → `{ model: string | null, effort: string | null }`, kept in the app's own
+record (`<home>/mado/<projectId>/options.json`, private file), never in the project. PUT: a field left out keeps
+what is on record, `null` or `""` clears it; values pass `settings::check_cli_value`; the effort must be one of the
+levels the installed `claude --help` lists (when it lists any); the model is any plain name (the app's list is open).
+`mado::run_options` returns what was chosen; `mado::options_for_run` is what every `mado` and `mado-build` run is
+started with: the choice, else Settings' Claude model/effort at the time the run starts; under full access with
+another program chosen, that program's own Settings defaults (a Claude choice is never handed to Codex). The run's
+chat records what it used.
 
 ### Build: three phases after the last wave
 
-`BuildStatus` gains `checking` and `reviewing` (both count as under way). `BuildState` gains (all optional):
+Only for a plan with any 0.4.0 field (`verify`, `run` or a task `kind`). `BuildStatus` gains `checking` and
+`reviewing` (under way: pausable, stoppable, recovered after a restart). `BuildState` gains (all optional):
 
 ```ts
 gateFixChatId?: string                         // on BuildWave: the run fixing a failed `verify`
 verified?: boolean                             // on BuildWave: `verify` passed after this wave
 screens?: { status: 'waiting' | 'running' | 'done' | 'skipped'; reason?: string; count?: number; failed?: number }
 review?:  { status: 'running' | 'passed' | 'changes' | 'failed'; round: number; chatId?: string; fixChatId?: string;
-            findings: { severity: 'must' | 'should'; where?: string; text: string }[] }
+            findings: { severity: 'must' | 'should'; where?: string; text: string }[]; finished?: boolean; note?: string }
 ```
 
-1. **Screen check** (`checking`), only with `plan.run`: the daemon starts `run.start` in the build copy
-   (same clean environment and confinement as every build command), waits until `url` answers (60 s), and
-   fetches each `path` itself (status code). Then it waits up to 120 s for a window to look:
-   - `GET  /api/mado/:project/build/screens` → `{ url, screens: [{id, path}], nonce }` while it waits, else 409.
-   - `POST /api/mado/:project/build/screens` `{ nonce, results: ScreenResult[] }`, where
-     `ScreenResult = { id, path, ok, status?, errors: string[], text: string, fields: {label: string, value: string}[] }`
-     (`text`: what the screen shows, at most 4000 characters; `fields`: every input, select and textarea with
-     its label and current value, at most 60; `errors`: uncaught errors and failed requests, at most 20).
-   - Nobody looked (no desktop window, or timeout): `screens.status = 'skipped'` with the reason; the build
-     goes on. The started program is always stopped, whatever happens.
-   The window does the looking through the desktop shell: `screenCheck(url, paths)` in
-   `ui/src/lib/mado/screencheck.ts` → shell command `mado_screen_check`. The shell opens each address in a
-   hidden window of its own that has **no access to the app** (no IPC, no app capabilities), may only load
-   that one local origin, is never shown, and is destroyed afterwards. In a browser (dev) it returns `null`.
-   Everything it returns is untrusted text.
-2. **Review** (`reviewing`): a fresh run with no memory of the build reads the build copy against `spec.md`'s
-   pass/fail lists, `conventions.md`, the open and resolved comments, and the screen results (given as data
-   between random delimiters), and reports findings. It only reads.
-3. **Fix**: `must` findings go to a fix run in the build copy (edits only), then `verify` runs again, then one
-   more review. At most 2 rounds. Whatever is left is kept in `review.findings`; the build still ends `done`
-   and can be landed, and the view says plainly how many findings remain.
+0. **The `verify` gate**, after every merged wave: up to 3 fix runs in the build copy (one chat, its session
+   resumed); still failing, the fixes are undone and the build waits; Resume runs the gate again with 3 fresh tries.
+1. **Screen check** (`checking`), only with `run`. The address is checked again (never the daemon's port); nothing
+   may already answer there; the daemon starts `run.start` in the build copy with the same clean environment and
+   confinement as every build command, waits up to 60 s for `url`, and requires the listener to be in the started
+   program's process group (`lsof`; where that cannot be told the check is skipped, unless full access is on). It
+   asks each path itself (only 127.0.0.1/::1, no redirects, status line only) — `count`/`failed` are set from this
+   even when no window looks. Then, if a window listens on the events socket, it offers the screens for 120 s:
+   - `GET  …/build/screens` → `{ url, screens: [{id, path}], nonce }` while it waits, else 409.
+   - `POST …/build/screens` `{ nonce, results: ScreenResult[] }` → `{ ok: true, taken }`. Wrong nonce 403 (compared in
+     constant time), single use (then 409), body ≤ 4 MB; only offered ids at the offered path, once each; every field
+     cleaned (control, direction and zero-width characters) and bounded (text 4000, fields 60, errors 20, line 500).
+   - "Nobody looked" (no listener, 120 s passed, or an empty `results`): `screens.status = 'skipped'` with the reason
+     (the daemon's words); the build goes on. The started program's whole process group is stopped at the end, on
+     pause and stop, when the daemon exits and after a restart (`<home>/mado/<projectId>/app.pid` with its start time).
+   Results are kept for the review (`screens.json` in the app's record).
+2. **Review** (`reviewing`): a fresh run in Claude Code's `plan` mode (read-only, also under full access) with deny
+   rules on the build copy; anything it changed anyway is put back. It reads spec.md's pass/fail lists,
+   conventions.md, the comments and the screen results (as data between random delimiters). Findings come from the
+   last fenced `json` block of its answer (`{"findings":[…]}`, at most 50, cleaned and bounded); none readable →
+   `failed`.
+3. **Fix**: `must` findings go to a fix run in the build copy; locked files are put back, `verify` runs again, and a
+   failing fix round is undone and ends the review (`finished`, `note`). At most 3 reviews (the first and two after
+   fixes). Whatever is left stays in `review.findings`; the build ends `done` and can be landed.
 
-Model and effort: every `mado` and `mado-build` run takes them from `GET/PUT /api/mado/:project/options`
-(`{ model: string | null, effort: string | null }`, `null` = the app's default), kept in the app's own
-record of the project (never in the project). `crate::mado::run_options(state, pid)` hands them to the engine.
+The desktop shell does the looking: `screenCheck(url, screens)` (`ui/src/lib/mado/screencheck.ts`) → command
+`mado_screen_check` (`src-tauri/src/screen_check.rs`, main window only). Each screen opens in a hidden, unfocusable,
+incognito window of its own (`screencheck-<n>`, no capability names it, so no IPC), allowed only that origin;
+new windows, downloads and permissions refused, dialogs and pickers stubbed, the app's own `tauri://` answered 403.
+It reads the text, every field with its label (passwords as "(filled in)", hidden inputs skipped), the page's
+errors and failed requests, then reports through a cancelled navigation, re-cut and cleaned in Rust. One check at a
+time; at most 40 screens looked at within a 100 s budget (the rest "Not checked: …"); ~10 s per screen. The shell
+refuses, by error code: `screen-check-bad-url` (not a local address, or the daemon's port, or in a developer build
+the dev server's), `screen-check-busy`, `screen-check-too-many` (over 200). `status` is optional and in practice
+absent on macOS (WebKit does not give it); the daemon's own status per path stands in. In a browser and in a
+second window it returns `null` and nothing is posted.
+
+The window (`lib/mado/screenwatch.svelte.ts`) asks every 4 s while `checking`, one window at a time (a Web Lock per
+project, plus a per-window busy flag and the nonces it dealt with), keeps only well-formed local addresses and paths
+(at most 60 screens), cuts results to the contract's sizes and posts them once. `busy` is asked again on the next
+turn; `bad-url` / `too-many` post an empty `results` at once (the build skips with its reason) and the window says
+why, in English and Arabic.
 
 ### After the build
 
-- `GET /api/mado/:project/build/guide` → `{ start?: string, url?: string, readme?: string }` (`readme`: the
-  project's own `README.md`, at most 8000 characters, as markdown text). The Build view, once a build is
-  landed, shows a finished state: what was merged where, what the review still questions, and **How to run
-  it** (the command with a copy button, the address, the README drawn as markdown through the app's own safe
-  renderer). The app does not start the project itself.
+`GET …/build/guide` → `{ start?, url?, readme? }`: `start`/`url` from the build's approved plan snapshot (else the
+project's validated plan), each only when it passes the review's rules; `readme` the project's own `README.md` (a
+plain, not hard-linked file in the project folder; ≤ 8000 characters, cleaned). Once landed, the Build view shows
+what was merged where, how many findings remain (and how many are `must`), **How to run it** (command with Copy, the
+address as a link only when it is local, the README through `lib/md.ts` with pictures removed) and "The app does not
+start your project for you"; **Plan a change** opens the features step; **Build the plan again** when allowed.
 
 ### Window
 
-- The button on a project is **Build with MADO** (was Plan).
-- `GET /api/mado` → `[{ projectId, name, step, stepStatus, build?: BuildStatus, updatedAt }]`: every linked
-  project whose plan was started. The sidebar's chats area shows them under **Plans**; one opens the Plan view.
-- The Plan view's header has the model and the effort (the app's existing pickers; lists are never
-  hard-coded) and the usage ring the chats have.
+- The button on a project is **Build with MADO**.
+- `GET /api/mado` → `[{ projectId, name, step, stepStatus, build?, updatedAt }]`, newest first: linked projects whose
+  `state.json` is the one this daemon last wrote (its fingerprint; no program is run to tell trust). `step` is the
+  first step not approved (`build` once all are); `build` is the engine's status word, absent while idle;
+  `updatedAt` RFC 3339 UTC. The sidebar shows them under **Plans** (refetched on `mado` events), with a ring while
+  something works and a dot when a build waits for the user; hidden when empty.
+- The Plan view's header has the model and effort (the chats' picker, lists from `GET /api/ai/claude/options`, never
+  hard-coded) and the chats' usage ring (plan limits only). `conventions.md` is a read-only **Conventions** tab.
+- Work plan: "Agreed examples" / "Tests first" pills and a "How the build checks itself" block (verify, start,
+  address, screen paths). Build view: per round "Whole project checked" or not, a link to the gate's fix chat; the
+  screen check card (with the daemon's reason when skipped, and the screens it asked itself); the review card (round
+  "n of at most 3", its note, its chats, findings as text).
 
-### Build engine, as built (daemon side, round 0.4.0)
+### Old plans
 
-- The phases after the last wave run only for a plan that has any of this round's fields (`verify`, `run`, a task
-  `kind`); a 0.3.x plan ends `done` right after its last wave, exactly as before. `checking` only with `run`.
-- `Review.commands` lists set-up, acceptance, `verify`, then `run.start`; `start` refuses a plan any of whose
-  commands is not in the approval record (an approval made before 0.4.0 of a plan with `verify` is refused).
-- `unchecked-screen` is given only when `run` exists (without it, `no-run` says it once).
-- The `verify` gate: up to 3 fix runs in the build copy (one chat, its session resumed); still failing, the fixes
-  are undone and the build waits; resume runs the gate again with 3 fresh tries.
-- Locked files: a change to them is undone by the daemon (put back from the last commit, new files removed) and the
-  task goes back to the assistant with the files named. A file the task's own `owns` names exactly (not a pattern,
-  e.g. the marker `tests/built/F2`) is not locked for that task. The rule holds on every fix path too: a wave's fix,
-  the `verify` fix and a review fix have such changes undone before their checks run; settling a merge clash by
-  changing a locked file of another lane fails the fix (the merge is undone, the lane waits).
-- Screen check: the address is checked again (never the daemon's port), nothing else may already answer there,
-  and what answers must be in the started program's process group (`lsof`; where it cannot be told the check is
-  skipped, unless full access is on). The daemon asks each path itself (only `127.0.0.1`/`::1`, no redirects,
-  status line only). "Nobody looked": no window listens to the events socket, the 120 s pass, or the window posts
-  an empty `results`. The started program (its whole process group) is stopped at the end, on pause and stop, when
-  the daemon exits, and after a restart (`<home>/mado/<projectId>/app.pid`, only if the process still has the
-  recorded start time). Results are kept beside it (`screens.json`, closed to the build's commands) for the review.
-- Review: Claude Code's `plan` mode (the app's read-only mode) plus deny rules on the build copy; anything it
-  changed anyway is put back. Findings come from the last fenced `json` block of its answer
-  (`{"findings":[…]}`, at most 50, texts cleaned and bounded); none readable: `review.status = 'failed'`.
-  A fix round whose `verify` then fails is undone and ends the review. `BuildReview` also carries `finished` and
-  `note` (why the review or its fix did not go as planned).
-- Model and effort (`mado::run_options`) go to every build, fix and review run and are recorded on its chat; under
-  full access with Codex as the chosen program, none is handed over (Codex uses its own defaults).
+A plan with none of `verify`, `run`, a task `kind` builds exactly as in 0.3.x: no gate, no screen check, no review,
+`done` after the last wave, the same `build.json` shape. The window then shows no phase cards and, once landed,
+says the plan was made before builds were checked and reviewed; the guide (USING.md) says the phases apply to plans
+made with this version.

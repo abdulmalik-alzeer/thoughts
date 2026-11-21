@@ -60,4 +60,14 @@
   checks, link/inside-`mado/` checks, the git-config check, rules, the command check and the confinement. What does
   not: validation and cleaning, the approval record and plan hash, the clean-tree and never-the-user's-branch rules of
   the build, the approved-step lock, where a build run may work, and the build's usage governor.
+  Round 0.4.0 (last section of the spec): a plan may add `verify`, `run` and task `kind`s; only such a plan gets the
+  phases after the last wave (the `verify` gate after every wave, the screen check, the review and its fixes,
+  `mado_build_finish.rs`), and files of `contracts`/`tests` tasks are locked on every path. The daemon starts
+  `run.start` only confined like every build command, checks the address is local and answered by that program's own
+  process group, and always stops it. The screens are looked at by the desktop shell (`src-tauri/src/screen_check.rs`,
+  command `mado_screen_check`, main window only) in hidden windows that no capability names (no IPC), one origin only;
+  what they report, the review's answer, README and conventions are untrusted text (cleaned, bounded, data blocks).
+  Every planning and build run takes its model and effort from `mado::options_for_run` (the project's record outside
+  the project, else Settings; never a Claude choice for Codex); `mado_e2e_tests.rs` walks a whole 0.4.0 project
+  over HTTP and checks the command line of every run.
 - Verify with `cargo test -p thoughtsd`, `npx vite build` and `cargo build -p thoughts`.
