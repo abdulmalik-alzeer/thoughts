@@ -14,7 +14,9 @@ export interface DesignClient {
   screen(projectId: string, id: string): Promise<{ html: string }>;
 }
 
-const base = (projectId: string) => `/api/mado/${encodeURIComponent(projectId)}/design`;
+// (`api()` adds the `/api` in front: with it written here too, every call went to `/api/api/…`, which
+// the service does not have, and the design step said it could not reach the service. 0.3.0–0.3.2.)
+const base = (projectId: string) => `/mado/${encodeURIComponent(projectId)}/design`;
 
 const daemon: DesignClient = {
   styles: (p) => api(`${base(p)}/styles`),
