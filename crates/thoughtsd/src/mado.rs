@@ -781,7 +781,7 @@ pub fn ignores_case(dir: &Path) -> Option<bool> {
 /// Deny rules closing every name at the top of the project that is not `mado`: each entry there now,
 /// and, for names made during the run, `*.*`, every name of 1–3 and of 5 or more characters, and every
 /// four-letter name differing from `mado` in one of its letters. Each also with `/**` (everything under
-/// it, should it be a folder), absolute and relative to the project. Unless the volume is known to
+/// it, should it be a folder), as absolute paths only (see below). Unless the volume is known to
 /// ignore case (`ignores`), only the entry spelled exactly `mado` is left open, and every other
 /// spelling of it (`Mado`, `MADO`…) is denied too; on one that ignores case those are the same folder.
 pub fn write_deny(project: &Path, ignores: bool) -> Vec<String> {
@@ -811,7 +811,10 @@ pub fn write_deny(project: &Path, ignores: bool) -> Vec<String> {
             names.push(chars.iter().enumerate().map(|(i, c)| if mask & (1 << i) != 0 { c.to_ascii_uppercase() } else { *c }).collect());
         }
     }
-    let mut out: Vec<String> = names.iter().flat_map(|n| [format!("Edit({p}/{n})"), format!("Edit({p}/{n}/**)"), format!("Edit(./{n})"), format!("Edit(./{n}/**)")]).collect();
+    // Absolute forms only. Claude Code reads a rule written relative to the project (`./name`) like a
+    // gitignore line with no folder in it: it matches at any depth, so `./*.*` and `./?????*` closed
+    // `mado/brief.md` itself and no step could save anything (0.3.0 and 0.3.1).
+    let mut out: Vec<String> = names.iter().flat_map(|n| [format!("Edit({p}/{n})"), format!("Edit({p}/{n}/**)")]).collect();
     let mut seen = std::collections::HashSet::new();
     out.retain(|r| seen.insert(r.clone()));
     out

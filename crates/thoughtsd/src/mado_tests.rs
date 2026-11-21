@@ -78,6 +78,10 @@ fn the_deny_layer_fails_closed_whatever_the_volume_says_about_letter_case() {
         assert!(deny.iter().any(|d| d.contains("[Rr][Ee][Aa][Dd][Mm][Ee]")), "{ignores:?}: deny rules are folded");
         assert!(deny.iter().any(|d| d.contains("[Ss][Tt][Aa][Tt][Ee]")), "{ignores:?}: the daemon files are denied in every case");
         assert!(deny.contains(&format!("Edit({p}/MADO/**)")));
+        // No rule relative to the project names a single top-level name: Claude Code matches such a
+        // rule at any depth, which closed every file inside `mado/` (0.3.0 and 0.3.1).
+        let loose: Vec<&String> = deny.iter().filter(|d| d.strip_prefix("Edit(./").is_some_and(|r| !r.trim_end_matches(')').trim_end_matches("/**").contains('/'))).collect();
+        assert!(loose.is_empty(), "{ignores:?}: {loose:?}");
     }
 
     // A volume positively known to ignore case: allow folded too, and no spelling of `mado` is closed.
@@ -473,7 +477,7 @@ async fn a_step_run_may_write_only_mado_and_has_no_commands_tools_or_bypass() {
     assert_eq!(info.setting_sources.as_deref(), Some(""));
     // Layer 2: a deny wins over any allow, wherever it came from — everything at the top of the
     // project that is not `mado`, what is there now and what a run could make.
-    for rule in [format!("Edit({p}/README.md)"), format!("Edit({p}/src/**)"), format!("Edit({p}/*.*)"), format!("Edit({p}/?????*)"), format!("Edit({p}/???)"), "Edit(./src/**)".into()] {
+    for rule in [format!("Edit({p}/README.md)"), format!("Edit({p}/src/**)"), format!("Edit({p}/*.*)"), format!("Edit({p}/?????*)"), format!("Edit({p}/???)")] {
         assert!(info.deny.contains(&rule), "{rule} missing from the deny layer");
     }
     // None of the top-level patterns names `mado` (in any case); each other four-letter name is closed.
@@ -1082,4 +1086,14 @@ async fn links_and_shared_files_inside_mado_are_refused_before_start_and_every_r
     assert_eq!(odd_entry(&mado).as_deref(), Some("mado"));
     std::fs::remove_file(&mado).unwrap();
     for d in [dir, outside, real] { std::fs::remove_dir_all(d).unwrap(); }
+}
+
+/// Not a check: writes the rules of a planning run in `MADO_DUMP_DIR` to `MADO_DUMP_OUT`, to try them
+/// with the real program by hand.
+#[test]
+#[ignore]
+fn dump_rules() {
+    let dir = std::path::PathBuf::from(std::env::var("MADO_DUMP_DIR").unwrap());
+    let (deny, allow) = write_rules(&dir);
+    std::fs::write(std::env::var("MADO_DUMP_OUT").unwrap(), serde_json::json!({"permissions": {"allow": allow, "deny": deny}}).to_string()).unwrap();
 }
