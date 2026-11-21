@@ -34,6 +34,8 @@
   import ChatOptions from './chat/ChatOptions.svelte';
   import DictateButton from '../lib/voice/DictateButton.svelte';
   import Attachments from './chat/Attachments.svelte';
+  import FileViewer from './chat/FileViewer.svelte';
+  import { dataUrlBytes } from './chat/attachView';
   import QueuedCard from './chat/QueuedCard.svelte';
   import ExportMenu from './chat/ExportMenu.svelte';
   import RunChanges from './chat/RunChanges.svelte';
@@ -110,6 +112,8 @@
   let thinking = $state('');
   let text = $state('');
   let files = $state<Attachment[]>([]);
+  /** The waiting file being looked at (FileViewer), if any. */
+  let looking = $state<Attachment | null>(null);
   let mentions = $state<Mention[]>([]);
   let opts = $state<any>({ models: [], efforts: [], permissionModes: [] });
   let mentionQ = $state<string | null>(null);
@@ -147,6 +151,7 @@
       mentions = Array.isArray(d.mentions) ? d.mentions.map(asMention).filter((m: Mention | null): m is Mention => !!m).slice(0, 30) : [];
       const mem = pendingFiles.get(id) ?? [];
       const meta: any[] = Array.isArray(d.files) ? d.files.slice(0, 20) : [];
+      looking = null;
       files = meta.map((m) => mem.find((f) => f.name === m.name && f.size === m.size) ?? { name: String(m.name ?? ''), size: Number(m.size) || 0, image: !!m.image, data: '', missing: true });
     }
   }
@@ -1019,7 +1024,8 @@
             {#each files as f, i (f.name + i)}
               <li class="file" class:gone={f.missing} title={f.missing ? t('chat3.reattachTip') : undefined}>
                 {#if f.image && !f.missing}<img src={f.data} alt="" use:zoomImages={{ name: f.name }} />{:else}<span class="ficon"><Icon name={f.missing ? 'warning' : 'docs'} size={16} /></span>{/if}
-                <span class="fmeta"><bdi class="ell fname">{f.name}</bdi><span class="muted">{f.missing ? t('chat3.reattach') : fmtSize(f.size)}</span></span>
+                {#if f.missing}<span class="fmeta"><bdi class="ell fname">{f.name}</bdi><span class="muted">{t('chat3.reattach')}</span></span>
+                {:else}<button type="button" class="fmeta flook" onclick={() => (looking = f)} title={t('v012-files.preview', { name: f.name })}><bdi class="ell fname">{f.name}</bdi><span class="muted">{fmtSize(f.size)}</span></button>{/if}
                 <button class="x" type="button" onclick={() => files.splice(i, 1)} aria-label={t('chat.removeFile', { name: f.name })} title={t('chat.removeFile', { name: f.name })}><Icon name="close" size={13} /></button>
               </li>
             {/each}
@@ -1076,6 +1082,12 @@
     {#if dragging}<div class="dropzone" aria-hidden="true"><Icon name="upload" size={26} /><span>{t('chat.dropHere')}</span></div>{/if}
   </div>
   {#if pane}<SidePane path={pane} chatId={id} avail={splitW} onclose={closePane} onopen={openFile} />{/if}
+  {#if looking}
+    {@const seen = looking}
+    <!-- A file not sent yet has no place on disk: it is shown from what the message box holds.
+         (Here rather than inside the message box, so that nothing styled there can hold a full-window layer in.) -->
+    <FileViewer name={seen.name} size={seen.size} note={t('v012-files.notSent')} load={async () => dataUrlBytes(seen.data)} onClose={() => (looking = null)} />
+  {/if}
   </div>
 {/if}
 
@@ -1201,6 +1213,9 @@
   .file img, .ficon { width: 36px; height: 36px; border-radius: 7px; object-fit: cover; flex: none; }
   .ficon { display: grid; place-items: center; background: var(--fill-2); color: var(--muted); }
   .fmeta { display: flex; flex-direction: column; min-width: 0; font-size: var(--fs-xs); line-height: 1.35; }
+  .flook { font-family: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0; text-align: start; cursor: pointer; border-radius: 6px; }
+  .flook:hover .fname { text-decoration: underline; text-underline-offset: 2px; }
+  .flook:focus-visible { outline: 2px solid var(--accent-fg); outline-offset: 2px; }
   .fname { display: block; font-weight: 500; }
   .file.gone { outline: 1px dashed var(--muted); outline-offset: -1px; }
   .file.gone .fname { color: var(--muted); }

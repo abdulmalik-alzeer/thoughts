@@ -14,6 +14,28 @@ export function decodeText(b: Uint8Array): string | null {
   try { return new TextDecoder(enc).decode(b.subarray(start)); } catch { return null; }
 }
 
+/** Are these bytes text, for a file whose name does not say? Stricter than `decodeText`, which is
+ *  for files named as text: here the start must be valid UTF-8 (or UTF-16 with its mark) and all
+ *  but a few of its characters printable, so that a program or a packed file is not shown as noise. */
+export function looksLikeText(b: Uint8Array): boolean {
+  if (!b.length) return true;
+  const head = b.subarray(0, 8192);
+  const utf16 = (b[0] === 0xff && b[1] === 0xfe) || (b[0] === 0xfe && b[1] === 0xff);
+  let s: string;
+  try {
+    // `stream`: a character cut in two at the end of the sample is not an error.
+    s = utf16 ? new TextDecoder(b[0] === 0xff ? 'utf-16le' : 'utf-16be', { fatal: true }).decode(head.subarray(2), { stream: true })
+      : new TextDecoder('utf-8', { fatal: true }).decode(head, { stream: true });
+  } catch { return false; }
+  let odd = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0) return false;
+    if ((c < 32 && c !== 9 && c !== 10 && c !== 13 && c !== 12 && c !== 27) || c === 127 || c === 0xfffd) odd++;
+  }
+  return odd * 100 <= s.length;
+}
+
 export type Cut = { text: string; lines: number; shownLines: number; cut: boolean };
 
 /** The first `maxLines` lines and at most `maxChars` characters of `text`, and how many lines it has. */
