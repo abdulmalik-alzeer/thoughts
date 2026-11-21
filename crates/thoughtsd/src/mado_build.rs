@@ -578,6 +578,8 @@ async fn cleanup(state: &AppState, project: &Path, pid: &str, b: &BuildState, st
         }
     }
     if let Ok(wt) = build_wt(pid) { remove_worktree(state, project, pid, &wt).await; }
+    // The build's own caches go with its worktrees.
+    if let Ok(c) = cache_dir(pid) { if std::fs::symlink_metadata(&c).is_ok() { crate::log::ok_or_warn("mado build: could not remove its caches", std::fs::remove_dir_all(&c)); } }
     if stopped && !b.branch.is_empty() && !b.base_commit.is_empty() {
         let tip = git(state, project, &["rev-parse", "-q", "--verify", &format!("refs/heads/{}", b.branch)]).await.unwrap_or_default();
         if tip.trim() == b.base_commit { delete_branch(state, project, &b.branch, true).await; }
@@ -1090,7 +1092,8 @@ async fn approved_now(state: &AppState, pid: &str, project: &Path, hash: &str, c
 /// Each command, in order, from `cwd`; the first that fails ends it, with what it printed.
 async fn run_checks(state: &AppState, pid: &str, hash: &str, cmds: &[String], cwd: &Path, project: &Path) -> Result<(), CheckErr> {
     let full = full(state).await;
-    let how = confinement(state).await;
+    let mut how = confinement(state).await;
+    how.cache = cache_dir(pid).unwrap_or_default();
     for cmd in cmds.iter().filter(|c| !c.trim().is_empty()) {
         if status_now(project) == BuildStatus::Stopped { return Err(CheckErr::Failed(tr("mado_build.stopped_note", &[]))); }
         if !approved_now(state, pid, project, hash, cmd).await {
@@ -1129,23 +1132,39 @@ pub fn env_kept(name: &str) -> bool {
 }
 
 /// The environment of a command the daemon runs for a build: the kept part of its own, the PATH a
-/// terminal would have, and `CI=1`.
-pub fn command_env() -> Vec<(String, String)> {
-    let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| env_kept(k) && k != "PATH").collect();
+/// terminal would have, `CI=1`, and every package tool's cache pointed at the build's own `cache`
+/// folder (never the user's caches, which hold code that runs later).
+pub fn command_env(cache: &Path) -> Vec<(String, String)> {
+    let at = |sub: &str| cache.join(sub).to_string_lossy().to_string();
+    let own: Vec<(&str, String)> = vec![
+        ("npm_config_cache", at("npm")), ("npm_config_update_notifier", "false".into()), ("YARN_CACHE_FOLDER", at("yarn")),
+        ("PNPM_STORE_DIR", at("pnpm")), ("npm_config_store_dir", at("pnpm")), ("BUN_INSTALL_CACHE_DIR", at("bun")),
+        ("CARGO_HOME", at("cargo")), ("GOPATH", at("go")), ("GOMODCACHE", at("go/pkg/mod")), ("GOCACHE", at("go/build")),
+        ("GRADLE_USER_HOME", at("gradle")), ("MAVEN_OPTS", format!("-Dmaven.repo.local={}", at("m2"))), ("PIP_CACHE_DIR", at("pip")),
+        ("COMPOSER_HOME", at("composer")), ("COMPOSER_CACHE_DIR", at("composer/cache")), ("NUGET_PACKAGES", at("nuget")), ("XDG_CACHE_HOME", at("xdg")),
+        // git reads none of the user's own settings (they are closed to the commands, and could name programs).
+        ("GIT_CONFIG_GLOBAL", "/dev/null".into()), ("GIT_CONFIG_NOSYSTEM", "1".into()),
+    ];
+    let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| env_kept(k) && k != "PATH" && !own.iter().any(|(o, _)| o == k)).collect();
     env.push(("PATH".into(), claude::shell_path().to_string()));
     env.push(("CI".into(), "1".into()));
+    env.extend(own.into_iter().map(|(k, v)| (k.to_string(), v)));
     env
 }
+
+/// The build's own download caches (`<thoughts home>/mado/<projectId>/cache`), removed with its worktrees.
+fn cache_dir(pid: &str) -> anyhow::Result<PathBuf> { Ok(engine_dir(pid)?.join("cache")) }
 
 /// How a build's own commands are kept in: `confined` is whether they run under macOS's sandbox.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Confinement { pub confined: bool, /// The daemon's own port, closed to the commands (0: not known).
-    pub port: u16 }
+    pub port: u16, /// The build's own caches (`cache_dir`).
+    pub cache: PathBuf }
 
 /// Whether the build's commands run confined now: on macOS, while the setting is on and full access is off.
 pub async fn confinement(state: &AppState) -> Confinement {
     let s = state.settings.read().await;
-    Confinement { confined: cfg!(target_os = "macos") && !s.full_access() && s.spending.confine_commands(), port: crate::approvals::port() }
+    Confinement { confined: cfg!(target_os = "macos") && !s.full_access() && s.spending.confine_commands(), port: crate::approvals::port(), cache: PathBuf::new() }
 }
 
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -1162,49 +1181,78 @@ fn sb_str(p: &Path) -> String {
     format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The download caches a build may write in the user's home: only the caches themselves, never a
-/// tool's home (`~/.cargo` holds `bin/` and `env`, which run later).
-const CACHES: &[&str] = &[".npm/_cacache", ".npm/_logs", ".npm/_npx", ".cache", "Library/Caches", ".cargo/registry", ".cargo/git", ".gradle/caches", ".gradle/wrapper/dists",
-    ".m2/repository", ".pnpm-store", "Library/pnpm/store", ".local/share/pnpm/store", ".bun/install/cache", "go/pkg/mod", ".composer/cache", ".nuget/packages",
-    ".yarn/berry/cache", "Library/Caches/Yarn"];
+/// Inside the user's home, what stays closed to reading even where a toolchain on the PATH is let back in.
+const SECRETS_IN_HOME: &[&str] = &[".claude", ".claude.json", ".ssh", ".aws", ".azure", ".config/gcloud", ".kube", ".netrc", ".config/gh", ".docker", ".npmrc",
+    ".yarnrc", ".yarnrc.yml", ".pypirc", ".gem/credentials", ".cargo/credentials", ".cargo/credentials.toml", ".gnupg", ".git-credentials", ".gitconfig", ".config/git",
+    "Library/Keychains", "Library/Cookies", "Library/Mail", "Library/Messages", "Documents", "Desktop", "Downloads", "Pictures", "Library/Mobile Documents",
+    ".composer/auth.json", ".config/composer/auth.json", ".m2/settings.xml", ".gradle/gradle.properties"];
 
-/// Inside those, what is run or loaded later and so stays closed: programs and the settings tools read.
-const CLOSED_IN_HOME: &[&str] = &[".cargo/bin", ".cargo/env", ".cargo/config", ".cargo/config.toml", ".rustup", ".bun/bin", "go/bin", ".local/bin", ".npm-global",
-    ".nvm", ".volta", ".pyenv", ".rbenv", ".asdf", ".sdkman", ".deno/bin", ".gradle/init.d", ".gradle/gradle.properties", ".m2/settings.xml", ".npmrc", ".yarnrc", ".yarnrc.yml",
-    ".bashrc", ".bash_profile", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin", ".config/fish", ".gitconfig", ".config/git", ".ssh", ".claude", ".claude.json",
-    ".cache/pre-commit", ".config", "Library/LaunchAgents", "Library/Application Support"];
+/// The folders of the PATH inside the user's home, with the installation each belongs to (`…/v22/bin`
+/// → `…/v22`, never a folder right inside the home such as `~/.cargo`), as the sandbox sees them.
+fn toolchains(home: &Path) -> Vec<PathBuf> {
+    let home = real(home);
+    let mut out = vec![];
+    for d in claude::shell_path().split(':').filter(|d| Path::new(d).is_absolute()) {
+        let d = real(Path::new(d));
+        if !d.starts_with(&home) || d == home { continue; }
+        let parent = d.parent().map(Path::to_path_buf);
+        let root = match (d.file_name().map(|n| n == "bin").unwrap_or(false), parent) {
+            (true, Some(p)) if p.parent().map_or(false, |pp| pp != home) && p != home => p,
+            _ => d,
+        };
+        if !out.contains(&root) { out.push(root); }
+    }
+    out
+}
 
 /// The sandbox profile for a build's command run in `wt` (a worktree of the engine, under
-/// `<thoughts home>/mado/<projectId>/`). Everything is allowed but:
-/// - writing files: only in `wt`, the temporary folders, the null devices and the download caches
-///   (`CACHES`), and never in the app's own folder, the user's project (its `.git` with it), the
-///   folders of the daemon's PATH, or what is run or loaded later (`CLOSED_IN_HOME`);
-/// - reading the app's own folder (its token, settings, the approval records), except `wt`;
+/// `<thoughts home>/mado/<projectId>/`), with the build's own caches in `cache`. Everything is
+/// allowed but:
+/// - writing files: only in `wt`, `cache`, the temporary folders and the null devices; never in the
+///   app's own folder, the user's project (its `.git` with it), the user's home or the PATH;
+/// - reading the user's home and the app's own folder: only `wt`, `cache`, the project's `.git` (the
+///   worktree's history lives there), `RUSTUP_HOME`'s toolchains and the toolchains on the PATH, and
+///   never the places that hold credentials or the user's files (`SECRETS_IN_HOME`);
 /// - connecting to the daemon's own port (`port`, when known), and reaching the keychain.
 /// The last rule that matches wins, so the order matters.
-pub fn sandbox_profile(wt: &Path, project: &Path, user_home: Option<&Path>, port: u16) -> String {
+pub fn sandbox_profile(wt: &Path, project: &Path, cache: &Path, user_home: Option<&Path>, port: u16) -> String {
     let q = |p: &Path| sb_str(&real(p));
     let home = crate::paths::home();
     let mut out = String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*");
-    let mut allow: Vec<PathBuf> = vec![PathBuf::from("/private/tmp"), PathBuf::from("/private/var/folders"), std::env::temp_dir()];
-    if let Ok(t) = std::env::var("TMPDIR") { if Path::new(&t).is_absolute() { allow.push(PathBuf::from(t)); } }
-    if let Some(h) = user_home { allow.extend(CACHES.iter().map(|c| h.join(c))); }
-    for p in &allow { out.push_str(&format!(" (subpath {})", q(p))); }
+    let mut tmp: Vec<PathBuf> = vec![PathBuf::from("/private/tmp"), PathBuf::from("/private/var/folders"), std::env::temp_dir()];
+    if let Ok(t) = std::env::var("TMPDIR") { if Path::new(&t).is_absolute() { tmp.push(PathBuf::from(t)); } }
+    for p in &tmp { out.push_str(&format!(" (subpath {})", q(p))); }
     out.push_str(" (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\") (regex #\"^/dev/ttys[0-9]+$\"))\n");
-    let mut deny = vec![home.clone(), project.to_path_buf(), project.join(".git")];
-    deny.extend(claude::shell_path().split(':').filter(|d| Path::new(d).is_absolute()).map(PathBuf::from));
-    if let Some(h) = user_home { deny.extend(CLOSED_IN_HOME.iter().map(|c| h.join(c))); }
+    let mut closed = vec![home.clone(), project.to_path_buf(), project.join(".git")];
+    closed.extend(claude::shell_path().split(':').filter(|d| Path::new(d).is_absolute()).map(PathBuf::from));
+    if let Some(h) = user_home { closed.push(h.to_path_buf()); }
     out.push_str("(deny file-write*");
-    for p in &deny { out.push_str(&format!(" (subpath {})", q(p))); }
+    for p in &closed { out.push_str(&format!(" (subpath {})", q(p))); }
     out.push_str(")\n");
-    // The app's own folder is not read either (its token is there), apart from the way to `wt`.
-    out.push_str(&format!("(deny file-read* (subpath {}))\n", q(&home)));
-    let mut way = vec![];
-    let mut a = real(wt);
-    while let Some(parent) = a.parent().map(Path::to_path_buf) { if !parent.starts_with(real(&home)) { break; } way.push(parent.clone()); a = parent; }
-    if !way.is_empty() { out.push_str(&format!("(allow file-read-metadata {})\n", way.iter().map(|p| format!("(literal {})", sb_str(p))).collect::<Vec<_>>().join(" "))); }
-    out.push_str(&format!("(allow file-read* file-write* (subpath {}))\n", q(wt)));
-    // The worktree's own `.git` (a file naming git's folder for it, inside the project's `.git`) stays closed.
+    // Reading: the user's home and the app's folder are closed, then the few things a build needs are let back in.
+    out.push_str("(deny file-read*");
+    for p in [Some(home.as_path()), user_home].into_iter().flatten() { out.push_str(&format!(" (subpath {})", q(p))); }
+    out.push_str(")\n");
+    let mut back: Vec<PathBuf> = vec![project.join(".git")];
+    if let Some(h) = user_home {
+        back.extend(toolchains(h));
+        back.push(std::env::var("RUSTUP_HOME").ok().filter(|r| Path::new(r).is_absolute()).map(PathBuf::from).unwrap_or_else(|| h.join(".rustup")));
+    }
+    // (Whether a file is there, and its size, may be asked anywhere in them: no names are listed and nothing is read.)
+    out.push_str("(allow file-read-metadata");
+    for p in [Some(home.as_path()), user_home].into_iter().flatten() { out.push_str(&format!(" (subpath {})", q(p))); }
+    out.push_str(")\n(allow file-read*");
+    for p in &back { out.push_str(&format!(" (subpath {})", q(p))); }
+    out.push_str(")\n");
+    if let Some(h) = user_home {
+        let mut secrets: Vec<PathBuf> = SECRETS_IN_HOME.iter().map(|c| h.join(c)).collect();
+        if let Ok(c) = std::env::var("CLAUDE_CONFIG_DIR") { if Path::new(&c).is_absolute() { secrets.push(PathBuf::from(c)); } }
+        out.push_str("(deny file-read*");
+        for p in &secrets { out.push_str(&format!(" (subpath {})", q(p))); }
+        out.push_str(")\n");
+    }
+    out.push_str(&format!("(allow file-read* file-write* (subpath {}) (subpath {}))\n", q(wt), q(cache)));
+    // The worktree's own `.git` (a file naming git's folder for it, inside the project's `.git`) stays closed to writing.
     out.push_str(&format!("(deny file-write* (literal {}))\n", q(&wt.join(".git"))));
     if port != 0 { out.push_str(&format!("(deny network-outbound (remote ip \"localhost:{port}\"))\n")); }
     // The keychain (the assistant's key is kept there). TLS checks do not need it (tried: git and curl over https).
@@ -1248,7 +1296,7 @@ pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &
     let unconfined = || CheckErr::Unapproved(tr("mado_build.no_sandbox", &[("cmd", &one_line(cmd, 300))]));
     let mut c = if how.confined {
         if !Path::new(SANDBOX_EXEC).is_file() { return Err(unconfined()); }
-        let profile = sandbox_profile(cwd, project, crate::paths::user_home().ok().as_deref(), how.port);
+        let profile = sandbox_profile(cwd, project, &how.cache, crate::paths::user_home().ok().as_deref(), how.port);
         let mut c = crate::proc::command(SANDBOX_EXEC);
         c.arg("-p").arg(profile).arg(&prog).args(&args);
         c
@@ -1257,7 +1305,8 @@ pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &
         c.args(&args);
         c
     };
-    c.env_clear().envs(command_env()).current_dir(cwd)
+    if !how.cache.as_os_str().is_empty() { let _ = std::fs::create_dir_all(&how.cache); }
+    c.env_clear().envs(command_env(&how.cache)).current_dir(cwd)
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     crate::proc::own_group(&mut c);
     let mut child = match c.spawn() {

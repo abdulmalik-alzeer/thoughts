@@ -432,7 +432,7 @@ async fn a_check_runs_in_its_folder_with_bounded_output_and_names_no_app_folder(
     let d = std::env::temp_dir().join(format!("thoughts-mado-check-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&d).unwrap();
     std::fs::write(d.join("here.txt"), "x").unwrap();
-    let off = Confinement { confined: false, port: 0 };
+    let off = Confinement { confined: false, port: 0, cache: d.join("cache") };
     let text = |e: CheckErr| e.text();
     assert!(run_check("test -f here.txt", &d, &d, false, &off).await.is_ok());
     let e = text(run_check("yes line | head -c 200000; echo LAST >&2; exit 3", &d, &d, false, &off).await.unwrap_err());
@@ -448,9 +448,16 @@ fn a_builds_commands_get_no_keys_tokens_or_the_apps_own_settings() {
     for k in ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "CARGO_HOME", "NVM_DIR"] { assert!(env_kept(k), "{k}"); }
     for k in ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE", "THOUGHTS_HOME", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY",
               "NPM_TOKEN", "OPENAI_API_KEY", "DB_PASSWORD", "SSH_AUTH_SOCK", "LC_KEY", "GIT_DIR", "EDITOR"] { assert!(!env_kept(k), "{k}"); }
-    let env = command_env();
+    let cache = Path::new("/x/cache");
+    let env = command_env(cache);
     assert!(env.iter().any(|(k, v)| k == "CI" && v == "1") && env.iter().any(|(k, _)| k == "PATH"));
-    assert!(env.iter().all(|(k, _)| k == "CI" || env_kept(k)), "{env:?}");
+    // Every package tool's cache is the build's own.
+    for k in ["npm_config_cache", "YARN_CACHE_FOLDER", "PNPM_STORE_DIR", "BUN_INSTALL_CACHE_DIR", "CARGO_HOME", "GOMODCACHE", "GOCACHE", "GRADLE_USER_HOME", "PIP_CACHE_DIR", "COMPOSER_CACHE_DIR", "NUGET_PACKAGES", "XDG_CACHE_HOME"] {
+        let v = env.iter().filter(|(n, _)| n == k).map(|(_, v)| v.clone()).collect::<Vec<_>>();
+        assert!(v.len() == 1 && v[0].starts_with("/x/cache/"), "{k}: {v:?}");
+    }
+    assert!(env.iter().any(|(k, v)| k == "MAVEN_OPTS" && v.contains("/x/cache/m2")));
+    assert!(env.iter().all(|(k, v)| k == "CI" || env_kept(k) || v.contains("/x/cache") || v == "false" || v == "/dev/null" || v == "1"), "{env:?}");
 }
 
 /// A command run by the daemon the way a build runs it (cleared environment), confined.
@@ -465,7 +472,8 @@ async fn a_confined_command_writes_only_in_its_worktree_temporary_files_and_cach
     std::fs::write(engine_dir(&p.pid).unwrap().join("approval.json"), "{}").unwrap();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let on = Confinement { confined: true, port };
+    let cache = cache_dir(&p.pid).unwrap();
+    let on = Confinement { confined: true, port, cache: cache.clone() };
     std::fs::write(crate::paths::home().join("daemon.json"), "{\"token\":\"secret-app-token\"}").unwrap();
     let run = |cmd: String| { let (wt, dir, on) = (wt.clone(), p.dir.clone(), on.clone()); async move { run_check(&cmd, &wt, &dir, false, &on).await } };
     // Inside its worktree: fine.
@@ -492,7 +500,8 @@ async fn a_confined_command_writes_only_in_its_worktree_temporary_files_and_cach
     }
     assert!(!probe.exists() && !p.dir.join("new.txt").exists());
     // git and the usual tools still work, temporary files included.
-    assert!(run("git status".into()).await.is_ok());
+    let r = run("git status".into()).await;
+    assert!(r.is_ok(), "git status: {}", match r { Err(e) => e.text(), Ok(()) => String::new() });
     if std::process::Command::new("python3").arg("--version").output().map_or(false, |o| o.status.success()) {
         assert!(run("python3 -c 'import tempfile; f=tempfile.NamedTemporaryFile(delete=False); f.write(b\"x\"); f.close(); open(\"py.txt\",\"w\").write(\"ok\")'".into()).await.is_ok());
         assert!(wt.join("py.txt").exists());
@@ -511,17 +520,39 @@ async fn a_confined_command_writes_only_in_its_worktree_temporary_files_and_cach
         assert!(r.is_err(), "{host}:{port} was reached");
     }
     assert!(std::process::Command::new("/usr/bin/nc").args(["-z", "-G", "2", "127.0.0.1", &port.to_string()]).status().unwrap().success(), "the port is open outside");
-    // Programs and settings that run later stay closed, the caches open.
+    // Nothing in the user's home is written, the caches included: the build has its own.
     let fake_home = p.root.join("home");
-    for d in [".cargo/bin", ".cargo/registry", ".npm/_cacache", "Library/Caches"] { std::fs::create_dir_all(fake_home.join(d)).unwrap(); }
-    let profile = sandbox_profile(&wt, &p.dir, Some(&fake_home), port);
+    for d in [".cargo/bin", ".cargo/registry", ".npm/_cacache", "Library/Caches", ".ssh", "Documents"] { std::fs::create_dir_all(fake_home.join(d)).unwrap(); }
+    std::fs::write(fake_home.join(".ssh/id_ed25519"), "fake key").unwrap();
+    std::fs::write(fake_home.join("Documents/letter.txt"), "fake letter").unwrap();
+    std::fs::write(fake_home.join(".claude.json"), "{}").unwrap();
+    let profile = sandbox_profile(&wt, &p.dir, &cache, Some(&fake_home), port);
     let sb = |cmd: &str| std::process::Command::new(SANDBOX_EXEC).arg("-p").arg(&profile).args(["/bin/sh", "-c", cmd]).current_dir(&wt).status().unwrap().success();
-    for closed in [".cargo/bin/cargo", ".cargo/env", ".zshrc", ".npmrc", ".local/bin/x", ".cargo/config.toml", ".gitconfig"] {
+    for closed in [".cargo/bin/cargo", ".cargo/env", ".zshrc", ".npmrc", ".local/bin/x", ".cargo/config.toml", ".gitconfig", ".cargo/registry/x", ".npm/_cacache/x", "Library/Caches/x"] {
         assert!(!sb(&format!("mkdir -p \"$(dirname '{0}')\" 2>/dev/null; echo x > '{0}'", fake_home.join(closed).display())), "{closed} was writable");
     }
-    for open in [".cargo/registry/x", ".npm/_cacache/x", "Library/Caches/x"] { assert!(sb(&format!("echo x > '{}'", fake_home.join(open).display())), "{open} was closed"); }
+    std::fs::create_dir_all(&cache).unwrap();
+    assert!(sb(&format!("echo x > '{}'", cache.join("npm-x").display())), "the build's own cache was closed");
+    // Reading: credentials and the user's files are closed.
+    for f in [".ssh/id_ed25519", "Documents/letter.txt", ".claude.json"] { assert!(!sb(&format!("head -c 0 '{}'", fake_home.join(f).display())), "{f} was readable"); }
+    for d in [".ssh", "Documents", ""] { assert!(!sb(&format!("ls '{}' >/dev/null", fake_home.join(d).display())), "{d} could be listed"); }
     for d in claude::shell_path().split(':').filter(|d| Path::new(d).is_dir()).take(3) {
         assert!(!sb(&format!("touch '{d}/thoughts-sandbox-probe'")), "{d} on the PATH was writable");
+    }
+    // The same with the real home (names only, nothing is shown): the real profile run_check uses.
+    let user_home = crate::paths::user_home().unwrap();
+    for f in [".claude.json", ".ssh", ".gitconfig", "Documents", "Desktop"] {
+        let path = user_home.join(f);
+        if std::fs::symlink_metadata(&path).is_err() { continue; }
+        let cmd = if path.is_dir() { format!("ls '{}' >/dev/null 2>&1", path.display()) } else { format!("head -c 0 '{}' 2>/dev/null", path.display()) };
+        assert!(run(cmd).await.is_err(), "{f} was readable");
+    }
+    // Toolchains on the PATH still run.
+    for (tool, cmd) in [("node", "node -e 'process.exit(0)'"), ("npm", "npm --version"), ("git", "git --version")] {
+        if std::process::Command::new("sh").args(["-c", &format!("command -v {tool}")]).env("PATH", claude::shell_path()).output().map_or(false, |o| o.status.success()) {
+            let r = run(cmd.into()).await;
+            assert!(r.is_ok(), "{tool}: {}", match r { Err(e) => e.text(), Ok(()) => String::new() });
+        }
     }
     drop(listener);
     // The keychain cannot be asked (the assistant's key is kept there).
@@ -866,9 +897,10 @@ async fn npm_ci_installs_under_the_confinement() {
         p.done();
         return;
     }
-    let on = Confinement { confined: true, port: 0 };
+    let on = Confinement { confined: true, port: 0, cache: cache_dir(&p.pid).unwrap() };
     let r = run_check("npm ci --no-audit --no-fund", &wt, &p.dir, false, &on).await;
     assert!(r.is_ok(), "{}", match r { Err(e) => e.text(), Ok(()) => String::new() });
     assert!(wt.join("node_modules/is-number/package.json").exists());
+    assert!(cache_dir(&p.pid).unwrap().join("npm/_cacache").is_dir(), "the download went to the build's own cache");
     p.done();
 }
