@@ -649,3 +649,48 @@ async fn a_link_inside_mado_keeps_a_build_from_starting_and_nothing_is_copied_th
     assert_eq!(t::sh(&p.dir, &["branch", "--list", "mado/*"]), "");
     p.done();
 }
+
+#[test]
+fn git_settings_that_start_programs_are_recognised() {
+    for (k, v) in [("filter.x.clean", "sh evil"), ("filter.lfs.smudge", "git-lfs smudge -- %f; evil"), ("merge.ours.driver", "x"), ("diff.png.textconv", "x"), ("diff.x.command", "x"),
+                   ("diff.external", "x"), ("core.editor", "vim"), ("sequence.editor", "x"), ("core.pager", "less"), ("pager.log", "x"), ("credential.helper", "store"),
+                   ("credential.https://h.example.helper", "x"), ("gpg.program", "x"), ("gpg.ssh.program", "x"), ("commit.gpgSign", "true"), ("core.sshCommand", "x"),
+                   ("core.fsmonitor", "x"), ("core.hooksPath", "x"), ("remote.origin.uploadpack", "x")] {
+        assert!(crate::git::runs_program(k, v), "{k}");
+    }
+    for (k, v) in [("filter.lfs.clean", "git-lfs clean -- %f"), ("filter.lfs.smudge", "git-lfs smudge -- %f"), ("filter.lfs.process", "git-lfs filter-process"), ("filter.lfs.required", "true"),
+                   ("commit.gpgsign", "false"), ("core.fsmonitor", "false"), ("credential.helper", ""), ("user.name", "x"), ("core.bare", "false"), ("remote.origin.url", "x"), ("diff.x.binary", "true")] {
+        assert!(!crate::git::runs_program(k, v), "{k}");
+    }
+}
+
+#[tokio::test]
+async fn a_project_whose_git_settings_start_programs_is_not_built_or_landed() {
+    let p = project(vec![task("a", &["src/**"], &[], &["test -f src/a.txt"])]).await;
+    t::assistant(&p.st, |info: RunInfo| async move { put(&info.cwd, "src/a.txt", "a"); true });
+    t::sh(&p.dir, &["config", "--local", "filter.evil.clean", "touch /tmp/never"]);
+    t::sh(&p.dir, &["config", "--local", "diff.evil.textconv", "touch /tmp/never"]);
+    // (Trusted again with these settings: the trust check alone would no longer stop it.)
+    crate::trust::trust(&p.dir).unwrap();
+    let e = crate::tr::classify_in(false, &start(&p.st, &p.pid, None).await.unwrap_err()).message;
+    assert!(e.contains("filter.evil.clean, diff.evil.textconv"), "{e}");
+    assert!(!p.dir.join("mado/build.json").exists());
+    // Full access lets it through, as every guard.
+    p.st.settings.write().await.full_access.on = true;
+    assert!(check_ready(&p.st, &p.pid, &p.dir).await.is_ok());
+    p.st.settings.write().await.full_access.on = false;
+    t::sh(&p.dir, &["config", "--local", "--remove-section", "filter.evil"]);
+    t::sh(&p.dir, &["config", "--local", "--remove-section", "diff.evil"]);
+    crate::trust::trust(&p.dir).unwrap();
+    start(&p.st, &p.pid, None).await.unwrap();
+    until(&p, "done", |b| b.status == BuildStatus::Done).await;
+    t::sh(&p.dir, &["config", "--local", "core.editor", "touch /tmp/never"]);
+    crate::trust::trust(&p.dir).unwrap();
+    let e = crate::tr::classify_in(false, &land(&p.st, &p.pid).await.unwrap_err()).message;
+    assert!(e.contains("core.editor"), "{e}");
+    t::sh(&p.dir, &["config", "--local", "--unset", "core.editor"]);
+    crate::trust::trust(&p.dir).unwrap();
+    land(&p.st, &p.pid).await.unwrap();
+    assert!(p.dir.join("src/a.txt").exists());
+    p.done();
+}

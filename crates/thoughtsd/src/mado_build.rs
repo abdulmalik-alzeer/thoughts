@@ -268,6 +268,17 @@ async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<Stri
 async fn git_ok(state: &AppState, dir: &Path, args: &[&str]) -> bool { crate::git::git_output(state, dir, args).await.map_or(false, |(ok, _)| ok) }
 fn s(p: &Path) -> String { p.to_string_lossy().to_string() }
 
+/// Refused when the repository's own config makes git start programs (filters, merge drivers, diff
+/// converters, editors, pagers, credential helpers, signing): they would run with the engine's git
+/// commands. A guard: the caller lets it yield to full access.
+async fn no_git_programs(state: &AppState, project: &Path) -> anyhow::Result<()> {
+    let keys = crate::git::program_keys(state, project).await?;
+    if keys.is_empty() { return Ok(()); }
+    let mut shown: Vec<String> = keys.iter().take(6).map(|k| k.chars().take(80).collect()).collect();
+    if keys.len() > 6 { shown.push("…".into()); }
+    Err(crate::tr::err("mado_build.git_programs", &[("keys", &shown.join(", "))]))
+}
+
 /// Changes in the project's working tree, the app's own `mado/` folder aside.
 async fn dirty_files(state: &AppState, dir: &Path) -> anyhow::Result<Vec<String>> {
     let out = git(state, dir, &["status", "--porcelain=v1", "-z"]).await?;
@@ -401,6 +412,7 @@ async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Res
     let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
     if !same { return Err(crate::tr::err("mado_build.not_repo", &[])); }
     if !full(state).await { crate::trust::require_git(project)?; }
+    if !full(state).await { no_git_programs(state, project).await?; }
     // No link or shared file in `mado/` (a cloned repository can ship `mado/spec.md -> ~/.zshrc`).
     mado::require_plain(&mado_dir(project)?, full(state).await)?;
     // The Review step approved exactly the plan that is there now (its commands are what will run).
@@ -595,7 +607,7 @@ pub async fn land(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState
     let mut b = load_build(&project)?.ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
     if b.landed_at.is_some() { return Err(crate::tr::err("mado_build.landed", &[])); }
     if b.status != BuildStatus::Done { return Err(crate::tr::err("mado_build.not_done", &[])); }
-    if !full(state).await { crate::trust::require_git(&project)?; }
+    if !full(state).await { crate::trust::require_git(&project)?; no_git_programs(state, &project).await?; }
     let here = crate::git::current_branch(state, &project).await.unwrap_or_default();
     if here != b.base { return Err(crate::tr::err("mado_build.wrong_branch", &[("branch", &b.base)])); }
     let dirty = dirty_files(state, &project).await?;

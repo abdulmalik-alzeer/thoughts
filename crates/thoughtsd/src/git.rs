@@ -291,7 +291,7 @@ async fn run_opts(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
     #[cfg(not(windows))] let no_hooks = "/dev/null";
     c.env("GIT_CONFIG_NOSYSTEM", "1").env("GIT_ATTR_NOSYSTEM", "1");
     for kv in ["core.fsmonitor=false", &format!("core.hooksPath={no_hooks}"), "core.sshCommand=ssh",
-               "core.askPass=", "core.pager=cat", "core.editor=true",
+               "core.askPass=", "core.pager=cat", "core.editor=true", "sequence.editor=true",
                "commit.gpgSign=false", "tag.gpgSign=false", "gpg.program=gpg", "protocol.ext.allow=never", "core.gitProxy=",
                "credential.helper=",
                // File names are shown as they are. Without this git prints every name that is not
@@ -348,6 +348,46 @@ async fn run_opts(state: &AppState, dir: &Path, repo: Repo, args: &[&str], index
     };
     drop(ticket);
     Ok(out)
+}
+
+/// Is `key` (as `git config --list` prints it, any case) one that makes git start a program of the
+/// configuration's choosing: a filter, a merge driver, a diff converter, an editor or pager, a
+/// credential helper, a signing program and the like? `value` lets git-lfs's own standard filter through.
+pub fn runs_program(key: &str, value: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    let parts: Vec<&str> = k.split('.').collect();
+    let (first, last) = (parts[0], *parts.last().unwrap_or(&""));
+    let sub = parts.len() >= 3;
+    if first == "filter" && sub && matches!(last, "clean" | "smudge" | "process") {
+        // `git lfs install --local` writes exactly these.
+        let lfs = parts.len() == 3 && parts[1] == "lfs" && matches!((last, value.trim()), ("clean", "git-lfs clean -- %f") | ("smudge", "git-lfs smudge -- %f") | ("process", "git-lfs filter-process"));
+        return !lfs;
+    }
+    if first == "merge" && sub && last == "driver" { return true; }
+    if first == "diff" && ((sub && matches!(last, "textconv" | "command")) || k == "diff.external") { return true; }
+    if first == "credential" && last == "helper" { return !value.trim().is_empty(); }
+    if first == "gpg" && last == "program" { return true; }
+    if first == "pager" { return true; }
+    if first == "remote" && sub && matches!(last, "uploadpack" | "receivepack") { return true; }
+    let off = matches!(value.trim().to_ascii_lowercase().as_str(), "false" | "no" | "off" | "0" | "");
+    match k.as_str() {
+        "commit.gpgsign" | "tag.gpgsign" | "rebase.gpgsign" | "push.gpgsign" | "core.fsmonitor" => !off,
+        "core.editor" | "sequence.editor" | "core.pager" | "core.sshcommand" | "core.hookspath" | "core.askpass" | "core.gitproxy"
+        | "core.alternaterefscommand" | "uploadpack.packobjectshook" | "sendemail.smtpserver" => true,
+        _ => false,
+    }
+}
+
+/// The keys of the repository's own configuration (`.git/config`, with what it includes) that make
+/// git start a program of its choosing (`runs_program`), in order, each once.
+pub async fn program_keys(state: &AppState, dir: &Path) -> anyhow::Result<Vec<String>> {
+    let out = git(state, dir, &["config", "--local", "--includes", "--list", "-z"]).await.unwrap_or_default();
+    let mut keys: Vec<String> = vec![];
+    for rec in out.split('\0').filter(|r| !r.is_empty()) {
+        let (k, v) = rec.split_once('\n').unwrap_or((rec, ""));
+        if runs_program(k, v) && !keys.iter().any(|x| x.eq_ignore_ascii_case(k)) { keys.push(k.to_string()); }
+    }
+    Ok(keys)
 }
 
 pub async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<String> {

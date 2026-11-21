@@ -1522,6 +1522,9 @@ const TABLE: &[Entry] = &[
     e("mado.odd_entry", "forbidden", 403, "",
         "“{path}” in the project's mado folder is a link, a special file or a file shared with another place, so the app will not use the folder. Replace it with a plain file and try again.",
         "«{path}» في مجلد mado بالمشروع رابطٌ أو ملفٌّ خاص أو ملفٌّ مشترك مع مكان آخر، فلن يستعمل التطبيق المجلد. ضع مكانه ملفاً عادياً ثم حاول مرة أخرى."),
+    e("mado_build.git_programs", "forbidden", 403, "",
+        "This project's own git settings make git start other programs ({keys}), so the app will not build or bring a build in here: those programs would run with every step. Remove these settings from the project's .git/config (for example with “git config --local --unset <name>”) and try again.",
+        "إعدادات git الخاصة بهذا المشروع تجعل git يشغّل برامج أخرى ({keys})، فلن يبني التطبيق هنا ولن يدمج بناءً: إذ ستعمل تلك البرامج مع كل خطوة. احذف هذه الإعدادات من ملف ‎.git/config في المشروع (مثلاً بالأمر «git config --local --unset <الاسم>») ثم حاول مرة أخرى."),
 ];
 
 fn entry(key: &str) -> &'static Entry {
