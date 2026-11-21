@@ -2886,6 +2886,8 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     let _claim = st.chats.claim_send(&id).ok_or_else(|| crate::tr::err("chat.running", &[]))?;
     let chat = st.chats.get(&id).await.ok_or_else(no_chat)?;
     if chat.running { return Err(crate::tr::err("chat.running", &[]).into()); }
+    // A build task's chat is its record: continued by hand it would run in the user's own folder.
+    if chat.kind == "mado-build" { return Err(crate::tr::err("mado.build_chat_closed", &[]).into()); }
     // Edit and resend: only the last message of the user's is replaced (`branch.rs`).
     let edit_at = match m.replace.as_deref() { Some(mid) => Some(crate::branch::edit_at(&chat, mid)?), None => None };
     let files_dir = crate::branch::files_dir(&id);

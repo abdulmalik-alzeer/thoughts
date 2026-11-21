@@ -241,7 +241,7 @@
         if (restored.delete(id)) notify(t('chatc.queue.restored'), { kind: 'info', key: 'requeue:' + id });
         // The cursor goes straight into the message box, so typing can start at once (the shell
         // announces the chat's title). Not while a dialog is open, nor away from where the user is typing.
-        if (!['wrap', 'reorganize', 'setup'].includes(c.kind)) {
+        if (!['wrap', 'reorganize', 'setup', 'mado-build'].includes(c.kind)) {
           await tick();
           const a = document.activeElement as HTMLElement | null;
           const elsewhere = !!a && a !== document.body && a !== boxElement(input) && !!a.closest('input, textarea, select, [contenteditable="true"]');
@@ -457,7 +457,8 @@
   // (In a chat that began as first-run setup, the setup's own "Set up my library." is never sent again.)
   const lastUser = $derived(chat ? chat.messages.slice(Number(chat.meta?.doneAt) || 0).reverse().find((m: any) => m.role === 'user') : null);
   const lastAnswerId = $derived(chat ? [...chat.messages].reverse().find((m: any) => m.role === 'assistant' || m.role === 'error')?.id : null);
-  const canCompose = $derived(!!chat && !['wrap', 'reorganize', 'setup'].includes(chat.kind));
+  // (A build task's chat is a record: continued by hand it would run in the user's own folder.)
+  const canCompose = $derived(!!chat && !['wrap', 'reorganize', 'setup', 'mado-build'].includes(chat.kind));
 
   async function retry() {
     if (!lastUser || chat.running || sending) return;
@@ -994,7 +995,7 @@
     {/if}
 
     <!-- Wrap, Reorganize and Setup have no message box, so their Stop lives here (setup's is on its own card below). -->
-    {#if !canCompose && chat.running && chat.kind !== 'setup'}
+    {#if !canCompose && chat.running && chat.kind !== 'setup' && chat.kind !== 'mado-build'}
       <div class="runbar card row" role="status">
         <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
         <span class="grow">{t(chat.kind === 'wrap' ? (phase === 'applying' ? (chat.meta?.inCopy ? 'wrapb.run.writing' : 'chata.run.wrapApply') : 'chata.run.wrapPreview') : chat.kind === 'reorganize' ? 'chata.run.reorganize' : 'chata.run.setup')}</span>
@@ -1002,6 +1003,7 @@
       </div>
     {/if}
 
+    {#if chat.kind === 'mado-build'}<p class="muted" role="note">{t('mado.chat.buildRecord')}</p>{/if}
     {#if chat.kind === 'setup' || chat.meta?.setup}
       <!-- First run: setup at work, setup that did not finish, or "you're set up" with a reply ready to send. -->
       <SetupCard {chat} {stop} reload={() => load()} reply={(s) => { if (!text.trim()) text = s; tick().then(() => input?.focus()); }} />

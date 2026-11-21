@@ -957,7 +957,7 @@ fn deny_for(project: &Path, pid: &str, b: &BuildState, wt: &Path) -> Vec<String>
     }
     let own = claude::rule_path(wt);
     for r in [format!("Edit({own}/mado)"), format!("Edit({own}/mado/**)"), format!("Edit({own}/.git)")] { d.push(r); }
-    for g in ["commit", "push", "checkout", "switch", "reset", "merge", "rebase", "branch", "worktree", "tag", "stash", "update-ref", "cherry-pick", "revert", "am", "pull", "fetch", "remote", "config", "clean"] {
+    for g in mado::BUILD_GIT_DENY {
         d.push(format!("Bash(git {g}:*)"));
     }
     d

@@ -793,6 +793,10 @@ pub fn write_deny(project: &Path, ignores: bool) -> Vec<String> {
     out
 }
 
+/// The git commands a build run may not use: the engine alone commits, merges and changes branches.
+pub const BUILD_GIT_DENY: &[&str] = &["commit", "push", "checkout", "switch", "reset", "merge", "rebase", "branch", "worktree", "tag", "stash", "update-ref",
+    "cherry-pick", "revert", "am", "pull", "fetch", "remote", "config", "clean"];
+
 /// The commands a build task may run without asking: its own acceptance commands that are among
 /// the commands of the approval record (what the user was shown) and that are plain commands
 /// (`mado_validate::command_ok`: no rule or shell syntax that would allow more than the command).
@@ -817,8 +821,23 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
     let Some(role) = role_of(&meta) else { return Err(crate::tr::err("mado.not_a_step", &[])) };
     let project = project_dir(state, &role.project_id).await?;
     if kind == "mado-build" {
+        // Only ever in one of the engine's own worktrees (`<home>/mado/<projectId>/build` or
+        // `…/lane-<w>-<l>`), with no other folder: never the user's project, never the records beside them.
+        // (Not a guard of the app's: the engine always runs there, so it holds under full access too.)
+        let engine = record_dir(&role.project_id).and_then(|d| crate::paths::canonical(&d).ok());
+        let cwd = crate::paths::canonical(&spec.cwd).ok();
+        let inside = match (&engine, &cwd) {
+            (Some(e), Some(c)) => c.strip_prefix(e).ok().and_then(|r| r.components().next()).map_or(false, |first| {
+                let n = first.as_os_str().to_string_lossy();
+                n == "build" || n.strip_prefix("lane-").map_or(false, |r| r.split('-').count() == 2 && r.split('-').all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit())))
+            }),
+            _ => false,
+        };
+        if !inside || !spec.add_dirs.is_empty() { return Err(crate::tr::err("mado.build_run_place", &[])); }
         let mut allow = vec![];
         if !full {
+            // Git commands that change branches or history, here too (the engine adds them as well).
+            for g in BUILD_GIT_DENY { spec.extra_deny.push(format!("Bash(git {g}:*)")); }
             let p = crate::claude::rule_path(&project);
             spec.extra_deny.extend([format!("Edit({p})"), format!("Edit({p}/**)")]);
             crate::claude::every_case(&mut spec.extra_deny);

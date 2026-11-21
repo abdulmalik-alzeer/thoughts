@@ -610,10 +610,19 @@ async fn a_build_task_may_run_only_its_approved_commands_and_not_write_the_proje
     assert_eq!(status_of(&pid, &dir, "review"), "locked", "a state.json the daemon did not write is not believed");
     assert!(approved_plan(&st, &pid).await.is_none());
     let seen = hook(&st, |_| {});
-    let lane = tmp("lane");
+    let lane = record_dir(&pid).unwrap().join("lane-1-1");
+    std::fs::create_dir_all(&lane).unwrap();
     let chat = crate::chats::Chat { kind: "mado-build".into(), meta: json!({"mado": {"projectId": pid, "taskId": "t-a"}}), ..Default::default() };
     st.chats.insert(chat.clone()).await;
     let spec = RunSpec { chat_id: chat.id.clone(), prompt: "build".into(), cwd: lane.clone(), add_dirs: vec![], options: Default::default(), resume: None, append_system: None, extra_deny: vec![] };
+    // Never in the user's own folder, the records' folder, elsewhere, or with an added folder.
+    let other = tmp("lane-elsewhere");
+    for (cwd, add) in [(dir.clone(), vec![]), (record_dir(&pid).unwrap(), vec![]), (other.clone(), vec![]), (lane.clone(), vec![dir.clone()])] {
+        let mut s = respec(&spec);
+        s.cwd = cwd.clone();
+        s.add_dirs = add;
+        assert!(start_run(st.clone(), s, None).await.is_err(), "{cwd:?}");
+    }
     start_run(st.clone(), respec(&spec), None).await.unwrap();
     idle(&st, &chat.id, &seen, 1).await;
     assert!(!seen.lock().unwrap()[0].allow.iter().any(|a| a.starts_with("Bash(")), "forged: nothing allowed");
@@ -629,6 +638,7 @@ async fn a_build_task_may_run_only_its_approved_commands_and_not_write_the_proje
     let bash: Vec<&String> = info.allow.iter().filter(|a| a.starts_with("Bash(")).collect();
     assert_eq!(bash, vec!["Bash(npm ci)", "Bash(npm test)"], "{:?}", info.allow);
     assert!(info.deny.iter().any(|d| d.ends_with("/approval.json)")), "the record is closed to the run");
+    for g in ["commit", "push", "checkout", "config"] { assert!(info.deny.contains(&format!("Bash(git {g}:*)")), "git {g}"); }
     assert!(info.deny.contains(&format!("Edit({}/**)", crate::claude::rule_path(&dir))));
     assert_ne!(info.permission_mode.as_deref(), Some(crate::settings::BYPASS));
     // The plan changed since the review: none of its commands run without asking.
@@ -646,8 +656,12 @@ async fn a_build_task_may_run_only_its_approved_commands_and_not_write_the_proje
     let full = seen.lock().unwrap()[3].clone();
     assert!(full.deny.is_empty() && full.allow.is_empty() && full.permission_mode.as_deref() == Some(crate::settings::BYPASS));
     assert_eq!(crate::claude::run_limits("mado").total, None);
+    // Continued by hand it would run in the user's own folder: the chat is a record, closed.
+    let e = crate::api::send_text(st.clone(), chat.id.clone(), "go on".into()).await.unwrap_err();
+    assert!(crate::tr::classify_in(false, &e).message.contains("record of a build task"), "{e}");
     std::fs::remove_dir_all(dir).unwrap();
-    std::fs::remove_dir_all(lane).unwrap();
+    std::fs::remove_dir_all(other).unwrap();
+    std::fs::remove_dir_all(record_dir(&pid).unwrap()).unwrap();
 }
 
 #[test]

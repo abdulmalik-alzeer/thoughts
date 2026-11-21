@@ -330,6 +330,7 @@ export default {
     'mado.task.failed': 'Failed',
     'mado.task.conflict': 'Clashes with other work',
     'mado.task.skipped': 'Skipped',
+    'mado.chat.buildRecord': 'This is the record of a build task: what the app and its assistant did in a copy of your project. It cannot be continued here; to change the work, retry the task from the Plan view.',
   },
   ar: {
     'mado.entry': 'الخطة',
@@ -690,5 +691,6 @@ export default {
     'mado.task.failed': 'فشلت',
     'mado.task.conflict': 'تتعارض مع عمل آخر',
     'mado.task.skipped': 'تُخطّيت',
+    'mado.chat.buildRecord': 'هذه سجلّ مهمة بناء: ما فعله التطبيق ومساعده في نسخة من مشروعك. لا يمكن متابعتها هنا؛ لتغيير العمل أعد محاولة المهمة من عرض الخطة.',
   },
 };
