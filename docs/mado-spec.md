@@ -143,9 +143,11 @@ The window refetches; it does not trust the event's payload.
   be asked, and the only allow rules are `Edit(<project>/mado/**)`; the run loads none of the user's or the project's
   own Claude Code settings (`--setting-sources ""`), so no allow rule of theirs widens it. Second layer: deny rules
   for every name at the top of the project that is not `mado` (each entry there, `*.*`, names of 1–3 and 5+ characters,
-  four-letter names differing from `mado` in a letter; `mado::write_deny`), and for the daemon files. Whether the
-  project's volume ignores letter case is probed (`mado::ignores_case`): if it does, every rule is also given in every
-  case (as for other runs); if it tells cases apart, rules stay exact and every other spelling of `mado` is denied. As a third, the
+  four-letter names differing from `mado` in a letter; `mado::write_deny`), and for the daemon files. The deny rules
+  are always also given in every letter case (fail closed), except those naming another spelling of `mado`, which stay
+  exact. Whether the project's volume ignores case is probed (`mado::ignores_case`); only when it positively does is
+  the allow rule folded too and other spellings of `mado` left alone (they are the same folder); otherwise (case-telling,
+  or the probe could not tell) the allow stays exact and every other spelling of `mado` is denied. As a third, the
   daemon notes what changed outside `mado/` during the run (`git status` in a repository, else a walk of sizes and
   times capped at 20 000 entries, said when the cap is hit), tells the user in the step's chat and puts it on the step
   as `strayed`. Nothing is put back. Always Claude Code (unless full access). One chat per step,

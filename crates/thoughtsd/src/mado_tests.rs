@@ -60,35 +60,40 @@ fn tops_of(rules: &[String], p: &str) -> Vec<String> {
 }
 
 #[test]
-fn the_deny_layer_follows_whether_the_volume_tells_letter_case_apart() {
+fn the_deny_layer_fails_closed_whatever_the_volume_says_about_letter_case() {
     let dir = tmp("cases");
     std::fs::create_dir_all(dir.join("mado")).unwrap();
     std::fs::write(dir.join("README.md"), "x").unwrap();
     let p = crate::claude::rule_path(&dir);
+    let exact_allow = vec![format!("Edit({p}/mado/**)"), "Edit(./mado/**)".to_string()];
 
-    // A volume that tells cases apart: only `mado` exactly is open; every other spelling is closed,
-    // and nothing is folded (a folded allow would open a sibling `MADO/`).
-    let (deny, allow) = write_rules_for(&dir, false);
-    assert_eq!(allow, vec![format!("Edit({p}/mado/**)"), "Edit(./mado/**)".to_string()]);
-    let tops = tops_of(&deny, &p);
-    assert!(!tops.iter().any(|t| seg_match(t, "mado")), "mado itself is closed");
-    for name in ["Mado", "MADO", "mAdO", "madO", "README.md", "made", "src"] { assert!(tops.iter().any(|t| seg_match(t, name)), "{name} is left open"); }
-    assert!(!deny.iter().any(|d| d.contains("[Mm]")), "no folded rule on a case-telling volume");
-    // An existing sibling spelled differently is closed by its own name too.
-    let (deny, _) = write_rules_for(&dir, false);
-    assert!(deny.contains(&format!("Edit({p}/README.md/**)")));
+    // Case-telling, and a probe that could not tell (fails closed the same way): the deny list is
+    // folded anyway, other spellings of `mado` are denied exactly, and the allow stays exact.
+    for ignores in [Some(false), None] {
+        let (deny, allow) = write_rules_for(&dir, ignores);
+        assert_eq!(allow, exact_allow, "{ignores:?}");
+        let tops = tops_of(&deny, &p);
+        assert!(!tops.iter().any(|t| seg_match(t, "mado")), "{ignores:?}: mado itself is closed by {:?}", tops.iter().find(|t| seg_match(t, "mado")));
+        for name in ["Mado", "MADO", "mAdO", "madO", "README.md", "readme.MD", "made", "src"] { assert!(tops.iter().any(|t| seg_match(t, name)), "{ignores:?}: {name} is left open"); }
+        assert!(deny.iter().any(|d| d.contains("[Rr][Ee][Aa][Dd][Mm][Ee]")), "{ignores:?}: deny rules are folded");
+        assert!(deny.iter().any(|d| d.contains("[Ss][Tt][Aa][Tt][Ee]")), "{ignores:?}: the daemon files are denied in every case");
+        assert!(deny.contains(&format!("Edit({p}/MADO/**)")));
+    }
 
-    // A volume that ignores case: the folded forms are there (README.MD is README.md), and no spelling of
-    // `mado` is closed — they are all the one plan folder.
-    let (deny, allow) = write_rules_for(&dir, true);
+    // A volume positively known to ignore case: allow folded too, and no spelling of `mado` is closed.
+    let (deny, allow) = write_rules_for(&dir, Some(true));
     assert!(allow.iter().any(|a| a.contains("[Mm][Aa][Dd][Oo]/**")), "{allow:?}");
     let tops = tops_of(&deny, &p);
     for name in ["mado", "MADO", "Mado"] { assert!(!tops.iter().any(|t| seg_match(t, name)), "{name} is closed on a case-ignoring volume"); }
-    assert!(deny.iter().any(|d| d.contains("[Rr][Ee][Aa][Dd][Mm][Ee]")), "README is closed in every case");
+    assert!(tops.iter().any(|t| seg_match(t, "readme.MD")));
 
-    // The probe agrees with the volume the test runs on.
-    let flipped = dir.join("readme.MD");
-    assert_eq!(ignores_case(&dir), flipped.exists());
+    // The probe: on the volume the test runs on it agrees with a plain lookup; an empty folder named
+    // with no letters gives nothing to probe with; a missing folder is an error (None).
+    assert_eq!(ignores_case(&dir), Some(dir.join("readme.MD").exists()));
+    let bare = tmp("x").join("123");
+    std::fs::create_dir_all(&bare).unwrap();
+    assert_eq!(ignores_case(&bare), None);
+    assert_eq!(ignores_case(&dir.join("no-such-folder")), None);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -469,7 +474,7 @@ async fn a_step_run_may_write_only_mado_and_has_no_commands_tools_or_bypass() {
     // None of the top-level patterns names `mado` (in any case); each other four-letter name is closed.
     let tops: Vec<String> = info.deny.iter().filter_map(|d| d.strip_prefix(&format!("Edit({p}/"))).map(|r| r.trim_end_matches(')').trim_end_matches("/**").to_string()).filter(|r| !r.contains('/')).collect();
     // (Other spellings of `mado` are the same folder only on a volume that ignores case.)
-    let spellings: &[&str] = if ignores_case(&dir) { &["mado", "MADO", "Mado"] } else { &["mado"] };
+    let spellings: &[&str] = if ignores_case(&dir) == Some(true) { &["mado", "MADO", "Mado"] } else { &["mado"] };
     for name in spellings { assert!(!tops.iter().any(|t| seg_match(t, name)), "{name} is closed by {:?}", tops.iter().find(|t| seg_match(t, name))); }
     for name in ["made", "xado", "m-do", "mad0", "docs", "a", "ab.c", "longer", "src"] { assert!(tops.iter().any(|t| seg_match(t, name)), "{name} is left open"); }
     assert!(info.system.contains("This step: the BRIEF") && info.system.contains("You write only inside `mado/`"), "{}", info.system);

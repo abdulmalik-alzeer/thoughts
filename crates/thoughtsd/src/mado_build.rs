@@ -749,7 +749,7 @@ fn usage_percent(pid: &str) -> Option<f64> {
 async fn governor_reason(state: &AppState, pid: &str) -> Option<String> {
     if crate::spend::reached(state).await { return Some(tr("mado_build.hold_spend", &[])); }
     if crate::spend::plan_limit_json(state)["reached"] == true { return Some(tr("mado_build.hold_plan", &[])); }
-    let limit = state.settings.read().await.spending.build_hold_percent;
+    let limit = state.settings.read().await.spending.build_hold();
     let pct = usage_percent(pid)?;
     (pct >= f64::from(limit)).then(|| tr("mado_build.hold_usage", &[("percent", &format!("{}", pct.floor() as i64)), ("limit", &limit.to_string())]))
 }

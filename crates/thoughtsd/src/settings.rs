@@ -188,12 +188,14 @@ pub struct SpendingSettings {
     /// What the usage page's API-price figures cover: only the runs the app starts (false), or also
     /// every Claude Code and Codex session on this computer, read from their folders (`meter.rs`).
     pub whole_computer: bool,
-    /// A MADO build holds new lanes while this share (percent) of the plan's current usage window is used (`mado_build.rs`).
-    pub build_hold_percent: u8,
+    /// A MADO build holds new lanes while this share (percent) of the plan's current usage window is used
+    /// (`mado_build.rs`); `None`: the default (`build_hold`). A save that does not name it keeps the one in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_hold_percent: Option<u8>,
 }
 
 impl Default for SpendingSettings {
-    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false, build_hold_percent: 80 } }
+    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false, build_hold_percent: None } }
 }
 
 impl SpendingSettings {
@@ -206,9 +208,12 @@ impl SpendingSettings {
             self.monthly_limit_usd = Some((l * 100.0).round() / 100.0);
         }
         if !(50..=95).contains(&self.warn_percent) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
-        if !(10..=100).contains(&self.build_hold_percent) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
+        if self.build_hold_percent.map_or(false, |p| !(10..=100).contains(&p)) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
         Ok(())
     }
+    pub const BUILD_HOLD_DEFAULT: u8 = 80;
+    /// The share of the usage window at which a MADO build holds new lanes.
+    pub fn build_hold(&self) -> u8 { self.build_hold_percent.unwrap_or(Self::BUILD_HOLD_DEFAULT) }
 }
 
 /// The keyboard shortcut that opens the quick capture box from any app. Only the desktop app reads
@@ -794,6 +799,8 @@ impl Settings {
             if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) { anyhow::bail!("the Codex program was not found at {b}"); }
         }
 
+        // A window that does not know the build setting (or leaves it out) keeps the one in force.
+        if self.spending.build_hold_percent.is_none() { self.spending.build_hold_percent = old.spending.build_hold_percent; }
         self.spending.sanitize()?;
 
         self.search.extension_repo = self.search.extension_repo.trim().to_string();
@@ -1068,6 +1075,25 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_that_leaves_out_the_build_hold_keeps_the_one_in_force() {
+        let mut old = Settings::default();
+        assert_eq!(old.spending.build_hold(), 80);
+        old.spending.build_hold_percent = Some(60);
+        // The window sends spending without the field (an older page, or one that never shows it).
+        let mut new: Settings = serde_json::from_value(serde_json::json!({"spending": {"monthlyLimitUsd": null, "warnPercent": 80}})).unwrap();
+        new.sanitize_update(&old).unwrap();
+        assert_eq!(new.spending.build_hold(), 60);
+        // Named, it changes; out of range, refused.
+        let mut new: Settings = serde_json::from_value(serde_json::json!({"spending": {"warnPercent": 80, "buildHoldPercent": 90}})).unwrap();
+        new.sanitize_update(&old).unwrap();
+        assert_eq!(new.spending.build_hold(), 90);
+        let mut bad: Settings = serde_json::from_value(serde_json::json!({"spending": {"warnPercent": 80, "buildHoldPercent": 5}})).unwrap();
+        assert!(bad.sanitize_update(&old).is_err());
+        // It travels to the window under its contract name.
+        assert_eq!(serde_json::to_value(&old).unwrap()["spending"]["buildHoldPercent"], 60);
+    }
 
     #[test]
     fn permission_modes_are_allow_listed() {

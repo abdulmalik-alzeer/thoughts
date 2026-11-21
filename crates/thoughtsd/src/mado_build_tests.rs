@@ -395,7 +395,7 @@ async fn the_governor_holds_new_lanes_above_the_threshold_and_goes_on_by_itself(
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(ran.load(Ordering::SeqCst), 0, "nothing started while holding");
     // The usage going down (here: a higher threshold of the user's) lets it go on by itself.
-    p.st.settings.write().await.spending.build_hold_percent = 95;
+    p.st.settings.write().await.spending.build_hold_percent = Some(95);
     let b = until(&p, "done", |b| b.status == BuildStatus::Done).await;
     assert!(!b.governor.holding && b.governor.reason.is_none());
     assert_eq!(ran.load(Ordering::SeqCst), 1);
