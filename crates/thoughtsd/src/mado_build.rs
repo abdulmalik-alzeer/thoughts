@@ -66,7 +66,11 @@ const RECHECK: Duration = Duration::from_millis(50);
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum BuildStatus { #[default] Idle, Running, Paused, Waiting, Failed, Done, Stopped }
+pub enum BuildStatus { #[default] Idle, Running, Paused, Waiting, Failed, Done, Stopped,
+    /// Round 0.4.0: after the last wave, the started product's screens are looked at (`finish`).
+    Checking,
+    /// Round 0.4.0: a fresh run reviews the joined product, and `must` findings are fixed (`finish`).
+    Reviewing }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -112,6 +116,12 @@ pub struct BuildWave {
     /// The run that fixes what those checks found (beyond the contract's shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fix_chat_id: Option<String>,
+    /// Round 0.4.0: the plan's `verify` commands passed in the build's copy after this wave.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub verified: bool,
+    /// Round 0.4.0: the run fixing a failed `verify` (the latest one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_fix_chat_id: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -152,19 +162,28 @@ pub struct BuildState {
     /// When the finished build was brought into the user's branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landed_at: Option<String>,
+    /// Round 0.4.0: the screen check after the last wave (`finish`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screens: Option<finish::BuildScreens>,
+    /// Round 0.4.0: the review of the joined product after the last wave (`finish`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<finish::BuildReview>,
 }
 
 impl Default for BuildState {
     fn default() -> Self {
         BuildState { version: 1, status: BuildStatus::Idle, branch: String::new(), base: String::new(), started_at: None, waves: vec![],
-            governor: Governor::default(), plan_hash: String::new(), number: 0, base_commit: String::new(), message: None, landed_at: None }
+            governor: Governor::default(), plan_hash: String::new(), number: 0, base_commit: String::new(), message: None, landed_at: None,
+            screens: None, review: None }
     }
 }
 
 impl BuildState {
     fn lane_mut(&mut self, wi: usize, li: usize) -> Option<&mut BuildLane> { self.waves.get_mut(wi)?.lanes.get_mut(li) }
     fn task_mut(&mut self, wi: usize, li: usize, ti: usize) -> Option<&mut BuildTask> { self.lane_mut(wi, li)?.tasks.get_mut(ti) }
-    fn under_way(&self) -> bool { matches!(self.status, BuildStatus::Running | BuildStatus::Paused | BuildStatus::Waiting) }
+    fn under_way(&self) -> bool { matches!(self.status, BuildStatus::Running | BuildStatus::Paused | BuildStatus::Waiting | BuildStatus::Checking | BuildStatus::Reviewing) }
+    /// Working by itself right now (a wave, the screen check, the review).
+    fn active(&self) -> bool { matches!(self.status, BuildStatus::Running | BuildStatus::Checking | BuildStatus::Reviewing) }
 }
 
 // ---------- where things are ----------
@@ -370,7 +389,7 @@ fn copy_docs(project: &Path, wt: &Path, full: bool) -> anyhow::Result<()> {
         _ => {}
     }
     let mut names: Vec<String> = ["brief.md", "spec.md", "tech.md", "design.md", "plan.json", "flow.graph.json", "architecture.graph.json", "schema.graph.json",
-        "design/tokens.json", "design/styles.json"].iter().map(|n| n.to_string()).collect();
+        "design/tokens.json", "design/styles.json", "conventions.md"].iter().map(|n| n.to_string()).collect();
     if let Ok(rd) = std::fs::read_dir(src.join("design/screens")) {
         for e in rd.flatten().take(400) {
             let n = e.file_name().to_string_lossy().to_string();
@@ -447,7 +466,8 @@ async fn check_ready(state: &AppState, pid: &str, project: &Path, commit: bool) 
     if !mado::approval_matches(&approval, &bytes) { return Err(crate::tr::err("mado_build.plan_changed", &[])); }
     let plan: PlanDoc = serde_json::from_slice(&bytes).map_err(|_| crate::tr::err("mado_build.plan_invalid", &[("why", "plan.json")]))?;
     if let Some(why) = plan_problem(&plan) { return Err(crate::tr::err("mado_build.plan_invalid", &[("why", &why)])); }
-    if plan.setup.iter().flatten().chain(plan.tasks.iter().flat_map(|t| t.acceptance.iter())).filter(|c| !c.trim().is_empty()).any(|c| !approval.commands.contains(c)) {
+    // Every command the build may run (set-up, checks, `verify`, `run.start`) is one the user was shown and approved.
+    if plan.all_commands().into_iter().any(|c| !approval.commands.contains(c)) {
         return Err(crate::tr::err("mado_build.plan_changed", &[]));
     }
     let branch = crate::git::current_branch(state, project).await.map_err(|_| crate::tr::err("mado_build.no_branch", &[]))?;
@@ -558,14 +578,14 @@ pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) 
         }
         crate::log::ok_or_warn("mado build: the plan's documents were not copied", copy_docs(&project, &build_wt(pid)?, full(state).await));
         let waves = mado::waves(&r.plan).into_iter().map(|w| BuildWave {
-            status: TaskStatus::Pending, checked: false, fix_chat_id: None,
+            status: TaskStatus::Pending, checked: false, fix_chat_id: None, verified: false, gate_fix_chat_id: None,
             lanes: w.lanes.into_iter().map(|l| BuildLane { id: l.id, status: TaskStatus::Pending, fix_chat_id: None,
                 tasks: l.tasks.into_iter().map(|id| BuildTask { id, ..Default::default() }).collect() }).collect(),
         }).collect();
         let b = BuildState {
             version: 1, status: BuildStatus::Running, branch, base: r.branch, started_at: Some(chrono::Utc::now().to_rfc3339()), waves,
             governor: Governor { max_parallel: max_parallel.unwrap_or(DEFAULT_PARALLEL).clamp(1, MAX_PARALLEL), ..Default::default() },
-            plan_hash: r.hash, number: n, base_commit: r.head, message: None, landed_at: None,
+            plan_hash: r.hash, number: n, base_commit: r.head, message: None, landed_at: None, screens: None, review: None,
         };
         save_build(&project, &b)?;
         b
@@ -578,9 +598,11 @@ pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) 
 
 pub async fn pause(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState> {
     let project = project_of(state, pid).await?;
-    let r = update(pid, &project, |b| if b.status == BuildStatus::Running { b.status = BuildStatus::Paused; true } else { false }).await?
+    let r = update(pid, &project, |b| if b.active() { b.status = BuildStatus::Paused; true } else { false }).await?
         .ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
     if !r { return Err(not_now(&project)); }
+    // A started product (the screen check) is stopped at once; it starts again on resume.
+    finish::end_app(pid).await;
     mado::tell(state, pid, "build").await;
     Ok(load_build(&project)?.unwrap_or_default())
 }
@@ -610,13 +632,15 @@ pub async fn stop(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState
         b.governor.holding = false;
         b.governor.reason = None;
         let mut chats = vec![];
-        for w in &b.waves { if let Some(c) = &w.fix_chat_id { chats.push(c.clone()); } for l in &w.lanes {
+        if let Some(r) = &b.review { chats.extend(r.chat_id.iter().chain(r.fix_chat_id.iter()).cloned()); }
+        for w in &b.waves { chats.extend(w.fix_chat_id.iter().chain(w.gate_fix_chat_id.iter()).cloned()); for l in &w.lanes {
             if let Some(c) = &l.fix_chat_id { chats.push(c.clone()); }
             for t in &l.tasks { if matches!(t.status, TaskStatus::Running | TaskStatus::Checking) { if let Some(c) = &t.chat_id { chats.push(c.clone()); } } }
         } }
         Some(chats)
     }).await?.ok_or_else(|| crate::tr::err("mado_build.none", &[]))?.ok_or_else(|| not_now(&project))?;
     for c in chats { if let Some(k) = state.runs.lock().await.remove(&c) { let _ = k.send(()); } }
+    finish::end_app(pid).await;
     crate::log::info("mado build: stopped by the user");
     mado::tell(state, pid, "build").await;
     if live_of(pid).is_empty() { cleanup_stopped(state, &project, pid).await; }
@@ -753,21 +777,37 @@ async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
     let project = engine_project_of(state, pid).await?;
     let mut spawn: Vec<(usize, usize)> = vec![];
     let mut check_wave: Option<usize> = None;
-    let (mut recheck, mut finished) = (false, None);
+    let (mut recheck, mut finished, mut finishing) = (false, None, false);
     {
         let l = lock_of(&STATE_LOCKS, pid);
         let _g = l.lock().await;
         let Some(mut b) = load_build(&project)? else { return Ok(()) };
         let before = b.clone();
         let live = live_of(pid);
+        // The plan as approved: whether waves have a `verify` gate, and what follows the last wave.
+        let plan = snapshot(pid, &b.plan_hash).ok();
+        let gate = plan.as_ref().map_or(false, finish::has_verify);
+        // The screen check or the review was under way and nobody works on it (a restart): it goes on.
+        if matches!(b.status, BuildStatus::Checking | BuildStatus::Reviewing) && !live.contains(finish::FINISH) { finishing = true; }
         if b.status == BuildStatus::Running {
             loop {
                 let Some(wi) = b.waves.iter().position(|w| w.status != TaskStatus::Done) else {
-                    b.status = BuildStatus::Done;
-                    b.message = None;
-                    b.governor.holding = false;
-                    b.governor.reason = None;
-                    finished = Some(b.clone());
+                    // Every wave is in. What a 0.4.0 plan asks for after it (the screen check, the
+                    // review) comes next; a plan without it is done, as before.
+                    match plan.as_ref().and_then(|p| finish::next_phase(&b, p)) {
+                        Some(phase) => {
+                            b.status = phase;
+                            b.message = None;
+                            if !live.contains(finish::FINISH) { finishing = true; }
+                        }
+                        None => {
+                            b.status = BuildStatus::Done;
+                            b.message = None;
+                            b.governor.holding = false;
+                            b.governor.reason = None;
+                            finished = Some(b.clone());
+                        }
+                    }
                     break;
                 };
                 let max = b.governor.max_parallel.clamp(1, MAX_PARALLEL) as usize;
@@ -775,8 +815,9 @@ async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
                 // A lane marked running with nobody working on it (a restart, a worker gone): it starts again.
                 for (li, lane) in w.lanes.iter_mut().enumerate() { if lane.status == TaskStatus::Running && !live.contains(&key(wi, li)) { lane.status = TaskStatus::Pending; } }
                 if w.lanes.iter().all(|l| l.status == TaskStatus::Done) {
-                    if w.checked { w.status = TaskStatus::Done; continue; }
-                    // Every lane is in: the wave's checks run once more, together, in the build's worktree.
+                    if w.checked && (w.verified || !gate) { w.status = TaskStatus::Done; continue; }
+                    // Every lane is in: the wave's checks run once more, together, in the build's
+                    // worktree, then the plan's `verify` commands (the gate of a 0.4.0 plan).
                     if !live.contains(&wave_key(wi)) { check_wave = Some(wi); }
                     w.status = TaskStatus::Running;
                     break;
@@ -801,26 +842,32 @@ async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
                 }
                 break;
             }
-        } else if b.governor.holding {
+        } else if b.governor.holding && !matches!(b.status, BuildStatus::Checking | BuildStatus::Reviewing) {
+            // (While checking or reviewing, the finishing worker holds and releases the governor itself.)
             b.governor.holding = false;
             b.governor.reason = None;
         }
-        b.governor.running = (live.len() + spawn.len() + usize::from(check_wave.is_some())) as u32;
+        b.governor.running = (live.len() + spawn.len() + usize::from(check_wave.is_some()) + usize::from(finishing)) as u32;
         for (wi, li) in &spawn { live_add(pid, &key(*wi, *li)); }
         if let Some(wi) = check_wave { live_add(pid, &wave_key(wi)); }
+        if finishing { live_add(pid, finish::FINISH); }
         if b != before { save_build(&project, &b)?; }
     }
-    if let Some(b) = finished {
-        crate::log::info(format!("mado build {}: done", b.number));
-        let gl = lock_of(&GIT_LOCKS, pid);
-        let _g = gl.lock().await;
-        cleanup(state, &project, pid, &b, false).await;
-    }
+    if let Some(b) = finished { done_cleanup(state, pid, &project, &b).await; }
     mado::tell(state, pid, "build").await;
     for (wi, li) in spawn { tokio::spawn(lane_worker(state.clone(), pid.to_string(), project.clone(), wi, li)); }
     if let Some(wi) = check_wave { tokio::spawn(wave_worker(state.clone(), pid.to_string(), project.clone(), wi)); }
+    if finishing { tokio::spawn(finish::finish_worker(state.clone(), pid.to_string(), project.clone())); }
     if recheck { schedule_recheck(state.clone(), pid.to_string()); }
     Ok(())
+}
+
+/// A build just done: its worktrees and lane branches go (its branch stays, for `land`).
+async fn done_cleanup(state: &AppState, pid: &str, project: &Path, b: &BuildState) {
+    crate::log::info(format!("mado build {}: done", b.number));
+    let gl = lock_of(&GIT_LOCKS, pid);
+    let _g = gl.lock().await;
+    cleanup(state, project, pid, b, false).await;
 }
 
 fn schedule_recheck(state: Arc<AppState>, pid: String) {
@@ -987,7 +1034,8 @@ async fn run_task(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSta
         let session = match &earlier { Some(c) => state.chats.with(c, |c| c.session_id.clone()).await.flatten(), None => None };
         let (chat, brief, resume) = match (earlier, session, failure.as_deref().filter(|f| !f.trim().is_empty())) {
             (Some(c), Some(sid), Some(f)) => (c, retry_brief(task, f), Some(sid)),
-            _ => (new_chat(state, pid, &task.id, &format!("{} — {}", tr("mado_build.chat_title", &[]), one_line(&task.title, 80))).await, task_brief(task, plan, failure.as_deref()), None),
+            _ => (new_chat(state, pid, &task.id, &format!("{} — {}", tr("mado_build.chat_title", &[]), one_line(&task.title, 80))).await,
+                task_brief(task, plan, failure.as_deref(), finish::conventions(project, full(state).await).as_deref()), None),
         };
         update(pid, project, |b| if let Some(t) = b.task_mut(wi, li, ti) { t.attempts += 1; t.status = TaskStatus::Running; t.chat_id = Some(chat.clone()); t.commit = None; }).await?;
         mado::tell(state, pid, "build").await;
@@ -1010,6 +1058,15 @@ async fn run_task(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSta
             }
         }
         if status_now(project) == BuildStatus::Stopped { return Ok(TaskEnd::Stopped); }
+        // Files of a `contracts` or `tests` task that is done are locked: a later task may not change
+        // them. Its changes to them are undone, and it goes back to the assistant like a failed check.
+        let locked = load_build(project)?.map(|b| finish::locked_by(plan, &b, Some(&task.id))).unwrap_or_default();
+        let touched = finish::undo_locked(state, wt, &locked).await?;
+        if !touched.is_empty() {
+            note_fail(pid, project, at, &finish::locked_note(&touched)).await?;
+            mado::tell(state, pid, "build").await;
+            continue;
+        }
         let (sha, changed) = commit_task(state, wt, b.number, task).await?;
         let outside: Vec<String> = changed.iter().filter(|f| !task.owns.iter().any(|p| glob_match(p, f))).take(10).cloned().collect();
         let note = if changed.is_empty() { Some(tr("mado_build.no_change", &[])) }
@@ -1038,9 +1095,16 @@ fn one_line(s: &str, n: usize) -> String { s.split_whitespace().collect::<Vec<_>
 /// A chat of kind `mado-build` for task `task_id`: its `meta.mado` tells `mado::prepare_run` whose
 /// approved acceptance commands the run may use.
 async fn new_chat(state: &AppState, pid: &str, task_id: &str, title: &str) -> String {
+    new_chat_with(state, pid, json!({"mado": {"projectId": pid, "taskId": task_id}}), title, false).await
+}
+
+/// A chat of kind `mado-build` with `meta`; `read_only`: a run that may only read (the review).
+/// Its model and effort are the project's (`mado::run_options`), recorded with the chat.
+async fn new_chat_with(state: &AppState, pid: &str, meta: Value, title: &str, read_only: bool) -> String {
+    let (model, effort) = options_for(state, pid).await;
     let c = Chat { kind: "mado-build".into(), title: title.to_string(), project_id: Some(pid.to_string()),
-        options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() },
-        meta: json!({"mado": {"projectId": pid, "taskId": task_id}}), ..Default::default() };
+        options: RunOptions { permission_mode: Some(mode_of(read_only).into()), model, effort, ..Default::default() },
+        meta, ..Default::default() };
     let id = c.id.clone();
     state.chats.insert(c).await;
     id
@@ -1067,11 +1131,26 @@ fn deny_for(project: &Path, pid: &str, b: &BuildState, wt: &Path) -> Vec<String>
     d
 }
 
+/// The permission mode of a build's run: edits are accepted (they are confined by the deny rules
+/// and the worktree), except for a run that only reads, which gets Claude Code's `default` (an
+/// edit would have to be asked for, and nobody can be asked).
+fn mode_of(read_only: bool) -> &'static str { if read_only { "default" } else { "acceptEdits" } }
+
+#[cfg(test)]
+static TEST_OPTIONS: std::sync::Mutex<Vec<(String, (Option<String>, Option<String>))>> = std::sync::Mutex::new(Vec::new());
+
+/// The model and effort of every run of this project's build (`mado::run_options`).
+async fn options_for(state: &AppState, pid: &str) -> (Option<String>, Option<String>) {
+    #[cfg(test)]
+    if let Some(o) = TEST_OPTIONS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(p, _)| p == pid).map(|(_, o)| o.clone()) { return o; }
+    mado::run_options(state, pid).await
+}
+
 const SYSTEM: &str = "This run is one task of a build the Thoughts app runs by itself from a plan the user approved. Nobody is watching it: \
 do not ask questions, do the work the task describes, and end with a short plain-language summary of what you did. \
 Work only in the current folder, by reading and editing files: you have no shell and run no commands. The app runs the checks and commits your work itself.";
 
-fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>) -> String {
+fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>, conventions: Option<&str>) -> String {
     // The task's words come from plan.json: quoted as data, apart from the app's own instructions.
     let mut out = format!("Task {}: {}\n\nWhat the task is (from the plan):\n{}\n", task.id,
         crate::mado_prompts::inline(&one_line(&task.title, 200)), crate::mado_prompts::block(&task.description.chars().take(8000).collect::<String>()));
@@ -1081,6 +1160,8 @@ fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>) -> String 
     let deps: Vec<String> = task.depends_on.iter().filter_map(|d| plan.tasks.iter().find(|t| &t.id == d)).map(|t| format!("{} ({})", t.id, crate::mado_prompts::inline(&one_line(&t.title, 100)))).collect();
     if !deps.is_empty() { out.push_str(&format!("\nIt builds on work already done: {}.\n", deps.join(", "))); }
     out.push_str("\nRead first, for context (copies of the plan's documents; do not change them): mado/brief.md, mado/spec.md, mado/tech.md, mado/design.md, mado/plan.json, and mado/design/ for the look.\n");
+    if let Some(c) = conventions { out.push_str(&prompts::conventions(c)); }
+    if task.locks() { out.push_str(prompts::LOCKING_TASK); }
     out.push_str("\nStay inside the files you own; if you must touch another file, say so in your final message.\n");
     out.push_str("You cannot run commands in this task. When you finish, the app runs the commands above itself, in this folder; \
         if one fails it comes back to you in this chat with the command and what it printed.\n");
@@ -1102,7 +1183,12 @@ fn retry_brief(task: &PlanTask, failure: &str) -> String {
 /// Start a run in `cwd` and wait for it to end. `Err` carries what went wrong, for the user and the next try.
 #[allow(clippy::too_many_arguments)]
 async fn run_and_wait(state: &Arc<AppState>, project: &Path, pid: &str, chat: &str, cwd: &Path, brief: &str, resume: Option<String>, extra_deny: Vec<String>) -> Result<(), String> {
-    let _ = pid;
+    run_and_wait_as(state, project, pid, chat, cwd, brief, resume, extra_deny, false, SYSTEM).await
+}
+
+/// `run_and_wait` with the run's mode (`read_only`: `mode_of`) and its instructions.
+#[allow(clippy::too_many_arguments)]
+async fn run_and_wait_as(state: &Arc<AppState>, project: &Path, pid: &str, chat: &str, cwd: &Path, brief: &str, resume: Option<String>, extra_deny: Vec<String>, read_only: bool, system: &str) -> Result<(), String> {
     if !full(state).await {
         // The worktree is a checkout of the trusted project: its assistant settings must be ones the user already saw.
         if let Err(e) = crate::trust::require(project) { return Err(crate::tr::classify(&e).message); }
@@ -1112,10 +1198,11 @@ async fn run_and_wait(state: &Arc<AppState>, project: &Path, pid: &str, chat: &s
     }
     state.chats.update(chat, |c| c.messages.push(Msg::new("user", brief))).await;
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    let (model, effort) = options_for(state, pid).await;
     let spec = RunSpec {
         chat_id: chat.to_string(), prompt: brief.to_string(), cwd: cwd.to_path_buf(), add_dirs: vec![],
-        options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, resume,
-        append_system: Some(SYSTEM.into()), extra_deny,
+        options: RunOptions { permission_mode: Some(mode_of(read_only).into()), model, effort, ..Default::default() }, resume,
+        append_system: Some(system.into()), extra_deny,
     };
     let done: claude::OnDone = Box::new(move |_st, ok| Box::pin(async move { let _ = tx.send(ok); }));
     if let Err(e) = claude::start_run(state.clone(), spec, Some(done)).await {
@@ -1343,8 +1430,8 @@ pub fn sandbox_profile(wt: &Path, project: &Path, cache: &Path, user_home: Optio
         out.push_str(")\n");
     }
     // The app's records (the approval, the plan the build was started with) beside the worktrees.
-    out.push_str(&format!("(deny file-read* file-write* (regex #\"^{}/[^/]+\\.(json|sha256|setup)$\"))\n", sb_regex(&real(&crate::paths::home()))));
-    if let Some(p) = wt_at.parent() { out.push_str(&format!("(deny file-read* file-write* (regex #\"^{}/[^/]+\\.(json|sha256|setup)$\"))\n", sb_regex(p))); }
+    out.push_str(&format!("(deny file-read* file-write* (regex #\"^{}/[^/]+\\.(json|sha256|setup|pid)$\"))\n", sb_regex(&real(&crate::paths::home()))));
+    if let Some(p) = wt_at.parent() { out.push_str(&format!("(deny file-read* file-write* (regex #\"^{}/[^/]+\\.(json|sha256|setup|pid)$\"))\n", sb_regex(p))); }
     if port != 0 { out.push_str(&format!("(deny network-outbound (remote ip \"localhost:{port}\"))\n")); }
     // The keychain (the assistant's key is kept there). TLS checks do not need it (tried: git and curl over https).
     out.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd.xpc\"))\n");
@@ -1381,31 +1468,9 @@ fn shown_output(parts: (Vec<u8>, Vec<u8>, bool)) -> String {
 /// sandbox (`sandbox_profile`). `Err` says what failed, with the end of what it printed;
 /// `CheckErr::Unapproved` when it could not be run confined at all (no try can change that).
 pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &Confinement) -> Result<(), CheckErr> {
-    // The same check every command of a run gets (`shell_guard`): not the app's own folder. A guard: it yields to full access.
-    if !full && crate::shell_guard::blocked(cmd, &s(cwd), &crate::paths::home()) { return Err(CheckErr::Failed(tr("mado_build.check_refused", &[("cmd", &one_line(cmd, 300))]))); }
-    let (prog, args) = shell_argv(cmd);
+    let mut c = command_for(cmd, cwd, project, full, how)?;
+    c.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
     let unconfined = || CheckErr::Unapproved(tr("mado_build.no_sandbox", &[("cmd", &one_line(cmd, 300))]));
-    let mut c = if how.confined {
-        if !Path::new(SANDBOX_EXEC).is_file() { return Err(unconfined()); }
-        // The worktree and the cache are the engine's real folders, never links (a command could have planted one).
-        if !how.cache.as_os_str().is_empty() && std::fs::symlink_metadata(&how.cache).is_err() { let _ = std::fs::create_dir_all(&how.cache); }
-        if how.cache.as_os_str().is_empty() || !real_dirs(cwd, &how.cache) {
-            crate::log::warn("mado build: a worktree or the build's cache is not a plain folder; the command was not run");
-            return Err(CheckErr::Unapproved(tr("mado_build.not_plain_dirs", &[("cmd", &one_line(cmd, 300))])));
-        }
-        let profile = sandbox_profile(cwd, project, &how.cache, crate::paths::user_home().ok().as_deref(), how.port);
-        let mut c = crate::proc::command(SANDBOX_EXEC);
-        c.arg("-p").arg(profile).arg(&prog).args(&args);
-        c
-    } else {
-        let mut c = crate::proc::command(&prog);
-        c.args(&args);
-        c
-    };
-    if !how.confined && !how.cache.as_os_str().is_empty() { let _ = std::fs::create_dir_all(&how.cache); }
-    c.env_clear().envs(command_env(&how.cache)).current_dir(cwd)
-        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
-    crate::proc::own_group(&mut c);
     let mut child = match c.spawn() {
         Ok(ch) => ch,
         Err(_) if how.confined => return Err(unconfined()),
@@ -1433,6 +1498,37 @@ pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &
             Err(CheckErr::Failed(tr("mado_build.check_timeout", &[("cmd", &one_line(cmd, 300)), ("minutes", &(CHECK_LIMIT.as_secs() / 60).to_string())])))
         }
     }
+}
+
+/// The process of one of the build's own commands, not started yet: the user's shell from `cwd`,
+/// the cleared environment, its own process group, and (when `how.confined`) macOS's sandbox. Its
+/// standard streams are the caller's to set. Refused like `run_check` refuses.
+pub(crate) fn command_for(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &Confinement) -> Result<tokio::process::Command, CheckErr> {
+    // The same check every command of a run gets (`shell_guard`): not the app's own folder. A guard: it yields to full access.
+    if !full && crate::shell_guard::blocked(cmd, &s(cwd), &crate::paths::home()) { return Err(CheckErr::Failed(tr("mado_build.check_refused", &[("cmd", &one_line(cmd, 300))]))); }
+    let (prog, args) = shell_argv(cmd);
+    let unconfined = || CheckErr::Unapproved(tr("mado_build.no_sandbox", &[("cmd", &one_line(cmd, 300))]));
+    let mut c = if how.confined {
+        if !Path::new(SANDBOX_EXEC).is_file() { return Err(unconfined()); }
+        // The worktree and the cache are the engine's real folders, never links (a command could have planted one).
+        if !how.cache.as_os_str().is_empty() && std::fs::symlink_metadata(&how.cache).is_err() { let _ = std::fs::create_dir_all(&how.cache); }
+        if how.cache.as_os_str().is_empty() || !real_dirs(cwd, &how.cache) {
+            crate::log::warn("mado build: a worktree or the build's cache is not a plain folder; the command was not run");
+            return Err(CheckErr::Unapproved(tr("mado_build.not_plain_dirs", &[("cmd", &one_line(cmd, 300))])));
+        }
+        let profile = sandbox_profile(cwd, project, &how.cache, crate::paths::user_home().ok().as_deref(), how.port);
+        let mut c = crate::proc::command(SANDBOX_EXEC);
+        c.arg("-p").arg(profile).arg(&prog).args(&args);
+        c
+    } else {
+        let mut c = crate::proc::command(&prog);
+        c.args(&args);
+        c
+    };
+    if !how.confined && !how.cache.as_os_str().is_empty() { let _ = std::fs::create_dir_all(&how.cache); }
+    c.env_clear().envs(command_env(&how.cache)).current_dir(cwd);
+    crate::proc::own_group(&mut c);
+    Ok(c)
 }
 
 // ---------- commits and merges ----------
@@ -1514,9 +1610,9 @@ async fn ensure_setup(state: &AppState, pid: &str, project: &Path, hash: &str, p
 async fn hold_waiting(state: &AppState, pid: &str, project: &Path, lane: Option<(usize, usize)>, why: &str) -> anyhow::Result<()> {
     update(pid, project, |b| {
         if let Some(l) = lane.and_then(|(wi, li)| b.lane_mut(wi, li)) { if l.status == TaskStatus::Running { l.status = TaskStatus::Pending; } }
-        if b.status == BuildStatus::Running { b.status = BuildStatus::Waiting; b.message = Some(clip_note(why)); }
+        if b.active() { b.status = BuildStatus::Waiting; b.message = Some(clip_note(why)); }
     }).await?;
-    crate::log::warn("mado build: waiting for the user (set-up or a wave's checks)");
+    crate::log::warn("mado build: waiting for the user (set-up, a wave's checks, or the steps after the last wave)");
     mado::tell(state, pid, "build").await;
     Ok(())
 }
@@ -1554,9 +1650,11 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
     let _m = ml.lock().await;
     let bwt = ensure_build_wt(state, project, pid, &b).await?;
     if let Err(why) = ensure_setup(state, pid, project, &b.plan_hash, &plan, &bwt).await { return hold_waiting(state, pid, project, None, &why).await; }
+    // Checked before (the build waited on its `verify` gate, or was paused there): only the gate again.
+    if b.waves[wi].checked { return finish::verify_gate(state, pid, project, &b, &plan, wi, &bwt).await; }
     let ids: Vec<String> = b.waves[wi].lanes.iter().flat_map(|l| l.tasks.iter().map(|t| t.id.clone())).collect();
     let (task, out) = match wave_checks(state, pid, project, &b.plan_hash, &plan, &ids, &bwt).await {
-        Ok(()) => return mark_checked(pid, project, wi).await,
+        Ok(()) => { mark_checked(pid, project, wi).await?; return finish::verify_gate(state, pid, project, &b, &plan, wi, &bwt).await; }
         Err((_, CheckErr::Unapproved(why))) => return hold_waiting(state, pid, project, None, &why).await,
         Err((task, CheckErr::Failed(out))) => (task, out),
     };
@@ -1581,7 +1679,8 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
         crate::git::git_ident(state, &bwt, &["commit", "-q", "-m", &format!("MADO: wave {}, fixed after its checks", wi + 1)]).await?;
         git_safe(state, &bwt).await?;
     }
-    mark_checked(pid, project, wi).await
+    mark_checked(pid, project, wi).await?;
+    finish::verify_gate(state, pid, project, &b, &plan, wi, &bwt).await
 }
 
 async fn mark_checked(pid: &str, project: &Path, wi: usize) -> anyhow::Result<()> {
@@ -1689,13 +1788,15 @@ pub fn resume(state: Arc<AppState>) {
 pub async fn recover(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
     let Ok(project) = engine_project_of(state, pid).await else { return Ok(()) };
     let Ok(Some(b)) = load_build(&project) else { return Ok(()) };
-    if !matches!(b.status, BuildStatus::Running | BuildStatus::Paused | BuildStatus::Waiting | BuildStatus::Failed) { return Ok(()); }
+    // A product the screen check started before the daemon went away is stopped first, whatever comes next.
+    finish::end_stale_app(pid).await;
+    if !matches!(b.status, BuildStatus::Running | BuildStatus::Paused | BuildStatus::Waiting | BuildStatus::Failed | BuildStatus::Checking | BuildStatus::Reviewing) { return Ok(()); }
     // A build goes on only under the approval it was started with (the daemon's own record, never `state.json`).
     let approved = match (mado::approved_plan(state, pid).await, read_mado(&project, "plan.json")) {
         (Some(a), Ok(Some(bytes))) => a.plan_hash == b.plan_hash && mado::approval_matches(&a, &bytes),
         _ => false,
     };
-    if !approved && b.status == BuildStatus::Running {
+    if !approved && b.active() {
         update(pid, &project, |b| { b.status = BuildStatus::Waiting; b.message = Some(crate::tr::text("mado_build.plan_changed", &[])); }).await?;
         crate::log::warn(format!("mado build {}: not picked up after a restart, its plan is no longer the approved one", b.number));
         mado::tell(state, pid, "build").await;
@@ -1744,7 +1845,7 @@ pub async fn recover(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
     }).await?;
     crate::log::info(format!("mado build {}: picked up after a restart", b.number));
 
-    if status == Some(BuildStatus::Running) { tick(state.clone(), pid.to_string()).await; } else { mado::tell(state, pid, "build").await; }
+    if matches!(status, Some(BuildStatus::Running | BuildStatus::Checking | BuildStatus::Reviewing)) { tick(state.clone(), pid.to_string()).await; } else { mado::tell(state, pid, "build").await; }
     Ok(())
 }
 
@@ -1761,6 +1862,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/mado/:projectId/build/stop", post(api_stop))
         .route("/api/mado/:projectId/build/land", post(api_land))
         .route("/api/mado/:projectId/build/tasks/:id/retry", post(api_retry))
+        .route("/api/mado/:projectId/build/screens", get(finish::api_screens_get).post(finish::api_screens_post))
+        .route("/api/mado/:projectId/build/guide", get(finish::api_guide))
 }
 
 fn shown(b: &BuildState) -> R { Ok(Json(serde_json::to_value(b)?)) }
@@ -1797,6 +1900,15 @@ async fn api_retry(State(st): State<Arc<AppState>>, UrlPath((pid, id)): UrlPath<
     if !valid_id(&id) { return Err(crate::tr::err("mado_build.no_task", &[]).into()); }
     shown(&retry(&st, &pid, &id).await?)
 }
+
+/// Round 0.4.0: the `verify` gate, locked files, and what follows the last wave (the screen check,
+/// the review and its fixes), with their routes and the guide.
+#[path = "mado_build_finish.rs"]
+mod finish;
+/// The instructions of the runs `finish` starts (the app's own words; the project's text goes in as data).
+#[path = "mado_build_prompts.rs"]
+mod prompts;
+pub use finish::end_apps;
 
 #[cfg(test)]
 #[path = "mado_build_tests.rs"]
