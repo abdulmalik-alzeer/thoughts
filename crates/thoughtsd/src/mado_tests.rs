@@ -869,6 +869,39 @@ fn the_walk_outside_git_sees_changes_and_says_when_it_stopped() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[tokio::test]
+async fn a_run_cut_off_by_a_restart_is_checked_for_strays_on_the_next_start() {
+    let (st, pid, dir) = with_project("stray-restart").await;
+    let _ = start(State(st.clone()), UrlPath(pid.clone())).await.unwrap();
+    let chat = step_chat(&st, &pid, "brief").await.unwrap();
+    // The run started (its "before" kept on disk beside the approval record), then the daemon stopped under it.
+    crate::mado_stray::before_run(&st, &pid, &chat, &dir).await;
+    let kept = record_dir(&pid).unwrap().join(format!("stray-before-{chat}.json"));
+    assert!(kept.is_file());
+    std::fs::write(dir.join("README.md"), "# Shop, rewritten by the run\n").unwrap();
+    std::fs::write(dir.join("src/new.txt"), "x").unwrap();
+    std::fs::write(dir.join("mado/brief.md"), "# Brief\n").unwrap();
+    let mine = || crate::mado_stray::kept_runs().into_iter().filter(|(p, _)| *p == pid).collect::<Vec<_>>();
+    assert_eq!(mine(), [(pid.clone(), chat.clone())]);
+    // A run that is going on is not judged yet.
+    st.chats.update(&chat, |c| c.running = true).await;
+    check_cut_off_runs(&st, Some(&pid)).await;
+    assert!(kept.is_file());
+    st.chats.update(&chat, |c| c.running = false).await;
+    // The next start: compared, told in the chat and kept on the step; the "before" is gone.
+    check_cut_off_runs(&st, Some(&pid)).await;
+    let strayed = load_state(&pid, &dir.join("mado"), false).unwrap().unwrap().steps["brief"].strayed.clone().unwrap_or_default();
+    assert_eq!(strayed, ["README.md", "src/new.txt"]);
+    let c = st.chats.get(&chat).await.unwrap();
+    assert!(c.messages.iter().any(|m| m.role == "error" && m.text.contains("src/new.txt")), "the user is told in the chat");
+    assert!(!kept.exists() && mine().is_empty());
+    // A kept "before" whose chat is gone is dropped without a word.
+    crate::mado_stray::before_run(&st, &pid, "0000-gone", &dir).await;
+    check_cut_off_runs(&st, Some(&pid)).await;
+    assert!(mine().is_empty());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// A step run whose stand-in writes `brief.md` and, against its rules, files outside `mado/`.
 async fn strays(git: bool) {
     let (st, pid, dir) = with_project(if git { "stray-git" } else { "stray-walk" }).await;

@@ -168,7 +168,9 @@ The window refetches; it does not trust the event's payload.
   or the probe could not tell) the allow stays exact and every other spelling of `mado` is denied. As a third, the
   daemon notes what changed outside `mado/` during the run (`git status` in a repository, else a walk of sizes and
   times capped at 20 000 entries, said when the cap is hit), tells the user in the step's chat and puts it on the step
-  as `strayed`. Nothing is put back. Always Claude Code (unless full access). One chat per step,
+  as `strayed`. Nothing is put back. The "before" is kept beside the approval record
+  (`<home>/mado/<projectId>/stray-before-<chatId>.json`), so a run a daemon restart cut off is checked on the next
+  start (`mado::check_cut_off_runs`). Always Claude Code (unless full access). One chat per step,
   kept in `state.steps[step].chatId`, so the user can talk in it (the brief is an interview: the assistant asks,
   the user answers in that chat). Never bypass, except under full access like every other kind.
 - Kind `mado-build` (one task of a lane): cwd is the lane's worktree, may read and edit only there, and has **no shell**

@@ -186,6 +186,7 @@ pub async fn run() -> anyhow::Result<()> {
     layer_api::start(state.clone());
     // MADO builds that were under way when the daemon stopped pick up where they were.
     mado_build::resume(state.clone());
+    { let st = state.clone(); tokio::spawn(async move { mado::check_cut_off_runs(&st, None).await; }); }
     // Every library has a history of changes: one that has none yet (from before 0.0.9) gets it now.
     history::start(state.clone());
     // Changes made to the library by other programs are noticed, and recorded on their own.

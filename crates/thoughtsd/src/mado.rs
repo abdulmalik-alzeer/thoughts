@@ -872,7 +872,7 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
         spec.extra_deny.extend(deny);
         allowed = allow;
         // The backstop: what changes outside `mado/` while it runs is told to the user afterwards.
-        crate::mado_stray::before_run(state, &spec.chat_id, &project).await;
+        crate::mado_stray::before_run(state, &role.project_id, &spec.chat_id, &project).await;
     }
     let mado = mado_dir_of(&project, full)?;
     std::fs::create_dir_all(&mado)?;
@@ -908,14 +908,10 @@ pub fn after_run(state: Arc<AppState>, chat_id: String, ok: bool) -> futures::fu
     })
 }
 
-async fn settle(state: &Arc<AppState>, chat_id: &str, role: &ChatRole, meta: &Value, ok: bool) -> anyhow::Result<()> {
-    let full = state.settings.read().await.full_access();
-    let project = project_dir(state, &role.project_id).await?;
-    let mado = mado_dir_of(&project, full)?;
-    let repairing = meta["mado"]["repair"].as_bool().unwrap_or(false);
-    // What it changed outside `mado/` (the deny rules should have made that impossible): said in
-    // the chat and kept on the step. Nothing is put back. A repair turn adds to its first turn's list.
-    if let Some((list, capped)) = crate::mado_stray::after_run(state, chat_id, &project).await {
+/// What a planning run changed outside `mado/` (the deny rules should have made that impossible):
+/// said in the chat and kept on the step. Nothing is put back. A repair turn adds to its first turn's list.
+async fn report_strays(state: &AppState, chat_id: &str, role: &ChatRole, repairing: bool, found: Option<(Vec<String>, bool)>) -> anyhow::Result<()> {
+    if let Some((list, capped)) = found {
         if !list.is_empty() || capped {
             let mut text = String::new();
             if !list.is_empty() {
@@ -936,6 +932,43 @@ async fn settle(state: &Arc<AppState>, chat_id: &str, role: &ChatRole, meta: &Va
             Ok(())
         }).await?;
     }
+    Ok(())
+}
+
+/// At the start of the daemon: planning runs a restart cut off still had their "before" kept
+/// (`mado_stray`). Each is compared with the project as it is now and what changed is told and kept
+/// on its step, as after any run. (What changed since includes what anyone did while the daemon was
+/// down: the list says what to look at, never who did it.) A run that is going on is left alone; one
+/// whose project is not among the open library's is checked on a later start. `only`: one project's
+/// runs (the tests, which share one home).
+pub async fn check_cut_off_runs(state: &AppState, only: Option<&str>) {
+    for (pid, chat) in crate::mado_stray::kept_runs() {
+        if only.is_some_and(|o| o != pid) { continue; }
+        let running = state.runs.lock().await.contains_key(&chat) || state.chats.with(&chat, |c| c.running).await == Some(true);
+        if running { continue; }
+        let meta = state.chats.with(&chat, |c| c.meta.clone()).await;
+        let role = meta.as_ref().and_then(role_of).filter(|r| r.project_id == pid);
+        let (Some(meta), Some(role)) = (meta, role) else {
+            // The chat is gone (or is not this project's step): nothing left to tell.
+            crate::mado_stray::discard(&pid, &chat);
+            continue;
+        };
+        let Ok(project) = project_dir(state, &pid).await else { continue };
+        let repairing = meta["mado"]["repair"].as_bool().unwrap_or(false);
+        let found = crate::mado_stray::after_run(state, &pid, &chat, &project).await;
+        if let Err(e) = report_strays(state, &chat, &role, repairing, found).await {
+            crate::log::warn(format!("mado: the check of a run cut off by a restart ({chat}): {e:#}"));
+        }
+    }
+}
+
+async fn settle(state: &Arc<AppState>, chat_id: &str, role: &ChatRole, meta: &Value, ok: bool) -> anyhow::Result<()> {
+    let full = state.settings.read().await.full_access();
+    let project = project_dir(state, &role.project_id).await?;
+    let mado = mado_dir_of(&project, full)?;
+    let repairing = meta["mado"]["repair"].as_bool().unwrap_or(false);
+    let found = crate::mado_stray::after_run(state, &role.project_id, chat_id, &project).await;
+    report_strays(state, chat_id, role, repairing, found).await?;
     let before = meta["mado"]["before"]["status"].as_str().unwrap_or_default().to_string();
     let before_files: BTreeMap<String, String> = serde_json::from_value(meta["mado"]["before"]["files"].clone()).unwrap_or_default();
     let changed = fingerprint(&mado) != before_files;

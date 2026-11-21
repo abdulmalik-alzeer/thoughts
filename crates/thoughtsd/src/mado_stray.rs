@@ -3,6 +3,10 @@
 //! (cheaply: `git status` in a repository, a bounded walk of sizes and times outside one) and
 //! told to the user — in the step's chat and as `strayed` on the step, which keeps the step from
 //! being approved until the user dismisses it. Nothing is ever put back: the user decides.
+//!
+//! The "before" is kept on disk beside the approval record (`<thoughts home>/mado/<projectId>/
+//! stray-before-<chatId>.json`), so a run cut off by a restart of the daemon is still checked:
+//! on the next start (`mado::check_cut_off_runs`).
 
 use crate::state::AppState;
 use std::collections::BTreeMap;
@@ -16,7 +20,7 @@ pub const LIST_CAP: usize = 200;
 const SKIP: &[&str] = &[".git", "node_modules", "target", ".thoughts-search", ".Trash", ".Trashes", ".Spotlight-V100", ".fseventsd"];
 
 /// How the project stood: project-relative path → a stamp of it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Snapshot { pub files: BTreeMap<String, String>, pub capped: bool, pub git: bool }
 
 fn stamp(p: &Path) -> String {
@@ -85,21 +89,63 @@ pub fn changed(before: &Snapshot, after: &Snapshot) -> Vec<String> {
     out
 }
 
-/// What each `mado` run found when it started (kept in memory: a run cut off by a restart is not checked).
-fn kept() -> &'static std::sync::Mutex<std::collections::HashMap<String, Snapshot>> {
-    static K: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Snapshot>>> = std::sync::OnceLock::new();
-    K.get_or_init(Default::default)
+/// The most a kept "before" may weigh when it is read back (a full walk is far less).
+const MAX_KEPT: u64 = 64 * 1024 * 1024;
+const PREFIX: &str = "stray-before-";
+
+/// Where the "before" of the run of `chat_id` on project `project_id` is kept. `None` for an id
+/// that could name anything else.
+fn kept_file(project_id: &str, chat_id: &str) -> Option<std::path::PathBuf> {
+    let ok = !chat_id.is_empty() && chat_id.len() <= 64 && chat_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if !ok { return None; }
+    Some(crate::mado::record_dir(project_id)?.join(format!("{PREFIX}{chat_id}.json")))
 }
 
-pub async fn before_run(state: &AppState, chat_id: &str, dir: &Path) {
+/// Read back (and remove) what the run found when it started. `None` when the run was not watched.
+fn take(project_id: &str, chat_id: &str) -> Option<Snapshot> {
+    let f = kept_file(project_id, chat_id)?;
+    let m = std::fs::symlink_metadata(&f).ok()?;
+    let s = if m.is_file() && m.len() <= MAX_KEPT { std::fs::read(&f).ok().and_then(|b| serde_json::from_slice(&b).ok()) } else { None };
+    crate::log::ok_or_warn("mado: could not remove a run's kept snapshot", std::fs::remove_file(&f));
+    s
+}
+
+/// Drop what was kept for a run that will never be checked (its chat is gone).
+pub fn discard(project_id: &str, chat_id: &str) { let _ = take(project_id, chat_id); }
+
+/// Every run whose "before" is still kept: (project id, chat id). At the start of the daemon these
+/// are the runs a restart cut off.
+pub fn kept_runs() -> Vec<(String, String)> {
+    let root = crate::paths::home().join(crate::mado::DIR);
+    let mut out = vec![];
+    for p in std::fs::read_dir(&root).into_iter().flatten().flatten() {
+        let pid = p.file_name().to_string_lossy().to_string();
+        if crate::mado::record_dir(&pid).is_none() { continue; }
+        for f in std::fs::read_dir(p.path()).into_iter().flatten().flatten() {
+            let name = f.file_name().to_string_lossy().to_string();
+            let Some(chat) = name.strip_prefix(PREFIX).and_then(|n| n.strip_suffix(".json")) else { continue };
+            if kept_file(&pid, chat).is_some() { out.push((pid.clone(), chat.to_string())); }
+        }
+    }
+    out.sort();
+    out
+}
+
+pub async fn before_run(state: &AppState, project_id: &str, chat_id: &str, dir: &Path) {
     let s = snapshot(state, dir).await;
-    kept().lock().unwrap_or_else(|e| e.into_inner()).insert(chat_id.to_string(), s);
+    let Some(f) = kept_file(project_id, chat_id) else { return };
+    let write = || -> anyhow::Result<()> {
+        if let Some(d) = f.parent() { crate::paths::create_private_dir(d)?; }
+        crate::paths::write_atomic(&f, &serde_json::to_vec(&s)?, true)?;
+        Ok(())
+    };
+    crate::log::ok_or_warn("mado: could not keep what the project looked like before a run", write());
 }
 
 /// After the run: what changed outside `mado/` (`None` when the run was not watched), and whether
 /// the walk stopped at its cap.
-pub async fn after_run(state: &AppState, chat_id: &str, dir: &Path) -> Option<(Vec<String>, bool)> {
-    let before = kept().lock().unwrap_or_else(|e| e.into_inner()).remove(chat_id)?;
+pub async fn after_run(state: &AppState, project_id: &str, chat_id: &str, dir: &Path) -> Option<(Vec<String>, bool)> {
+    let before = take(project_id, chat_id)?;
     let after = snapshot(state, dir).await;
     let capped = before.capped || after.capped;
     // A repository made or removed meanwhile: the two cannot be compared, which is said as such.
