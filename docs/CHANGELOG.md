@@ -1,5 +1,21 @@
 # What's new in Thoughts
 
+## 0.3.1
+
+Small repairs to planning and building a project (MADO), and stricter checks before a release. Nothing new to learn. As with 0.3.0, the MADO parts have still not been seen in the real app window or run with a real assistant.
+
+### Fixed
+- **A planning run cut off by a restart is still checked.** When Thoughts starts again, it looks for files the run changed outside the `mado` folder and lists them in the step, as it does after any run. If it could not check, the step says so, and it cannot be approved until you have looked.
+- **A build continues after a restart or a change of library.** A build of a project in a library that is not the open one used to stall; now it goes on. You see it, stop it or bring it into your branch after switching to that library.
+- **Removed build copies leave nothing behind.** When a build's copy of the project is removed, the record that Thoughts trusted that folder is removed with it. Records 0.3.0 left for copies that are gone are cleared the next time a copy of that project is removed.
+
+### Behind the scenes
+- The checks run before a release now include the UI's own tests, and they stop early when the installed packages do not match the lock file.
+- A test that failed at random was fixed. The fault was in the test, not in the app.
+
+### Before you rely on it
+- **Still not seen for real.** These fixes were tested automatically only. MADO has still not been seen in the real app window, and no plan or build has yet been run with a real assistant. Everything under "Before you rely on it" in 0.3.0 still applies.
+
 ## 0.3.0
 
 Plan and build a project: Thoughts can take a software idea from a first conversation to working code in seven steps, with you reading and approving each one. Read "Before you rely on it" below: the new parts have been tested automatically and in a browser, but not yet in the real app window or with a real assistant run.
