@@ -128,9 +128,15 @@ pub fn url_port(url: &str) -> Option<u16> {
 /// `run.screens[].path`: starts with one `/` (never `//`, which would name another host), at most
 /// `MAX_PATH` characters of printable ASCII without spaces or backslashes. It is only ever put
 /// after the plan's own `url`, so it cannot lead anywhere else.
+/// No `.` or `..` part either (also percent-encoded), and never the desktop shell's own report
+/// address: the shell refuses those paths (`plain_path` in src-tauri/src/screen_check.rs), so the
+/// plan may not name them.
 pub fn screen_path_ok(path: &str) -> bool {
+    let dot = |seg: &str| { let s = seg.to_ascii_lowercase(); matches!(s.as_str(), "." | ".." | "%2e" | "%2e%2e" | ".%2e" | "%2e.") };
+    let path_part = path.split(['?', '#']).next().unwrap_or("");
     path.starts_with('/') && !path.starts_with("//") && path.len() <= MAX_PATH
         && path.bytes().all(|b| (0x21..=0x7e).contains(&b) && b != b'\\')
+        && !path_part.split('/').any(dot) && !path_part.starts_with("/__thoughts_screen_check__")
 }
 
 /// A task's `kind`: absent, `contracts`, `tests` or `feature`.
@@ -159,7 +165,7 @@ pub fn plan(bytes: &[u8]) -> Result<PlanDoc, Vec<String>> {
         for (i, sc) in run.screens.iter().enumerate().take(MAX_SCREENS) {
             if !id_ok(&sc.id) { p.push(format!("run.screens[{i}].id \"{}\" is not a screen id", sc.id.chars().take(70).collect::<String>())); }
             else if !seen.insert(sc.id.as_str()) { p.push(format!("run.screens: screen \"{}\" is listed twice", sc.id)); }
-            if !screen_path_ok(&sc.path) { p.push(format!("run.screens[{i}].path must start with a single \"/\" and be at most {MAX_PATH} printable characters without spaces (like /customers/1)")); }
+            if !screen_path_ok(&sc.path) { p.push(format!("run.screens[{i}].path must start with a single \"/\" and be at most {MAX_PATH} printable characters without spaces and without \".\" or \"..\" parts (like /customers/1)")); }
         }
     }
     let mut ids = HashSet::new();

@@ -601,9 +601,11 @@ fn run(app: &AppHandle, site: &Site, screens: &[Screen]) -> Vec<ScreenResult> {
 }
 
 /// Ports the check never loads: the daemon's, and (in a developer build) the app's own dev server.
+/// Only a developer build counts `devUrl` as the app's own origin (`get_app_url` in Tauri reads it
+/// under `cfg(dev)` alone), so a release build does not refuse a project that happens to use its port.
 fn own_ports(app: &AppHandle) -> Vec<u16> {
     let mut ports: Vec<u16> = thoughtsd::paths::read_daemon_info().map(|i| i.port).into_iter().collect();
-    if let Some(dev) = app.config().build.dev_url.as_ref() {
+    if let Some(dev) = app.config().build.dev_url.as_ref().filter(|_| tauri::is_dev()) {
         if let Some(p) = dev.port_or_known_default() {
             ports.push(p);
         }

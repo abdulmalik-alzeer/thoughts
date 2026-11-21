@@ -1036,7 +1036,7 @@ fn round_four_plans_are_validated_and_their_commands_are_in_the_review() {
         assert!(v::url_port(bad).is_none(), "{bad}");
     }
     for ok in ["/", "/customers/1", "/#/orders?id=2"] { assert!(v::screen_path_ok(ok), "{ok}"); }
-    for bad in ["", "customers", "//evil.example/x", "/a b", "/a\\b", "/a\nb", &format!("/{}", "x".repeat(400)), "/\u{202e}x"] { assert!(!v::screen_path_ok(bad), "{bad:?}"); }
+    for bad in ["", "customers", "//evil.example/x", "/a b", "/a\\b", "/a\nb", &format!("/{}", "x".repeat(400)), "/\u{202e}x", "/../etc", "/a/./b", "/a/%2E%2e/b", "/a/.%2e?x", "/__thoughts_screen_check__/n"] { assert!(!v::screen_path_ok(bad), "{bad:?}"); }
     let plan = json!({"version": 1, "verify": ["npm test", "npm run lint"], "run": {"start": "npm run dev", "url": "http://localhost:5173", "screens": [{"id": "home", "path": "/"}]},
         "tasks": [{"id": "api", "title": "API", "description": "d", "owns": ["contracts/**"], "dependsOn": [], "acceptance": ["npm test -- api"], "feature": "F1", "kind": "contracts"}]});
     let doc = v::plan(plan.to_string().as_bytes()).unwrap();

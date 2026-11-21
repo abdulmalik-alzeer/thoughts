@@ -1186,6 +1186,15 @@ fn the_plan_the_instructions_show_is_one_the_app_would_build() {
     for sc in run["screens"].as_array().unwrap() {
         let path = sc["path"].as_str().unwrap();
         assert!(val::id_ok(sc["id"].as_str().unwrap()) && path.starts_with('/') && !path.contains(':') && !path.contains('{'), "{path}");
+        assert!(val::screen_path_ok(path) && !path.split('/').any(|s| s == "." || s == ".."), "the engine and the shell take it: {path}");
+    }
+    // The engine's own rules agree with what the instructions show (round 0.4.0 validation, locks).
+    assert!(val::url_port(run["url"].as_str().unwrap()).is_some());
+    for t in tasks { assert!(val::kind_ok(t["kind"].as_str()), "{}", t["id"]); }
+    let doc: crate::mado::PlanDoc = serde_json::from_value(v.clone()).unwrap();
+    // The marker is the feature's own file: no contracts or tests task owns it, so it is never locked against it.
+    for locked in doc.tasks.iter().filter(|t| t.locks()) {
+        assert!(!locked.owns.iter().any(|o| rv::overlaps(o, "tests/built/F2")), "{} would lock the marker", locked.id);
     }
     for t in tasks { for c in t["acceptance"].as_array().unwrap() { assert!(val::command_ok(c.as_str().unwrap()), "{c}"); } }
 }
