@@ -1,6 +1,9 @@
 <script lang="ts">
-  // Placeholder with the fixed interface. The diagram worker replaces the body; nobody else edits this file.
+  // The interactive diagram of a project plan: one component, four looks (by `doc.kind`). The props are a fixed
+  // interface: the Plan view mounts this file. Everything behind it lives in this folder.
+  import { SvelteFlowProvider } from '@xyflow/svelte';
   import type { Comment, GraphDoc, GraphOp, Pos } from '../types';
+  import GraphCanvas from './GraphCanvas.svelte';
 
   let {
     doc,
@@ -31,4 +34,6 @@
   } = $props();
 </script>
 
-<div data-mado-graph>{doc.title}</div>
+<SvelteFlowProvider>
+  <GraphCanvas {doc} {comments} {editable} {pendingOps} {onops} {onpositions} {oncomment} {onselect} />
+</SvelteFlowProvider>
