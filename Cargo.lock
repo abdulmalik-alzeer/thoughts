@@ -5021,6 +5021,7 @@ dependencies = [
  "dunce",
  "encoding_rs",
  "futures",
+ "html5ever",
  "include_dir",
  "keyring",
  "notify",

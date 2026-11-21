@@ -312,6 +312,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::incoming::routes())
         .merge(crate::mado::routes())
         .merge(crate::mado_build::routes())
+        .merge(crate::mado_design::routes())
         .layer(middleware::from_fn_with_state(state.clone(), plugin_gate))
         .layer(middleware::from_fn_with_state(state.clone(), crate::libraries::gate))
         .layer(middleware::from_fn(note_errors))

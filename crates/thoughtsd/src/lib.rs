@@ -89,6 +89,7 @@ pub mod mado_stray;
 pub mod mado_validate;
 pub mod mado_build;
 pub mod mado_build_shim;
+pub mod mado_design;
 #[cfg(test)]
 mod upgrade_tests;
 
