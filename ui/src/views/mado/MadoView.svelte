@@ -14,6 +14,7 @@
   import { STEPS, type StepId } from '../../lib/mado/types';
   import Stepper from './Stepper.svelte';
   import StepWorkspace from './StepWorkspace.svelte';
+  import PlanOptions from './PlanOptions.svelte';
 
   let { projectId, projects = [], api }: { projectId: string; projects?: any[]; /** For tests and the dev preview. */ api?: MadoApi } = $props();
 
@@ -22,6 +23,7 @@
   let current = $state<StepId>('brief');
   let tabs = $state<Partial<Record<StepId, string>>>({});
   let starting = $state(false);
+  const running = $derived(STEPS.some((s) => store.status(s) === 'drafting') || ['running', 'checking', 'reviewing'].includes(store.build?.status ?? ''));
 
   onMount(() => {
     store.load(() => { current = firstOpenStep(store.overview); }).catch((e) => failed(t('mado.loadFailed'), e));
@@ -63,6 +65,7 @@
     <div class="row title">
       <span class="emblem" aria-hidden="true"><FolderKanban size={18} /></span>
       <h1 tabindex="-1"><span class="muted">{t('mado.title')}</span>{#if name} <span class="sep" aria-hidden="true">·</span> <bdi>{name}</bdi>{/if}</h1>
+      {#if store.exists}<span class="grow"></span><PlanOptions madoApi={store.api} {running} />{/if}
     </div>
   </header>
 
@@ -93,7 +96,7 @@
   {:else}
     <div class="stepper"><Stepper overview={store.overview} {current} onpick={(s) => (current = s)} /></div>
     {#key current}
-      <StepWorkspace {store} step={current} bind:tab={() => tabs[current] ?? '', (v) => { tabs[current] = v; }} />
+      <StepWorkspace {store} step={current} onstep={(s) => (current = s)} bind:tab={() => tabs[current] ?? '', (v) => { tabs[current] = v; }} />
     {/key}
   {/if}
 </div>
@@ -103,7 +106,8 @@
   .top { display: grid; gap: 6px; }
   .back { font: inherit; font-size: 13px; color: var(--muted); background: none; border: 0; padding: 2px 4px; margin-inline-start: -4px; border-radius: 6px; cursor: pointer; display: inline-flex; align-items: center; gap: 2px; justify-self: start; }
   .back:hover { color: var(--fg); background: var(--fill); }
-  .title { gap: 12px; }
+  .title { gap: 12px; flex-wrap: wrap; }
+  h1 { min-width: 0; overflow-wrap: anywhere; }
   .emblem { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; background: var(--tint); color: var(--on-tint); flex: none; }
   h1 { margin: 0; font-size: 24px; }
   h1 .muted { font-weight: 400; }

@@ -6,6 +6,7 @@ vi.mock('../../lib/i18n', () => ({ t: (k: string) => k }));
 const { neighbour, statusKey, stepperItems, tabKey, tabsOf } = await import('./steps');
 const { blockingProblems, canApprove, canReopen, canRun, firstOpenStep, isEditable, statusOf } = await import('../../lib/mado/store.svelte');
 const dict = (await import('../../lib/i18n/mado-plan')).default;
+const more = (await import('../../lib/i18n/mado-v040')).default;
 import { STEPS, type MadoOverview, type ProblemKind, type Review, type StepId, type StepStatus } from '../../lib/mado/types';
 
 function overview(s: Partial<Record<StepId, StepStatus>>): MadoOverview {
@@ -133,6 +134,21 @@ describe('the review gate', () => {
   });
 });
 
+describe('round 0.4.0', () => {
+  it('shows the conventions beside the technical design only when the service lists the file', () => {
+    expect(tabsOf('tech').map((x) => x.id)).not.toContain('doc:conventions');
+    expect(tabsOf('tech', ['tech.md', 'conventions.md']).map((x) => x.id)).toEqual(['doc:tech', 'doc:conventions', 'graph:architecture', 'graph:schema']);
+    expect(tabsOf('spec', ['conventions.md']).map((x) => x.id)).not.toContain('doc:conventions');
+    expect(tabKey({ id: 'doc:conventions', kind: 'conventions' })).toBe('mado.tab.conventions');
+    expect(more.en['mado.tab.conventions'] && more.ar['mado.tab.conventions']).toBeTruthy();
+  });
+  it('has plain words for the new kinds of problem, none of which blocks the build', () => {
+    const kinds: ProblemKind[] = ['no-verify', 'no-run', 'no-contracts', 'no-tests', 'unchecked-screen'];
+    for (const k of kinds) { expect(dict.en[`mado.problem.${k}`], k).toBeTruthy(); expect(dict.ar[`mado.problem.${k}`], k).toBeTruthy(); }
+    expect(blockingProblems(review(kinds))).toEqual([]);
+  });
+});
+
 describe('the dictionary', () => {
   it('has Arabic for every English string, with the same placeholders', () => {
     const base = (k: string) => k.replace(/_(zero|one|two|few|many|other)$/, '');
@@ -145,7 +161,8 @@ describe('the dictionary', () => {
   });
   it('every key a view asks for exists', () => {
     const files = import.meta.glob(['./*.svelte', '../../lib/mado/**/*.svelte', '../Projects.svelte'], { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
-    const en = dict.en as Record<string, string>;
+    // The strings of round 0.4.0 live in a dictionary of their own (lib/i18n/mado-v040.ts).
+    const en = { ...dict.en, ...more.en } as Record<string, string>;
     const missing: string[] = [];
     for (const text of Object.values(files)) {
       for (const m of text.matchAll(/'(mado\.[A-Za-z0-9.-]+)'/g)) {

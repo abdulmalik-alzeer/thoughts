@@ -78,6 +78,7 @@
   import { announceChat, chatOpenElsewhere, initialRoute, isSecondary, mainRoute, setWindowTitle, showInMain } from './lib/windows';
   import MadoView from './views/mado/MadoView.svelte';
   import { listedChats } from './lib/mado/chats';
+  import PlansGroup from './views/mado/PlansGroup.svelte';
 
   let projects = $state<any[]>([]);
   /** A second window (lib/windows.ts): the whole app at one note or chat, without what belongs to
@@ -927,6 +928,7 @@
             </button>
           {/each}
         {/if}
+        <PlansGroup {projects} />
       </div>
 
       <div class="foot">

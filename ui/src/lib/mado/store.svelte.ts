@@ -5,7 +5,7 @@ import { ApiError } from '../api';
 import { madoApi, type DocName, type MadoApi } from './api';
 import { changeRequest, GRAPH_FILES, STEP_DOCS, STEP_GRAPHS, type PendingOps } from './comments/batch';
 import type {
-  BuildView, Comment, CommentStatus, CommentTarget, GraphDoc, GraphName, GraphOp, MadoEvent, MadoOverview, PlanDoc,
+  BuildGuide, BuildView, Comment, CommentStatus, CommentTarget, GraphDoc, GraphName, GraphOp, MadoEvent, MadoOverview, PlanDoc,
   Pos, Review, StepId, StepState, StepStatus,
 } from './types';
 import { STEPS } from './types';
@@ -61,6 +61,10 @@ export class MadoStore {
   plan = $state<PlanDoc | null | undefined>(undefined);
   review = $state<Review | null | undefined>(undefined);
   build = $state<BuildView | null | undefined>(undefined);
+  /** `mado/conventions.md` (round 0.4.0; older plans have none). */
+  conventions = $state<string | null | undefined>(undefined);
+  /** How to run what was built (`GET /build/guide`), fetched once a build is landed. */
+  guide = $state<BuildGuide | null | undefined>(undefined);
   comments = $state<Comment[]>([]);
   /** Diagram edits the user made and has not sent, per diagram file. Kept across tabs and steps. */
   pendingOps = $state<PendingOps>({});
@@ -117,6 +121,14 @@ export class MadoStore {
   refreshPlan() { return this.latest('plan', () => this.api.plan(), (v) => { this.plan = v; }); }
   refreshReview() { return this.latest('review', () => this.api.review(), (v) => { this.review = v; }); }
   refreshBuild() { return this.latest('build', () => this.api.build(), (v) => { this.build = v; }); }
+  refreshConventions() { return this.latest('conventions', () => this.api.conventions(), (v) => { this.conventions = v ? String(v.text ?? '') : null; }); }
+  /** A service from before 0.4.0 has no guide: then there is simply none (null). */
+  refreshGuide() {
+    return this.latest('guide', () => this.api.buildGuide(), (v) => {
+      const s = (x: unknown, max: number) => (typeof x === 'string' && x.trim() ? x.slice(0, max) : undefined);
+      this.guide = v && typeof v === 'object' ? { start: s(v.start, 2000), url: s(v.url, 200), readme: s(v.readme, 8000) } : null;
+    }).catch(() => { this.guide = null; });
+  }
 
   /** Fetch what a step shows. `force`: again, even if it is already here. */
   async ensureStep(step: StepId, force = false): Promise<void> {
@@ -124,6 +136,7 @@ export class MadoStore {
     const jobs: Promise<void>[] = [];
     for (const d of STEP_DOCS[step]) if (force || this.docs[d] === undefined) jobs.push(this.refreshDoc(d));
     for (const g of STEP_GRAPHS[step]) if (force || this.graphs[g] === undefined) jobs.push(this.refreshGraph(g));
+    if (step === 'tech' && this.has('conventions.md') && (force || this.conventions === undefined)) jobs.push(this.refreshConventions().catch(() => { this.conventions = null; }));
     if (step === 'plan' && (force || this.plan === undefined)) jobs.push(this.refreshPlan());
     if (step === 'review') { jobs.push(this.refreshReview()); if (force || this.plan === undefined) jobs.push(this.refreshPlan()); }
     if (step === 'build') { jobs.push(this.refreshBuild()); if (force || this.plan === undefined) jobs.push(this.refreshPlan()); }
@@ -144,11 +157,11 @@ export class MadoStore {
     };
     switch (ev.what) {
       case 'state': jobs.push(this.refreshOverview()); derived(); if (this.build !== undefined) jobs.push(this.refreshBuild()); break;
-      case 'doc': jobs.push(this.refreshOverview(), ...loadedDocs()); derived(); break;
+      case 'doc': jobs.push(this.refreshOverview(), ...loadedDocs()); if (this.conventions !== undefined) jobs.push(this.refreshConventions().catch(() => {})); derived(); break;
       case 'graph': jobs.push(this.refreshOverview(), ...loadedGraphs()); derived(); break;
       case 'comments': jobs.push(this.refreshComments()); break;
       case 'design': this.designVersion++; jobs.push(this.refreshOverview()); if (this.docs.design !== undefined) jobs.push(this.refreshDoc('design')); break;
-      case 'build': jobs.push(this.refreshBuild()); break;
+      case 'build': jobs.push(this.refreshBuild()); if (this.guide !== undefined) jobs.push(this.refreshGuide()); break;
       default: return;
     }
     await Promise.all(jobs);
@@ -165,6 +178,8 @@ export class MadoStore {
     if (this.plan !== undefined) jobs.push(this.refreshPlan());
     if (this.review !== undefined) jobs.push(this.refreshReview());
     if (this.build !== undefined) jobs.push(this.refreshBuild());
+    if (this.conventions !== undefined) jobs.push(this.refreshConventions().catch(() => {}));
+    if (this.guide !== undefined) jobs.push(this.refreshGuide());
     await Promise.all(jobs);
   }
 

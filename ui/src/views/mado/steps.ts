@@ -50,15 +50,18 @@ export type Tab =
   | { id: string; kind: 'doc'; name: DocName }
   | { id: string; kind: 'graph'; name: GraphName }
   | { id: string; kind: 'tasks' }
+  | { id: string; kind: 'conventions' }
   | { id: string; kind: 'design' };
 
 /** The tabs of a step's workspace, in the order they are shown. */
-export function tabsOf(step: StepId): Tab[] {
+export function tabsOf(step: StepId, files: readonly string[] = []): Tab[] {
   const tabs: Tab[] = [];
   if (step === 'design') tabs.push({ id: 'design', kind: 'design' });
   for (const name of STEP_DOCS[step]) tabs.push({ id: `doc:${name}`, kind: 'doc', name });
+  // The project's conventions sit beside the technical design, once the service lists the file (plans from before 0.4.0 have none).
+  if (step === 'tech' && files.includes('conventions.md')) tabs.push({ id: 'doc:conventions', kind: 'conventions' });
   for (const name of STEP_GRAPHS[step]) tabs.push({ id: `graph:${name}`, kind: 'graph', name });
   if (step === 'plan') tabs.push({ id: 'tasks', kind: 'tasks' });
   return tabs;
 }
-export const tabKey = (tab: Tab) => (tab.kind === 'doc' ? `mado.tab.${tab.name}` : tab.kind === 'graph' ? (tab.name === 'tasks' ? 'mado.tab.graph.tasks' : `mado.tab.${tab.name}`) : tab.kind === 'design' ? 'mado.tab.designStep' : 'mado.tab.tasks');
+export const tabKey = (tab: Tab) => (tab.kind === 'doc' ? `mado.tab.${tab.name}` : tab.kind === 'graph' ? (tab.name === 'tasks' ? 'mado.tab.graph.tasks' : `mado.tab.${tab.name}`) : tab.kind === 'design' ? 'mado.tab.designStep' : tab.kind === 'conventions' ? 'mado.tab.conventions' : 'mado.tab.tasks');
