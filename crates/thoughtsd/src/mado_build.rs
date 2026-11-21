@@ -37,7 +37,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// How many times a task is tried before the build waits for the user (the first try and one more).
-pub const MAX_ATTEMPTS: u32 = 2;
+/// (A run has no commands of its own: the daemon checks its work, and a failed check goes back to
+/// the same chat up to three times.)
+pub const MAX_ATTEMPTS: u32 = 4;
 pub const DEFAULT_PARALLEL: u32 = 3;
 pub const MAX_PARALLEL: u32 = 6;
 /// Longest one task's run may take before it is stopped and counted as failed.
@@ -914,10 +916,17 @@ async fn run_task(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSta
             mado::tell(state, pid, "build").await;
             return Ok(TaskEnd::Failed);
         }
-        let chat = new_chat(state, pid, &task.id, &format!("{} — {}", tr("mado_build.chat_title", &[]), one_line(&task.title, 80))).await;
+        // A try after a failed one in this lane goes on in the same chat (its session knows the work);
+        // the first try, and one after the user's retry, start a chat of their own.
+        let earlier = if attempts > 0 { update(pid, project, |b| b.task_mut(wi, li, ti).and_then(|t| t.chat_id.clone())).await?.flatten() } else { None };
+        let session = match &earlier { Some(c) => state.chats.with(c, |c| c.session_id.clone()).await.flatten(), None => None };
+        let (chat, brief, resume) = match (earlier, session, failure.as_deref().filter(|f| !f.trim().is_empty())) {
+            (Some(c), Some(sid), Some(f)) => (c, retry_brief(task, f), Some(sid)),
+            _ => (new_chat(state, pid, &task.id, &format!("{} — {}", tr("mado_build.chat_title", &[]), one_line(&task.title, 80))).await, task_brief(task, plan, failure.as_deref()), None),
+        };
         update(pid, project, |b| if let Some(t) = b.task_mut(wi, li, ti) { t.attempts += 1; t.status = TaskStatus::Running; t.chat_id = Some(chat.clone()); t.commit = None; }).await?;
         mado::tell(state, pid, "build").await;
-        let ended = run_and_wait(state, project, pid, &chat, wt, &task_brief(task, plan, failure.as_deref()), deny_for(project, pid, b, wt)).await;
+        let ended = run_and_wait(state, project, pid, &chat, wt, &brief, resume, deny_for(project, pid, b, wt)).await;
         if status_now(project) == BuildStatus::Stopped { return Ok(TaskEnd::Stopped); }
         if let Err(why) = ended { note_fail(pid, project, at, &why).await?; continue; }
         // The run must have left its worktree on its lane's branch.
@@ -995,7 +1004,7 @@ fn deny_for(project: &Path, pid: &str, b: &BuildState, wt: &Path) -> Vec<String>
 
 const SYSTEM: &str = "This run is one task of a build the Thoughts app runs by itself from a plan the user approved. Nobody is watching it: \
 do not ask questions, do the work the task describes, and end with a short plain-language summary of what you did. \
-Work only in the current folder. Do not run git commands that change branches or history and do not commit: the app checks and commits your work itself.";
+Work only in the current folder, by reading and editing files: you have no shell and run no commands. The app runs the checks and commits your work itself.";
 
 fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>) -> String {
     // The task's words come from plan.json: quoted as data, apart from the app's own instructions.
@@ -1008,6 +1017,8 @@ fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>) -> String 
     if !deps.is_empty() { out.push_str(&format!("\nIt builds on work already done: {}.\n", deps.join(", "))); }
     out.push_str("\nRead first, for context (copies of the plan's documents; do not change them): mado/brief.md, mado/spec.md, mado/tech.md, mado/design.md, mado/plan.json, and mado/design/ for the look.\n");
     out.push_str("\nStay inside the files you own; if you must touch another file, say so in your final message.\n");
+    out.push_str("You cannot run commands in this task. When you finish, the app runs the commands above itself, in this folder; \
+        if one fails it comes back to you in this chat with the command and what it printed.\n");
     out.push_str("Commit nothing: the app commits your work after the commands pass.\n");
     if let Some(f) = failure.filter(|f| !f.trim().is_empty()) {
         out.push_str(&format!("\nThe previous try of this task did not succeed. What went wrong (what the app and the commands printed):\n{}\nFix that this time.\n", crate::mado_prompts::block(&clip_note(f))));
@@ -1016,8 +1027,16 @@ fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>) -> String 
     out
 }
 
+/// What a try after a failed one is told, in the same chat.
+fn retry_brief(task: &PlanTask, failure: &str) -> String {
+    format!("Task {}: the app ran the checks after your work, and this did not succeed (what the app and the command printed):\n{}\n\
+        Fix it in the files. You still cannot run commands: the app runs the checks again when you finish.\n\n{}\n",
+        task.id, crate::mado_prompts::block(&clip_note(failure)), crate::mado_prompts::DATA_NOTE)
+}
+
 /// Start a run in `cwd` and wait for it to end. `Err` carries what went wrong, for the user and the next try.
-async fn run_and_wait(state: &Arc<AppState>, project: &Path, pid: &str, chat: &str, cwd: &Path, brief: &str, extra_deny: Vec<String>) -> Result<(), String> {
+#[allow(clippy::too_many_arguments)]
+async fn run_and_wait(state: &Arc<AppState>, project: &Path, pid: &str, chat: &str, cwd: &Path, brief: &str, resume: Option<String>, extra_deny: Vec<String>) -> Result<(), String> {
     let _ = pid;
     if !full(state).await {
         // The worktree is a checkout of the trusted project: its assistant settings must be ones the user already saw.
@@ -1030,7 +1049,7 @@ async fn run_and_wait(state: &Arc<AppState>, project: &Path, pid: &str, chat: &s
     let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
     let spec = RunSpec {
         chat_id: chat.to_string(), prompt: brief.to_string(), cwd: cwd.to_path_buf(), add_dirs: vec![],
-        options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, resume: None,
+        options: RunOptions { permission_mode: Some("acceptEdits".into()), ..Default::default() }, resume,
         append_system: Some(SYSTEM.into()), extra_deny,
     };
     let done: claude::OnDone = Box::new(move |_st, ok| Box::pin(async move { let _ = tx.send(ok); }));
@@ -1120,12 +1139,13 @@ pub fn command_env() -> Vec<(String, String)> {
 
 /// How a build's own commands are kept in: `confined` is whether they run under macOS's sandbox.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Confinement { pub confined: bool }
+pub struct Confinement { pub confined: bool, /// The daemon's own port, closed to the commands (0: not known).
+    pub port: u16 }
 
 /// Whether the build's commands run confined now: on macOS, while the setting is on and full access is off.
 pub async fn confinement(state: &AppState) -> Confinement {
     let s = state.settings.read().await;
-    Confinement { confined: cfg!(target_os = "macos") && !s.full_access() && s.spending.confine_commands() }
+    Confinement { confined: cfg!(target_os = "macos") && !s.full_access() && s.spending.confine_commands(), port: crate::approvals::port() }
 }
 
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -1142,30 +1162,53 @@ fn sb_str(p: &Path) -> String {
     format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// The sandbox profile for a build's command run in `wt` (a worktree of the engine): everything is
-/// allowed but writing files, which is allowed only in `wt`, the temporary folders, the null devices
-/// and the download caches a build writes (those that exist), and never in the app's own folder, the
-/// user's project (its `.git` with it) or `~/.claude`. The last rule that matches wins.
-pub fn sandbox_profile(wt: &Path, project: &Path, user_home: Option<&Path>) -> String {
+/// The download caches a build may write in the user's home: only the caches themselves, never a
+/// tool's home (`~/.cargo` holds `bin/` and `env`, which run later).
+const CACHES: &[&str] = &[".npm/_cacache", ".npm/_logs", ".npm/_npx", ".cache", "Library/Caches", ".cargo/registry", ".cargo/git", ".gradle/caches", ".gradle/wrapper/dists",
+    ".m2/repository", ".pnpm-store", "Library/pnpm/store", ".local/share/pnpm/store", ".bun/install/cache", "go/pkg/mod", ".composer/cache", ".nuget/packages",
+    ".yarn/berry/cache", "Library/Caches/Yarn"];
+
+/// Inside those, what is run or loaded later and so stays closed: programs and the settings tools read.
+const CLOSED_IN_HOME: &[&str] = &[".cargo/bin", ".cargo/env", ".cargo/config", ".cargo/config.toml", ".rustup", ".bun/bin", "go/bin", ".local/bin", ".npm-global",
+    ".nvm", ".volta", ".pyenv", ".rbenv", ".asdf", ".sdkman", ".deno/bin", ".gradle/init.d", ".gradle/gradle.properties", ".m2/settings.xml", ".npmrc", ".yarnrc", ".yarnrc.yml",
+    ".bashrc", ".bash_profile", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin", ".config/fish", ".gitconfig", ".config/git", ".ssh", ".claude", ".claude.json",
+    ".cache/pre-commit", ".config", "Library/LaunchAgents", "Library/Application Support"];
+
+/// The sandbox profile for a build's command run in `wt` (a worktree of the engine, under
+/// `<thoughts home>/mado/<projectId>/`). Everything is allowed but:
+/// - writing files: only in `wt`, the temporary folders, the null devices and the download caches
+///   (`CACHES`), and never in the app's own folder, the user's project (its `.git` with it), the
+///   folders of the daemon's PATH, or what is run or loaded later (`CLOSED_IN_HOME`);
+/// - reading the app's own folder (its token, settings, the approval records), except `wt`;
+/// - connecting to the daemon's own port (`port`, when known), and reaching the keychain.
+/// The last rule that matches wins, so the order matters.
+pub fn sandbox_profile(wt: &Path, project: &Path, user_home: Option<&Path>, port: u16) -> String {
+    let q = |p: &Path| sb_str(&real(p));
+    let home = crate::paths::home();
+    let mut out = String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*");
     let mut allow: Vec<PathBuf> = vec![PathBuf::from("/private/tmp"), PathBuf::from("/private/var/folders"), std::env::temp_dir()];
     if let Ok(t) = std::env::var("TMPDIR") { if Path::new(&t).is_absolute() { allow.push(PathBuf::from(t)); } }
-    if let Some(h) = user_home {
-        for c in [".npm", ".cache", "Library/Caches", ".cargo", ".rustup", ".gradle", ".m2", ".pnpm-store", ".bun", "go", ".composer", "Library/pnpm", ".yarn", ".nuget"] {
-            let p = h.join(c);
-            if std::fs::symlink_metadata(&p).is_ok() { allow.push(p); }
-        }
-    }
-    let mut out = String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*");
-    for p in &allow { out.push_str(&format!(" (subpath {})", sb_str(&real(p)))); }
+    if let Some(h) = user_home { allow.extend(CACHES.iter().map(|c| h.join(c))); }
+    for p in &allow { out.push_str(&format!(" (subpath {})", q(p))); }
     out.push_str(" (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\") (regex #\"^/dev/ttys[0-9]+$\"))\n");
-    let mut deny = vec![crate::paths::home(), project.to_path_buf(), project.join(".git")];
-    if let Some(h) = user_home { deny.push(h.join(".claude")); }
+    let mut deny = vec![home.clone(), project.to_path_buf(), project.join(".git")];
+    deny.extend(claude::shell_path().split(':').filter(|d| Path::new(d).is_absolute()).map(PathBuf::from));
+    if let Some(h) = user_home { deny.extend(CLOSED_IN_HOME.iter().map(|c| h.join(c))); }
     out.push_str("(deny file-write*");
-    for p in &deny { out.push_str(&format!(" (subpath {})", sb_str(&real(p)))); }
+    for p in &deny { out.push_str(&format!(" (subpath {})", q(p))); }
     out.push_str(")\n");
-    out.push_str(&format!("(allow file-write* (subpath {}))\n", sb_str(&real(wt))));
+    // The app's own folder is not read either (its token is there), apart from the way to `wt`.
+    out.push_str(&format!("(deny file-read* (subpath {}))\n", q(&home)));
+    let mut way = vec![];
+    let mut a = real(wt);
+    while let Some(parent) = a.parent().map(Path::to_path_buf) { if !parent.starts_with(real(&home)) { break; } way.push(parent.clone()); a = parent; }
+    if !way.is_empty() { out.push_str(&format!("(allow file-read-metadata {})\n", way.iter().map(|p| format!("(literal {})", sb_str(p))).collect::<Vec<_>>().join(" "))); }
+    out.push_str(&format!("(allow file-read* file-write* (subpath {}))\n", q(wt)));
     // The worktree's own `.git` (a file naming git's folder for it, inside the project's `.git`) stays closed.
-    out.push_str(&format!("(deny file-write* (literal {}))\n", sb_str(&real(&wt.join(".git")))));
+    out.push_str(&format!("(deny file-write* (literal {}))\n", q(&wt.join(".git"))));
+    if port != 0 { out.push_str(&format!("(deny network-outbound (remote ip \"localhost:{port}\"))\n")); }
+    // The keychain (the assistant's key is kept there). TLS checks do not need it (tried: git and curl over https).
+    out.push_str("(deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd.xpc\"))\n");
     out
 }
 
@@ -1205,7 +1248,7 @@ pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &
     let unconfined = || CheckErr::Unapproved(tr("mado_build.no_sandbox", &[("cmd", &one_line(cmd, 300))]));
     let mut c = if how.confined {
         if !Path::new(SANDBOX_EXEC).is_file() { return Err(unconfined()); }
-        let profile = sandbox_profile(cwd, project, crate::paths::user_home().ok().as_deref());
+        let profile = sandbox_profile(cwd, project, crate::paths::user_home().ok().as_deref(), how.port);
         let mut c = crate::proc::command(SANDBOX_EXEC);
         c.arg("-p").arg(profile).arg(&prog).args(&args);
         c
@@ -1379,7 +1422,7 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
     let brief = format!("This folder holds the build so far: the work of several tasks, just put together. One of their checks now fails here (what it printed):\n{}\n\
         Fix the code so that every task's checks pass, keeping the work of every task. Stay with the files that need it. \
         Commit nothing: the app runs the checks again and commits the result.\n\n{}", crate::mado_prompts::block(&clip_note(&out)), crate::mado_prompts::DATA_NOTE);
-    let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, deny_for(project, pid, &b, &bwt)).await;
+    let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, None, deny_for(project, pid, &b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { reset_wt(state, project, &bwt).await; return Ok(()); }
     let again = match ended { Err(why) => Err(why), Ok(()) => wave_checks(state, pid, project, &b.plan_hash, &plan, &ids, &bwt).await.map_err(|(_, e)| e.text()) };
     if let Err(why) = again {
@@ -1448,7 +1491,7 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
         Settle every conflict in those files (the lines between <<<<<<<, ======= and >>>>>>>) so that the work of both sides is kept. \
         The side being merged in is: {}. Do not change other files. Commit nothing: the app checks and commits the result.\n\n{}",
         clash.iter().map(|f| format!("- {}", crate::mado_prompts::inline(f))).collect::<Vec<_>>().join("\n"), titles.join("; "), crate::mado_prompts::DATA_NOTE);
-    let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, deny_for(project, pid, b, &bwt)).await;
+    let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, None, deny_for(project, pid, b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { let _ = git(state, &bwt, &["merge", "--abort"]).await; return Ok(LaneEnd::Stopped); }
     if let Err(why) = ended { return fix_failed(state, project, pid, &bwt, wi, li, &why).await; }
     if !git_ok(state, &bwt, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).await || clash.iter().any(|f| has_marks(&bwt.join(f))) {

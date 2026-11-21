@@ -797,18 +797,6 @@ pub fn write_deny(project: &Path, ignores: bool) -> Vec<String> {
 pub const BUILD_GIT_DENY: &[&str] = &["commit", "push", "checkout", "switch", "reset", "merge", "rebase", "branch", "worktree", "tag", "stash", "update-ref",
     "cherry-pick", "revert", "am", "pull", "fetch", "remote", "config", "clean"];
 
-/// The commands a build task may run without asking: its own acceptance commands that are among
-/// the commands of the approval record (what the user was shown) and that are plain commands
-/// (`mado_validate::command_ok`: no rule or shell syntax that would allow more than the command).
-pub fn build_allow(acceptance: &[String], approved: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = vec![];
-    for c in acceptance.iter().map(|c| c.trim()) {
-        if !crate::mado_validate::command_ok(c) || !approved.iter().any(|a| a.trim() == c) { continue; }
-        let rule = format!("Bash({c})");
-        if !out.contains(&rule) { out.push(rule); }
-    }
-    out
-}
 
 /// Called by `claude::start_run` for every run, once its kind is known: a run of kind `mado` gets its
 /// step's instructions, works in the project only, and (unless full access is on) may write only
@@ -834,7 +822,6 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
             _ => false,
         };
         if !inside || !spec.add_dirs.is_empty() { return Err(crate::tr::err("mado.build_run_place", &[])); }
-        let mut allow = vec![];
         if !full {
             // Git commands that change branches or history, here too (the engine adds them as well).
             for g in BUILD_GIT_DENY { spec.extra_deny.push(format!("Bash(git {g}:*)")); }
@@ -847,22 +834,11 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
                 spec.extra_deny.extend(["approval.json", "state.sha256"].iter().flat_map(|f| [format!("Edit({r}/{f})"), format!("Read({r}/{f})")]));
             }
             crate::claude::every_case(&mut spec.extra_deny);
-            // Only commands of the plan the user approved, by the daemon's own record of that
-            // approval (never by what state.json says), and only while plan.json is that plan.
-            let task = meta["mado"]["taskId"].as_str().unwrap_or_default().to_string();
-            let mado = mado_dir_of(&project, full)?;
-            require_plain(&mado, full)?;
-            let bytes = read_in(&mado, PLAN, full, DOC_MAX)?.unwrap_or_default();
-            if let Some(a) = approved_plan_in(&role.project_id).filter(|a| approval_matches(a, &bytes)) {
-                if let Ok(plan) = crate::mado_validate::plan(&bytes) {
-                    // The plan's setup commands too: the engine may run them in a task's run as well.
-                    let mut own: Vec<String> = plan.setup.clone().unwrap_or_default();
-                    if let Some(t) = plan.tasks.iter().find(|t| t.id == task) { own.extend(t.acceptance.iter().cloned()); }
-                    allow = build_allow(&own, &a.commands);
-                }
-            }
+            // No link or shared file in `mado/` (its documents are copied into the worktree).
+            require_plain(&mado_dir_of(&project, full)?, full)?;
         }
-        return Ok((spec, allow));
+        // No commands at all: the run has no shell (`claude::profile`); the daemon runs the checks.
+        return Ok((spec, vec![]));
     }
     if !RUN_STEPS.contains(&role.step.as_str()) { return Err(crate::tr::err("mado.not_a_step", &[])); }
     // No link or shared file in `mado/` that a write of the run would go through.

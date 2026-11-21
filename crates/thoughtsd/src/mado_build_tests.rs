@@ -183,7 +183,7 @@ async fn tasks_whose_files_overlap_run_one_after_another_in_one_lane() {
 }
 
 #[tokio::test]
-async fn a_failing_check_is_tried_once_more_with_its_output_then_the_build_waits_and_a_retry_finishes_it() {
+async fn a_failing_check_is_tried_three_more_times_with_its_output_then_the_build_waits_and_a_retry_finishes_it() {
     let p = project(vec![task("a", &["src/**"], &[], &["test -f src/ok.txt"]), task("c", &["lib/**"], &["a"], &["true"])]).await;
     let fixed = Arc::new(AtomicBool::new(false));
     let prompts: Arc<std::sync::Mutex<Vec<(String, String)>>> = Default::default();
@@ -201,13 +201,13 @@ async fn a_failing_check_is_tried_once_more_with_its_output_then_the_build_waits
     start(&p.st, &p.pid, None).await.unwrap();
     let b = until(&p, "waiting", |b| b.status == BuildStatus::Waiting).await;
     let a = find(&b, "a");
-    assert_eq!((a.status, a.attempts), (TaskStatus::Failed, 2));
+    assert_eq!((a.status, a.attempts), (TaskStatus::Failed, MAX_ATTEMPTS));
     assert!(a.note.as_deref().unwrap().contains("test -f src/ok.txt"), "{a:?}");
     assert_eq!(find(&b, "c").status, TaskStatus::Pending, "its dependant never started");
     assert!(b.message.is_some() && b.waves[0].status == TaskStatus::Failed);
     {
         let ps = prompts.lock().unwrap();
-        assert_eq!(ps.iter().filter(|(id, _)| id == "a").count(), 2);
+        assert_eq!(ps.iter().filter(|(id, _)| id == "a").count(), MAX_ATTEMPTS as usize, "the first try and three more");
         assert!(!ps.iter().any(|(id, _)| id == "c"));
         assert!(ps[1].1.contains("did not succeed") && ps[1].1.contains("test -f src/ok.txt"), "the second try was told what went wrong");
     }
@@ -432,7 +432,7 @@ async fn a_check_runs_in_its_folder_with_bounded_output_and_names_no_app_folder(
     let d = std::env::temp_dir().join(format!("thoughts-mado-check-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&d).unwrap();
     std::fs::write(d.join("here.txt"), "x").unwrap();
-    let off = Confinement { confined: false };
+    let off = Confinement { confined: false, port: 0 };
     let text = |e: CheckErr| e.text();
     assert!(run_check("test -f here.txt", &d, &d, false, &off).await.is_ok());
     let e = text(run_check("yes line | head -c 200000; echo LAST >&2; exit 3", &d, &d, false, &off).await.unwrap_err());
@@ -463,7 +463,10 @@ async fn a_confined_command_writes_only_in_its_worktree_temporary_files_and_cach
     // A real worktree of the project, as the engine makes them.
     t::sh(&p.dir, &["worktree", "add", "-q", "-b", "mado/build-9-lane-1-1", &wt.to_string_lossy()]);
     std::fs::write(engine_dir(&p.pid).unwrap().join("approval.json"), "{}").unwrap();
-    let on = Confinement { confined: true };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let on = Confinement { confined: true, port };
+    std::fs::write(crate::paths::home().join("daemon.json"), "{\"token\":\"secret-app-token\"}").unwrap();
     let run = |cmd: String| { let (wt, dir, on) = (wt.clone(), p.dir.clone(), on.clone()); async move { run_check(&cmd, &wt, &dir, false, &on).await } };
     // Inside its worktree: fine.
     assert!(run("touch made-here.txt".into()).await.is_ok());
@@ -499,6 +502,36 @@ async fn a_confined_command_writes_only_in_its_worktree_temporary_files_and_cach
         assert!(r.is_ok(), "{:?}", r.err().map(|e| e.text()));
         assert!(wt.join("node.txt").exists());
     }
+    // Nor the app's token, nor the daemon itself.
+    let r = run(format!("cat {}", crate::paths::home().join("daemon.json").display())).await;
+    assert!(r.is_err() && !match &r { Err(CheckErr::Failed(t)) | Err(CheckErr::Unapproved(t)) => t.clone(), Ok(()) => String::new() }.contains("secret-app-token"));
+    assert!(run(format!("ls {}", crate::paths::home().display())).await.is_err());
+    for host in ["127.0.0.1", "localhost"] {
+        let r = run(format!("/usr/bin/nc -z -G 2 {host} {port}")).await;
+        assert!(r.is_err(), "{host}:{port} was reached");
+    }
+    assert!(std::process::Command::new("/usr/bin/nc").args(["-z", "-G", "2", "127.0.0.1", &port.to_string()]).status().unwrap().success(), "the port is open outside");
+    // Programs and settings that run later stay closed, the caches open.
+    let fake_home = p.root.join("home");
+    for d in [".cargo/bin", ".cargo/registry", ".npm/_cacache", "Library/Caches"] { std::fs::create_dir_all(fake_home.join(d)).unwrap(); }
+    let profile = sandbox_profile(&wt, &p.dir, Some(&fake_home), port);
+    let sb = |cmd: &str| std::process::Command::new(SANDBOX_EXEC).arg("-p").arg(&profile).args(["/bin/sh", "-c", cmd]).current_dir(&wt).status().unwrap().success();
+    for closed in [".cargo/bin/cargo", ".cargo/env", ".zshrc", ".npmrc", ".local/bin/x", ".cargo/config.toml", ".gitconfig"] {
+        assert!(!sb(&format!("mkdir -p \"$(dirname '{0}')\" 2>/dev/null; echo x > '{0}'", fake_home.join(closed).display())), "{closed} was writable");
+    }
+    for open in [".cargo/registry/x", ".npm/_cacache/x", "Library/Caches/x"] { assert!(sb(&format!("echo x > '{}'", fake_home.join(open).display())), "{open} was closed"); }
+    for d in claude::shell_path().split(':').filter(|d| Path::new(d).is_dir()).take(3) {
+        assert!(!sb(&format!("touch '{d}/thoughts-sandbox-probe'")), "{d} on the PATH was writable");
+    }
+    drop(listener);
+    // The keychain cannot be asked (the assistant's key is kept there).
+    // (A name that does not exist: inside, the search itself cannot be made; outside it is made and finds nothing.)
+    let ask = |inside: bool| {
+        let mut c = if inside { let mut c = std::process::Command::new(SANDBOX_EXEC); c.arg("-p").arg(&profile).arg("/usr/bin/security"); c } else { std::process::Command::new("/usr/bin/security") };
+        String::from_utf8_lossy(&c.args(["find-generic-password", "-s", "thoughts-ai-sandbox-probe"]).output().unwrap().stderr).to_string()
+    };
+    assert!(ask(true).contains("SecKeychainSearchCreateFromAttributes"), "the keychain answered: {}", ask(true));
+    assert!(!ask(false).contains("SecKeychainSearchCreateFromAttributes"), "{}", ask(false));
     // No key of the daemon's reaches it.
     std::env::set_var("THOUGHTS_TEST_SECRET_TOKEN", "hunter2");
     assert!(run("sh -c 'test -z \"$THOUGHTS_TEST_SECRET_TOKEN\"'".into()).await.is_ok());
@@ -817,14 +850,25 @@ async fn git_settings_read_from_elsewhere_are_refused_not_followed() {
     p.done();
 }
 
-#[test]
-fn a_build_runs_shell_drops_keys_and_tokens_before_each_command() {
-    let script = crate::claude::BUILD_SHELL_SCRUB;
-    let out = std::process::Command::new("/bin/bash").arg("-c").arg(format!("{script}\nenv"))
-        .env("ANTHROPIC_API_KEY", "k").env("CLAUDE_CODE_OAUTH_TOKEN", "t").env("GITHUB_TOKEN", "g").env("THOUGHTS_HOME", "h").env("db_password", "p")
-        .env("KEEP_ME", "yes").output().unwrap();
-    let env = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success());
-    for gone in ["ANTHROPIC_API_KEY=", "CLAUDE_CODE_OAUTH_TOKEN=", "GITHUB_TOKEN=", "THOUGHTS_HOME=", "db_password="] { assert!(!env.lines().any(|l| l.starts_with(gone)), "{gone}"); }
-    assert!(env.lines().any(|l| l == "KEEP_ME=yes") && env.lines().any(|l| l.starts_with("PATH=")));
+
+/// `npm ci` of a tiny project, confined, with the network (skipped, saying so, without npm or the network).
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn npm_ci_installs_under_the_confinement() {
+    let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
+    let wt = engine_dir(&p.pid).unwrap().join("lane-1-1");
+    std::fs::create_dir_all(&wt).unwrap();
+    std::fs::write(wt.join("package.json"), r#"{"name":"tiny","version":"1.0.0","private":true,"dependencies":{"is-number":"7.0.0"}}"#).unwrap();
+    let path = claude::shell_path().to_string();
+    let lock = std::process::Command::new("npm").args(["install", "--package-lock-only", "--no-audit", "--no-fund"]).current_dir(&wt).env("PATH", &path).output();
+    if !lock.as_ref().map_or(false, |o| o.status.success()) {
+        eprintln!("npm_ci_installs_under_the_confinement: skipped (no npm, or no network)");
+        p.done();
+        return;
+    }
+    let on = Confinement { confined: true, port: 0 };
+    let r = run_check("npm ci --no-audit --no-fund", &wt, &p.dir, false, &on).await;
+    assert!(r.is_ok(), "{}", match r { Err(e) => e.text(), Ok(()) => String::new() });
+    assert!(wt.join("node_modules/is-number/package.json").exists());
+    p.done();
 }
