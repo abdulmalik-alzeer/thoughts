@@ -1,5 +1,15 @@
 # What's new in Thoughts
 
+## 0.3.2
+
+One repair: planning a project (MADO) could not save anything in 0.3.0 and 0.3.1. Take this update before you try it.
+
+### Fixed
+- **A planning step can save its work.** In 0.3.0 and 0.3.1 every step ended with the assistant saying it was not allowed to write in the `mado` folder, so no brief, document or diagram ever appeared. The rules that keep a planning run out of the rest of your project were also closing the `mado` folder itself. They no longer do. A planning run still cannot change anything outside `mado`, and still cannot change the app's own files inside it.
+
+### Before you rely on it
+- **Found in the first real use.** The fix was tried with the real Claude Code outside the app: files inside `mado` are written, and files anywhere else in the project are refused. It has not yet been seen from inside the app window, and the steps after the Brief have still never been run with a real assistant. Everything under "Before you rely on it" in 0.3.0 still applies.
+
 ## 0.3.1
 
 Small repairs to planning and building a project (MADO), and stricter checks before a release. Nothing new to learn. As with 0.3.0, the MADO parts have still not been seen in the real app window or run with a real assistant.
