@@ -471,7 +471,7 @@ fn clean_within(html: &str, time: std::time::Duration) -> Result<String, Refused
         parser.process(StrTendril::from_slice(&html[at..end]));
         at = end;
         if let Some(why) = stop.get() { return Err(why); }
-        if started.elapsed() > time { return Err(Refused::TooSlow); }
+        if at < html.len() && started.elapsed() > time { return Err(Refused::TooSlow); }
     }
     let document = parser.finish();
     if let Some(why) = stop.get() { return Err(why); }
