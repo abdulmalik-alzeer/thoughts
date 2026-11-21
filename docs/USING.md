@@ -51,6 +51,34 @@ Click a picture to see it large. Pictures follow the app's day or night look, an
 
 When a diagram cannot be drawn, Thoughts shows what is wrong with it. **Copy message**, paste it to the assistant, and it corrects the diagram.
 
+## Plan and build a project (MADO)
+
+Thoughts can take a software idea from a first conversation to working code, one step at a time, with you reading and approving each step. Open **Projects**, pick a project folder you linked, and choose **Plan**. Planning starts a `mado` folder inside the project; everything the plan says lives there.
+
+The seven steps, in order:
+
+1. **Brief**: a short interview about what you want to make, written up as a one-page summary.
+2. **What it does**: the features, one by one, and a diagram of the screens and how people move between them.
+3. **How it's built**: the parts of the system and how they talk to each other, and the data it keeps (each as a diagram).
+4. **Look and screens**: colours, type and spacing, and a first picture of every screen.
+5. **Work plan**: the work cut into tasks, each saying which files it changes and which command checks it is done.
+6. **Final check**: the app checks the plan against what it should do (every feature and every screen has work planned for it, nothing waits on itself) and lists every command the build would run.
+7. **Build**: the app does the work.
+
+A step opens once the steps before it are approved (**How it's built** and **Look and screens** both open after **What it does**). Each step has its own chat, so you can talk to the assistant about it; approving a step again after a change marks the later steps for another look.
+
+**Comments are how you ask for changes.** Select a passage and choose **Comment**, or comment on a box or a line of a diagram, a design setting or a spot on a screen. Collect as many as you like, then **Send changes**: the assistant gets them all as one request, changes the documents and the diagrams together, and the comments are marked done.
+
+**Diagrams can be edited.** Rename a box, add one (it is placed next to what you selected), draw a line between two boxes, delete something, or fill in a table's fields. Your edits show as pending until you **Send changes**; the assistant then applies them to the diagram and to the documents that describe the same thing. Moving boxes is saved at once and changes nothing else. The tasks diagram is drawn from the work plan and cannot be edited.
+
+**The design step** shows a few ready-made looks and the assistant's own; pick one, then change any colour, font, corner or spacing yourself. **Fix contrast** makes text easy to read again. The screens are pictures only: they are shown in a sealed frame that runs nothing and loads nothing from outside.
+
+**Approving the final check allows the app to run the listed commands on this computer.** Read them: the build runs exactly these commands, set-up commands first (installing what the project needs, for example), then each task's check. If the plan changes after you looked, the approval is refused and you are shown the new list.
+
+**The build** needs the project to be a git repository with nothing uncommitted. It never touches your own branch while it works: it builds on a branch of its own (`mado/build-1`, …), a few tasks side by side, checks each task with its command, and brings the pieces together. A task that fails is tried once more with what went wrong; then the build waits for you (**Try again**, or **Resume**). You can **Pause** or **Stop** it at any time. When everything is done, **Bring the finished build into my branch** merges it. It also slows down by itself near your plan's usage limit (Settings › Privacy and cost sets where).
+
+**Limits.** Planning and build runs always use Claude Code (not Codex), unless full access is on. A planning run may write only the `mado` folder; anything it changes elsewhere is listed in the step, and the step cannot be approved until you have looked at it and dismissed the notice.
+
 ## Printing and saving as a PDF
 
 Any note can be printed or saved as a PDF, in a light print layout whatever theme you use, with Arabic text laid out correctly. The PDF is named after the note's title.

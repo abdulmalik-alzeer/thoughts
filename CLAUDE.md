@@ -39,4 +39,18 @@
   as an `<img>` of a self-contained SVG and never as markup in the page; the shell saves an SVG only after parsing it
   against an allowlist (`plain_svg`; `DRAWN` in `standalone.ts` is the same list). Never show a figure by putting SVG
   into rendered markdown, and never let a document reach outside itself (`figures::prepare` takes out what would).
+- MADO, planning and building a project (`mado*.rs`, `ui/src/lib/mado/`, `ui/src/views/mado/`; contract
+  `docs/mado-spec.md`): the plan lives in `<project>/mado/`, whose `state.json`, `comments.json` and `build.json`
+  only the daemon writes (`state.json` only through the core, `mado.rs`: the design step records its pick with
+  `mado::set_style`). Nothing in the project is trusted: a `state.json` the daemon did not write (fingerprint in
+  `<home>/mado/<projectId>/state.sha256`) is distrusted, and what allows commands is the approval record beside it
+  (`approval.json` = plan hash + the commands the user was shown), never anything in `mado/`. Every file a run wrote
+  is validated and size-limited before it is shown; mock-ups are cleaned from an allowlist and shown only in the
+  sealed frame (`<iframe sandbox="" srcdoc>` with its own CSP meta), never as markup in the page. A planning run
+  (kind `mado`) loads no user or project Claude Code settings and is confined by allow rules for `mado/**` only,
+  with deny rules for every other top-level name (folded in every letter case; the allow is folded only on a volume
+  probed to ignore case) and the stray check afterwards; a build run (`mado-build`) may run only the approved plan's
+  commands, in its own worktree. What yields to full access: trust checks, link/inside-`mado/` checks, rules and
+  the command check. What does not: validation and cleaning, the approval record and plan hash, the clean-tree and
+  never-the-user's-branch rules of the build, the approved-step lock, and the build's usage governor.
 - Verify with `cargo test -p thoughtsd`, `npx vite build` and `cargo build -p thoughts`.
