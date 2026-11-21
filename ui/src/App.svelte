@@ -667,7 +667,8 @@
   });
 
   const meOpen = $derived(app.view.kind === 'docs' && (app.view.path ?? '').startsWith('me/'));
-  const isActive = (k: string) => (app.view.kind === k || (k === 'ideas' && app.view.kind === 'item')) && !(k === 'docs' && meOpen);
+  // The Plan view (MADO) belongs to Projects: its item stays lit there.
+  const isActive = (k: string) => (app.view.kind === k || (k === 'ideas' && app.view.kind === 'item') || (k === 'projects' && app.view.kind === 'mado')) && !(k === 'docs' && meOpen);
 
   // Sidebar items: built-ins, "Me" and plugin views — then `nav.json` (hidden / order / labels) from the
   // customisation layer. Home can never be hidden; Settings and Help live in the footer, outside this list.
