@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { LIMITS, SERVED_MAX, codeLang, extOf, mimeFor, previewKind, tooLarge } from './kinds';
+import { LIMITS, SERVED_MAX, TRIAL_MAX, appOnly, codeLang, extOf, mimeFor, previewKind, previewPlan, tooLarge } from './kinds';
+import { renderers } from './renderers';
 
 describe('previewKind', () => {
   it('knows the common kinds, in any case', () => {
@@ -65,5 +66,38 @@ describe('codeLang / extOf / limits', () => {
     expect(mimeFor('a.html')).toBe('text/plain');
     expect(mimeFor('a.mov')).toBe('video/quicktime');
     expect(mimeFor('a.docx')).toBe('application/octet-stream');
+  });
+});
+
+describe('any kind of file', () => {
+  it('knows the other spellings of the office kinds and more kinds of plain text', () => {
+    const cases: [string, string][] = [
+      ['t.dotm', 'docx'], ['t.xltm', 'xlsx'], ['t.ppsm', 'pptx'], ['t.potm', 'pptx'], ['t.ott', 'odt'], ['t.ots', 'ods'], ['t.otp', 'odp'],
+      ['events.jsonl', 'text'], ['invite.ics', 'text'], ['card.vcf', 'text'], ['mail.eml', 'text'], ['guide.adoc', 'text'],
+    ];
+    for (const [name, kind] of cases) expect(previewKind(name), name).toBe(kind);
+  });
+  it('every kind but "none" has a renderer, so a known file never shows nothing', () => {
+    for (const [kind, loader] of Object.entries(renderers)) expect(!!loader, kind).toBe(kind !== 'none');
+  });
+  it('a file only its own app can show says so instead of being tried', () => {
+    for (const n of ['Budget.numbers', 'Letter.pages', 'Talk.key', 'big.xlsb', 'book.epub', 'art.psd', 'a.tar.gz', 'setup.exe', 'disk.dmg', 'data.sqlite', 'font.woff2', 'film.mkv']) {
+      expect(appOnly(n), n).toBe(true);
+      expect(previewPlan(n), n).toEqual({ kind: 'none', trial: false, appOnly: true });
+    }
+    for (const n of ['a.xlsx', 'a.txt', 'noext', 'a.unknownext', 'a.dat']) expect(appOnly(n), n).toBe(false);
+  });
+  it('a name that says nothing is tried as text, up to a size', () => {
+    for (const n of ['noext', 'notes.unknownext', 'server.log.1', 'values.dat', 'folder/Thing', 'x.cfg2'])
+      expect(previewPlan(n), n).toEqual({ kind: 'text', trial: true, appOnly: false });
+    expect(previewPlan('noext', TRIAL_MAX)).toEqual({ kind: 'text', trial: true, appOnly: false });
+    expect(previewPlan('noext', TRIAL_MAX + 1)).toEqual({ kind: 'none', trial: false, appOnly: false });
+    expect(previewPlan('')).toEqual({ kind: 'none', trial: false, appOnly: false });
+  });
+  it('a known kind is never a trial, and one too big for the service stays "none"', () => {
+    expect(previewPlan('budget.xlsx')).toEqual({ kind: 'xlsx', trial: false, appOnly: false });
+    expect(previewPlan('old.xls')).toEqual({ kind: 'legacy', trial: false, appOnly: false });
+    expect(previewPlan('big.png', SERVED_MAX + 1)).toEqual({ kind: 'none', trial: false, appOnly: false });
+    expect(previewPlan('Budget.numbers', SERVED_MAX + 1)).toEqual({ kind: 'none', trial: false, appOnly: false });
   });
 });

@@ -214,6 +214,8 @@ struct Sheet { body: String, room: usize, rows: usize, more_rows: u64, widest: u
 
 impl Sheet {
     fn new(room: usize) -> Self { Sheet { body: String::new(), room, rows: 0, more_rows: 0, widest: 0, row: None, cells: vec![] } }
+    /// A cell with text of any length (cut here).
+    #[cfg(test)]
     fn cell(&mut self, row: u32, col: u32, text: String) {
         if self.row != Some(row) { self.flush(); self.row = Some(row); }
         self.cell_cut(row, col, cut_cell(&text, 0));

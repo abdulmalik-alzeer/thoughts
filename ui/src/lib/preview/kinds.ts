@@ -26,7 +26,7 @@ const add = (kind: PreviewKind, exts: string) => { for (const e of exts.split(' 
 add('image', 'png jpg jpeg jpe jfif gif webp bmp avif ico heic heif tif tiff');
 add('svg', 'svg');
 add('pdf', 'pdf');
-add('text', 'txt text log md markdown mdown rst org nfo');
+add('text', 'txt text log md markdown mdown rst org nfo adoc asciidoc textile jsonl ndjson ics vcf eml out err lst');
 add('json', 'json jsonc json5 geojson webmanifest har ipynb');
 add('yaml', 'yaml yml');
 add('xml', 'xml plist xsd xsl xslt rss atom kml gpx opml xliff xlf csproj resx storyboard xib');
@@ -35,14 +35,42 @@ add('audio', 'mp3 m4a aac wav ogg oga opus flac caf aif aiff');
 add('video', 'mp4 m4v mov webm ogv');
 add('zip', 'zip');
 // Macro-enabled Office files (docm, xlsm, pptm) are only read as data here: nothing in them runs.
-add('docx', 'docx docm dotx');
-add('xlsx', 'xlsx xlsm xltx');
+add('docx', 'docx docm dotx dotm');
+add('xlsx', 'xlsx xlsm xltx xltm');
 add('csv', 'csv tsv tab');
-add('pptx', 'pptx pptm ppsx potx');
+add('pptx', 'pptx pptm ppsx ppsm potx potm');
 add('odt', 'odt ott');
 add('ods', 'ods ots');
 add('odp', 'odp otp');
 add('legacy', 'doc xls ppt rtf pps dot xlt pot wpd wps');
+
+/** Kinds of file this app has no way to show and that are certainly not text: they belong to
+ *  another program (Apple's and other office formats, e-books, design files), are packed, or are
+ *  programs. The preview says to open the file in its own app rather than trying anything.
+ *  Nothing in such a file is ever read or run here. */
+const APP_ONLY = new Set(('xlsb numbers pages key one pub vsd vsdx mpp accdb mdb epub mobi azw3 djvu xps '
+  + 'psd psb ai eps indd sketch fig xd afdesign afphoto dwg dxf blend raw cr2 nef arw dng '
+  + '7z rar tar gz tgz bz2 xz zst lz4 cab iso dmg pkg deb rpm msi exe dll so dylib app apk ipa jar war class o a bin '
+  + 'sqlite sqlite3 db ttf otf woff woff2 mkv avi wmv flv wma mid midi').split(' '));
+
+/** Is this a file that can only be opened in its own app (see `APP_ONLY`)? */
+export function appOnly(name: string): boolean {
+  return APP_ONLY.has(extOf(name));
+}
+
+/** The largest file with a name that says nothing which is tried as text. */
+export const TRIAL_MAX = 2 * MB;
+
+/** What the preview does with a file. `kind`: the renderer's kind. `trial`: the name says nothing
+ *  about the file (no extension, or one not known here), so it is shown as text if its bytes turn
+ *  out to be text (text.ts `looksLikeText`) and as "can't be shown" otherwise. `appOnly`: see above. */
+export function previewPlan(name: string, size?: number): { kind: PreviewKind; trial: boolean; appOnly: boolean } {
+  const kind = previewKind(name, size);
+  if (kind !== 'none' || (size !== undefined && size > SERVED_MAX)) return { kind, trial: false, appOnly: false };
+  if (appOnly(name)) return { kind: 'none', trial: false, appOnly: true };
+  if (!baseOf(name) || (size !== undefined && size > TRIAL_MAX)) return { kind: 'none', trial: false, appOnly: false };
+  return { kind: 'text', trial: true, appOnly: false };
+}
 
 /** Source code: extension → language hint for the highlighter (highlight.ts). */
 const CODE: Record<string, string> = {};

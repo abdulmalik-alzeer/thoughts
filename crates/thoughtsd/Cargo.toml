@@ -29,7 +29,7 @@ base64 = "0.23"
 # Noticing changes other programs make to the library (watch.rs): FSEvents, inotify, ReadDirectoryChanges. CC0-1.0.
 notify = "8"
 # Text versions of attached office files for the assistant (as_text.rs). All MIT or MIT/Apache-2.0, and
-# zip, quick-xml and encoding_rs were already built for the desktop shell.
+# zip and quick-xml were already built for the desktop shell; calamine reads only .xlsx/.xlsb/.xls.
 calamine = "0.38"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 quick-xml = "0.42"

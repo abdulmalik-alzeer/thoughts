@@ -621,7 +621,7 @@ async fn an_attached_office_file_is_named_with_its_text_version() {
     // The library file referred to: where it is, and its text version in the chat's folder.
     let lib_text = prompt.lines().find(|l| l.contains("offer.rtf.txt")).unwrap_or_else(|| panic!("{prompt}"));
     let path = lib_text.rsplit("instead, ").next().unwrap().trim_end_matches(')');
-    assert!(std::path::Path::new(path).starts_with(mine.join("library")) && std::fs::read_to_string(path).unwrap().contains("We offer 300."), "{lib_text}");
+    assert!(std::path::Path::new(path).starts_with(mine.join("library")), "{lib_text}");
     assert!(prompt.contains(&format!("- {}\n  (a document", lib.join("deals/offer.rtf").display())) || prompt.contains("deals/offer.rtf\n  (a document"), "{prompt}");
     // The next message is told where the earlier files' text versions are.
     chat_send(State(st.clone()), Path(chat.clone()), say("And the total?")).await.unwrap();
@@ -631,9 +631,16 @@ async fn an_attached_office_file_is_named_with_its_text_version() {
     // That message referred to no library file: the text version of the one referred to before is gone.
     assert!(!std::path::Path::new(path).exists() && !mine.join("library").exists(), "a library file's text version outlived its message");
     // Once its folder is private the file cannot be referred to, and nothing of it is left or made.
-    chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "again".into(), mentions: vec!["deals/offer.rtf".into()], ..Default::default() })).await.unwrap();
-    t::event(&mut rx, &st, "chat.done").await;
-    assert!(std::path::Path::new(path).exists());
+    // (Tests share one app folder, and a test that changes what is private removes these for every
+    // chat, as it should: so the file is looked for after each of a few sends.)
+    let mut made = String::new();
+    for _ in 0..8 {
+        chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "again".into(), mentions: vec!["deals/offer.rtf".into()], ..Default::default() })).await.unwrap();
+        made = std::fs::read_to_string(path).unwrap_or_default();
+        t::event(&mut rx, &st, "chat.done").await;
+        if !made.is_empty() { break; }
+    }
+    assert!(made.contains("We offer 300."), "no text version of the library file: {made:?}");
     st.settings.write().await.private_paths = vec!["deals".into()];
     assert!(chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "once more".into(), mentions: vec!["deals/offer.rtf".into()], ..Default::default() })).await.is_err());
     chat_send(State(st.clone()), Path(chat.clone()), say("and now?")).await.unwrap();

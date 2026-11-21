@@ -14,7 +14,8 @@
   import { errDetail } from '../errors';
   import { fmtSize, notify } from '../content/util';
   import { revealLabelKey } from '../openInApp';
-  import { codeLang, LIMITS, mimeFor, previewKind, tooLarge } from './kinds';
+  import { codeLang, LIMITS, mimeFor, previewKind, previewPlan, tooLarge, TRIAL_MAX } from './kinds';
+  import { looksLikeText } from './text';
   import { renderers, type RendererProps } from './renderers';
   import { openImage } from '../imageOpen.svelte';
 
@@ -49,12 +50,15 @@
   let seq = 0;
 
   const base = $derived(name.split(/[\\/]/).pop() || name);
-  const kind = $derived(previewKind(name, size));
+  const plan = $derived(previewPlan(name, size));
+  const kind = $derived(plan.kind);
+  /** A file that only its own app can show: said so, rather than "can't be shown". */
+  let appOnly = $state(false);
 
   async function run() {
     const n = ++seq;
-    const k = previewKind(name, size);
-    data = null; Comp = null; detail = ''; bigSize = size;
+    const { kind: k, trial, appOnly: own } = previewPlan(name, size);
+    data = null; Comp = null; detail = ''; bigSize = size; appOnly = own;
     const loader = renderers[k];
     if (size !== undefined && k === 'none' && previewKind(name) !== 'none') { phase = 'large'; return; }
     if (!loader) { phase = 'unsupported'; return; }
@@ -64,6 +68,12 @@
       const [raw, mod] = await Promise.all([load(), loader()]);
       if (n !== seq) return;
       const blob = raw instanceof Blob ? raw : new Blob([raw as BlobPart]);
+      // A name that says nothing: shown as text only if that is what the bytes are.
+      if (trial) {
+        const isText = blob.size <= TRIAL_MAX && looksLikeText(new Uint8Array(await blob.slice(0, 8192).arrayBuffer()));
+        if (n !== seq) return;
+        if (!isText) { phase = 'unsupported'; return; }
+      }
       if (blob.size > LIMITS[k]) { bigSize = blob.size; phase = 'large'; return; }
       // Typed by us from the name, never by what the file claims to be.
       data = blob.type === mimeFor(name, k) ? blob : new Blob([blob], { type: mimeFor(name, k) });
@@ -109,7 +119,7 @@
       <Icon name={phase === 'large' ? 'info' : 'eye'} size={22} />
       <p>{phase === 'large'
         ? (bigSize !== undefined ? t('libf-preview-core.tooLarge', { size: fmtSize(bigSize) }) : t('libf-preview-core.tooLargePlain'))
-        : t('libf-preview-core.cannot')}</p>
+        : t(appOnly ? 'v012-files.appOnly' : 'libf-preview-core.cannot')}</p>
       {#if phase === 'unsupported' && detail}<p class="muted sm" dir="auto">{detail}</p>{/if}
       {#if onReveal}<button type="button" class="btn" onclick={reveal}><Icon name="folder" size={14} /> {t(revealLabelKey())}</button>{/if}
     </div>
