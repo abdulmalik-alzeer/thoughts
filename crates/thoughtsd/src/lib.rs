@@ -87,6 +87,8 @@ pub mod mado_prompts;
 pub mod mado_review;
 pub mod mado_stray;
 pub mod mado_validate;
+pub mod mado_build;
+pub mod mado_build_shim;
 #[cfg(test)]
 mod upgrade_tests;
 
@@ -180,6 +182,8 @@ pub async fn run() -> anyhow::Result<()> {
     tokio::spawn(wraps::idle_loop(state.clone()));
     // The customisation layer's background work (default-file updates, workflows, usage log).
     layer_api::start(state.clone());
+    // MADO builds that were under way when the daemon stopped pick up where they were.
+    mado_build::resume(state.clone());
     // Every library has a history of changes: one that has none yet (from before 0.0.9) gets it now.
     history::start(state.clone());
     // Changes made to the library by other programs are noticed, and recorded on their own.
