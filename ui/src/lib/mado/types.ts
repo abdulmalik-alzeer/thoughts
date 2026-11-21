@@ -26,8 +26,10 @@ export type GraphOp =
   | { op: 'relabel-edge'; id: string; label: string }
   | { op: 'set-prop'; id: string; key: string; value: unknown };
 
-export interface PlanTask { id: string; title: string; description: string; owns: string[]; dependsOn: string[]; acceptance: string[]; feature: string; screens?: string[] }
-export interface PlanDoc { version: 1; tasks: PlanTask[]; /** run once in each fresh working copy before any task */ setup?: string[] }
+export type TaskKind = 'contracts' | 'tests' | 'feature';
+export interface PlanTask { id: string; title: string; description: string; owns: string[]; dependsOn: string[]; acceptance: string[]; feature: string; screens?: string[]; kind?: TaskKind }
+export interface PlanRun { start: string; url: string; screens: { id: string; path: string }[] }
+export interface PlanDoc { version: 1; tasks: PlanTask[]; /** run once in each fresh working copy before any task */ setup?: string[]; /** run in the merged copy after every wave */ verify?: string[]; run?: PlanRun }
 
 export type CommentTarget =
   | { kind: 'text'; file: string; quote: string; prefix: string; suffix: string; heading?: string }
@@ -50,7 +52,7 @@ export interface DesignTokens {
 export interface StyleCandidate { id: string; name: string; description: string; tokens: DesignTokens; source: 'app' | 'assistant' }
 export interface ScreenInfo { id: string; label: string; hasMock: boolean }
 
-export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path' | 'bad-command' | 'no-repo' | 'no-branch' | 'uncommitted';
+export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path' | 'bad-command' | 'no-repo' | 'no-branch' | 'uncommitted' | 'no-verify' | 'no-run' | 'no-contracts' | 'no-tests' | 'unchecked-screen';
 export interface Problem { kind: ProblemKind; message: string; tasks?: string[] }
 export interface Lane { id: string; tasks: string[] }
 export interface Wave { lanes: Lane[] }
@@ -64,7 +66,15 @@ export interface Review {
   planHash: string;
 }
 
-export type BuildStatus = 'idle' | 'running' | 'paused' | 'waiting' | 'failed' | 'done' | 'stopped';
+export type BuildStatus = 'idle' | 'running' | 'paused' | 'waiting' | 'failed' | 'done' | 'stopped' | 'checking' | 'reviewing';
+/** What one screen showed when the app looked at it (docs/mado-spec.md, round 0.4.0). Untrusted text. */
+export interface ScreenResult { id: string; path: string; ok: boolean; status?: number; errors: string[]; text: string; fields: { label: string; value: string }[] }
+export interface BuildScreens { status: 'waiting' | 'running' | 'done' | 'skipped'; reason?: string; count?: number; failed?: number }
+export interface ReviewFinding { severity: 'must' | 'should'; where?: string; text: string }
+export interface BuildReview { status: 'running' | 'passed' | 'changes' | 'failed'; round: number; chatId?: string; fixChatId?: string; findings: ReviewFinding[] }
+export interface MadoOptions { model: string | null; effort: string | null }
+export interface PlanEntry { projectId: string; name: string; step: string; stepStatus: string; build?: BuildStatus; updatedAt: string }
+export interface BuildGuide { start?: string; url?: string; readme?: string }
 export type TaskStatus = 'pending' | 'running' | 'checking' | 'done' | 'failed' | 'conflict' | 'skipped';
 /** `attempts`: tries started so far. */
 export interface BuildTask { id: string; status: TaskStatus; chatId?: string; commit?: string; note?: string; attempts?: number }
@@ -72,7 +82,7 @@ export interface BuildTask { id: string; status: TaskStatus; chatId?: string; co
 export interface BuildLane { id: string; status: TaskStatus; tasks: BuildTask[]; fixChatId?: string }
 /** `checked`: every task's checks passed again in the build's own copy after the lanes were merged;
  *  `fixChatId`: the run that fixed what those checks found. */
-export interface BuildWave { status: TaskStatus; lanes: BuildLane[]; checked?: boolean; fixChatId?: string }
+export interface BuildWave { status: TaskStatus; lanes: BuildLane[]; checked?: boolean; fixChatId?: string; verified?: boolean; gateFixChatId?: string }
 export interface BuildState {
   version: 1;
   status: BuildStatus;
@@ -82,6 +92,8 @@ export interface BuildState {
   waves: BuildWave[];
   governor: { maxParallel: number; running: number; holding: boolean; reason?: string };
   plan_hash: string;
+  screens?: BuildScreens;
+  review?: BuildReview;
   /** The build's number (`mado/build-<n>`). */
   number?: number;
   /** The commit of the user's branch the build started from. */

@@ -250,3 +250,91 @@ The window refetches; it does not trust the event's payload.
   the comments, and Run / Send changes / Approve. Everything in English and Arabic, RTL, theme tokens only.
 - Components with a fixed interface (the Plan view mounts them; their owners build them):
   `ui/src/lib/mado/graph/MadoGraph.svelte` and `ui/src/lib/mado/design/DesignStep.svelte` (props in the files).
+
+## Round 0.4.0: better projects, and the plan in reach
+
+Why: the first real build (mini-crm) passed 227 tests with three broken screens. Every fault was where one
+task's work met another's, and nothing looked at the joined product. Everything below is additive: a plan
+or build written by 0.3.x stays valid.
+
+### `plan.json` additions (version stays 1; all optional)
+
+- `verify: string[]` — commands the engine runs in the build's own merged copy **after every wave is merged**
+  (the whole test suite, the type check, the linter). Validated like acceptance commands; part of the
+  review's `commands`, so approved with them. A failure goes to a fix run in the build copy (as a failed
+  wave check does today), up to 3 tries, then the build waits for the user.
+- `run: { start: string, url: string, screens: [{ id: string, path: string }] }` — how to start the product
+  and one concrete address per screen of the flow (`path` starts with `/`, uses ids that exist in the sample
+  data). `start` is validated like a command and is part of `commands`. `url` must be `http://localhost:<port>`
+  or `http://127.0.0.1:<port>`, nothing else.
+- task `kind?: "contracts" | "tests" | "feature"` (absent = feature).
+  - A `contracts` task comes first and writes, as files, an example of every answer of every endpoint (or
+    module boundary). Providers' tests must produce exactly these; consumers' tests must read exactly these.
+  - A `tests` task writes the acceptance tests of a feature from `spec.md` before the feature is built.
+  - Files owned by a `contracts` or `tests` task are **locked**: after that task is done, a later task whose
+    commit changes one of them fails with a plain message (and goes back to the assistant like a failed check).
+- Review problems, all non-blocking ("worth a look"): `no-verify`, `no-run`, `no-contracts` (more than one
+  task and none of kind contracts), `no-tests` (no task of kind tests), `unchecked-screen` (a screen of the
+  flow with no entry in `run.screens`).
+
+### Tech step
+
+- Also writes `mado/conventions.md`: the one way this project builds a screen, handles an error, names things,
+  talks to its API, and which shared helpers exist and how they must be called. Optional file (old plans have
+  none). When present, every build task is given it.
+- Static checks by default: a type check and a linter as build-time-only tools, wired into `verify`, unless
+  the brief rules them out, in which case `tech.md` says so in a sentence.
+
+### Build: three phases after the last wave
+
+`BuildStatus` gains `checking` and `reviewing` (both count as under way). `BuildState` gains (all optional):
+
+```ts
+gateFixChatId?: string                         // on BuildWave: the run fixing a failed `verify`
+verified?: boolean                             // on BuildWave: `verify` passed after this wave
+screens?: { status: 'waiting' | 'running' | 'done' | 'skipped'; reason?: string; count?: number; failed?: number }
+review?:  { status: 'running' | 'passed' | 'changes' | 'failed'; round: number; chatId?: string; fixChatId?: string;
+            findings: { severity: 'must' | 'should'; where?: string; text: string }[] }
+```
+
+1. **Screen check** (`checking`), only with `plan.run`: the daemon starts `run.start` in the build copy
+   (same clean environment and confinement as every build command), waits until `url` answers (60 s), and
+   fetches each `path` itself (status code). Then it waits up to 120 s for a window to look:
+   - `GET  /api/mado/:project/build/screens` → `{ url, screens: [{id, path}], nonce }` while it waits, else 409.
+   - `POST /api/mado/:project/build/screens` `{ nonce, results: ScreenResult[] }`, where
+     `ScreenResult = { id, path, ok, status?, errors: string[], text: string, fields: {label: string, value: string}[] }`
+     (`text`: what the screen shows, at most 4000 characters; `fields`: every input, select and textarea with
+     its label and current value, at most 60; `errors`: uncaught errors and failed requests, at most 20).
+   - Nobody looked (no desktop window, or timeout): `screens.status = 'skipped'` with the reason; the build
+     goes on. The started program is always stopped, whatever happens.
+   The window does the looking through the desktop shell: `screenCheck(url, paths)` in
+   `ui/src/lib/mado/screencheck.ts` → shell command `mado_screen_check`. The shell opens each address in a
+   hidden window of its own that has **no access to the app** (no IPC, no app capabilities), may only load
+   that one local origin, is never shown, and is destroyed afterwards. In a browser (dev) it returns `null`.
+   Everything it returns is untrusted text.
+2. **Review** (`reviewing`): a fresh run with no memory of the build reads the build copy against `spec.md`'s
+   pass/fail lists, `conventions.md`, the open and resolved comments, and the screen results (given as data
+   between random delimiters), and reports findings. It only reads.
+3. **Fix**: `must` findings go to a fix run in the build copy (edits only), then `verify` runs again, then one
+   more review. At most 2 rounds. Whatever is left is kept in `review.findings`; the build still ends `done`
+   and can be landed, and the view says plainly how many findings remain.
+
+Model and effort: every `mado` and `mado-build` run takes them from `GET/PUT /api/mado/:project/options`
+(`{ model: string | null, effort: string | null }`, `null` = the app's default), kept in the app's own
+record of the project (never in the project). `crate::mado::run_options(state, pid)` hands them to the engine.
+
+### After the build
+
+- `GET /api/mado/:project/build/guide` → `{ start?: string, url?: string, readme?: string }` (`readme`: the
+  project's own `README.md`, at most 8000 characters, as markdown text). The Build view, once a build is
+  landed, shows a finished state: what was merged where, what the review still questions, and **How to run
+  it** (the command with a copy button, the address, the README drawn as markdown through the app's own safe
+  renderer). The app does not start the project itself.
+
+### Window
+
+- The button on a project is **Build with MADO** (was Plan).
+- `GET /api/mado` → `[{ projectId, name, step, stepStatus, build?: BuildStatus, updatedAt }]`: every linked
+  project whose plan was started. The sidebar's chats area shows them under **Plans**; one opens the Plan view.
+- The Plan view's header has the model and the effort (the app's existing pickers; lists are never
+  hard-coded) and the usage ring the chats have.

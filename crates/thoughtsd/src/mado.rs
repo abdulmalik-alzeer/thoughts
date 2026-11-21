@@ -1435,6 +1435,10 @@ pub fn check_ops(ops: &[GraphOp]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The model and the effort every run of this project's plan and build uses (`None` = the app's
+/// default). Round 0.4.0: a stand-in until the options record exists (docs/mado-spec.md).
+pub async fn run_options(_state: &AppState, _project_id: &str) -> (Option<String>, Option<String>) { (None, None) }
+
 /// What the Final check says about the project's git repository (`mado_build::repo_findings`), as
 /// problems of the review: the build needs a repository, and says what it will commit first.
 async fn repo_problems(st: &AppState, project: &Path) -> Vec<Problem> {
