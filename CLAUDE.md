@@ -33,4 +33,10 @@
   and frontmatter is preserved.
 - Anything the user can customise belongs in the app layer, never in core. The Recovery menu and
   Rollback must stay outside the app layer (out of reach unless full access is on).
+- Diagrams and charts in answers and notes (`figures.rs`, `ui/src/lib/figures/`): a fenced block in the language `archify`
+  is drawn by the copy of Archify in `vendor/archify` (run by the daemon with the machine's Node.js, from a closed
+  folder, compared with the binary's own copy before every use); a `chart` block is drawn by the window. Both are shown
+  as an `<img>` of a self-contained SVG and never as markup in the page; the shell saves an SVG only after parsing it
+  against an allowlist (`plain_svg`; `DRAWN` in `standalone.ts` is the same list). Never show a figure by putting SVG
+  into rendered markdown, and never let a document reach outside itself (`figures::prepare` takes out what would).
 - Verify with `cargo test -p thoughtsd`, `npx vite build` and `cargo build -p thoughts`.

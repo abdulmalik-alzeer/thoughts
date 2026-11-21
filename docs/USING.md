@@ -32,6 +32,25 @@ Some files are not shown, and the preview says why: files over 25 MB (less for t
 
 Old Office files, Rich Text and OpenDocument files can carry macros, so Thoughts does not open them in another program with one click. It offers **Show in Finder** instead (**Show in File Explorer** on Windows, **Show in folder** on Linux), and you open the file from there yourself. Opening a file from a private folder in another program asks you first.
 
+## Diagrams and charts
+
+Ask for a picture and the answer has one in it: "draw how the checkout talks to the bank", "show last quarter's sales as bars". The same pictures are drawn in your notes, wherever a note holds one.
+
+- **Diagrams** are drawn by [Archify](https://github.com/tt-a1i/archify), which comes inside Thoughts: architecture, workflows and flowcharts, sequences of messages, data flows, lifecycles (states), database tables, classes, trees, timelines and waterfalls.
+- **Charts** of numbers are drawn by Thoughts itself: bars (also stacked or sideways), lines, areas, pies, donuts and scatter plots.
+
+Above each picture:
+
+- **SVG** saves it as an SVG picture, sharp at any size, for a document, a slide or a web page.
+- **draw.io** (diagrams only) saves it as a file you can open and change in draw.io (diagrams.net): every box is a shape you can move, and the lines stay attached to the boxes they join.
+- **Source** shows the text the picture was drawn from. To change a picture, ask the assistant for the change, or edit that text in the note.
+
+Click a picture to see it large. Pictures follow the app's day or night look, and are printed with the note.
+
+**Diagrams need Node.js** (version 18 or newer) on your computer. Without it a diagram shows its source and says so; charts are drawn either way. Get it from [nodejs.org](https://nodejs.org). Nothing is sent anywhere to draw a picture: it all happens on your computer.
+
+When a diagram cannot be drawn, Thoughts shows what is wrong with it. **Copy message**, paste it to the assistant, and it corrects the diagram.
+
 ## Printing and saving as a PDF
 
 Any note can be printed or saved as a PDF, in a light print layout whatever theme you use, with Arabic text laid out correctly. The PDF is named after the note's title.
