@@ -99,9 +99,17 @@ pub fn owned_path_ok(path: &str) -> bool {
 /// it? No rule or pattern syntax (`*`, `?`, `[`, `]`, `(`, `)`, a trailing `:*`) and no shell syntax
 /// that runs more than one command or redirects (`;`, `|`, `&`, backticks, `$`, `>`, `<`, `\`,
 /// line breaks, `{`, `}`, `!`, `#`). One command per entry: several are separate entries.
+/// Printable ASCII only (0x20–0x7E): a format character (a bidi override, a zero-width space) could
+/// make the line the user reads differ from what runs.
 pub fn command_ok(c: &str) -> bool {
     let c = c.trim();
-    !c.is_empty() && c.len() <= 1000 && !c.chars().any(|ch| ch.is_control() || "*?[]();|&`$><\\{}!#".contains(ch))
+    !c.is_empty() && c.len() <= 1000 && c.bytes().all(|b| (0x20..=0x7e).contains(&b) && !b"*?[]();|&`$><\\{}!#".contains(&b))
+}
+
+/// `c` as the review shows a refused command: every character outside printable ASCII written as
+/// `\u{…}`, so nothing in it can change how the line reads.
+pub fn escaped(c: &str) -> String {
+    c.chars().map(|ch| if (' '..='~').contains(&ch) { ch.to_string() } else { format!("\\u{{{:x}}}", ch as u32) }).collect()
 }
 
 /// The plan, parsed and checked for its shape (dependencies, traceability and the like are the

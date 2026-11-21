@@ -156,7 +156,7 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
         tasks: plan.tasks.iter().filter(|t| t.screens.iter().flatten().any(|s| s == id)).map(|t| t.id.clone()).collect() }).collect();
     let mut problems = vec![];
     for c in plan.setup.iter().flatten().filter(|c| !crate::mado_validate::command_ok(c)) {
-        problems.push(problem(ar, "bad-command", "mado.p.bad_setup", &[("command", c.trim())], vec![]));
+        problems.push(problem(ar, "bad-command", "mado.p.bad_setup", &[("command", &crate::mado_validate::escaped(c.trim()))], vec![]));
     }
     let cyc = in_cycles(plan);
     if !cyc.is_empty() { problems.push(problem(ar, "cycle", "mado.p.cycle", &[("tasks", &cyc.join(", "))], cyc.clone())); }
@@ -171,7 +171,7 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
             problems.push(problem(ar, "bad-path", "mado.p.bad_path", &[("task", &t.id), ("path", o)], vec![t.id.clone()]));
         }
         for c in t.acceptance.iter().filter(|c| !c.trim().is_empty() && !crate::mado_validate::command_ok(c)) {
-            problems.push(problem(ar, "bad-command", "mado.p.bad_command", &[("task", &t.id), ("command", c.trim())], vec![t.id.clone()]));
+            problems.push(problem(ar, "bad-command", "mado.p.bad_command", &[("task", &t.id), ("command", &crate::mado_validate::escaped(c.trim()))], vec![t.id.clone()]));
         }
         if t.acceptance.iter().all(|c| c.trim().is_empty()) {
             problems.push(problem(ar, "empty-acceptance", "mado.p.empty_acceptance", &[("task", &t.id)], vec![t.id.clone()]));
@@ -201,6 +201,8 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
     }
     let mut seen = HashSet::new();
     // The setup commands first: they run first, in every fresh working copy.
-    let commands: Vec<String> = plan.setup.iter().flatten().chain(plan.tasks.iter().flat_map(|t| t.acceptance.iter())).map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && seen.insert(c.clone())).collect();
+    let commands: Vec<String> = plan.setup.iter().flatten().chain(plan.tasks.iter().flat_map(|t| t.acceptance.iter())).map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && seen.insert(c.clone()))
+        // A refused command is shown escaped (it blocks approval, so it never reaches an approval record).
+        .map(|c| if crate::mado_validate::command_ok(&c) { c } else { crate::mado_validate::escaped(&c) }).collect();
     Review { features, screens: screen_traces, problems, waves: ws, commands, plan_hash: String::new() }
 }

@@ -717,6 +717,26 @@ fn acceptance_and_setup_commands_must_be_one_plain_command() {
 }
 
 #[test]
+fn commands_with_invisible_or_reordering_characters_are_refused_and_shown_escaped() {
+    // A right-to-left override (U+202E) makes the line read differently from what runs.
+    for bad in ["npm test \u{202e}tset", "npm\u{200b} test", "npm\u{00a0}test", "npm\ttest", "npm t\u{e9}st", "npm test\u{2066}", "\u{feff}npm test"] {
+        assert!(!val::command_ok(bad), "{bad:?}");
+    }
+    assert!(val::command_ok("npm test -- --grep 'sign in' \"x\" ~/a=b,c@d%e^f+g"));
+    assert_eq!(val::escaped("npm \u{202e}x"), "npm \\u{202e}x");
+    let mut plan = PlanDoc { version: 1, setup: None, tasks: vec![task("t-a", &["src/**"], &[], "F1")] };
+    plan.tasks[0].acceptance = vec!["npm test \u{202e}hsab".into()];
+    let r = rv::review_in(false, SPEC, None, &plan);
+    let bad: Vec<&Problem> = r.problems.iter().filter(|p| p.kind == "bad-command").collect();
+    assert_eq!(bad.len(), 1, "{:?}", r.problems);
+    assert!(rv::blocks(bad[0]));
+    assert!(bad[0].message.contains("npm test \\u{202e}hsab"), "{}", bad[0].message);
+    assert!(!bad[0].message.contains('\u{202e}'));
+    assert_eq!(r.commands, vec!["npm test \\u{202e}hsab".to_string()]);
+    assert!(build_allow(&["npm test \u{202e}hsab".into()], &["npm test \u{202e}hsab".into()]).is_empty());
+}
+
+#[test]
 fn graph_ops_may_name_nodes_the_user_just_added() {
     let ops = vec![
         GraphOp::AddNode { label: "Order detail".into(), kind: "screen".into(), near: Some("orders".into()) },
