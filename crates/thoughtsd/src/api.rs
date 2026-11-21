@@ -907,6 +907,12 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     crate::full_access::set_on(new.full_access());
     *cur = new.clone();
     drop(cur);
+    // What is private changed, or another library is open: the text versions made of library files
+    // under the rules as they were go at once (`run_files`; a message that may still refer to one makes it again).
+    if new.private_paths != old.private_paths || new.library_path != old.library_path {
+        let home = paths::home();
+        let _ = tokio::task::spawn_blocking(move || crate::run_files::forget_library_texts(&home)).await;
+    }
     if full_on { crate::log::warn(format!("full access switched ON by the user, confirmed in the app's own warning, at {}", new.full_access.since.as_deref().unwrap_or(""))); }
     if full_off && old.full_access.on {
         let stopped = crate::full_access::switched_off(&st).await;

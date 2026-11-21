@@ -235,23 +235,53 @@ fn library_name(file: &Path) -> std::ffi::OsString {
     n
 }
 
-/// Make the text versions of the office files among `files` (library files a message of chat
-/// `chat_id` refers to; folders and other kinds are left alone), in the chat's own folder. They
-/// stay for the chat's later messages; with more than a hundred, those not asked for now go.
+/// Bring the text versions of library files up to date for chat `chat_id`: `files` are the library
+/// files this message refers to, already checked by the caller (in the library, not private, not
+/// protected). The office files among them that are there now get a text version in the chat's own
+/// folder; **every other text version there is removed** — of a file referred to earlier, of one
+/// since deleted, of one whose folder has since been made private. A text version never outlives
+/// the message whose permission it was made under; a later message that refers to the file again
+/// (and may) gets it again. Call it with every message, also with no files at all.
 /// Blocking: call it off the runtime. Never fails.
 pub fn library_texts(home: &Path, chat_id: &str, files: &[PathBuf]) {
-    let office: Vec<&PathBuf> = files.iter().filter(|f| crate::as_text::convertible(&f.to_string_lossy())).collect();
-    if office.is_empty() { return; }
     let Some(mine) = folder(home, chat_id) else { return };
     let dir = mine.join(LIBRARY);
+    let office: Vec<&PathBuf> = files.iter()
+        .filter(|f| crate::as_text::convertible(&f.to_string_lossy()))
+        .filter(|f| std::fs::symlink_metadata(f).map_or(false, |m| m.file_type().is_file()))
+        .collect();
+    if office.is_empty() {
+        // Nothing may stay: the folder goes (only ever as a plain folder of this chat's own).
+        if std::fs::symlink_metadata(&dir).is_ok() && plain_path(home, &mine, false).unwrap_or(false) {
+            match std::fs::symlink_metadata(&dir) { Ok(m) if m.is_dir() => { let _ = std::fs::remove_dir_all(&dir); } Ok(_) => { let _ = std::fs::remove_file(&dir); } Err(_) => {} }
+        }
+        return;
+    }
     if !plain_path(home, &dir, true).unwrap_or(false) { return; }
     let until = std::time::Instant::now() + TEXTS_TIME;
     let mut keep: std::collections::HashSet<std::ffi::OsString> = Default::default();
     for f in office { keep.extend(text_of(&dir, f, &library_name(f), until)); }
-    if std::fs::read_dir(&dir).map_or(0, |d| d.count()) > 200 { sweep(&dir, &keep); }
+    sweep(&dir, &keep);
 }
 
-/// What there is to read of an office file instead of the file itself.
+/// Remove every chat's text versions of library files (when what is private changes, or the
+/// library does): the folders named `LIBRARY` at the end of each chat's path. Nothing is followed
+/// or removed through a link. Blocking: call it off the runtime.
+pub fn forget_library_texts(home: &Path) {
+    fn walk(dir: &Path, depth: usize) {
+        let Ok(list) = std::fs::read_dir(dir) else { return };
+        for e in list.flatten() {
+            let p = e.path();
+            if !std::fs::symlink_metadata(&p).map_or(false, |m| m.is_dir()) { continue; }
+            if depth == DEPTH { if e.file_name() == LIBRARY { let _ = std::fs::remove_dir_all(&p); } }
+            else { walk(&p, depth + 1); }
+        }
+    }
+    let root = root(home);
+    if std::fs::symlink_metadata(&root).map_or(false, |m| m.is_dir()) { walk(&root, 0); }
+}
+
+
 #[derive(Debug, PartialEq)]
 pub enum Text {
     /// Not an office file: the Read tool opens it as it is (or nothing can).
@@ -469,6 +499,51 @@ mod tests {
         assert!(matches!(library_text_for(&home, "c-2", &refs[0]), Text::Failed(_)), "another chat's text version");
         assert_eq!(std::fs::read(lib.join("a/plan.rtf")).unwrap(), b"{\\rtf1 plan A\\par}");
         library_texts(&home, "../c-2", &refs);
+        // The next message refers to one of them only: the other's text version goes with the
+        // permission it was made under (its folder may have been made private since; the caller
+        // no longer passes it). So does that of a file deleted since, even if still referred to.
+        let lib_dir = mine.join("library");
+        library_texts(&home, "c-1", &refs[..1]);
+        assert!(a.exists() && !b.exists(), "a text version outlived its message");
+        assert_eq!(names(&lib_dir).len(), 1);
+        assert!(matches!(library_text_for(&home, "c-1", &refs[1]), Text::Failed(_)));
+        library_texts(&home, "c-1", &refs);
+        assert!(a.exists() && b.exists(), "referred to again, it is made again");
+        std::fs::remove_file(lib.join("b/plan.rtf")).unwrap();
+        std::fs::write(lib_dir.join("planted.txt"), b"x").unwrap();
+        library_texts(&home, "c-1", &refs);
+        assert!(a.exists() && !b.exists() && names(&lib_dir).len() == 1, "the text of a deleted file stayed: {:?}", names(&lib_dir));
+        // A file that could not be converted leaves its note only while it is referred to.
+        std::fs::write(lib.join("a/bad.docx"), b"nope").unwrap();
+        library_texts(&home, "c-1", &[lib.join("a/bad.docx")]);
+        assert!(!a.exists() && names(&lib_dir).len() == 1 && names(&lib_dir)[0].ends_with("bad.docx.failed"), "{:?}", names(&lib_dir));
+        // What is private changed: every chat's go at once, and nothing else does.
+        library_texts(&home, "c-7", &refs[..1]);
+        let theirs = folder(&home, "c-7").unwrap().join("library");
+        assert!(theirs.is_dir() && lib_dir.is_dir());
+        forget_library_texts(&home);
+        assert!(!theirs.exists() && !lib_dir.exists(), "a text version stayed after what is private changed");
+        assert!(dir.join("notes.txt").exists() && dir.join("letter.rtf").exists(), "the chat's own copies went too");
+        library_texts(&home, "c-1", &[lib.join("a/bad.docx")]);
+        // A message that refers to nothing (or to no office file) leaves none at all.
+        library_texts(&home, "c-1", &[lib.join("a/note.md")]);
+        assert!(!lib_dir.exists());
+        library_texts(&home, "c-1", &refs[..1]);
+        assert!(a.exists());
+        library_texts(&home, "c-1", &[]);
+        assert!(!lib_dir.exists());
+        // Never through a link put where the folder should be.
+        #[cfg(unix)]
+        {
+            let elsewhere = home.join("elsewhere2");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::fs::write(elsewhere.join("keep.txt"), b"k").unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &lib_dir).unwrap();
+            library_texts(&home, "c-1", &refs[..1]);
+            assert_eq!(names(&elsewhere), ["keep.txt"], "written or swept through a link");
+            library_texts(&home, "c-1", &[]);
+            assert!(elsewhere.join("keep.txt").exists() && std::fs::symlink_metadata(&lib_dir).is_err());
+        }
         // They go with the chat.
         clear(&home, Some("c-1"));
         assert!(!mine.exists());

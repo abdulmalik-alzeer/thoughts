@@ -628,4 +628,15 @@ async fn an_attached_office_file_is_named_with_its_text_version() {
     t::event(&mut rx, &st, "chat.done").await;
     let next = prompts.lock().unwrap()[1].clone();
     assert!(next.contains(&format!("read their text versions in {}, each named after its file with .txt added.", mine.join("text").display())), "{next}");
+    // That message referred to no library file: the text version of the one referred to before is gone.
+    assert!(!std::path::Path::new(path).exists() && !mine.join("library").exists(), "a library file's text version outlived its message");
+    // Once its folder is private the file cannot be referred to, and nothing of it is left or made.
+    chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "again".into(), mentions: vec!["deals/offer.rtf".into()], ..Default::default() })).await.unwrap();
+    t::event(&mut rx, &st, "chat.done").await;
+    assert!(std::path::Path::new(path).exists());
+    st.settings.write().await.private_paths = vec!["deals".into()];
+    assert!(chat_send(State(st.clone()), Path(chat.clone()), Json(SendBody { text: "once more".into(), mentions: vec!["deals/offer.rtf".into()], ..Default::default() })).await.is_err());
+    chat_send(State(st.clone()), Path(chat.clone()), say("and now?")).await.unwrap();
+    t::event(&mut rx, &st, "chat.done").await;
+    assert!(!mine.join("library").exists(), "the text of a file made private is still there");
 }
