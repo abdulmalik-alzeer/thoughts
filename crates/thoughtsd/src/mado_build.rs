@@ -100,7 +100,17 @@ pub struct BuildLane {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
-pub struct BuildWave { pub status: TaskStatus, pub lanes: Vec<BuildLane> }
+#[serde(rename_all = "camelCase")]
+pub struct BuildWave {
+    pub status: TaskStatus,
+    pub lanes: Vec<BuildLane>,
+    /// Its tasks' checks passed once more in the build's worktree after every lane was merged (beyond the contract's shape).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub checked: bool,
+    /// The run that fixes what those checks found (beyond the contract's shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fix_chat_id: Option<String>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -223,6 +233,7 @@ fn lock_of(map: &'static Locks, pid: &str) -> Arc<tokio::sync::Mutex<()>> {
     map.lock().unwrap_or_else(|e| e.into_inner()).entry(pid.to_string()).or_default().clone()
 }
 fn key(wi: usize, li: usize) -> String { format!("{wi}-{li}") }
+fn wave_key(wi: usize) -> String { format!("wave-{wi}") }
 fn live_of(pid: &str) -> HashSet<String> { LIVE.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(p, _)| p == pid).map(|(_, k)| k.clone()).collect() }
 fn live_add(pid: &str, k: &str) { LIVE.lock().unwrap_or_else(|e| e.into_inner()).push((pid.to_string(), k.to_string())); }
 fn live_remove(pid: &str, k: &str) {
@@ -289,7 +300,13 @@ async fn remove_worktree(state: &AppState, project: &Path, pid: &str, wt: &Path)
         }
         if std::fs::symlink_metadata(wt).is_ok() { crate::log::ok_or_warn("mado build: could not remove a worktree folder", std::fs::remove_dir_all(wt)); }
     }
+    let _ = std::fs::remove_file(setup_marker(wt));
     let _ = git(state, project, &["worktree", "prune"]).await;
+}
+
+/// Where the engine notes that a worktree's set-up commands ran (beside it, never inside it).
+fn setup_marker(wt: &Path) -> PathBuf {
+    wt.with_file_name(format!("{}.setup", wt.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()))
 }
 
 /// Delete a branch the engine made (only ever `mado/…`).
@@ -389,7 +406,7 @@ async fn check_ready(state: &AppState, pid: &str, project: &Path) -> anyhow::Res
     if !mado::approval_matches(&approval, &bytes) { return Err(crate::tr::err("mado_build.plan_changed", &[])); }
     let plan: PlanDoc = serde_json::from_slice(&bytes).map_err(|_| crate::tr::err("mado_build.plan_invalid", &[("why", "plan.json")]))?;
     if let Some(why) = plan_problem(&plan) { return Err(crate::tr::err("mado_build.plan_invalid", &[("why", &why)])); }
-    if plan.tasks.iter().flat_map(|t| t.acceptance.iter()).filter(|c| !c.trim().is_empty()).any(|c| !approval.commands.contains(c)) {
+    if plan.setup.iter().chain(plan.tasks.iter().flat_map(|t| t.acceptance.iter())).filter(|c| !c.trim().is_empty()).any(|c| !approval.commands.contains(c)) {
         return Err(crate::tr::err("mado_build.plan_changed", &[]));
     }
     let branch = crate::git::current_branch(state, project).await.map_err(|_| crate::tr::err("mado_build.no_branch", &[]))?;
@@ -439,7 +456,7 @@ pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) 
         }
         copy_docs(&project, &build_wt(pid)?);
         let waves = mado::waves(&r.plan).into_iter().map(|w| BuildWave {
-            status: TaskStatus::Pending,
+            status: TaskStatus::Pending, checked: false, fix_chat_id: None,
             lanes: w.lanes.into_iter().map(|l| BuildLane { id: l.id, status: TaskStatus::Pending, fix_chat_id: None,
                 tasks: l.tasks.into_iter().map(|id| BuildTask { id, ..Default::default() }).collect() }).collect(),
         }).collect();
@@ -466,10 +483,10 @@ pub async fn pause(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildStat
     Ok(load_build(&project)?.unwrap_or_default())
 }
 
-/// Paused (or failed as a whole): go on.
+/// Paused, failed as a whole, or waiting (after a failed set-up or wave check, which are tried again): go on.
 pub async fn resume_build(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState> {
     let project = project_of(state, pid).await?;
-    let r = update(pid, &project, |b| if matches!(b.status, BuildStatus::Paused | BuildStatus::Failed) { b.status = BuildStatus::Running; b.message = None; true } else { false }).await?
+    let r = update(pid, &project, |b| if matches!(b.status, BuildStatus::Paused | BuildStatus::Failed | BuildStatus::Waiting) { b.status = BuildStatus::Running; b.message = None; true } else { false }).await?
         .ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
     if !r { return Err(not_now(&project)); }
     mado::tell(state, pid, "build").await;
@@ -491,7 +508,7 @@ pub async fn stop(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState
         b.governor.holding = false;
         b.governor.reason = None;
         let mut chats = vec![];
-        for w in &b.waves { for l in &w.lanes {
+        for w in &b.waves { if let Some(c) = &w.fix_chat_id { chats.push(c.clone()); } for l in &w.lanes {
             if let Some(c) = &l.fix_chat_id { chats.push(c.clone()); }
             for t in &l.tasks { if matches!(t.status, TaskStatus::Running | TaskStatus::Checking) { if let Some(c) = &t.chat_id { chats.push(c.clone()); } } }
         } }
@@ -626,6 +643,7 @@ pub fn tick(state: Arc<AppState>, pid: String) -> BoxFuture<'static, ()> {
 async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
     let project = project_of(state, pid).await?;
     let mut spawn: Vec<(usize, usize)> = vec![];
+    let mut check_wave: Option<usize> = None;
     let (mut recheck, mut finished) = (false, None);
     {
         let l = lock_of(&STATE_LOCKS, pid);
@@ -647,7 +665,13 @@ async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
                 let w = &mut b.waves[wi];
                 // A lane marked running with nobody working on it (a restart, a worker gone): it starts again.
                 for (li, lane) in w.lanes.iter_mut().enumerate() { if lane.status == TaskStatus::Running && !live.contains(&key(wi, li)) { lane.status = TaskStatus::Pending; } }
-                if w.lanes.iter().all(|l| l.status == TaskStatus::Done) { w.status = TaskStatus::Done; continue; }
+                if w.lanes.iter().all(|l| l.status == TaskStatus::Done) {
+                    if w.checked { w.status = TaskStatus::Done; continue; }
+                    // Every lane is in: the wave's checks run once more, together, in the build's worktree.
+                    if !live.contains(&wave_key(wi)) { check_wave = Some(wi); }
+                    w.status = TaskStatus::Running;
+                    break;
+                }
                 let pending: Vec<usize> = (0..w.lanes.len()).filter(|li| w.lanes[*li].status == TaskStatus::Pending).collect();
                 let active = live.len();
                 let mut hold = None;
@@ -663,7 +687,7 @@ async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
                 b.governor.reason = hold;
                 if active == 0 && pending.is_empty() {
                     b.status = BuildStatus::Waiting;
-                    b.message = Some(tr("mado_build.waiting", &[]));
+                    if b.message.is_none() { b.message = Some(tr("mado_build.waiting", &[])); }
                     crate::log::warn(format!("mado build {}: waiting for the user", b.number));
                 }
                 break;
@@ -672,8 +696,9 @@ async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
             b.governor.holding = false;
             b.governor.reason = None;
         }
-        b.governor.running = (live.len() + spawn.len()) as u32;
+        b.governor.running = (live.len() + spawn.len() + usize::from(check_wave.is_some())) as u32;
         for (wi, li) in &spawn { live_add(pid, &key(*wi, *li)); }
+        if let Some(wi) = check_wave { live_add(pid, &wave_key(wi)); }
         if b != before { save_build(&project, &b)?; }
     }
     if let Some(b) = finished {
@@ -684,6 +709,7 @@ async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
     }
     mado::tell(state, pid, "build").await;
     for (wi, li) in spawn { tokio::spawn(lane_worker(state.clone(), pid.to_string(), project.clone(), wi, li)); }
+    if let Some(wi) = check_wave { tokio::spawn(wave_worker(state.clone(), pid.to_string(), project.clone(), wi)); }
     if recheck { schedule_recheck(state.clone(), pid.to_string()); }
     Ok(())
 }
@@ -780,6 +806,10 @@ async fn lane_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize,
     let b = load_build(project)?.ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
     let plan = snapshot(pid, &b.plan_hash)?;
     let wt = ensure_lane_wt(state, project, pid, &b, wi, li).await?;
+    if let Err(why) = ensure_setup(state, pid, project, &b.plan_hash, &plan, &wt).await {
+        hold_waiting(state, pid, project, Some((wi, li)), &why).await?;
+        return Ok(());
+    }
     loop {
         let next = update(pid, project, |b| {
             let running = b.status == BuildStatus::Running;
@@ -1118,11 +1148,8 @@ fn has_marks(p: &Path) -> bool {
     t.lines().any(|l| l.starts_with("<<<<<<< ") || l.starts_with(">>>>>>> "))
 }
 
-/// Merge a finished lane into the build branch, in the build's worktree. A clash gets one run that
-/// settles it; its tasks' commands must pass afterwards, or the merge is undone and the lane waits.
-async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildState, plan: &PlanDoc, wi: usize, li: usize) -> anyhow::Result<LaneEnd> {
-    let ml = lock_of(&MERGE_LOCKS, pid);
-    let _m = ml.lock().await;
+/// The build's own worktree, made again if it is gone.
+async fn ensure_build_wt(state: &AppState, project: &Path, pid: &str, b: &BuildState) -> anyhow::Result<PathBuf> {
     let bwt = build_wt(pid)?;
     if !bwt.join(".git").exists() {
         let gl = lock_of(&GIT_LOCKS, pid);
@@ -1130,6 +1157,108 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
         remove_worktree(state, project, pid, &bwt).await;
         git(state, project, &["worktree", "add", "-q", &s(&bwt), &b.branch]).await?;
         copy_docs(project, &bwt);
+    }
+    Ok(bwt)
+}
+
+/// The plan's set-up commands (`npm ci`…), once per fresh worktree, before any task or check there.
+/// They are approved commands like the checks, and go through the same re-check before each one.
+async fn ensure_setup(state: &AppState, pid: &str, project: &Path, hash: &str, plan: &PlanDoc, wt: &Path) -> Result<(), String> {
+    if plan.setup.iter().all(|c| c.trim().is_empty()) { return Ok(()); }
+    let marker = setup_marker(wt);
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(hash) { return Ok(()); }
+    run_checks(state, pid, hash, &plan.setup, wt, project).await.map_err(|e| tr("mado_build.setup_failed", &[("output", &e.text())]))?;
+    crate::log::ok_or_warn("mado build: could not note that a worktree was set up", std::fs::write(&marker, hash));
+    Ok(())
+}
+
+/// The build waits for the user, saying why; `lane` (when one) is put down to start again on resume.
+async fn hold_waiting(state: &AppState, pid: &str, project: &Path, lane: Option<(usize, usize)>, why: &str) -> anyhow::Result<()> {
+    update(pid, project, |b| {
+        if let Some(l) = lane.and_then(|(wi, li)| b.lane_mut(wi, li)) { if l.status == TaskStatus::Running { l.status = TaskStatus::Pending; } }
+        if b.status == BuildStatus::Running { b.status = BuildStatus::Waiting; b.message = Some(clip_note(why)); }
+    }).await?;
+    crate::log::warn("mado build: waiting for the user (set-up or a wave's checks)");
+    mado::tell(state, pid, "build").await;
+    Ok(())
+}
+
+async fn wave_worker(state: Arc<AppState>, pid: String, project: PathBuf, wi: usize) {
+    if let Err(e) = wave_inner(&state, &pid, &project, wi).await {
+        crate::log::error(format!("mado build: a wave's checks stopped with an error: {e:#}"));
+        let _ = hold_waiting(&state, &pid, &project, None, &crate::tr::classify(&e).message).await;
+    }
+    live_remove(&pid, &wave_key(wi));
+    if status_now(&project) == BuildStatus::Stopped {
+        if live_of(&pid).is_empty() { cleanup_stopped(&state, &project, &pid).await; }
+        mado::tell(&state, &pid, "build").await;
+    } else {
+        tick(state, pid).await;
+    }
+}
+
+/// The wave's checks in the build's worktree: the first failure as (task, what went wrong).
+async fn wave_checks(state: &AppState, pid: &str, project: &Path, hash: &str, plan: &PlanDoc, ids: &[String], bwt: &Path) -> Result<(), (String, CheckErr)> {
+    for id in ids {
+        let Some(t) = plan.tasks.iter().find(|t| &t.id == id) else { continue };
+        run_checks(state, pid, hash, &t.acceptance, bwt, project).await.map_err(|e| (id.clone(), e))?;
+    }
+    Ok(())
+}
+
+/// After every lane of wave `wi` is merged: its tasks' checks once more, together. A failure gets
+/// one fix run in the build's worktree with what failed; still failing, the fix is undone and the build waits.
+async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize) -> anyhow::Result<()> {
+    let b = load_build(project)?.ok_or_else(|| crate::tr::err("mado_build.none", &[]))?;
+    if b.status != BuildStatus::Running { return Ok(()); }
+    let plan = snapshot(pid, &b.plan_hash)?;
+    let ml = lock_of(&MERGE_LOCKS, pid);
+    let _m = ml.lock().await;
+    let bwt = ensure_build_wt(state, project, pid, &b).await?;
+    if let Err(why) = ensure_setup(state, pid, project, &b.plan_hash, &plan, &bwt).await { return hold_waiting(state, pid, project, None, &why).await; }
+    let ids: Vec<String> = b.waves[wi].lanes.iter().flat_map(|l| l.tasks.iter().map(|t| t.id.clone())).collect();
+    let (task, out) = match wave_checks(state, pid, project, &b.plan_hash, &plan, &ids, &bwt).await {
+        Ok(()) => return mark_checked(pid, project, wi).await,
+        Err((_, CheckErr::Unapproved(why))) => return hold_waiting(state, pid, project, None, &why).await,
+        Err((task, CheckErr::Failed(out))) => (task, out),
+    };
+    if status_now(project) == BuildStatus::Stopped { return Ok(()); }
+    crate::log::warn(format!("mado build {}: wave {} checks fail once put together; one fix run", b.number, wi + 1));
+    let fix = new_chat(state, pid, &task, &format!("{} — {}", tr("mado_build.chat_title_wave", &[]), wi + 1)).await;
+    update(pid, project, |b| if let Some(w) = b.waves.get_mut(wi) { w.fix_chat_id = Some(fix.clone()); }).await?;
+    mado::tell(state, pid, "build").await;
+    let brief = format!("This folder holds the build so far: the work of several tasks, just put together. One of their checks now fails here:\n```\n{}\n```\n\
+        Fix the code so that every task's checks pass, keeping the work of every task. Stay with the files that need it. \
+        Commit nothing: the app runs the checks again and commits the result.", clip_note(&out));
+    let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, deny_for(project, pid, &b, &bwt)).await;
+    if status_now(project) == BuildStatus::Stopped { reset_wt(state, project, &bwt).await; return Ok(()); }
+    let again = match ended { Err(why) => Err(why), Ok(()) => wave_checks(state, pid, project, &b.plan_hash, &plan, &ids, &bwt).await.map_err(|(_, e)| e.text()) };
+    if let Err(why) = again {
+        reset_wt(state, project, &bwt).await;
+        return hold_waiting(state, pid, project, None, &tr("mado_build.wave_failed", &[("output", &why)])).await;
+    }
+    git(state, &bwt, &["add", "-A", "--", ".", ":(exclude)mado"]).await?;
+    if !git_ok(state, &bwt, &["diff", "--cached", "--quiet"]).await {
+        crate::git::git_ident(state, &bwt, &["commit", "-q", "-m", &format!("MADO: wave {}, fixed after its checks", wi + 1)]).await?;
+    }
+    mark_checked(pid, project, wi).await
+}
+
+async fn mark_checked(pid: &str, project: &Path, wi: usize) -> anyhow::Result<()> {
+    update(pid, project, |b| if let Some(w) = b.waves.get_mut(wi) { w.checked = true; }).await?;
+    crate::log::info(format!("mado build: wave {} checked once put together", wi + 1));
+    Ok(())
+}
+
+/// Merge a finished lane into the build branch, in the build's worktree. A clash gets one run that
+/// settles it; its tasks' commands must pass afterwards, or the merge is undone and the lane waits.
+async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildState, plan: &PlanDoc, wi: usize, li: usize) -> anyhow::Result<LaneEnd> {
+    let ml = lock_of(&MERGE_LOCKS, pid);
+    let _m = ml.lock().await;
+    let bwt = ensure_build_wt(state, project, pid, b).await?;
+    if let Err(why) = ensure_setup(state, pid, project, &b.plan_hash, plan, &bwt).await {
+        hold_waiting(state, pid, project, None, &why).await?;
+        return Ok(LaneEnd::Stopped);
     }
     let br = lane_branch(b.number, wi, li);
     let lane = b.waves[wi].lanes[li].clone();
@@ -1232,9 +1361,8 @@ pub async fn recover(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
     {
         let gl = lock_of(&GIT_LOCKS, pid);
         let _g = gl.lock().await;
-        if let Ok(bwt) = build_wt(pid) {
-            if git_ok(state, &bwt, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).await { let _ = git(state, &bwt, &["merge", "--abort"]).await; }
-        }
+        // A merge, a clash's fix or a wave's fix that was cut off is undone (it is done again).
+        if let Ok(bwt) = build_wt(pid) { reset_wt(state, &project, &bwt).await; }
     }
     // Commits the engine made whose record did not reach `build.json` (the daemon stopped in between).
     let mut found: HashMap<String, String> = HashMap::new();

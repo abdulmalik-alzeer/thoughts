@@ -23,7 +23,13 @@ pub struct PlanTask {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct PlanDoc { pub version: u32, pub tasks: Vec<PlanTask> }
+pub struct PlanDoc {
+    pub version: u32,
+    pub tasks: Vec<PlanTask>,
+    /// Commands run once in every fresh worktree before any task or check there (`npm ci`…); approved with the checks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setup: Vec<String>,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Lane { pub id: String, pub tasks: Vec<String> }
@@ -169,7 +175,7 @@ mod tests {
 
     #[test]
     fn waves_follow_dependencies_and_overlap_shares_a_lane() {
-        let plan = PlanDoc { version: 1, tasks: vec![
+        let plan = PlanDoc { version: 1, setup: vec![], tasks: vec![
             t("a", &["src/auth/**"], &[]), t("b", &["src/auth/login.ts"], &[]), t("c", &["src/ui/**"], &[]),
             t("d", &["src/app.ts"], &["a", "c"]),
         ] };

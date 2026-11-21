@@ -26,7 +26,8 @@ fn approve(dir: &Path, pid: &str) {
     let bytes = std::fs::read(dir.join("mado/plan.json")).unwrap();
     let h = mado::plan_hash(&bytes);
     let plan: Value = serde_json::from_slice(&bytes).unwrap();
-    let commands: Vec<Value> = plan["tasks"].as_array().unwrap().iter().flat_map(|t| t["acceptance"].as_array().unwrap().clone()).collect();
+    let mut commands: Vec<Value> = plan["setup"].as_array().cloned().unwrap_or_default();
+    commands.extend(plan["tasks"].as_array().unwrap().iter().flat_map(|t| t["acceptance"].as_array().unwrap().clone()));
     let e = engine_dir(pid).unwrap();
     std::fs::create_dir_all(&e).unwrap();
     std::fs::write(e.join("approval.json"), json!({"planHash": h, "commands": commands, "approvedAt": "2026-11-21T00:00:00Z"}).to_string()).unwrap();
@@ -34,16 +35,20 @@ fn approve(dir: &Path, pid: &str) {
 }
 
 /// A linked, trusted project: a git repository with one commit, and an approved plan in `mado/` (not committed).
-async fn project(tasks: Vec<Value>) -> P {
+async fn project(tasks: Vec<Value>) -> P { project_with(tasks, &[]).await }
+
+/// …with set-up commands; `deps/` is ignored by git, as a dependency folder would be.
+async fn project_with(tasks: Vec<Value>, setup: &[&str]) -> P {
     let root = std::env::temp_dir().join(format!("thoughts-mado-build-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(root.join("proj")).unwrap();
     let dir = dunce::canonicalize(root.join("proj")).unwrap();
     t::sh(&dir, &["init", "-q", "-b", "main"]);
     for (k, v) in [("user.name", "Tester"), ("user.email", "tester@example.com"), ("commit.gpgsign", "false")] { t::sh(&dir, &["config", k, v]); }
     t::write(&dir, "README.md", "hello\n");
+    t::write(&dir, ".gitignore", "deps/\n");
     t::sh(&dir, &["add", "-A"]);
     t::sh(&dir, &["commit", "-q", "-m", "first"]);
-    t::write(&dir, "mado/plan.json", &serde_json::to_string_pretty(&json!({"version": 1, "tasks": tasks})).unwrap());
+    t::write(&dir, "mado/plan.json", &serde_json::to_string_pretty(&json!({"version": 1, "tasks": tasks, "setup": setup})).unwrap());
     t::write(&dir, "mado/spec.md", "# Spec\n\n### F1 — The thing\n");
     let st = Arc::new(AppState::for_test());
     let pid = uuid::Uuid::new_v4().simple().to_string();
@@ -56,6 +61,7 @@ async fn project(tasks: Vec<Value>) -> P {
 /// The task a run is for ("fix" for a run that settles a clash).
 fn task_of(info: &RunInfo) -> String {
     if info.prompt.starts_with("Two parts of this build") { return "fix".into(); }
+    if info.prompt.starts_with("This folder holds the build so far") { return "wave".into(); }
     info.prompt.strip_prefix("Task ").and_then(|r| r.split(':').next()).unwrap_or_default().to_string()
 }
 
@@ -442,9 +448,9 @@ fn owns_patterns_match_files_folders_and_globs() {
     assert!(glob_match("**/*.md", "docs/a.md") && glob_match("**/*.md", "a.md"));
     let pt = |id: &str, deps: &[&str]| PlanTask { id: id.into(), title: id.into(), description: String::new(), owns: vec![], depends_on: deps.iter().map(|d| d.to_string()).collect(),
         acceptance: vec![], feature: "F1".into(), screens: None };
-    assert!(plan_problem(&PlanDoc { version: 1, tasks: vec![pt("a", &["b"]), pt("b", &["a"])] }).is_some());
-    assert!(plan_problem(&PlanDoc { version: 1, tasks: vec![pt("A", &[])] }).is_some());
-    assert!(plan_problem(&PlanDoc { version: 1, tasks: vec![pt("a", &[]), pt("b", &["a"])] }).is_none());
+    assert!(plan_problem(&PlanDoc { version: 1, setup: vec![], tasks: vec![pt("a", &["b"]), pt("b", &["a"])] }).is_some());
+    assert!(plan_problem(&PlanDoc { version: 1, setup: vec![], tasks: vec![pt("A", &[])] }).is_some());
+    assert!(plan_problem(&PlanDoc { version: 1, setup: vec![], tasks: vec![pt("a", &[]), pt("b", &["a"])] }).is_none());
 }
 
 #[tokio::test]
@@ -522,5 +528,86 @@ async fn a_plan_changed_during_the_build_runs_no_more_commands_and_the_build_wai
     recover(&p.st, &p.pid).await.unwrap();
     assert_eq!(load_build(&p.dir).unwrap().unwrap().status, BuildStatus::Waiting);
     assert_eq!(*ran.lock().unwrap(), ["a"]);
+    p.done();
+}
+
+#[tokio::test]
+async fn set_up_commands_run_once_in_every_fresh_worktree_before_its_tasks() {
+    let count = std::env::temp_dir().join(format!("thoughts-mado-setup-{}", uuid::Uuid::new_v4()));
+    let setup = format!("mkdir -p deps && echo ok > deps/ready && echo x >> '{}'", count.display());
+    let ready = "test -f deps/ready";
+    let p = project_with(vec![
+        task("a", &["src/a.txt"], &[], &[ready, "test -f src/a.txt"]), task("b", &["src/b.txt"], &[], &[ready]),
+        task("c", &["src/c.txt"], &["a", "b"], &[ready, "test -f src/c.txt"]),
+    ], &[&setup]).await;
+    t::assistant(&p.st, |info: RunInfo| async move {
+        assert!(info.cwd.join("deps/ready").exists(), "set up before the task");
+        let id = task_of(&info);
+        put(&info.cwd, &format!("src/{id}.txt"), &id);
+        true
+    });
+    start(&p.st, &p.pid, None).await.unwrap();
+    let b = until(&p, "done", |b| b.status == BuildStatus::Done).await;
+    assert!(b.waves.iter().all(|w| w.checked && w.fix_chat_id.is_none()), "every wave checked once put together, nothing to fix");
+    // Three lanes and the build's own worktree, once each (the build worktree's checks need it too).
+    assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 4);
+    assert!(!t::sh(&p.dir, &["ls-tree", "-r", "--name-only", "mado/build-1"]).contains("deps/"));
+    let _ = std::fs::remove_file(count);
+    p.done();
+}
+
+#[tokio::test]
+async fn a_failing_set_up_makes_the_build_wait_with_its_output_and_runs_no_task() {
+    let p = project_with(vec![task("a", &["src/**"], &[], &["true"])], &["echo broken-tooling >&2; exit 4"]).await;
+    let ran = Arc::new(AtomicUsize::new(0));
+    let r2 = ran.clone();
+    t::assistant(&p.st, move |_| { let ran = r2.clone(); async move { ran.fetch_add(1, Ordering::SeqCst); true } });
+    start(&p.st, &p.pid, None).await.unwrap();
+    let b = until(&p, "waiting", |b| b.status == BuildStatus::Waiting).await;
+    let m = b.message.clone().unwrap();
+    assert!(m.starts_with(tr("mado_build.setup_failed", &[]).split('{').next().unwrap()) && m.contains("broken-tooling") && m.contains("exit 4"), "{m}");
+    assert_eq!((ran.load(Ordering::SeqCst), find(&b, "a").status, b.waves[0].lanes[0].status), (0, TaskStatus::Pending, TaskStatus::Pending));
+    // Going on tries the set-up again (still broken here: waiting again).
+    resume_build(&p.st, &p.pid).await.unwrap();
+    until(&p, "waiting again", |b| b.status == BuildStatus::Waiting).await;
+    assert_eq!(ran.load(Ordering::SeqCst), 0);
+    p.done();
+}
+
+/// Each lane alone passes a's check; together they do not, until a fix run adds `src/fixed`.
+async fn wave_that_breaks_together(fixes: bool) -> P {
+    let together = "test -f src/fixed || test $(ls src | wc -l) -lt 2";
+    let p = project(vec![task("a", &["src/a.txt"], &[], &[together]), task("b", &["src/b.txt"], &[], &["test -f src/b.txt"])]).await;
+    t::assistant(&p.st, move |info: RunInfo| async move {
+        let id = task_of(&info);
+        if id == "wave" {
+            assert!(info.cwd.ends_with("build") && info.prompt.contains("exit 1"), "in the build's worktree, told what failed");
+            if fixes { put(&info.cwd, "src/fixed", "y"); }
+        } else { put(&info.cwd, &format!("src/{id}.txt"), &id); }
+        true
+    });
+    start(&p.st, &p.pid, None).await.unwrap();
+    p
+}
+
+#[tokio::test]
+async fn checks_that_fail_once_a_wave_is_put_together_get_one_fix_run() {
+    let p = wave_that_breaks_together(true).await;
+    let b = until(&p, "done", |b| b.status == BuildStatus::Done).await;
+    assert!(b.waves[0].checked && b.waves[0].fix_chat_id.is_some());
+    assert!(t::sh(&p.dir, &["ls-tree", "-r", "--name-only", "mado/build-1"]).contains("src/fixed"));
+    assert!(t::sh(&p.dir, &["log", "-1", "--format=%s", "mado/build-1"]).contains("fixed after its checks"));
+    p.done();
+}
+
+#[tokio::test]
+async fn a_wave_whose_checks_still_fail_after_the_fix_run_waits_with_the_fix_undone() {
+    let p = wave_that_breaks_together(false).await;
+    let b = until(&p, "waiting", |b| b.status == BuildStatus::Waiting).await;
+    assert!(!b.waves[0].checked && b.waves[0].fix_chat_id.is_some());
+    assert!(b.message.as_deref().unwrap().starts_with(tr("mado_build.wave_failed", &[]).split('{').next().unwrap()), "{:?}", b.message);
+    assert!(b.waves[0].lanes.iter().all(|l| l.status == TaskStatus::Done), "the tasks themselves are done");
+    let bwt = build_wt(&p.pid).unwrap();
+    assert!(t::sh(&bwt, &["status", "--porcelain"]).lines().all(|l| l.contains("mado/")), "the fix run's changes were undone");
     p.done();
 }
