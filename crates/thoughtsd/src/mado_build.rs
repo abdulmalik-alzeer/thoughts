@@ -491,6 +491,11 @@ pub async fn repo_findings(state: &AppState, project: &Path) -> Vec<(&'static st
     let top = git(state, project, &["rev-parse", "--show-toplevel"]).await.ok().map(|t| PathBuf::from(t.trim()));
     let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
     if !same { return vec![("no-repo", "mado_build.not_repo", String::new())]; }
+    // The same guards as a build's start, before any git command that reads the working tree
+    // (`git status` runs the repository's filters): a repository that is not trusted, or whose own
+    // settings make git start programs, is named and nothing more is asked of it.
+    let guarded = async { if !full(state).await { crate::trust::require_git(project)?; } git_safe(state, project).await };
+    if let Err(e) = guarded.await { return vec![("no-repo", "mado.p.git_unsafe", crate::tr::classify(&e).message)]; }
     let mut out = vec![];
     // (A repository with no commit yet names its branch all the same.)
     let branch = git(state, project, &["symbolic-ref", "--short", "-q", "HEAD"]).await.map(|b| b.trim().to_string()).unwrap_or_default();

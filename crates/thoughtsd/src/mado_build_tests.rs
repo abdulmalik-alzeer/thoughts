@@ -381,6 +381,26 @@ async fn the_final_check_names_a_folder_that_is_not_a_repository() {
 }
 
 #[tokio::test]
+async fn the_final_check_runs_no_working_tree_command_in_a_repository_that_starts_programs() {
+    let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
+    // A clean filter that would leave a mark if `git status` ran it.
+    let mark = p.dir.join("ran-by-git");
+    t::sh(&p.dir, &["config", "--local", "filter.evil.clean", &format!("sh -c 'touch {}; cat'", mark.display())]);
+    put(&p.dir, ".gitattributes", "* filter=evil\n");
+    put(&p.dir, "notes.txt", "mine");
+    let found = repo_findings(&p.st, &p.dir).await;
+    assert_eq!(found.iter().map(|f| (f.0, f.1)).collect::<Vec<_>>(), [("no-repo", "mado.p.git_unsafe")], "{found:?}");
+    assert!(!mark.exists(), "git ran the repository's filter");
+    // Trusted by the user, its settings still start programs: named, and still nothing is run.
+    crate::trust::trust(&p.dir).unwrap();
+    let found = repo_findings(&p.st, &p.dir).await;
+    assert_eq!(found.iter().map(|f| (f.0, f.1)).collect::<Vec<_>>(), [("no-repo", "mado.p.git_unsafe")], "{found:?}");
+    assert!(found[0].2.contains("filter.evil.clean"), "{found:?}");
+    assert!(!mark.exists(), "git ran the repository's filter");
+    p.done();
+}
+
+#[tokio::test]
 async fn a_start_is_refused_on_an_unapproved_review_a_changed_plan_and_outside_git() {
     let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
     t::assistant(&p.st, |_| async { true });
