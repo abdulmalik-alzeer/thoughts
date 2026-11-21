@@ -188,10 +188,12 @@ pub struct SpendingSettings {
     /// What the usage page's API-price figures cover: only the runs the app starts (false), or also
     /// every Claude Code and Codex session on this computer, read from their folders (`meter.rs`).
     pub whole_computer: bool,
+    /// A MADO build holds new lanes while this share (percent) of the plan's current usage window is used (`mado_build.rs`).
+    pub build_hold_percent: u8,
 }
 
 impl Default for SpendingSettings {
-    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false } }
+    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false, build_hold_percent: 80 } }
 }
 
 impl SpendingSettings {
@@ -204,6 +206,7 @@ impl SpendingSettings {
             self.monthly_limit_usd = Some((l * 100.0).round() / 100.0);
         }
         if !(50..=95).contains(&self.warn_percent) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
+        if !(10..=100).contains(&self.build_hold_percent) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
         Ok(())
     }
 }
