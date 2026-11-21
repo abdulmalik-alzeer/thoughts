@@ -3,8 +3,8 @@
 // they go into an address, so nothing typed or read from a file can reach another route.
 import { api, del, patch, post, put } from '../api';
 import type {
-  BuildView, Comment, CommentStatus, CommentTarget, DesignTokens, GraphDoc, GraphName, GraphOp, MadoOverview,
-  PlanDoc, Pos, Review, ScreenInfo, StepId, StyleCandidate,
+  BuildGuide, BuildView, Comment, CommentStatus, CommentTarget, DesignTokens, GraphDoc, GraphName, GraphOp, MadoOptions, MadoOverview,
+  PlanDoc, PlanEntry, Pos, Review, ScreenInfo, ScreenResult, StepId, StyleCandidate,
 } from './types';
 import { STEPS } from './types';
 
@@ -81,9 +81,22 @@ export function madoApi(projectId: string) {
     buildStop: () => post<unknown>(`${base}/build/stop`),
     retryTask: (id: string) => post<unknown>(`${base}/build/tasks/${seg(id, 'task')}/retry`),
     land: () => post<unknown>(`${base}/build/land`),
+
+    // Round 0.4.0
+    /** `mado/conventions.md`, when the overview lists it (read only here). */
+    conventions: () => api<{ text: string }>(`${base}/doc/conventions`),
+    options: () => api<MadoOptions>(`${base}/options`),
+    saveOptions: (o: MadoOptions) => put<MadoOptions>(`${base}/options`, { model: o.model || null, effort: o.effort || null }),
+    /** The screens the build wants looked at, while it waits for a window (409 otherwise). */
+    buildScreens: () => api<{ url: string; screens: { id: string; path: string }[]; nonce: string }>(`${base}/build/screens`),
+    sendScreens: (nonce: string, results: ScreenResult[]) => post<unknown>(`${base}/build/screens`, { nonce, results }),
+    buildGuide: () => api<BuildGuide>(`${base}/build/guide`),
   };
 }
 export type MadoApi = ReturnType<typeof madoApi>;
+
+/** Every linked project whose plan was started (`GET /api/mado`). */
+export const listPlans = () => api<PlanEntry[]>('/mado');
 
 /** Builders working side by side: 1 to 6. */
 export const clampParallel = (n: number) => Math.min(6, Math.max(1, Math.round(Number(n) || 1)));

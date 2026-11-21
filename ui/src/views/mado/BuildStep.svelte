@@ -2,7 +2,13 @@
   // The build: the app does the planned work itself, on a copy of the project, a few pieces side
   // by side. This view shows where it stands, lets the user start, pause, resume or stop it, try a
   // failed piece again, and — only once everything is done — bring the result into their own branch.
-  import { Play, Pause, Square, RotateCw, GitMerge, Hourglass, CircleCheck, TriangleAlert, Hammer, MessageCircle, Minus, Plus, Wrench, ListChecks } from '@lucide/svelte';
+  // Round 0.4.0: after the last round of work the build looks at the product's screens (through this
+  // window, when it is the desktop app) and has the result reviewed; once it is in the user's branch
+  // the view becomes a finished state that says how to run what was built.
+  import { Play, Pause, Square, RotateCw, GitMerge, Hourglass, CircleCheck, TriangleAlert, Hammer, MessageCircle, Minus, Plus, Wrench, ListChecks, ShieldCheck, ScanEye, ClipboardCheck, Copy, Check, PartyPopper, PencilRuler } from '@lucide/svelte';
+  import { findingCounts, localUrl } from '../../lib/mado/plans';
+  import { lookAtScreens, looks } from '../../lib/mado/screenwatch.svelte';
+  import ProjectDoc from './ProjectDoc.svelte';
   import { t, tn, fmtDate, fmtNum } from '../../lib/i18n';
   import { failed } from '../../lib/errors';
   import { go, toast } from '../../lib/store.svelte';
@@ -11,7 +17,7 @@
   import type { MadoStore } from '../../lib/mado/store.svelte';
   import type { BuildTask, TaskStatus } from '../../lib/mado/types';
 
-  let { store }: { store: MadoStore } = $props();
+  let { store, onplan }: { store: MadoStore; /** Back to the steps, to plan a change. */ onplan?: () => void } = $props();
   const build = $derived(store.build);
   const status = $derived(build?.status ?? 'idle');
   const reviewed = $derived(store.status('review') === 'approved');
@@ -51,16 +57,94 @@
     if (!ok) return;
     act('land', async () => { await store.land(); toast(t('mado.build.landed'), { kind: 'success' }); }, 'mado.build.landFailed');
   }
+
+  // ---------- round 0.4.0 ----------
+  const landed = $derived(!!build?.landedAt);
+  const screens = $derived(build?.screens ?? null);
+  const review = $derived(build?.review ?? null);
+  const counts = $derived(findingCounts(review));
+  const look = $derived(looks[store.projectId]);
+  // While the build waits for a window to look at the screens: ask, look, answer (once, and only one window).
+  $effect(() => {
+    if (status !== 'checking') return;
+    const pid = store.projectId;
+    const go = () => { lookAtScreens(pid).catch(() => {}); };
+    go();
+    const timer = setInterval(go, 4000);
+    return () => clearInterval(timer);
+  });
+  // Once the build is in the user's branch: how to run it.
+  $effect(() => { if (landed && store.guide === undefined) store.refreshGuide(); });
+  const guide = $derived(store.guide);
+  const address = $derived(localUrl(guide?.url));
+  let copied = $state(false);
+  async function copy(text: string) {
+    try { await navigator.clipboard.writeText(text); copied = true; setTimeout(() => (copied = false), 2000); }
+    catch { toast(t('md.copyFailed'), { kind: 'error' }); }
+  }
   const TONE: Record<TaskStatus, string> = { pending: 'wait', running: 'run', checking: 'run', done: 'ok', failed: 'bad', conflict: 'bad', skipped: 'wait' };
 </script>
 
 {#if build === undefined}
   <div class="state muted" role="status">{t('mado.loading')}</div>
 {:else}
+  {#if landed}
+  <section class="card hero finished" aria-labelledby="mado-finished">
+    <div class="row top">
+      <span class="badge ok" aria-hidden="true"><PartyPopper size={22} /></span>
+      <div class="grow">
+        <h3 id="mado-finished" role="status">{t('mado.finished.title')}</h3>
+        <p class="muted sub">{t('mado.finished.what', { branch: build?.branch ?? '', base: build?.base ?? '' })}{#if build?.landedAt}{' '}{t('mado.finished.when', { when: fmtDate(build.landedAt, { dateStyle: 'medium', timeStyle: 'short' }) })}{/if}</p>
+      </div>
+      <div class="row acts">
+        <button type="button" class="btn primary" onclick={() => onplan?.()} title={t('mado.finished.changeTip')}><PencilRuler size={15} aria-hidden="true" /> {t('mado.finished.change')}</button>
+      </div>
+    </div>
+    <ul class="facts">
+      <li><GitMerge size={15} aria-hidden="true" /> <span>{t('mado.finished.merged')} <code dir="ltr">{build?.branch}</code> → <code dir="ltr">{build?.base}</code> · {t('mado.build.progress', { done: fmtNum(done), all: fmtNum(all.length) })}</span></li>
+      <li class:warnline={counts.all > 0}>
+        {#if !review}<ClipboardCheck size={15} aria-hidden="true" /> <span>{t('mado.finished.noReview')}</span>
+        {:else if counts.all === 0}<CircleCheck size={15} aria-hidden="true" /> <span>{t('mado.finished.clean')}</span>
+        {:else}<TriangleAlert size={15} aria-hidden="true" /> <span>{tn('mado.finished.findings', counts.all)}{#if counts.must} ({tn('mado.finished.must', counts.must)}){/if} <a href="#mado-review">{t('mado.finished.see')}</a></span>{/if}
+      </li>
+    </ul>
+
+    <div class="howrun" aria-labelledby="mado-howrun">
+      <h4 id="mado-howrun">{t('mado.run.title')}</h4>
+      {#if guide === undefined}
+        <p class="muted sm" role="status">{t('mado.loading')}</p>
+      {:else}
+        {#if guide?.start}
+          <p class="muted sm lead">{t('mado.run.lead')}</p>
+          <div class="cmdrow">
+            <code class="cmd" dir="ltr">{guide.start}</code>
+            <button type="button" class="btn" onclick={() => copy(guide?.start ?? '')} aria-label={t('mado.run.copy')}>{#if copied}<Check size={14} aria-hidden="true" /> {t('shell.copied')}{:else}<Copy size={14} aria-hidden="true" /> {t('shell.copy')}{/if}</button>
+          </div>
+          {#if guide.url}<p class="sm addr">{t('mado.run.then')} {#if address}<a href={address} target="_blank" rel="noreferrer noopener" dir="ltr">{address}</a>{:else}<code dir="ltr">{guide.url}</code>{/if}</p>{/if}
+        {:else}
+          <p class="muted sm">{t('mado.run.none')}</p>
+        {/if}
+        <p class="muted sm">{t('mado.run.notStarted')}</p>
+        {#if guide?.readme}
+          <details class="readme" open>
+            <summary>{t('mado.run.readme')}</summary>
+            <ProjectDoc text={guide.readme} label={t('mado.run.readme')} max={8000} />
+          </details>
+        {/if}
+      {/if}
+    </div>
+
+    {#if reviewed && !blocked}
+      <div class="again2"><span class="muted sm grow">{t('mado.finished.againWhat')}</span>
+        <button type="button" class="btn" onclick={start} disabled={!!busy} aria-busy={busy === 'start'}><Play size={14} aria-hidden="true" /> {t('mado.finished.again')}</button></div>
+    {/if}
+    {#if problem}<p class="note bad" role="alert"><TriangleAlert size={15} aria-hidden="true" /> <span dir="auto">{problem}</span></p>{/if}
+  </section>
+  {:else}
   <section class="card hero s-{status}">
     <div class="row top">
       <span class="badge" aria-hidden="true">
-        {#if status === 'done'}<CircleCheck size={22} />{:else if status === 'failed' || status === 'waiting'}<TriangleAlert size={22} />{:else if status === 'paused'}<Pause size={22} />{:else}<Hammer size={22} />{/if}
+        {#if status === 'done'}<CircleCheck size={22} />{:else if status === 'failed' || status === 'waiting'}<TriangleAlert size={22} />{:else if status === 'paused'}<Pause size={22} />{:else if status === 'checking'}<ScanEye size={22} />{:else if status === 'reviewing'}<ClipboardCheck size={22} />{:else}<Hammer size={22} />{/if}
       </span>
       <div class="grow">
         <h3 role="status">{t(`mado.build.${status}`)}</h3>
@@ -69,6 +153,8 @@
       <div class="row acts">
         {#if status === 'running'}
           <button type="button" class="btn" onclick={pause} disabled={!!busy}><Pause size={14} aria-hidden="true" /> {t('mado.build.pause')}</button>
+          <button type="button" class="btn danger" onclick={stop} disabled={!!busy}><Square size={13} aria-hidden="true" /> {t('mado.build.stop')}</button>
+        {:else if status === 'checking' || status === 'reviewing'}
           <button type="button" class="btn danger" onclick={stop} disabled={!!busy}><Square size={13} aria-hidden="true" /> {t('mado.build.stop')}</button>
         {:else if status === 'paused'}
           <button type="button" class="btn primary" onclick={resume} disabled={!!busy}><Play size={14} aria-hidden="true" /> {t('mado.build.resume')}</button>
@@ -94,6 +180,10 @@
         {#if build?.branch} · {t('mado.build.branch')} <code dir="ltr">{build.branch}</code>{/if}
         {#if build?.base} · {t('mado.build.from')} <code dir="ltr">{build.base}</code>{/if}
         {#if build?.startedAt} · {t('mado.build.started', { when: fmtDate(build.startedAt, { dateStyle: 'medium', timeStyle: 'short' }) })}{/if}</p>
+    {/if}
+
+    {#if status === 'done' && review && counts.all}
+      <p class="note" role="status"><TriangleAlert size={15} aria-hidden="true" /> <span>{tn('mado.finished.findings', counts.all)}{#if counts.must} ({tn('mado.finished.must', counts.must)}){/if} {t('mado.review.stillLand')} <a href="#mado-review">{t('mado.finished.see')}</a></span></p>
     {/if}
 
     {#if build?.governor && (status === 'running' || status === 'paused' || status === 'waiting')}
@@ -132,6 +222,52 @@
     {/if}
     {#if problem}<p class="note bad" role="alert"><TriangleAlert size={15} aria-hidden="true" /> <span dir="auto">{problem}</span></p>{/if}
   </section>
+  {/if}
+
+  {#if screens || status === 'checking'}
+    <section class="card phase" aria-labelledby="mado-screens">
+      <h4 id="mado-screens"><ScanEye size={17} aria-hidden="true" /> {t('mado.screens.title')}
+        <span class="st t-{screens?.status === 'done' ? (screens.failed ? 'bad' : 'ok') : screens?.status === 'skipped' ? 'wait' : 'run'}" role="status">{t(`mado.screens.${screens?.status ?? 'waiting'}`)}</span></h4>
+      <p class="muted sm">{t('mado.screens.what')}</p>
+      {#if screens?.status === 'done'}
+        <p class="sm">{tn('mado.screens.count', screens.count ?? 0)}{' · '}{#if screens.failed}<b class="badtxt">{tn('mado.screens.failed', screens.failed)}</b>{:else}{t('mado.screens.allFine')}{/if}</p>
+      {:else if screens?.status === 'skipped'}
+        <p class="sm"><span>{t('mado.screens.skippedWhat')}</span>{#if screens.reason} <span class="muted" dir="auto">{String(screens.reason).slice(0, 600)}</span>{/if}</p>
+      {/if}
+      {#if status === 'checking' && look}
+        <p class="note" class:bad={look === 'failed'} role="status">{#if look === 'cannot' || look === 'failed'}<TriangleAlert size={15} aria-hidden="true" />{:else}<ScanEye size={15} aria-hidden="true" />{/if} <span>{t(`mado.screens.look.${look}`)}</span></p>
+      {/if}
+    </section>
+  {/if}
+
+  {#if review}
+    <section class="card phase" id="mado-review" aria-labelledby="mado-review-h" tabindex="-1">
+      <h4 id="mado-review-h"><ClipboardCheck size={17} aria-hidden="true" /> {t('mado.breview.title')}
+        <span class="st t-{review.status === 'passed' ? 'ok' : review.status === 'failed' ? 'bad' : review.status === 'running' ? 'run' : 'wait'}" role="status">{t(`mado.breview.${review.status}`)}</span>
+        <span class="muted sm">{t('mado.breview.round', { n: fmtNum(Math.max(1, Number(review.round) || 1)) })}</span></h4>
+      <p class="muted sm">{t('mado.breview.what')}</p>
+      <div class="row chats">
+        {#if review.chatId}<button type="button" class="btn ghost sm" onclick={() => openChat(review.chatId!)} title={t('mado.breview.chatTip')}><MessageCircle size={13} aria-hidden="true" /> {t('mado.breview.chat')}</button>{/if}
+        {#if review.fixChatId}<button type="button" class="btn ghost sm" onclick={() => openChat(review.fixChatId!)} title={t('mado.breview.fixTip')}><Wrench size={13} aria-hidden="true" /> {t('mado.breview.fix')}</button>{/if}
+      </div>
+      {#if counts.all}
+        <ul class="findings" aria-label={t('mado.breview.findings')}>
+          {#each review.findings.slice(0, 100) as f}
+            <li class:must={f.severity === 'must'}>
+              <span class="pill" class:stop={f.severity === 'must'}>{t(f.severity === 'must' ? 'mado.breview.must' : 'mado.breview.should')}</span>
+              <span class="ftext">
+                {#if f.where}<code dir="ltr">{String(f.where).slice(0, 300)}</code>{/if}
+                <span dir="auto">{String(f.text ?? '').slice(0, 2000)}</span>
+              </span>
+            </li>
+          {/each}
+        </ul>
+        {#if review.findings.length > 100}<p class="muted sm">{tn('mado.breview.more', review.findings.length - 100)}</p>{/if}
+      {:else if review.status !== 'running'}
+        <p class="good"><CircleCheck size={16} aria-hidden="true" /> {t('mado.breview.none')}</p>
+      {/if}
+    </section>
+  {/if}
 
   {#if build?.waves?.length}
     <ol class="waves">
@@ -140,7 +276,10 @@
           <div class="wh"><b>{t('mado.review.round', { n: i + 1 })}</b> <span class="st t-{TONE[w.status]}">{t(`mado.task.${w.status}`)}</span>
             {#if w.lanes.length > 1}<span class="muted sm">{tn('mado.review.together', w.lanes.length)}</span>{/if}
             {#if w.checked}<span class="st t-ok" title={t('mado.build.checkedTip')}><ListChecks size={13} aria-hidden="true" /> {t('mado.build.checked')}</span>{/if}
-            {#if w.fixChatId}<button type="button" class="btn ghost sm" onclick={() => openChat(w.fixChatId!)} title={t('mado.build.waveFixTip')}><Wrench size={13} aria-hidden="true" /> {t('mado.build.waveFix')}</button>{/if}</div>
+            {#if w.fixChatId}<button type="button" class="btn ghost sm" onclick={() => openChat(w.fixChatId!)} title={t('mado.build.waveFixTip')}><Wrench size={13} aria-hidden="true" /> {t('mado.build.waveFix')}</button>{/if}
+            {#if w.verified === true}<span class="st t-ok" title={t('mado.build.verifiedTip')}><ShieldCheck size={13} aria-hidden="true" /> {t('mado.build.verified')}</span>
+            {:else if w.verified === false}<span class="st t-bad" title={t('mado.build.verifiedTip')}><TriangleAlert size={13} aria-hidden="true" /> {t('mado.build.notVerified')}</span>{/if}
+            {#if w.gateFixChatId}<button type="button" class="btn ghost sm" onclick={() => openChat(w.gateFixChatId!)} title={t('mado.build.gateFixTip')}><Wrench size={13} aria-hidden="true" /> {t('mado.build.gateFix')}</button>{/if}</div>
           <div class="lanes">
             {#each w.lanes as lane (lane.id)}
               <ul class="lane" aria-label={t('mado.build.lane')}>
@@ -222,6 +361,39 @@
   .again { justify-self: start; margin-top: 6px; }
   .ib { padding: 4px 6px; }
   .state { padding: 40px 0; text-align: center; }
+  /* Round 0.4.0: the phases after the last round, and the finished state. */
+  .badge.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  .phase { margin-top: 12px; padding: 16px 18px; display: grid; gap: 8px; }
+  .phase h4, .howrun h4 { margin: 0; font-size: 15px; font-weight: 600; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .phase h4 :global(svg) { color: var(--accent); flex: none; }
+  .phase p { margin: 0; }
+  .phase:focus { outline: none; }
+  .badtxt { color: var(--danger); }
+  .good { display: flex; gap: 8px; align-items: center; color: var(--ok); font-weight: 500; }
+  .chats { gap: 6px; flex-wrap: wrap; }
+  .findings { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 6px; }
+  .findings li { display: grid; grid-template-columns: max-content 1fr; gap: 10px; align-items: start; padding: 9px 12px; border-radius: var(--radius); background: var(--fill); border-inline-start: 3px solid var(--control-border); }
+  .findings li.must { border-inline-start-color: var(--danger); }
+  .ftext { display: grid; gap: 3px; min-width: 0; font-size: 13.5px; overflow-wrap: anywhere; }
+  .ftext > span { white-space: pre-wrap; }
+  .ftext code { justify-self: start; font-size: var(--fs-xs); white-space: pre-wrap; }
+  .pill.stop { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); font-weight: 600; }
+  :global([data-theme="contrast"]) .pill.stop { background: var(--danger); color: var(--bg); }
+  .facts { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13.5px; }
+  .facts li { display: flex; gap: 8px; align-items: flex-start; }
+  .facts :global(svg) { flex: none; margin-top: 3px; color: var(--ok); }
+  .facts .warnline :global(svg) { color: var(--accent-2); }
+  .facts code, .cmd { overflow-wrap: anywhere; }
+  .howrun { display: grid; gap: 8px; padding: 14px 16px; border-radius: var(--radius-lg); background: var(--fill); }
+  .howrun p { margin: 0; }
+  .cmdrow { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+  .cmdrow .cmd { flex: 1 1 240px; min-width: 0; padding: 8px 12px; border-radius: 8px; background: var(--code-bg); border: var(--border-w) solid var(--hairline); white-space: pre-wrap; text-align: left; user-select: all; }
+  .addr a { overflow-wrap: anywhere; }
+  .readme { margin-top: 6px; padding: 10px 14px; border-radius: var(--radius); background: var(--panel); border: var(--border-w) solid var(--hairline); }
+  .readme summary { cursor: pointer; font-weight: 600; font-size: 13.5px; }
+  .readme[open] summary { margin-bottom: 12px; }
+  .again2 { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--hairline); }
+  @container main (max-width: 560px) { .findings li { grid-template-columns: 1fr; } }
   .empty { margin-top: 16px; display: grid; justify-items: center; gap: 6px; text-align: center; padding: 48px 24px; border: 1px dashed var(--border); border-radius: var(--radius-lg); color: var(--muted); }
   .empty b { color: var(--fg); font-size: 15px; }
   .empty span { max-width: 50ch; }

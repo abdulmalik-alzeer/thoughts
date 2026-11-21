@@ -387,3 +387,36 @@ describe('temporary keys of new nodes', () => {
     expect(body[0].graphOps[0].ops).toEqual(ops);
   });
 });
+
+describe('round 0.4.0', () => {
+  it('fetches the conventions with the technical design only when the service lists the file', async () => {
+    const f = fake({ overview: overview({ brief: 'approved', spec: 'approved', tech: 'review' }, ['tech.md']) });
+    (f.api as any).conventions = async () => { f.calls.push('conventions'); return { text: '# Conventions' }; };
+    const s = new MadoStore(PID, f.api);
+    await s.load();
+    await s.ensureStep('tech');
+    expect(f.calls).not.toContain('conventions');
+    expect(s.conventions).toBeUndefined();
+    f.db.overview.files.push('conventions.md');
+    await s.refreshOverview();
+    await s.ensureStep('tech');
+    expect(s.conventions).toBe('# Conventions');
+    // A change of the documents fetches it again.
+    (f.api as any).conventions = async () => ({ text: '# Conventions v2' });
+    await s.onEvent({ projectId: PID, what: 'doc' });
+    expect(s.conventions).toBe('# Conventions v2');
+  });
+  it('the guide is cut to size, and an older service simply has none', async () => {
+    const f = fake({ overview: overview({ brief: 'approved' }) });
+    const s = new MadoStore(PID, f.api);
+    (f.api as any).buildGuide = async () => ({ start: 'npm start', url: 'http://localhost:3000', readme: 'r'.repeat(20000), extra: '<script>' });
+    await s.refreshGuide();
+    expect(s.guide).toEqual({ start: 'npm start', url: 'http://localhost:3000', readme: 'r'.repeat(8000) });
+    (f.api as any).buildGuide = async () => { throw new ApiError('Not found', 404, ''); };
+    await s.refreshGuide();
+    expect(s.guide).toBeNull();
+    (f.api as any).buildGuide = async () => { throw new Error('offline'); };
+    await s.refreshGuide();
+    expect(s.guide).toBeNull();
+  });
+});

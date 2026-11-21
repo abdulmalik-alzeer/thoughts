@@ -21,14 +21,17 @@
   import StepChat from './StepChat.svelte';
   import ReviewStep from './ReviewStep.svelte';
   import BuildStep from './BuildStep.svelte';
+  import ProjectDoc from './ProjectDoc.svelte';
 
-  let { store, step: stepProp, tab = $bindable('') }: { store: MadoStore; step: StepId; /** The open tab, remembered by the view per step. */ tab?: string } = $props();
+  let { store, step: stepProp, tab = $bindable(''), onstep }: { store: MadoStore; step: StepId; /** The open tab, remembered by the view per step. */ tab?: string; /** Go to another step. */ onstep?: (s: StepId) => void } = $props();
 
   // One workspace shows one step for as long as it lives (the view makes a new one per step).
   const step = untrack(() => stepProp);
   const status = $derived(store.status(step));
   const chatId = $derived(store.step(step).chatId ?? '');
-  const tabs = $derived(tabsOf(step));
+  const tabs = $derived(tabsOf(step, store.overview?.files ?? []));
+  // The conventions file can appear while the step is open (the run that writes it just ended).
+  $effect(() => { if (step === 'tech' && store.has('conventions.md') && store.conventions === undefined) store.refreshConventions().catch(() => { store.conventions = null; }); });
   const active = $derived(tabs.find((x) => x.id === tab) ?? tabs[0]);
   const comments = $derived(commentsOfStep(store.comments, step));
   const openCount = $derived(comments.filter((c) => c.status === 'open').length);
@@ -222,7 +225,7 @@
   {:else if step === 'review'}
     <ReviewStep review={store.review} plan={store.plan} />
   {:else if step === 'build'}
-    <BuildStep {store} />
+    <BuildStep {store} onplan={() => onstep?.('spec')} />
   {:else}
     <div class="cols" class:wide>
       <div class="main">
@@ -248,6 +251,8 @@
             {#key active.name}<DocPane {store} name={active.name} canEdit={editable} {canComment} {focusId} oncomment={startComment} onpick={pick} />{/key}
           {:else if active?.kind === 'graph'}
             {#key active.name}<GraphPane {store} name={active.name} canEdit={editable} {canComment} oncomment={startComment} />{/key}
+          {:else if active?.kind === 'conventions'}
+            <ProjectDoc text={store.conventions} label={t('mado.tab.conventions')} max={60000} hint={t('mado.conventions.hint')} />
           {:else if active?.kind === 'tasks'}
             <TaskList plan={store.plan} {comments} {canComment} focusId={focusTask} oncomment={startComment} />
           {:else if active?.kind === 'design'}

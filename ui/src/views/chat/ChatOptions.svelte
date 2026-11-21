@@ -6,7 +6,7 @@
   import Icon from '../../lib/Icon.svelte';
   import { t } from '../../lib/i18n';
 
-  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram, modelNote = '' }: {
+  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram, modelNote = '', plain = false, below = false, busy = false }: {
     options: { model?: string | null; effort?: string | null; permissionMode?: string | null };
     models: string[]; efforts: string[]; modes: string[];
     /** Where the names of the modes and efforts are (Codex has names of its own for them). */
@@ -19,7 +19,13 @@
     onmodel: (e: Event & { currentTarget: HTMLSelectElement }) => void;
     /** One more entry at the end of the model menu (typing a model's name). */
     extraModel?: { value: string; label: string };
-    oneffort: (v: string | null) => void; onperm: (v: string) => void;
+    oneffort: (v: string | null) => void; onperm?: (v: string) => void;
+    /** Only the model and the effort (a plan's runs have their own fixed rules): the button names them, or the default. */
+    plain?: boolean;
+    /** Open under the button (in a page header) instead of over it (in the composer). */
+    below?: boolean;
+    /** A change is being saved: the menus wait. */
+    busy?: boolean;
     /** Said under the model menu when the program could not list its models. */
     modelNote?: string;
   } = $props();
@@ -45,14 +51,19 @@
 <span class="co" bind:this={root} onkeydown={onkey}>
   <button bind:this={button} type="button" class="cobtn" class:bypass={mode === BYPASS} class:plan={mode === 'plan'}
     aria-haspopup="dialog" aria-expanded={open} aria-controls="co-{uid}" onclick={() => (open = !open)}
-    title={t('chatc.opt.tip')} aria-label={t('chatc.opt.aria', { mode: label(permPrefix, mode) })}>
+    title={plain ? t('mado.opts.tip') : t('chatc.opt.tip')} aria-label={plain ? t('mado.opts.aria', { what: extra || t('default') }) : t('chatc.opt.aria', { mode: label(permPrefix, mode) })}>
+    {#if plain}
+      <Icon name="settings" size={13} />
+      {#if extra}<span class="ell extra wide" dir="ltr">{extra}</span>{:else}<span class="ell">{t('mado.opts.default')}</span>{/if}
+    {:else}
     <Icon name={mode === BYPASS ? 'warning' : mode === 'plan' ? 'eye' : 'shield'} size={13} />
     <span class="ell">{label(permPrefix, mode)}</span>
     {#if extra}<span class="ell muted extra" dir="ltr">· {extra}</span>{/if}
+    {/if}
     <Icon name="down" size={12} />
   </button>
   {#if open}
-    <div class="pop" id="co-{uid}" role="dialog" aria-label={t('chatc.opt.title')}>
+    <div class="pop" class:below id="co-{uid}" role="dialog" aria-label={plain ? t('mado.opts.title') : t('chatc.opt.title')}>
       {#if programs.length > 1 && onprogram}
         <fieldset>
           <legend>{t('codex.move.label')}</legend>
@@ -71,7 +82,7 @@
           <legend>{t('chatc.opt.may')}</legend>
           {#each modes as m (m)}
             <label class="radio" class:danger={m === BYPASS}>
-              <input type="radio" name="co-perm-{uid}" value={m} checked={mode === m} onchange={() => onperm(m)} />
+              <input type="radio" name="co-perm-{uid}" value={m} checked={mode === m} onchange={() => onperm?.(m)} />
               <span><b>{label(permPrefix, m)}</b>{#if hint(m)}<span class="muted sm blk">{hint(m)}</span>{/if}</span>
             </label>
           {/each}
@@ -80,7 +91,7 @@
       <div class="row2">
         <label class="field">
           <span class="lbl">{t('model')}</span>
-          <select value={options.model ?? ''} onchange={onmodel}>
+          <select value={options.model ?? ''} onchange={onmodel} disabled={busy}>
             <option value="">{t('chatc.opt.auto')}</option>
             {#each models as m (m)}<option value={m}>{m}</option>{/each}
             {#if options.model && !models.includes(options.model)}<option value={options.model}>{options.model}</option>{/if}
@@ -90,7 +101,7 @@
         {#if efforts.length}
           <label class="field">
             <span class="lbl">{t('effort')}</span>
-            <select value={options.effort ?? ''} onchange={(e) => oneffort((e.target as HTMLSelectElement).value || null)}>
+            <select value={options.effort ?? ''} onchange={(e) => oneffort((e.target as HTMLSelectElement).value || null)} disabled={busy}>
               <option value="">{t('chatc.opt.auto')}</option>
               {#each efforts as m (m)}<option value={m}>{label(effortPrefix, m)}</option>{/each}
             </select>
@@ -98,7 +109,7 @@
         {/if}
       </div>
       {#if modelNote}<p class="sm note model-note" role="status">{modelNote}</p>{/if}
-      <p class="muted sm note">{t('chatc.opt.modelHint')}</p>
+      <p class="muted sm note">{t(plain ? 'mado.opts.hint' : 'chatc.opt.modelHint')}</p>
     </div>
   {/if}
 </span>
@@ -110,6 +121,8 @@
   .cobtn:hover, .cobtn[aria-expanded="true"] { background: var(--fill-2); }
   .cobtn.bypass { color: var(--danger); border-color: var(--danger); font-weight: 600; background: color-mix(in srgb, var(--danger) 8%, transparent); }
   .extra { max-width: 18ch; }
+  .extra.wide { max-width: 30ch; }
+  .pop.below { bottom: auto; top: calc(100% + 6px); inset-inline-start: auto; inset-inline-end: 0; }
   .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .pop { position: absolute; bottom: calc(100% + 6px); inset-inline-start: 0; z-index: 6; width: min(380px, 86vw); padding: 12px; display: grid; gap: 10px;
     background: var(--panel); border: var(--border-w) solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-lg); }

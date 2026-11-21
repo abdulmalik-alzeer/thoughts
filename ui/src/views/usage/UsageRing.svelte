@@ -9,7 +9,13 @@
   import { costText, followMeter, fmtPct, fmtTokens, fullest, level, loadChatMeter, meter, providerName, type Plan, type Provider } from '../../lib/meter.svelte';
   import PlanBars from './PlanBars.svelte';
 
-  let { chatId, provider, running = false }: { chatId: string; provider: string; running?: boolean } = $props();
+  let { chatId, provider, running = false, below = false, plansOnly = false }: {
+    chatId: string; provider: string; running?: boolean;
+    /** Open under the ring (in a page header) instead of over it. */
+    below?: boolean;
+    /** Only the plan's limits: there is no one chat to give figures for. */
+    plansOnly?: boolean;
+  } = $props();
   const prov = $derived<Provider>(provider === 'codex' ? 'codex' : 'claude');
 
   let data = $state<any>(null);
@@ -57,8 +63,9 @@
     </svg>
   </button>
   {#if open}
-    <div class="pop surface" id={uid} role="dialog" aria-label={t('r10-usage.ring.title')}>
+    <div class="pop surface" class:below id={uid} role="dialog" aria-label={t('r10-usage.ring.title')}>
       <PlanBars provider={prov} {plan} compact />
+      {#if !plansOnly}
       <div class="chat">
         <b class="h">{t('r10-usage.ring.thisChat')}</b>
         {#if use?.count}
@@ -77,6 +84,7 @@
           <p class="muted xs">{t('r10-usage.ring.none', { name: providerName(prov) })}</p>
         {/if}
       </div>
+      {/if}
       <button type="button" class="link" onclick={() => { close(); go({ kind: 'usage' }); }}>{t('r10-usage.ring.all')} <Icon name="right" size={12} class="flip-rtl" /></button>
     </div>
   {/if}
@@ -94,6 +102,7 @@
   .full .fill { stroke: var(--danger); }
   .pop { position: absolute; inset-block-end: calc(100% + 8px); inset-inline-end: 0; inline-size: 290px; max-inline-size: calc(100vw - 32px); z-index: 30;
     padding: 14px; display: flex; flex-direction: column; gap: 12px; box-shadow: var(--shadow-lg, var(--shadow)); text-align: start; }
+  .pop.below { inset-block-end: auto; inset-block-start: calc(100% + 8px); }
   .chat { border-top: var(--border-w, 1px) solid var(--hairline); padding-top: 10px; display: flex; flex-direction: column; gap: 6px; }
   .h { font-size: var(--fs-sm, 13px); }
   dl { margin: 0; display: grid; grid-template-columns: 1fr auto; gap: 3px 12px; font-size: var(--fs-sm, 13px); }

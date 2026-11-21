@@ -121,6 +121,19 @@ describe('madoApi', () => {
     expect(e.message).toBe('The plan changed');
   });
 
+  it('round 0.4.0: the list of plans, the plan\'s options, the screens to look at, the guide', async () => {
+    const { listPlans } = await import('./api');
+    await listPlans(); expect(last()).toMatchObject({ method: 'GET', path: '/api/mado' });
+    await m.options(); expect(last()).toMatchObject({ method: 'GET', path: `${B}/options` });
+    await m.saveOptions({ model: 'opus', effort: null }); expect(last()).toMatchObject({ method: 'PUT', path: `${B}/options`, body: { model: 'opus', effort: null } });
+    await m.saveOptions({ model: '', effort: '' } as any); expect(last().body).toEqual({ model: null, effort: null });
+    await m.buildScreens(); expect(last()).toMatchObject({ method: 'GET', path: `${B}/build/screens` });
+    await m.sendScreens('n1', []); expect(last()).toMatchObject({ method: 'POST', path: `${B}/build/screens`, body: { nonce: 'n1', results: [] } });
+    await m.buildGuide(); expect(last()).toMatchObject({ method: 'GET', path: `${B}/build/guide` });
+    await m.conventions(); expect(last()).toMatchObject({ method: 'GET', path: `${B}/doc/conventions` });
+    for (const c of calls) expect(c.auth).toBe('Bearer test-token');
+  });
+
   it('clampParallel keeps builders between 1 and 6', () => {
     expect([0, 1, 3.4, 6, 7, NaN, -2].map(clampParallel)).toEqual([1, 1, 3, 6, 6, 1, 1]);
   });
