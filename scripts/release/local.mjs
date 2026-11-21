@@ -10,7 +10,7 @@
 //   node scripts/release/local.mjs --publish   make that draft public. This is the moment the
 //                                              update reaches every installed copy.
 //
-//   --skip-tests       do not run the tests first (the summary says so)
+//   --skip-tests       do not run the tests first (TESTS below; the summary says so)
 //   --include-others   build although commits since the last release were made by someone else:
 //                      you have read them
 //
@@ -124,6 +124,16 @@ export function preflightProblems({ branch, dirty, version, head, tagAt, key, pa
   if (!changelogAr) problems.push(`docs/ar/CHANGELOG.md has no entry "## ${version}". It becomes this version's Help › What's new in Arabic (and the update notes Arabic copies older than 0.1.0 show).`);
   return problems;
 }
+
+/** The tests run before a release is built (unless --skip-tests), in this order: the daemon, the
+ *  desktop shell, the UI type checks, the UI's own tests, and the tests of these scripts. */
+export const TESTS = [
+  ['cargo', ['test', '-p', 'thoughtsd']],
+  ['cargo', ['test', '-p', 'thoughts']],
+  ['npm', ['run', 'check']],
+  ['npx', ['vitest', 'run']],
+  [process.execPath, ['--test', join(ROOT, 'scripts', 'release', 'release.test.mjs')]],
+];
 
 /** Of the workflows a push starts, the ones that are switched on now (and so must be switched
  *  off for the push, and on again afterwards). `listed` is `gh workflow list --all --json name,state,id`. */
@@ -416,12 +426,7 @@ if (isMain(import.meta.url)) {
       // As the pipeline's preflight does: the list of what earlier releases shipped in the
       // starter kit must be current, or libraries made by older versions are asked for trust again.
       sh(process.execPath, [join(ROOT, 'scripts', 'kit-history.mjs'), '--check', '--before', f.version]);
-      if (!args.has('--skip-tests')) {
-        sh('cargo', ['test', '-p', 'thoughtsd']);
-        sh('cargo', ['test', '-p', 'thoughts']);
-        sh('npm', ['run', 'check']);
-        sh(process.execPath, ['--test', join(ROOT, 'scripts', 'release', 'release.test.mjs')]);
-      }
+      if (!args.has('--skip-tests')) for (const [cmd, cmdArgs] of TESTS) sh(cmd, cmdArgs);
       built = build(f);
     }
     console.log(`\nBuilt and checked ${f.tag} (${f.head.slice(0, 7)})${args.has('--skip-tests') ? ' — THE TESTS WERE SKIPPED' : ''}:`);

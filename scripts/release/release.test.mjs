@@ -17,8 +17,8 @@ import { NO_HOOKS, prepare, RUNNER_CHANNELS } from '../tauri-ci.mjs';
 import { assemble, changelogSection, notesFor, updaterManifest } from './assemble.mjs';
 import { decide, verdict } from './ci-status.mjs';
 import { collect } from './collect.mjs';
-import { GitHub, PLATFORMS, Stop } from './lib.mjs';
-import { ALWAYS_ASK_ACCOUNT, commitsByOthers, findKey, findPassword, keychainPath, KEYCHAIN_SERVICE, preflightProblems, publicEndpoint, repoFromRemote, workflowsToSwitch } from './local.mjs';
+import { GitHub, PLATFORMS, ROOT, Stop } from './lib.mjs';
+import { ALWAYS_ASK_ACCOUNT, commitsByOthers, findKey, findPassword, keychainPath, KEYCHAIN_SERVICE, preflightProblems, publicEndpoint, repoFromRemote, TESTS, workflowsToSwitch } from './local.mjs';
 import { executable, MANIFEST, pack, place } from './compiled.mjs';
 import { checkSignature } from './minisign.mjs';
 import { plan } from './plan.mjs';
@@ -577,6 +577,22 @@ test('local release: what must hold before anything is built', () => {
   one({ keysMatch: false }, /does not match/);
   one({ changelog: null }, /docs\/CHANGELOG\.md has no entry "## 1\.2\.3"/);
   one({ changelogAr: null }, /docs\/ar\/CHANGELOG\.md has no entry/);
+});
+
+test('local release: every test suite runs before the build, the UI tests included', () => {
+  const lines = TESTS.map(([cmd, args]) => [cmd === process.execPath ? 'node' : cmd, ...args].join(' '));
+  assert.deepEqual(lines, [
+    'cargo test -p thoughtsd',
+    'cargo test -p thoughts',
+    'npm run check',
+    'npx vitest run',
+    `node --test ${join(ROOT, 'scripts', 'release', 'release.test.mjs')}`,
+  ]);
+  // The build itself runs these from the list, not a copy of it.
+  const source = readFileSync(join(ROOT, 'scripts', 'release', 'local.mjs'), 'utf8');
+  const main = source.slice(source.indexOf('if (isMain(import.meta.url))'));
+  assert.match(main, /for \(const \[cmd, cmdArgs\] of TESTS\) sh\(cmd, cmdArgs\)/);
+  assert.ok(main.indexOf('of TESTS') < main.indexOf('built = build(f)'), 'the tests come before the build');
 });
 
 test('local release: the repository, the key and the workflows are found where they are', () => {

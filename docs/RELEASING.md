@@ -189,7 +189,9 @@ Before it:
 **What it checks before building:** a clean tree on `main`; a version that is not tagged on
 another commit; the updater's private key and its password; `src-tauri/updater.pub`, and that
 the private key really belongs to it (it signs a few bytes and checks them); both changelog
-entries; the kit history; the tests (`--skip-tests` leaves them out, and the summary says so).
+entries; the kit history; the tests — `cargo test -p thoughtsd`, `cargo test -p thoughts`, `npm run check`
+(svelte-check), `npx vitest run` (the UI's own tests) and the release scripts' tests
+(`--skip-tests` leaves them out, and the summary says so).
 
 **Whose commits go into it.** Everyone who can see this repository can also push to `main`
 (see [Repository settings](#repository-settings-worth-switching-on)), so before it builds the
