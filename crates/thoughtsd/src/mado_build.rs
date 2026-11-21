@@ -279,6 +279,13 @@ async fn no_git_programs(state: &AppState, project: &Path) -> anyhow::Result<()>
     Err(crate::tr::err("mado_build.git_programs", &[("keys", &shown.join(", "))]))
 }
 
+/// Is `e` the refusal of `no_git_programs`?
+fn is_git_programs(e: &anyhow::Error) -> bool {
+    let shown = crate::tr::classify(e).message;
+    let head = |ar: bool| crate::tr::text_in(ar, "mado_build.git_programs", &[]).split('{').next().unwrap_or_default().to_string();
+    shown.starts_with(&head(false)) || shown.starts_with(&head(true))
+}
+
 /// `no_git_programs` for `dir` (the project or one of the engine's worktrees), right before the
 /// engine's own git changes files there; it yields to full access.
 async fn git_safe(state: &AppState, dir: &Path) -> anyhow::Result<()> {
@@ -479,6 +486,11 @@ pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) 
             delete_branch(state, &project, &branch, true).await;
             return Err(e);
         }
+        if let Err(e) = git_safe(state, &build_wt(pid)?).await {
+            remove_worktree(state, &project, pid, &build_wt(pid)?).await;
+            delete_branch(state, &project, &branch, true).await;
+            return Err(e);
+        }
         crate::log::ok_or_warn("mado build: the plan's documents were not copied", copy_docs(&project, &build_wt(pid)?, full(state).await));
         let waves = mado::waves(&r.plan).into_iter().map(|w| BuildWave {
             status: TaskStatus::Pending, checked: false, fix_chat_id: None,
@@ -631,6 +643,10 @@ pub async fn land(state: &Arc<AppState>, pid: &str) -> anyhow::Result<BuildState
     let ff = git_ok(state, &project, &["merge-base", "--is-ancestor", &head, &b.branch]).await;
     let res = if ff { git(state, &project, &["merge", "-q", "--ff-only", &b.branch]).await }
         else { crate::git::git_ident(state, &project, &["merge", "-q", "--no-ff", "--no-edit", "-m", &format!("MADO: build {}", b.number), &b.branch]).await };
+    if let Err(e) = git_safe(state, &project).await {
+        crate::log::warn(format!("mado build {}: git settings that start programs appeared while it was brought in", b.number));
+        return Err(e);
+    }
     if let Err(e) = res {
         let clash = crate::git::unmerged(state, &project).await;
         if git_ok(state, &project, &["rev-parse", "-q", "--verify", "MERGE_HEAD"]).await { let _ = git(state, &project, &["merge", "--abort"]).await; }
@@ -790,9 +806,11 @@ async fn lane_worker(state: Arc<AppState>, pid: String, project: PathBuf, wi: us
     if let Err(e) = r {
         crate::log::error(format!("mado build: a lane stopped with an error: {e:#}"));
         let text = clip_note(&crate::tr::classify(&e).message);
+        // Git settings that start programs: nothing more is done until the user has removed them.
+        let unsafe_git = is_git_programs(&e);
         let _ = update(&pid, &project, |b| {
-            if let Some(l) = b.lane_mut(wi, li) { l.status = TaskStatus::Failed; }
-            if b.status == BuildStatus::Running { b.status = BuildStatus::Failed; b.message = Some(text); }
+            if let Some(l) = b.lane_mut(wi, li) { l.status = if unsafe_git { TaskStatus::Pending } else { TaskStatus::Failed }; }
+            if b.status == BuildStatus::Running { b.status = if unsafe_git { BuildStatus::Waiting } else { BuildStatus::Failed }; b.message = Some(text); }
         }).await;
     }
     live_remove(&pid, &key(wi, li));
@@ -825,6 +843,7 @@ async fn ensure_lane_wt(state: &AppState, project: &Path, pid: &str, b: &BuildSt
     } else {
         git(state, project, &["worktree", "add", "-q", "-b", &br, &s(&wt), &b.branch]).await?;
     }
+    git_safe(state, &wt).await?;
     copy_docs(project, &wt, full(state).await)?;
     Ok(wt)
 }
@@ -1035,7 +1054,8 @@ async fn run_and_wait(state: &Arc<AppState>, project: &Path, pid: &str, chat: &s
 // ---------- acceptance commands ----------
 
 /// Why a check did not pass: it failed (worth another try), or it was refused because it is not
-/// a command the user approved for this build's plan (no try can change that: the build waits).
+/// a command the user approved for this build's plan, or it could not be run confined (no try can
+/// change that: the build waits).
 pub enum CheckErr { Failed(String), Unapproved(String) }
 
 impl CheckErr { fn text(self) -> String { match self { CheckErr::Failed(t) | CheckErr::Unapproved(t) => t } } }
@@ -1051,28 +1071,102 @@ async fn approved_now(state: &AppState, pid: &str, project: &Path, hash: &str, c
 /// Each command, in order, from `cwd`; the first that fails ends it, with what it printed.
 async fn run_checks(state: &AppState, pid: &str, hash: &str, cmds: &[String], cwd: &Path, project: &Path) -> Result<(), CheckErr> {
     let full = full(state).await;
+    let how = confinement(state).await;
     for cmd in cmds.iter().filter(|c| !c.trim().is_empty()) {
         if status_now(project) == BuildStatus::Stopped { return Err(CheckErr::Failed(tr("mado_build.stopped_note", &[]))); }
         if !approved_now(state, pid, project, hash, cmd).await {
             crate::log::warn("mado build: a check was refused, it is not an approved command of this plan");
             return Err(CheckErr::Unapproved(tr("mado_build.check_unapproved", &[("cmd", &one_line(cmd, 300))])));
         }
-        run_check(cmd, cwd, full).await.map_err(CheckErr::Failed)?;
+        run_check(cmd, cwd, project, full, &how).await?;
     }
     Ok(())
 }
 
-/// The user's shell, as a terminal would start it for one command.
-fn shell_command(cmd: &str) -> tokio::process::Command {
+/// The user's shell, as a terminal would start it for one command: `(program, arguments)`.
+fn shell_argv(cmd: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
-    { let mut c = crate::proc::command("cmd"); c.args(["/C", cmd]); c }
+    { ("cmd".into(), vec!["/C".into(), cmd.into()]) }
     #[cfg(not(windows))]
     {
         let sh = std::env::var("SHELL").ok().filter(|s| Path::new(s).is_absolute() && Path::new(s).exists()).unwrap_or_else(|| "/bin/sh".into());
-        let mut c = crate::proc::command(sh);
-        c.args(["-c", cmd]);
-        c
+        (sh, vec!["-c".into(), cmd.into()])
     }
+}
+
+// ---------- what a command the daemon runs may see and change ----------
+
+/// The variables a command the daemon runs for a build keeps from the daemon's environment (and `LC_*`).
+/// Everything else (keys, tokens, the app's and the assistant's own settings) is left out.
+const ENV_KEEP: &[&str] = &["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "TERM",
+    "CARGO_HOME", "RUSTUP_HOME", "GOPATH", "GOROOT", "JAVA_HOME", "NVM_DIR", "PNPM_HOME", "VOLTA_HOME", "PYENV_ROOT"];
+
+/// May a variable of this name reach a command a build runs?
+pub fn env_kept(name: &str) -> bool {
+    let up = name.to_ascii_uppercase();
+    let secret = ["TOKEN", "KEY", "SECRET", "PASSWORD"].iter().any(|w| up.contains(w));
+    let own = ["ANTHROPIC_", "CLAUDE", "THOUGHTS_"].iter().any(|p| up.starts_with(p));
+    !secret && !own && (ENV_KEEP.contains(&name) || name.starts_with("LC_"))
+}
+
+/// The environment of a command the daemon runs for a build: the kept part of its own, the PATH a
+/// terminal would have, and `CI=1`.
+pub fn command_env() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = std::env::vars().filter(|(k, _)| env_kept(k) && k != "PATH").collect();
+    env.push(("PATH".into(), claude::shell_path().to_string()));
+    env.push(("CI".into(), "1".into()));
+    env
+}
+
+/// How a build's own commands are kept in: `confined` is whether they run under macOS's sandbox.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Confinement { pub confined: bool }
+
+/// Whether the build's commands run confined now: on macOS, while the setting is on and full access is off.
+pub async fn confinement(state: &AppState) -> Confinement {
+    let s = state.settings.read().await;
+    Confinement { confined: cfg!(target_os = "macos") && !s.full_access() && s.spending.confine_commands() }
+}
+
+pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+
+/// `p` as the sandbox sees it: links resolved (`/tmp` is `/private/tmp`); the nearest folder that
+/// exists, resolved, with the rest put back when it does not exist yet.
+fn real(p: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) { return c; }
+    match (p.parent(), p.file_name()) { (Some(par), Some(n)) if par != p => real(par).join(n), _ => p.to_path_buf() }
+}
+
+fn sb_str(p: &Path) -> String {
+    let t = p.to_string_lossy();
+    format!("\"{}\"", t.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// The sandbox profile for a build's command run in `wt` (a worktree of the engine): everything is
+/// allowed but writing files, which is allowed only in `wt`, the temporary folders, the null devices
+/// and the download caches a build writes (those that exist), and never in the app's own folder, the
+/// user's project (its `.git` with it) or `~/.claude`. The last rule that matches wins.
+pub fn sandbox_profile(wt: &Path, project: &Path, user_home: Option<&Path>) -> String {
+    let mut allow: Vec<PathBuf> = vec![PathBuf::from("/private/tmp"), PathBuf::from("/private/var/folders"), std::env::temp_dir()];
+    if let Ok(t) = std::env::var("TMPDIR") { if Path::new(&t).is_absolute() { allow.push(PathBuf::from(t)); } }
+    if let Some(h) = user_home {
+        for c in [".npm", ".cache", "Library/Caches", ".cargo", ".rustup", ".gradle", ".m2", ".pnpm-store", ".bun", "go", ".composer", "Library/pnpm", ".yarn", ".nuget"] {
+            let p = h.join(c);
+            if std::fs::symlink_metadata(&p).is_ok() { allow.push(p); }
+        }
+    }
+    let mut out = String::from("(version 1)\n(allow default)\n(deny file-write*)\n(allow file-write*");
+    for p in &allow { out.push_str(&format!(" (subpath {})", sb_str(&real(p)))); }
+    out.push_str(" (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/tty\") (literal \"/dev/dtracehelper\") (regex #\"^/dev/fd/\") (regex #\"^/dev/ttys[0-9]+$\"))\n");
+    let mut deny = vec![crate::paths::home(), project.to_path_buf(), project.join(".git")];
+    if let Some(h) = user_home { deny.push(h.join(".claude")); }
+    out.push_str("(deny file-write*");
+    for p in &deny { out.push_str(&format!(" (subpath {})", sb_str(&real(p)))); }
+    out.push_str(")\n");
+    out.push_str(&format!("(allow file-write* (subpath {}))\n", sb_str(&real(wt))));
+    // The worktree's own `.git` (a file naming git's folder for it, inside the project's `.git`) stays closed.
+    out.push_str(&format!("(deny file-write* (literal {}))\n", sb_str(&real(&wt.join(".git")))));
+    out
 }
 
 /// Read all of `r`, keeping its start and its end.
@@ -1101,16 +1195,33 @@ fn shown_output(parts: (Vec<u8>, Vec<u8>, bool)) -> String {
 }
 
 /// One acceptance command, run by the daemon with the user's shell, time-limited, its output kept
-/// within bounds. `Err` says what failed, with the end of what it printed.
-pub async fn run_check(cmd: &str, cwd: &Path, full: bool) -> Result<(), String> {
+/// within bounds, with a cleared environment (`command_env`) and, when `how.confined`, under macOS's
+/// sandbox (`sandbox_profile`). `Err` says what failed, with the end of what it printed;
+/// `CheckErr::Unapproved` when it could not be run confined at all (no try can change that).
+pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &Confinement) -> Result<(), CheckErr> {
     // The same check every command of a run gets (`shell_guard`): not the app's own folder. A guard: it yields to full access.
-    if !full && crate::shell_guard::blocked(cmd, &s(cwd), &crate::paths::home()) { return Err(tr("mado_build.check_refused", &[("cmd", &one_line(cmd, 300))])); }
-    let mut c = shell_command(cmd);
-    c.current_dir(cwd).env("PATH", claude::shell_path()).env("CI", "1")
+    if !full && crate::shell_guard::blocked(cmd, &s(cwd), &crate::paths::home()) { return Err(CheckErr::Failed(tr("mado_build.check_refused", &[("cmd", &one_line(cmd, 300))]))); }
+    let (prog, args) = shell_argv(cmd);
+    let unconfined = || CheckErr::Unapproved(tr("mado_build.no_sandbox", &[("cmd", &one_line(cmd, 300))]));
+    let mut c = if how.confined {
+        if !Path::new(SANDBOX_EXEC).is_file() { return Err(unconfined()); }
+        let profile = sandbox_profile(cwd, project, crate::paths::user_home().ok().as_deref());
+        let mut c = crate::proc::command(SANDBOX_EXEC);
+        c.arg("-p").arg(profile).arg(&prog).args(&args);
+        c
+    } else {
+        let mut c = crate::proc::command(&prog);
+        c.args(&args);
+        c
+    };
+    c.env_clear().envs(command_env()).current_dir(cwd)
         .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
-    for var in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"] { c.env_remove(var); }
     crate::proc::own_group(&mut c);
-    let mut child = match c.spawn() { Ok(ch) => ch, Err(e) => return Err(tr("mado_build.check_failed", &[("cmd", &one_line(cmd, 300)), ("output", &e.to_string())])) };
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(_) if how.confined => return Err(unconfined()),
+        Err(e) => return Err(CheckErr::Failed(tr("mado_build.check_failed", &[("cmd", &one_line(cmd, 300)), ("output", &e.to_string())]))),
+    };
     let (out, err) = (child.stdout.take(), child.stderr.take());
     let run = async {
         let (o, e) = tokio::join!(read_capped(out), read_capped(err));
@@ -1121,14 +1232,16 @@ pub async fn run_check(cmd: &str, cwd: &Path, full: bool) -> Result<(), String> 
             if status.as_ref().map_or(false, |s| s.success()) { return Ok(()); }
             let mut text = shown_output(o);
             let e = shown_output(e);
+            // The sandbox itself refused to start (its own words, before the command ran).
+            if how.confined && e.starts_with("sandbox-exec:") { crate::log::warn(format!("mado build: the sandbox did not start: {}", one_line(&e, 300))); return Err(unconfined()); }
             if !e.trim().is_empty() { if !text.is_empty() { text.push('\n'); } text.push_str(&e); }
             let code = status.ok().and_then(|s| s.code()).map(|c| c.to_string()).unwrap_or_else(|| "?".into());
-            Err(tr("mado_build.check_failed", &[("cmd", &one_line(cmd, 300)), ("output", &format!("(exit {code})\n{}", text.trim_end()))]))
+            Err(CheckErr::Failed(tr("mado_build.check_failed", &[("cmd", &one_line(cmd, 300)), ("output", &format!("(exit {code})\n{}", text.trim_end()))])))
         }
         Err(_) => {
             if let Some(id) = child.id() { crate::proc::end_tree(id).await; }
             let _ = child.kill().await;
-            Err(tr("mado_build.check_timeout", &[("cmd", &one_line(cmd, 300)), ("minutes", &(CHECK_LIMIT.as_secs() / 60).to_string())]))
+            Err(CheckErr::Failed(tr("mado_build.check_timeout", &[("cmd", &one_line(cmd, 300)), ("minutes", &(CHECK_LIMIT.as_secs() / 60).to_string())])))
         }
     }
 }
@@ -1165,6 +1278,8 @@ async fn commit_task(state: &AppState, wt: &Path, n: u32, task: &PlanTask) -> an
     let changed: Vec<String> = git(state, wt, &["diff", "--cached", "--name-only", "-z", "--no-renames"]).await?.split('\0').filter(|f| !f.is_empty()).map(String::from).collect();
     let msg = format!("MADO: {}\n\nTask {} of build {}, made by the Thoughts app.\n\nMado-Task: {}", one_line(&task.title, 100), task.id, n, task.id);
     crate::git::git_ident(state, wt, &["commit", "-q", "--allow-empty", "-m", &msg]).await?;
+    // And again after it: settings that appeared meanwhile stop the build here.
+    git_safe(state, wt).await?;
     let sha = git(state, wt, &["rev-parse", "HEAD"]).await?.trim().to_string();
     Ok((sha, changed))
 }
@@ -1189,6 +1304,7 @@ async fn ensure_build_wt(state: &AppState, project: &Path, pid: &str, b: &BuildS
         remove_worktree(state, project, pid, &bwt).await;
         git_safe(state, project).await?;
         git(state, project, &["worktree", "add", "-q", &s(&bwt), &b.branch]).await?;
+        git_safe(state, &bwt).await?;
         copy_docs(project, &bwt, full(state).await)?;
     }
     Ok(bwt)
@@ -1274,6 +1390,7 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
     git(state, &bwt, &["add", "-A", "--", ".", ":(exclude)mado"]).await?;
     if !git_ok(state, &bwt, &["diff", "--cached", "--quiet"]).await {
         crate::git::git_ident(state, &bwt, &["commit", "-q", "-m", &format!("MADO: wave {}, fixed after its checks", wi + 1)]).await?;
+        git_safe(state, &bwt).await?;
     }
     mark_checked(pid, project, wi).await
 }
@@ -1300,6 +1417,7 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     let msg = format!("MADO: wave {} lane {} ({names})", wi + 1, li + 1);
     git_safe(state, &bwt).await?;
     let merged = crate::git::git_ident(state, &bwt, &["merge", "-q", "--no-ff", "--no-edit", "-m", &msg, &br]).await;
+    git_safe(state, &bwt).await?;
     let e = match merged { Ok(_) => { drop_lane(state, project, pid, wi, li, &br).await; return Ok(LaneEnd::Merged); } Err(e) => e };
     let clash = crate::git::unmerged(state, &bwt).await;
     if clash.is_empty() {
@@ -1341,6 +1459,7 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     git_safe(state, &bwt).await?;
     git(state, &bwt, &["add", "-A", "--", ".", ":(exclude)mado"]).await?;
     if let Err(e) = crate::git::git_ident(state, &bwt, &["commit", "-q", "--no-edit"]).await { return fix_failed(state, project, pid, &bwt, wi, li, &e.to_string()).await; }
+    git_safe(state, &bwt).await?;
     update(pid, project, |b| if let Some(l) = b.lane_mut(wi, li) {
         for t in l.tasks.iter_mut().filter(|t| t.status == TaskStatus::Conflict) { t.status = TaskStatus::Done; t.note = Some(tr("mado_build.settled", &[])); }
     }).await?;
@@ -1464,6 +1583,8 @@ async fn api_get(State(st): State<Arc<AppState>>, UrlPath(pid): UrlPath<String>)
     let mut b = load_build(&project)?.unwrap_or_default();
     b.governor.running = live_of(&pid).len() as u32;
     let mut v = serde_json::to_value(&b)?;
+    // Whether the build's own commands run confined (never on other systems than macOS: the window says so).
+    v["confined"] = json!(confinement(&st).await.confined);
     if !b.under_way() {
         if let Err(e) = check_ready(&st, &pid, &project).await { v["blocked"] = json!(crate::tr::classify(&e).message); }
     }

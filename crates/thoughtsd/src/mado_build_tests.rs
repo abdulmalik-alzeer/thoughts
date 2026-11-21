@@ -432,13 +432,92 @@ async fn a_check_runs_in_its_folder_with_bounded_output_and_names_no_app_folder(
     let d = std::env::temp_dir().join(format!("thoughts-mado-check-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&d).unwrap();
     std::fs::write(d.join("here.txt"), "x").unwrap();
-    assert!(run_check("test -f here.txt", &d, false).await.is_ok());
-    let e = run_check("yes line | head -c 200000; echo LAST >&2; exit 3", &d, false).await.unwrap_err();
+    let off = Confinement { confined: false };
+    let text = |e: CheckErr| e.text();
+    assert!(run_check("test -f here.txt", &d, &d, false, &off).await.is_ok());
+    let e = text(run_check("yes line | head -c 200000; echo LAST >&2; exit 3", &d, &d, false, &off).await.unwrap_err());
     assert!(e.contains("exit 3") && e.contains("LAST") && e.len() < 40_000, "{}", e.len());
     let home = crate::paths::home();
-    let e = run_check(&format!("cat {}/settings.json", home.display()), &d, false).await.unwrap_err();
+    let e = text(run_check(&format!("cat {}/settings.json", home.display()), &d, &d, false, &off).await.unwrap_err());
     assert!(e.starts_with(tr("mado_build.check_refused", &[]).split('{').next().unwrap()), "{e}");
     std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn a_builds_commands_get_no_keys_tokens_or_the_apps_own_settings() {
+    for k in ["PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "CARGO_HOME", "NVM_DIR"] { assert!(env_kept(k), "{k}"); }
+    for k in ["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDECODE", "THOUGHTS_HOME", "GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY",
+              "NPM_TOKEN", "OPENAI_API_KEY", "DB_PASSWORD", "SSH_AUTH_SOCK", "LC_KEY", "GIT_DIR", "EDITOR"] { assert!(!env_kept(k), "{k}"); }
+    let env = command_env();
+    assert!(env.iter().any(|(k, v)| k == "CI" && v == "1") && env.iter().any(|(k, _)| k == "PATH"));
+    assert!(env.iter().all(|(k, _)| k == "CI" || env_kept(k)), "{env:?}");
+}
+
+/// A command run by the daemon the way a build runs it (cleared environment), confined.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn a_confined_command_writes_only_in_its_worktree_temporary_files_and_caches() {
+    let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
+    let wt = engine_dir(&p.pid).unwrap().join("lane-1-1");
+    std::fs::create_dir_all(&wt).unwrap();
+    // A real worktree of the project, as the engine makes them.
+    t::sh(&p.dir, &["worktree", "add", "-q", "-b", "mado/build-9-lane-1-1", &wt.to_string_lossy()]);
+    std::fs::write(engine_dir(&p.pid).unwrap().join("approval.json"), "{}").unwrap();
+    let on = Confinement { confined: true };
+    let run = |cmd: String| { let (wt, dir, on) = (wt.clone(), p.dir.clone(), on.clone()); async move { run_check(&cmd, &wt, &dir, false, &on).await } };
+    // Inside its worktree: fine.
+    assert!(run("touch made-here.txt".into()).await.is_ok());
+    assert!(wt.join("made-here.txt").exists());
+    // The user's project, its .git, the approval record, a file in the home folder: refused.
+    let user_home = crate::paths::user_home().unwrap();
+    let probe = user_home.join(format!(".thoughts-sandbox-probe-{}", uuid::Uuid::new_v4().simple()));
+    for (cmd, target) in [
+        (format!("touch {}", p.dir.join("README.md").display()), p.dir.join("README.md")),
+        (format!("touch {}", p.dir.join("new.txt").display()), p.dir.join("new.txt")),
+        (format!("touch {}", p.dir.join(".git/config").display()), p.dir.join(".git/config")),
+        (format!("touch {}", p.dir.join(".git/hooks/pre-commit").display()), p.dir.join(".git/hooks/pre-commit")),
+        (format!("touch {}", engine_dir(&p.pid).unwrap().join("approval.json").display()), engine_dir(&p.pid).unwrap().join("approval.json")),
+        (format!("touch {}", probe.display()), probe.clone()),
+        (format!("touch {}", user_home.join(".claude/thoughts-probe").display()), user_home.join(".claude/thoughts-probe")),
+        (format!("touch {}", wt.join(".git").display()), wt.join(".git")),
+    ] {
+        let before = std::fs::metadata(&target).ok().and_then(|m| m.modified().ok());
+        let r = run(cmd.clone()).await;
+        assert!(r.is_err(), "{cmd} was allowed");
+        let after = std::fs::metadata(&target).ok().and_then(|m| m.modified().ok());
+        assert_eq!(before, after, "{cmd} changed {target:?}");
+    }
+    assert!(!probe.exists() && !p.dir.join("new.txt").exists());
+    // git and the usual tools still work, temporary files included.
+    assert!(run("git status".into()).await.is_ok());
+    if std::process::Command::new("python3").arg("--version").output().map_or(false, |o| o.status.success()) {
+        assert!(run("python3 -c 'import tempfile; f=tempfile.NamedTemporaryFile(delete=False); f.write(b\"x\"); f.close(); open(\"py.txt\",\"w\").write(\"ok\")'".into()).await.is_ok());
+        assert!(wt.join("py.txt").exists());
+    }
+    if std::process::Command::new("node").arg("--version").output().map_or(false, |o| o.status.success()) {
+        let r = run("node -e 'const fs=require(\"fs\"),os=require(\"os\"),path=require(\"path\");fs.writeFileSync(path.join(os.tmpdir(),\"thoughts-node-probe\"),\"x\");fs.writeFileSync(\"node.txt\",\"ok\")'".into()).await;
+        assert!(r.is_ok(), "{:?}", r.err().map(|e| e.text()));
+        assert!(wt.join("node.txt").exists());
+    }
+    // No key of the daemon's reaches it.
+    std::env::set_var("THOUGHTS_TEST_SECRET_TOKEN", "hunter2");
+    assert!(run("sh -c 'test -z \"$THOUGHTS_TEST_SECRET_TOKEN\"'".into()).await.is_ok());
+    std::env::remove_var("THOUGHTS_TEST_SECRET_TOKEN");
+    t::sh(&p.dir, &["worktree", "remove", "--force", &wt.to_string_lossy()]);
+    p.done();
+}
+
+#[tokio::test]
+async fn get_build_says_whether_the_commands_are_confined() {
+    let p = project(vec![task("a", &["src/**"], &[], &["true"])]).await;
+    let v = api_get(State(p.st.clone()), UrlPath(p.pid.clone())).await.unwrap().0;
+    assert_eq!(v["confined"], cfg!(target_os = "macos"));
+    p.st.settings.write().await.spending.confine_commands = Some(false);
+    assert_eq!(api_get(State(p.st.clone()), UrlPath(p.pid.clone())).await.unwrap().0["confined"], false);
+    p.st.settings.write().await.spending.confine_commands = None;
+    p.st.settings.write().await.full_access.on = true;
+    assert_eq!(api_get(State(p.st.clone()), UrlPath(p.pid.clone())).await.unwrap().0["confined"], false, "it yields to full access");
+    p.done();
 }
 
 #[test]
@@ -731,7 +810,7 @@ async fn git_settings_read_from_elsewhere_are_refused_not_followed() {
         true
     } });
     start(&p.st, &p.pid, None).await.unwrap();
-    let b = until(&p, "the lane stops", |b| matches!(b.status, BuildStatus::Failed | BuildStatus::Waiting)).await;
+    let b = until(&p, "the build waits", |b| b.status == BuildStatus::Waiting).await;
     assert!(b.message.as_deref().unwrap_or_default().contains("filter.late.smudge"), "{b:?}");
     assert!(find(&b, "a").commit.is_none(), "nothing was committed");
     let _ = stop(&p.st, &p.pid).await;

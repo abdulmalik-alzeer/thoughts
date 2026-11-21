@@ -192,10 +192,15 @@ pub struct SpendingSettings {
     /// (`mado_build.rs`); `None`: the default (`build_hold`). A save that does not name it keeps the one in force.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub build_hold_percent: Option<u8>,
+    /// The commands a MADO build runs itself (set-up and checks) run confined on macOS: they may change
+    /// files only in the build's own copy of the project, temporary files and download caches
+    /// (`mado_build::confinement`). `None`: on (the default, `confine_commands`). A save that does not name it keeps the one in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confine_commands: Option<bool>,
 }
 
 impl Default for SpendingSettings {
-    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false, build_hold_percent: None } }
+    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false, build_hold_percent: None, confine_commands: None } }
 }
 
 impl SpendingSettings {
@@ -214,6 +219,8 @@ impl SpendingSettings {
     pub const BUILD_HOLD_DEFAULT: u8 = 80;
     /// The share of the usage window at which a MADO build holds new lanes.
     pub fn build_hold(&self) -> u8 { self.build_hold_percent.unwrap_or(Self::BUILD_HOLD_DEFAULT) }
+    /// Are a MADO build's own commands confined (on unless the user switched it off)?
+    pub fn confine_commands(&self) -> bool { self.confine_commands.unwrap_or(true) }
 }
 
 /// The keyboard shortcut that opens the quick capture box from any app. Only the desktop app reads
@@ -801,6 +808,7 @@ impl Settings {
 
         // A window that does not know the build setting (or leaves it out) keeps the one in force.
         if self.spending.build_hold_percent.is_none() { self.spending.build_hold_percent = old.spending.build_hold_percent; }
+        if self.spending.confine_commands.is_none() { self.spending.confine_commands = old.spending.confine_commands; }
         self.spending.sanitize()?;
 
         self.search.extension_repo = self.search.extension_repo.trim().to_string();
@@ -1075,6 +1083,20 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_save_that_leaves_out_the_command_confinement_keeps_the_one_in_force() {
+        let mut old = Settings::default();
+        assert!(old.spending.confine_commands(), "on by default");
+        old.spending.confine_commands = Some(false);
+        let mut new: Settings = serde_json::from_value(serde_json::json!({"spending": {"warnPercent": 80}})).unwrap();
+        new.sanitize_update(&old).unwrap();
+        assert!(!new.spending.confine_commands());
+        let mut on: Settings = serde_json::from_value(serde_json::json!({"spending": {"warnPercent": 80, "confineCommands": true}})).unwrap();
+        on.sanitize_update(&old).unwrap();
+        assert!(on.spending.confine_commands());
+        assert_eq!(serde_json::to_value(&old).unwrap()["spending"]["confineCommands"], false);
+    }
 
     #[test]
     fn a_save_that_leaves_out_the_build_hold_keeps_the_one_in_force() {
