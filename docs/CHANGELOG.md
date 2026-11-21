@@ -1,5 +1,28 @@
 # What's new in Thoughts
 
+## 0.2.0
+
+Chats read your Excel, Word and PowerPoint files, answers can hold diagrams and charts that you save as SVG or draw.io files, and the built-in pages can be rearranged. This version also brings a dangerous **Full access** switch, off unless you turn it on.
+
+### New
+- **The assistant reads office files.** Attach an Excel, Word or PowerPoint file (also OpenDocument, Rich Text and the older doc, xls and ppt) and ask about it: the assistant now reads what is in it. Spreadsheets are read sheet by sheet. Very large files are read up to a limit, and the assistant is told where it was cut.
+- **Every attached file opens in the preview** with one click, also one still waiting in the message box. Files only their own program can show, such as Numbers, Pages and Keynote, say so.
+- **Diagrams in answers and notes.** Ask for one ("draw how the checkout talks to the bank") and it is drawn inside the answer by [Archify](https://github.com/tt-a1i/archify), which comes with Thoughts: architecture, workflows, sequences, data flows, lifecycles, database tables, classes, trees, timelines and waterfalls. Diagrams need Node.js 18 or newer on your computer; without it Thoughts says so.
+- **Charts** of numbers: bars, lines, areas, pies, donuts and scatter plots, drawn by Thoughts itself.
+- **Save a picture as SVG, a diagram also as draw.io.** The draw.io file opens in draw.io (diagrams.net) with every box as a shape you can move and the lines attached. **Source** shows what a picture was drawn from. Help › "Working with notes, chats and files" has a section on all of this.
+- **Markdown while you type and while an answer arrives.** The message box shows bold, lists and code as you write, and can be made larger (⌘⇧E). Answers are formatted as they stream.
+- **Built-in pages can be rearranged.** Ask Customise to move, hide or replace the sections of Home, Todos and the other built-in pages, or to replace a whole page. **Edit sidebar** lets you drag the sidebar's items into place.
+- **Quick capture** is a small bar in your chosen theme that grows as you type and can be dragged.
+- **Codex models** are read from the Codex installed on your computer. An older Codex that cannot list its models takes a model name you type.
+- **Full access (dangerous)**, in Settings › Privacy & cost. While it is on, the assistant, add-ons and pages can do anything on this computer, and every protection Thoughts adds is switched off. It is off unless you switch it on, behind two warnings. Read [Privacy › Full access](PRIVACY.md#full-access) first.
+
+### Better
+- **Full screen** is ⌃⌘F, and Esc no longer leaves it.
+
+### Safer
+- A picture saved from Thoughts is checked to be only a picture: nothing in it can run or fetch anything.
+- Office files are read with limits on size and time, so a file built to exhaust the computer cannot.
+
 ## 0.1.0
 
 A big one: pictures and files open inside the app, chats can be edited and branched, a Graph of your notes, suggestions for automating your work, and a long list of fixes and safety improvements. Help has a new guide, "Working with notes, chats and files", that explains the new tools.
