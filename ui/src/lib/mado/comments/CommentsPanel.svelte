@@ -39,7 +39,7 @@
   let listEl = $state<HTMLElement>();
 
   // A new draft: the cursor goes into its box.
-  $effect(() => { if (draft) tick().then(() => box?.focus()); });
+  $effect(() => { if (draft) tick().then(() => box?.focus({ preventScroll: true })); });
   $effect(() => {
     const id = focusId;
     if (!id || !listEl) return;
@@ -138,7 +138,7 @@
 
 <style>
   .panel { display: grid; gap: 14px; align-content: start; }
-  .draft { display: grid; gap: 8px; padding: 12px; border-radius: var(--radius-lg); background: var(--tint); animation: mado-in .22s var(--ease) both; }
+  .draft { display: grid; gap: 8px; padding: 12px; border-radius: var(--radius-lg); background: var(--tint); animation: mado-in .22s var(--ease) backwards; }
   :global([data-theme="contrast"]) .draft { background: var(--panel); border: var(--border-w) solid var(--accent); }
   .draft .about { color: var(--on-tint); }
   :global([data-theme="contrast"]) .draft .about { color: var(--fg); }

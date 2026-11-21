@@ -1,6 +1,7 @@
 <script lang="ts">
   // One step's workspace: what it is for, what can be done now (write it, send changes, approve,
   // reopen), its documents and diagrams in tabs, and beside them the step's chat and its comments.
+  import { untrack } from 'svelte';
   import { Sparkles, Send, Check, Undo2, Lock, MessageSquareText, MessagesSquare, StickyNote, RotateCw } from '@lucide/svelte';
   import { t, tn } from '../../lib/i18n';
   import { failed } from '../../lib/errors';
@@ -20,8 +21,10 @@
   import ReviewStep from './ReviewStep.svelte';
   import BuildStep from './BuildStep.svelte';
 
-  let { store, step, tab = $bindable('') }: { store: MadoStore; step: StepId; /** The open tab, remembered by the view per step. */ tab?: string } = $props();
+  let { store, step: stepProp, tab = $bindable('') }: { store: MadoStore; step: StepId; /** The open tab, remembered by the view per step. */ tab?: string } = $props();
 
+  // One workspace shows one step for as long as it lives (the view makes a new one per step).
+  const step = untrack(() => stepProp);
   const status = $derived(store.status(step));
   const chatId = $derived(store.step(step).chatId ?? '');
   const tabs = $derived(tabsOf(step));
@@ -228,7 +231,7 @@
           <button type="button" class="segb" role="tab" aria-selected={side === 'chat'} onclick={() => (side = 'chat')}><MessagesSquare size={14} aria-hidden="true" /> {t('mado.side.chat')}</button>
           <button type="button" class="segb" role="tab" aria-selected={side === 'comments'} onclick={() => (side = 'comments')}><MessageSquareText size={14} aria-hidden="true" /> {t('mado.side.comments')}{#if openCount}<span class="pill">{openCount}</span>{/if}</button>
         </div>
-        <div class="sidebody">
+        <div class="sidebody" class:chat={side === 'chat'}>
           {#if side === 'chat'}
             {#if chatId}
               {#key chatId}<StepChat {chatId} placeholder={t(step === 'brief' ? 'mado.chat.answerPh' : 'mado.chat.placeholder')} emptyTitle={t('mado.chat.emptyTitle')} emptyBody={t('mado.chat.emptyBody')} />{/key}
@@ -250,7 +253,7 @@
 </section>
 
 <style>
-  .ws { display: grid; gap: 16px; animation: mado-step .3s var(--ease) both; }
+  .ws { display: grid; gap: 16px; animation: mado-step .3s var(--ease) backwards; }
   @keyframes mado-step { from { opacity: 0; transform: translateY(8px); } }
   .head { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
   .titles { min-width: 240px; }
@@ -262,7 +265,7 @@
   .pill.st-approved { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
   .pill.st-stale { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
   :global([data-theme="contrast"]) .pill[class*="st-"] { background: var(--panel-2); color: var(--fg); border: var(--border-w) solid var(--border); }
-  .noterow { display: grid; gap: 4px; animation: mado-step .2s var(--ease) both; }
+  .noterow { display: grid; gap: 4px; animation: mado-step .2s var(--ease) backwards; }
   .noterow label { margin: 0; }
   .banner { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 10px 14px; border-radius: var(--radius-lg); font-size: 13.5px; position: relative; overflow: hidden; }
   .banner :global(svg) { flex: none; }
@@ -282,6 +285,7 @@
   .side { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 86px); min-height: 360px; padding: 14px; border-radius: var(--radius-lg); background: var(--panel); border: var(--border-w) solid var(--hairline); box-shadow: var(--shadow); }
   .side > .seg { align-self: flex-start; }
   .sidebody { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
+  .sidebody.chat { overflow: hidden; }
   .sidebody > :global(*) { flex: 1; min-height: 0; }
   .nochat, .lockedbox { display: grid; justify-items: center; align-content: center; gap: 8px; text-align: center; padding: 28px 14px; color: var(--muted); }
   .nochat b, .lockedbox b { color: var(--fg); font-size: 15px; }

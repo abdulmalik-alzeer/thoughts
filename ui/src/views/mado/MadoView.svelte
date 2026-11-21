@@ -24,7 +24,7 @@
   let starting = $state(false);
 
   onMount(() => {
-    store.load().then(() => { current = firstOpenStep(store.overview); }).catch((e) => failed(t('mado.loadFailed'), e));
+    store.load(() => { current = firstOpenStep(store.overview); }).catch((e) => failed(t('mado.loadFailed'), e));
     const off = on((e) => {
       if (e.type !== 'mado' && e.type !== 'resync') return;
       store.onEvent(e).catch(() => { /* the next event or a reconnect fetches again */ });
@@ -73,7 +73,7 @@
       <TriangleAlert size={24} aria-hidden="true" />
       <b>{t('mado.loadFailed')}</b>
       <span class="muted" dir="auto">{store.error}</span>
-      <button type="button" class="btn" onclick={() => { store.phase = 'loading'; store.load(); }}>{t('mado.tryAgain')}</button>
+      <button type="button" class="btn" onclick={() => { store.phase = 'loading'; store.load(() => { current = firstOpenStep(store.overview); }).catch(() => {}); }}>{t('mado.tryAgain')}</button>
     </div>
   {:else if !store.exists}
     <section class="intro surface lit">
@@ -107,7 +107,7 @@
   .emblem { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; background: var(--tint); color: var(--on-tint); flex: none; }
   h1 { margin: 0; font-size: 24px; }
   h1 .muted { font-weight: 400; }
-  .sep { color: var(--muted); }
+  .sep { color: var(--muted); margin-inline: 4px; }
   .stepper { padding: 8px 10px; border-radius: 16px; background: var(--panel); border: var(--border-w) solid var(--hairline); box-shadow: var(--shadow); }
   .state { display: grid; justify-items: center; gap: 8px; text-align: center; padding: 80px 20px; }
   .state :global(svg) { color: var(--danger); }

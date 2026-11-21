@@ -71,7 +71,7 @@
 
     <section class="card wide" aria-labelledby="rv-order">
       <h3 id="rv-order">{t('mado.review.order')}</h3>
-      <p class="muted sub">{t('mado.review.orderSub')}{#if laneCount > 1} {tn('mado.review.sideBySide', laneCount)}{/if}</p>
+      <p class="muted sub">{t('mado.review.orderSub')}{#if laneCount > 1}{' '}{tn('mado.review.sideBySide', laneCount)}{/if}</p>
       <ol class="waves">
         {#each review.waves as w, i}
           <li class="wave">

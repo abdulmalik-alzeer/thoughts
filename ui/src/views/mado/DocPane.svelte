@@ -3,7 +3,7 @@
   // with commented passages marked and a "Comment" button for whatever the reader selects. The Edit
   // toggle swaps it for the app's text editor; what is being typed is kept in the store, so
   // switching tabs does not lose it.
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { MessageSquarePlus, Pencil, FileText } from '@lucide/svelte';
   import { md, mdClick } from '../../lib/md';
   import { t } from '../../lib/i18n';
@@ -18,7 +18,7 @@
   import { DOC_FILES, commentsOnDoc } from '../../lib/mado/comments/batch';
   import { commentAt, docClick, paint, pageText, pickedIn, unpaint, type Highlight, type PagePick } from '../../lib/mado/comments/dom';
 
-  let { store, name, canEdit, canComment, focusId = null, oncomment, onpick }: {
+  let { store, name: nameProp, canEdit, canComment, focusId = null, oncomment, onpick }: {
     store: MadoStore;
     name: DocName;
     /** The step is with the user: the document may be edited by hand. */
@@ -31,6 +31,8 @@
     onpick: (id: string) => void;
   } = $props();
 
+  // One pane shows one document for as long as it lives (the workspace makes a new one per tab).
+  const name = untrack(() => nameProp);
   const file = $derived(DOC_FILES[name]);
   const source = $derived(store.docs[name]);
   const html = $derived(typeof source === 'string' ? md(source) : '');
@@ -123,13 +125,15 @@
     finally { saving = false; }
   }
 
-  // The floating button sits just under the selection, inside the window.
+  // The floating button sits just under the selection (above it at the bottom of the window),
+  // placed inside the document's own box so it moves with the page.
+  let wrap = $state<HTMLElement>();
   const spot = $derived.by(() => {
-    const r = pick?.rect;
-    if (!r || (!r.width && !r.height)) return null;
-    const x = Math.min(Math.max(r.left + r.width / 2, 70), window.innerWidth - 70);
-    const below = r.bottom + 44 < window.innerHeight;
-    return { x, y: below ? r.bottom + 8 : Math.max(8, r.top - 40) };
+    const r = pick?.rect, box = wrap?.getBoundingClientRect();
+    if (!r || !box || (!r.width && !r.height)) return null;
+    const x = Math.min(Math.max(r.left + r.width / 2 - box.left, 60), box.width - 60);
+    const below = r.bottom + 48 < window.innerHeight;
+    return { x, y: (below ? r.bottom + 8 : r.top - 40) - box.top };
   });
 </script>
 
@@ -163,12 +167,14 @@
   {:else if !source.trim()}
     <div class="empty"><FileText size={26} strokeWidth={1.5} aria-hidden="true" /><b>{t('mado.doc.blankTitle')}</b><span class="muted">{t('mado.doc.blankBody')}</span></div>
   {:else}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
-    <article class="md doc" bind:this={el} onclick={click} onkeydown={key} onmouseup={readSelection} onkeyup={readSelection} aria-label={t(`mado.tab.${name}`)}>{@html html}</article>
-    {#if pick && spot && canComment}
-      <button type="button" class="float btn primary" style:left="{spot.x}px" style:top="{spot.y}px" onmousedown={(e) => e.preventDefault()} onclick={comment}>
-        <MessageSquarePlus size={15} aria-hidden="true" /> {t('mado.comment.add')}</button>
-    {/if}
+    <div class="docwrap" bind:this={wrap}>
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions, a11y_click_events_have_key_events -->
+      <article class="md doc" bind:this={el} onclick={click} onkeydown={key} onmouseup={readSelection} onkeyup={readSelection} aria-label={t(`mado.tab.${name}`)}>{@html html}</article>
+      {#if pick && spot && canComment}
+        <button type="button" class="float btn primary" style:left="{spot.x}px" style:top="{spot.y}px" onmousedown={(e) => e.preventDefault()} onclick={comment}>
+          <MessageSquarePlus size={15} aria-hidden="true" /> {t('mado.comment.add')}</button>
+      {/if}
+    </div>
   {/if}
 {/if}
 
@@ -186,7 +192,8 @@
   .doc :global(mark.mado-hl.flash) { animation: mado-flash 1.4s ease-out 1; }
   @keyframes mado-flash { 0%, 40% { background: color-mix(in srgb, var(--accent) 50%, transparent); } }
   :global([data-theme="contrast"]) .doc :global(mark.mado-hl) { background: none; box-shadow: inset 0 -3px 0 var(--accent); }
-  .float { position: fixed; z-index: 40; transform: translateX(-50%); box-shadow: var(--shadow-lg); animation: mado-pop .16s var(--ease) both; }
+  .docwrap { position: relative; }
+  .float { position: absolute; z-index: 40; transform: translateX(-50%); box-shadow: var(--shadow-lg); animation: mado-pop .16s var(--ease) backwards; }
   @keyframes mado-pop { from { opacity: 0; transform: translateX(-50%) translateY(4px) scale(.96); } }
   .editor { min-height: 420px; }
   .state { padding: 40px 0; text-align: center; }

@@ -2,6 +2,7 @@
   // One diagram of a step. The drawing itself is MadoGraph (lib/mado/graph, its own worker's):
   // this pane only hands it the diagram, the comments on it and the edits not sent yet, and keeps
   // what it reports — edits stay in the store until "Send changes", positions are saved directly.
+  import { untrack } from 'svelte';
   import { Waypoints, Undo2 } from '@lucide/svelte';
   import MadoGraph from '../../lib/mado/graph/MadoGraph.svelte';
   import { t, tn } from '../../lib/i18n';
@@ -10,11 +11,13 @@
   import type { CommentTarget, GraphName, Pos } from '../../lib/mado/types';
   import { commentsOnGraph, graphTarget } from '../../lib/mado/comments/batch';
 
-  let { store, name, canEdit, canComment, oncomment }: {
+  let { store, name: nameProp, canEdit, canComment, oncomment }: {
     store: MadoStore; name: GraphName; canEdit: boolean; canComment: boolean;
     oncomment: (target: CommentTarget, label: string) => void;
   } = $props();
 
+  // One pane shows one diagram for as long as it lives (the workspace makes a new one per tab).
+  const name = untrack(() => nameProp);
   const doc = $derived(store.graphs[name]);
   const comments = $derived(commentsOnGraph(store.comments, name).filter((c) => c.status === 'open' || c.status === 'sent'));
   const ops = $derived(store.opsOf(name));
@@ -38,7 +41,7 @@
   </div>
 {:else}
   <div class="bar">
-    <span class="muted hint grow">{t(name === 'tasks' ? 'mado.graph.tasksHint' : editable ? 'mado.graph.editHint' : 'mado.graph.lookHint')}</span>
+    <span class="muted hint grow">{t(!canComment ? 'mado.doc.lookOnly' : name === 'tasks' ? 'mado.graph.tasksHint' : editable ? 'mado.graph.editHint' : 'mado.graph.lookHint')}</span>
     {#if ops.length}
       <span class="pill accent" role="status">{tn('mado.graph.pending', ops.length)}</span>
       <button type="button" class="btn ghost" onclick={() => store.setOps(name, [])}><Undo2 size={14} aria-hidden="true" /> {t('mado.graph.undoAll')}</button>

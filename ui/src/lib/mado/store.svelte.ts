@@ -86,12 +86,14 @@ export class MadoStore {
     if (this.tickets[key] === ticket) use(v);
   }
 
-  async load(): Promise<void> {
+  /** `first`: called once the plan is known, in the same tick it is first shown (to pick the step to open). */
+  async load(first?: () => void): Promise<void> {
     try {
       await this.refreshOverview();
-      this.phase = 'ready';
-      this.error = '';
       if (this.exists) await this.refreshComments().catch(() => {});
+      this.error = '';
+      if (this.phase !== 'ready') first?.();
+      this.phase = 'ready';
     } catch (e) {
       if (this.overview) throw e; // keep what is on screen; the caller says the refresh failed
       this.error = e instanceof Error ? e.message : String(e);

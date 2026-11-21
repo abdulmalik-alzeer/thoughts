@@ -137,10 +137,10 @@
                       <span class="name" dir="auto">{titles.get(task.id) ?? task.id}</span>
                       <span class="st t-{TONE[task.status]}">{t(`mado.task.${task.status}`)}{#if task.commit} · <code dir="ltr">{task.commit.slice(0, 8)}</code>{/if}</span>
                       {#if task.note}<span class="tnote muted" dir="auto">{task.note}</span>{/if}
+                      {#if task.status === 'failed' || task.status === 'conflict'}<button type="button" class="btn again" onclick={() => retry(task)} disabled={!!busy}><RotateCw size={13} aria-hidden="true" /> {t('mado.build.retry')}</button>{/if}
                     </span>
                     <span class="row ta">
                       {#if task.chatId}<button type="button" class="btn ghost ib" onclick={() => go({ kind: 'chat', id: task.chatId! })} aria-label={t('mado.build.openChat', { name: titles.get(task.id) ?? task.id })} title={t('mado.build.openChatTip')}><MessageCircle size={15} /></button>{/if}
-                      {#if task.status === 'failed' || task.status === 'conflict'}<button type="button" class="btn" onclick={() => retry(task)} disabled={!!busy}><RotateCw size={13} aria-hidden="true" /> {t('mado.build.retry')}</button>{/if}
                     </span>
                   </li>
                 {/each}
@@ -201,6 +201,7 @@
   :global([data-theme="contrast"]) .st.t-run { color: var(--fg); }
   .tnote { font-size: var(--fs-xs); overflow-wrap: anywhere; }
   .ta { gap: 4px; }
+  .again { justify-self: start; margin-top: 6px; }
   .ib { padding: 4px 6px; }
   .state { padding: 40px 0; text-align: center; }
   .empty { margin-top: 16px; display: grid; justify-items: center; gap: 6px; text-align: center; padding: 48px 24px; border: 1px dashed var(--border); border-radius: var(--radius-lg); color: var(--muted); }

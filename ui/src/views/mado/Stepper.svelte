@@ -71,7 +71,7 @@
   .tone-warn .state { color: var(--danger); }
   .step.current .stepb { background: var(--fill); }
   .step.current .dot { box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 22%, transparent); }
-  :global([data-theme="contrast"]) .tone-you .state, :global([data-theme="contrast"]) .tone-you .dot { color: var(--accent-fg); }
+  :global([data-theme="contrast"]) .tone-you .dot { color: var(--accent-fg); }
   :global([data-theme="contrast"]) .tone-you .state { color: var(--fg); }
   .dot :global(.spin) { animation: mado-spin 1.1s linear infinite; }
   @keyframes mado-spin { to { transform: rotate(360deg); } }

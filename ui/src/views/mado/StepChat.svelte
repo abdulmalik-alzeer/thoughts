@@ -133,7 +133,7 @@
   .chat { display: flex; flex-direction: column; min-height: 0; height: 100%; gap: 8px; }
   .sm { font-size: var(--fs-xs); }
   .log { flex: 1; min-height: 120px; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; overscroll-behavior: contain; }
-  .msg { font-size: 13.5px; line-height: 1.55; overflow-wrap: anywhere; animation: mado-msg .25s var(--ease) both; }
+  .msg { font-size: 13.5px; line-height: 1.55; overflow-wrap: anywhere; animation: mado-msg .25s var(--ease) backwards; }
   @keyframes mado-msg { from { opacity: 0; transform: translateY(6px); } }
   .me { align-self: flex-end; max-width: 88%; background: var(--tint); color: var(--on-tint); padding: 7px 11px; border-radius: 14px; border-end-end-radius: 4px; white-space: pre-wrap; }
   .ai :global(p:last-child) { margin-bottom: 0; }
