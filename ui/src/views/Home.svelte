@@ -20,6 +20,7 @@
   import Sections from './Sections.svelte';
   import UsageTile from './usage/UsageTile.svelte';
   import { surfaceIn } from '../lib/surfaceIn';
+  import { listedChats } from '../lib/mado/chats';
 
   let { projects, newChat, startWrap }: { projects: any[]; newChat: (pid?: string | null) => void; startWrap: () => void } = $props();
 
@@ -407,7 +408,7 @@
             <button class="proj surface lit" title={t('ui.home.openProject', { name: p.name })} onclick={() => openProject(p)}>
               <Icon name="folder" size={18} />
               <b class="ell" dir="auto">{p.name}</b>
-              <span class="muted when">{tn('home.chatCount', app.chats.filter((c) => c.projectId === p.id).length)}</span>
+              <span class="muted when">{tn('home.chatCount', listedChats(app.chats).filter((c) => c.projectId === p.id).length)}</span>
             </button>
             <button class="pnew" aria-label={t('shell.newChatIn', { name: p.name })} title={t('shell.newChatIn', { name: p.name })} onclick={() => newChat(p.id)}><Icon name="plus" size={15} /></button>
           </div>

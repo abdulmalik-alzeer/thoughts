@@ -13,6 +13,7 @@
   import PageExtras from './PageExtras.svelte';
   import Sections from './Sections.svelte';
   import { pageText, pageTitle, shows } from '../lib/pages.svelte';
+  import { listedChats } from '../lib/mado/chats';
 
   let { projects, newChat }: { projects: any[]; newChat: (pid?: string | null) => void } = $props();
 
@@ -30,10 +31,10 @@
 
   const needle = $derived(fold(q.trim()));
   const matches = (c: any) => !needle || fold(String(c.title || '')).includes(needle);
-  const live = $derived(app.chats.filter((c: any) => !c.archived));
+  const live = $derived(listedChats(app.chats).filter((c: any) => !c.archived));
   const mine = $derived(sorted(live.filter((c: any) => c.kind === 'chat' && matches(c))));
   const system = $derived(live.filter((c: any) => c.kind !== 'chat' && matches(c)));
-  const archived = $derived(sorted(app.chats.filter((c: any) => c.archived && matches(c))));
+  const archived = $derived(sorted(listedChats(app.chats).filter((c: any) => c.archived && matches(c))));
   // What the current filter lists, as one or two groups.
   const shown = $derived(filter === 'archived' ? archived : filter === 'mine' ? mine : filter === 'system' ? system : [...mine, ...system]);
   const systemRows = $derived(filter === 'system' || showAllSystem ? system : system.slice(0, SYSTEM_SHOWN));

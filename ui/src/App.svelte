@@ -77,6 +77,7 @@
   import { sidebarSlide, railFade } from './lib/sidebarMotion';
   import { announceChat, chatOpenElsewhere, initialRoute, isSecondary, mainRoute, setWindowTitle, showInMain } from './lib/windows';
   import MadoView from './views/mado/MadoView.svelte';
+  import { listedChats } from './lib/mado/chats';
 
   let projects = $state<any[]>([]);
   /** A second window (lib/windows.ts): the whole app at one note or chat, without what belongs to
@@ -651,11 +652,11 @@
   }
 
   // ---------- derived lists ----------
-  const system = $derived(app.chats.filter((c) => c.kind !== 'chat').slice(0, 6));
+  const system = $derived(listedChats(app.chats).filter((c) => c.kind !== 'chat').slice(0, 6));
   const groups = $derived.by(() => {
     // Running or open system chats are listed under System already: never twice.
     const inSystem = new Set(system.map((c) => c.id));
-    const visible = app.chats.filter((c) => (c.kind === 'chat' && (!c.archived || c.running || app.view.id === c.id)) || ((c.running || app.view.id === c.id) && !inSystem.has(c.id)))
+    const visible = listedChats(app.chats).filter((c) => (c.kind === 'chat' && (!c.archived || c.running || app.view.id === c.id)) || ((c.running || app.view.id === c.id) && !inSystem.has(c.id)))
       .sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned));
     const byProj = new Map<string | null, any[]>();
     for (const c of visible) {

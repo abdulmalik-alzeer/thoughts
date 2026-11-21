@@ -8,6 +8,7 @@
   import PageExtras from './PageExtras.svelte';
   import Sections from './Sections.svelte';
   import { pageIntro, pageText, pageTitle, shows } from '../lib/pages.svelte';
+  import { listedChats } from '../lib/mado/chats';
 
   let { projects, reload, newChat }: { projects: any[]; reload: () => Promise<void>; newChat: (pid: string) => void } = $props();
 
@@ -71,7 +72,7 @@
 {#snippet listS()}
   <div class="list">
     {#each projects as p (p.id)}
-      {@const chats = app.chats.filter((c) => c.projectId === p.id)}
+      {@const chats = listedChats(app.chats).filter((c) => c.projectId === p.id)}
       <div class="card">
         <div class="row"><b class="grow" dir="auto">{p.name}</b>
           <button type="button" class="btn" onclick={() => go({ kind: 'mado', id: p.id })} title={t('mado.entry.tip')}><Icon name="list" size={15} /> {t('mado.entry')}</button>
