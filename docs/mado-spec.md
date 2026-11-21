@@ -73,7 +73,8 @@ See `ui/src/lib/mado/types.ts` for the exact fields. In short:
   In mock-ups they are the CSS variables `--mado-color-bg` …, `--mado-font-heading` …, `--mado-radius`,
   `--mado-spacing`, `--mado-shadow`.
 - `StyleCandidate { id, name, description, tokens: DesignTokens, source: 'app'|'assistant' }`
-- `Review { features: [{id, name, tasks: string[]}], screens: [{id, label, tasks: string[]}], problems: Problem[], waves: Wave[], commands: string[] }`
+- `Review { features: [{id, name, tasks: string[]}], screens: [{id, label, tasks: string[]}], problems: Problem[], waves: Wave[], commands: string[], planHash: string }`
+  `planHash` is the sha256 (lowercase hex) of the bytes of `plan.json` the review was computed from.
   `Problem { kind: 'cycle'|'missing-dep'|'overlap'|'untraced-feature'|'untraced-screen'|'unknown-feature'|'empty-acceptance'|'bad-path', message, tasks?: string[] }`
   `Wave { lanes: Lane[] }`, `Lane { id, tasks: string[] }`. A wave is one dependency level; inside a wave,
   tasks whose `owns` overlap share a lane (run one after another), others get their own lane.
@@ -90,6 +91,8 @@ Core (`mado.rs`):
 - `GET /plan` → `PlanDoc`
 - `POST /steps/:step/run {note?}` → `{chatId}` starts or continues the step's run (status `drafting`, then `review` when it ends)
   `POST /steps/:step/approve` · `POST /steps/:step/reopen`
+  Approving `review` takes `{planHash}` (the one its `GET /review` carried). It is refused, with a plain message, when the hash
+  is missing or differs from the hash of `plan.json` now (the plan changed after the user saw it); the matching hash is kept as `state.plan_hash`.
 - `GET /comments` · `POST /comments {target, body}` · `PATCH /comments/:id {body?, status?}` · `DELETE /comments/:id`
 - `POST /changes {step, commentIds: string[], graphOps?: {file, ops: GraphOp[]}[], note?}` → `{chatId}`
   One run applies everything, to the diagram and to the passages of the documents that describe it. Comments go
