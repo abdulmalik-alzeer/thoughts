@@ -900,10 +900,26 @@ async fn a_run_cut_off_by_a_restart_is_checked_for_strays_on_the_next_start() {
     let c = st.chats.get(&chat).await.unwrap();
     assert!(c.messages.iter().any(|m| m.role == "error" && m.text.contains("src/new.txt")), "the user is told in the chat");
     assert!(!kept.exists() && mine().is_empty());
-    // A kept "before" whose chat is gone is dropped without a word.
+    let marked = || st.chats.with(&chat, |c| c.meta["mado"].get("strayCheck").is_some());
+    assert_eq!(marked().await, Some(false), "reported, so no longer marked");
+    // A kept "before" no chat refers to is dropped without a word.
     crate::mado_stray::before_run(&st, &pid, "0000-gone", &dir).await;
     check_cut_off_runs(&st, Some(&pid)).await;
     assert!(mine().is_empty());
+    // Marked, but its kept file deleted: found from the chat, and the step says it could not be checked.
+    let _ = strayed_dismiss(State(st.clone()), UrlPath((pid.clone(), "brief".into()))).await.unwrap();
+    watch_run(&st, &pid, &chat, &dir).await;
+    std::fs::remove_file(&kept).unwrap();
+    check_cut_off_runs(&st, Some(&pid)).await;
+    let step = load_state(&pid, &dir.join("mado"), false).unwrap().unwrap().steps["brief"].clone();
+    assert_eq!(step.stray_unchecked, Some(true));
+    assert_eq!(marked().await, Some(false));
+    let e = step_approve(State(st.clone()), UrlPath((pid.clone(), "brief".into())), Default::default(), None).await.unwrap_err();
+    assert_eq!(crate::api::shown_status(&e), 409);
+    // Once reported, a second start has nothing more to say.
+    let n = st.chats.get(&chat).await.unwrap().messages.len();
+    check_cut_off_runs(&st, Some(&pid)).await;
+    assert_eq!(st.chats.get(&chat).await.unwrap().messages.len(), n);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -986,6 +1002,7 @@ async fn strays(git: bool) {
     assert!(!strayed.iter().any(|s| s.starts_with("mado/")), "{strayed:?}");
     let c = st.chats.get(&chat).await.unwrap();
     assert!(c.messages.iter().any(|m| m.role == "error" && m.text.contains("README.md")), "the user is told in the chat");
+    assert!(c.meta["mado"].get("strayCheck").is_none(), "checked and reported: a later start has nothing to pick up");
     // Nothing was put back.
     assert!(std::fs::read_to_string(dir.join("README.md")).unwrap().contains("rewritten by the run"));
     // Approve refused until dismissed.

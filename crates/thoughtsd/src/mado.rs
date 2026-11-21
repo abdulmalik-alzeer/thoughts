@@ -961,6 +961,8 @@ async fn report_strays(state: &AppState, chat_id: &str, role: &ChatRole, repairi
 /// Keep how the project stands before a planning run, and record in its chat that it was watched
 /// and what was kept (`mado_stray::META_KEY`), so its check fails closed.
 async fn watch_run(state: &AppState, project_id: &str, chat_id: &str, project: &Path) {
+    // Marked first, so the file is never there without a chat naming it (`check_cut_off_runs`).
+    state.chats.update(chat_id, |c| { c.meta["mado"][crate::mado_stray::META_KEY] = json!({"sha256": ""}); }).await;
     let kept = crate::mado_stray::before_run(state, project_id, chat_id, project).await;
     state.chats.update(chat_id, |c| { c.meta["mado"][crate::mado_stray::META_KEY] = json!({"sha256": kept}); }).await;
 }
@@ -971,30 +973,40 @@ fn kept_hash(meta: &Value) -> Option<String> {
     Some(v["sha256"].as_str().unwrap_or_default().to_string())
 }
 
-/// At the start of the daemon: planning runs a restart cut off still had their "before" kept
-/// (`mado_stray`). Each is compared with the project as it is now and what changed is told and kept
-/// on its step, as after any run. (What changed since includes what anyone did while the daemon was
-/// down: the list says what to look at, never who did it.) A run that is going on is left alone; one
-/// whose project is not among the open library's is checked on a later start. `only`: one project's
-/// runs (the tests, which share one home).
+/// The run's check is done (reported): its chat no longer says it is waiting for one.
+async fn unmark(state: &AppState, chat_id: &str) {
+    state.chats.update(chat_id, |c| { if let Some(o) = c.meta["mado"].as_object_mut() { o.remove(crate::mado_stray::META_KEY); } }).await;
+}
+
+/// At the start of the daemon: planning runs a restart cut off. They are found from their chats,
+/// which still carry the mark a watched run gets (`mado_stray::META_KEY`), so a run whose kept
+/// "before" was deleted is found too (and is then reported as one that could not be checked).
+/// Each is compared with the project as it is now, told and kept on its step as after any run, and
+/// unmarked. (What changed includes what anyone did while the daemon was down: the list says what
+/// to look at, never who did it.) A run going on is left alone; one whose project is not among the
+/// open library's is checked on a later start. Kept files no chat refers to are dropped.
+/// `only`: one project's runs (the tests, which share one home).
 pub async fn check_cut_off_runs(state: &AppState, only: Option<&str>) {
-    for (pid, chat) in crate::mado_stray::kept_runs() {
-        if only.is_some_and(|o| o != pid) { continue; }
-        let running = state.runs.lock().await.contains_key(&chat) || state.chats.with(&chat, |c| c.running).await == Some(true);
-        if running { continue; }
-        let meta = state.chats.with(&chat, |c| c.meta.clone()).await;
-        let role = meta.as_ref().and_then(role_of).filter(|r| r.project_id == pid);
-        let (Some(meta), Some(role)) = (meta, role) else {
-            // The chat is gone (or is not this project's step): nothing left to tell.
-            crate::mado_stray::discard(&pid, &chat);
-            continue;
-        };
-        let Ok(project) = project_dir(state, &pid).await else { continue };
-        let repairing = meta["mado"]["repair"].as_bool().unwrap_or(false);
-        let found = crate::mado_stray::after_run(state, &pid, &chat, &project, kept_hash(&meta).as_deref()).await;
-        if let Err(e) = report_strays(state, &chat, &role, repairing, found).await {
-            crate::log::warn(format!("mado: the check of a run cut off by a restart ({chat}): {e:#}"));
+    let mut named: std::collections::HashSet<(String, String)> = Default::default();
+    for c in state.chats.list().await {
+        if c.kind != "mado" || c.meta["mado"].get(crate::mado_stray::META_KEY).is_none() { continue; }
+        let Some(role) = role_of(&c.meta) else { continue };
+        if only.is_some_and(|o| o != role.project_id) { continue; }
+        named.insert((role.project_id.clone(), c.id.clone()));
+        if c.running || state.runs.lock().await.contains_key(&c.id) { continue; }
+        let Ok(project) = project_dir(state, &role.project_id).await else { continue };
+        let repairing = c.meta["mado"]["repair"].as_bool().unwrap_or(false);
+        let found = crate::mado_stray::after_run(state, &role.project_id, &c.id, &project, kept_hash(&c.meta).as_deref()).await;
+        match report_strays(state, &c.id, &role, repairing, found).await {
+            Ok(()) => unmark(state, &c.id).await,
+            Err(e) => crate::log::warn(format!("mado: the check of a run cut off by a restart ({}): {e:#}", c.id)),
         }
+    }
+    for (pid, chat) in crate::mado_stray::kept_runs() {
+        if only.is_some_and(|o| o != pid) || named.contains(&(pid.clone(), chat.clone())) { continue; }
+        // Marked since the list above was made: a run just starting.
+        if state.chats.with(&chat, |c| c.meta["mado"].get(crate::mado_stray::META_KEY).is_some()).await == Some(true) { continue; }
+        crate::mado_stray::discard(&pid, &chat);
     }
 }
 
@@ -1005,6 +1017,7 @@ async fn settle(state: &Arc<AppState>, chat_id: &str, role: &ChatRole, meta: &Va
     let repairing = meta["mado"]["repair"].as_bool().unwrap_or(false);
     let found = crate::mado_stray::after_run(state, &role.project_id, chat_id, &project, kept_hash(meta).as_deref()).await;
     report_strays(state, chat_id, role, repairing, found).await?;
+    unmark(state, chat_id).await;
     let before = meta["mado"]["before"]["status"].as_str().unwrap_or_default().to_string();
     let before_files: BTreeMap<String, String> = serde_json::from_value(meta["mado"]["before"]["files"].clone()).unwrap_or_default();
     let changed = fingerprint(&mado) != before_files;
