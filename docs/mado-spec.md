@@ -41,6 +41,18 @@ Runs of kind `mado` may write only inside `<project>/mado/` and never `state.jso
 `build.json`. The daemon validates every file a run wrote before the step can be reviewed; an invalid
 file is reported to the user and to the run (one automatic repair turn), never drawn.
 
+What allows commands to run is never taken from the project folder (a build run, or a cloned repository
+arriving with a ready-made `mado/`, could write it). The daemon keeps, outside the project, in
+`<thoughts home>/mado/<projectId>/` (private, written atomically, mode 0600):
+- `approval.json` = `{planHash, commands: string[], approvedAt}`: written when the user approves the review
+  (`commands` = `Review.commands`, setup first), removed as soon as the review is no longer approved (reopened,
+  stale, an earlier step approved again). `mado::approved_plan(state, projectId) -> Option<Approval>` (async) and
+  `mado::approval_matches(&Approval, plan_bytes) -> bool` are what every command gate checks (the `mado-build`
+  allowance, the engine) — never `state.plan_hash`, which is display only.
+- `state.sha256`: the fingerprint of the last `state.json` the daemon wrote. A `state.json` the daemon did not write
+  is not believed: steps with a run past a draft go back to `review`, `review` and `build` are closed, chat ids and
+  `plan_hash` are dropped. `review` shows `approved` only with an approval record matching `plan.json` now (else `stale`).
+
 Graph ids, task ids, screen ids, style ids: `^[a-z0-9][a-z0-9-]{0,63}$`. Feature ids: `^F[0-9]{1,3}$`.
 Limits: a graph has at most 400 nodes and 1200 edges; a mock-up at most 400 kB; a doc at most 1 MB.
 
@@ -49,14 +61,18 @@ Limits: a graph has at most 400 nodes and 1200 edges; a mock-up at most 400 kB; 
 See `ui/src/lib/mado/types.ts` for the exact fields. In short:
 
 - `MadoState { version: 1, steps: Record<StepId, StepState>, style?: string, plan_hash?: string }`
-  `StepState { status: 'locked'|'ready'|'drafting'|'review'|'approved'|'stale', chatId?: string, approvedAt?: string }`
+  `StepState { status: 'locked'|'ready'|'drafting'|'review'|'approved'|'stale', chatId?: string, approvedAt?: string, strayed?: string[] }`
+  `strayed`: project-relative paths the step's last run changed outside `mado/` (see Runs); while it is there the step
+  cannot be approved; `POST /steps/:step/strayed/dismiss` clears it, and so does the next run that strays nowhere.
   Order is fixed. A step is `ready` when the one before it is `approved` (`design` and `tech` both open after
   `spec`; `plan` needs both). Approving again after a change marks every later approved step `stale`
   (not locked: its files stay, the user re-runs or re-approves).
 - `GraphDoc { version: 1, kind, title, nodes: GraphNode[], edges: GraphEdge[] }`
   `GraphNode { id, label, kind, props?, pos?: {x,y} }`, `GraphEdge { id, from, to, label?, kind? }`.
   `pos` is presentation only: the window may save it directly; a run must keep the `pos` of nodes it keeps.
-- `PlanDoc { version: 1, tasks: PlanTask[] }`
+- `PlanDoc { version: 1, tasks: PlanTask[], setup?: string[] }`
+  `setup`: commands the build runs once in each fresh working copy before any task (installing dependencies);
+  checked like acceptance commands, listed first in `Review.commands`, kept in the approval record.
   `PlanTask { id, title, description, owns: string[], dependsOn: string[], acceptance: string[], feature: string, screens?: string[] }`
   `owns` are project-relative paths or globs (`src/auth/**`). `acceptance` are shell commands run from the project root.
 - `Comment { id, target, body, createdAt, status: 'open'|'sent'|'resolved'|'orphaned', runId? }`
@@ -66,8 +82,12 @@ See `ui/src/lib/mado/types.ts` for the exact fields. In short:
   `{kind:'screen', screenId, x, y}` (a pin, x and y in 0..1 of the mock-up), `{kind:'task', taskId}`.
 - `GraphOp` (what the user did to a diagram, sent as a change request, never applied by the window itself):
   `{op:'rename', id, label}`, `{op:'add-node', label, kind, near?: id}`, `{op:'remove-node', id}`,
-  `{op:'add-edge', from, to, label?}`, `{op:'remove-edge', id}`, `{op:'relabel-edge', id, label}`,
+  `{op:'add-edge', from, to, label?, kind?}`, `{op:'remove-edge', id}`, `{op:'relabel-edge', id, label}`,
   `{op:'set-prop', id, key, value}`.
+  A node the user added in the same list has no id yet: `add-edge.from`/`to`, `set-prop.id` and `add-node.near`
+  may name it as `new:<n>`, the n-th `add-node` of that list (1-based, n ≤ the number of `add-node`s). Every other
+  value there, and every other id, must be a real id; anything else is refused (422). The run is told to name such
+  nodes by their label and give each a proper id.
 - `DesignTokens { color: {bg, surface, text, muted, primary, onPrimary, accent, border, success, warning, danger}, font: {heading, body, mono}, radius: number, spacing: number, density: 'compact'|'regular'|'roomy', shadow: 'none'|'soft'|'strong' }`
   Colours are `#rrggbb`. Fonts are names from a fixed list the app ships (system stacks only: no downloads).
   In mock-ups they are the CSS variables `--mado-color-bg` …, `--mado-font-heading` …, `--mado-radius`,
@@ -75,7 +95,10 @@ See `ui/src/lib/mado/types.ts` for the exact fields. In short:
 - `StyleCandidate { id, name, description, tokens: DesignTokens, source: 'app'|'assistant' }`
 - `Review { features: [{id, name, tasks: string[]}], screens: [{id, label, tasks: string[]}], problems: Problem[], waves: Wave[], commands: string[], planHash: string }`
   `planHash` is the sha256 (lowercase hex) of the bytes of `plan.json` the review was computed from.
-  `Problem { kind: 'cycle'|'missing-dep'|'overlap'|'untraced-feature'|'untraced-screen'|'unknown-feature'|'empty-acceptance'|'bad-path', message, tasks?: string[] }`
+  `Problem { kind: 'cycle'|'missing-dep'|'overlap'|'untraced-feature'|'untraced-screen'|'unknown-feature'|'empty-acceptance'|'bad-path'|'bad-command', message, tasks?: string[] }`
+  `bad-command`: an acceptance or setup command that is not one plain command — it has rule or pattern syntax
+  (`* ? [ ] ( )`, `:*`) or shell syntax (`; | & \` $ > < \ { } ! #`, line breaks). It blocks approval, like
+  `cycle`, `missing-dep`, `bad-path`, `empty-acceptance` and `unknown-feature`; the others are shown, not blocking.
   `Wave { lanes: Lane[] }`, `Lane { id, tasks: string[] }`. A wave is one dependency level; inside a wave,
   tasks whose `owns` overlap share a lane (run one after another), others get their own lane.
 - `BuildState { version: 1, status: 'idle'|'running'|'paused'|'waiting'|'failed'|'done'|'stopped', branch, base, startedAt?, waves: BuildWave[], governor: {maxParallel, running, holding: boolean, reason?}, plan_hash }`
@@ -115,17 +138,26 @@ The window refetches; it does not trust the event's payload.
 ## Runs
 
 - Kind `mado` (planning steps and change requests): cwd is the project, may read the project, may write only
-  `mado/**` minus the daemon-only files; no shell, no MCP, no web unless the chat has it on. One chat per step,
+  `mado/**` minus the daemon-only files; no shell, no MCP, no web unless the chat has it on. Writes are confined by
+  allowing, not by denying: the run uses Claude Code's `default` mode (an edit is not accepted by itself), nobody can
+  be asked, and the only allow rules are `Edit(<project>/mado/**)`; the daemon files are denied. As a backstop the
+  daemon notes what changed outside `mado/` during the run (`git status` in a repository, else a walk of sizes and
+  times capped at 20 000 entries, said when the cap is hit), tells the user in the step's chat and puts it on the step
+  as `strayed`. Nothing is put back. Always Claude Code (unless full access). One chat per step,
   kept in `state.steps[step].chatId`, so the user can talk in it (the brief is an interview: the assistant asks,
   the user answers in that chat). Never bypass, except under full access like every other kind.
 - Kind `mado-build` (one task of a lane): cwd is the lane's worktree, may write only there, shell as the app's
   rules for unattended work allow (questions surface in the build view). Never bypass, except under full access.
+  Nobody can be asked, so a command runs only if allowed: the allow rules are exactly the task's acceptance commands
+  and the plan's setup commands that pass the `bad-command` check and are in the approval record, while `plan.json`
+  matches it. Edits of the user's own project folder and of the approval records are denied. The chat carries
+  `meta.mado = {projectId, taskId}`. Always Claude Code (unless full access).
 - Every guard MADO adds yields to `full_access()` exactly like the existing ones, and behaves as written here while it is off.
 
 ## Build engine
 
 - Needs the project to be a git repository with a clean working tree; the view says so and offers nothing else.
-- Refuses to start unless `review` is approved and `state.plan_hash` equals the hash of `plan.json` now.
+- Refuses to start unless the daemon's approval record exists and matches `plan.json` now (`approval_matches`).
   The review step shows every acceptance command verbatim; approving it is what allows the daemon to run them.
 - Works on a branch of its own (`mado/build-<n>`, from the user's current branch) in worktrees under
   `<thoughts home>/mado/<projectId>/`, one per lane. Never checks out, commits to or merges into the user's

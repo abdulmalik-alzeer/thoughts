@@ -40,6 +40,10 @@ pub struct StepState {
     pub chat_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_at: Option<String>,
+    /// What the step's last run changed outside `mado/` (project-relative), which keeps the step
+    /// from being approved until the user dismisses it (`mado_stray`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub strayed: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -109,7 +113,14 @@ pub struct PlanTask {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-pub struct PlanDoc { pub version: u32, pub tasks: Vec<PlanTask> }
+pub struct PlanDoc {
+    pub version: u32,
+    pub tasks: Vec<PlanTask>,
+    /// Commands the build runs once in each fresh working copy before any task (installing the
+    /// dependencies, say). Checked like acceptance commands, shown first in the review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Vec<String>>,
+}
 
 /// What a comment is about.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -152,7 +163,7 @@ pub enum GraphOp {
     Rename { id: String, label: String },
     AddNode { label: String, kind: String, #[serde(default)] near: Option<String> },
     RemoveNode { id: String },
-    AddEdge { from: String, to: String, #[serde(default)] label: Option<String> },
+    AddEdge { from: String, to: String, #[serde(default)] label: Option<String>, #[serde(default)] kind: Option<String> },
     RemoveEdge { id: String },
     RelabelEdge { id: String, label: String },
     SetProp { id: String, key: String, value: Value },
@@ -347,7 +358,8 @@ pub fn normalize(st: &mut MadoState) {
     for s in STEPS {
         let e = st.steps.entry(s.to_string()).or_default();
         if !["locked", "ready", "drafting", "review", "approved", "stale"].contains(&e.status.as_str()) { e.status = "locked".into(); }
-        if RUN_STEPS.iter().all(|r| *r != s) { e.chat_id = None; }
+        if RUN_STEPS.iter().all(|r| *r != s) { e.chat_id = None; e.strayed = None; }
+        if e.strayed.as_ref().map_or(false, |l| l.is_empty()) { e.strayed = None; }
         // The review and the build have no run: nothing for them to be drafting.
         if (s == "review" || s == "build") && e.status == "drafting" { e.status = "ready".into(); }
     }
@@ -388,8 +400,76 @@ pub fn approvable(st: &MadoState, step: &str) -> bool {
 
 fn state_path(mado: &Path, full: bool) -> anyhow::Result<PathBuf> { resolve_in(mado, "state.json", full) }
 
-/// The state as stored, put right; `None` when `mado/` has not been started.
-pub fn load_state(mado: &Path, full: bool) -> anyhow::Result<Option<MadoState>> {
+// ---------- what the daemon keeps outside the project ----------
+//
+// Anything that can write the project (a build run, a cloned repository that arrives with a
+// ready-made `mado/`) could write `state.json`. So what allows commands to run lives in the app's
+// own data folder, `<thoughts home>/mado/<projectId>/`, which no run may reach: the approval of the
+// review (`approval.json`: the plan's hash and its commands), and the fingerprint of the last
+// `state.json` the daemon wrote (`state.sha256`). A state.json the daemon did not write is not
+// believed: every step in it that is further than a draft needs the user again.
+
+/// The user's approval of the review, kept by the daemon: the plan it approved and the commands it showed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Approval { pub plan_hash: String, pub commands: Vec<String>, pub approved_at: String }
+
+/// `<thoughts home>/mado/<projectId>/`, for a well-formed project id only.
+pub fn record_dir(project_id: &str) -> Option<PathBuf> {
+    let ok = !project_id.is_empty() && project_id.len() <= 64 && project_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    ok.then(|| crate::paths::home().join(DIR).join(project_id))
+}
+
+fn write_record(project_id: &str, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    let d = record_dir(project_id).ok_or_else(|| crate::tr::err("not_found.project", &[]))?;
+    crate::paths::create_private_dir(&d)?;
+    crate::paths::write_atomic(&d.join(name), bytes, true)?;
+    Ok(())
+}
+
+/// The review's approval as the daemon recorded it, if there is one.
+pub fn approved_plan_in(project_id: &str) -> Option<Approval> {
+    let f = record_dir(project_id)?.join("approval.json");
+    if std::fs::symlink_metadata(&f).ok()?.file_type().is_symlink() { return None; }
+    serde_json::from_slice(&std::fs::read(f).ok()?).ok()
+}
+
+/// `approved_plan_in`, for callers holding the state (the build engine).
+pub async fn approved_plan(_state: &AppState, project_id: &str) -> Option<Approval> { approved_plan_in(project_id) }
+
+/// Is `plan_bytes` (plan.json now) the very plan the user approved?
+pub fn approval_matches(a: &Approval, plan_bytes: &[u8]) -> bool { !a.plan_hash.is_empty() && a.plan_hash == plan_hash(plan_bytes) }
+
+pub fn write_approval(project_id: &str, a: &Approval) -> anyhow::Result<()> { write_record(project_id, "approval.json", &serde_json::to_vec_pretty(a)?) }
+
+/// The approval is gone (the review reopened, or no longer approved).
+pub fn clear_approval(project_id: &str) {
+    if let Some(d) = record_dir(project_id) { let _ = std::fs::remove_file(d.join("approval.json")); }
+}
+
+fn state_seen(project_id: &str) -> Option<String> {
+    std::fs::read_to_string(record_dir(project_id)?.join("state.sha256")).ok().map(|s| s.trim().to_string())
+}
+
+/// A state.json the daemon did not write: nothing past a draft is believed. Steps with a run go
+/// back to review (their files stay), the review and the build are closed, chats and the plan hash
+/// are forgotten.
+pub fn distrust(st: &mut MadoState) {
+    for (k, e) in st.steps.iter_mut() {
+        e.chat_id = None;
+        e.approved_at = None;
+        if RUN_STEPS.contains(&k.as_str()) {
+            if matches!(e.status.as_str(), "approved" | "stale" | "drafting") { e.status = "review".into(); }
+        } else { e.status = "locked".into(); }
+    }
+    st.plan_hash = None;
+    normalize(st);
+}
+
+/// The state as stored, put right; `None` when `mado/` has not been started. A state.json this
+/// computer's daemon did not write is `distrust`ed, and the review counts as approved only with
+/// the daemon's own record of it for the plan as it is now.
+pub fn load_state(project_id: &str, mado: &Path, full: bool) -> anyhow::Result<Option<MadoState>> {
     let p = state_path(mado, full)?;
     if !p.is_file() { return Ok(None); }
     let bytes = read_in(mado, "state.json", full, DOC_MAX)?.unwrap_or_default();
@@ -398,12 +478,24 @@ pub fn load_state(mado: &Path, full: bool) -> anyhow::Result<Option<MadoState>> 
         crate::log::warn(format!("mado: state.json could not be read ({e}); starting from the files"));
         MadoState::default()
     });
+    if state_seen(project_id).as_deref() != Some(plan_hash(&bytes).as_str()) { distrust(&mut st); }
     normalize(&mut st);
+    if is_approved(&st, "review") {
+        let now = read_in(mado, PLAN, full, DOC_MAX).ok().flatten();
+        let ok = approved_plan_in(project_id).zip(now).map_or(false, |(a, b)| approval_matches(&a, &b));
+        if !ok { if let Some(e) = st.steps.get_mut("review") { e.status = "stale".into(); } normalize(&mut st); }
+    }
     Ok(Some(st))
 }
 
-pub fn save_state(mado: &Path, st: &MadoState, full: bool) -> anyhow::Result<()> {
-    write_in(mado, "state.json", &serde_json::to_vec_pretty(st)?, full)
+/// Save the state, note its fingerprint outside the project, and drop the approval record once the
+/// review is no longer approved.
+pub fn save_state(project_id: &str, mado: &Path, st: &MadoState, full: bool) -> anyhow::Result<()> {
+    let bytes = serde_json::to_vec_pretty(st)?;
+    write_in(mado, "state.json", &bytes, full)?;
+    write_record(project_id, "state.sha256", plan_hash(&bytes).as_bytes())?;
+    if !is_approved(st, "review") { clear_approval(project_id); }
+    Ok(())
 }
 
 /// Change the state under the project's lock and tell the window.
@@ -412,10 +504,10 @@ pub async fn with_state<T>(state: &AppState, project_id: &str, f: impl FnOnce(&m
     let _held = lock.lock().await;
     let full = state.settings.read().await.full_access();
     let mado = mado_dir(state, project_id).await?;
-    let mut st = load_state(&mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
+    let mut st = load_state(project_id, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
     let out = f(&mut st)?;
     normalize(&mut st);
-    save_state(&mado, &st, full)?;
+    save_state(project_id, &mado, &st, full)?;
     drop(_held);
     tell(state, project_id, "state").await;
     Ok(out)
@@ -546,57 +638,49 @@ pub fn role_of(meta: &Value) -> Option<ChatRole> {
     Some(ChatRole { project_id: m["projectId"].as_str()?.to_string(), step: m["step"].as_str().unwrap_or_default().to_string() })
 }
 
-/// Edit rules that keep a run of kind `mado` to `mado/` inside `project`: permission rules have no
-/// "everything except", so every name at the top of the project that could be anything but `mado`
-/// is closed — the ones there now (in any letter case), new files with a dot in their name, and new
-/// names of any length but four — and inside `mado/` the files only the daemon writes.
-pub fn write_deny(project: &Path) -> Vec<String> {
-    use crate::claude::{glob_escape, rule_path};
-    let p = rule_path(project);
-    let mut names: Vec<String> = ["*.*", "?", "??", "???", "?????*"].iter().map(|s| s.to_string()).collect();
-    if let Ok(rd) = std::fs::read_dir(project) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if name.eq_ignore_ascii_case(DIR) { continue; }
-            names.push(glob_escape(&name));
-        }
-    }
-    // A new four-letter name that is not `mado`: one of its letters differs. (Written with plain
-    // classes: a negated one such as `[!m]` is not read the same way by every rule reader.)
-    const NAME_CHARS: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ -";
-    for (i, c) in DIR.chars().enumerate() {
-        let class: String = NAME_CHARS.chars().filter(|x| !x.eq_ignore_ascii_case(&c)).collect();
-        let pat: String = (0..4).map(|j| if j == i { format!("[{class}]") } else { "?".to_string() }).collect();
-        names.push(pat);
-    }
-    // Each name, and everything under it should it be a folder.
-    let mut deny: Vec<String> = names.iter().flat_map(|n| [format!("Edit({p}/{n})"), format!("Edit({p}/{n}/**)")]).collect();
+/// The permission mode a run of kind `mado` uses: Claude Code's own `default`, where an edit is
+/// not accepted by itself. Nobody can be asked in the app (`--permission-prompts none`, no
+/// `approvals` for this kind), so an edit no allow rule covers is refused: the run's writes are
+/// confined by what is allowed (`write_rules`), not by listing what is not. Full access keeps the
+/// mode it gives every run; every other kind keeps its own.
+pub fn run_mode(kind: &str, mode: String, full: bool) -> String {
+    // (Bypass is left as asked, so that it is refused for this kind like for any other.)
+    if kind == "mado" && !full && mode != "plan" && mode != crate::settings::BYPASS { "default".into() } else { mode }
+}
+
+/// The rules of a run of kind `mado`, as `(deny, allow)`: edits are allowed under `mado/` only
+/// (in the default mode, everything else would ask, and is refused); the daemon's own files there
+/// are denied (a deny wins over an allow). `.claude`, `.git` and `.mcp.json` stay closed by the
+/// rules every run gets (`claude::protective_deny`).
+pub fn write_rules(project: &Path) -> (Vec<String>, Vec<String>) {
+    let p = crate::claude::rule_path(project);
+    let mut allow = vec![format!("Edit({p}/{DIR}/**)"), format!("Edit(./{DIR}/**)")];
+    let mut deny = vec![];
     for f in DAEMON_FILES {
         deny.push(format!("Edit({p}/{DIR}/{f})"));
         deny.push(format!("Edit(./{DIR}/{f})"));
     }
     crate::claude::every_case(&mut deny);
-    deny
+    crate::claude::every_case(&mut allow);
+    (deny, allow)
 }
 
-/// The commands a build task may run without asking: exactly the acceptance commands of its task in
-/// the plan the user approved (each also split at `&&`, which the program checks part by part).
-pub fn build_allow(acceptance: &[String]) -> Vec<String> {
+/// The commands a build task may run without asking: its own acceptance commands that are among
+/// the commands of the approval record (what the user was shown) and that are plain commands
+/// (`mado_validate::command_ok`: no rule or shell syntax that would allow more than the command).
+pub fn build_allow(acceptance: &[String], approved: &[String]) -> Vec<String> {
     let mut out: Vec<String> = vec![];
-    for c in acceptance {
-        let c = c.trim();
-        if c.is_empty() || c.contains(['\n', '\r', '(', ')']) { continue; }
-        out.push(format!("Bash({c})"));
-        if c.contains("&&") { for part in c.split("&&").map(str::trim).filter(|p| !p.is_empty()) { out.push(format!("Bash({part})")); } }
+    for c in acceptance.iter().map(|c| c.trim()) {
+        if !crate::mado_validate::command_ok(c) || !approved.iter().any(|a| a.trim() == c) { continue; }
+        let rule = format!("Bash({c})");
+        if !out.contains(&rule) { out.push(rule); }
     }
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|r| seen.insert(r.clone()));
     out
 }
 
 /// Called by `claude::start_run` for every run, once its kind is known: a run of kind `mado` gets its
 /// step's instructions, works in the project only, and (unless full access is on) may write only
-/// `mado/` minus the daemon's own files; its step goes `drafting`. A run of kind `mado-build` may run
+/// `mado/` minus the daemon's own files (the returned allow rules, with `run_mode`); its step goes `drafting`. A run of kind `mado-build` may run
 /// its own task's acceptance commands (the returned allow rules) and may not write the project's own
 /// folder. Every other run passes unchanged.
 pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::RunSpec, full: bool) -> anyhow::Result<(crate::claude::RunSpec, Vec<String>)> {
@@ -610,25 +694,39 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
             let p = crate::claude::rule_path(&project);
             spec.extra_deny.extend([format!("Edit({p})"), format!("Edit({p}/**)")]);
             crate::claude::every_case(&mut spec.extra_deny);
-            // Only the commands of the plan the user approved (its hash is the one kept at the review).
+            // The approval records outside the project are not the runs' to change either.
+            if let Some(d) = record_dir(&role.project_id) {
+                let r = crate::claude::rule_path(&d);
+                spec.extra_deny.extend(["approval.json", "state.sha256"].iter().flat_map(|f| [format!("Edit({r}/{f})"), format!("Read({r}/{f})")]));
+            }
+            crate::claude::every_case(&mut spec.extra_deny);
+            // Only commands of the plan the user approved, by the daemon's own record of that
+            // approval (never by what state.json says), and only while plan.json is that plan.
             let task = meta["mado"]["taskId"].as_str().unwrap_or_default().to_string();
             let mado = mado_dir_of(&project, full)?;
-            let st = load_state(&mado, full)?.unwrap_or_default();
             let bytes = read_in(&mado, PLAN, full, DOC_MAX)?.unwrap_or_default();
-            if st.plan_hash.as_deref() == Some(plan_hash(&bytes).as_str()) {
+            if let Some(a) = approved_plan_in(&role.project_id).filter(|a| approval_matches(a, &bytes)) {
                 if let Ok(plan) = crate::mado_validate::plan(&bytes) {
-                    if let Some(t) = plan.tasks.iter().find(|t| t.id == task) { allow = build_allow(&t.acceptance); }
+                    // The plan's setup commands too: the engine may run them in a task's run as well.
+                    let mut own: Vec<String> = plan.setup.clone().unwrap_or_default();
+                    if let Some(t) = plan.tasks.iter().find(|t| t.id == task) { own.extend(t.acceptance.iter().cloned()); }
+                    allow = build_allow(&own, &a.commands);
                 }
             }
         }
         return Ok((spec, allow));
     }
     if !RUN_STEPS.contains(&role.step.as_str()) { return Err(crate::tr::err("mado.not_a_step", &[])); }
+    let mut allowed = vec![];
     if !full {
         // Its folder is the project, and nothing besides it.
         if crate::paths::canonical(&spec.cwd).ok().as_deref() != Some(project.as_path()) { return Err(crate::tr::err("mado.path", &[("path", &spec.cwd.display().to_string())])); }
         spec.add_dirs.clear();
-        spec.extra_deny.extend(write_deny(&project));
+        let (deny, allow) = write_rules(&project);
+        spec.extra_deny.extend(deny);
+        allowed = allow;
+        // The backstop: what changes outside `mado/` while it runs is told to the user afterwards.
+        crate::mado_stray::before_run(state, &spec.chat_id, &project).await;
     }
     let mado = mado_dir_of(&project, full)?;
     std::fs::create_dir_all(&mado)?;
@@ -636,7 +734,7 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
     let step_text = crate::mado_prompts::system(&role.step, &ctx);
     spec.append_system = Some(match spec.append_system.take() { Some(a) => format!("{step_text}\n\n{a}"), None => step_text });
     // Drafting from now on; how things stood is kept, for a run that ends having changed nothing.
-    let before = { let st = load_state(&mado, full)?.unwrap_or_default(); st.steps.get(&role.step).map(|s| s.status.clone()).unwrap_or_default() };
+    let before = { let st = load_state(&role.project_id, &mado, full)?.unwrap_or_default(); st.steps.get(&role.step).map(|s| s.status.clone()).unwrap_or_default() };
     let prints = fingerprint(&mado);
     state.chats.update(&spec.chat_id, |c| { c.meta["mado"]["before"] = json!({"status": before, "files": prints}); }).await;
     let step = role.step.clone();
@@ -645,7 +743,7 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
         if let Some(e) = st.steps.get_mut(&step) { e.status = "drafting".into(); e.chat_id = Some(chat); }
         Ok(())
     }).await?;
-    Ok((spec, vec![]))
+    Ok((spec, allowed))
 }
 
 /// Called by `claude::finish` after every run: a run of kind `mado` has its files checked. Invalid
@@ -666,8 +764,32 @@ pub fn after_run(state: Arc<AppState>, chat_id: String, ok: bool) -> futures::fu
 
 async fn settle(state: &Arc<AppState>, chat_id: &str, role: &ChatRole, meta: &Value, ok: bool) -> anyhow::Result<()> {
     let full = state.settings.read().await.full_access();
-    let mado = mado_dir(state, &role.project_id).await?;
+    let project = project_dir(state, &role.project_id).await?;
+    let mado = mado_dir_of(&project, full)?;
     let repairing = meta["mado"]["repair"].as_bool().unwrap_or(false);
+    // What it changed outside `mado/` (the deny rules should have made that impossible): said in
+    // the chat and kept on the step. Nothing is put back. A repair turn adds to its first turn's list.
+    if let Some((list, capped)) = crate::mado_stray::after_run(state, chat_id, &project).await {
+        if !list.is_empty() || capped {
+            let mut text = String::new();
+            if !list.is_empty() {
+                let shown = list.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n");
+                text.push_str(&format!("{}\n\n{shown}", crate::tr::text("mado.strayed", &[])));
+            }
+            if capped { if !text.is_empty() { text.push_str("\n\n"); } text.push_str(&crate::tr::text("mado.strayed_capped", &[("n", &crate::mado_stray::WALK_CAP.to_string())])); }
+            crate::claude::push(state, chat_id, crate::chats::Msg::new("error", &text)).await;
+        }
+        let step = role.step.clone();
+        with_state(state, &role.project_id, |st| {
+            if let Some(e) = st.steps.get_mut(&step) {
+                let mut all = if repairing { e.strayed.clone().unwrap_or_default() } else { vec![] };
+                for p in list { if !all.contains(&p) { all.push(p); } }
+                all.truncate(crate::mado_stray::LIST_CAP);
+                e.strayed = (!all.is_empty()).then_some(all);
+            }
+            Ok(())
+        }).await?;
+    }
     let before = meta["mado"]["before"]["status"].as_str().unwrap_or_default().to_string();
     let before_files: BTreeMap<String, String> = serde_json::from_value(meta["mado"]["before"]["files"].clone()).unwrap_or_default();
     let changed = fingerprint(&mado) != before_files;
@@ -713,7 +835,7 @@ async fn settle(state: &Arc<AppState>, chat_id: &str, role: &ChatRole, meta: &Va
 async fn step_chat(state: &AppState, project_id: &str, step: &str) -> anyhow::Result<String> {
     let full = state.settings.read().await.full_access();
     let mado = mado_dir(state, project_id).await?;
-    let st = load_state(&mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
+    let st = load_state(project_id, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
     if let Some(id) = st.steps.get(step).and_then(|s| s.chat_id.clone()) {
         if state.chats.get(&id).await.is_some() { return Ok(id); }
     }
@@ -742,7 +864,7 @@ async fn run_step(state: &Arc<AppState>, project_id: &str, step: &str, text: Str
     let project = project_dir(state, project_id).await?;
     if !full { crate::trust::require(&project)?; }
     let mado = mado_dir_of(&project, full)?;
-    let st = load_state(&mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
+    let st = load_state(project_id, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
     if st.steps.get(step).map_or(true, |s| s.status == "locked") { return Err(crate::tr::err("mado.locked", &[])); }
     let id = step_chat(state, project_id, step).await?;
     crate::api::send_text(state.clone(), id.clone(), text).await?;
@@ -762,6 +884,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/mado/:project/steps/:step/run", post(step_run))
         .route("/api/mado/:project/steps/:step/approve", post(step_approve))
         .route("/api/mado/:project/steps/:step/reopen", post(step_reopen))
+        .route("/api/mado/:project/steps/:step/strayed/dismiss", post(strayed_dismiss))
         .route("/api/mado/:project/comments", get(comments_get).post(comments_add))
         .route("/api/mado/:project/comments/:id", patch(comments_patch).delete(comments_delete))
         .route("/api/mado/:project/changes", post(changes))
@@ -790,17 +913,11 @@ fn files_of(mado: &Path) -> Vec<String> {
 }
 
 /// The review is no longer approved when the plan changed since (its hash is what allows the build).
-fn reconcile(mado: &Path, st: &mut MadoState, full: bool) -> bool {
-    let mut changed = false;
-    if is_approved(st, "review") {
-        let now = read_in(mado, PLAN, full, DOC_MAX).ok().flatten().map(|b| plan_hash(&b));
-        if now.is_none() || now != st.plan_hash {
-            if let Some(e) = st.steps.get_mut("review") { e.status = "stale".into(); }
-            changed = true;
-        }
-    }
-    normalize(st);
-    changed
+/// (`load_state` already made the review stale where its approval record does not match the plan,
+/// and distrusted a state.json the daemon did not write: the file is rewritten when it says otherwise.)
+fn reconcile(_pid: &str, mado: &Path, st: &MadoState, full: bool) -> bool {
+    let raw = read_in(mado, "state.json", full, DOC_MAX).ok().flatten().and_then(|b| serde_json::from_slice::<MadoState>(&b).ok());
+    raw.map_or(true, |mut r| { normalize(&mut r); r != *st })
 }
 
 /// `GET /api/mado/:project` → `{project, exists, state, files}`.
@@ -809,8 +926,8 @@ async fn overview(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
     let name = st.settings.read().await.projects.iter().find(|p| p.id == pid).map(|p| p.name.clone()).unwrap_or_default();
     let lock = lock_of(&pid);
     let _held = lock.lock().await;
-    let mut state = load_state(&mado, full)?;
-    if let Some(s) = state.as_mut() { if reconcile(&mado, s, full) { save_state(&mado, s, full)?; } }
+    let state = load_state(&pid, &mado, full)?;
+    if let Some(s) = state.as_ref() { if reconcile(&pid, &mado, s, full) { save_state(&pid, &mado, s, full)?; } }
     let files = if mado.is_dir() { files_of(&mado) } else { vec![] };
     Ok(Json(json!({"project": {"id": pid, "name": name, "path": project.to_string_lossy()}, "exists": state.is_some(), "state": state, "files": files})))
 }
@@ -821,9 +938,9 @@ async fn start(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
     if !full { crate::trust::require(&project)?; }
     let lock = lock_of(&pid);
     let held = lock.lock().await;
-    let state = match load_state(&mado, full)? {
+    let state = match load_state(&pid, &mado, full)? {
         Some(s) => s,
-        None => { let s = MadoState::default(); save_state(&mado, &s, full)?; s }
+        None => { let s = MadoState::default(); save_state(&pid, &mado, &s, full)?; s }
     };
     drop(held);
     tell(&st, &pid, "state").await;
@@ -846,7 +963,7 @@ async fn doc_put(State(st): S, UrlPath((pid, name)): UrlPath<(String, String)>, 
     let (_, mado, full) = ctx(&st, &pid).await?;
     let file = doc_file(&name).ok_or_else(|| crate::tr::err("mado.unknown_name", &[("name", &name)]))?;
     if b.text.len() > DOC_MAX { return Err(crate::tr::err("mado.too_large", &[("path", file)]).into()); }
-    let state = load_state(&mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
+    let state = load_state(&pid, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
     if let Some(chat) = state.steps.get(&name).and_then(|s| s.chat_id.clone()) {
         if st.chats.with(&chat, |c| c.running).await == Some(true) { return Err(crate::tr::err("mado.busy", &[]).into()); }
     }
@@ -908,7 +1025,7 @@ async fn step_run(State(st): S, UrlPath((pid, step)): UrlPath<(String, String)>,
     let note = body.and_then(|b| b.0.note).filter(|n| !n.trim().is_empty());
     if note.as_ref().map_or(false, |n| n.len() > 20_000) { return Err(crate::tr::err("mado.too_large", &[("path", "note")]).into()); }
     let (_, mado, full) = ctx(&st, &pid).await?;
-    let state = load_state(&mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
+    let state = load_state(&pid, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
     let again = state.steps.get(&step).map_or(false, |s| s.status != "ready");
     let text = crate::mado_prompts::run_message(&step, again, note.as_deref());
     let id = run_step(&st, &pid, &step, text).await?;
@@ -927,8 +1044,11 @@ async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, Strin
     let shown = body.and_then(|b| b.0.plan_hash).filter(|h| !h.is_empty());
     let (_, mado, full) = ctx(&st, &pid).await?;
     if !STEPS.contains(&step.as_str()) { return Err(crate::tr::err("mado.unknown_name", &[("name", &step)]).into()); }
-    let state = load_state(&mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
+    let state = load_state(&pid, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
     if !approvable(&state, &step) { return Err(crate::tr::err("mado.not_approvable", &[]).into()); }
+    if let Some(list) = state.steps.get(&step).and_then(|s| s.strayed.clone()).filter(|l| !l.is_empty()) {
+        return Err(crate::tr::err_detail("mado.strayed_block", &[], list.join("\n")).into());
+    }
     if let Some(chat) = state.steps.get(&step).and_then(|s| s.chat_id.clone()) {
         if st.chats.with(&chat, |c| c.running).await == Some(true) { return Err(crate::tr::err("mado.busy", &[]).into()); }
     }
@@ -943,7 +1063,7 @@ async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, Strin
         if !blocking.is_empty() { return Err(crate::tr::err_detail("mado.review_blocked", &[], blocking.join("\n")).into()); }
         let now = plan_hash(&bytes);
         if shown.as_deref() != Some(now.as_str()) { return Err(crate::tr::err("mado.plan_changed", &[]).into()); }
-        hash = Some(now);
+        hash = Some((now, r.commands.clone()));
     } else {
         let (missing, wrong) = check_step(&mado, &step, full);
         if !missing.is_empty() || !wrong.is_empty() {
@@ -953,9 +1073,14 @@ async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, Strin
     }
     let now = chrono::Utc::now().to_rfc3339();
     let s = step.clone();
+    let pid2 = pid.clone();
     let out = with_state(&st, &pid, move |state| {
         approve_in(state, &s, &now);
-        if hash.is_some() { state.plan_hash = hash; }
+        if let Some((h, commands)) = hash.clone() {
+            // What allows the build to run commands: kept outside the project, never in state.json.
+            write_approval(&pid2, &Approval { plan_hash: h.clone(), commands, approved_at: now.clone() })?;
+            state.plan_hash = Some(h);
+        }
         Ok(state.clone())
     }).await?;
     Ok(Json(json!({"ok": true, "state": out})))
@@ -965,6 +1090,13 @@ async fn step_reopen(State(st): S, UrlPath((pid, step)): UrlPath<(String, String
     if !STEPS.contains(&step.as_str()) || step == "build" { return Err(crate::tr::err("mado.unknown_name", &[("name", &step)]).into()); }
     let s = step.clone();
     let out = with_state(&st, &pid, move |state| { reopen_in(state, &s); Ok(state.clone()) }).await?;
+    Ok(Json(json!({"ok": true, "state": out})))
+}
+
+/// `POST /steps/:step/strayed/dismiss`: the user has seen what the run changed outside `mado/`.
+async fn strayed_dismiss(State(st): S, UrlPath((pid, step)): UrlPath<(String, String)>) -> R {
+    if !RUN_STEPS.contains(&step.as_str()) { return Err(crate::tr::err("mado.unknown_name", &[("name", &step)]).into()); }
+    let out = with_state(&st, &pid, move |state| { if let Some(e) = state.steps.get_mut(&step) { e.strayed = None; } Ok(state.clone()) }).await?;
     Ok(Json(json!({"ok": true, "state": out})))
 }
 
@@ -1017,6 +1149,7 @@ async fn changes(State(st): S, UrlPath(pid): UrlPath<String>, Json(b): Json<Chan
     for g in &b.graph_ops {
         if !GRAPHS.iter().any(|(_, f, _)| *f == g.file) { return Err(crate::tr::err("mado.unknown_name", &[("name", &g.file)]).into()); }
         if g.ops.len() > 500 { return Err(crate::tr::err("mado.too_large", &[("path", &g.file)]).into()); }
+        check_ops(&g.ops)?;
         ops.push(g.clone());
     }
     if chosen.is_empty() && ops.iter().all(|g| g.ops.is_empty()) && b.note.as_deref().map_or(true, |n| n.trim().is_empty()) {
@@ -1031,6 +1164,34 @@ async fn changes(State(st): S, UrlPath(pid): UrlPath<String>, Json(b): Json<Chan
         Ok(id) => Ok(Json(json!({"chatId": id}))),
         Err(e) => { let _ = crate::mado_comments::unsend(&st, &pid, &ids).await; Err(e.into()) }
     }
+}
+
+/// A node an op names: a real id, or `new:<n>` — the n-th `add-node` of the same list (1-based),
+/// for a node the user added in the window, which has no id yet. Only where an op may name such a
+/// node (`add-edge` ends, `set-prop`, `add-node.near`); everything else takes a real id.
+pub fn new_ref(r: &str, added: usize) -> Option<usize> {
+    let n: usize = r.strip_prefix("new:")?.parse().ok()?;
+    (n >= 1 && n <= added && r == format!("new:{n}")).then_some(n)
+}
+
+pub fn check_ops(ops: &[GraphOp]) -> anyhow::Result<()> {
+    let added = ops.iter().filter(|o| matches!(o, GraphOp::AddNode { .. })).count();
+    let bad = |id: &str| crate::tr::err("mado.bad_op", &[("id", &id.chars().take(80).collect::<String>())]);
+    let node = |id: &str, new_ok: bool| -> anyhow::Result<()> {
+        if crate::mado_validate::id_ok(id) || (new_ok && new_ref(id, added).is_some()) { Ok(()) } else { Err(bad(id)) }
+    };
+    let text = |t: &str, max: usize| -> anyhow::Result<()> { if t.chars().count() <= max { Ok(()) } else { Err(crate::tr::err("mado.bad_request", &[])) } };
+    for op in ops {
+        match op {
+            GraphOp::Rename { id, label } => { node(id, false)?; text(label, 300)?; }
+            GraphOp::AddNode { label, kind, near } => { text(label, 300)?; node(kind, false)?; if let Some(n) = near { node(n, true)?; } }
+            GraphOp::RemoveNode { id } | GraphOp::RemoveEdge { id } => node(id, false)?,
+            GraphOp::AddEdge { from, to, label, kind } => { node(from, true)?; node(to, true)?; text(label.as_deref().unwrap_or(""), 300)?; if let Some(k) = kind { if !k.is_empty() { text(k, 40)?; if k.chars().any(char::is_control) { return Err(bad(k)); } } } }
+            GraphOp::RelabelEdge { id, label } => { node(id, false)?; text(label, 300)?; }
+            GraphOp::SetProp { id, key, value } => { node(id, true)?; text(key, 100)?; if serde_json::to_string(value).map_or(true, |v| v.len() > 10_000) { return Err(crate::tr::err("mado.bad_request", &[])); } }
+        }
+    }
+    Ok(())
 }
 
 async fn review_get(State(st): S, UrlPath(pid): UrlPath<String>) -> R {

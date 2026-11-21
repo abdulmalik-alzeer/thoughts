@@ -28,7 +28,7 @@ async fn with_comments<T>(state: &AppState, pid: &str, f: impl FnOnce(&Path, &mu
     let m = mado::mado_dir(state, pid).await?;
     let lock = lock_of(pid);
     let _held = lock.lock().await;
-    if mado::load_state(&m, full)?.is_none() { return Err(crate::tr::err("mado.not_started", &[])); }
+    if mado::load_state(pid, &m, full)?.is_none() { return Err(crate::tr::err("mado.not_started", &[])); }
     let mut c = load(&m, full)?;
     let out = f(&m, &mut c, full)?;
     save(&m, &c, full)?;
@@ -67,6 +67,12 @@ pub fn clean_target(t: CommentTarget) -> anyhow::Result<CommentTarget> {
             let (file, _) = graph_file_of(&file).ok_or_else(bad)?;
             if !id_ok(&node_id) { return Err(bad()); }
             CommentTarget::Node { file: file.into(), node_id }
+        }
+        // (An edge of the task diagram is a dependency, `<task>--<task>`, of `plan.json`.)
+        CommentTarget::Edge { file, edge_id } if file == mado::PLAN => {
+            let ok = edge_id.split_once("--").map_or(false, |(a, b)| id_ok(a) && id_ok(b));
+            if !ok { return Err(bad()); }
+            CommentTarget::Edge { file, edge_id }
         }
         CommentTarget::Edge { file, edge_id } => {
             let (file, _) = graph_file_of(&file).ok_or_else(bad)?;
@@ -163,6 +169,7 @@ pub async fn reanchor_project(state: &AppState, pid: &str) -> anyhow::Result<()>
 }
 
 fn graph(m: &Path, file: &str, full: bool) -> Option<GraphDoc> {
+    if file == mado::PLAN { return mado::read_plan(m, full).ok().flatten().map(|p| mado::tasks_graph(&p)); }
     let (file, kind) = graph_file_of(file)?;
     mado::read_graph(m, file, kind, full).ok().flatten()
 }
@@ -283,15 +290,27 @@ fn comment_line(m: &Path, full: bool, c: &Comment) -> String {
     }
 }
 
-fn op_line(g: Option<&GraphDoc>, op: &GraphOp) -> String {
+/// A node an op names: a real one by id, one the user just added (`new:<n>`) by its label.
+fn ref_desc(g: Option<&GraphDoc>, ops: &[GraphOp], r: &str) -> String {
+    let added: Vec<&String> = ops.iter().filter_map(|o| match o { GraphOp::AddNode { label, .. } => Some(label), _ => None }).collect();
+    match mado::new_ref(r, added.len()) {
+        Some(n) => format!("the new node \u{201c}{}\u{201d}", added[n - 1]),
+        None => node_desc(g, r),
+    }
+}
+
+fn op_line(g: Option<&GraphDoc>, ops: &[GraphOp], op: &GraphOp) -> String {
+    let n = |r: &str| ref_desc(g, ops, r);
     match op {
         GraphOp::Rename { id, label } => format!("rename node {} to {label:?}", node_desc(g, id)),
-        GraphOp::AddNode { label, kind, near } => format!("add a node {label:?} of kind {kind}{}", near.as_ref().map(|n| format!(", next to {}", node_desc(g, n))).unwrap_or_default()),
+        GraphOp::AddNode { label, kind, near } => format!("add a node {label:?} of kind {kind}{} (give it a proper id)", near.as_ref().map(|x| format!(", next to {}", n(x))).unwrap_or_default()),
         GraphOp::RemoveNode { id } => format!("remove node {} and the edges that touch it", node_desc(g, id)),
-        GraphOp::AddEdge { from, to, label } => format!("add an edge from {} to {}{}", node_desc(g, from), node_desc(g, to), label.as_ref().map(|l| format!(" labelled {l:?}")).unwrap_or_default()),
+        GraphOp::AddEdge { from, to, label, kind } => format!("add an edge from {} to {}{}{}", n(from), n(to),
+            label.as_ref().filter(|l| !l.is_empty()).map(|l| format!(" labelled {l:?}")).unwrap_or_default(),
+            kind.as_ref().filter(|k| !k.is_empty()).map(|k| format!(", of kind {k:?}")).unwrap_or_default()),
         GraphOp::RemoveEdge { id } => format!("remove edge {}", edge_desc(g, id)),
         GraphOp::RelabelEdge { id, label } => format!("relabel edge {} to {label:?}", edge_desc(g, id)),
-        GraphOp::SetProp { id, key, value } => format!("set the property {key:?} of {} to {}", node_desc(g, id), serde_json::to_string(value).unwrap_or_default()),
+        GraphOp::SetProp { id, key, value } => format!("set the property {key:?} of {} to {}", n(id), serde_json::to_string(value).unwrap_or_default()),
     }
 }
 
@@ -317,11 +336,12 @@ pub fn change_prompt(m: &Path, full: bool, comments: &[Comment], ops: &[OpsOnFil
     }
     let ops: Vec<&OpsOnFile> = ops.iter().filter(|o| !o.ops.is_empty()).collect();
     if !ops.is_empty() {
-        out.push_str("\n## Diagram edits the user made in the window (not yet in the files: make them)\n");
+        out.push_str("\n## Diagram edits the user made in the window (not yet in the files: make them)\n\
+            A node the user added has no id yet and is named here as \u{201c}the new node \u{2026}\u{201d}: give each one a proper id in the id pattern.\n");
         for o in ops {
             let g = graph(m, &o.file, full);
             out.push_str(&format!("\nIn `{}`:\n", o.file));
-            for op in &o.ops { out.push_str(&format!("- {}\n", op_line(g.as_ref(), op))); }
+            for op in &o.ops { out.push_str(&format!("- {}\n", op_line(g.as_ref(), &o.ops, op))); }
         }
     }
     if let Some(n) = note.map(str::trim).filter(|n| !n.is_empty()) { out.push_str(&format!("\n## The user's note\n\n{n}\n")); }

@@ -3,7 +3,7 @@
 export const STEPS = ['brief', 'spec', 'tech', 'design', 'plan', 'review', 'build'] as const;
 export type StepId = (typeof STEPS)[number];
 export type StepStatus = 'locked' | 'ready' | 'drafting' | 'review' | 'approved' | 'stale';
-export interface StepState { status: StepStatus; chatId?: string; approvedAt?: string }
+export interface StepState { status: StepStatus; chatId?: string; approvedAt?: string; /** paths the last run changed outside mado/; blocks approval until dismissed */ strayed?: string[] }
 export interface MadoState { version: 1; steps: Record<StepId, StepState>; style?: string; plan_hash?: string }
 export interface MadoOverview { project: { id: string; name: string; path: string }; exists: boolean; state: MadoState | null; files: string[] }
 
@@ -15,17 +15,19 @@ export interface GraphEdge { id: string; from: string; to: string; label?: strin
 export interface GraphDoc { version: 1; kind: GraphKind; title: string; nodes: GraphNode[]; edges: GraphEdge[] }
 export interface ErdField { name: string; type: string; key?: 'pk' | 'fk'; note?: string }
 
+// In add-edge.from/to, set-prop.id and add-node.near a node added in the same ops list may be named `new:<n>`
+// (the n-th add-node of that list, 1-based).
 export type GraphOp =
   | { op: 'rename'; id: string; label: string }
   | { op: 'add-node'; label: string; kind: string; near?: string }
   | { op: 'remove-node'; id: string }
-  | { op: 'add-edge'; from: string; to: string; label?: string }
+  | { op: 'add-edge'; from: string; to: string; label?: string; kind?: string }
   | { op: 'remove-edge'; id: string }
   | { op: 'relabel-edge'; id: string; label: string }
   | { op: 'set-prop'; id: string; key: string; value: unknown };
 
 export interface PlanTask { id: string; title: string; description: string; owns: string[]; dependsOn: string[]; acceptance: string[]; feature: string; screens?: string[] }
-export interface PlanDoc { version: 1; tasks: PlanTask[] }
+export interface PlanDoc { version: 1; tasks: PlanTask[]; /** run once in each fresh working copy before any task */ setup?: string[] }
 
 export type CommentTarget =
   | { kind: 'text'; file: string; quote: string; prefix: string; suffix: string; heading?: string }
@@ -48,7 +50,7 @@ export interface DesignTokens {
 export interface StyleCandidate { id: string; name: string; description: string; tokens: DesignTokens; source: 'app' | 'assistant' }
 export interface ScreenInfo { id: string; label: string; hasMock: boolean }
 
-export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path';
+export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path' | 'bad-command';
 export interface Problem { kind: ProblemKind; message: string; tasks?: string[] }
 export interface Lane { id: string; tasks: string[] }
 export interface Wave { lanes: Lane[] }

@@ -136,9 +136,10 @@ fn problem(ar: bool, kind: &str, key: &str, args: &[(&str, &str)], tasks: Vec<St
 
 /// Does this problem keep the review from being approved? A cycle or a missing dependency cannot be
 /// built; a bad path could reach outside the project; a task without a check cannot be called done;
-/// a task for a feature the spec does not have traces to nothing. Untraced features and screens are
+/// a task for a feature the spec does not have traces to nothing; a command with shell or pattern
+/// syntax could run more than the user was shown. Untraced features and screens are
 /// for the user to judge, and overlapping tasks simply run one after another.
-pub fn blocks(p: &Problem) -> bool { matches!(p.kind.as_str(), "cycle" | "missing-dep" | "bad-path" | "empty-acceptance" | "unknown-feature") }
+pub fn blocks(p: &Problem) -> bool { matches!(p.kind.as_str(), "cycle" | "missing-dep" | "bad-path" | "bad-command" | "empty-acceptance" | "unknown-feature") }
 
 /// `review_in` in the UI language.
 pub fn review(spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) -> Review { review_in(crate::tr::arabic(), spec, flow, plan) }
@@ -154,6 +155,9 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
     let screen_traces: Vec<ScreenTrace> = screens.iter().map(|(id, label)| ScreenTrace { id: id.clone(), label: label.clone(),
         tasks: plan.tasks.iter().filter(|t| t.screens.iter().flatten().any(|s| s == id)).map(|t| t.id.clone()).collect() }).collect();
     let mut problems = vec![];
+    for c in plan.setup.iter().flatten().filter(|c| !crate::mado_validate::command_ok(c)) {
+        problems.push(problem(ar, "bad-command", "mado.p.bad_setup", &[("command", c.trim())], vec![]));
+    }
     let cyc = in_cycles(plan);
     if !cyc.is_empty() { problems.push(problem(ar, "cycle", "mado.p.cycle", &[("tasks", &cyc.join(", "))], cyc.clone())); }
     for t in &plan.tasks {
@@ -165,6 +169,9 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
         }
         for o in t.owns.iter().filter(|o| !crate::mado_validate::owned_path_ok(o)) {
             problems.push(problem(ar, "bad-path", "mado.p.bad_path", &[("task", &t.id), ("path", o)], vec![t.id.clone()]));
+        }
+        for c in t.acceptance.iter().filter(|c| !c.trim().is_empty() && !crate::mado_validate::command_ok(c)) {
+            problems.push(problem(ar, "bad-command", "mado.p.bad_command", &[("task", &t.id), ("command", c.trim())], vec![t.id.clone()]));
         }
         if t.acceptance.iter().all(|c| c.trim().is_empty()) {
             problems.push(problem(ar, "empty-acceptance", "mado.p.empty_acceptance", &[("task", &t.id)], vec![t.id.clone()]));
@@ -193,6 +200,7 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
         }
     }
     let mut seen = HashSet::new();
-    let commands: Vec<String> = plan.tasks.iter().flat_map(|t| t.acceptance.iter()).map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && seen.insert(c.clone())).collect();
+    // The setup commands first: they run first, in every fresh working copy.
+    let commands: Vec<String> = plan.setup.iter().flatten().chain(plan.tasks.iter().flat_map(|t| t.acceptance.iter())).map(|c| c.trim().to_string()).filter(|c| !c.is_empty() && seen.insert(c.clone())).collect();
     Review { features, screens: screen_traces, problems, waves: ws, commands, plan_hash: String::new() }
 }

@@ -290,7 +290,9 @@ Read every earlier file first: `mado/brief.md`, `mado/spec.md`, `mado/flow.graph
 
 `mado/plan.json`:
 ```json
-{"version": 1, "tasks": [
+{"version": 1,
+ "setup": ["npm ci"],
+ "tasks": [
   {"id": "t-setup", "title": "Project skeleton and test runner",
    "description": "What to build, precisely enough for someone who has read only the spec and tech.md: the files to create or change, the behaviour, the rules, the edge cases, and which spec acceptance criteria this task satisfies.",
    "owns": ["package.json", "src/app/**", "tests/setup/**"],
@@ -300,11 +302,14 @@ Read every earlier file first: `mado/brief.md`, `mado/spec.md`, `mado/flow.graph
    "screens": ["sign-in"]}
 ]}
 ```
+Setup
+- "setup": the commands that make a fresh copy of the project ready to build and test — above all installing its dependencies (`npm ci`, `pip install -r requirements.txt`, `bundle install`, `composer install`, `cargo fetch`… whatever this stack uses). The build works in fresh copies of the repository where nothing ignored by git exists: no installed packages, no build output, no local settings files. The app runs these once in each copy before any task. Same rules as acceptance commands (one plain command per entry). Leave it out or empty only when nothing needs installing.
+
 Rules for the tasks
 - Size: one task is one coherent change a single run can finish and test in one go — a model and its migration, an endpoint with its tests, a screen with its states. Not a whole feature at once, not a one-line change.
 - "owns": the project-relative paths or globs (`src/auth/**`, `src/routes/orders.ts`) the task creates or changes. Make tasks that can be built side by side own different files: put shared things (the app shell, the database setup, shared types, the router, translations) in early tasks that others depend on, and give each later task its own folders and files. Tasks whose "owns" overlap are built one after another. Never own anything under `mado/` or `.git/`; no absolute paths, no `..`.
 - "dependsOn": the ids of the tasks that must be finished first — only real needs, so that as much as possible can run at the same time. No cycles. Every id named must exist.
-- "acceptance": real shell commands for THIS project's stack, run from the project root, that pass only when the task is done — the test, lint, type-check or build commands of tech.md, narrowed to what the task touched where the tools allow it. Each task has at least one, and each task's tests are written by that task. One command per line, no interactive commands, nothing that needs a network service the project does not set up, nothing that deletes outside the project. The user sees every command before the build and approves them.
+- "acceptance": real shell commands for THIS project's stack, run from the project root, that pass only when the task is done — the test, lint, type-check or build commands of tech.md, narrowed to what the task touched where the tools allow it. Each task has at least one, and each task's tests are written by that task. Each entry is ONE plain command — no `&&`, `;`, pipes, redirections, `$`, backticks, globs (`*`, `?`, `[ ]`), parentheses or braces (the app refuses those): several commands are several entries, run in order. No interactive commands, nothing that needs a network service the project does not set up, nothing that deletes outside the project. The user sees every command before the build and approves them.
 - "feature": the F-id of the spec feature the task serves (the skeleton and shared tasks: the feature they mainly serve, usually F1). "screens": the screen ids of the flow the task builds, if any.
 - Traceability: every feature of the spec has at least one task; every screen of the flow is built by at least one task; every task traces to a feature. The first tasks set up what the tests need, so that every later task's acceptance commands can run.
 - Order the tasks in the file the way they would be built. Ids follow the id pattern and say what the task is (`t-orders-api`).

@@ -95,6 +95,15 @@ pub fn owned_path_ok(path: &str) -> bool {
         && !matches!(p.split('/').next().map(str::to_ascii_lowercase).as_deref(), Some("mado" | ".git"))
 }
 
+/// Is an acceptance command one plain command, safe to become a permission rule that allows exactly
+/// it? No rule or pattern syntax (`*`, `?`, `[`, `]`, `(`, `)`, a trailing `:*`) and no shell syntax
+/// that runs more than one command or redirects (`;`, `|`, `&`, backticks, `$`, `>`, `<`, `\`,
+/// line breaks, `{`, `}`, `!`, `#`). One command per entry: several are separate entries.
+pub fn command_ok(c: &str) -> bool {
+    let c = c.trim();
+    !c.is_empty() && c.len() <= 1000 && !c.chars().any(|ch| ch.is_control() || "*?[]();|&`$><\\{}!#".contains(ch))
+}
+
 /// The plan, parsed and checked for its shape (dependencies, traceability and the like are the
 /// review's: `mado_review`).
 pub fn plan(bytes: &[u8]) -> Result<PlanDoc, Vec<String>> {
@@ -104,6 +113,9 @@ pub fn plan(bytes: &[u8]) -> Result<PlanDoc, Vec<String>> {
     if plan.version != 1 { p.push(format!("\"version\" must be 1, not {}", plan.version)); }
     if plan.tasks.is_empty() { p.push("the plan has no tasks".into()); }
     if plan.tasks.len() > MAX_TASKS { p.push(format!("{} tasks: at most {MAX_TASKS} are allowed", plan.tasks.len())); }
+    let setup = plan.setup.as_deref().unwrap_or_default();
+    if setup.len() > MAX_LIST { p.push(format!("\"setup\" has more than {MAX_LIST} entries")); }
+    if setup.iter().any(|c| c.trim().is_empty() || c.len() > 1000 || c.contains(['\n', '\r'])) { p.push("every \"setup\" command is one non-empty line (at most 1000 characters)".into()); }
     let mut ids = HashSet::new();
     for (i, t) in plan.tasks.iter().enumerate() {
         if !id_ok(&t.id) { p.push(format!("tasks[{i}].id \"{}\" must match ^[a-z0-9][a-z0-9-]{{0,63}}$", t.id)); }

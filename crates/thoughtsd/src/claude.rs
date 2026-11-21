@@ -1887,6 +1887,8 @@ pub async fn start_run(
     // never a wrap, a workflow, a customise run or anything else the app starts itself. With full
     // access on, every run skips them (one that only plans keeps planning).
     let mode = if full { crate::full_access::mode_for(&mode) } else { mode };
+    // A MADO step's edits are confined by allow rules: edits are not accepted by themselves (`mado::run_mode`).
+    let mode = crate::mado::run_mode(&kind, mode, full);
     if !full && mode == crate::settings::BYPASS && kind != "chat" {
         return Err(crate::tr::err("bypass.chat_only", &[]));
     }

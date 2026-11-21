@@ -85,6 +85,7 @@ pub mod mado;
 pub mod mado_comments;
 pub mod mado_prompts;
 pub mod mado_review;
+pub mod mado_stray;
 pub mod mado_validate;
 #[cfg(test)]
 mod upgrade_tests;
