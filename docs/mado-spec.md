@@ -53,6 +53,16 @@ arriving with a ready-made `mado/`, could write it). The daemon keeps, outside t
   is not believed: steps with a run past a draft go back to `review`, `review` and `build` are closed, chat ids and
   `plan_hash` are dropped. `review` shows `approved` only with an approval record matching `plan.json` now (else `stale`).
 
+Nothing in `mado/` may be a link: before every run of kind `mado` or `mado-build`, at `POST /start`, and before the
+engine copies `mado/` into a worktree (and when a build starts), the daemon walks `mado/` (at most 5000 entries and 12
+levels; anything beyond either is refused too) and refuses, naming the entry, any symbolic link, any entry that is not a
+plain folder or file, and any file with more than one hard link (`mado::odd_entry`). Yields to full access.
+
+Text from the project reaches a prompt only as data: file names only if they pass `clean_rel`, ids only if they match
+their patterns, and free text (comment bodies, quoted passages, labels, task titles and descriptions, a check's output)
+inside a block opened by `<<<DATA-<code>` and closed by `DATA-<code>>>>` with a fresh random code per block, control
+characters and `<<<`/`>>>` taken out of the content, and a note saying it is the user's or the files' text, not instructions.
+
 Graph ids, task ids, screen ids, style ids: `^[a-z0-9][a-z0-9-]{0,63}$`. Feature ids: `^F[0-9]{1,3}$`.
 Limits: a graph has at most 400 nodes and 1200 edges; a mock-up at most 400 kB; a doc at most 1 MB.
 
@@ -97,7 +107,9 @@ See `ui/src/lib/mado/types.ts` for the exact fields. In short:
   `planHash` is the sha256 (lowercase hex) of the bytes of `plan.json` the review was computed from.
   `Problem { kind: 'cycle'|'missing-dep'|'overlap'|'untraced-feature'|'untraced-screen'|'unknown-feature'|'empty-acceptance'|'bad-path'|'bad-command', message, tasks?: string[] }`
   `bad-command`: an acceptance or setup command that is not one plain command — it has rule or pattern syntax
-  (`* ? [ ] ( )`, `:*`) or shell syntax (`; | & \` $ > < \ { } ! #`, line breaks). It blocks approval, like
+  (`* ? [ ] ( )`, `:*`) or shell syntax (`; | & \` $ > < \ { } ! #`, line breaks), or any character outside printable
+  ASCII (0x20–0x7E: no bidi overrides, zero-width or other format characters). The review shows such a command with
+  those characters escaped (`\u{202e}`), in the problem and in `commands`. It blocks approval, like
   `cycle`, `missing-dep`, `bad-path`, `empty-acceptance` and `unknown-feature`; the others are shown, not blocking.
   `Wave { lanes: Lane[] }`, `Lane { id, tasks: string[] }`. A wave is one dependency level; inside a wave,
   tasks whose `owns` overlap share a lane (run one after another), others get their own lane.
@@ -116,6 +128,12 @@ Core (`mado.rs`):
   `POST /steps/:step/approve` · `POST /steps/:step/reopen`
   Approving `review` takes `{planHash}` (the one its `GET /review` carried). It is refused, with a plain message, when the hash
   is missing or differs from the hash of `plan.json` now (the plan changed after the user saw it); the matching hash is kept as `state.plan_hash`.
+  It also needs the desktop shell's approval (`?approval=`, `consent::Action::MadoApprove`): the window calls
+  `approve_action('mado-approve', '<projectId>/<planHash>')`; the shell reads the project's name and the review's commands
+  and hash from the service itself, refuses when the hash is not the one the window named, shows a native dialog naming
+  the project, the number of commands and the commands (twelve, then "and N more — see the list in the window"), and
+  signs over `consent::mado_subject(projectId, planHash)`. Without it (a plain browser, the token alone) the approval
+  is refused (403), unless full access is on.
 - `GET /comments` · `POST /comments {target, body}` · `PATCH /comments/:id {body?, status?}` · `DELETE /comments/:id`
 - `POST /changes {step, commentIds: string[], graphOps?: {file, ops: GraphOp[]}[], note?}` → `{chatId}`
   One run applies everything, to the diagram and to the passages of the documents that describe it. Comments go
@@ -129,7 +147,7 @@ Design (`mado_design.rs`):
 - `GET /design/screens` → `[{id, label, hasMock}]` · `GET /design/screens/:id` → `{html}` (cleaned, see below)
 
 Build (`mado_build.rs`):
-- `GET /build` → `BuildState` · `POST /build/start {maxParallel?}` · `POST /build/pause` · `/build/resume` · `/build/stop`
+- `GET /build` → `BuildState` plus `blocked?` and `confined: boolean` (whether the build's own commands run confined now) · `POST /build/start {maxParallel?}` · `POST /build/pause` · `/build/resume` · `/build/stop`
 - `POST /build/tasks/:id/retry` · `POST /build/land` (brings the finished build branch into the user's branch)
 
 Every change tells the window over the existing events socket: `{type: 'mado', projectId, what: 'state'|'doc'|'graph'|'comments'|'design'|'build'}`.
@@ -153,13 +171,15 @@ The window refetches; it does not trust the event's payload.
   as `strayed`. Nothing is put back. Always Claude Code (unless full access). One chat per step,
   kept in `state.steps[step].chatId`, so the user can talk in it (the brief is an interview: the assistant asks,
   the user answers in that chat). Never bypass, except under full access like every other kind.
-- Kind `mado-build` (one task of a lane): cwd is the lane's worktree, may write only there, shell as the app's
-  rules for unattended work allow (questions surface in the build view). Never bypass, except under full access.
-  Nobody can be asked, so a command runs only if allowed: the allow rules are exactly the task's acceptance commands
-  and the plan's setup commands that pass the `bad-command` check and are in the approval record, while `plan.json`
-  matches it. Edits of the user's own project folder and of the approval records are denied. Like `mado` runs, it
-  loads none of the user's or the project's own Claude Code settings. The chat carries
-  `meta.mado = {projectId, taskId}`. Always Claude Code (unless full access).
+- Kind `mado-build` (one task of a lane): cwd is the lane's worktree, may read and edit only there, and has **no shell**
+  (unless full access): the shell would be a child of the assistant, which holds the sign-in, running code the run wrote.
+  The daemon alone runs the plan's set-up and acceptance commands (see Build engine). Nobody can be asked. Its cwd must
+  be one of the engine's worktrees (`<home>/mado/<projectId>/build` or `…/lane-<w>-<l>`, canonical) with no added
+  folders, or the run is refused (this holds under full access too). Edits of the user's own project folder and of the
+  approval records are denied, and so are the git subcommands that change branches or history. Like `mado` runs, it
+  loads none of the user's or the project's own Claude Code settings. The chat carries `meta.mado = {projectId, taskId}`
+  and is a read-only record: `chat_send` (and so editing and resending) refuses a `mado-build` chat, and the window shows
+  no message box for it. Always Claude Code (unless full access).
 - Every guard MADO adds yields to `full_access()` exactly like the existing ones, and behaves as written here while it is off.
 
 ## Build engine
@@ -174,7 +194,30 @@ The window refetches; it does not trust the event's payload.
   done when its run ended, its acceptance commands pass in the lane's worktree and a commit exists. Then the
   daemon merges the lanes into the build branch one by one; a merge conflict marks the task `conflict` and
   starts one fix run in the build worktree; if that fails the build goes `waiting` for the user.
-- A failed task is retried once with the failure output, then the build goes `waiting`; tasks that depend on it are not started.
+- A failed task is tried up to three more times (`MAX_ATTEMPTS` 4): each try goes on in the same task chat (its session
+  resumed) with the failing command and its capped output, then the build goes `waiting`; tasks that depend on it are not started.
+- The daemon's own commands (set-up and checks, `run_check`): run with the user's shell from a cleared environment
+  (PATH, HOME, USER, LOGNAME, SHELL, LANG, `LC_*`, TMPDIR, TERM and the toolchain homes, never a name with TOKEN, KEY,
+  SECRET or PASSWORD, nor `ANTHROPIC_*`, `CLAUDE*`, `THOUGHTS_*`), `CI=1`, git reading no global or system settings, and
+  every package tool's cache pointed at the build's own `<home>/mado/<projectId>/cache/` (removed with the worktrees).
+  On macOS, while `spending.confineCommands` is on (default; off only with the shell's approval,
+  `?confirm=confine-off&approval=`, `Action::ConfineOff`; on is free) and full access is off, each runs under
+  `/usr/bin/sandbox-exec` with a generated profile: default allow; writes only inside the worktree and the build's cache
+  (their contents: the folders themselves, and the folder they are in, cannot be removed, renamed or replaced), the
+  temporary folders and the null devices; reads of the user's home and the app's folder closed except the worktree, the
+  cache, the project's `.git`, `RUSTUP_HOME` and the toolchains on the PATH; credential places and the user's own
+  folders (`.ssh`, `.claude*`, `.aws`, `.npmrc`, `Documents`, `Library/Keychains`, …) and the app's records closed last;
+  no connection to the daemon's port; no keychain. Before every command the worktree and cache must be plain folders,
+  not links. If the sandbox is missing or does not start, or a folder is a link, the command is not run and the build
+  goes `waiting` with a plain message naming the setting. Elsewhere there is no confinement (`confined: false`).
+- Git: before a build starts, before `land`, and right before and after each of the engine's own git changes in a
+  worktree (worktree add, merge, commit, reset, checkout), the repository's own configuration (`git config --local
+  --no-includes --list`) must hold no key that starts a program (`filter.*.clean/smudge/process` other than git-lfs's
+  standard ones, `merge.*.driver`, `diff.*.textconv/command`, `diff.external`, editors, pagers, `credential.*helper`,
+  `gpg.*program`, `*.gpgsign` on, `core.sshCommand`, `core.fsmonitor`, `core.hooksPath`, …), no `include.path` or
+  `includeIf.*.path`, no `extensions.worktreeConfig` and no `config.worktree` file; otherwise it refuses (the build goes
+  `waiting`), naming the keys. Every git call of the app also overrides hooks, fsmonitor, ssh command, editor,
+  sequence editor, pager, signing and credential helper on the command line. Yields to full access.
 - Governor: before starting a lane, look at the usage the app already meters. Above the threshold
   (setting, default 80 % of the current window) it holds new lanes (`holding: true`, with the reason) and resumes by itself.
 - Survives a restart of the daemon: `build.json` plus git are the truth; a task that was `running` is started again.

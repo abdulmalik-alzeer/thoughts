@@ -49,8 +49,15 @@
   sealed frame (`<iframe sandbox="" srcdoc>` with its own CSP meta), never as markup in the page. A planning run
   (kind `mado`) loads no user or project Claude Code settings and is confined by allow rules for `mado/**` only,
   with deny rules for every other top-level name (folded in every letter case; the allow is folded only on a volume
-  probed to ignore case) and the stray check afterwards; a build run (`mado-build`) may run only the approved plan's
-  commands, in its own worktree. What yields to full access: trust checks, link/inside-`mado/` checks, rules and
-  the command check. What does not: validation and cleaning, the approval record and plan hash, the clean-tree and
-  never-the-user's-branch rules of the build, the approved-step lock, and the build's usage governor.
+  probed to ignore case) and the stray check afterwards; a build run (`mado-build`) has no shell, edits only its own
+  worktree (refused anywhere else, with no added folders) and its chat is a read-only record. Only the daemon runs the
+  approved set-up and check commands (`mado_build::run_check`): cleared environment, the build's own caches, and on
+  macOS `sandbox-exec` with a generated profile (setting `spending.confineCommands`, on by default). Approving the Final
+  check needs the shell's yes (`Action::MadoApprove`, bound to the plan hash, `?approval=`), and so does switching
+  confinement off (`Action::ConfineOff`). Links, special or hard-linked files in `mado/` are refused (`mado::odd_entry`),
+  and so is a project whose own git config starts programs or includes other config (`git::program_keys`). Text from
+  the project reaches prompts only as data blocks (`mado_prompts::block`/`inline`). What yields to full access: trust
+  checks, link/inside-`mado/` checks, the git-config check, rules, the command check and the confinement. What does
+  not: validation and cleaning, the approval record and plan hash, the clean-tree and never-the-user's-branch rules of
+  the build, the approved-step lock, where a build run may work, and the build's usage governor.
 - Verify with `cargo test -p thoughtsd`, `npx vite build` and `cargo build -p thoughts`.
