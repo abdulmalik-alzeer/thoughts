@@ -69,10 +69,17 @@ export interface Review {
 export type BuildStatus = 'idle' | 'running' | 'paused' | 'waiting' | 'failed' | 'done' | 'stopped' | 'checking' | 'reviewing';
 /** What one screen showed when the app looked at it (docs/mado-spec.md, round 0.4.0). Untrusted text. */
 export interface ScreenResult { id: string; path: string; ok: boolean; status?: number; errors: string[]; text: string; fields: { label: string; value: string }[] }
+/** `count`/`failed`: screens whose address the daemon asked itself, and those that answered with an error or that a
+ *  looking window found broken; also set when skipped after the daemon asked (no window looked). `reason`: why skipped. */
 export interface BuildScreens { status: 'waiting' | 'running' | 'done' | 'skipped'; reason?: string; count?: number; failed?: number }
+/** `GET …/build/screens` while the build waits for a window to look (409 otherwise). */
+export interface ScreenOffer { url: string; screens: { id: string; path: string }[]; nonce: string }
 export interface ReviewFinding { severity: 'must' | 'should'; where?: string; text: string }
-export interface BuildReview { status: 'running' | 'passed' | 'changes' | 'failed'; round: number; chatId?: string; fixChatId?: string; findings: ReviewFinding[] }
+/** `round`: the review under way or last made, 1 to 3 (the first and at most two after fixes).
+ *  `finished`: nothing more will be done. `note`: why the review or its fix did not go as planned (the daemon's words). */
+export interface BuildReview { status: 'running' | 'passed' | 'changes' | 'failed'; round: number; chatId?: string; fixChatId?: string; findings: ReviewFinding[]; finished?: boolean; note?: string }
 export interface MadoOptions { model: string | null; effort: string | null }
+/** `step`: the first step not approved ('build' once all are); `build`: absent while idle; `updatedAt`: RFC 3339, UTC. */
 export interface PlanEntry { projectId: string; name: string; step: string; stepStatus: string; build?: BuildStatus; updatedAt: string }
 export interface BuildGuide { start?: string; url?: string; readme?: string }
 export type TaskStatus = 'pending' | 'running' | 'checking' | 'done' | 'failed' | 'conflict' | 'skipped';

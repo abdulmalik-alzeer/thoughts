@@ -8,8 +8,13 @@ import { screenCheck } from './screencheck';
 import type { ScreenResult } from './types';
 
 /** `looking`: this window is at it · `sent`: it answered · `cannot`: nothing here can look ·
- *  `failed`: the answer could not be sent. */
-export type Look = 'looking' | 'sent' | 'cannot' | 'failed';
+ *  `failed`: the answer could not be sent · `busy`: the shell is looking at another build's screens
+ *  (asked again on the next call) · `badUrl` / `tooMany`: the shell refused the address or the number
+ *  of screens (the build is told at once that nothing was looked at). */
+export type Look = 'looking' | 'sent' | 'cannot' | 'failed' | 'busy' | 'badUrl' | 'tooMany';
+
+/** The shell's refusals (`src-tauri/src/screen_check.rs`), by the code it throws. */
+const REFUSED: Record<string, Look> = { 'screen-check-busy': 'busy', 'screen-check-bad-url': 'badUrl', 'screen-check-too-many': 'tooMany' };
 /** By project: what this window did about the build's request. */
 export const looks = $state<Record<string, Look>>({});
 
@@ -49,7 +54,18 @@ export async function lookAtScreens(projectId: string, deps?: Partial<LookDeps>)
       if (!url || !screens.length) { looks[projectId] = 'cannot'; return; }
       looks[projectId] = 'looking';
       let seen: ScreenResult[] | null;
-      try { seen = await check(url, screens); } catch { seen = null; }
+      try { seen = await check(url, screens); }
+      catch (e) {
+        const refused = REFUSED[e instanceof Error ? e.message : String(e)];
+        if (refused === 'busy') { answered.delete(nonce); looks[projectId] = 'busy'; return; }
+        if (refused) {
+          // Nothing will be looked at here: say so to the build now, rather than have it wait.
+          looks[projectId] = refused;
+          try { await api.sendScreens(nonce, []); } catch { /* it gives up by itself */ }
+          return;
+        }
+        seen = null;
+      }
       if (seen === null) { looks[projectId] = 'cannot'; return; }
       try { await api.sendScreens(nonce, clampResults(seen, screens)); looks[projectId] = 'sent'; }
       catch { looks[projectId] = 'failed'; }

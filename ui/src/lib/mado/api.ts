@@ -4,7 +4,7 @@
 import { api, del, patch, post, put } from '../api';
 import type {
   BuildGuide, BuildView, Comment, CommentStatus, CommentTarget, DesignTokens, GraphDoc, GraphName, GraphOp, MadoOptions, MadoOverview,
-  PlanDoc, PlanEntry, Pos, Review, ScreenInfo, ScreenResult, StepId, StyleCandidate,
+  PlanDoc, PlanEntry, Pos, Review, ScreenInfo, ScreenOffer, ScreenResult, StepId, StyleCandidate,
 } from './types';
 import { STEPS } from './types';
 
@@ -33,7 +33,7 @@ export function madoApi(projectId: string) {
     overview: () => api<MadoOverview>(base),
     start: () => post<unknown>(`${base}/start`),
 
-    doc: (name: DocName) => api<{ text: string }>(`${base}/doc/${oneOf(name, DOC_NAMES, 'document')}`),
+    doc: (name: DocName) => api<{ text: string; exists?: boolean }>(`${base}/doc/${oneOf(name, DOC_NAMES, 'document')}`),
     saveDoc: (name: DocName, text: string) => put<unknown>(`${base}/doc/${oneOf(name, DOC_NAMES, 'document')}`, { text }),
 
     graph: (name: GraphName) => api<GraphDoc>(`${base}/graph/${oneOf(name, GRAPH_NAMES, 'diagram')}`),
@@ -84,12 +84,13 @@ export function madoApi(projectId: string) {
 
     // Round 0.4.0
     /** `mado/conventions.md`, when the overview lists it (read only here). */
-    conventions: () => api<{ text: string }>(`${base}/doc/conventions`),
+    conventions: () => api<{ text: string; exists?: boolean }>(`${base}/doc/conventions`),
     options: () => api<MadoOptions>(`${base}/options`),
     saveOptions: (o: MadoOptions) => put<MadoOptions>(`${base}/options`, { model: o.model || null, effort: o.effort || null }),
     /** The screens the build wants looked at, while it waits for a window (409 otherwise). */
-    buildScreens: () => api<{ url: string; screens: { id: string; path: string }[]; nonce: string }>(`${base}/build/screens`),
-    sendScreens: (nonce: string, results: ScreenResult[]) => post<unknown>(`${base}/build/screens`, { nonce, results }),
+    buildScreens: () => api<ScreenOffer>(`${base}/build/screens`),
+    /** → `{ ok: true, taken }`: how many results were taken (only screens offered, at the path offered, once). */
+    sendScreens: (nonce: string, results: ScreenResult[]) => post<{ ok: boolean; taken: number }>(`${base}/build/screens`, { nonce, results }),
     buildGuide: () => api<BuildGuide>(`${base}/build/guide`),
   };
 }

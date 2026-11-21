@@ -64,6 +64,9 @@
   const review = $derived(build?.review ?? null);
   const counts = $derived(findingCounts(review));
   const look = $derived(looks[store.projectId]);
+  const lookBad = $derived(look === 'cannot' || look === 'failed' || look === 'badUrl' || look === 'tooMany');
+  /** A build of a plan made before round 0.4.0: no whole-project checks, no screens, no review (the engine runs those only for a newer plan). */
+  const oldPlan = $derived(!screens && !review && !(build?.waves ?? []).some((w) => w.verified !== undefined || w.gateFixChatId));
   // While the build waits for a window to look at the screens: ask, look, answer (once, and only one window).
   $effect(() => {
     if (status !== 'checking') return;
@@ -103,7 +106,7 @@
     <ul class="facts">
       <li><GitMerge size={15} aria-hidden="true" /> <span>{t('mado.finished.merged')} <code dir="ltr">{build?.branch}</code> → <code dir="ltr">{build?.base}</code> · {t('mado.build.progress', { done: fmtNum(done), all: fmtNum(all.length) })}</span></li>
       <li class:warnline={counts.all > 0}>
-        {#if !review}<ClipboardCheck size={15} aria-hidden="true" /> <span>{t('mado.finished.noReview')}</span>
+        {#if !review}<ClipboardCheck size={15} aria-hidden="true" /> <span>{t(oldPlan ? 'mado.finished.noReviewOld' : 'mado.finished.noReview')}</span>
         {:else if counts.all === 0}<CircleCheck size={15} aria-hidden="true" /> <span>{t('mado.finished.clean')}</span>
         {:else}<TriangleAlert size={15} aria-hidden="true" /> <span>{tn('mado.finished.findings', counts.all)}{#if counts.must} ({tn('mado.finished.must', counts.must)}){/if} <a href="#mado-review">{t('mado.finished.see')}</a></span>{/if}
       </li>
@@ -233,9 +236,10 @@
         <p class="sm">{tn('mado.screens.count', screens.count ?? 0)}{' · '}{#if screens.failed}<b class="badtxt">{tn('mado.screens.failed', screens.failed)}</b>{:else}{t('mado.screens.allFine')}{/if}</p>
       {:else if screens?.status === 'skipped'}
         <p class="sm"><span>{t('mado.screens.skippedWhat')}</span>{#if screens.reason} <span class="muted" dir="auto">{String(screens.reason).slice(0, 600)}</span>{/if}</p>
+        {#if screens.count}<p class="sm">{tn('mado.screens.asked', screens.count)}{' · '}{#if screens.failed}<b class="badtxt">{tn('mado.screens.askedFailed', screens.failed)}</b>{:else}{t('mado.screens.askedFine')}{/if}</p>{/if}
       {/if}
       {#if status === 'checking' && look}
-        <p class="note" class:bad={look === 'failed'} role="status">{#if look === 'cannot' || look === 'failed'}<TriangleAlert size={15} aria-hidden="true" />{:else}<ScanEye size={15} aria-hidden="true" />{/if} <span>{t(`mado.screens.look.${look}`)}</span></p>
+        <p class="note" class:bad={look === 'failed' || look === 'badUrl' || look === 'tooMany'} role="status">{#if lookBad}<TriangleAlert size={15} aria-hidden="true" />{:else}<ScanEye size={15} aria-hidden="true" />{/if} <span>{t(`mado.screens.look.${look}`)}</span></p>
       {/if}
     </section>
   {/if}
@@ -246,6 +250,7 @@
         <span class="st t-{review.status === 'passed' ? 'ok' : review.status === 'failed' ? 'bad' : review.status === 'running' ? 'run' : 'wait'}" role="status">{t(`mado.breview.${review.status}`)}</span>
         <span class="muted sm">{t('mado.breview.round', { n: fmtNum(Math.max(1, Number(review.round) || 1)) })}</span></h4>
       <p class="muted sm">{t('mado.breview.what')}</p>
+      {#if review.note}<p class="note bad" role="status"><TriangleAlert size={15} aria-hidden="true" /> <span dir="auto">{String(review.note).slice(0, 2000)}</span></p>{/if}
       <div class="row chats">
         {#if review.chatId}<button type="button" class="btn ghost sm" onclick={() => openChat(review.chatId!)} title={t('mado.breview.chatTip')}><MessageCircle size={13} aria-hidden="true" /> {t('mado.breview.chat')}</button>{/if}
         {#if review.fixChatId}<button type="button" class="btn ghost sm" onclick={() => openChat(review.fixChatId!)} title={t('mado.breview.fixTip')}><Wrench size={13} aria-hidden="true" /> {t('mado.breview.fix')}</button>{/if}

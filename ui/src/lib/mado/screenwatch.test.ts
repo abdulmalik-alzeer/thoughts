@@ -92,4 +92,25 @@ describe('one window at a time', () => {
     expect(job).toHaveBeenCalledTimes(2);
     vi.unstubAllGlobals();
   });
+  it('tries again later while the shell is looking at another build, without answering', async () => {
+    const s = service();
+    let busy = true;
+    const check = vi.fn(async (_u: string, sc: { id: string; path: string }[]) => { if (busy) throw new Error('screen-check-busy'); return sc.map((x) => seen(x.id, x.path)); });
+    await lookAtScreens('p1', { api: s.api, check, only: alone });
+    expect(looks.p1).toBe('busy');
+    expect(s.sent).toEqual([]);
+    busy = false;
+    await lookAtScreens('p1', { api: s.api, check, only: alone });
+    expect(looks.p1).toBe('sent');
+    expect(s.sent.length).toBe(1);
+  });
+  it('tells the build at once, with nothing seen, when the shell refuses the address or the number of screens', async () => {
+    for (const [code, look] of [['screen-check-bad-url', 'badUrl'], ['screen-check-too-many', 'tooMany']] as const) {
+      forgetLooks();
+      const s = service({ nonce: code });
+      await lookAtScreens('p1', { api: s.api, check: async () => { throw new Error(code); }, only: alone });
+      expect(looks.p1).toBe(look);
+      expect(s.sent).toEqual([{ nonce: code, results: [] }]);
+    }
+  });
 });
