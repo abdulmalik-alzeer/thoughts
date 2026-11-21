@@ -304,3 +304,121 @@ fn long_text_is_wrapped_and_a_huge_document_is_cut_with_a_line_saying_so() {
     let empty = convert("e.docx", &zip_of(&[("word/document.xml", format!("<w:document {W}><w:body><w:p/></w:body></w:document>").as_bytes())])).unwrap();
     assert!(empty.contains("(No text was found in the file.)"), "{empty}");
 }
+
+fn clock() -> Clock { Clock(Instant::now() + TIME_MAX) }
+
+#[test]
+fn a_container_whose_chains_loop_or_repeat_never_gives_more_than_the_file_holds() {
+    // An honest one first: read back by this reader and by a strict one.
+    let data: Vec<u8> = (0..10_000u32).flat_map(|i| i.to_le_bytes()).collect();
+    let good = ole_single("Workbook", &data);
+    let c = clock();
+    let read = Ole::open(&good, &c).unwrap().stream("Workbook").unwrap();
+    assert!(read.starts_with(&data) && read.len() == data.len().div_ceil(4096) * 4096 && read[data.len()..].iter().all(|b| *b == 0));
+    let mut strict = cfb::CompoundFile::open(Cursor::new(&good[..])).unwrap();
+    assert_eq!(strict.walk().filter(|e| e.is_stream()).map(|e| e.path().to_string_lossy().to_string()).collect::<Vec<_>>(), ["/Workbook"]);
+    let mut back = Vec::new();
+    strict.open_stream("/Workbook").unwrap().read_to_end(&mut back).unwrap();
+    assert_eq!(back, read);
+    let (fat, dir, first) = (4096usize, 4096 * 2, 3u32);
+    let put = |b: &mut Vec<u8>, at: usize, v: u32| b[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    // The stream's first sector chained to itself, and a size no file has.
+    let mut looped = good.clone();
+    put(&mut looped, fat + first as usize * 4, first);
+    looped[dir + 128 + 120..dir + 128 + 128].copy_from_slice(&u64::MAX.to_le_bytes());
+    let got = Ole::open(&looped, &c).unwrap().stream("Workbook").unwrap();
+    assert!(got.len() <= 4096, "a sector was taken more than once: {}", got.len());
+    // A loop over several sectors, and a chain that runs out of the file: each real sector once at most.
+    let mut ring = good.clone();
+    put(&mut ring, fat + (first as usize + 3) * 4, first);
+    ring[dir + 128 + 120..dir + 128 + 128].copy_from_slice(&(1u64 << 40).to_le_bytes());
+    assert_eq!(Ole::open(&ring, &c).unwrap().stream("Workbook").unwrap().len(), 4 * 4096);
+    let mut out = good.clone();
+    put(&mut out, fat + first as usize * 4, 0x00FF_FFFF);
+    assert_eq!(Ole::open(&out, &c).unwrap().stream("Workbook").unwrap().len(), 4096);
+    // The header naming the same sector 109 times as allocation table: it counts once.
+    let mut many = good.clone();
+    for i in 0..109 { put(&mut many, 76 + i * 4, 0); }
+    let o = Ole::open(&many, &c).unwrap();
+    assert_eq!(o.fat.len(), 1024);
+    assert!(o.stream("Workbook").unwrap().len() <= many.len());
+    // The list of table sectors chained to itself.
+    let mut listed = good.clone();
+    put(&mut listed, 68, 1);
+    put(&mut listed, 4096 * 2 + 4092, 1);
+    let started = Instant::now();
+    assert!(Ole::open(&listed, &c).map_or(true, |o| o.fat.len() <= (listed.len() / 4096) * 1024));
+    // The directory chained to itself: a bounded list of entries.
+    let mut dirs = good.clone();
+    put(&mut dirs, fat + 4, 1);
+    assert!(Ole::open(&dirs, &c).map_or(true, |o| o.dir.len() <= dirs.len() / 128));
+    // Whatever is damaged, whole conversions end too, and nothing read is bigger than the file.
+    for bad in [&looped, &ring, &out, &many, &listed, &dirs] {
+        for name in ["x.xls", "x.doc", "x.ppt"] { let _ = convert(name, bad); }
+        if let Some(o) = Ole::open(bad, &c) { for d in o.dir.clone() { assert!(o.stream(&d.0).map_or(0, |s| s.len()) <= bad.len()); } }
+    }
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // Out of time: no container at all.
+    assert!(Ole::open(&good, &Clock(Instant::now())).is_none());
+}
+
+#[test]
+fn repeated_cells_and_rows_of_long_text_cost_no_more_than_what_is_shown() {
+    let long = "y".repeat(200_000);
+    let content = format!(r#"<office:document-content xmlns:office="o" xmlns:table="t" xmlns:text="x"><office:body><office:spreadsheet><table:table table:name="Bomb">
+        <table:table-row table:number-rows-repeated="1048576"><table:table-cell table:number-columns-repeated="16384"><text:p>{long}</text:p></table:table-cell></table:table-row>
+        <table:table-row table:number-rows-repeated="1000000000"><table:table-cell table:number-columns-repeated="1000000000" office:string-value="{long}"/></table:table-row>
+        </table:table><table:table table:name="After"><table:table-row><table:table-cell><text:p>still here</text:p></table:table-cell></table:table-row></table:table>
+        </office:spreadsheet></office:body></office:document-content>"#);
+    let started = Instant::now();
+    let t = convert("bomb.ods", &zip_of(&[("content.xml", content.as_bytes())])).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(8), "{:?}", started.elapsed());
+    assert!(t.len() <= OUT_MAX + 400, "{}", t.len());
+    // Each cell is cut once, with the count of what is missing; the rows not written are counted.
+    assert!(t.contains(&format!("{}… [truncated: {} more characters in this cell],", "y".repeat(CELL_MAX), 200_000 - CELL_MAX)), "{}", &t[..300]);
+    let more: u64 = t.lines().find_map(|l| l.strip_prefix("[truncated: ")?.strip_suffix(" more rows of this sheet are not shown]")?.parse().ok()).expect("no count of rows left out");
+    let shown = t.lines().filter(|l| l.contains("… [truncated:")).count() as u64;
+    assert_eq!(shown + more, 1_048_576 + 1_000_000_000, "rows shown and rows counted do not add up");
+    assert!(shown >= 1 && shown < ROWS_MAX as u64);
+    assert!(t.contains("it reaches column ") && t.contains("more columns of this sheet are not shown"));
+    assert_eq!(cut_cell(&long, 7), format!("{}… [truncated: about {} more characters in this cell]", "y".repeat(CELL_MAX), 200_000 - CELL_MAX + 7));
+    assert_eq!(cut_cell(&"é".repeat(CELL_MAX + 3), 0), format!("{}… [truncated: 3 more characters in this cell]", "é".repeat(CELL_MAX)));
+    assert_eq!(cut_cell("short", 0), "short");
+    // A sheet with room left is still read after a full one only if there is room: here there is none, and that is said.
+    assert!(t.contains("## Sheet 2: After\nrow,A\n1,still here\n") || t.contains("[truncated: this text version stops here"), "{}", &t[t.len() - 300..]);
+    // An Excel sheet naming one cell again and again with a long shared text: one cell is kept.
+    let mut row = String::from(r#"<row r="1">"#);
+    for _ in 0..50_000 { row.push_str(r#"<c r="A1" t="s"><v>0</v></c>"#); }
+    row.push_str("</row>");
+    let started = Instant::now();
+    let t = convert("again.xlsx", &xlsx_of(&[("S", row)], &[&long])).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(8) && t.len() < 300 * (CELL_MAX + 100), "{} in {:?}", t.len(), started.elapsed());
+    let mut s = Sheet::new(1 << 20);
+    for _ in 0..10 * COLS_MAX { s.cell(0, 0, "again".into()); }
+    assert_eq!(s.cells.len(), COLS_MAX);
+}
+
+#[test]
+fn an_old_workbook_reader_is_given_only_the_stream_that_was_measured() {
+    let cells = |list: &[(u16, u16, f64)]| Ole::open(&xls_of(list), &clock()).unwrap().stream("Workbook").unwrap();
+    let (small, wide) = (cells(&[(0, 1, 42.0)]), cells(&[(0, 0, 1.0), (65_535, 255, 2.0)]));
+    // A second stream of records beside the first: the first is measured, and it alone is read.
+    let two = ole_of(&[("Workbook", &small), ("Book", &wide)]);
+    let c = clock();
+    let measured = xls_stream(&two, &c).unwrap();
+    assert_eq!(measured, small);
+    let only = ole_single("Workbook", &measured);
+    let strict = cfb::CompoundFile::open(Cursor::new(&only[..])).unwrap();
+    assert_eq!(strict.walk().filter(|e| e.is_stream()).count(), 1, "more than the measured stream is handed on");
+    assert!(!only.windows(wide.len()).any(|w| w == &wide[..]));
+    let t = convert("two.xls", &two).unwrap();
+    assert!(t.contains("## Sheet 1: Old\nrow,A,B\n1,Label,42\n") && !t.contains("65536"), "{t}");
+    // The other way round, the wide one is the one measured: refused.
+    assert!(convert("two.xls", &ole_of(&[("Workbook", &wide), ("Book", &small)])).unwrap_err().contains("too large"));
+    assert!(convert("book.xls", &ole_of(&[("Book", &wide)])).unwrap_err().contains("too large"));
+    assert!(convert("book.xls", &ole_of(&[("Book", &small)])).unwrap().contains("1,Label,42"));
+    // A workbook of many sectors (its stream is not one of the small ones kept in the root's stream).
+    let many: Vec<(u16, u16, f64)> = (0..900).map(|i| (i, 0, i as f64)).collect();
+    let t = convert("many.xls", &xls_of(&many)).unwrap();
+    assert!(t.contains("\n900,899\n") && !t.contains("[truncated"), "{}", &t[t.len() - 200..]);
+}

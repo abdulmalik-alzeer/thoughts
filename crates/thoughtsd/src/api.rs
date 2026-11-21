@@ -2970,8 +2970,9 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
     // No run may open the attachments folder: it reads copies of this chat's files, made for it
     // now (`run_files`). Without them it reads none.
     // (Copying is file work: off the runtime. Only new or changed files are copied.)
-    let (home, cid) = (paths::home(), id.clone());
-    let copies = match tokio::task::spawn_blocking(move || crate::run_files::copy(&home, &cid)).await {
+    // (Office files the Read tool cannot open get a text version there too, as do those referred to in the library.)
+    let (home, cid, referred) = (paths::home(), id.clone(), mention_paths.iter().map(std::path::PathBuf::from).collect::<Vec<_>>());
+    let copies = match tokio::task::spawn_blocking(move || { let made = crate::run_files::copy(&home, &cid); crate::run_files::library_texts(&home, &cid, &referred); made }).await {
         Ok(Ok(dir)) => Some(dir),
         Ok(Err(e)) => { crate::log::error(format!("chat {id}: the attached files could not be copied for the assistant: {e}")); None }
         Err(e) => { crate::log::error(format!("chat {id}: the attached files could not be copied for the assistant: {e}")); None }
@@ -2980,15 +2981,16 @@ async fn chat_send(State(st): S, Path(id): Path<String>, Json(m): Json<SendBody>
         .filter(|c| c.is_file()).map_or(p.clone(), |c| c.to_string_lossy().to_string());
     if !saved.is_empty() {
         prompt.push_str(if copies.is_some() { "\n\nAttached files (read them, with the Read tool: commands cannot reach them):\n" } else { "\n\nAttached files (read them):\n" });
-        for p in &saved { prompt.push_str(&format!("- {}\n", readable(p))); }
+        for p in &saved { let r = readable(p); prompt.push_str(&crate::run_files::listed(&r, crate::run_files::text_for(std::path::Path::new(&r)))); }
     }
     if let Some(dir) = copies.as_ref().filter(|_| chat.messages.iter().any(|x| !x.attachments.is_empty())) {
         prompt.push_str(&format!("\n\nFiles attached earlier in this chat can be read, with the Read tool, from copies in {} (their first places are closed to you).\n", dir.display()));
+        prompt.push_str(&crate::run_files::earlier_note(dir));
     }
     drop(files);
     if !m.mentions.is_empty() {
         prompt.push_str("\n\nReferenced library files and folders (read them; for a folder, look at what is in it):\n");
-        for abs in &mention_paths { prompt.push_str(&format!("- {abs}\n")); }
+        for abs in &mention_paths { prompt.push_str(&crate::run_files::listed(abs, crate::run_files::library_text_for(&paths::home(), &id, std::path::Path::new(abs)))); }
     }
     let has_history = chat.messages.iter().any(|x| x.role == "assistant");
     let with_history = |p: &str| format!("Earlier conversation (continue from it):\n\n{}\n\n---\n\n{p}", chat.transcript(120_000));

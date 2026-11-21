@@ -9,6 +9,12 @@
 //! of the 9 other digits at some level along this chat's path — a fixed list that can be closed
 //! before any of those folders exist (`closed_for`). Digits have no letter case, so a rule can not
 //! be dodged by spelling a name in capitals on a file system that ignores case.
+//!
+//! The Read tool opens text, pictures and PDFs, not spreadsheets, Word documents or slide decks. For
+//! each copy of such a file a text version is written (`as_text`) in `text/` beside the copies'
+//! folder, inside the chat's own folder, so the same rules open it to this chat's run and close it
+//! to every other; the prompt names it (`listed`). Library files of those kinds that a message
+//! refers to get theirs in `library/` there (`library_texts`).
 
 use std::path::{Path, PathBuf};
 
@@ -124,7 +130,188 @@ pub fn copy(home: &Path, chat_id: &str) -> std::io::Result<PathBuf> {
             Err(_) => {}
         }
     }
+    texts(home, &mine, &dest, &kept);
     Ok(dest)
+}
+
+/// The folder (inside the chat's `folder`, beside `COPIES`) of the text versions of copied office files.
+const TEXTS: &str = "text";
+/// The folder (inside the chat's `folder`) of the text versions of library files referred to in the chat.
+const LIBRARY: &str = "library";
+/// End of a text version's name, after the file's whole name (`report.xlsx.txt`).
+const TEXT_EXT: &str = ".txt";
+/// End of the name of the note left when a file could not be turned into text (it holds the reason),
+/// so that the same file is not tried again with every message.
+const FAILED_EXT: &str = ".failed";
+/// Longest all the text versions of one message may take together; what is left is tried with the next message.
+const TEXTS_TIME: std::time::Duration = std::time::Duration::from_secs(45);
+
+fn with_ext(name: &std::ffi::OsStr, ext: &str) -> std::ffi::OsString { let mut n = name.to_os_string(); n.push(ext); n }
+
+/// Does `to` carry the time of change of the file looked at (`meta`): made from that very content?
+fn same_time(to: &Path, meta: &std::fs::Metadata) -> bool {
+    let Ok(have) = std::fs::symlink_metadata(to) else { return false };
+    have.file_type().is_file() && matches!((have.modified(), meta.modified()), (Ok(a), Ok(b)) if a == b)
+}
+
+/// Write `bytes` as `to` in `dir` (under a passing name first), read-only, with the time of change `meta` has.
+fn write_one(dir: &Path, to: &Path, bytes: &[u8], meta: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::io::Write;
+    let part = dir.join(format!("{PART}{}", uuid::Uuid::new_v4().simple()));
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create_new(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::OpenOptionsExt; o.mode(0o600); }
+    let mut out = o.open(&part)?;
+    let written = out.write_all(bytes).and_then(|_| match meta.modified() { Ok(t) => out.set_modified(t), Err(_) => Ok(()) });
+    drop(out);
+    #[cfg(unix)]
+    let written = written.and_then(|_| { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o400)) });
+    let placed = written.and_then(|_| std::fs::rename(&part, to));
+    if placed.is_err() { let _ = std::fs::remove_file(&part); }
+    placed
+}
+
+/// Make sure `dir` holds the text version of the office file `src` (or the note saying why there
+/// is none) under `name`, made from the content `src` has now. Returns the two names it may have.
+/// Nothing is made once `until` has passed. Never fails: a file that cannot be read or turned into
+/// text just has no text version.
+fn text_of(dir: &Path, src: &Path, name: &std::ffi::OsStr, until: std::time::Instant) -> [std::ffi::OsString; 2] {
+    let names = [with_ext(name, TEXT_EXT), with_ext(name, FAILED_EXT)];
+    let (ok, failed) = (dir.join(&names[0]), dir.join(&names[1]));
+    let Ok(meta) = std::fs::symlink_metadata(src) else { return names };
+    if !meta.file_type().is_file() || same_time(&ok, &meta) || same_time(&failed, &meta) { return names; }
+    let now = std::time::Instant::now();
+    if now >= until { return names; }
+    let made = if meta.len() > crate::as_text::IN_MAX { Err("the file is too big".to_string()) } else {
+        match std::fs::read(src) {
+            Ok(bytes) => crate::as_text::convert_by(&name.to_string_lossy(), &bytes, until.min(now + crate::as_text::TIME_MAX)),
+            Err(_) => Err("the file could not be opened".to_string()),
+        }
+    };
+    let (to, other, bytes) = match &made { Ok(t) => (&ok, &failed, t.as_bytes()), Err(why) => (&failed, &ok, why.as_bytes()) };
+    let _ = std::fs::remove_file(other);
+    if let Err(e) = write_one(dir, to, bytes, &meta) { crate::log::warn(format!("the text version of an attached file could not be written: {e}")); }
+    names
+}
+
+/// Remove from `dir` everything whose name is not in `keep`.
+fn sweep(dir: &Path, keep: &std::collections::HashSet<std::ffi::OsString>) {
+    let Ok(list) = std::fs::read_dir(dir) else { return };
+    for e in list.flatten() {
+        if keep.contains(&e.file_name()) { continue; }
+        let p = e.path();
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.is_dir() => { let _ = std::fs::remove_dir_all(&p); }
+            Ok(_) => { let _ = std::fs::remove_file(&p); }
+            Err(_) => {}
+        }
+    }
+}
+
+/// Bring the text versions of the copies in `dest` (named in `kept`) up to date, in `mine/text`:
+/// made for a new or changed copy, kept for an unchanged one, removed with the copy they are of.
+fn texts(home: &Path, mine: &Path, dest: &Path, kept: &std::collections::HashSet<std::ffi::OsString>) {
+    let dir = mine.join(TEXTS);
+    let office: Vec<&std::ffi::OsString> = kept.iter().filter(|n| crate::as_text::convertible(&n.to_string_lossy())).collect();
+    if office.is_empty() {
+        // Nothing to have a text version of: no folder either (only ever removed as a plain folder of this chat's).
+        if std::fs::symlink_metadata(&dir).is_ok() && plain_path(home, mine, false).unwrap_or(false) {
+            match std::fs::symlink_metadata(&dir) { Ok(m) if m.is_dir() => { let _ = std::fs::remove_dir_all(&dir); } Ok(_) => { let _ = std::fs::remove_file(&dir); } Err(_) => {} }
+        }
+        return;
+    }
+    if !plain_path(home, &dir, true).unwrap_or(false) { crate::log::warn("the folder for text versions of attached files is not a plain folder: none were made".to_string()); return; }
+    let until = std::time::Instant::now() + TEXTS_TIME;
+    let mut keep: std::collections::HashSet<std::ffi::OsString> = Default::default();
+    for name in office { keep.extend(text_of(&dir, &dest.join(name), name, until)); }
+    sweep(&dir, &keep);
+}
+
+/// The name a library file's text version has: a fingerprint of its whole path, then its own name.
+fn library_name(file: &Path) -> std::ffi::OsString {
+    let mut n = std::ffi::OsString::from(format!("{}-", &crate::updates::sha(file.to_string_lossy().as_bytes())[..16]));
+    n.push(file.file_name().unwrap_or_default());
+    n
+}
+
+/// Make the text versions of the office files among `files` (library files a message of chat
+/// `chat_id` refers to; folders and other kinds are left alone), in the chat's own folder. They
+/// stay for the chat's later messages; with more than a hundred, those not asked for now go.
+/// Blocking: call it off the runtime. Never fails.
+pub fn library_texts(home: &Path, chat_id: &str, files: &[PathBuf]) {
+    let office: Vec<&PathBuf> = files.iter().filter(|f| crate::as_text::convertible(&f.to_string_lossy())).collect();
+    if office.is_empty() { return; }
+    let Some(mine) = folder(home, chat_id) else { return };
+    let dir = mine.join(LIBRARY);
+    if !plain_path(home, &dir, true).unwrap_or(false) { return; }
+    let until = std::time::Instant::now() + TEXTS_TIME;
+    let mut keep: std::collections::HashSet<std::ffi::OsString> = Default::default();
+    for f in office { keep.extend(text_of(&dir, f, &library_name(f), until)); }
+    if std::fs::read_dir(&dir).map_or(0, |d| d.count()) > 200 { sweep(&dir, &keep); }
+}
+
+/// What there is to read of an office file instead of the file itself.
+#[derive(Debug, PartialEq)]
+pub enum Text {
+    /// Not an office file: the Read tool opens it as it is (or nothing can).
+    NotNeeded,
+    /// Its text version.
+    Ready(PathBuf),
+    /// There is none, and why.
+    Failed(String),
+}
+
+fn text_in(dir: &Path, name: &std::ffi::OsStr, file: &str) -> Text {
+    if !crate::as_text::convertible(file) { return Text::NotNeeded; }
+    let ok = dir.join(with_ext(name, TEXT_EXT));
+    if std::fs::symlink_metadata(&ok).map_or(false, |m| m.file_type().is_file()) { return Text::Ready(ok); }
+    let why = std::fs::read_to_string(dir.join(with_ext(name, FAILED_EXT))).ok().map(|w| w.chars().take(200).collect::<String>().replace(['\n', '\r'], " "));
+    Text::Failed(why.filter(|w| !w.trim().is_empty()).unwrap_or_else(|| "no text version could be made".to_string()))
+}
+
+/// The text version of `file`: a copy made by `copy` (then it is beside the copies' folder), or
+/// any other path (an office file that was not copied has none).
+pub fn text_for(file: &Path) -> Text {
+    let name = file.file_name().unwrap_or_default();
+    match file.parent().filter(|d| d.file_name().map_or(false, |n| n == COPIES)).and_then(Path::parent) {
+        Some(mine) => text_in(&mine.join(TEXTS), name, &file.to_string_lossy()),
+        None => no_text(file),
+    }
+}
+
+/// An office file with nowhere a text version of it could be.
+fn no_text(file: &Path) -> Text {
+    if crate::as_text::convertible(&file.to_string_lossy()) { Text::Failed("no text version could be made".to_string()) } else { Text::NotNeeded }
+}
+
+/// The text version of library file `file` made for chat `chat_id` by `library_texts`.
+pub fn library_text_for(home: &Path, chat_id: &str, file: &Path) -> Text {
+    match folder(home, chat_id) {
+        Some(mine) => text_in(&mine.join(LIBRARY), &library_name(file), &file.to_string_lossy()),
+        None => no_text(file),
+    }
+}
+
+/// One file in the prompt's list of files to read: its path and, for an office file, where its
+/// text version is (or that there is none, so that the assistant says so instead of guessing).
+pub fn listed(path: &str, text: Text) -> String {
+    let what = crate::as_text::what(path);
+    match text {
+        Text::Ready(t) => format!("- {path}\n  ({what}, which the Read tool cannot open: read its text version instead, {})\n", t.display()),
+        Text::Failed(why) => format!("- {path}\n  ({what}, which the Read tool cannot open, and no text version of it could be made here: {why}. Say so plainly instead of guessing what is in it.)\n"),
+        Text::NotNeeded if crate::as_text::opaque(path) => format!("- {path}\n  (a kind of file that cannot be read here. Say so plainly instead of guessing what is in it.)\n"),
+        Text::NotNeeded => format!("- {path}\n"),
+    }
+}
+
+/// For the prompt's line about files attached earlier (`copies`: their folder): where the text
+/// versions of the office files among them are. Empty when there are none.
+pub fn earlier_note(copies: &Path) -> String {
+    let Some(dir) = copies.parent().map(|m| m.join(TEXTS)) else { return String::new() };
+    let any = std::fs::read_dir(&dir).map_or(false, |d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(TEXT_EXT)));
+    if !any { return String::new(); }
+    format!("Spreadsheets, Word documents and slide decks among them cannot be opened by the Read tool: read their text versions in {}, each named after its file with {TEXT_EXT} added.\n", dir.display())
 }
 
 /// Is `to` a plain file copied from the file looked at (`meta`): same size and same time of change?
@@ -184,6 +371,109 @@ pub fn clear(home: &Path, chat_id: Option<&str>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn office_files_get_a_text_version_beside_their_copies() {
+        let home = std::env::temp_dir().join(format!("thoughts-run-texts-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("attachments/c-1")).unwrap();
+        let att = home.join("attachments/c-1");
+        std::fs::write(att.join("letter.rtf"), b"{\\rtf1 Dear Sara,\\par the total is 950.\\par}").unwrap();
+        std::fs::write(att.join("broken.docx"), b"not a word file").unwrap();
+        std::fs::write(att.join("notes.txt"), b"plain").unwrap();
+        std::fs::write(att.join("Budget.numbers"), b"apple").unwrap();
+        let dir = copy(&home, "c-1").unwrap();
+        let mine = folder(&home, "c-1").unwrap();
+        let text = mine.join("text");
+        let names = |d: &Path| { let mut n: Vec<String> = std::fs::read_dir(d).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect(); n.sort(); n };
+        // Inside the chat's own folder, so the rule that opens the copies to its run opens these
+        // too, and every other chat's are under a folder closed to it. The copies themselves are as before.
+        assert_eq!(names(&dir), ["Budget.numbers", "broken.docx", "letter.rtf", "notes.txt"]);
+        assert_eq!(names(&text), ["broken.docx.failed", "letter.rtf.txt"]);
+        let closed: Vec<PathBuf> = closed_for("c-2").unwrap().iter().map(|r| root(&home).join(r)).collect();
+        assert!(closed.iter().any(|c| text.starts_with(c)) && !closed_for("c-1").unwrap().iter().any(|r| text.starts_with(root(&home).join(r))));
+        let made = std::fs::read_to_string(text.join("letter.rtf.txt")).unwrap();
+        assert!(made.contains("Dear Sara,\nthe total is 950.\n"), "{made}");
+        #[cfg(unix)]
+        assert!(std::fs::metadata(text.join("letter.rtf.txt")).unwrap().permissions().readonly());
+        // What the prompt says of each file.
+        assert_eq!(text_for(&dir.join("letter.rtf")), Text::Ready(text.join("letter.rtf.txt")));
+        assert!(matches!(text_for(&dir.join("broken.docx")), Text::Failed(why) if why.contains("not what its name says")));
+        assert_eq!((text_for(&dir.join("notes.txt")), text_for(&dir.join("Budget.numbers"))), (Text::NotNeeded, Text::NotNeeded));
+        // (An office file that was not copied has no text version: said, not guessed.)
+        assert!(matches!(text_for(&att.join("letter.rtf")), Text::Failed(_)));
+        let p = dir.join("letter.rtf").to_string_lossy().to_string();
+        let line = listed(&p, text_for(&dir.join("letter.rtf")));
+        assert!(line.starts_with(&format!("- {p}\n  (a document, which the Read tool cannot open: read its text version instead, {})", text.join("letter.rtf.txt").display())), "{line}");
+        let line = listed("/x/broken.docx", text_for(&dir.join("broken.docx")));
+        assert!(line.contains("no text version of it could be made here: the file is not what its name says. Say so plainly"), "{line}");
+        assert_eq!(listed("/x/notes.txt", Text::NotNeeded), "- /x/notes.txt\n");
+        assert!(listed("/x/Budget.numbers", Text::NotNeeded).contains("cannot be read here"));
+        assert!(earlier_note(&dir).contains(&text.display().to_string()) && earlier_note(&dir).contains(".txt added"));
+        // The next message: what is unchanged is not made again (the failed one is not tried again
+        // either); a changed file gets a new text version; a file no longer attached loses its own;
+        // anything else found there goes.
+        #[cfg(unix)]
+        let ino = |p: &Path| { use std::os::unix::fs::MetadataExt; std::fs::metadata(p).unwrap().ino() };
+        #[cfg(unix)]
+        let (was_ok, was_failed) = (ino(&text.join("letter.rtf.txt")), ino(&text.join("broken.docx.failed")));
+        std::fs::write(text.join("planted.txt"), b"x").unwrap();
+        copy(&home, "c-1").unwrap();
+        assert_eq!(names(&text), ["broken.docx.failed", "letter.rtf.txt"]);
+        #[cfg(unix)]
+        assert_eq!((ino(&text.join("letter.rtf.txt")), ino(&text.join("broken.docx.failed"))), (was_ok, was_failed), "made again without a change");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(att.join("letter.rtf"), b"{\\rtf1 Dear Omar,\\par}").unwrap();
+        std::fs::write(att.join("broken.docx"), b"{\\rtf1 still not word}").unwrap();
+        std::fs::remove_file(att.join("broken.docx")).unwrap();
+        copy(&home, "c-1").unwrap();
+        assert_eq!(names(&text), ["letter.rtf.txt"]);
+        assert!(std::fs::read_to_string(text.join("letter.rtf.txt")).unwrap().contains("Dear Omar,"));
+        // A file that fails now and reads later: the note goes, the text comes.
+        std::fs::write(att.join("late.rtf"), b"nothing yet").unwrap();
+        copy(&home, "c-1").unwrap();
+        assert_eq!(names(&text), ["late.rtf.failed", "letter.rtf.txt"]);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(att.join("late.rtf"), b"{\\rtf1 here now\\par}").unwrap();
+        copy(&home, "c-1").unwrap();
+        assert_eq!(names(&text), ["late.rtf.txt", "letter.rtf.txt"]);
+        // No office file left: no folder, and nothing said about one.
+        std::fs::remove_file(att.join("letter.rtf")).unwrap();
+        std::fs::remove_file(att.join("late.rtf")).unwrap();
+        copy(&home, "c-1").unwrap();
+        assert!(!text.exists() && earlier_note(&dir).is_empty());
+        // A link where the folder should be: nothing is written through it, and the message's copies are still made.
+        #[cfg(unix)]
+        {
+            let elsewhere = home.join("elsewhere");
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &text).unwrap();
+            std::fs::write(att.join("letter.rtf"), b"{\\rtf1 again\\par}").unwrap();
+            assert_eq!(names(&copy(&home, "c-1").unwrap()), ["Budget.numbers", "letter.rtf", "notes.txt"]);
+            assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "written through a link");
+            assert!(matches!(text_for(&dir.join("letter.rtf")), Text::Failed(_)));
+            std::fs::remove_file(&text).unwrap();
+        }
+        // Library files a message refers to: theirs are in the chat's folder too, named by their whole path.
+        let lib = home.join("lib");
+        std::fs::create_dir_all(lib.join("a")).unwrap();
+        std::fs::create_dir_all(lib.join("b")).unwrap();
+        std::fs::write(lib.join("a/plan.rtf"), b"{\\rtf1 plan A\\par}").unwrap();
+        std::fs::write(lib.join("b/plan.rtf"), b"{\\rtf1 plan B\\par}").unwrap();
+        std::fs::write(lib.join("a/note.md"), b"# hi").unwrap();
+        let refs = [lib.join("a/plan.rtf"), lib.join("b/plan.rtf"), lib.join("a/note.md"), lib.join("a"), lib.join("missing.docx")];
+        library_texts(&home, "c-1", &refs);
+        let (Text::Ready(a), Text::Ready(b)) = (library_text_for(&home, "c-1", &refs[0]), library_text_for(&home, "c-1", &refs[1])) else { panic!("no text version of a library file") };
+        assert!(a != b && a.starts_with(mine.join("library")) && std::fs::read_to_string(&a).unwrap().contains("plan A") && std::fs::read_to_string(&b).unwrap().contains("plan B"));
+        assert_eq!((library_text_for(&home, "c-1", &refs[2]), library_text_for(&home, "c-1", &refs[3])), (Text::NotNeeded, Text::NotNeeded));
+        assert!(matches!(library_text_for(&home, "c-1", &refs[4]), Text::Failed(_)));
+        assert!(matches!(library_text_for(&home, "c-2", &refs[0]), Text::Failed(_)), "another chat's text version");
+        assert_eq!(std::fs::read(lib.join("a/plan.rtf")).unwrap(), b"{\\rtf1 plan A\\par}");
+        library_texts(&home, "../c-2", &refs);
+        // They go with the chat.
+        clear(&home, Some("c-1"));
+        assert!(!mine.exists());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn a_run_gets_copies_of_its_own_chats_files_only() {

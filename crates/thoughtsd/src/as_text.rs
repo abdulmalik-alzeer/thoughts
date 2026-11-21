@@ -191,10 +191,21 @@ fn col_name(mut i: usize) -> String {
     String::from_utf8(s).unwrap_or_default()
 }
 
+/// A cell's text as kept: at most `CELL_MAX` characters, then a note of how many more there were
+/// (`more`: characters already dropped by the caller). Done once, before the text is stored or
+/// copied, so that no cell held in memory is ever long.
+fn cut_cell(v: &str, more: usize) -> String {
+    let cut = v.char_indices().nth(CELL_MAX).map_or(v.len(), |(i, _)| i);
+    let rest = &v[cut..];
+    if rest.is_empty() && more == 0 { return v.to_string(); }
+    // What is left is counted exactly when that is quick, and from its size when it is very long
+    // (so that a huge text named by a million cells is not read through a million times).
+    let (about, over) = if rest.len() <= 16_384 { ("", rest.chars().count()) } else { ("about ", rest.len()) };
+    format!("{}… [truncated: {about}{} more characters in this cell]", &v[..cut], over + more)
+}
+
 fn csv_cell(v: &str) -> String {
-    let mut v: String = clean(v).replace("\r\n", "\n").replace('\n', " \u{23ce} ").replace('\t', " ");
-    let n = v.chars().count();
-    if n > CELL_MAX { v = v.chars().take(CELL_MAX).collect::<String>() + &format!("… [truncated: {} more characters in this cell]", n - CELL_MAX); }
+    let v: String = clean(v).replace("\r\n", "\n").replace('\n', " \u{23ce} ").replace('\t', " ");
     if v.contains([',', '"']) || v.starts_with(' ') || v.ends_with(' ') { format!("\"{}\"", v.replace('"', "\"\"")) } else { v }
 }
 
@@ -205,11 +216,19 @@ impl Sheet {
     fn new(room: usize) -> Self { Sheet { body: String::new(), room, rows: 0, more_rows: 0, widest: 0, row: None, cells: vec![] } }
     fn cell(&mut self, row: u32, col: u32, text: String) {
         if self.row != Some(row) { self.flush(); self.row = Some(row); }
+        self.cell_cut(row, col, cut_cell(&text, 0));
+    }
+    /// `cell`, for text already cut to length (`cut_cell`).
+    fn cell_cut(&mut self, row: u32, col: u32, text: String) {
+        if self.row != Some(row) { self.flush(); self.row = Some(row); }
         if text.is_empty() { return; }
         let col = col as usize;
         self.widest = self.widest.max(col + 1);
-        if col < COLS_MAX { self.cells.push((col, text)); }
+        // (A file may name the same cell a million times: a row keeps no more cells than are shown.)
+        if col < COLS_MAX && self.cells.len() < COLS_MAX { self.cells.push((col, text)); }
     }
+    /// Has the sheet taken all the rows it will show? (Further rows are only counted.)
+    fn full(&self) -> bool { self.rows >= ROWS_MAX || self.body.len() >= self.room }
     fn flush(&mut self) {
         let Some(row) = self.row.take() else { return };
         if self.cells.is_empty() { return; }
@@ -222,7 +241,7 @@ impl Sheet {
             at = col + 1;
             line.push_str(&csv_cell(&text));
         }
-        if self.rows >= ROWS_MAX || self.body.len() + line.len() + 1 > self.room { self.more_rows += 1; return; }
+        if self.rows >= ROWS_MAX || self.body.len() + line.len() + 1 > self.room { self.more_rows += 1; self.room = self.room.min(self.body.len()); return; }
         self.body.push_str(&line);
         self.body.push('\n');
         self.rows += 1;
@@ -262,13 +281,14 @@ fn date(d: &calamine::ExcelDateTime) -> String {
     else { format!("{y:04}-{mo:02}-{da:02} {h:02}:{mi:02}:{s:02}") }
 }
 
+/// A cell's value as text, already cut to a cell's length (`cut_cell`).
 fn cell_ref(v: &calamine::DataRef) -> String {
     use calamine::DataRef as D;
     match v {
         D::Int(i) => i.to_string(),
         D::Float(f) => number(*f),
-        D::String(s) => s.clone(),
-        D::SharedString(s) => s.to_string(),
+        D::String(s) => cut_cell(s, 0),
+        D::SharedString(s) => cut_cell(s, 0),
         D::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
         D::DateTime(d) => date(d),
         D::DateTimeIso(s) | D::DurationIso(s) => s.clone(),
@@ -282,7 +302,7 @@ fn cell_data(v: &calamine::Data) -> String {
     match v {
         D::Int(i) => i.to_string(),
         D::Float(f) => number(*f),
-        D::String(s) => s.clone(),
+        D::String(s) => cut_cell(s, 0),
         D::Bool(b) => if *b { "TRUE".into() } else { "FALSE".into() },
         D::DateTime(d) => date(d),
         D::DateTimeIso(s) | D::DurationIso(s) => s.clone(),
@@ -313,7 +333,7 @@ fn xlsx(bytes: &[u8], binary: bool, out: &mut Out, clock: &Clock) -> Res<()> {
                         let mut n = 0u32;
                         loop {
                             match cells.next_cell() {
-                                Ok(Some(c)) => { let (r, col) = c.get_position(); sheet.cell(r, col, cell_ref(c.get_value())); }
+                                Ok(Some(c)) => { let (r, col) = c.get_position(); sheet.cell_cut(r, col, cell_ref(c.get_value())); }
                                 Ok(None) => break,
                                 Err(_) => { stopped = Some("the rest of this sheet could not be read"); break; }
                             }
@@ -334,12 +354,17 @@ fn xlsx(bytes: &[u8], binary: bool, out: &mut Out, clock: &Clock) -> Res<()> {
     Ok(())
 }
 
+/// The workbook's stream of records in an old Excel file.
+fn xls_stream(bytes: &[u8], clock: &Clock) -> Res<Vec<u8>> {
+    Ole::open(bytes, clock).and_then(|f| ["Workbook", "Book"].into_iter().find_map(|s| f.stream(s))).filter(|b| !b.is_empty()).ok_or_else(|| "the workbook could not be read".to_string())
+}
+
 /// Old Excel workbooks (.xls). The reader keeps each sheet's whole used area in memory, so the
 /// area is measured first, from the cell records themselves, and a workbook spanning too much is
 /// refused.
 fn xls(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
     use calamine::Reader;
-    let book = Ole::open(bytes).and_then(|f| ["Workbook", "Book"].into_iter().find_map(|s| f.stream(s))).ok_or("the workbook could not be read")?;
+    let book = xls_stream(bytes, clock)?;
     let mut area = 0u64;
     let mut span: Option<(u16, u16, u16, u16)> = None;
     let mut close = |span: &mut Option<(u16, u16, u16, u16)>| if let Some((r0, r1, c0, c1)) = span.take() { area += (r1 - r0) as u64 * (c1 - c0) as u64 + (r1 - r0) as u64 + (c1 - c0) as u64 + 1; };
@@ -363,7 +388,11 @@ fn xls(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
     close(&mut span);
     if area > XLS_AREA_MAX { return Err("the workbook is too large to turn into text here".into()); }
     clock.check()?;
-    let mut book = calamine::Xls::new(Cursor::new(bytes)).map_err(|e| format!("the workbook could not be read ({e})"))?;
+    // The reader gets a container made here around the very stream that was measured: in the file
+    // itself it might find another stream (a second "Workbook", a "Book" beside it) than the one looked at.
+    let only = ole_single("Workbook", &book);
+    drop(book);
+    let mut book = calamine::Xls::new(Cursor::new(&only[..])).map_err(|e| format!("the workbook could not be read ({e})"))?;
     let names = book.sheet_names();
     if names.is_empty() { return Err("the workbook has no sheets".into()); }
     for (i, name) in names.iter().enumerate() {
@@ -373,7 +402,7 @@ fn xls(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
         let (r0, c0) = range.start().unwrap_or((0, 0));
         let mut stopped = None;
         for (r, row) in range.rows().enumerate() {
-            for (c, v) in row.iter().enumerate() { sheet.cell(r0 + r as u32, c0 + c as u32, cell_data(v)); }
+            for (c, v) in row.iter().enumerate() { sheet.cell_cut(r0 + r as u32, c0 + c as u32, cell_data(v)); }
             if r % 512 == 0 && clock.over() { stopped = Some(SLOW); break; }
         }
         sheet.finish(out, i + 1, name, stopped);
@@ -784,6 +813,7 @@ fn ods(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
     let (mut row_rep, mut col, mut cell_rep) = (1u32, 0u32, 1u32);
     let (mut row_cells, mut text, mut value): (Vec<(u32, String)>, String, Option<String>) = (vec![], String::new(), None);
     let (mut in_cell, mut depth, mut skip, mut nested) = (false, 0usize, 0usize, 0usize);
+    let (mut row_widest, mut dropped) = (0usize, 0usize);
     let reps = |e: &BytesStart, key: &[u8]| attr(e, key).and_then(|v| v.parse::<u32>().ok()).unwrap_or(1).clamp(1, 1 << 30);
     let mut stopped = false;
     walk(&xml, clock, |n| {
@@ -802,35 +832,52 @@ fn ods(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
                 if let Some(c) = cur.take() { count += 1; c.sheet.finish(out, count, &c.name, None); }
             }
             _ if nested > 0 => {}
-            Node::Open(b"table-row", e) => { row_rep = reps(e, b"number-rows-repeated"); col = 0; row_cells.clear(); }
+            Node::Open(b"table-row", e) => { row_rep = reps(e, b"number-rows-repeated"); col = 0; row_cells.clear(); row_widest = 0; }
             Node::Close(b"table-row") => {
                 let Some(c) = cur.as_mut() else { return Ok(()) };
                 if !row_cells.is_empty() {
-                    let write = row_rep.min(ROWS_MAX as u32 + 1);
-                    for i in 0..write { for (col, t) in &row_cells { c.sheet.cell(c.row.saturating_add(i), *col, t.clone()); } c.sheet.flush(); }
-                    c.sheet.more_rows += (row_rep - write) as u64;
+                    c.sheet.widest = c.sheet.widest.max(row_widest);
+                    // A row said to repeat is written until the sheet is full; the rest are counted.
+                    let mut written = 0u32;
+                    while written < row_rep && !c.sheet.full() {
+                        if written % 256 == 255 { clock.check()?; }
+                        for (col, t) in &row_cells { c.sheet.cell_cut(c.row.saturating_add(written), *col, t.clone()); }
+                        c.sheet.flush();
+                        written += 1;
+                    }
+                    c.sheet.more_rows += (row_rep - written) as u64;
                 }
                 c.row = c.row.saturating_add(row_rep);
             }
             Node::Open(b"table-cell" | b"covered-table-cell", e) => {
                 in_cell = true;
                 text.clear();
+                dropped = 0;
                 cell_rep = reps(e, b"number-columns-repeated");
                 value = ["date-value", "time-value", "boolean-value", "value", "string-value"].iter().find_map(|k| attr(e, k.as_bytes()));
             }
             Node::Close(b"table-cell" | b"covered-table-cell") => {
                 in_cell = false;
-                let shown = if text.is_empty() { value.take().unwrap_or_default() } else { std::mem::take(&mut text) };
+                // Cut to a cell's length before it is kept, and long before it is copied for repeats.
+                let shown = if text.is_empty() { cut_cell(&value.take().unwrap_or_default(), 0) } else { cut_cell(&std::mem::take(&mut text), dropped) };
                 if !shown.is_empty() {
-                    for i in 0..cell_rep.min(COLS_MAX as u32 + 1) { if row_cells.len() <= COLS_MAX { row_cells.push((col.saturating_add(i), shown.clone())); } }
-                    // The last of the repeats, so that the sheet's width is known.
-                    if cell_rep > COLS_MAX as u32 + 1 { row_cells.push((col.saturating_add(cell_rep - 1), shown)); }
+                    row_widest = row_widest.max(col.saturating_add(cell_rep) as usize);
+                    for i in 0..cell_rep.min(COLS_MAX as u32) {
+                        if col.saturating_add(i) as usize >= COLS_MAX || row_cells.len() >= COLS_MAX { break; }
+                        row_cells.push((col.saturating_add(i), shown.clone()));
+                    }
                 }
                 col = col.saturating_add(cell_rep);
             }
             Node::Open(b"p", _) if in_cell => { if depth == 0 && !text.is_empty() { text.push('\n'); } depth += 1; }
             Node::Close(b"p") if in_cell => depth = depth.saturating_sub(1),
-            Node::Text(s) if in_cell && depth > 0 => text.push_str(s),
+            // (No more of a cell's text is held than a few times what is kept of it.)
+            Node::Text(s) if in_cell && depth > 0 => {
+                let mut room = (CELL_MAX * 8).saturating_sub(text.len()).min(s.len());
+                while !s.is_char_boundary(room) { room -= 1; }
+                text.push_str(&s[..room]);
+                dropped += s[room..].chars().count();
+            }
             Node::Open(b"s", e) if in_cell && depth > 0 => { let n = attr(e, b"c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).min(100); text.extend(std::iter::repeat(' ').take(n)); }
             Node::Open(b"tab", _) if in_cell && depth > 0 => text.push(' '),
             Node::Open(b"line-break", _) if in_cell && depth > 0 => text.push('\n'),
@@ -969,33 +1016,42 @@ fn rtf(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
 // ---------- old binary Word and PowerPoint ----------
 
 /// An OLE compound file (the container of old Office files), read leniently: real files from
-/// other programs break rules a strict reader insists on. Streams are found by name; every chain
-/// of sectors is followed for at most as many steps as the file has sectors, so a chain that
-/// loops ends, and nothing read can be bigger than the file.
-struct Ole<'a> { bytes: &'a [u8], shift: u32, fat: Vec<u32>, mini_fat: Vec<u32>, mini: Vec<u8>, cutoff: u64, dir: Vec<(String, u8, u32, u64)> }
+/// other programs break rules a strict reader insists on. Streams are found by name.
+///
+/// Nothing in the file is trusted to end a read: a chain of sectors is followed for at most as
+/// many steps as the file really has sectors and stops at a sector it has already taken, so a
+/// chain that loops or repeats ends; a stream is never longer than the file, whatever size it
+/// declares; a sector listed twice as part of the allocation table counts once; and the clock is
+/// looked at along the way.
+struct Ole<'a> { bytes: &'a [u8], shift: u32, sectors: usize, fat: Vec<u32>, mini_fat: Vec<u32>, mini: Vec<u8>, cutoff: u64, dir: Vec<(String, u8, u32, u64)>, clock: &'a Clock }
 
 impl<'a> Ole<'a> {
-    fn open(bytes: &'a [u8]) -> Option<Self> {
+    fn open(bytes: &'a [u8], clock: &'a Clock) -> Option<Self> {
         if !bytes.starts_with(&CFB_MAGIC) || bytes.len() < 512 { return None; }
         let shift = le16(bytes, 30)? as u32;
         if shift != 9 && shift != 12 { return None; }
         let size = 1usize << shift;
-        let sectors = bytes.len() >> shift;
+        // Sectors the file really has (the header takes the place of one).
+        let sectors = (bytes.len() >> shift).saturating_sub(1);
         let sector = |n: u32| -> Option<&'a [u8]> { let at = (n as usize).checked_add(1)?.checked_mul(size)?; bytes.get(at..at.checked_add(size)?) };
-        // The list of sectors holding the allocation table: 109 in the header, the rest chained.
-        let mut fat_at: Vec<u32> = (0..109).filter_map(|i| le32(bytes, 76 + i * 4)).filter(|s| *s < 0xFFFF_FFFA).collect();
+        // The sectors holding the allocation table: 109 named in the header, the rest in a chain
+        // of lists. Each real sector is taken once, so the table is never bigger than the file.
+        let mut seen = vec![false; sectors];
+        let mut fat_at: Vec<u32> = vec![];
+        let mut take = |v: u32, fat_at: &mut Vec<u32>| if let Some(s) = seen.get_mut(v as usize) { if !*s { *s = true; fat_at.push(v); } };
+        for i in 0..109 { take(le32(bytes, 76 + i * 4)?, &mut fat_at); }
+        let mut lists = vec![false; sectors];
         let mut next = le32(bytes, 68)?;
-        let mut steps = 0;
-        while next < 0xFFFF_FFFA && steps <= sectors {
+        while let Some(visited) = lists.get_mut(next as usize) {
+            if *visited || clock.over() { break; }
+            *visited = true;
             let s = sector(next)?;
-            for i in 0..size / 4 - 1 { let v = le32(s, i * 4)?; if v < 0xFFFF_FFFA { fat_at.push(v); } }
+            for i in 0..size / 4 - 1 { take(le32(s, i * 4)?, &mut fat_at); }
             next = le32(s, size - 4)?;
-            steps += 1;
         }
-        if fat_at.len() > sectors { return None; }
         let mut fat = Vec::with_capacity(fat_at.len() * (size / 4));
         for s in fat_at { let s = sector(s)?; fat.extend(s.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))); }
-        let mut ole = Ole { bytes, shift, fat, mini_fat: vec![], mini: vec![], cutoff: le32(bytes, 56)? as u64, dir: vec![] };
+        let mut ole = Ole { bytes, shift, sectors, fat, mini_fat: vec![], mini: vec![], cutoff: le32(bytes, 56)? as u64, dir: vec![], clock };
         let dir = ole.chain(le32(bytes, 48)?, u64::MAX);
         for e in dir.chunks_exact(128).take(100_000) {
             let len = (le16(e, 64)? as usize).min(64);
@@ -1006,19 +1062,25 @@ impl<'a> Ole<'a> {
         let mini_fat = ole.chain(le32(bytes, 60)?, u64::MAX);
         ole.mini_fat = mini_fat.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         if let Some(root) = ole.dir.iter().find(|d| d.1 == 5).cloned() { ole.mini = ole.chain(root.2, root.3); }
+        if clock.over() { return None; }
         Some(ole)
     }
-    /// The sectors chained from `start`, at most `size` bytes of them.
+    /// The sectors chained from `start`, at most `size` bytes of them and never more than the file holds.
     fn chain(&self, start: u32, size: u64) -> Vec<u8> {
         let sector = 1usize << self.shift;
+        let size = size.min(self.bytes.len() as u64);
         let mut out = Vec::new();
+        let mut taken = vec![false; self.sectors];
         let (mut at, mut steps) = (start, 0usize);
-        while at < 0xFFFF_FFFA && steps <= self.fat.len() && (out.len() as u64) < size {
+        while (out.len() as u64) < size && steps < self.sectors {
+            // A sector outside the file, an end mark, or one this chain already took: the end.
+            match taken.get_mut(at as usize) { Some(t) if !*t => *t = true, _ => break }
             let from = (at as usize + 1) << self.shift;
             let Some(s) = self.bytes.get(from..(from + sector).min(self.bytes.len())) else { break };
             out.extend_from_slice(s);
             at = self.fat.get(at as usize).copied().unwrap_or(0xFFFF_FFFE);
             steps += 1;
+            if steps % 4096 == 0 && self.clock.over() { break; }
         }
         out.truncate(size.min(out.len() as u64) as usize);
         out
@@ -1028,9 +1090,14 @@ impl<'a> Ole<'a> {
     fn stream(&self, name: &str) -> Option<Vec<u8>> {
         let (_, _, start, size) = self.dir.iter().find(|d| d.1 == 2 && d.0 == name)?.clone();
         if size >= self.cutoff { return Some(self.chain(start, size)); }
+        // A small stream lies in 64-byte pieces of the root's own stream, with a table of its own.
+        let pieces = self.mini.len() / 64 + 1;
+        let size = size.min(self.mini.len() as u64);
         let mut out = Vec::new();
+        let mut taken = vec![false; pieces];
         let (mut at, mut steps) = (start, 0usize);
-        while at < 0xFFFF_FFFA && steps <= self.mini_fat.len() && (out.len() as u64) < size {
+        while (out.len() as u64) < size && steps < pieces {
+            match taken.get_mut(at as usize) { Some(t) if !*t => *t = true, _ => break }
             let from = at as usize * 64;
             let Some(s) = self.mini.get(from..(from + 64).min(self.mini.len())) else { break };
             out.extend_from_slice(s);
@@ -1042,6 +1109,50 @@ impl<'a> Ole<'a> {
     }
 }
 
+/// A new container holding `data` as its one stream, `name`: what the workbook reader is given, so
+/// that it reads exactly the bytes that were measured and nothing else of the file it came from.
+/// (4096-byte sectors; the stream is padded with zeros to a whole sector, which no reader takes for a record.)
+fn ole_single(name: &str, data: &[u8]) -> Vec<u8> {
+    const S: usize = 4096;
+    let (end, fat_mark, free) = (0xFFFF_FFFEu32, 0xFFFF_FFFDu32, 0xFFFF_FFFFu32);
+    let nd = data.len().div_ceil(S).max(1);
+    // Sectors: the allocation table's (nf), the directory's one, one (empty) for the root's own
+    // stream — the workbook reader wants the root to have a place — then the stream's (nd).
+    let mut nf = 1;
+    while nf * (S / 4) < nf + 2 + nd { nf += 1; }
+    let (dir_at, root_at, data_at) = (nf, nf + 1, nf + 2);
+    let mut out = vec![0u8; S * (1 + data_at + nd)];
+    let put16 = |o: &mut [u8], at: usize, v: u16| o[at..at + 2].copy_from_slice(&v.to_le_bytes());
+    let put32 = |o: &mut [u8], at: usize, v: u32| o[at..at + 4].copy_from_slice(&v.to_le_bytes());
+    out[..8].copy_from_slice(&CFB_MAGIC);
+    put16(&mut out, 24, 0x3E); put16(&mut out, 26, 4); put16(&mut out, 28, 0xFFFE); put16(&mut out, 30, 12); put16(&mut out, 32, 6);
+    put32(&mut out, 40, 1); put32(&mut out, 44, nf as u32); put32(&mut out, 48, dir_at as u32); put32(&mut out, 56, 4096);
+    put32(&mut out, 60, end); put32(&mut out, 68, end);
+    for i in 0..109 { put32(&mut out, 76 + i * 4, if i < nf { i as u32 } else { free }); }
+    for i in 0..nf * (S / 4) {
+        let v = if i < nf { fat_mark } else if i == dir_at || i == root_at || i == data_at + nd - 1 { end } else if i < data_at + nd { i as u32 + 1 } else { free };
+        put32(&mut out, S + i * 4, v);
+    }
+    let dir = S * (1 + dir_at);
+    let mut entry = |n: usize, name: &str, kind: u8, child: u32, start: u32, size: u64| {
+        let at = dir + n * 128;
+        let units: Vec<u16> = name.encode_utf16().take(31).collect();
+        for (i, u) in units.iter().enumerate() { put16(&mut out, at + i * 2, *u); }
+        put16(&mut out, at + 64, if kind == 0 { 0 } else { (units.len() as u16 + 1) * 2 });
+        out[at + 66] = kind;
+        out[at + 67] = 1;
+        put32(&mut out, at + 68, free); put32(&mut out, at + 72, free); put32(&mut out, at + 76, child);
+        put32(&mut out, at + 116, start);
+        out[at + 120..at + 128].copy_from_slice(&size.to_le_bytes());
+    };
+    entry(0, "Root Entry", 5, 1, root_at as u32, 0);
+    entry(1, name, 2, free, data_at as u32, (nd * S) as u64);
+    for n in 2..S / 128 { entry(n, "", 0, free, 0, 0); }
+    let at = S * (1 + data_at);
+    out[at..at + data.len()].copy_from_slice(data);
+    out
+}
+
 fn le16(b: &[u8], at: usize) -> Option<u16> { b.get(at..at + 2).map(|x| u16::from_le_bytes([x[0], x[1]])) }
 fn le32(b: &[u8], at: usize) -> Option<u32> { b.get(at..at + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]])) }
 
@@ -1049,7 +1160,7 @@ fn le32(b: &[u8], at: usize) -> Option<u32> { b.get(at..at + 4).map(|x| u32::fro
 /// Headers, footnotes, text boxes and all formatting are left out.
 fn doc(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
     let not_word = || "the file could not be read as an old Word document".to_string();
-    let file = Ole::open(bytes).ok_or_else(not_word)?;
+    let file = Ole::open(bytes, clock).ok_or_else(not_word)?;
     let main = file.stream("WordDocument").ok_or_else(not_word)?;
     if le16(&main, 0) != Some(0xA5EC) { return Err(not_word()); }
     let flags = le16(&main, 0x0A).ok_or_else(not_word)?;
@@ -1118,7 +1229,7 @@ fn doc(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
 /// by slide), then the text of text boxes and of the notes pages, in the order they are stored.
 fn ppt(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
     let not_ppt = || "the file could not be read as an old PowerPoint deck".to_string();
-    let file = Ole::open(bytes).ok_or_else(not_ppt)?;
+    let file = Ole::open(bytes, clock).ok_or_else(not_ppt)?;
     if file.has("EncryptedSummary") { return Err("the file is protected with a password".into()); }
     let s = file.stream("PowerPoint Document").ok_or_else(not_ppt)?;
     #[derive(Clone, Copy, PartialEq)]

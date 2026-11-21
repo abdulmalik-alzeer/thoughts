@@ -596,3 +596,36 @@ async fn moving_a_chat_back_to_the_library_clears_its_folder() {
     assert_eq!(v["projectId"], Value::Null);
     assert_eq!(st.chats.meta(&id).await.unwrap().summary()["projectId"], Value::Null);
 }
+
+#[tokio::test]
+async fn an_attached_office_file_is_named_with_its_text_version() {
+    let (st, lib) = t::library().await;
+    let prompts = record_prompts(&st, true);
+    let chat = t::chat(&st, "the letter").await;
+    std::fs::create_dir_all(lib.join("deals")).unwrap();
+    std::fs::write(lib.join("deals/offer.rtf"), b"{\\rtf1 We offer 300.\\par}").unwrap();
+    let mut rx = st.events.subscribe();
+    let body = SendBody { text: "What does the letter say?".into(), mentions: vec!["deals/offer.rtf".into()],
+        attachments: vec![att("letter.rtf", b"{\\rtf1 Dear Sara,\\par the total is 950.\\par}"), att("sheet.xlsx", b"not a workbook"), att("notes.txt", b"plain")], ..Default::default() };
+    chat_send(State(st.clone()), Path(chat.clone()), Json(body)).await.unwrap();
+    t::event(&mut rx, &st, "chat.done").await;
+    let prompt = prompts.lock().unwrap()[0].clone();
+    let mine = crate::run_files::folder(&paths::home(), &chat).unwrap();
+    let (copy, text) = (mine.join("files/letter.rtf"), mine.join("text/letter.rtf.txt"));
+    // The file itself and, said to be the one to read, its text version: both inside the chat's own folder of copies.
+    assert!(prompt.contains(&format!("- {}\n  (a document, which the Read tool cannot open: read its text version instead, {})\n", copy.display(), text.display())), "{prompt}");
+    assert!(std::fs::read_to_string(&text).unwrap().contains("Dear Sara,\nthe total is 950."));
+    // One that could not be turned into text is still sent, and said to be unreadable; a plain file is listed as before.
+    assert!(prompt.contains(&format!("- {}\n  (a spreadsheet, which the Read tool cannot open, and no text version of it could be made here: the file is not what its name says.", mine.join("files/sheet.xlsx").display())), "{prompt}");
+    assert!(prompt.contains(&format!("- {}\n", mine.join("files/notes.txt").display())) && !prompt.contains("notes.txt.txt"), "{prompt}");
+    // The library file referred to: where it is, and its text version in the chat's folder.
+    let lib_text = prompt.lines().find(|l| l.contains("offer.rtf.txt")).unwrap_or_else(|| panic!("{prompt}"));
+    let path = lib_text.rsplit("instead, ").next().unwrap().trim_end_matches(')');
+    assert!(std::path::Path::new(path).starts_with(mine.join("library")) && std::fs::read_to_string(path).unwrap().contains("We offer 300."), "{lib_text}");
+    assert!(prompt.contains(&format!("- {}\n  (a document", lib.join("deals/offer.rtf").display())) || prompt.contains("deals/offer.rtf\n  (a document"), "{prompt}");
+    // The next message is told where the earlier files' text versions are.
+    chat_send(State(st.clone()), Path(chat.clone()), say("And the total?")).await.unwrap();
+    t::event(&mut rx, &st, "chat.done").await;
+    let next = prompts.lock().unwrap()[1].clone();
+    assert!(next.contains(&format!("read their text versions in {}, each named after its file with .txt added.", mine.join("text").display())), "{next}");
+}
