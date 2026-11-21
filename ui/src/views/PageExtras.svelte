@@ -9,6 +9,7 @@
   import { t } from '../lib/i18n';
   import { post } from '../lib/api';
   import { failed } from '../lib/errors';
+  import { isolate } from '../lib/effects';
   import { reloadLayer } from '../lib/layer';
   import { pageBoxes, pageIntro, pageWarnings, swapState, useSwap } from '../lib/pages.svelte';
 
@@ -50,7 +51,7 @@
   </div>
 {/if}
 {#if warnings.length}
-  <p class="warn no-print muted" role="status"><Icon name="info" size={13} /> <span>{t('pgs.unknown', { list: warnings.map((w) => `\u2068${w}\u2069`).join(t('ldb.listSep')) })}</span></p>
+  <p class="warn no-print muted" role="status"><Icon name="info" size={13} /> <span>{t('pgs.unknown', { list: warnings.map(isolate).join(t('ldb.listSep')) })}</span></p>
 {/if}
 {#if line}<p class="intro muted" dir="auto">{line}</p>{/if}
 {#if boxes.length}

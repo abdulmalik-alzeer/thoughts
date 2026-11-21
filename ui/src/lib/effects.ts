@@ -14,6 +14,8 @@ export type FxLine = { tag: '' | 'added' | 'changed' | 'removed'; text: string; 
 
 /** Values from the files are set apart so their direction never reorders the sentence around them. */
 const q = (v: unknown) => `\u2068${String(v ?? '')}\u2069`;
+/** The same, for the views (a .svelte file may not hold these marks, even as escapes). */
+export const isolate = (v: unknown) => q(v);
 const list = (xs: unknown[]) => xs.map(q).join(t('ldb.listSep'));
 const strs = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 

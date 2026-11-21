@@ -13,5 +13,4 @@
 <style>
   .logo-mark { flex: none; display: block; }
   .bgr { fill: var(--panel-2); stroke: color-mix(in srgb, var(--fg) 12%, transparent); stroke-width: 2; }
-  polygon { transition: fill .4s; }
 </style>

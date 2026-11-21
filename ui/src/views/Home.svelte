@@ -3,6 +3,7 @@
   import { api, on, post } from '../lib/api';
   import { app, go, refreshChats, toast, track } from '../lib/store.svelte';
   import { startCustomise } from '../lib/layer';
+  import { isolate } from '../lib/effects';
   import { t, tn, ago, fmtDate, fmtHijri, fmtNum, lang } from '../lib/i18n';
   import { showHijri } from '../lib/weekPrefs.svelte';
   import { inSentence } from '../lib/todoline';
@@ -449,7 +450,7 @@
 {#snippet automateS()}<section class="autoq"><button type="button" class="more" onclick={() => go({ kind: 'customise', id: 'automate' })} title={t('auto-ui.homeTip')}><Icon name="ai" size={14} /> {t('auto-ui.suggest')}</button></section>{/snippet}
 
 <div class="home">
-  {#if pageWarnings('home').length}<p class="muted sm hw" role="status">{t('pgs.unknown', { list: pageWarnings('home').map((w) => `\u2068${w}\u2069`).join(t('ldb.listSep')) })}</p>{/if}
+  {#if pageWarnings('home').length}<p class="muted sm hw" role="status">{t('pgs.unknown', { list: pageWarnings('home').map(isolate).join(t('ldb.listSep')) })}</p>{/if}
   <Sections page="home" parts={homeParts} order={homeOrder} sizes={homeSizes} gap="12px" box={widgetS} />
 
 
