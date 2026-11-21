@@ -49,6 +49,8 @@ describe('madoApi', () => {
       [() => m.run('spec', '  small  '), 'POST', '/steps/spec/run', { note: 'small' }],
       [() => m.approve('spec'), 'POST', '/steps/spec/approve', {}],
       [() => m.approve('review', 'abc123'), 'POST', '/steps/review/approve', { planHash: 'abc123' }],
+      [() => m.approve('review', 'abc123', '1.ab+c.d'), 'POST', '/steps/review/approve?approval=1.ab%2Bc.d', { planHash: 'abc123' }],
+      [() => m.approve('spec', undefined, 'x'), 'POST', '/steps/spec/approve', {}],
       [() => m.reopen('tech'), 'POST', '/steps/tech/reopen', {}],
       [() => m.addComment({ kind: 'task', taskId: 'auth' }, 'split it'), 'POST', '/comments', { target: { kind: 'task', taskId: 'auth' }, body: 'split it' }],
       [() => m.editComment('c-1', { body: 'x' }), 'PATCH', '/comments/c-1', { body: 'x' }],

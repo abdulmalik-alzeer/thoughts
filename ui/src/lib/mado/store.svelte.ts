@@ -200,9 +200,9 @@ export class MadoStore {
   /** Approve the review the user was just shown. Only that one: its plan hash goes along, a review
    *  with problems that block the build is never sent, and when the service says the plan is no
    *  longer the one shown, the new review is fetched and 'changed' comes back (nothing approved). */
-  async approveReview(shown: Review): Promise<'approved' | 'changed' | 'blocked'> {
+  async approveReview(shown: Review, approval?: string): Promise<'approved' | 'changed' | 'blocked'> {
     if (!shown?.planHash || blockingProblems(shown).length) return 'blocked';
-    try { await this.api.approve('review', shown.planHash); }
+    try { await this.api.approve('review', shown.planHash, approval); }
     catch (e) {
       if (!planChanged(e)) throw e;
       await this.freshReview().catch(() => {});

@@ -127,6 +127,7 @@
           <p class="note bad" id="mado-blocked" role="status"><TriangleAlert size={15} aria-hidden="true" /> <span><b>{t('mado.build.blocked')}</b> <span dir="auto">{blocked}</span></span></p>
         {/if}
         <p class="muted sm needs">{t('mado.build.needsGit')}</p>
+        {#if build?.confined === false}<p class="note" role="note"><TriangleAlert size={15} aria-hidden="true" /> <span>{t('mado.build.unconfined')}</span></p>{/if}
       {/if}
     {/if}
     {#if problem}<p class="note bad" role="alert"><TriangleAlert size={15} aria-hidden="true" /> <span dir="auto">{problem}</span></p>{/if}

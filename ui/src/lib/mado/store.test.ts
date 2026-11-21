@@ -262,8 +262,9 @@ describe('approving the review is tied to the plan that was shown', () => {
     const { f, s } = await ready();
     const shown = (await s.freshReview())!;
     expect(shown.planHash).toBe('h1');
-    expect(await s.approveReview(shown)).toBe('approved');
-    expect(f.calls).toContain('approve review h1');
+    // With the desktop shell's approval for that plan, which goes along with the hash.
+    expect(await s.approveReview(shown, 'shell-yes')).toBe('approved');
+    expect(f.calls).toContain('approve review h1 shell-yes');
     expect(s.status('review')).toBe('approved');
   });
 

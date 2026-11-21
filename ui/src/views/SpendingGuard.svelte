@@ -1,14 +1,38 @@
 <script lang="ts">
   // The monthly spending limit (Settings › Privacy and cost). Edits the draft `value`
   // ({ monthlyLimitUsd, warnPercent }); the page saves it with the rest.
-  import { app } from '../lib/store.svelte';
+  import { app, saveSettings } from '../lib/store.svelte';
   import { fmtMoney, t } from '../lib/i18n';
+  import { approval } from '../lib/consent';
+  import { failed } from '../lib/errors';
 
-  let { value = $bindable(), disabled = false, error = '', buildError = '' }: { value: { monthlyLimitUsd: number | null; warnPercent: number; buildHoldPercent?: number }; disabled?: boolean; error?: string; buildError?: string } = $props();
+  let { value = $bindable(), disabled = false, error = '', buildError = '' }: { value: { monthlyLimitUsd: number | null; warnPercent: number; buildHoldPercent?: number; confineCommands?: boolean }; disabled?: boolean; error?: string; buildError?: string } = $props();
   // The MADO build's hold (`spending.buildHoldPercent`): shown at its default until the user changes it.
   const hold = { get v() { return value.buildHoldPercent ?? 80; }, set v(n: number) { value.buildHoldPercent = n; } };
   const on = $derived(value.monthlyLimitUsd != null);
   const usage = $derived(app.status?.usage);
+
+  // The confinement of a build's commands is saved at once, not with the page: switching it off is
+  // asked by the desktop app in its own warning, and only its approval lets the service do it.
+  const confined = $derived(app.settings?.spending?.confineCommands !== false);
+  let confining = $state(false);
+  async function setConfine(on: boolean, box: HTMLInputElement) {
+    if (confining) return;
+    confining = true;
+    try {
+      let query = '';
+      if (!on) {
+        const a = await approval('confine-off');
+        if (a === null || a === undefined) { box.checked = true; return; }
+        query = `?confirm=confine-off&approval=${encodeURIComponent(a)}`;
+      }
+      await saveSettings((now) => ({ ...now, spending: { ...(now?.spending ?? {}), confineCommands: on } }), query);
+      value.confineCommands = on;
+    } catch (e) {
+      box.checked = confined;
+      failed(t('runc.build.confineFailed'), e);
+    } finally { confining = false; }
+  }
 
   function toggle(checked: boolean) {
     value.monthlyLimitUsd = checked ? (value.monthlyLimitUsd ?? 20) : null;
@@ -47,10 +71,13 @@
   </div>
 </div>
 {#if buildError}<p class="err" role="alert">{buildError}</p>{/if}
+<label class="check confine"><input type="checkbox" checked={confined} disabled={disabled || confining} onchange={(e) => setConfine(e.currentTarget.checked, e.currentTarget)} aria-describedby="st-confine-hint" /> {t('runc.build.confine')}</label>
+<p class="muted sm" id="st-confine-hint">{t('runc.build.confineHint')}</p>
 
 <style>
   .fields { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
   .fields > div { display: grid; gap: 4px; }
   .num { width: 9em; }
   .buildh { margin-top: 20px; }
+  .confine { margin-top: 12px; }
 </style>

@@ -264,7 +264,7 @@ export function install(scenario: string): Fake {
     }
     const base = `/api/mado/${PID}`;
     if (!path.startsWith(base)) return refuse(404, 'Not in the preview');
-    const p = path.slice(base.length);
+    const p = path.slice(base.length).split('?')[0];
     if (p === '' && method === 'GET') return json({ project: { id: PID, name: 'Corner Bakery', path: '/Users/you/Projects/corner-bakery' }, exists: db.exists, state: db.exists ? { version: 1, steps: db.steps, plan_hash: db.planHash } : null, files: db.exists ? files() : [] });
     if (p === '/start') { db.exists = true; db.steps = steps('early'); mado('state'); return json({}); }
     let x: RegExpExecArray | null;

@@ -92,6 +92,7 @@ export interface BuildState {
   landedAt?: string;
 }
 /** `GET /build`: the build, plus (while none is under way) why a start would be refused now. */
-export interface BuildView extends BuildState { blocked?: string }
+/** `confined`: whether the build's own commands run confined (macOS only; false elsewhere, and while full access is on or the setting is off). */
+export interface BuildView extends BuildState { blocked?: string; confined?: boolean }
 
 export interface MadoEvent { type: 'mado'; projectId: string; what: 'state' | 'doc' | 'graph' | 'comments' | 'design' | 'build' }

@@ -60,7 +60,14 @@ pub(crate) enum Subject {
     Folder(String),
     /// Full access (`thoughtsd::full_access`): every limit the app adds, gone. Asked in two steps.
     FullAccess,
+    /// A MADO plan's Final check: the project's name and the commands approving it lets the build run.
+    MadoApprove { project: String, commands: Vec<String> },
+    /// Switching off the confinement of a MADO build's commands.
+    ConfineOff,
 }
+
+/// How many commands the Final check's dialog lists before it says how many more there are.
+pub(crate) const MADO_SHOWN: usize = 12;
 
 /// The words of the native confirmation.
 #[derive(Debug, PartialEq)]
@@ -189,6 +196,36 @@ pub(crate) fn ask_text(subject: &Subject, ar: bool) -> Ask {
             yes: pick(("Continue…", "متابعة…")),
             no: cancel,
         },
+        Subject::MadoApprove { project, commands } => {
+            let which = if ar { format!("المشروع: «{}»", named(project, 160)) } else { format!("Project: “{}”", named(project, 160)) };
+            let n = commands.len();
+            let what = if ar {
+                format!("باعتماد الفحص النهائي سيشغّل Thoughts هذه الأوامر ({n}) على هذا الحاسوب، في نسخة منفصلة من المشروع، لتهيئته والتحقق من كل مهمة. تشغّل هذه الأوامر شيفرة كتبها المساعد أثناء البناء (أمر الاختبار يشغّل اختبارات المشروع أياً كان ما فيها)، ويمكنها استخدام الشبكة.")
+            } else {
+                format!("Approving the Final check lets Thoughts run these {n} command(s) on this computer, in a separate copy of the project, to set it up and check each task. They run code the assistant wrote during the build (a test command runs the project's tests, whatever they contain), and they can use the network.")
+            };
+            let mut list: Vec<String> = commands.iter().take(MADO_SHOWN).map(|c| format!("• {}", named(c, 200))).collect();
+            if n > MADO_SHOWN {
+                let more = n - MADO_SHOWN;
+                list.push(if ar { format!("و{more} غيرها — انظر القائمة في النافذة") } else { format!("and {more} more — see the list in the window") });
+            }
+            Ask {
+                title: pick(("Approve the Final check and let the build run these commands?", "اعتماد الفحص النهائي والسماح للبناء بتشغيل هذه الأوامر؟")),
+                body: format!("{which}\n\n{what}\n\n{}", list.join("\n")),
+                yes: pick(("Approve and allow", "اعتمد واسمح")),
+                no: cancel,
+            }
+        }
+        Subject::ConfineOff => Ask {
+            title: pick(("Let the build's commands change files outside its copy of the project?", "السماح لأوامر البناء بتغيير ملفات خارج نسختها من المشروع؟")),
+            body: pick((
+                "With this off, the commands a build runs (installing packages, running tests) run as you, with nothing to stop them: they can read, change or delete files anywhere your account can reach, read your saved sign-ins, and reach other programs on this computer. They run code the assistant wrote during the build. Switch it off only for a project that needs it (for example to install from a private package registry with your saved credentials), and back on afterwards.",
+                "مع إيقاف هذا تعمل الأوامر التي يشغّلها البناء (تثبيت الحزم وتشغيل الاختبارات) باسمك دون ما يوقفها: يمكنها قراءة الملفات أو تغييرها أو حذفها في أي مكان يصل إليه حسابك، وقراءة بيانات الدخول المحفوظة، والوصول إلى برامج أخرى على هذا الحاسوب. وهي تشغّل شيفرة كتبها المساعد أثناء البناء. أوقفه فقط لمشروع يحتاج ذلك (مثلاً للتثبيت من مستودع حزم خاص ببيانات دخولك المحفوظة)، ثم أعده بعدها.",
+            ))
+            .to_string(),
+            yes: pick(("Switch it off", "أوقفه")),
+            no: cancel,
+        },
     }
 }
 
@@ -258,6 +295,18 @@ fn learn(i: &DaemonInfo, what: Action, subject: &str) -> Option<(Subject, String
         }
         Action::SettingsBypass => Some((Subject::Default, String::new())),
         Action::FullAccess => Some((Subject::FullAccess, String::new())),
+        Action::ConfineOff => Some((Subject::ConfineOff, String::new())),
+        Action::MadoApprove => {
+            // The project and the plan the window named; the name, the commands and the plan's hash come from the service.
+            let (pid, hash) = consent::mado_parts(subject)?;
+            let name = get(i, &format!("/mado/{pid}"))?["project"]["name"].as_str().unwrap_or("").to_string();
+            let review = get(i, &format!("/mado/{pid}/review"))?;
+            if review["planHash"].as_str()? != hash {
+                return None;
+            }
+            let commands: Vec<String> = review["commands"].as_array()?.iter().filter_map(|c| c.as_str().map(String::from)).collect();
+            Some((Subject::MadoApprove { project: name, commands }, consent::mado_subject(pid, hash)))
+        }
         Action::Trust => {
             let path = get(i, &format!("/library/trust?id={subject}"))?["path"].as_str()?.to_string();
             Some((Subject::Folder(path.clone()), consent::trust_subject(subject, &path)))
@@ -270,6 +319,8 @@ fn unknown(what: Action, ar: bool) -> String {
     match (what, ar) {
         (Action::Trust, false) => "Thoughts could not find the folder this question is about, so nothing was trusted. Try again.",
         (Action::Trust, true) => "تعذّر على Thoughts العثور على المجلد الذي يخصّه هذا السؤال، فلم يُمنح أي ثقة. حاول مرة أخرى.",
+        (Action::MadoApprove, false) => "The plan changed, or Thoughts could not read it, so nothing was approved. Look at the Final check again and try again.",
+        (Action::MadoApprove, true) => "تغيّرت الخطة أو تعذّر على Thoughts قراءتها، فلم يُعتمد شيء. راجع الفحص النهائي من جديد ثم حاول مرة أخرى.",
         (_, false) => "Thoughts could not find this chat to confirm the change, so nothing was changed. Try again.",
         (_, true) => "تعذّر على Thoughts العثور على هذه المحادثة لتأكيد التغيير، فلم يتغيّر شيء. حاول مرة أخرى.",
     }
@@ -326,7 +377,9 @@ pub async fn approve_action(app: tauri::AppHandle, window: tauri::Window, action
 mod tests {
     use super::*;
 
-    const ALL: [fn() -> Subject; 5] = [
+    const ALL: [fn() -> Subject; 7] = [
+        || Subject::MadoApprove { project: "Shop".into(), commands: vec!["npm ci".into(), "npm test".into()] },
+        || Subject::ConfineOff,
         || Subject::FullAccess,
         || Subject::Chat { title: "Budget".into(), codex: false },
         || Subject::Chat { title: "Budget".into(), codex: true },
@@ -346,7 +399,7 @@ mod tests {
             assert!(arabic(ar.title) && arabic(&ar.body) && arabic(ar.yes) && arabic(ar.no), "{ar:?}");
             assert!(!arabic(en.title) && !arabic(&en.body) && !arabic(en.yes) && !arabic(en.no), "{en:?}");
         }
-        for what in [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess] {
+        for what in [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess, Action::MadoApprove, Action::ConfineOff] {
             assert_ne!(unknown(what, false), unknown(what, true));
         }
     }
@@ -428,6 +481,26 @@ mod tests {
         assert_eq!(crate::recovery::exact_choice(M::Ok, &two), Some(0));
         for gone in [M::Cancel, M::No, M::Custom("".into())] { assert_eq!(crate::recovery::exact_choice(gone, &two), None); }
         assert_eq!(crate::recovery::exact_choice(M::Custom("Cancel".into()), &two), Some(1), "a press of Cancel is Cancel, never a yes");
+    }
+
+    #[test]
+    fn the_final_check_names_the_project_and_lists_its_commands_plainly() {
+        let commands: Vec<String> = (1..=15).map(|i| format!("npm run check-{i}")).chain(["npm test \u{202e}hsab".to_string()]).collect();
+        for ar in [false, true] {
+            let a = ask_text(&Subject::MadoApprove { project: "Shop\u{202e}".into(), commands: commands.clone() }, ar);
+            assert!(a.body.contains("Shop<U+202E>"), "{}", a.body);
+            assert!(a.body.contains("npm run check-1\u{2069}") && a.body.contains("npm run check-12\u{2069}") && !a.body.contains("check-13"), "{}", a.body);
+            if !ar {
+                assert!(a.body.contains("and 4 more — see the list in the window"), "{}", a.body);
+                for w in ["16 command", "separate copy", "code the assistant wrote", "network"] { assert!(a.body.contains(w), "{w}: {}", a.body); }
+            } else {
+                assert!(a.body.contains("و4 غيرها"), "{}", a.body);
+            }
+        }
+        let few = ask_text(&Subject::MadoApprove { project: "Shop".into(), commands: vec!["npm test".into()] }, false);
+        assert!(!few.body.contains("more —"), "{}", few.body);
+        let off = ask_text(&Subject::ConfineOff, false);
+        assert!(off.body.contains("saved sign-ins") && off.body.contains("private package registry"), "{}", off.body);
     }
 
     #[test]

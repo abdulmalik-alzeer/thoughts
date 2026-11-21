@@ -7,6 +7,7 @@
   import { failed } from '../../lib/errors';
   import { toast } from '../../lib/store.svelte';
   import { confirmDialog } from '../../lib/dialog.svelte';
+  import { approval } from '../../lib/consent';
   import DesignStep from '../../lib/mado/design/DesignStep.svelte';
   import CommentsPanel, { type Described, type Draft } from '../../lib/mado/comments/CommentsPanel.svelte';
   import { DOC_FILES, GRAPH_FILES, changeCount, commentsOfStep, commentsOnDesign } from '../../lib/mado/comments/batch';
@@ -123,9 +124,16 @@
     return act('approve', async () => {
       const shown = await store.freshReview();
       if (!shown || !canApprove('review', store.status('review'), shown)) { toast(t('mado.act.fixFirst'), { kind: 'error' }); return; }
-      const ok = await confirmDialog({ title: t('mado.act.approveReviewTitle'), body: t('mado.review.commandsWarn'), list: [...shown.commands], note: tn('mado.review.commandCount', shown.commands.length), confirmLabel: t('mado.act.approveReview') });
-      if (!ok) return;
-      const said = await store.approveReview(shown);
+      // Approving lets the build run these commands: the desktop app asks in its own dialog, which
+      // lists them, and that is the confirmation. Outside it (the browser preview) the page asks,
+      // and a real service refuses the approval without the shell's yes.
+      const yes = await approval('mado-approve', `${store.projectId}/${shown.planHash}`);
+      if (yes === null) return;
+      if (yes === undefined) {
+        const ok = await confirmDialog({ title: t('mado.act.approveReviewTitle'), body: t('mado.review.commandsWarn'), list: [...shown.commands], note: tn('mado.review.commandCount', shown.commands.length), confirmLabel: t('mado.act.approveReview') });
+        if (!ok) return;
+      }
+      const said = await store.approveReview(shown, yes);
       if (said === 'approved') toast(t('mado.act.approved', { step: t('mado.step.review') }), { kind: 'success' });
       else toast(t(said === 'changed' ? 'mado.act.planChanged' : 'mado.act.fixFirst'), { kind: 'error' });
     }, 'mado.act.approveFailed');

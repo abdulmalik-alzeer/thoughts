@@ -42,8 +42,10 @@ export function madoApi(projectId: string) {
     plan: () => api<PlanDoc>(`${base}/plan`),
 
     run: (s: StepId, note?: string) => post<{ chatId: string }>(`${base}/steps/${step(s)}/run`, note?.trim() ? { note: note.trim() } : {}),
-    /** Approving the review names the plan that was shown (`planHash`): the service refuses if the plan changed since. */
-    approve: (s: StepId, planHash?: string) => post<unknown>(`${base}/steps/${step(s)}/approve`, s === 'review' ? { planHash: String(planHash ?? '') } : {}),
+    /** Approving the review names the plan that was shown (`planHash`): the service refuses if the plan changed since.
+     *  It also carries the desktop shell's approval for exactly that plan (`approval`): the app token alone is not a yes. */
+    approve: (s: StepId, planHash?: string, approval?: string) =>
+      post<unknown>(`${base}/steps/${step(s)}/approve${s === 'review' && approval ? `?approval=${encodeURIComponent(approval)}` : ''}`, s === 'review' ? { planHash: String(planHash ?? '') } : {}),
     reopen: (s: StepId) => post<unknown>(`${base}/steps/${step(s)}/reopen`),
     /** The user has looked at the files the last run changed outside `mado/`: the step may be approved again. */
     dismissStrayed: (s: StepId) => post<unknown>(`${base}/steps/${step(s)}/strayed/dismiss`),
