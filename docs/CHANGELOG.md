@@ -1,5 +1,16 @@
 # What's new in Thoughts
 
+## 0.3.4
+
+Two changes to planning and building a project (MADO), both about git.
+
+### Changed
+- **The Final check looks at the project's git repository.** It says when the folder is not a git repository of its own, or is not on a branch of yours; either one must be put right before the check can be approved. It also lists the files you have not committed yet.
+- **A build commits your pending changes first.** Starting a build used to be refused while anything was uncommitted. Now its first step commits those changes on your own branch, as "Before the MADO build", and the build starts from there. A repository with no commit yet gets its first one. The `mado` folder is left out of that commit, as before. After this first step the build does not touch your branch until you bring the finished work in.
+
+### Before you rely on it
+- **Tested automatically only.** Neither change has been seen in the app window. Work plan and Final check have now been reached in a real plan; a real build has still never been run.
+
 ## 0.3.3
 
 One repair: the "Look and screens" step of planning a project (MADO) could not be opened in 0.3.0 to 0.3.2.
