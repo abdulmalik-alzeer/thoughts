@@ -76,6 +76,7 @@
   import { contentScroller, pageChanging, returningNext } from './lib/mainScroll';
   import { sidebarSlide, railFade } from './lib/sidebarMotion';
   import { announceChat, chatOpenElsewhere, initialRoute, isSecondary, mainRoute, setWindowTitle, showInMain } from './lib/windows';
+  import MadoView from './views/mado/MadoView.svelte';
 
   let projects = $state<any[]>([]);
   /** A second window (lib/windows.ts): the whole app at one note or chat, without what belongs to
@@ -1049,6 +1050,7 @@
       {:else if app.view.kind === 'help'}<Help />
       {:else if app.view.kind === 'reorganize'}<Reorganize id={app.view.id} />
       {:else if app.view.kind === 'plugin'}{#key app.view.id + ':' + lang()}<PluginView id={app.view.id!} />{/key}
+      {:else if app.view.kind === 'mado' && app.view.id}<MadoView projectId={app.view.id} {projects} />
       {/if}
       {#snippet failed(error, reset)}
         <div class="page missing">

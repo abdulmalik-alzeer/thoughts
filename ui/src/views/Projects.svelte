@@ -74,6 +74,7 @@
       {@const chats = app.chats.filter((c) => c.projectId === p.id)}
       <div class="card">
         <div class="row"><b class="grow" dir="auto">{p.name}</b>
+          <button type="button" class="btn" onclick={() => go({ kind: 'mado', id: p.id })} title={t('mado.entry.tip')}><Icon name="list" size={15} /> {t('mado.entry')}</button>
           <button type="button" class="btn primary" onclick={() => newChat(p.id)}><Icon name="plus" size={15} /> {pageText('projects', 'newChat', t('newChat'))}</button>
           <button type="button" class="btn ghost" disabled={removing[p.id]} onclick={() => remove(p)}>{t('proj.unlink')}</button></div>
         <code class="muted sm path"><bdi>{p.path}</bdi></code>
