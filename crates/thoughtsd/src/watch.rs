@@ -537,18 +537,34 @@ mod tests {
         let st = Arc::new(st);
         let mut events = st.events.subscribe();
         let task = tokio::spawn(run(st.clone()));
-        // The watch is set up when the loop first runs.
+        // The watch is set up when the loop first runs. There is no signal for that, so under load
+        // the first edit can come before it: then the edit is made again (a later one is just as
+        // much "another program's").
         tokio::time::sleep(Duration::from_millis(800)).await;
-        std::fs::write(lib.join("ideas/plan.md"), "plan, edited in another editor\n").unwrap();
-        std::fs::write(lib.join("ideas/.plan.md.swp"), "swap").unwrap();
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let edit = |n: u32| {
+            std::fs::write(lib.join("ideas/plan.md"), format!("plan, edited in another editor ({n})\n")).unwrap();
+            std::fs::write(lib.join("ideas/.plan.md.swp"), format!("swap {n}")).unwrap();
+        };
+        edit(0);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut again = Instant::now() + Duration::from_secs(10);
+        let mut edits = 1;
         let mut told = false;
-        while Instant::now() < deadline && subjects(&st, &lib).await[0] != crate::git::subject::outside() {
+        // The watch records the entry first and tells the views right after: wait for both before
+        // stopping it, or the stop can fall between the two (the race that made this test flaky).
+        let recorded = |log: &[String]| log[0] == crate::git::subject::outside();
+        loop {
             while let Ok(e) = events.try_recv() { if e["type"] == "library.changed" && e["outside"] == true { told = true; } }
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            let log = subjects(&st, &lib).await;
+            if (recorded(&log) && told) || Instant::now() >= deadline { break; }
+            if !recorded(&log) && Instant::now() >= again {
+                edit(edits);
+                edits += 1;
+                again = Instant::now() + Duration::from_secs(10);
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         task.abort();
-        while let Ok(e) = events.try_recv() { if e["type"] == "library.changed" && e["outside"] == true { told = true; } }
         assert_eq!(subjects(&st, &lib).await[0], crate::git::subject::outside(), "recorded as its own entry");
         let files = crate::git::git(&st, &lib, &["show", "--name-only", "--format=", "HEAD"]).await.unwrap();
         assert_eq!(files.trim(), "ideas/plan.md");
