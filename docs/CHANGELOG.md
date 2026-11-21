@@ -1,5 +1,28 @@
 # What's new in Thoughts
 
+## 0.4.0
+
+Planning and building a project (MADO) now checks the finished product, not only each piece. The first real build passed all its tests with three broken screens; this version is the answer to that. Read "Before you rely on it": the new parts have not yet been run with a real assistant.
+
+### New
+- **The build checks itself as it goes.** A plan made with this version starts with a task that writes an example of every answer the project's parts give each other, and each feature's tests are written by a separate task before the feature. Later tasks cannot change those files. After every round of tasks the whole test suite runs on the joined result, and a failure goes back to the assistant.
+- **The app looks at the screens.** When the tasks are done, the app starts the project and opens every screen in a hidden window of its own that has no access to the app. A fresh review then compares what the screens showed with what you asked for, your comments included. What must be fixed is fixed, up to two times; what is left is listed for you.
+- **A project's own rules.** The "How it's built" step also writes a **Conventions** page: the one way this project builds a screen, calls its own parts and names things. Every build task gets it. A type check and a linter are chosen by default.
+- **Plans in the sidebar.** Under your chats, **Plans** lists every project with a plan, the step it is at, and whether a build is running or waiting for you.
+- **Model and effort for a plan.** The plan's header has the model and the effort every run of that plan uses, and the usage ring the chats have.
+- **A finished view.** After **Bring the finished build into my branch** the Build step shows what went where, what the review still questions, and **How to run it**: the command with a copy button, the address, and the project's own README.
+
+### Changed
+- The button on a project is now **Build with MADO** (it was Plan).
+- The Build step's label follows the build: Building, Built, Built and in your branch.
+- A build now makes more runs than before (tests first, fixes, up to three reviews), so it uses more of your plan's usage.
+
+### Before you rely on it
+- **No real assistant has run the new instructions yet.** Whether a real plan comes out with the examples, the tests-first tasks and the checks is not known until one is made.
+- **Looking at the screens** was tried on a Mac in a real hidden window, and separately with the background service; the two have not yet run together. It was not run on Windows or Linux. A screen that loads its data more than about a second after it opens can be read too early.
+- **Plans made before this version build as before**, without the new checks. Write the plan again from "How it's built" on to get them.
+- Tests written before a feature wait for that feature through a small marker file the plan sets up. This is an instruction to the assistant, not something the app enforces.
+
 ## 0.3.4
 
 Two changes to planning and building a project (MADO), both about git.
