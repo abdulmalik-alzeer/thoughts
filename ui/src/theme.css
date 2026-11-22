@@ -231,6 +231,10 @@ html.native.os-macos:has(.shell), html.native.os-macos:has(.shell) body { backgr
 .toast { animation: toast-in .3s var(--ease) both; }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-8px) scale(.97); } }
 .nav, .chat, .cat, .iconbtn { transition: background .18s ease, color .18s ease; }
+/* The icon of a "Check for updates" button turns while the check is looking. */
+@keyframes turn { to { transform: rotate(360deg); } }
+.btn.checking > .icon { animation: turn .9s linear infinite; }
+
 @media (prefers-reduced-motion: reduce) {
   /* One short run, not a 1ms loop: a looping animation would strobe (running-chat dot, spinners). */
   *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }

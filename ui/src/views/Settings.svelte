@@ -33,7 +33,7 @@
   import AccessKeys from './AccessKeys.svelte';
   import UsageSettings from './usage/UsageSettings.svelte';
   import { checkAppUpdate } from '../lib/updates';
-  import { download } from '../lib/updateProgress.svelte';
+  import { check, download } from '../lib/updateProgress.svelte';
 
   let { reload }: { reload: () => Promise<void> } = $props();
 
@@ -1102,7 +1102,7 @@
           <progress class="upd-bar" max={known ? download.total : undefined} value={known ? Math.min(download.got, download.total) : undefined} aria-label={label}></progress>
           <p class="muted sm">{label}</p>
         {:else}
-          <button type="button" class="btn" onclick={() => checkAppUpdate(true)}><Icon name="sync" size={14} /> {t('care.upd.check')}</button>
+          <button type="button" class="btn" class:checking={check.busy} disabled={check.busy} aria-busy={check.busy} onclick={() => checkAppUpdate(true)}><Icon name="sync" size={14} /> {t('care.upd.check')}</button>
         {/if}
       </div>
     {/if}

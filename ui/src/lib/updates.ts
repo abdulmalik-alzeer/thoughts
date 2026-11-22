@@ -6,7 +6,7 @@ import { t, tn } from './i18n';
 import { checkPending } from './layer';
 import { withBusyPrompt } from './shell';
 import { offerDownload, openDownload } from './maintenance';
-import { download } from './updateProgress.svelte';
+import { download, looking } from './updateProgress.svelte';
 
 let checking = false;
 
@@ -20,7 +20,7 @@ export async function checkAppUpdate(manual = false) {
   try {
     const { invoke } = await import('@tauri-apps/api/core');
     let r: any;
-    try { r = await invoke('update_check'); }
+    try { r = await looking(() => invoke('update_check')); }
     catch (e: any) { if (manual) toast(t('layer.upd.checkFailed'), { kind: 'error', detail: String(e?.message ?? e) }); return; }
     if (!r?.configured) { if (manual) await checkRelease(r?.reason === 'deb' ? 'ui.upd.deb' : r?.reason === 'build' ? 'ui.upd.build' : 'layer.upd.notConfigured'); return; }
     // A check that could not tell (no connection, a release that is not public, the GitHub
@@ -119,7 +119,7 @@ export function startAutoUpdateChecks() {
  *  docs/PRIVACY.md). When it cannot tell, say what the build says about updates (`fallback`). */
 async function checkRelease(fallback: string) {
   let r: any = null;
-  try { r = await post('/release-check'); } catch { /* older background service, or no connection */ }
+  try { r = await looking(() => post('/release-check')); } catch { /* older background service, or no connection */ }
   if (r?.state === 'newer' && r.version && r.url) { await offerDownload(r.version, r.url); return; }
   if (r?.state === 'current') { toast(t('layer.upd.none'), { kind: 'success', key: 'upd' }); return; }
   toast(r?.state === 'unknown' ? `${t(fallback)} ${t('care.upd.unknown')}` : t(fallback), { key: 'upd' });

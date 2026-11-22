@@ -12,6 +12,7 @@
   import WaitingChanges from './WaitingChanges.svelte';
   import UpdateChoices from './UpdateChoices.svelte';
   import { checkAppUpdate } from '../lib/updates';
+  import { check } from '../lib/updateProgress.svelte';
   import AddOns from './AddOns.svelte';
   import ReadyPacks from './ReadyPacks.svelte';
   import SharePacks from './SharePacks.svelte';
@@ -130,7 +131,7 @@
       <div class="card">
         <h3>{t('layer.appUpdates')}</h3>
         <p class="muted sm">{t('layer.appUpdatesHint')}</p>
-        <button type="button" class="btn" onclick={() => checkAppUpdate(true)}><Icon name="sync" size={15} /> {t('layer.upd.check')}</button>
+        <button type="button" class="btn" class:checking={check.busy} disabled={check.busy} aria-busy={check.busy} onclick={() => checkAppUpdate(true)}><Icon name="sync" size={15} /> {t('layer.upd.check')}</button>
         <UpdateChoices />
       </div>
     {/if}

@@ -1,5 +1,10 @@
 # What's new in Thoughts
 
+## 0.4.1
+
+### Improved
+- **Check for updates shows it is working.** The icon on the button turns while the check is looking, in Settings › Maintenance and in Customise, and the button waits until the answer arrives.
+
 ## 0.4.0
 
 Planning and building a project (MADO) now checks the finished product, not only each piece. The first real build passed all its tests with three broken screens; this version is the answer to that. Read "Before you rely on it": the new parts have not yet been run with a real assistant.
