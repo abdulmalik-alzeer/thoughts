@@ -152,7 +152,7 @@
     }, 'mado.act.approveFailed');
   }
   const reopen = () => act('reopen', () => store.reopen(step), 'mado.act.reopenFailed');
-  const runLabel = $derived(step === 'brief' && status === 'ready' && !chatId ? 'mado.act.interview' : status === 'ready' ? 'mado.act.run' : 'mado.act.rerun');
+  const runLabel = $derived(step === 'brief' && status === 'ready' && !chatId ? (existing ? 'mado-v050.act.readCode' : 'mado.act.interview') : status === 'ready' ? 'mado.act.run' : 'mado.act.rerun');
   const strayed = $derived(store.step(step).strayed ?? []);
   const unchecked = $derived(store.step(step).strayUnchecked === true);
   const approvable = $derived(canApprove(step, status, store.review ?? null, strayed, unchecked));
@@ -297,8 +297,8 @@
             {:else}
               <div class="nochat">
                 <MessagesSquare size={24} strokeWidth={1.5} aria-hidden="true" />
-                <b>{t(step === 'brief' ? 'mado.chat.briefTitle' : 'mado.chat.noneTitle')}</b>
-                <span class="muted">{t(step === 'brief' ? 'mado.chat.briefBody' : 'mado.chat.noneBody')}</span>
+                <b>{t(step === 'brief' ? (existing ? 'mado-v050.chat.briefTitle' : 'mado.chat.briefTitle') : 'mado.chat.noneTitle')}</b>
+                <span class="muted">{t(step === 'brief' ? (existing ? 'mado-v050.chat.briefBody' : 'mado.chat.briefBody') : 'mado.chat.noneBody')}</span>
                 {#if canRun(step, status)}<button type="button" class="btn primary" onclick={run} disabled={!!busy}><Sparkles size={14} aria-hidden="true" /> {t(runLabel)}</button>{/if}
               </div>
             {/if}

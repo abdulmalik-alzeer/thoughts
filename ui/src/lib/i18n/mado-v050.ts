@@ -41,6 +41,9 @@ export default {
     'mado-v050.stepWhat.tech': 'The stack, the parts, the data and the commands the project really uses, and its conventions, taken from the code.',
     'mado-v050.stepWhat.design': 'The look the product has today. Mock-ups are optional here.',
     'mado-v050.stepWhat.plan': 'Say what you want changed. The assistant writes the change down and plans only the work it needs, keeping the project’s own checks passing.',
+    'mado-v050.act.readCode': 'Read the code and draft the brief',
+    'mado-v050.chat.briefTitle': 'It starts from the code',
+    'mado-v050.chat.briefBody': 'The assistant reads the project and drafts the brief from it, then asks you only what the code cannot tell: who it is for, what hurts, what you want next.',
     'mado-v050.documented': 'Documented. These documents now describe the project as it is: plan a change next, or keep them as its documentation. No further step is needed.',
 
     // The change
@@ -141,6 +144,9 @@ export default {
     'mado-v050.stepWhat.tech': 'التقنيات والأجزاء والبيانات والأوامر التي يستعملها المشروع فعلاً، وأعرافه، مأخوذة من الشيفرة.',
     'mado-v050.stepWhat.design': 'المظهر الذي للمنتج اليوم. والنماذج المرسومة اختيارية هنا.',
     'mado-v050.stepWhat.plan': 'قل ما تريد تغييره. يكتب المساعد التغيير ويخطّط للعمل الذي يحتاجه فقط، مع إبقاء فحوص المشروع نفسه ناجحة.',
+    'mado-v050.act.readCode': 'اقرأ الشيفرة واكتب مسودة الملخّص',
+    'mado-v050.chat.briefTitle': 'يبدأ من الشيفرة',
+    'mado-v050.chat.briefBody': 'يقرأ المساعد المشروع ويكتب منه مسودة الملخّص، ثم لا يسألك إلا عمّا لا تجيب عنه الشيفرة: لمن هو، وما الذي يزعج، وما الذي تريده بعد ذلك.',
     'mado-v050.documented': 'تم التوثيق. تصف هذه المستندات الآن المشروع كما هو: خطّط لتغيير بعد ذلك، أو احتفظ بها توثيقاً له. لا حاجة إلى خطوة أخرى.',
 
     'mado-v050.change.tab': 'التغيير',
@@ -173,7 +179,7 @@ export default {
     'mado-v050.graph.state.building': 'قيد البناء',
     'mado-v050.graph.state.blocked': 'لا يمكن بناؤه هنا',
     'mado-v050.graph.state.failed': 'تعذّر بناؤه',
-    'mado-v050.graph.state.stale': 'قديم',
+    'mado-v050.graph.state.stale': 'غير محدَّث',
     'mado-v050.graph.state.ready': 'جاهز',
     'mado-v050.graph.state.unbuilt': 'لم يُبنَ بعد',
     'mado-v050.graph.found': 'أداة code-review-graph {version} مثبّتة.',

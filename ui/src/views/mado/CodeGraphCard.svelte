@@ -94,7 +94,7 @@
         <span class="muted small">{t('mado-v050.graph.afterInstall')}</span>
       </div>
     {:else}
-      <p class="small">{g.tool.version ? t('mado-v050.graph.found', { version: g.tool.version }) : t('mado-v050.graph.foundNoVersion')}{#if builtLine} {builtLine}{/if}</p>
+      <p class="small">{g.tool.version ? t('mado-v050.graph.found', { version: g.tool.version }) : t('mado-v050.graph.foundNoVersion')}{#if builtLine}{' '}{builtLine}{/if}</p>
       {#if cardState === 'building'}
         <div class="bar" role="progressbar" aria-label={t('mado-v050.graph.state.building')} aria-valuemin="0" aria-valuemax="100" aria-valuenow={share === null ? undefined : Math.round(share * 100)}>
           <i class:indef={share === null} style:width={share === null ? undefined : `${Math.round(share * 100)}%`}></i>

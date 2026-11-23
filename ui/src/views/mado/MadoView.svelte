@@ -34,8 +34,9 @@
   const toolMissing = $derived(graphState === 'missing' || graphState === 'old');
   let hidden = $state(untrack(() => cardHidden(projectId)));
   let cardOpen = $state<boolean | null>(null);
-  /** Open by default for a built project (unless put away); otherwise only when asked for. */
-  const showCard = $derived(cardOpen ?? (existing && !hidden));
+  /** Open by default for a built project when the tool is there (unless put away); without the tool
+   *  a built project gets one recommending line instead; otherwise the card opens only when asked for. */
+  const showCard = $derived(cardOpen ?? (existing && !hidden && !toolMissing));
   /** One line at the start of existing mode recommending the tool, while the card is closed. */
   const recommend = $derived(existing && toolMissing && !showCard && !hidden && store.status('brief') !== 'approved');
   function hideCard() { cardOpen = false; hidden = true; setCardHidden(projectId, true); }
