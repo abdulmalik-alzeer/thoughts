@@ -1,5 +1,20 @@
 # What's new in Thoughts
 
+## 0.6.0
+
+Claude Code chats now run through the Agent Client Protocol (ACP), the chat offers every permission mode the assistant reports, explanations sit behind a `?` icon, and signing in with a subscription shows a clear warning first. Read "Before you rely on it": none of it has been seen in the app window yet.
+
+### New
+- **Claude Code over ACP.** Ordinary chats talk to Claude Code through its official ACP adapter, which Thoughts installs on first use (it needs Node.js). Your own installed `claude` and its sign-in are used. Until the adapter is ready, chats run the old way.
+- **Models, effort and modes from the assistant.** The chat's model, effort and mode menus list what Claude Code and Codex report. Claude chats offer Manual, Accept edits, Auto, Plan and Skip permissions. Auto and Skip permissions ask you to confirm first, and only chats you start yourself can use them.
+- **Help behind `?`.** Explanations across the app moved into a `?` icon next to the heading or setting; press it to read them. Warnings, errors and costs stay on screen.
+- **Subscription warning.** Using a Claude or ChatGPT subscription through an app like Thoughts is a gray area under those services' terms and could lead to the subscription being restricted or lost. An API key avoids this. Onboarding, Settings and the Codex sign-in show this warning, and sign-in waits until you tick that you understand.
+
+### Before you rely on it
+- **Nothing here has been seen in the app window**, and no real signed-in chat has run over ACP yet.
+- Codex chats, MADO and the runs Thoughts starts itself still use the command line; Codex's adapter is used only to list its models and modes.
+- Without Node.js, chats stay on the old path and only the log says so.
+
 ## 0.5.0
 
 A large release: your customisations become plugins you can carry to another computer, every keyboard shortcut can be changed, notes can be presented as slides, search can work by meaning, and MADO can document a project that already exists. Read "Before you rely on it": none of it has been seen in the app window yet.
