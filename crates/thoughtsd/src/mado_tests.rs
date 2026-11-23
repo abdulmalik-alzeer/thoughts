@@ -1863,3 +1863,136 @@ async fn a_document_that_seems_to_hold_a_key_is_refused_and_never_shown() {
     std::fs::remove_dir_all(&dir).unwrap();
     std::fs::remove_dir_all(record_dir(&pid).unwrap()).unwrap();
 }
+
+// ---------- with the real Claude Code, against a stand-in for the Anthropic API ----------
+
+/// A stand-in for the Messages API that asks for `tools` one after another (one tool use per answer,
+/// counted by the tool results sent back so far), then ends with plain text. Every request is kept.
+async fn scripted_api(tools: Vec<(&'static str, Value)>) -> (u16, Arc<std::sync::Mutex<Vec<Value>>>) {
+    use axum::response::{IntoResponse, sse::{Event as E, Sse}};
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let log = seen.clone();
+    let tools = Arc::new(tools);
+    let answer = move |axum::Json(body): axum::Json<Value>| {
+        let (log, tools) = (log.clone(), tools.clone());
+        async move {
+            log.lock().unwrap().push(body.clone());
+            let done = body["messages"].to_string().matches("\"tool_result\"").count();
+            let has_tools = body["tools"].as_array().map_or(false, |t| !t.is_empty());
+            let next = if has_tools { tools.get(done).cloned() } else { None };
+            let model = body["model"].as_str().unwrap_or("mock").to_string();
+            let id = format!("toolu_mado_{done}");
+            let (block, delta, stop, content) = match &next {
+                Some((name, input)) => (json!({"type": "tool_use", "id": id, "name": name, "input": {}}),
+                    json!({"type": "input_json_delta", "partial_json": input.to_string()}), "tool_use",
+                    json!([{"type": "tool_use", "id": id, "name": name, "input": input}])),
+                None => (json!({"type": "text", "text": ""}), json!({"type": "text_delta", "text": "Done."}), "end_turn", json!([{"type": "text", "text": "Done."}])),
+            };
+            if body["stream"] != true {
+                return axum::Json(json!({"id": "msg_1", "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": stop, "stop_sequence": null, "usage": {"input_tokens": 10, "output_tokens": 5}})).into_response();
+            }
+            let start = json!({"type": "message_start", "message": {"id": "msg_1", "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": null, "stop_sequence": null, "usage": {"input_tokens": 10, "output_tokens": 1}}});
+            let events = vec![
+                ("message_start", start),
+                ("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": block})),
+                ("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": delta})),
+                ("content_block_stop", json!({"type": "content_block_stop", "index": 0})),
+                ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": stop, "stop_sequence": null}, "usage": {"output_tokens": 5}})),
+                ("message_stop", json!({"type": "message_stop"})),
+            ];
+            Sse::new(futures::stream::iter(events.into_iter().map(|(n, d)| Ok::<_, std::convert::Infallible>(E::default().event(n).data(d.to_string()))))).into_response()
+        }
+    };
+    let app = Router::new()
+        .route("/v1/messages", post(answer))
+        .route("/v1/messages/count_tokens", post(|| async { axum::Json(json!({"input_tokens": 10})) }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (port, seen)
+}
+
+/// The rules an existing-mode planning run is really started with (taken from `claude::start_run`
+/// through the test hook), handed to the installed Claude Code, which then tries to read the code, the
+/// secrets and git's config, and to write outside `mado/`, `mado/state.json` and `mado/brief.md`.
+/// Nothing reaches Anthropic: a dummy key, a stand-in API on this computer, a throwaway home. (Not
+/// `--bare`, which takes Write and Grep away and so would prove nothing about them; `MADO_REAL_BARE=1` adds it.)
+/// Run by hand: `cargo test -p thoughtsd real_claude_code_keeps_an_existing -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn real_claude_code_keeps_an_existing_project_run_to_reading_code_and_writing_mado() {
+    let Some(bin) = crate::claude::find_binary(&None, "claude") else { eprintln!("no claude installed: skipped"); return };
+    let help = String::from_utf8_lossy(&tokio::process::Command::new(&bin).arg("--help").output().await.unwrap().stdout).to_string();
+    let (st, pid, dir) = with_project("real-existing").await;
+    std::fs::write(dir.join("package.json"), r#"{"name":"shop"}"#).unwrap();
+    std::fs::write(dir.join("src/main.ts"), "export const marker = 'SOURCE-MARKER-7';\n").unwrap();
+    std::fs::write(dir.join(".env"), "API_TOKEN=SECRET-ENV-7\n").unwrap();
+    std::fs::create_dir_all(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub/.env.local"), "DB=SECRET-SUB-7\n").unwrap();
+    std::fs::create_dir_all(dir.join("lib/vendored/.git")).unwrap();
+    std::fs::write(dir.join("lib/vendored/.git/config"), "[remote \"o\"]\n\turl = https://x:SECRET-NESTED-7@example.com/r\n").unwrap();
+    // A real repository, so its config is git's own.
+    let git = |args: &[&str]| std::process::Command::new("git").args(args).current_dir(&dir).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+    assert!(git(&["init", "-q"]).status.success());
+    assert!(git(&["config", "remote.origin.url", "https://u:SECRET-GIT-7@example.com/r.git"]).status.success());
+    let seen_runs = hook(&st, |_| {});
+    let _ = start_route(State(st.clone()), UrlPath(pid.clone()), start_body(json!({"mode": "existing"}))).await.unwrap();
+    let chat = step_run(State(st.clone()), UrlPath((pid.clone(), "brief".into())), None).await.unwrap().0["chatId"].as_str().unwrap().to_string();
+    idle(&st, &chat, &seen_runs, 1).await;
+    let info = seen_runs.lock().unwrap()[0].clone();
+    let d = |rel: &str| dir.join(rel).to_string_lossy().to_string();
+    let tools: Vec<(&'static str, Value)> = vec![
+        ("Read", json!({"file_path": d("src/main.ts")})),
+        ("Read", json!({"file_path": d(".env")})),
+        ("Read", json!({"file_path": d("sub/.env.local")})),
+        ("Read", json!({"file_path": d(".git/config")})),
+        ("Read", json!({"file_path": d("lib/vendored/.git/config")})),
+        ("Grep", json!({"pattern": "SECRET-", "path": d(""), "output_mode": "content"})),
+        ("Write", json!({"file_path": d("outside.txt"), "content": "no"})),
+        ("Write", json!({"file_path": d("mado/state.json"), "content": "{}"})),
+        ("Write", json!({"file_path": d("mado/brief.md"), "content": "# Shop — Brief\nFound.\n"})),
+    ];
+    let n = tools.len();
+    let (api, seen) = scripted_api(tools).await;
+    let base = tmp("real-existing-home");
+    let home = base.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let rules = base.join("rules.json");
+    std::fs::write(&rules, json!({"permissions": {"allow": info.allow, "deny": info.deny}}).to_string()).unwrap();
+    let state_before = std::fs::read(dir.join("mado/state.json")).unwrap();
+    let mut c = tokio::process::Command::new(&bin);
+    c.env_clear().env("PATH", std::env::var("PATH").unwrap_or_default()).env("HOME", &home).env("CLAUDE_CONFIG_DIR", home.join(".claude"))
+        .env("ANTHROPIC_API_KEY", "sk-ant-dummy-not-a-key").env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{api}"))
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1").env("DISABLE_AUTOUPDATER", "1").env("DISABLE_TELEMETRY", "1").env("DISABLE_ERROR_REPORTING", "1")
+        .current_dir(&dir)
+        .args(if std::env::var("MADO_REAL_BARE").is_ok() { vec!["--bare"] } else { vec![] }).args(&info.args).arg("--settings").arg(&rules)
+        .args(crate::claude::profile_flags(&info.profile, &help))
+        .arg("Document the project.")
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    eprintln!("args: {:?}", info.args);
+    let out = tokio::time::timeout(std::time::Duration::from_secs(120), c.spawn().unwrap().wait_with_output()).await.expect("the program did not finish").unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(stdout.contains("\"type\":\"result\""), "no result; stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let bodies = seen.lock().unwrap().clone();
+    eprintln!("tools offered: {:?}", bodies.iter().find(|b| b["tools"].is_array()).map(|b| b["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap_or("").to_string()).collect::<Vec<_>>()));
+    let last = bodies.last().unwrap()["messages"].to_string();
+    assert_eq!(last.matches("\"tool_result\"").count(), n, "every tool was tried: {last}");
+    // The tool results the program sent back, in order.
+    let results: Vec<String> = bodies.last().unwrap()["messages"].as_array().unwrap().iter()
+        .flat_map(|m| m["content"].as_array().cloned().unwrap_or_default()).filter(|b| b["type"] == "tool_result").map(|b| b.to_string()).collect();
+    for (i, r) in results.iter().enumerate() { eprintln!("tool {i}: {}", r.chars().take(300).collect::<String>()); }
+    assert!(results[0].contains("SOURCE-MARKER-7"), "a source file is read: {}", results[0]);
+    assert!(!results[5].contains("SECRET-"), "a search of the project finds nothing in the closed files: {}", results[5]);
+    for (i, what) in [(1, ".env"), (2, "sub/.env.local"), (3, ".git/config"), (4, "nested .git/config")] {
+        assert!(results[i].contains("is_error\":true") || results[i].to_lowercase().contains("denied") || results[i].to_lowercase().contains("permission"), "{what} is refused: {}", results[i]);
+    }
+    for secret in ["SECRET-ENV-7", "SECRET-SUB-7", "SECRET-GIT-7", "SECRET-NESTED-7"] {
+        assert!(!bodies.iter().any(|b| b["messages"].to_string().contains(secret)), "{secret} reached the model");
+    }
+    assert!(!dir.join("outside.txt").exists(), "a write outside mado/ is refused");
+    assert_eq!(std::fs::read(dir.join("mado/state.json")).unwrap(), state_before, "state.json is not the run's");
+    assert_eq!(std::fs::read_to_string(dir.join("mado/brief.md")).unwrap(), "# Shop — Brief\nFound.\n", "mado/ is written");
+    std::fs::remove_dir_all(&base).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    std::fs::remove_dir_all(record_dir(&pid).unwrap()).unwrap();
+}
