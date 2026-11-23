@@ -151,8 +151,7 @@
         {#if status === 'done'}<CircleCheck size={22} />{:else if status === 'failed' || status === 'waiting'}<TriangleAlert size={22} />{:else if status === 'paused'}<Pause size={22} />{:else if status === 'checking'}<ScanEye size={22} />{:else if status === 'reviewing'}<ClipboardCheck size={22} />{:else}<Hammer size={22} />{/if}
       </span>
       <div class="grow">
-        <h3 role="status">{t(`mado.build.${status}`)}</h3>
-        <p class="muted sub">{t(`mado.build.${status}.what`)}</p>
+        <h3 role="status">{t(`mado.build.${status}`)} <HelpTip text={t(`mado.build.${status}.what`)} /></h3>
       </div>
       <div class="row acts">
         {#if status === 'running'}

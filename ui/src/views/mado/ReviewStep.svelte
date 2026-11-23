@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from "../../lib/HelpTip.svelte";
   // The check before building: does every feature and every screen have work planned for it, is
   // anything wrong with the plan, what will be built side by side — and every command the app
   // would run on this computer, word for word, because approving this step is what allows them.
@@ -46,8 +47,7 @@
     </section>
 
     <section class="card" aria-labelledby="rv-features">
-      <h3 id="rv-features">{t('mado.review.features')}</h3>
-      <p class="muted sub">{t('mado.review.featuresSub')}</p>
+      <h3 id="rv-features">{t('mado.review.features')} <HelpTip text={t('mado.review.featuresSub')} /></h3>
       <div class="tablewrap"><table>
         <thead><tr><th scope="col">{t('mado.review.feature')}</th><th scope="col">{t('mado.review.plannedWork')}</th></tr></thead>
         <tbody>
@@ -60,8 +60,7 @@
     </section>
 
     <section class="card" aria-labelledby="rv-screens">
-      <h3 id="rv-screens">{t('mado.review.screens')}</h3>
-      <p class="muted sub">{t('mado.review.screensSub')}</p>
+      <h3 id="rv-screens">{t('mado.review.screens')} <HelpTip text={t('mado.review.screensSub')} /></h3>
       <div class="tablewrap"><table>
         <thead><tr><th scope="col">{t('mado.review.screen')}</th><th scope="col">{t('mado.review.plannedWork')}</th></tr></thead>
         <tbody>

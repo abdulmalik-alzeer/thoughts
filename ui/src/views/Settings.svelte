@@ -770,8 +770,7 @@
       {/if}
       {#each [['a11y.motion', 'reduceMotion'], ['a11y.links', 'underlineLinks'], ['a11y.focus', 'strongFocus'], ['a11y.spacing', 'textSpacing']] as [key, field]}
         {#if vis(c, key)}
-          <label class="check ax"><input type="checkbox" checked={!!ax[field as keyof A11y]} onchange={(e) => setAx({ [field]: e.currentTarget.checked } as Partial<A11y>, e.currentTarget)} aria-describedby={'st-' + field + '-hint'} /> {t(key)}</label>
-          <p class="muted sm axhint" id={'st-' + field + '-hint'}>{t(key + 'Hint')}</p>
+          <label class="check ax"><input type="checkbox" checked={!!ax[field as keyof A11y]} onchange={(e) => setAx({ [field]: e.currentTarget.checked } as Partial<A11y>, e.currentTarget)} aria-describedby={'st-' + field + '-hint'} /> {t(key)} <HelpTip text={t(key + 'Hint')} /></label>
         {/if}
       {/each}
       {#if !q}
@@ -856,8 +855,7 @@
           {@render err('idleMinutes')}
         {/if}
         {#if vis(c, 'set.provider', 'set.baseUrl', 'set.apiKey')}
-          <h3>{t('set.provider')} <HelpTip text={t('prov5.litellm')} /></h3>
-          <p class="muted sm">{t('set.providerHint')} {t('runa.prov.how')}</p>
+          <h3>{t('set.provider')} <HelpTip text={t('prov5.litellm')} /> <HelpTip>{t('set.providerHint')} {t('runa.prov.how')}</HelpTip></h3>
           <ProviderPresets url={provUrl} disabled={readOnly} onpick={(u, noKey) => { provUrl = u; provNoKey = noKey; provTest = null; }} />
           <label for="st-base">{t('set.baseUrl')}</label>
           <input id="st-base" dir="ltr" bind:value={provUrl} placeholder="https://api.anthropic.com" aria-invalid={!!provErr} aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly} />
@@ -1235,7 +1233,6 @@
   .blk { display: block; font-weight: 400; }
   .danger-text { color: var(--danger); }
   .ax { margin-top: 14px; }
-  .axhint { margin: 2px 0 0; padding-inline-start: 24px; }
   .perm { border: 0; padding: 0; margin: 14px 0 0; min-width: 0; }
   .perm legend { font-size: var(--fs-xs); font-weight: 500; color: var(--muted); padding: 0; }
   .num { max-width: 120px; }

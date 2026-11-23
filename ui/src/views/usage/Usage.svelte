@@ -206,8 +206,7 @@
 <div class="page usage">
   <div class="row head">
     <div class="grow">
-      <h1>{pageTitle('usage', t('r10-usage.title'))}</h1>
-      <p class="muted sub">{t('r10-usage.sub')}</p>
+      <h1>{pageTitle('usage', t('r10-usage.title'))} <HelpTip text={t('r10-usage.sub')} /></h1>
     </div>
     <div class="seg" role="group" aria-label={t('r10-usage.period')}>
       {#each PERIODS as p (p)}<button type="button" class="segb" aria-pressed={days === p} onclick={() => (days = p)}>{tn('r10-usage.days', p)}</button>{/each}

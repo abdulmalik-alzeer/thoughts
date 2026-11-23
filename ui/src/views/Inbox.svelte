@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from "../lib/HelpTip.svelte";
   import { onMount } from 'svelte';
   import Icon from '../lib/Icon.svelte';
   import PageExtras from './PageExtras.svelte';
@@ -212,8 +213,7 @@
 <div class="page">
   <div class="row head">
     <div class="grow">
-      <h1>{pageTitle('inbox', t('inbox.title'))}</h1>
-      <p class="muted sub">{t('inbox.sub')}</p>
+      <h1>{pageTitle('inbox', t('inbox.title'))} <HelpTip text={t('inbox.sub')} /></h1>
     </div>
     {#if items.length}
       <button class="btn primary" disabled={processing} aria-busy={processing} onclick={process} title={t('inbox.processHint')}>
@@ -229,7 +229,6 @@
 
 <style>
   .head { align-items: flex-start; gap: 16px; flex-wrap: wrap; }
-  .sub { margin: 4px 0 14px; }
   .list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
   .cap { padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; }
   .meta { align-items: center; gap: 6px; }

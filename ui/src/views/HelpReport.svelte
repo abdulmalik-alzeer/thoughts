@@ -52,8 +52,7 @@
 </script>
 
 <p><button class="btn" onclick={back}><Icon name="left" size={15} class="flip-rtl" /> {t('help.back')}</button></p>
-<h1 class="row"><Icon name="warning" size={24} /> {t('help.rep.title')}</h1>
-<p class="muted lead">{t('help.rep.lead')}</p>
+<h1 class="row"><Icon name="warning" size={24} /> {t('help.rep.title')} <HelpTip text={t('help.rep.lead')} /></h1>
 
 <section>
   <label for="rep-what"><b>{t('help.rep.what')}</b></label>
@@ -73,7 +72,6 @@
 </section>
 
 <style>
-  .lead { font-size: 15px; margin: 0 0 6px; }
   section { margin-bottom: 22px; }
   textarea { width: 100%; box-sizing: border-box; margin: 6px 0 10px; font: inherit; }
   .preview { font-family: var(--mono); font-size: var(--fs-xs); white-space: pre; }

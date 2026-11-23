@@ -248,16 +248,13 @@
           {/if}
         {/if}
         {#if inspected.settings}
-          <label class="check"><input type="checkbox" bind:checked={pick.settings} aria-describedby="care-set-hint" /> {t('care.move.settings')}</label>
-          <p class="muted sm sub" id="care-set-hint">{t('care.move.settingsHint')}</p>
+          <label class="check"><input type="checkbox" bind:checked={pick.settings} /> {t('care.move.settings')} <HelpTip text={t('care.move.settingsHint')} /></label>
         {/if}
         {#if inspected.customisations > 0}
-          <label class="check"><input type="checkbox" bind:checked={pick.customisations} aria-describedby="care-cust-hint" /> {t('care.move.custom', { n: fmtNum(inspected.customisations) })}</label>
-          <p class="muted sm sub" id="care-cust-hint">{t('care.move.customHint')}</p>
+          <label class="check"><input type="checkbox" bind:checked={pick.customisations} /> {t('care.move.custom', { n: fmtNum(inspected.customisations) })} <HelpTip text={t('care.move.customHint')} /></label>
         {/if}
         {#if inspected.addonData > 0}
-          <label class="check"><input type="checkbox" bind:checked={pick.addonData} aria-describedby="care-data-hint" /> {t('ldc.move.data', { n: fmtNum(inspected.addonData) })}</label>
-          <p class="muted sm sub" id="care-data-hint">{t('ldc.move.dataHint')}</p>
+          <label class="check"><input type="checkbox" bind:checked={pick.addonData} /> {t('ldc.move.data', { n: fmtNum(inspected.addonData) })} <HelpTip text={t('ldc.move.dataHint')} /></label>
           {#if pick.addonData && inspected.addonDataExisting > 0}
             <div class="sub">
               <label class="check"><input type="checkbox" bind:checked={pick.addonDataReplace} /> {t('ldc.move.dataReplace', { n: fmtNum(inspected.addonDataExisting) })} <HelpTip text={t('ldc.move.dataReplaceHint')} /></label>

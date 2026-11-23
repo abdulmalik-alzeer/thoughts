@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from "../../lib/HelpTip.svelte";
   // Projects › a project › Plan: MADO, the app's way of planning and building a software project
   // in seven steps (docs/mado-spec.md). This view is the frame — the project, the stepper, and the
   // workspace of the step that is open; everything it knows lives in the store.
@@ -129,8 +130,7 @@
   {:else if !store.exists && choice === 'choose'}
     <section class="intro surface lit" aria-labelledby="mado-choose-title">
       <p class="eyebrow">{t('mado-v050.choose.eyebrow')}</p>
-      <h2 id="mado-choose-title">{t('mado-v050.choose.title')}</h2>
-      <p class="lead muted">{t('mado-v050.choose.body')}</p>
+      <h2 id="mado-choose-title">{t('mado-v050.choose.title')} <HelpTip text={t('mado-v050.choose.body')} /></h2>
       {#if found}
         <p class="found"><span class="muted">{t('mado-v050.choose.found')}</span>
           {#each found.langs as l, i}{i ? ', ' : ' '}<bdi>{t('mado-v050.choose.lang', { lang: l.lang, n: l.files })}</bdi>{/each}{#if found.more}{' '}{t('mado-v050.choose.more')}{/if}
@@ -161,8 +161,7 @@
   {:else if !store.exists}
     <section class="intro surface lit">
       <p class="eyebrow">{t('mado.intro.eyebrow')}</p>
-      <h2>{t('mado.intro.title')}</h2>
-      <p class="lead muted">{t('mado.intro.body')}</p>
+      <h2>{t('mado.intro.title')} <HelpTip text={t('mado.intro.body')} /></h2>
       <ol class="seven">
         {#each STEPS as s, i}
           <li><span class="n" aria-hidden="true">{i + 1}</span><span><b>{t(`mado.step.${s}`)}</b><span class="muted">{t(`mado.intro.${s}`)}</span></span></li>
