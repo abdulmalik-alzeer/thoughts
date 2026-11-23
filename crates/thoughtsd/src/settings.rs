@@ -33,6 +33,9 @@ pub struct Settings {
     /// (`thoughts.showCost`), and a save that does not name it keeps it as it is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub show_cost: Option<bool>,
+    /// When (and to which wording) the user acknowledged the notice about using an assistant
+    /// subscription (Claude or ChatGPT sign-in) through the app; `None` until they did.
+    pub subscription_risk_ack: Option<String>,
     /// Minutes without activity before a chat gets its mini-wrap.
     pub idle_minutes: u64,
     /// Popup when this many chats are unwrapped.
@@ -313,7 +316,13 @@ const RETIRED_EXTENSION_REPO: &str = "https://github.com/thoughts-app/thoughts-s
 /// The only permission modes the app ever passes to the CLI, under the names Claude Code gives them.
 /// `bypassPermissions` is special: it is only ever switched on after the user confirmed it in a
 /// dialog (see `bypass_needs_confirm`), and only for ordinary chats.
-pub const PERMISSION_MODES: &[&str] = &["acceptEdits", "plan", BYPASS];
+/// The modes the daemon accepts, under Claude Code's own ids: Manual (`default`, every change is
+/// put to the user on an approval card), Accept edits, Auto, Plan and Bypass. Which of them a chat
+/// offers, and under what names, is what the agent reports over ACP (`acp_agent::catalog`).
+pub const PERMISSION_MODES: &[&str] = &["default", "acceptEdits", "auto", "plan", BYPASS];
+/// Claude Code's mode in which its own classifier approves actions. Like bypass, only for chats the
+/// user started by hand; anything the app starts itself gets accept-edits instead.
+pub const AUTO: &str = "auto";
 /// Claude Code's "skip all permission checks" mode.
 pub const BYPASS: &str = "bypassPermissions";
 /// What a client sends along (`?confirm=…` on settings, `confirmBypass` on a chat) once the user said yes.
@@ -328,15 +337,15 @@ pub fn bypass_needs_confirm(old: Option<&str>, new: Option<&str>) -> bool {
 pub const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
 
 /// Allow-list for a chat/run permission mode. `None` / empty means "not said": the app's own
-/// default (`DEFAULT_PERMISSION_MODE`), never Claude Code's. The old `default` ("ask before
-/// changes") is still accepted from files and clients written before it was removed, and is always
-/// treated as `plan` (see `effective_permission_mode`): the app has no way to answer the CLI's
-/// permission questions, so asking only ever meant silently skipping the change.
+/// default (`DEFAULT_PERMISSION_MODE`), never Claude Code's. `default` is Claude Code's Manual
+/// mode again: the app answers its permission questions on approval cards (`approvals.rs`); a run
+/// nobody can be asked for has each such change refused. (Files written while `default` was
+/// read as `plan` were rewritten with `plan` when they were loaded.)
 pub fn check_permission_mode(mode: Option<&str>) -> anyhow::Result<()> {
     match mode {
-        None | Some("") | Some("default") => Ok(()),
+        None | Some("") => Ok(()),
         Some(m) if PERMISSION_MODES.contains(&m) => Ok(()),
-        Some(m) => anyhow::bail!("permission mode \"{m}\" is not allowed (use acceptEdits, plan or bypassPermissions)"),
+        Some(m) => anyhow::bail!("permission mode \"{m}\" is not allowed (use default, acceptEdits, auto, plan or bypassPermissions)"),
     }
 }
 
@@ -346,7 +355,6 @@ pub fn check_permission_mode(mode: Option<&str>) -> anyhow::Result<()> {
 pub fn effective_permission_mode(mode: Option<&str>) -> &str {
     match mode {
         None | Some("") => DEFAULT_PERMISSION_MODE,
-        Some("default") => "plan",
         Some(m) => m,
     }
 }
@@ -444,6 +452,9 @@ pub struct AiSettings {
     pub secondary: Option<String>,
     pub claude: ClaudeSettings,
     pub codex: CodexSettings,
+    /// Ordinary Claude Code chats run through the command line as before (`true`) instead of the
+    /// Agent Client Protocol adapter (`acp_agent.rs`, the default once it is installed).
+    pub classic_chats: bool,
 }
 
 /// Codex (`codex.rs`). The permission mode new chats start with is the app's one setting
@@ -582,6 +593,7 @@ impl Default for Settings {
             notifications: true,
             chat_steps: false,
             show_cost: None,
+            subscription_risk_ack: None,
             idle_minutes: 15,
             wrap_nag_threshold: 5,
             chat_retention_days: 0,
@@ -607,7 +619,7 @@ impl Default for Settings {
 
 impl Default for AiSettings {
     fn default() -> Self {
-        Self { primary: "claude".into(), secondary: None, claude: ClaudeSettings::default(), codex: CodexSettings::default() }
+        Self { primary: "claude".into(), secondary: None, claude: ClaudeSettings::default(), codex: CodexSettings::default(), classic_chats: false }
     }
 }
 
@@ -1178,16 +1190,17 @@ mod tests {
     #[test]
     fn permission_modes_are_allow_listed() {
         for ok in [None, Some(""), Some("default"), Some("acceptEdits"), Some("plan"), Some("bypassPermissions")] { assert!(check_permission_mode(ok).is_ok(), "{ok:?}"); }
-        // "Ask before changes" no longer exists: it is read as "plan" wherever it is still stored.
-        assert!(!PERMISSION_MODES.contains(&"default"));
-        assert_eq!(effective_permission_mode(Some("default")), "plan");
+        // Manual (`default`) and Auto are Claude Code's modes again: the app answers Manual's questions.
+        assert!(PERMISSION_MODES.contains(&"default") && PERMISSION_MODES.contains(&AUTO));
+        assert_eq!(effective_permission_mode(Some("default")), "default");
+        assert!(check_permission_mode(Some("dontAsk")).is_err());
         assert_eq!(effective_permission_mode(Some("acceptEdits")), "acceptEdits");
         // Nothing said is never "whatever Claude Code would do": it is accept-edits.
         assert_eq!(effective_permission_mode(Some("")), "acceptEdits");
         assert_eq!(effective_permission_mode(None), "acceptEdits");
         assert_eq!(effective_permission_mode(Some(BYPASS)), BYPASS);
-        assert_eq!(parse(r#"{"ai":{"claude":{"permissionMode":"default"}}}"#).unwrap().ai.claude.permission_mode.as_deref(), Some("plan"));
-        for bad in ["auto", "dontAsk", "manual", "Plan", "bypasspermissions", "plan --dangerously-skip-permissions"] {
+        assert_eq!(parse(r#"{"ai":{"claude":{"permissionMode":"default"}}}"#).unwrap().ai.claude.permission_mode.as_deref(), Some("default"));
+        for bad in ["dontAsk", "manual", "Plan", "bypasspermissions", "plan --dangerously-skip-permissions"] {
             assert!(check_permission_mode(Some(bad)).is_err(), "{bad}");
         }
         // Switching "bypass permissions" on is the one step that needs the user's yes; staying on it does not.
@@ -1462,7 +1475,7 @@ mod tests {
         blank.ai.claude.permission_mode = Some("default".into());
         blank.sanitize_update(&old).unwrap();
         assert_eq!(blank.profession, None);
-        assert_eq!(blank.ai.claude.permission_mode.as_deref(), Some("plan"));
+        assert_eq!(blank.ai.claude.permission_mode.as_deref(), Some("default"));
     }
 
     #[test]

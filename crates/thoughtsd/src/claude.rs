@@ -301,7 +301,7 @@ pub fn run_key(c: &crate::settings::ClaudeSettings, saved: impl FnOnce() -> Opti
 pub struct ProviderEnv { pub set: Vec<(&'static str, String)>, pub unset: Vec<&'static str> }
 
 impl ProviderEnv {
-    fn apply(&self, c: &mut Command) {
+    pub(crate) fn apply(&self, c: &mut Command) {
         for name in &self.unset { c.env_remove(name); }
         for (name, value) in &self.set { c.env(name, value); }
     }
@@ -353,7 +353,7 @@ fn saved_key() -> Option<String> {
 }
 
 /// The provider environment for a run that is about to start, or the reason it may not start.
-async fn provider_env(state: &AppState) -> anyhow::Result<ProviderEnv> {
+pub(crate) async fn provider_env(state: &AppState) -> anyhow::Result<ProviderEnv> {
     let c = state.settings.read().await.ai.claude.clone();
     let provider = provider_of(&c);
     let key = run_key(&c, saved_key);
@@ -1983,6 +1983,9 @@ pub async fn start_run(
     if !full && mode == crate::settings::BYPASS && kind != "chat" {
         return Err(crate::tr::err("bypass.chat_only", &[]));
     }
+    // Auto mode lets Claude Code's own classifier approve what it does: for a chat the user watches,
+    // never for anything the app starts by itself (that gets the app's default).
+    let mode = if !full && mode == crate::settings::AUTO && kind != "chat" { crate::settings::DEFAULT_PERMISSION_MODE.to_string() } else { mode };
     let mut deny = private_deny_settings(library.as_deref(), &spec.cwd, &private_paths)?;
     // A library inside another (a pair listed before that was refused), or around it: each one's
     // private folders are closed to the run as well.
@@ -2010,8 +2013,15 @@ pub async fn start_run(
     // refused when its help cannot be read, never started without the flags it gives.)
     let help = if hook.is_some() || on_codex { String::new() } else { run_help(&state).await? };
     // (Codex has no way to ask: its runs never get the prompt tool.)
+    // An ordinary Claude Code chat runs through the ACP adapter once it is installed (`acp_agent.rs`);
+    // until then (and with `ai.classicChats`) through the command line. Its questions come over ACP.
+    let acp_entry = if hook.is_none() && !on_codex && kind == "chat" && !settings.ai.classic_chats {
+        let e = crate::acp_install::ready(crate::assistant::Program::Claude);
+        if e.is_none() { crate::acp_install::ensure_in_background(state.clone(), crate::assistant::Program::Claude); }
+        e
+    } else { None };
     let asks = !full && !on_codex && crate::approvals::wanted(&kind, &mode, &prof)
-        && (hook.is_some() || (crate::approvals::supported(&help) && crate::approvals::port() != 0));
+        && (hook.is_some() || acp_entry.is_some() || (crate::approvals::supported(&help) && crate::approvals::port() != 0));
     // Strict private folders: commands are put to the user one by one, or closed where nobody can be asked.
     let strict = !full && crate::approvals::strict_applies(settings.strict_private(), &private_paths, &kind, &mode);
     if strict { prof = prof.strict(asks); }
@@ -2129,6 +2139,11 @@ pub async fn start_run(
         // Started: its end (`finish`) closes the watch on what it changes.
         if launched.is_ok() { if let Some(w) = watching { w.hand_over(); } }
         return launched;
+    }
+    if let Some(entry) = acp_entry {
+        let system = system_text(true);
+        return start_acp_chat(state, spec, entry, AcpStart { mode, deny, system, ticket, standing, record, touches_library,
+            watching, on_done, full, kind, stopped, prof_name: prof.name, asks, strict }).await;
     }
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
@@ -2273,6 +2288,104 @@ pub async fn start_run(
                 if first.is_empty() { String::new() } else { format!(": {first}") }));
         }
         finish(state, id, ok, record, touches_library, on_done).await;
+        guard.disarm();
+    });
+    Ok(())
+}
+
+/// What `start_run` decided for an ordinary chat that runs through the ACP adapter.
+pub(crate) struct AcpStart {
+    mode: String,
+    deny: Option<String>,
+    system: String,
+    ticket: Option<crate::approvals::Ticket>,
+    standing: Option<StandingSnapshot>,
+    record: Option<PathBuf>,
+    touches_library: bool,
+    watching: Option<crate::changesets::Watching>,
+    on_done: Option<OnDone>,
+    full: bool,
+    kind: String,
+    stopped: &'static str,
+    prof_name: &'static str,
+    asks: bool,
+    strict: bool,
+}
+
+/// An ordinary Claude Code chat's turn through the ACP adapter (`acp_agent.rs`). Everything the
+/// command-line path is started with travels too: the rules file (deny/allow/ask rules and the
+/// command-check hooks) as the SDK's `settings`, the app's notes on top of Claude Code's system
+/// prompt, the mode (set over ACP and checked), the model, effort and spending limit, the folders.
+/// Its permission questions are the chat's approval cards; with nobody to ask they are refused.
+async fn start_acp_chat(state: Arc<AppState>, spec: RunSpec, entry: PathBuf, a: AcpStart) -> anyhow::Result<()> {
+    let id = spec.chat_id.clone();
+    let mut temp = TempFiles::default();
+    let rules = match &a.deny {
+        Some(d) if d.len() > MAX_RULES_BYTES => anyhow::bail!("the assistant was not started: its safety rules have grown too large to hand over"),
+        Some(d) => Some(temp.add(&crate::paths::run_tmp_dir(), "settings.json", d)?),
+        None => None,
+    };
+    let bypass_ok = a.mode == crate::settings::BYPASS && (a.full || a.kind == "chat");
+    let cs = crate::acp_agent::ChatSpec {
+        cwd: spec.cwd.clone(), add_dirs: spec.add_dirs.clone(), resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some(),
+        model: spec.options.model.clone(), effort: spec.options.effort.clone(), mode: a.mode.clone(), rules, system: a.system.clone(),
+        budget: spec.options.max_budget_usd, prompt: spec.prompt.clone(),
+    };
+    let mut c = crate::acp_agent::adapter_command(&state, crate::assistant::Program::Claude, &entry).await?;
+    c.current_dir(&spec.cwd);
+    let (mut child, conn, rx) = crate::acp_agent::connect(c).await.map_err(|e| {
+        crate::log::error(format!("run {id}: could not start the ACP adapter: {e}"));
+        e
+    })?;
+    let session = match crate::acp_agent::open_chat(&conn, &cs).await {
+        Ok((sid, _)) => sid,
+        Err(e) => { crate::acp_agent::end(&mut child).await; return Err(e); }
+    };
+    let mut kill_rx = match take_switch(&state, &id).await {
+        Ok(rx) => rx,
+        Err(e) => { crate::acp_agent::end(&mut child).await; return Err(e); }
+    };
+    if !crate::full_access::still_full(&state, &id, a.full).await {
+        crate::acp_agent::end(&mut child).await;
+        return Err(crate::tr::err("full_access.off", &[]));
+    }
+    let pid = child.id();
+    crate::runs::record(pid, &id);
+    crate::log::info(format!("run {id} started over ACP (pid {}, mode {}, profile {}{}{}{}, in {})", pid.unwrap_or(0), a.mode, a.prof_name,
+        if a.asks { ", asks the user" } else { "" }, if a.strict { ", strict private folders" } else { "" }, if a.full { ", FULL ACCESS: no app guards" } else { "" }, spec.cwd.display()));
+    state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), spec.cwd.clone());
+    state.ack_interrupted(&id).await;
+    if let Some(ch) = state.chats.update(&id, |c| c.running = true).await {
+        state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
+    }
+    let asker = crate::acp_agent::Asker { token: a.ticket.as_ref().map(|t| t.token().to_string()), bypass_ok };
+    let started = std::time::Instant::now();
+    tokio::spawn(async move {
+        let guard = RunGuard::new(&state, &id);
+        let _temp = temp;
+        let ticket = a.ticket;
+        let _watching = a.watching;
+        let f = crate::acp_agent::drive(&state, &id, child, conn, rx, session, cs.prompt, asker, &mut kill_rx).await;
+        drop(kill_rx);
+        drop(ticket);
+        if let Some(s) = a.standing { put_back_standing(&state, &id, s).await; }
+        if state.stopping.load(std::sync::atomic::Ordering::Relaxed) { guard.disarm(); return; }
+        crate::runs::forget(pid);
+        let ok = f.ended == Ended::Result(true);
+        match &f.ended {
+            Ended::Stopped => push(&state, &id, Msg::new("system", a.stopped)).await,
+            Ended::Lost(why) => {
+                crate::log::error(format!("run {id} (ACP) ended by the app: {why}"));
+                push(&state, &id, Msg::new("error", crate::tr::text("run.lost", &[]))).await;
+            }
+            Ended::NoResult if !f.stderr.trim().is_empty() => push(&state, &id, error_msg(&state, f.stderr.trim()).await).await,
+            Ended::NoResult => push(&state, &id, Msg::new("error", crate::tr::text("assistant.no_answer", &[]))).await,
+            _ => {}
+        }
+        let secs = started.elapsed().as_secs();
+        if ok { state.note_run_ok(); crate::log::info(format!("run {id} (ACP) finished ok in {secs}s")); }
+        else { crate::log::warn(format!("run {id} (ACP) did not finish ({secs}s): {:?}", f.ended)); }
+        finish(state, id, ok, a.record, a.touches_library, a.on_done).await;
         guard.disarm();
     });
     Ok(())
@@ -3248,7 +3361,7 @@ pub(crate) mod tests {
         // Nothing chosen (a fresh install, an old chat, an add-on that sent no options): accept edits,
         // never "whatever Claude Code is set to".
         for unset in [None, Some("")] { assert_eq!(flag(&args(unset), "--permission-mode"), Some("acceptEdits"), "{unset:?}"); }
-        assert_eq!(flag(&args(Some("default")), "--permission-mode"), Some("plan"));
+        assert_eq!(flag(&args(Some("default")), "--permission-mode"), Some("default"));
         for chosen in ["acceptEdits", "plan", "bypassPermissions"] { assert_eq!(flag(&args(Some(chosen)), "--permission-mode"), Some(chosen)); }
         // The flag is there exactly once, whatever else is passed.
         let o = RunOptions { model: Some("opus".into()), effort: Some("high".into()), ..Default::default() };
@@ -3285,13 +3398,17 @@ pub(crate) mod tests {
             start_run(st.clone(), spec(&chat, mode), None).await.unwrap();
             for _ in 0..200 { if !st.chats.get(&chat.id).await.unwrap().running { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
         }
-        assert_eq!(*seen.lock().unwrap(), [Some("acceptEdits".to_string()), Some("acceptEdits".into()), Some("plan".into()), Some("bypassPermissions".into())]);
+        assert_eq!(*seen.lock().unwrap(), [Some("acceptEdits".to_string()), Some("acceptEdits".into()), Some("default".into()), Some("bypassPermissions".into())]);
         // Anything the app starts itself is refused in bypass mode, and gets accept-edits when it names none.
         let wrap = crate::chats::Chat { kind: "wrap".into(), ..Default::default() };
         st.chats.insert(wrap.clone()).await;
         assert!(start_run(st.clone(), spec(&wrap, Some("bypassPermissions")), None).await.is_err());
         start_run(st.clone(), spec(&wrap, None), None).await.unwrap();
         for _ in 0..200 { if seen.lock().unwrap().len() == 5 { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        assert_eq!(seen.lock().unwrap().last().unwrap().as_deref(), Some("acceptEdits"));
+        // Auto mode (Claude Code's classifier approves) is for chats the user watches: a wrap gets accept-edits.
+        start_run(st.clone(), spec(&wrap, Some("auto")), None).await.unwrap();
+        for _ in 0..200 { if seen.lock().unwrap().len() == 6 { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
         assert_eq!(seen.lock().unwrap().last().unwrap().as_deref(), Some("acceptEdits"));
         std::fs::remove_dir_all(dir).unwrap();
     }

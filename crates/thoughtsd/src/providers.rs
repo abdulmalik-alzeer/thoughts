@@ -219,7 +219,7 @@ impl KeyStore for CodexKeychain {
     fn delete(&self) -> anyhow::Result<()> { crate::secrets::delete("thoughts-ai", "codex") }
 }
 
-fn codex_key() -> Option<String> {
+pub(crate) fn codex_key() -> Option<String> {
     if cfg!(test) { return Some("test-codex-key".into()); }
     CodexKeychain.get()
 }
@@ -474,3 +474,15 @@ async fn test_codex(axum::extract::State(st): S, body: Option<axum::Json<Body>>)
 #[cfg(test)]
 #[path = "providers_tests.rs"]
 mod tests;
+
+/// `codex_args` as the JSON object Codex's ACP adapter merges into its session config
+/// (`CODEX_CONFIG`): the same provider, the same key variable, the same excludes.
+pub fn codex_config_json(svc: &CodexService, user_excludes: &[String]) -> Value {
+    let mut exclude: Vec<String> = user_excludes.iter().filter(|e| !e.is_empty() && *e != CODEX_KEY_ENV).cloned().collect();
+    exclude.push(CODEX_KEY_ENV.into());
+    serde_json::json!({
+        "model_provider": CODEX_PROVIDER_ID,
+        "model_providers": {CODEX_PROVIDER_ID: {"name": "Thoughts: another provider", "base_url": svc.base_url, "wire_api": "responses", "env_key": CODEX_KEY_ENV}},
+        "shell_environment_policy": {"ignore_default_excludes": false, "exclude": exclude},
+    })
+}

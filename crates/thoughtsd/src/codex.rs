@@ -338,6 +338,9 @@ pub async fn login(state: Arc<AppState>) -> anyhow::Result<()> {
 
 // ---------- choices: models, efforts, modes ----------
 
+/// The modes only Claude Code chats have; a Codex chat in one of them works as in accept-edits.
+pub const CLAUDE_ONLY_MODES: [&str; 2] = ["default", crate::settings::AUTO];
+
 /// The app's permission mode as a Codex sandbox. Plan reads only; Accept edits writes in the
 /// folders the run works in; Bypass has no sandbox at all.
 pub fn sandbox_for(mode: &str) -> &'static str {
@@ -402,7 +405,9 @@ pub async fn refresh_models(state: &AppState) -> Value {
 async fn options_with(state: &AppState, bin: &Path, detected: Option<crate::codex_models::Detected>) -> Value {
     let help = exec_help(state).await;
     let offered = sandboxes(&help);
-    let modes: Vec<&str> = crate::settings::PERMISSION_MODES.iter().copied().filter(|m| offered.iter().any(|s| s == sandbox_for(m))).collect();
+    // Manual and Auto are Claude Code's: a Codex run cannot put its changes to the user one by one.
+    let modes: Vec<&str> = crate::settings::PERMISSION_MODES.iter().copied().filter(|m| !CLAUDE_ONLY_MODES.contains(m))
+        .filter(|m| offered.iter().any(|s| s == sandbox_for(m))).collect();
     let (own, mini, provider) = { let s = state.settings.read().await; (s.ai.codex.model.clone(), s.ai.codex.mini_wrap_model.clone(), crate::providers::codex_provider_of(&s.ai.codex)) };
     let mut models = if let crate::providers::CodexProvider::Service(dest) = &provider {
         // Another provider: OpenAI's catalogue and the models of the user's own set-up are not its

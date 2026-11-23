@@ -1653,7 +1653,11 @@ async fn disable_module(State(st): S, Path(id): Path<String>) -> R {
     ok()
 }
 
-async fn claude_options(State(st): S) -> R { Ok(Json(claude::options(&st).await)) }
+async fn claude_options(State(st): S) -> R {
+    let mut o = claude::options(&st).await;
+    crate::acp_agent::merge_options(&st, crate::assistant::Program::Claude, &mut o, false).await;
+    Ok(Json(o))
+}
 
 #[derive(Deserialize)]
 struct Token { token: String }
@@ -1717,10 +1721,18 @@ async fn claude_recheck(State(st): S) -> R {
 }
 
 /// Codex's models, efforts and the permission modes it can enforce (see `codex::options`).
-async fn codex_options(State(st): S) -> R { Ok(Json(crate::codex::options(&st).await)) }
+async fn codex_options(State(st): S) -> R {
+    let mut o = crate::codex::options(&st).await;
+    crate::acp_agent::merge_options(&st, crate::assistant::Program::Codex, &mut o, false).await;
+    Ok(Json(o))
+}
 
 /// "Refresh models": ask the installed Codex for its models again now (`codex_models`), then the options.
-async fn codex_models_refresh(State(st): S) -> R { Ok(Json(crate::codex::refresh_models(&st).await)) }
+async fn codex_models_refresh(State(st): S) -> R {
+    let mut o = crate::codex::refresh_models(&st).await;
+    crate::acp_agent::merge_options(&st, crate::assistant::Program::Codex, &mut o, true).await;
+    Ok(Json(o))
+}
 
 /// Opens Codex's browser sign-in (`codex login`): one attempt at a time, ended after ten minutes.
 async fn codex_login(State(st): S) -> R { crate::codex::login(st.clone()).await?; ok() }
@@ -5614,7 +5626,7 @@ mod tests {
         assert_eq!(launchd_job_pid("gui/501/app.thoughts.daemon = {\n\tstate = running\n\tpid = 4242\n}"), Some(4242));
         assert_eq!(launchd_job_pid("state = not running"), None);
         let o = |p: &str| normalized(RunOptions { permission_mode: Some(p.into()), ..Default::default() }, None).permission_mode;
-        assert_eq!(o("default").as_deref(), Some("plan"));
+        assert_eq!(o("default").as_deref(), Some("default"));
         assert_eq!(o("acceptEdits").as_deref(), Some("acceptEdits"));
         // No mode is never stored: it becomes accept-edits, or stays what the chat already had.
         assert_eq!(o("").as_deref(), Some("acceptEdits"));
@@ -5623,7 +5635,7 @@ mod tests {
             assert_eq!(normalized(RunOptions { model: Some("opus".into()), ..Default::default() }, Some(current)).permission_mode.as_deref(), Some(current));
         }
         assert_eq!(normalized(RunOptions { permission_mode: Some("plan".into()), ..Default::default() }, Some("acceptEdits")).permission_mode.as_deref(), Some("plan"));
-        assert_eq!(normalized(RunOptions::default(), Some("default")).permission_mode.as_deref(), Some("plan"));
+        assert_eq!(normalized(RunOptions::default(), Some("default")).permission_mode.as_deref(), Some("default"));
     }
 
     #[tokio::test]
@@ -5683,8 +5695,8 @@ mod tests {
     #[test]
     fn run_options_are_allow_listed() {
         let o = |p: &str| RunOptions { permission_mode: Some(p.into()), ..Default::default() };
-        for ok in ["default", "acceptEdits", "plan", "bypassPermissions", ""] { assert!(check_run_options(&o(ok)).is_ok(), "{ok}"); }
-        for bad in ["auto", "dontAsk", "manual"] { assert!(check_run_options(&o(bad)).is_err(), "{bad}"); }
+        for ok in ["default", "acceptEdits", "auto", "plan", "bypassPermissions", ""] { assert!(check_run_options(&o(ok)).is_ok(), "{ok}"); }
+        for bad in ["dontAsk", "manual"] { assert!(check_run_options(&o(bad)).is_err(), "{bad}"); }
         assert!(check_run_options(&RunOptions { model: Some("--settings".into()), ..Default::default() }).is_err());
     }
 
