@@ -22,6 +22,7 @@
   import ReviewStep from './ReviewStep.svelte';
   import BuildStep from './BuildStep.svelte';
   import ProjectDoc from './ProjectDoc.svelte';
+  import { isExisting, stepNameKey, stepWhatKey } from '../../lib/mado/existing';
 
   let { store, step: stepProp, tab = $bindable(''), onstep }: { store: MadoStore; step: StepId; /** The open tab, remembered by the view per step. */ tab?: string; /** Go to another step. */ onstep?: (s: StepId) => void } = $props();
 
@@ -41,12 +42,21 @@
   const editable = $derived(isEditable(status));
   const canComment = $derived(!locked && !drafting);
   const wide = $derived(step === 'review' || step === 'build');
+  // Round 0.5.0: a built project's plan names its steps for what they do there.
+  const existing = $derived(isExisting(store.overview));
+  const nameKey = $derived(stepNameKey(step, existing));
+  const asChange = $derived(existing && step === 'plan');
+  const documented = $derived(existing && !!store.overview?.state?.documented && (step === 'tech' || step === 'design' || step === 'plan'));
+  /** Why the open tab's file is not shown (the service's words), or ''. */
+  const refusedWhy = $derived(!active ? '' : active.kind === 'doc' ? store.refusal(`doc:${active.name}`) : active.kind === 'graph' ? (store.refusal(`graph:${active.name}`) || (active.name === 'tasks' ? store.refusal('plan') : '')) : active.kind === 'tasks' ? store.refusal('plan') : active.kind === 'change' ? store.refusal('change') : '');
+  const change = $derived(store.plan?.change && typeof store.plan.change.title === 'string' ? store.plan.change : null);
 
   let side = $state<'chat' | 'comments'>('chat');
   let draft = $state<Draft | null>(null);
   let focusId = $state<string | null>(null);
   let note = $state('');
-  let showNote = $state(false);
+  // The plan of a change starts from what the user wants changed: its box is open from the start.
+  let showNote = $state(untrack(() => isExisting(store.overview) && stepProp === 'plan' && store.status('plan') === 'ready'));
   let busy = $state('');
 
   // ---------- what a comment is about, in plain words ----------
@@ -119,7 +129,7 @@
     if (busy) return;
     if (changes > 0 && !(await confirmDialog({ title: t('mado.act.unsentTitle'), body: tn('mado.act.unsentBody', changes), confirmLabel: t('mado.act.approveAnyway') }))) return;
     if (step === 'review') return approveReview();
-    act('approve', async () => { await store.approve(step); toast(t('mado.act.approved', { step: t(`mado.step.${step}`) }), { kind: 'success' }); }, 'mado.act.approveFailed');
+    act('approve', async () => { await store.approve(step); toast(t('mado.act.approved', { step: t(nameKey) }), { kind: 'success' }); }, 'mado.act.approveFailed');
   }
   /** The review is approved as it is NOW: fetched again, every command shown, and the approval
    *  names that very plan — the service refuses it if the plan changed in between. */
@@ -152,8 +162,8 @@
 <section class="ws" aria-labelledby="mado-step-title">
   <header class="head">
     <div class="grow titles">
-      <div class="row"><h2 id="mado-step-title">{t(`mado.step.${step}`)}</h2><span class="pill st-{status}" role="status">{t(statusKey(step, status, store.build))}</span></div>
-      <p class="muted what">{t(`mado.stepWhat.${step}`)}</p>
+      <div class="row"><h2 id="mado-step-title">{t(nameKey)}</h2><span class="pill st-{status}" role="status">{t(statusKey(step, status, store.build))}</span></div>
+      <p class="muted what">{t(stepWhatKey(step, existing))}</p>
     </div>
     {#if !locked && step !== 'build'}
       <div class="row actions">
@@ -181,8 +191,9 @@
 
   {#if showNote && !locked}
     <div class="noterow" id="mado-note">
-      <label for="mado-note-in">{t('mado.act.noteLabel')}</label>
-      <input id="mado-note-in" dir="auto" bind:value={note} placeholder={t('mado.act.notePh')} autocomplete="off" maxlength="2000" />
+      <label for="mado-note-in">{t(asChange ? 'mado-v050.change.noteLabel' : 'mado.act.noteLabel')}</label>
+      <input id="mado-note-in" dir="auto" bind:value={note} placeholder={t(asChange ? 'mado-v050.change.notePh' : 'mado.act.notePh')} autocomplete="off" maxlength="2000" />
+      {#if asChange && status === 'ready' && !note.trim()}<span class="muted hintline">{t('mado-v050.change.ask')}</span>{/if}
     </div>
   {/if}
 
@@ -212,6 +223,8 @@
     </div>
   {:else if status === 'stale'}
     <div class="banner warn" role="status"><RotateCw size={15} aria-hidden="true" /> <span><b>{t('mado.stale.title')}</b> {t('mado.stale.body')}</span></div>
+  {:else if documented && (status === 'approved' || step === 'plan')}
+    <div class="banner ok documented" role="status"><Check size={15} aria-hidden="true" /> <span>{t('mado-v050.documented')}</span></div>
   {:else if status === 'approved' && step !== 'build'}
     <div class="banner ok" role="status"><Check size={15} aria-hidden="true" /> <span>{t('mado.approved.body')}</span></div>
   {/if}
@@ -247,16 +260,27 @@
           </div>
         {/if}
         <div class="pane" id="mado-pane" role={tabs.length > 1 ? 'tabpanel' : undefined} aria-labelledby={tabs.length > 1 && active ? `mado-tab-${active.id}` : undefined}>
-          {#if active?.kind === 'doc'}
+          {#if refusedWhy}
+            <div class="refused" role="alert"><FileWarning size={22} strokeWidth={1.6} aria-hidden="true" /><b>{t('mado-v050.refused.title')}</b><span dir="auto">{refusedWhy}</span></div>
+          {:else if active?.kind === 'change'}
+            <ProjectDoc text={store.change} label={t('mado-v050.change.tab')} max={60000} />
+          {:else if active?.kind === 'doc'}
             {#key active.name}<DocPane {store} name={active.name} canEdit={editable} {canComment} {focusId} oncomment={startComment} onpick={pick} />{/key}
           {:else if active?.kind === 'graph'}
             {#key active.name}<GraphPane {store} name={active.name} canEdit={editable} {canComment} oncomment={startComment} />{/key}
           {:else if active?.kind === 'conventions'}
             <ProjectDoc text={store.conventions} label={t('mado.tab.conventions')} max={60000} hint={t('mado.conventions.hint')} />
           {:else if active?.kind === 'tasks'}
+            {#if change}
+              <div class="change" aria-label={t('mado-v050.change.title')}>
+                <b dir="auto">{change.title}</b>
+                {#if change.features?.length}<span class="muted">{t('mado-v050.change.features')} {#each change.features.slice(0, 100) as f, i}{i ? ', ' : ''}<span class="pill">{f}</span>{/each}</span>{/if}
+                {#if change.files?.length}<span class="muted">{t('mado-v050.change.files')} {#each change.files.slice(0, 20) as f, i}{i ? ', ' : ''}<code dir="ltr">{f}</code>{/each}{#if change.files.length > 20} …{/if}</span>{/if}
+              </div>
+            {/if}
             <TaskList plan={store.plan} {comments} {canComment} focusId={focusTask} oncomment={startComment} />
           {:else if active?.kind === 'design'}
-            <DesignStep projectId={store.projectId} comments={commentsOnDesign(store.comments)} locked={!editable} version={store.designVersion} oncomment={(target) => startComment(target)} />
+            <DesignStep projectId={store.projectId} {existing} comments={commentsOnDesign(store.comments)} locked={!editable} version={store.designVersion} oncomment={(target) => startComment(target)} />
           {/if}
         </div>
       </div>
@@ -331,6 +355,14 @@
     .cols { grid-template-columns: 1fr; }
     .side { position: static; height: auto; max-height: 70vh; }
   }
+  .hintline { font-size: var(--fs-sm); }
+  .refused { display: grid; justify-items: center; gap: 6px; text-align: center; padding: 48px 20px; border: 1px dashed var(--border); border-radius: var(--radius-lg); }
+  .refused :global(svg) { color: var(--danger); }
+  .refused span { max-width: 60ch; font-size: 13.5px; color: var(--muted); }
+  .change { display: grid; gap: 4px; padding: 10px 14px; margin-bottom: 14px; border-radius: var(--radius-lg); background: var(--tint); color: var(--on-tint); font-size: 13.5px; }
+  .change .muted { color: inherit; opacity: .85; overflow-wrap: anywhere; }
+  .change code { font-size: var(--fs-xs); }
+  :global([data-theme="contrast"]) .change { background: var(--panel); color: var(--fg); border: var(--border-w) solid var(--border); }
   .strayed { align-items: flex-start; }
   .strayed .grow { display: grid; gap: 4px; min-width: 0; }
   .strayedlist { margin: 4px 0 0; padding: 0; list-style: none; display: grid; gap: 2px; max-height: 160px; overflow: auto; }

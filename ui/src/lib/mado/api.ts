@@ -3,7 +3,7 @@
 // they go into an address, so nothing typed or read from a file can reach another route.
 import { api, del, patch, post, put } from '../api';
 import type {
-  BuildGuide, BuildView, Comment, CommentStatus, CommentTarget, DesignTokens, GraphDoc, GraphName, GraphOp, MadoOptions, MadoOverview,
+  BuildGuide, BuildView, CodeGraphStatus, Comment, CommentStatus, CommentTarget, DesignTokens, GraphDoc, GraphName, GraphOp, MadoMode, MadoOptions, MadoOverview,
   PlanDoc, PlanEntry, Pos, Review, ScreenInfo, ScreenOffer, ScreenResult, StepId, StyleCandidate,
 } from './types';
 import { STEPS } from './types';
@@ -11,6 +11,7 @@ import { STEPS } from './types';
 export type DocName = 'brief' | 'spec' | 'tech' | 'design';
 export const DOC_NAMES: readonly DocName[] = ['brief', 'spec', 'tech', 'design'];
 export const GRAPH_NAMES: readonly GraphName[] = ['flow', 'architecture', 'schema', 'tasks'];
+const MODES: readonly MadoMode[] = ['new', 'existing'];
 
 /** What one change request carries (`POST /changes`). */
 export interface ChangeRequest { step: StepId; commentIds: string[]; graphOps?: { file: string; ops: GraphOp[] }[]; note?: string }
@@ -31,7 +32,8 @@ export function madoApi(projectId: string) {
   const step = (s: StepId) => oneOf(s, STEPS, 'step');
   return {
     overview: () => api<MadoOverview>(base),
-    start: () => post<unknown>(`${base}/start`),
+    /** Round 0.5.0: `mode` (optional) — 'existing' documents a built project, 'new' plans a new one; none keeps what the plan has. */
+    start: (mode?: MadoMode) => post<unknown>(`${base}/start`, mode ? { mode: oneOf(mode, MODES, 'mode') } : undefined),
 
     doc: (name: DocName) => api<{ text: string; exists?: boolean }>(`${base}/doc/${oneOf(name, DOC_NAMES, 'document')}`),
     saveDoc: (name: DocName, text: string) => put<unknown>(`${base}/doc/${oneOf(name, DOC_NAMES, 'document')}`, { text }),
@@ -92,6 +94,14 @@ export function madoApi(projectId: string) {
     /** → `{ ok: true, taken }`: how many results were taken (only screens offered, at the path offered, once). */
     sendScreens: (nonce: string, results: ScreenResult[]) => post<{ ok: boolean; taken: number }>(`${base}/build/screens`, { nonce, results }),
     buildGuide: () => api<BuildGuide>(`${base}/build/guide`),
+
+    // Round 0.5.0
+    /** `mado/change.md`: what the user wants changed in a built project (the plan step's, optional). */
+    change: () => api<{ text: string; exists?: boolean }>(`${base}/doc/change`),
+    /** The code graph card. (`/graph` alone; the plan's diagrams are `/graph/:name`.) */
+    codeGraph: () => api<CodeGraphStatus>(`${base}/graph`),
+    /** Build or update the code graph, by the service, in the background. */
+    buildCodeGraph: () => post<CodeGraphStatus>(`${base}/graph/build`),
   };
 }
 export type MadoApi = ReturnType<typeof madoApi>;

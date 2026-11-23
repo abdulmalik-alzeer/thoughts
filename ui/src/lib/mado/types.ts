@@ -66,7 +66,9 @@ export interface ScreenInfo { id: string; label: string; hasMock: boolean }
 /** `GET /design/styles`. `current` (round 0.5.0, existing mode only): the id of the candidate that is the product's look today, listed first. */
 export interface DesignStyles { styles: StyleCandidate[]; picked?: string; dropped: number; current?: 'current' }
 
-export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path' | 'bad-command' | 'no-repo' | 'no-branch' | 'uncommitted' | 'no-verify' | 'no-run' | 'no-contracts' | 'no-tests' | 'unchecked-screen';
+export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path' | 'bad-command' | 'no-repo' | 'no-branch' | 'uncommitted' | 'no-verify' | 'no-run' | 'no-contracts' | 'no-tests' | 'unchecked-screen'
+  /** Round 0.5.0, from the code graph when the user's code-review-graph tool has one (none blocks). */
+  | 'untouched-impact' | 'hidden-dependency' | 'change-outside-scope';
 export interface Problem { kind: ProblemKind; message: string; tasks?: string[] }
 export interface Lane { id: string; tasks: string[] }
 export interface Wave { lanes: Lane[] }
@@ -129,3 +131,20 @@ export interface BuildState {
 export interface BuildView extends BuildState { blocked?: string; confined?: boolean }
 
 export interface MadoEvent { type: 'mado'; projectId: string; what: 'state' | 'doc' | 'graph' | 'comments' | 'design' | 'build' }
+
+/** Round 0.5.0: the code graph card, `GET /api/mado/:projectId/graph` (`code_graph.rs`). The tool is the user's own
+ *  code-review-graph, used when installed; the app never installs it. `reason`: why a build cannot run now (null while
+ *  building or when it can); `error`: how the last build failed; `recommend`: what to tell the user, always there. */
+export type CodeGraphReason = 'not-linked' | 'untrusted' | 'no-repo' | 'git-programs' | 'no-sandbox' | 'unsafe-place' | 'missing' | 'old-tool';
+export interface CodeGraphStatus {
+  tool: { found: boolean; version: string | null; usable: boolean };
+  built: boolean;
+  builtAt: string | null;
+  files: number | null;
+  stale: boolean;
+  building: boolean;
+  progress: { done: number; total: number } | null;
+  reason: { code: string; message: string } | null;
+  error: { message: string; detail?: string } | null;
+  recommend: { text: string; command: string; url: string };
+}

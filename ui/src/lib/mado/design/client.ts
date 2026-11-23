@@ -3,7 +3,7 @@
 import { api, post, put } from '../../api';
 import type { DesignTokens, ScreenInfo, StyleCandidate } from '../types';
 
-export interface StylesAnswer { styles: StyleCandidate[]; picked?: string; dropped?: number }
+export interface StylesAnswer { styles: StyleCandidate[]; picked?: string; dropped?: number; /** Round 0.5.0, a built project: the candidate that is its look today. */ current?: string }
 
 export interface DesignClient {
   styles(projectId: string): Promise<StylesAnswer>;
