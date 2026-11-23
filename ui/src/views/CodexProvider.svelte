@@ -5,6 +5,7 @@
   // the password store and binds it to this one address, exactly as for Claude Code's service.
   import Icon from '../lib/Icon.svelte';
   import ProviderPresets from './ProviderPresets.svelte';
+  import HelpTip from '../lib/HelpTip.svelte';
   import { del, post, put } from '../lib/api';
   import { app, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
@@ -79,8 +80,7 @@
 </script>
 
 {#if installed || kind !== 'own'}
-  <h3>{t('prov5.codex.title')}</h3>
-  <p class="muted sm">{t('prov5.codex.hint')}</p>
+  <h3>{t('prov5.codex.title')} <HelpTip text={t('prov5.codex.hint')} label={t('prov5.codex.title')} /></h3>
   {#if kind === 'service'}<p class="sm"><span class="pill accent">{t('prov5.codex.on')}</span></p>
   {:else if kind === 'incomplete'}<p class="err sm" role="status">{t('prov5.codex.incomplete')}</p>{/if}
   <ProviderPresets program="codex" {url} disabled={readOnly} onpick={(u, n) => { url = u; noKey = n; test = null; }} />
@@ -91,23 +91,22 @@
     <label class="check"><input type="checkbox" bind:checked={noKey} disabled={readOnly} aria-describedby="st-cx-nokey" /> {t('prov5.noKey')}</label>
     <p class="muted sm" id="st-cx-nokey">{t('prov5.codex.noKeyHint')}</p>
   {/if}
-  <label for="st-cx-key">{t('prov5.codex.key')} {#if saved.hasApiToken}<span class="pill accent">{t('prov5.codex.keyOn')}</span>{:else if saved.keyless && kind === 'service'}<span class="pill">{t('prov5.keylessPill')}</span>{/if}</label>
+  <label for="st-cx-key">{t('prov5.codex.key')} <HelpTip text={t('prov5.codex.keyHint')} label={t('prov5.codex.key')} /> {#if saved.hasApiToken}<span class="pill accent">{t('prov5.codex.keyOn')}</span>{:else if saved.keyless && kind === 'service'}<span class="pill">{t('prov5.keylessPill')}</span>{/if}</label>
   <input id="st-cx-key" dir="ltr" type="password" bind:value={token} placeholder="sk-…" aria-describedby={err ? 'st-cx-err' : undefined} autocomplete="off" disabled={readOnly || sendNoKey} />
   {#if err}<p class="err" id="st-cx-err" role="alert">{err}</p>{/if}
   <div class="row wrap gap-top">
     <button type="button" class="btn primary" disabled={!dirty || !!err || busy.save || readOnly} aria-busy={busy.save} onclick={save}>{t('runa.prov.save')}</button>
     <button type="button" class="btn" disabled={!canTest || busy.test} aria-busy={busy.test} onclick={tryIt}>{busy.test ? t('runa.prov.testing') : t('runa.prov.test')}</button>
+    <HelpTip text={t('runc.prov.testHint')} label={t('runa.prov.test')} />
     <button type="button" class="btn danger" disabled={kind === 'own' || busy.save || readOnly} onclick={remove}>{t('runa.prov.remove')}</button>
   </div>
   {#if test}<p class="sm" class:err={!test.ok} role="status" dir="auto">{test.ok ? t('runa.prov.testOk') : test.message}</p>{/if}
-  <p class="muted sm">{t('runc.prov.testHint')}</p>
   {#if kind === 'service'}
     <div class="row wrap gap-top">
       <button type="button" class="btn" disabled={dirty || busy.models} aria-busy={busy.models} aria-describedby="st-cx-models" onclick={loadModels}><Icon name="sync" size={14} /> {busy.models ? t('prov5.models.loading') : t('prov5.models.load')}</button>
     </div>
     <p class="muted sm" id="st-cx-models">{t('prov5.models.hint')}</p>
   {/if}
-  <p class="muted sm">{t('prov5.codex.keyHint')}</p>
 {/if}
 
 <style>

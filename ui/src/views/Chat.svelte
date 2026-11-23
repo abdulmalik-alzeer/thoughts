@@ -217,8 +217,6 @@
       const first = initial || !shownOnce;
       shownOnce = true;
       c.options ??= {} as Chat['options'];
-      // "Ask before changes" no longer exists: an older chat that stored it is read-only.
-      if (c.options.permissionMode === 'default') c.options.permissionMode = 'plan';
       // A chat from before every chat stored its mode: it runs with accept-edits, so show that.
       if (!c.options.permissionMode) c.options.permissionMode = 'acceptEdits';
       savedPerm = c.options.permissionMode ?? null;
@@ -310,6 +308,8 @@
       if (e.type === 'resync') { load(); return; }
       // Codex answered with its models (asked in the background): the menu takes them in.
       if (e.type === 'codex.models') { if (optsFor === 'codex') { optsFor = ''; loadOpts('codex'); } return; }
+      // What the agent offers was read again over ACP (or its adapter was just installed).
+      if (e.type === 'acp.options' || e.type === 'acp.installed') { if (optsFor === e.program) { optsFor = ''; loadOpts(e.program); } return; }
       if (e.chatId !== id && e.chat?.id !== id) return;
       // While the chat is being fetched, events are kept: the copy on its way may or may not include them.
       fetches.hold(e);
@@ -359,7 +359,6 @@
   let sending = false;   // a message is on its way to the service and its answer has not come back yet
   async function sendBody(body: any, failKey = 'chat3.sendFailed') {
     if (sending) return false;
-    if (body.options?.permissionMode === 'default') body.options = { ...body.options, permissionMode: 'plan' };
     chat.running = true;
     sending = true;
     stick = true;
@@ -780,7 +779,12 @@
   const label = (prefix: string, v: string) => { const k = `${prefix}.${v}`; const s = t(k); return s === k ? v : s; };
   const usd = fmtMoney;
   // Claude Code's modes, as far as the service allows them. Bypass is for ordinary chats only.
-  const permModes = $derived((opts.permissionModes as string[]).filter((m) => m === 'acceptEdits' || m === 'plan' || (m === BYPASS && chat?.kind === 'chat')));
+  // Every mode the agent reports (over ACP) and the daemon accepts, under the agent's own names.
+  // Bypass and Auto (Claude Code's classifier approves) are for ordinary chats only.
+  const permModes = $derived((opts.permissionModes as string[]).filter((m) => (m !== BYPASS && m !== 'auto') || chat?.kind === 'chat'));
+  /** The agent's own name for a mode or effort level when it reported one; else the app's label. */
+  const optLabel = (prefix: string, v: string) =>
+    (prefix.endsWith('.perm') ? opts.modeNames?.[v] : prefix.endsWith('.effort') ? opts.effortNames?.[v] : undefined) ?? label(prefix, v);
 </script>
 
 {#if loadState === 'loading'}
@@ -1060,7 +1064,7 @@
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
           <DictateButton target={() => input} />
           <!-- Model, effort and what the assistant may do: one control; the mode is always named on it. -->
-          <ChatOptions options={chat.options} models={opts.models} efforts={chatEfforts} modes={permModes} {label} {modelNote}
+          <ChatOptions options={chat.options} models={opts.models} modelNames={opts.modelNames ?? {}} efforts={chatEfforts} modes={permModes} label={optLabel} {modelNote}
             permPrefix={onCodex ? 'codex.perm' : 'chat3.perm'} hintPrefix={onCodex ? 'codex.perm' : 'set.perm'} effortPrefix={onCodex ? 'codex.effort' : 'chat.effort'}
             {programs} program={chat.provider} onprogram={programs.every((p) => p.ok) && !chat.running ? moveProgram : undefined}
             onmodel={modelChanged} extraModel={{ value: MODEL_OTHER, label: t('runc.model.other') }} oneffort={effortChanged}

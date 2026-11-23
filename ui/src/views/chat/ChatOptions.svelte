@@ -5,10 +5,13 @@
   // comes from the installed assistant program; nothing here is a fixed list of models or modes.
   import Icon from '../../lib/Icon.svelte';
   import { t } from '../../lib/i18n';
+  import HelpTip from '../../lib/HelpTip.svelte';
 
-  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram, modelNote = '', plain = false, below = false, busy = false }: {
+  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram, modelNote = '', plain = false, below = false, busy = false, modelNames = {} }: {
     options: { model?: string | null; effort?: string | null; permissionMode?: string | null };
     models: string[]; efforts: string[]; modes: string[];
+    /** The names the agent gives its models (over ACP), shown instead of the bare ids. */
+    modelNames?: Record<string, string>;
     /** Where the names of the modes and efforts are (Codex has names of its own for them). */
     permPrefix?: string; hintPrefix?: string; effortPrefix?: string;
     /** The assistant programs this chat can be moved between, when there are two. */
@@ -93,7 +96,7 @@
           <span class="lbl">{t('model')}</span>
           <select value={options.model ?? ''} onchange={onmodel} disabled={busy}>
             <option value="">{t('chatc.opt.auto')}</option>
-            {#each models as m (m)}<option value={m}>{m}</option>{/each}
+            {#each models as m (m)}<option value={m}>{modelNames[m] ?? m}</option>{/each}
             {#if options.model && !models.includes(options.model)}<option value={options.model}>{options.model}</option>{/if}
             {#if extraModel}<option value={extraModel.value}>{extraModel.label}</option>{/if}
           </select>
@@ -109,7 +112,7 @@
         {/if}
       </div>
       {#if modelNote}<p class="sm note model-note" role="status">{modelNote}</p>{/if}
-      <p class="muted sm note">{t(plain ? 'mado.opts.hint' : 'chatc.opt.modelHint')}</p>
+      <p class="muted sm note help"><HelpTip text={t(plain ? 'mado.opts.hint' : 'chatc.opt.modelHint')} label={t('model')} /></p>
     </div>
   {/if}
 </span>
@@ -140,6 +143,7 @@
   .field, .lbl { margin: 0; }
   .field select { width: 100%; font-size: var(--fs-xs); padding: 4px 6px; }
   .note { margin: 0; }
+  .help { display: flex; justify-content: flex-end; }
   .model-note { margin-bottom: 6px; padding: 6px 8px; border-radius: var(--radius); background: var(--fill); color: var(--fg); }
   .progs { display: flex; gap: 4px; flex-wrap: wrap; }
   .prog { flex: 1 1 120px; }

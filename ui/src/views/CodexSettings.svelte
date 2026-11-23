@@ -11,9 +11,13 @@
   import { failed } from '../lib/errors';
   import { copyText } from '../lib/content/util';
   import { modelsNoteKey, versionNumber } from '../lib/codexModels';
+  import SubscriptionRisk from '../lib/SubscriptionRisk.svelte';
+  import HelpTip from '../lib/HelpTip.svelte';
 
-  let { ai = $bindable(), part, vis, readOnly = false }: {
+  let { ai = $bindable(), part, vis, readOnly = false, riskAck = $bindable((app.settings as any)?.subscriptionRiskAck ?? null) }: {
     ai: any; part: 'which' | 'codex' | 'advanced';
+    /** `settings.subscriptionRiskAck`: a ChatGPT-subscription sign-in waits until the user acknowledged the risk. */
+    riskAck?: string | null;
     /** Settings search: is a row with one of these labels to be shown? */
     vis: (...keys: string[]) => boolean;
     readOnly?: boolean;
@@ -63,7 +67,7 @@
   }
 
   async function signIn() {
-    if (busy.login) return;
+    if (busy.login || (!riskAck && !ai?.codex?.baseUrl)) return;
     busy.login = true;
     try { await post('/ai/codex/login'); toast(t('codex.set.signInToast'), { key: 'auth' }); }
     catch (e) { failed(t('codex.set.signInFailed'), e); }
@@ -107,16 +111,19 @@
     {#if !codex.installed && ai.primary !== 'codex'}<p class="muted sm">{t('codex.set.needsInstall')}</p>{/if}
   </fieldset>
 {:else if part === 'codex' && vis('codex.set.title', 'codex.set.limitsTitle')}
-  <h3><bdi>Codex</bdi></h3>
-  <p class="muted sm">{t('codex.set.intro')}</p>
+  <h3><bdi>Codex</bdi> <HelpTip text={t('codex.set.intro')} label="Codex" /></h3>
   <div class="row wrap">
     <span class="pill" class:accent={codex.installed && codex.loggedIn}>{said(codex, 'codex')}</span>
     {#if codex.installed && !codex.loggedIn}
-      <button type="button" class="btn primary" disabled={busy.login || readOnly} aria-busy={busy.login} onclick={signIn}>{t('codex.set.signIn')}</button>
+      <button type="button" class="btn primary" disabled={busy.login || readOnly || (!riskAck && !ai?.codex?.baseUrl)} aria-busy={busy.login} onclick={signIn}>{t('codex.set.signIn')}</button>
     {/if}
     {#if codex.version}<span class="muted sm" dir="ltr"><bdi>{codex.version}</bdi></span>{/if}
     <button type="button" class="btn ghost" disabled={busy.check} aria-busy={busy.check} onclick={check}><Icon name="sync" size={14} /> {busy.check ? t('codex.set.checking') : t('codex.set.check')}</button>
   </div>
+  {#if codex.installed && !codex.loggedIn && !ai?.codex?.baseUrl}
+    <SubscriptionRisk bind:ack={riskAck} disabled={readOnly} />
+    {#if !riskAck}<p class="muted sm" role="status">{t('subRisk.needAck')}</p>{/if}
+  {/if}
   {#if !codex.installed}
     <div class="install" role="group" aria-label={t('codex.set.installTitle')}>
       <p class="sm"><b>{t('codex.set.installTitle')}</b></p>
@@ -146,10 +153,9 @@
 {:else if part === 'advanced' && ai.codex && vis('codex.set.model', 'codex.set.effort', 'codex.set.mini', 'codex.set.binary')}
   <h3><bdi>Codex</bdi></h3>
   {#if vis('codex.set.model')}
-    <label for="st-cx-model">{t('codex.set.model')}</label>
+    <label for="st-cx-model">{t('codex.set.model')} <HelpTip text={t('codex.set.modelHint')} /></label>
     <input id="st-cx-model" dir="ltr" list="st-cx-models" bind:value={ai.codex.model} placeholder={t('codex.set.auto')} autocomplete="off" />
     <datalist id="st-cx-models">{#each opts.models as m (m)}<option value={m}></option>{/each}</datalist>
-    <p class="muted sm">{t('codex.set.modelHint')}</p>
     {#if opts.throughProvider}
       <!-- Another provider: its own list ("Load models from the service"), never OpenAI's catalogue. -->
       <p class="muted sm" role="status">{t('prov5.codex.modelsNote')}</p>
@@ -169,14 +175,12 @@
     </select>
   {/if}
   {#if vis('codex.set.mini')}
-    <label for="st-cx-mini">{t('codex.set.mini')}</label>
+    <label for="st-cx-mini">{t('codex.set.mini')} <HelpTip text={t('codex.set.miniHint')} /></label>
     <input id="st-cx-mini" dir="ltr" list="st-cx-models" bind:value={ai.codex.miniWrapModel} placeholder={t('codex.set.auto')} autocomplete="off" />
-    <p class="muted sm">{t('codex.set.miniHint')}</p>
   {/if}
   {#if vis('codex.set.binary')}
-    <label for="st-cx-bin">{t('codex.set.binary')}</label>
+    <label for="st-cx-bin">{t('codex.set.binary')} <HelpTip text={t('codex.set.binaryHint')} /></label>
     <input id="st-cx-bin" dir="ltr" bind:value={ai.codex.binary} placeholder={codex.path || t('codex.set.auto')} autocomplete="off" />
-    <p class="muted sm">{t('codex.set.binaryHint')}</p>
   {/if}
 {/if}
 
