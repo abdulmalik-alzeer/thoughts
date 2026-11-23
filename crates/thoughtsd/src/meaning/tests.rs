@@ -218,6 +218,8 @@ fn a_snippet_is_read_only_while_the_piece_is_unchanged() {
     let root = tmp();
     put(&root, "n.md", "# Note\n\nfirst line\nthe fruit we like is apple\n");
     let text = std::fs::read_to_string(root.join("n.md")).unwrap();
+    let (s0, line0, _) = index::snippet(&root, &Chunk { path: "n.md".into(), start: 0, end: text.len(), sha: index::short_sha(text.as_bytes()) }, 400).unwrap();
+    assert_eq!((s0.as_str(), line0), ("first line the fruit we like is apple", 1), "the heading is not repeated");
     let start = text.find("the fruit").unwrap();
     let end = start + "the fruit we like is apple".len();
     let c = Chunk { path: "n.md".into(), start, end, sha: index::short_sha(&text.as_bytes()[start..end]) };

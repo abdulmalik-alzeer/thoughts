@@ -363,7 +363,11 @@ pub fn snippet(root: &Path, c: &Chunk, chars: usize) -> Option<(String, usize, S
     let ttl = title(&c.path, &text);
     let piece = text.as_bytes().get(c.start..c.end)?;
     if short_sha(piece) != c.sha || !text.is_char_boundary(c.start) || !text.is_char_boundary(c.end) { return None; }
-    let words = text[c.start..c.end].split_whitespace().collect::<Vec<_>>().join(" ");
+    // Headings are left out of the words shown (the title is shown already), unless that is all there is.
+    let piece = &text[c.start..c.end];
+    let body: Vec<&str> = piece.lines().filter(|l| !is_heading(l.trim_start())).collect();
+    let shown_from = if body.iter().any(|l| !l.trim().is_empty()) { body.join(" ") } else { piece.to_string() };
+    let words = shown_from.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut shown: String = words.chars().take(chars).collect();
     if words.chars().count() > chars { shown.push('…'); }
     let line = text[..c.start].matches('\n').count() + 1;

@@ -164,7 +164,7 @@
       {/each}
     {/if}
     {#if total >= 40}<p class="muted sm more">{t('srch.more')}</p>{/if}
-    <p class="sr-only" role="status">{tn('srch.count', total)}</p>
+    <p class="sr-only" role="status">{tn('srch.count', total + (show !== 'chats' ? relatedNotes.length : 0))}</p>
   {:else}
     <div class="pad" role="status" aria-busy="true"><span class="sr-only">{t('srch.searching')}</span><div class="skel h"></div><div class="skel"></div><div class="skel w70"></div></div>
   {/if}

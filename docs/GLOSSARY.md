@@ -147,3 +147,4 @@ freely.
 | Walk me through it in a chat | أرشدني إلى ذلك في محادثة | Opens a new chat with an unsent request. |
 | Email writing (routine) | كتابة رسائل البريد | The ready-made routine for drafting email. |
 | Open in Mail | افتح في البريد | The link that opens the user's own mail app with the draft filled in. Thoughts never sends email. |
+| Search by meaning · Related by meaning | البحث بالمعنى · مرتبطة بالمعنى | Optional (Settings › Features). Finds notes by what they are about, on this computer. *Switch on and download* «التفعيل والتنزيل» · *Getting your notes ready* «جارٍ تجهيز ملاحظاتك» · *Remove search by meaning* «إزالة البحث بالمعنى». Never "vector", "embedding" or "index" in the app. |

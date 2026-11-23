@@ -173,3 +173,18 @@ For a location that needs a sign-in, the check uses the sign-in you saved and ne
 ## Suggest automations
 
 **Customise › Automate** can suggest routines, helpers, connections and new pages from how you use Thoughts. Nothing is sent until you press **Suggest automations**, and you can read exactly what will be sent first. See [Suggest automations](CUSTOMISING.md#suggest-automations), and [Privacy](PRIVACY.md#what-is-sent-to-the-ai-provider) for what leaves your computer.
+
+## Search by meaning
+
+**What it is.** Word search finds notes that contain your words. **Search by meaning** also finds notes about what you mean when the words differ, in Arabic and English: an Arabic question can find an English note about the same thing. It runs on this computer; nothing about your notes is sent anywhere.
+
+**Off until you switch it on.** In **Settings › Features › Search by meaning**, the app shows the model it uses (Multilingual E5 small, about 465 MB, MIT licence) and **Switch on and download**. Nothing is downloaded before you press it. The model comes from Hugging Face, where it is published, and is checked against its known fingerprint before it is used. The download shows a bar like an app update's; **Pause** stops it and **Continue** goes on from where it stopped (also after a restart or a dropped connection); **Cancel** deletes what was downloaded.
+
+**Getting your notes ready.** Once the model is in, the app reads your notes in the background, outside private folders, and shows **Getting your notes ready: N of M**. You can go on working. After that it follows your changes by itself. Making a folder private takes its notes out at once.
+
+**Using it.** The search page shows **Related by meaning** under the word results (notes already found by their words are not repeated). Ordinary chats are told which notes may relate to your message, by their names only; the assistant reads them if they help.
+
+**When the app suggests it.** Never switched on by itself. It may suggest it when your library is large, when a search of two or more words finds nothing, or when the assistant could not find what you meant (a card under its answer: **Set it up**, **Not now** for 30 days, or **Don't ask again**).
+
+**Removing it.** **Remove search by meaning** deletes the model and what was made from your notes, says how much space that frees, and switches it off. Your notes are not touched.
+
