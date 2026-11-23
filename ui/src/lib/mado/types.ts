@@ -4,8 +4,18 @@ export const STEPS = ['brief', 'spec', 'tech', 'design', 'plan', 'review', 'buil
 export type StepId = (typeof STEPS)[number];
 export type StepStatus = 'locked' | 'ready' | 'drafting' | 'review' | 'approved' | 'stale';
 export interface StepState { status: StepStatus; chatId?: string; approvedAt?: string; /** paths the last run changed outside mado/; blocks approval until dismissed */ strayed?: string[]; /** that check could not be made; blocks approval until dismissed too */ strayUnchecked?: boolean }
-export interface MadoState { version: 1; steps: Record<StepId, StepState>; style?: string; plan_hash?: string }
-export interface MadoOverview { project: { id: string; name: string; path: string }; exists: boolean; state: MadoState | null; files: string[] }
+/** Round 0.5.0: `mode` absent = a new project (every plan of 0.3.x/0.4.x); 'existing' = a built project documented
+ *  from its code, whose plan is a change. `documented`: when its technical design was last approved (display only). */
+export type MadoMode = 'new' | 'existing';
+export interface Documented { at: string }
+export interface MadoState { version: 1; steps: Record<StepId, StepState>; style?: string; plan_hash?: string; mode?: 'existing'; documented?: Documented }
+/** Round 0.5.0: what the linked folder holds, from a bounded walk of names (docs/mado-spec.md "Round 0.5.0"). */
+export interface DetectedLanguage { lang: string; files: number }
+export interface Detected { hasCode: boolean; languages: DetectedLanguage[]; files: number; hasReadme: boolean; manifests: string[]; capped: boolean }
+/** `detected`: null when the app could not look (the folder is not trusted yet). */
+export interface MadoOverview { project: { id: string; name: string; path: string }; exists: boolean; state: MadoState | null; files: string[]; detected?: Detected | null }
+/** `POST /start` body (optional). */
+export interface StartBody { mode?: MadoMode }
 
 export type GraphKind = 'flow' | 'architecture' | 'erd' | 'tasks';
 export type GraphName = 'flow' | 'architecture' | 'schema' | 'tasks';
@@ -29,7 +39,9 @@ export type GraphOp =
 export type TaskKind = 'contracts' | 'tests' | 'feature';
 export interface PlanTask { id: string; title: string; description: string; owns: string[]; dependsOn: string[]; acceptance: string[]; feature: string; screens?: string[]; kind?: TaskKind }
 export interface PlanRun { start: string; url: string; screens: { id: string; path: string }[] }
-export interface PlanDoc { version: 1; tasks: PlanTask[]; /** run once in each fresh working copy before any task */ setup?: string[]; /** run in the merged copy after every wave */ verify?: string[]; run?: PlanRun }
+/** Round 0.5.0: what a plan of an existing project changes. */
+export interface PlanChange { title: string; features: string[]; files?: string[] }
+export interface PlanDoc { version: 1; tasks: PlanTask[]; /** run once in each fresh working copy before any task */ setup?: string[]; /** run in the merged copy after every wave */ verify?: string[]; run?: PlanRun; change?: PlanChange }
 
 export type CommentTarget =
   | { kind: 'text'; file: string; quote: string; prefix: string; suffix: string; heading?: string }
@@ -51,6 +63,8 @@ export interface DesignTokens {
 }
 export interface StyleCandidate { id: string; name: string; description: string; tokens: DesignTokens; source: 'app' | 'assistant' }
 export interface ScreenInfo { id: string; label: string; hasMock: boolean }
+/** `GET /design/styles`. `current` (round 0.5.0, existing mode only): the id of the candidate that is the product's look today, listed first. */
+export interface DesignStyles { styles: StyleCandidate[]; picked?: string; dropped: number; current?: 'current' }
 
 export type ProblemKind = 'cycle' | 'missing-dep' | 'overlap' | 'untraced-feature' | 'untraced-screen' | 'unknown-feature' | 'empty-acceptance' | 'bad-path' | 'bad-command' | 'no-repo' | 'no-branch' | 'uncommitted' | 'no-verify' | 'no-run' | 'no-contracts' | 'no-tests' | 'unchecked-screen';
 export interface Problem { kind: ProblemKind; message: string; tasks?: string[] }
