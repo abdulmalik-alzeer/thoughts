@@ -167,6 +167,8 @@ pub async fn ensure_in(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
             mark_system_head(g, dir).await;
         }
     }
+    // Plugins: an older layer format is brought up to date, and packs kept before plugins existed are listed as plugins.
+    crate::bundles::ensure(g, d).await;
     Ok(())
 }
 
@@ -317,16 +319,17 @@ pub async fn manifest() -> Value { manifest_of(&Dirs::real().layer) }
 pub fn manifest_of(dir: &Path) -> Value { manifest_lang(dir, false) }
 
 /// Same, with user-facing messages in the UI language.
-pub fn manifest_lang(dir: &Path, arabic: bool) -> Value { manifest_with(&dir, arabic, &switched_off(dir)) }
+pub fn manifest_lang(dir: &Path, arabic: bool) -> Value { manifest_with(&dir, arabic, &switched_off(dir), &crate::bundles::load(dir)) }
 
 /// The staged layer for "Try it": what the user switched off stays off. The switched-off list is
 /// the live layer's, since only the app writes it and a staged copy of it is never kept.
-pub fn manifest_preview(staging: &Path, layer: &Path, arabic: bool) -> Value { manifest_with(&staging, arabic, &switched_off(layer)) }
+/// The same goes for plugins: which are off is read from the kept layer's `bundles.json`.
+pub fn manifest_preview(staging: &Path, layer: &Path, arabic: bool) -> Value { manifest_with(&staging, arabic, &switched_off(layer), &crate::bundles::load(layer)) }
 
 /// `manifest_preview` built from `files` (see `Overlay`) without touching any folder but the kept layer.
-pub fn manifest_preview_files(files: &Overlay<'_>, arabic: bool) -> Value { manifest_with(files, arabic, &switched_off(files.base)) }
+pub fn manifest_preview_files(files: &Overlay<'_>, arabic: bool) -> Value { manifest_with(files, arabic, &switched_off(files.base), &crate::bundles::load(files.base)) }
 
-fn manifest_with(dir: &dyn LayerFiles, arabic: bool, off: &BTreeSet<String>) -> Value {
+fn manifest_with(dir: &dyn LayerFiles, arabic: bool, off: &BTreeSet<String>, bundles: &crate::bundles::BundlesFile) -> Value {
     let text = |p: &str| dir.file(p).and_then(|b| String::from_utf8(b).ok());
     let read = |p: &str| text(p).unwrap_or_default();
     let parsed = |p: &str| text(p).and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
@@ -348,7 +351,7 @@ fn manifest_with(dir: &dyn LayerFiles, arabic: bool, off: &BTreeSet<String>) -> 
         v.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         v
     };
-    json!({
+    let mut out = json!({
         "apiVersion": API_VERSION,
         "css": read("custom.css"),
         "themes": serde_json::from_str::<Value>(&read("themes.json")).ok().filter(Value::is_array).unwrap_or(json!([])),
@@ -364,7 +367,10 @@ fn manifest_with(dir: &dyn LayerFiles, arabic: bool, off: &BTreeSet<String>) -> 
         "off": off.iter().filter(|p| dir.has_file(p)).collect::<Vec<_>>(),
         // Built-in pages the user chose to keep although a customisation replaces them (`builtin_in`).
         "builtin": builtin_pages_of(dir),
-    })
+    });
+    // What belongs to a plugin that is switched off (or that this version cannot run) is not handed to the UI either.
+    crate::bundles::subtract_for_load(dir, bundles, &mut out);
+    out
 }
 
 // ---------- switching one add-on or page off, removing it ----------
@@ -399,6 +405,24 @@ fn write_off(dir: &Path, off: &BTreeSet<String>) -> anyhow::Result<()> {
     let mut o = read_object(&dir.join(ADDONS_FILE)).unwrap_or_default();
     o.insert("off".into(), json!(off));
     write_json(&dir.join(ADDONS_FILE), &Value::Object(o))
+}
+
+/// Switch the add-ons and pages `paths` on or off in the list (for a plugin that is switched or
+/// removed as a whole). → whether the list changed.
+pub(crate) fn set_switched(dir: &Path, paths: &[String], on: bool) -> anyhow::Result<bool> {
+    let mut off = switched_off(dir);
+    let before = off.clone();
+    for p in paths.iter().filter(|p| item_path(p).is_some()) { if on { off.remove(p); } else { off.insert(p.clone()); } }
+    if off == before { return Ok(false); }
+    write_off(dir, &off)?;
+    Ok(true)
+}
+
+/// `addons.json` as it would read with `off` as its switched-off list (everything else it holds kept).
+pub(crate) fn off_text(dir: &Path, off: &BTreeSet<String>) -> anyhow::Result<String> {
+    let mut o = read_object(&dir.join(ADDONS_FILE)).unwrap_or_default();
+    o.insert("off".into(), json!(off));
+    Ok(serde_json::to_string_pretty(&Value::Object(o))? + "\n")
 }
 
 /// A change the app makes to the live layer for the user, outside a review: `edit` changes the
@@ -756,7 +780,8 @@ fn kind_of(marks: &Marks, hash: &str, parents: &str) -> &'static str {
 fn entry_of(marks: &Marks, hash: &str, parents: &str, stored: &str) -> &'static str {
     match kind_of(marks, hash, parents) {
         "start" => return "start",
-        "system" => return if stored.starts_with(DEFAULTS_SUBJECT) { "defaults" } else { "guide" },
+        "system" => return if stored.starts_with(DEFAULTS_SUBJECT) { "defaults" } else if stored == crate::bundles::ORGANISE_SUBJECT { "plugins-organise" }
+            else if stored.starts_with(crate::bundles::FORMAT_SUBJECT) { "plugins-format" } else { "guide" },
         "undo" => return "undo",
         _ => {}
     }
@@ -769,6 +794,10 @@ fn entry_of(marks: &Marks, hash: &str, parents: &str, stored: &str) -> &'static 
         Some("sidebar") => "sidebar",
         Some("builtin") => "builtin",
         Some("keys") => "keys",
+        Some("plugin-on") => "plugin-on",
+        Some("plugin-off") => "plugin-off",
+        Some("plugin-remove") => "plugin-remove",
+        Some("plugin-describe") => "plugin-describe",
         _ if marks.packs.contains_key(hash) => "pack",
         _ => "change",
     }
@@ -848,6 +877,8 @@ fn title_of(marks: &Marks, hash: &str, parents: &str, raw: &str, ar: bool, depth
             if ar { format!("إضافة الحزمة «{n}»") } else { format!("Added the pack \u{201c}{n}\u{201d}") }
         }
         "keys" => crate::keys::act_title(ar),
+        kind @ ("plugin-on" | "plugin-off" | "plugin-remove" | "plugin-describe") => crate::bundles::act_title(kind, &act, ar),
+        kind @ ("plugins-organise" | "plugins-format") => crate::bundles::system_title(kind, &stored, ar),
         _ => stored,
     }
 }
@@ -900,6 +931,13 @@ pub async fn kept_packs(g: Git<'_>, dir: &Path) -> Vec<(String, PackMark)> {
     let m = load_marks(g, dir).await;
     let order: Vec<String> = log_records(g, dir, &["--reverse"], &["%H", "%s"]).await.into_iter().map(|mut p| p.remove(0)).collect();
     order.into_iter().filter_map(|h| m.packs.get(&h).map(|p| (h.clone(), p.clone()))).collect()
+}
+
+/// The kept packs that are still part of the layer (not undone), oldest first: `(entry, pack, the entry's title as stored)`.
+pub(crate) async fn kept_packs_in_effect(g: Git<'_>, dir: &Path) -> Vec<(String, PackMark, String)> {
+    let m = load_marks(g, dir).await;
+    log_records(g, dir, &["--reverse"], &["%H", "%s"]).await.into_iter()
+        .filter_map(|p| m.packs.get(&p[0]).filter(|_| m.in_effect(&p[0])).map(|k| (p[0].clone(), k.clone(), clean_subject(&p[1])))).collect()
 }
 
 async fn mark_act(g: Git<'_>, dir: &Path, act: Act) {
@@ -962,7 +1000,18 @@ pub async fn revert_in(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<()>
         _ => {}
     }
     let subject = clean_subject(&rec[2]);
-    if let Err(e) = g.run(dir, &["revert", "--no-commit", "--end-of-options", &full]).await {
+    let reverted = g.run(dir, &["revert", "--no-commit", "--end-of-options", &full]).await;
+    // The record of plugins is undone by what it means, never as lines of text (`bundles::settle_undo`):
+    // when it is the only file git could not merge, the undo goes ahead with the record settled that way.
+    let unmerged = if reverted.is_err() { g.run(dir, &["diff", "--name-only", "--diff-filter=U"]).await.unwrap_or_default() } else { String::new() };
+    let only_record = unmerged.lines().map(str::trim).filter(|l| !l.is_empty()).eq([crate::bundles::FILE]);
+    let settled = if reverted.is_ok() || only_record { crate::bundles::settle_undo(g, dir, &full, only_record).await } else { Ok(()) };
+    let failed = match (&reverted, &settled) {
+        (_, Err(e)) => Some(e.to_string()),
+        (Err(e), Ok(())) if !only_record => Some(e.to_string()),
+        _ => None,
+    };
+    if let Some(e) = failed {
         let _ = g.run(dir, &["revert", "--abort"]).await;
         let _ = g.run(dir, &["reset", "-q", "--hard", "HEAD"]).await;
         crate::log::warn(format!("layer: revert of {hash} failed: {e}"));

@@ -149,10 +149,27 @@ fn save_approved(home: &Path, a: &Approved) -> anyhow::Result<()> {
 
 fn is_approved(a: &Approved, l: &Loaded) -> bool { a.get(&l.file) == Some(&l.hash) }
 
-/// The workflows the runner may start: valid, and approved in their current form.
+/// The workflows the runner may start: valid, approved in their current form, and not switched off.
 pub fn approved_workflows(layer: &Path, home: &Path) -> Vec<Loaded> {
-    let a = load_approved(home);
-    load_files(layer).into_iter().filter(|l| is_approved(&a, l)).collect()
+    runnable(&load_files(layer), &load_approved(home), &crate::bundles::inactive_workflows(layer))
+}
+
+/// The one rule for what may start, from any trigger: approved in exactly this form, and not
+/// switched off (its plugin, or the task on its own: `bundles::inactive_workflows`).
+fn runnable(loaded: &[Loaded], approved: &Approved, off: &std::collections::BTreeSet<String>) -> Vec<Loaded> {
+    loaded.iter().filter(|l| is_approved(approved, l) && !off.contains(&l.file)).cloned().collect()
+}
+
+/// What stays in the runner's queue: only what may still start. A task queued before its plugin was
+/// switched off (or its approval went) is dropped, not started later.
+fn keep_queued(queue: &mut VecDeque<String>, workflows: &[Loaded]) {
+    queue.retain(|file| workflows.iter().any(|l| &l.file == file));
+}
+
+/// "Run now" is refused for a task that is switched off: off means it does nothing, by hand too.
+fn refuse_if_off(layer: &Path, file: &str) -> anyhow::Result<()> {
+    if crate::bundles::inactive_workflows(layer).contains(file) { return Err(crate::tr::err("plugin.task_off", &[])); }
+    Ok(())
 }
 
 /// The workflow in file `file` — looked up by its file only, never by its name.
@@ -526,10 +543,12 @@ pub fn status(layer: &Path, home: &Path, now: NaiveDateTime) -> Vec<Value> {
     let loaded = load_files(layer);
     migrate(&mut state, &loaded);
     let approved = load_approved(home);
+    let off = crate::bundles::inactive_workflows(layer);
     loaded.iter().map(|l| {
         let w = &l.workflow;
         let seen = state.get(&l.file);
         let ok = is_approved(&approved, l);
+        let is_off = off.contains(&l.file);
         let last = seen.and_then(|s| s.results.first());
         // A skip is news only until something ran after it.
         let skipped = seen.and_then(|s| s.skipped).filter(|t| seen.and_then(|s| s.last_run).map_or(true, |r| r < *t));
@@ -537,7 +556,9 @@ pub fn status(layer: &Path, home: &Path, now: NaiveDateTime) -> Vec<Value> {
             "name": w.name, "file": l.file, "hash": l.hash, "trigger": w.trigger, "prompt": w.prompt, "approved": ok,
             "duplicateName": l.duplicate_name,
             "lastRun": seen.and_then(|s| s.last_run.or(last.and_then(|r| r.started))).map(local_iso),
-            "nextRun": if ok { due_at(w, seen, now).map(local_iso) } else { None },
+            // Switched off (itself or with its plugin): allowed or not, it does not run.
+            "off": is_off,
+            "nextRun": if ok && !is_off { due_at(w, seen, now).map(local_iso) } else { None },
             "running": seen.map_or(false, |s| s.chat_id.is_some()),
             "chatId": seen.and_then(|s| s.chat_id.clone()),
             "last": last.map(result_json),
@@ -608,6 +629,7 @@ pub async fn run_now(state: &Arc<AppState>, file: &str, hash: &str) -> anyhow::R
     let _g = PASS.lock().await;
     let (layer, home) = (crate::paths::app_layer_dir(), crate::paths::home());
     let l = find_seen(&layer, file, hash)?;
+    refuse_if_off(&layer, &l.file)?;
     let mut st = load_state(&home);
     migrate(&mut st, &load_files(&layer));
     if busy(state).await || st.get(&l.file).map_or(false, |s| s.chat_id.is_some()) { return Err(crate::tr::err("workflow.busy", &[])); }
@@ -678,7 +700,10 @@ pub async fn run_loop(state: Arc<AppState>) {
         prune_approved(&layer, &home);
         let loaded = load_files(&layer);
         let approved_list = load_approved(&home);
-        let workflows: Vec<Loaded> = loaded.iter().filter(|l| is_approved(&approved_list, l)).cloned().collect();
+        // …and never one that is switched off, itself or with its plugin: the same rule for the
+        // schedule, the retry, the event triggers and what already waits in the queue.
+        let off = crate::bundles::inactive_workflows(&layer);
+        let workflows: Vec<Loaded> = runnable(&loaded, &approved_list, &off);
         // Tasks allowed before there were several libraries belong to the library open now.
         let unbound: Vec<String> = { let b = load_bound(&home); workflows.iter().filter(|l| !b.contains_key(&l.file)).map(|l| l.file.clone()).collect() };
         if !unbound.is_empty() { bind_to_open(&state, &unbound).await; }
@@ -686,7 +711,9 @@ pub async fn run_loop(state: Arc<AppState>) {
         let mut st = load_state(&home);
         let mut changed = migrate(&mut st, &loaded);
         for l in &loaded {
-            let ok = is_approved(&approved_list, l);
+            // (Switched off counts like not allowed: once it is on again its schedule counts from then,
+            // so nothing that came due while it was off runs afterwards.)
+            let ok = is_approved(&approved_list, l) && !off.contains(&l.file);
             let seen = st.entry(l.file.clone()).or_default();
             // A new approval starts the schedule's count from now. (`None`: nothing recorded yet,
             // as in an older version's state — its first meeting, if any, is kept. `""`: not approved.)
@@ -746,7 +773,7 @@ pub async fn run_loop(state: Arc<AppState>) {
             }
         }
         for file in due(&workflows, &st, now) { if !queue.contains(&file) { queue.push_back(file); } }
-        queue.retain(|file| workflows.iter().any(|l| &l.file == file));
+        keep_queued(&mut queue, &workflows);
         if !queue.is_empty() && !busy(&state).await {
             if let Some(l) = queue.pop_front().and_then(|file| workflows.iter().find(|l| l.file == file)) {
                 // Recorded before the run, so a workflow that fails is not retried in a loop.
@@ -940,6 +967,61 @@ mod tests {
         (d, layer, home)
     }
     fn hash_of(layer: &Path, file: &str) -> String { load_files(layer).into_iter().find(|l| l.file == file).unwrap().hash }
+
+    /// A task that is switched off (on its own, or with the plugin it belongs to) starts from no
+    /// trigger: not on schedule, not on its retry, not after a wrap or at start, not from the queue
+    /// it was already waiting in, and not by hand. Its approval is untouched, so switching it on
+    /// again is all it takes.
+    #[test]
+    fn a_switched_off_task_starts_from_no_trigger() {
+        let (d, layer, home) = tmp("off");
+        let write = |file: &str, trigger: &str| std::fs::write(layer.join("workflows").join(file), format!(r#"{{"name":"{file}","trigger":{trigger},"prompt":"do it"}}"#)).unwrap();
+        write("daily.json", r#"{"type":"schedule","every":"day","at":"09:00"}"#);
+        write("wrap.json", r#"{"type":"event","on":"wrap.done"}"#);
+        write("start.json", r#"{"type":"event","on":"app.start"}"#);
+        write("mine.json", r#"{"type":"schedule","every":"day","at":"09:00"}"#);
+        for f in ["daily.json", "wrap.json", "start.json", "mine.json"] { approve(&layer, &home, f, &hash_of(&layer, f)).unwrap(); }
+        let files = |v: Vec<Loaded>| v.into_iter().map(|l| l.file).collect::<Vec<_>>();
+        assert_eq!(files(approved_workflows(&layer, &home)), ["daily.json", "mine.json", "start.json", "wrap.json"]);
+        // A plugin that holds three of them is switched off; the fourth is the user's own.
+        let record = |off: &[&str]| std::fs::write(layer.join("bundles.json"), json!({"format": 1, "migrated": "x", "off": off, "bundles": {"p-abcdefghijkl": {"name": "Kit", "layerFormat": 1,
+            "claims": [{"kind": "file", "path": "workflows/daily.json"}, {"kind": "file", "path": "workflows/wrap.json"}, {"kind": "file", "path": "workflows/start.json"}]}}}).to_string()).unwrap();
+        record(&["p-abcdefghijkl"]);
+        let (loaded, approved, off) = (load_files(&layer), load_approved(&home), crate::bundles::inactive_workflows(&layer));
+        assert_eq!(off.iter().map(String::as_str).collect::<Vec<_>>(), ["daily.json", "start.json", "wrap.json"]);
+        // The one list every trigger of the runner reads from.
+        let may = runnable(&loaded, &approved, &off);
+        assert_eq!(files(may.clone()), ["mine.json"]);
+        assert_eq!(files(approved_workflows(&layer, &home)), ["mine.json"], "what the wrap and app-start triggers read");
+        // Schedule and retry: due, and with a retry waiting, and still not started.
+        let mut st = State::new();
+        for f in ["daily.json", "mine.json"] { st.insert(f.into(), Seen { first_seen: Some(at(2026, 11, 9, 8, 0)), retry_at: Some(at(2026, 11, 9, 9, 5)), ..Default::default() }); }
+        assert_eq!(due(&loaded, &st, at(2026, 11, 9, 9, 10)).len(), 2, "both would be due by the clock alone");
+        assert_eq!(due(&may, &st, at(2026, 11, 9, 9, 10)), ["mine.json"]);
+        // Already waiting in the queue when the plugin was switched off: dropped, not started later.
+        let mut queue: VecDeque<String> = ["wrap.json", "mine.json", "start.json", "daily.json"].iter().map(|s| s.to_string()).collect();
+        keep_queued(&mut queue, &may);
+        assert_eq!(queue, VecDeque::from(["mine.json".to_string()]));
+        // By hand: refused, with the reason; the list says it is off and gives it no next run.
+        for f in ["daily.json", "wrap.json", "start.json"] { assert!(refuse_if_off(&layer, f).unwrap_err().to_string().contains("switched off"), "{f}"); }
+        assert!(refuse_if_off(&layer, "mine.json").is_ok());
+        let rows = status(&layer, &home, at(2026, 11, 9, 8, 0));
+        let row = |f: &str| rows.iter().find(|r| r["file"] == f).unwrap().clone();
+        assert_eq!((&row("daily.json")["off"], &row("daily.json")["approved"], &row("daily.json")["nextRun"]), (&json!(true), &json!(true), &Value::Null));
+        assert_eq!((&row("mine.json")["off"], row("mine.json")["nextRun"].is_string()), (&json!(false), true));
+        // A task switched off on its own, and one of a plugin made for a newer Thoughts: the same.
+        record(&["task:workflows/mine.json"]);
+        assert_eq!(files(approved_workflows(&layer, &home)), ["daily.json", "start.json", "wrap.json"]);
+        assert!(refuse_if_off(&layer, "mine.json").is_err());
+        std::fs::write(layer.join("bundles.json"), json!({"format": 1, "bundles": {"p-abcdefghijkl": {"name": "Kit", "minApp": "99.0.0", "layerFormat": 1, "claims": [{"kind": "file", "path": "workflows/daily.json"}]}}}).to_string()).unwrap();
+        assert_eq!(files(approved_workflows(&layer, &home)), ["mine.json", "start.json", "wrap.json"]);
+        // A record that cannot be read: none runs. Switched on again (no record of anything off): all do, still approved.
+        std::fs::write(layer.join("bundles.json"), "{not json").unwrap();
+        assert!(approved_workflows(&layer, &home).is_empty() && refuse_if_off(&layer, "mine.json").is_err());
+        record(&[]);
+        assert_eq!(approved_workflows(&layer, &home).len(), 4);
+        std::fs::remove_dir_all(d).unwrap();
+    }
 
     #[test]
     fn only_approved_content_runs() {

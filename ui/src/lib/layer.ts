@@ -1248,6 +1248,8 @@ export async function loadLayer(opts: { preview?: boolean; sig?: string } = {}) 
   }
   const want = opts.preview ? (opts.sig ?? tried) : '';
   const m = await api(opts.preview ? '/layer?preview=1&sig=' + encodeURIComponent(want) : '/layer');
+  // The record of plugins cannot be read (`bundles.rs`): the service hands over nothing of the layer, and the user is told why and what to do.
+  if (m?.pluginsUnreadable === true) toast(t('plg.unreadable'), { kind: 'error', key: 'plugins-unreadable', action: { label: t('ldc.tab.history'), run: () => go({ kind: 'customise', id: 'history' }) } });
   // Without the frame document (Windows only) each add-on reports that it could not start; the
   // rest of the customisations still load.
   await frameDoc().catch(() => {});

@@ -3,15 +3,16 @@
   // and add a pack someone sent, after seeing what it says it is and the fingerprint the app works out.
   import Icon from '../lib/Icon.svelte';
   import { app, toast } from '../lib/store.svelte';
-  import { confirmDialog } from '../lib/dialog.svelte';
-  import { t, tn } from '../lib/i18n';
+  import { t } from '../lib/i18n';
   import { failed } from '../lib/errors';
   import { trapFocus } from '../lib/focus';
-  import { packChoices, readPack, stagePack } from '../lib/layer';
-  import { inspectPack, savePack } from '../lib/packs';
+  import { packChoices } from '../lib/layer';
+  import { savePack } from '../lib/packs';
+  import PackImport from './PackImport.svelte';
+
+  let { open = () => {} }: { open?: (tab: string) => void } = $props();
 
   let busy = $state<Record<string, boolean>>({});
-  let picker = $state<HTMLInputElement>();
 
   // ----- sharing -----
   let form = $state<null | { some: boolean }>(null);
@@ -64,47 +65,6 @@
     try { await navigator.clipboard.writeText(result.fp); toast(t('ldc.share.fpCopied'), { kind: 'success' }); } catch { /* the code is on screen */ }
   }
 
-  // ----- adding a pack someone sent -----
-  /** A pack's own words as one plain line: nothing hidden, nothing that reorders it, no quotation marks. */
-  function packWords(v: unknown, max: number): string {
-    return String(v ?? '')
-      .replace(/[\u0000-\u001f\u007f-\u009f\u00ad\u180e\u200b\u2028-\u202e\u2060-\u206f\ufeff]|[\u{e0000}-\u{e0fff}]/gu, ' ')
-      .replace(/["“”«»]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
-  }
-
-  function pick(e: Event) {
-    const el = e.target as HTMLInputElement;
-    const f = el.files?.[0];
-    el.value = '';
-    if (!f || busy.import) return;
-    busy.import = true;
-    (async () => {
-      const r = await readPack(f);
-      if (r.unsupported) { toast(t('layer3.packNewer'), { kind: 'error' }); return; }
-      // The service checks the whole pack and works out its fingerprint before anything is staged.
-      const look = await inspectPack(r.pack);
-      const name = packWords(look.name, 80);
-      const lines: string[] = [];
-      const said = [name ? t('ldc.imp.who', { name }) : '', look.author ? t('ldc.imp.by', { author: packWords(look.author, 80) }) : '', look.version ? t('ldc.imp.version', { version: packWords(look.version, 20) }) : ''].filter(Boolean);
-      if (said.length) lines.push(said.join(', ') + '.', t('ldc.imp.claims'));
-      lines.push(t(look.kind === 'feature' ? 'layer3.importFeature' : 'layer3.importFull') + ' ' + tn('layer3.importFiles', look.files.length));
-      if (look.matches === false) lines.push(t('ldc.imp.fpBad', { claimed: look.claimed ?? '' }));
-      lines.push(t('ldc.imp.fp', { fp: look.code }));
-      if (look.earlier && !look.earlier.same) lines.push(look.earlier.version ? t('ldc.imp.earlier', { version: packWords(look.earlier.version, 20), fp: look.earlier.code }) : t('ldc.imp.earlierNoVersion', { fp: look.earlier.code }));
-      if (!look.changes) lines.push(t('ldc.imp.same'));
-      const says = packWords(look.description, 400);
-      if (says) lines.push(`${t('lda.packSaysIntro')}\n“${says}”`);
-      const ok = await confirmDialog({
-        title: name ? `${t('layer3.importTitle')} “${name}”` : t('layer3.importTitle'),
-        body: lines.join('\n\n'),
-        list: look.files.slice(0, 30),
-        note: t('layer3.importNote'),
-        confirmLabel: t('layer3.importGo'),
-        danger: look.matches === false,
-      });
-      if (ok) await stagePack(r.pack);
-    })().catch((err) => failed(t('ldc.imp.failed'), err)).finally(() => { busy.import = false; });
-  }
 </script>
 
 <div class="card">
@@ -115,6 +75,7 @@
     <button type="button" class="btn" disabled={busy.open || busy.save} onclick={() => openForm(true)}>{t('ldc.share.some')}</button>
   </div>
   <p class="muted sm gap"><Icon name="lock" size={13} /> {t('ldc.share.privacy')}</p>
+  <p class="muted sm gap">{t('plg.share.hint')} <button type="button" class="link" onclick={() => open('addons')}>{t('plg.share.open')}</button></p>
   {#if result}
     <div class="done" role="status">
       <p>{t(result.copied ? 'ldc.share.copied' : 'ldc.share.saved')} <bdi class="code" dir="ltr">{result.fp}</bdi></p>
@@ -130,8 +91,7 @@
 <div class="card">
   <h3>{t('ldc.imp.title')}</h3>
   <p class="muted sm">{t('layer.importHint')}</p>
-  <button type="button" class="btn" disabled={busy.import} aria-busy={busy.import} onclick={() => picker?.click()}><Icon name="upload" size={15} /> {busy.import ? t('ldc.imp.checking') : t('layer.import')}</button>
-  <input type="file" accept=".json,application/json" hidden bind:this={picker} onchange={pick} />
+  <PackImport />
 </div>
 
 {#if form}
@@ -187,4 +147,5 @@
   .ck { display: flex !important; align-items: center; gap: 8px; margin: 0; font-weight: 400; cursor: pointer; min-height: 24px; }
   .err { color: var(--danger); margin: 0; }
   .end { justify-content: flex-end; }
+  .link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-decoration: underline; }
 </style>

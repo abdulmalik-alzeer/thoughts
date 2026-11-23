@@ -23,6 +23,7 @@
   import { checkLayerUpdates } from '../lib/updates';
   import { fxGroups, mayDo, type FxLine } from '../lib/effects';
   import { drafts, draftTitle, openDraft, refreshDrafts } from '../lib/drafts.svelte';
+  import { setPendingPlugin } from '../lib/plugins';
   import { closeReview, continueChatting, discardPending, dryLoadStaged, keepPending, stagedItems, tryPending, whenText, type LayerItem } from '../lib/layer';
 
   const p = $derived(app.pending);
@@ -46,6 +47,24 @@
   // What an imported pack says about itself: the pack's words, shown as a quotation.
   const packSays = $derived(origin === 'import' && typeof p?.pack?.description === 'string' ? p.pack.description.trim() : '');
   $effect(() => { void p?.summary; void p?.files; void p?.signature; allowWorkflows = false; keepIncomplete = false; keepBroken = false; showDiff = false; diff = null; });
+
+  // The plugin this change is kept as (`bundles::pending_plugin`): a change from a chat that touches
+  // two or more things is one new plugin unless the user unticks that; an imported file is the
+  // plugin it says it is; a chat started from a plugin updates that plugin.
+  type Plug = { target: string; name: string; suggested: boolean; takes: string[]; version: string; replaces: string; migrated: boolean };
+  const plug = $derived.by((): Plug | null => {
+    const v = p?.plugin;
+    if (!v || typeof v !== 'object' || typeof v.target !== 'string') return null;
+    return { target: v.target, name: String(v.name ?? '').slice(0, 80), suggested: v.suggested === true, takes: strs(v.takes).slice(0, 8).map((x) => x.slice(0, 80)),
+      version: String(v.version ?? '').slice(0, 20), replaces: String(v.replaces?.version ?? '').slice(0, 20), migrated: v.migrated === true };
+  });
+  // Shown for a choice (a chat's change that could be one plugin) or for something to say (an import, an update).
+  const plugChoice = $derived(!!plug && origin === 'customize' && (plug.target === 'new' || (plug.target === 'none' && plug.suggested)));
+  const plugSays = $derived(!!plug && (plug.target === 'existing' || plug.target === 'all' || (origin === 'import' && plug.target === 'new')));
+  let plugName = $state('');
+  $effect(() => { plugName = plug?.name ?? ''; });
+  const choosePlugin = (on: boolean) => act('plugin', () => setPendingPlugin(on ? 'new' : 'none', plugName.trim()), 'plg.rv.failed');
+  const renamePlugin = () => { if (plug?.target === 'new' && plugName.trim() && plugName.trim() !== plug.name) act('plugin', () => setPendingPlugin('new', plugName.trim()), 'plg.rv.failed'); };
 
   // What it does, item by item. The service's list (`effects`) is the truth; groups are for reading.
   const groups = $derived(fxGroups(p?.effects));
@@ -173,6 +192,11 @@
   .diff .hunk { color: var(--muted); }
   .others { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; font-size: 13px; }
   .others li { display: grid; gap: 4px; }
+  .plug { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--fill); font-size: 13px; }
+  .plug > .icon { margin-top: 2px; color: var(--muted); }
+  .plug p { margin-top: 4px; }
+  .plugname { margin-top: 6px; width: 100%; max-width: 360px; box-sizing: border-box; padding: 5px 8px; font: inherit; font-size: 13px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+  .plugname:disabled { opacity: .55; }
 </style>
 <div class="bg" data-backdrop>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rv-title" tabindex="-1">
@@ -323,6 +347,27 @@
             {/each}
           </ul>
         </details>
+      {/if}
+
+      {#if plug && !stale && (plugChoice || plugSays)}
+        <div class="plug" role="group" aria-labelledby="rv-plug">
+          <Icon name="modules" size={16} />
+          <div class="grow">
+            <b id="rv-plug">{t('plg.rv.title')}</b>
+            {#if plugChoice}
+              <label class="allow"><input type="checkbox" checked={plug.target === 'new'} disabled={!!busy} onchange={(e) => choosePlugin((e.currentTarget as HTMLInputElement).checked)} /> {t('plg.rv.keepAs')}</label>
+              <input class="plugname" type="text" dir="auto" maxlength="80" aria-label={t('plg.rv.nameLabel')} disabled={plug.target !== 'new' || !!busy} bind:value={plugName} onblur={renamePlugin} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); renamePlugin(); } }} />
+              <p class="muted">{t('plg.rv.keepHint')}</p>
+            {:else if plug.target === 'all'}
+              <p>{t('plg.rv.all')}</p>
+            {:else}
+              <p dir="auto">{t(plug.target === 'existing' ? 'plg.rv.updates' : 'plg.rv.new', { name: plug.name })}</p>
+              {#if plug.replaces && plug.replaces !== plug.version}<p>{t('plg.rv.replaces', { version: plug.replaces })}</p>{/if}
+            {/if}
+            {#if plug.takes.length}<p dir="auto">{t('plg.rv.takes', { names: plug.takes.join(' · ') })}</p>{/if}
+            {#if plug.migrated}<p>{t('plg.rv.migrated')}</p>{/if}
+          </div>
+        </div>
       {/if}
 
       <h2 id="rv-sum-title">{t('ldb.summary.' + (['import', 'manual', 'update'].includes(origin) ? origin : 'customize'))}</h2>

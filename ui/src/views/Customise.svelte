@@ -13,7 +13,7 @@
   import UpdateChoices from './UpdateChoices.svelte';
   import { checkAppUpdate } from '../lib/updates';
   import { check } from '../lib/updateProgress.svelte';
-  import AddOns from './AddOns.svelte';
+  import Plugins from './Plugins.svelte';
   import ReadyPacks from './ReadyPacks.svelte';
   import SharePacks from './SharePacks.svelte';
   import Rollback from './Rollback.svelte';
@@ -22,6 +22,7 @@
   const TABS = [
     { id: 'ask', icon: 'wrap' },
     { id: 'automate', icon: 'ai' },
+    // (Since 0.5.0 this tab is Plugins; its id stays `addons`, so links to it keep working.)
     { id: 'addons', icon: 'plugin' },
     { id: 'ready', icon: 'modules' },
     { id: 'tasks', icon: 'clock' },
@@ -79,7 +80,7 @@
   <div class="seg tabs" role="tablist" aria-label={t('layer.customise')} tabindex="-1" onkeydown={onTabKey}>
     {#each TABS as x (x.id)}
       <button type="button" class="segb" role="tab" id={'cz-tab-' + x.id} aria-selected={tab === x.id} aria-controls="cz-panel" tabindex={tab === x.id ? 0 : -1} onclick={() => open(x.id)}>
-        <Icon name={x.icon} size={14} /> {t(x.id === 'automate' ? 'auto-ui.tab' : 'ldc.tab.' + x.id)}
+        <Icon name={x.icon} size={14} /> {t(x.id === 'automate' ? 'auto-ui.tab' : x.id === 'addons' ? 'plg.tab' : 'ldc.tab.' + x.id)}
       </button>
     {/each}
   </div>
@@ -109,7 +110,7 @@
     {:else if tab === 'automate'}
       <Automations />
     {:else if tab === 'addons'}
-      <AddOns {open} />
+      <Plugins {open} />
     {:else if tab === 'ready'}
       <ReadyPacks />
     {:else if tab === 'tasks'}
@@ -124,7 +125,7 @@
         <Routines />
       </div>
     {:else if tab === 'share'}
-      <SharePacks />
+      <SharePacks {open} />
     {:else if tab === 'history'}
       <div class="card"><Rollback embedded /></div>
     {:else}

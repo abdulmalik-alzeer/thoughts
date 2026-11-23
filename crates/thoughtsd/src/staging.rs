@@ -55,6 +55,14 @@ pub struct Meta {
     /// The user tried this version and chose "Continue chatting": it waits for their next message
     /// in its chat instead of for a decision (see `cycle`).
     pub continued: bool,
+    /// The plugin this change is kept as (`bundles.rs`): `None` = the app decides (a change that
+    /// touches two or more things becomes one new plugin), `"none"`, `"new"`, or the id of the named
+    /// plugin it updates.
+    pub bundle_target: Option<String>,
+    /// The name the user gave the new plugin (empty: the first line of the summary).
+    pub bundle_name: String,
+    /// For an import: the pack's plugin lines, cleaned, with the claims the app worked out from its files.
+    pub bundle_pack: Option<Value>,
 }
 
 fn meta_file(d: &Dirs) -> PathBuf { d.home.join("layer-pending.json") }
@@ -95,6 +103,27 @@ pub fn set_pack_identity(d: &Dirs, author: &str, version: &str, fingerprint: &st
     let _ = save_meta(d, &m);
 }
 
+/// Remember what an imported pack is as a plugin (`bundles::before_merge`, `bundles::staged_all`).
+pub fn set_bundle_pack(d: &Dirs, record: Option<Value>) {
+    let Some(mut m) = load_meta(d) else { return };
+    m.bundle_pack = record;
+    let _ = save_meta(d, &m);
+}
+
+/// The user's choice in the review: keep this change as one new plugin (`"new"`, called `name`), as
+/// part of the named plugin `target`, or as it is (`"none"`). Only a change made in a customisation
+/// chat has the choice; an imported pack is the plugin it says it is.
+pub fn set_bundle(d: &Dirs, target: &str, name: &str) -> anyhow::Result<()> {
+    let mut m = load_meta(d).filter(|_| staged(d)).ok_or_else(|| crate::tr::err("layer.no_pending", &[]))?;
+    if !(m.origin.is_empty() || m.origin == "customize") || !(target == "none" || target == "new" || crate::bundles::valid_id(target)) {
+        return Err(crate::tr::err("plugin.gone", &[]));
+    }
+    if crate::bundles::valid_id(target) && !crate::bundles::load(&d.layer).bundles.contains_key(target) { return Err(crate::tr::err("plugin.gone", &[])); }
+    m.bundle_target = Some(target.to_string());
+    m.bundle_name = crate::packs::clean_line(name, 80).chars().filter(|c| !"\"'`«»“”„‟‹›".contains(*c)).collect::<String>().trim().to_string();
+    save_meta(d, &m)
+}
+
 /// Remember which update conflict the pending change settles once it is kept.
 pub fn set_resolves(d: &Dirs, path: &str) {
     let Some(mut m) = load_meta(d) else { return };
@@ -128,7 +157,9 @@ pub async fn recreate(g: Git<'_>, d: &Dirs, origin: &str, chat_id: Option<&str>)
     remove(g, d).await;
     let path = d.staging.to_string_lossy().to_string();
     g.run(&d.layer, &["worktree", "add", "-f", "-B", "staging", &path, "HEAD"]).await?;
-    save_meta(d, &Meta { origin: origin.into(), chat_id: chat_id.map(String::from), created: chrono::Utc::now().to_rfc3339(), ..Default::default() })
+    // A chat started from a plugin's "Change with the assistant" updates that plugin.
+    let bundle_target = chat_id.and_then(|c| crate::bundles::chat_target(d, c));
+    save_meta(d, &Meta { origin: origin.into(), chat_id: chat_id.map(String::from), created: chrono::Utc::now().to_rfc3339(), bundle_target, ..Default::default() })
 }
 
 /// An absolute path as a Claude Code permission pattern (`//path`, `//c/path` on Windows).
@@ -365,7 +396,7 @@ pub fn system_prompt(d: &Dirs) -> String {
          (and Settings cannot be replaced as a whole). Do not tell the user a built-in page cannot be changed when the reference allows it.\n\
          Nothing you write takes effect until the user previews it and presses Keep, so do not tell them it is already live. \
          The user cannot answer interactive tool prompts here — ask questions in plain text, and keep the change small.{note}",
-        staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d)
+        staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d).to_owned() + &crate::bundles::prompt_note(d)
     )
 }
 
@@ -388,7 +419,7 @@ pub fn system_prompt_full(d: &Dirs) -> String {
          included). The validation report the app shows is advice while full access is on; it does not stop a change from being kept.\n\
          A message may list files the user attached: open each with the Read tool. The user cannot answer interactive tool prompts here — ask \
          questions in plain text.{note}",
-        staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d)
+        staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d).to_owned() + &crate::bundles::prompt_note(d)
     )
 }
 
@@ -896,6 +927,8 @@ fn describe_staged(d: &Dirs, m: &Meta, files: &[(String, &'static str)], ignored
         "effects": described["effects"], "installed": described["installed"],
         "phase": match cycle::phase_of(m, running) { cycle::Phase::Running => "running", cycle::Phase::Pending => "pending", cycle::Phase::Continued => "continued" },
         "continued": !running && m.continued, "canContinue": !running && m.chat_id.as_deref().map_or(false, |c| !c.is_empty()),
+        // The plugin this change will be kept as (`bundles::pending_plugin`).
+        "plugin": crate::bundles::pending_plugin(d, m, &files, &summary),
     })
 }
 
@@ -1068,6 +1101,10 @@ pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) 
     }
     let head = g.rev(&d.layer, "HEAD").await?;
     let msg = entry_text(p["summary"].as_str().unwrap_or_default());
+    // The plugin this change is kept as is recorded in the same entry (`bundles.json`), so undoing
+    // the change undoes the registration. Worked out from the kept layer and the bytes checked above.
+    let over: BTreeMap<String, Option<Vec<u8>>> = writes.iter().map(|w| (w.path.clone(), w.bytes.clone())).collect();
+    let plan = crate::bundles::plan(d, &load_meta(d).unwrap_or_else(|| m.clone()), &over, p["summary"].as_str().unwrap_or_default())?;
     let written: anyhow::Result<String> = async {
         for w in &writes {
             let target = d.layer.join(&w.path);
@@ -1087,6 +1124,13 @@ pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) 
         }
         // (When nothing differs after all there is no entry, and so nothing for "Undo" to point at.)
         if g.run(&d.layer, &["diff", "--cached", "--quiet"]).await.is_ok() { return Ok(String::new()); }
+        if let Some(plan) = &plan {
+            std::fs::write(d.layer.join(crate::bundles::FILE), &plan.text)?;
+            for (path, text) in &plan.extra { std::fs::write(d.layer.join(path), text)?; }
+            let mut add = vec!["add", "--", crate::bundles::FILE];
+            add.extend(plan.extra.iter().map(|(p, _)| p.as_str()));
+            g.run(&d.layer, &add).await?;
+        }
         g.commit_staged(&d.layer, &msg, &[]).await?;
         g.rev(&d.layer, "HEAD").await
     }.await;
@@ -1102,7 +1146,8 @@ pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) 
     };
     remove(g, d).await;
     Ok(json!({"ok": true, "hash": hash, "summary": subject_of(p["summary"].as_str().unwrap_or_default()), "pluginChanged": p["pluginChanged"],
-        "request": m.request, "origin": p["origin"], "resolves": m.resolves}))
+        "request": m.request, "origin": p["origin"], "resolves": m.resolves,
+        "plugin": plan.as_ref().filter(|x| !x.id.is_empty() && !hash.is_empty()).map(|x| json!({"id": x.id, "name": x.name}))}))
 }
 
 pub async fn discard(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
