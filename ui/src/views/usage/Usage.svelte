@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../../lib/HelpTip.svelte';
   // The Usage page: each assistant's plan limits, and the tokens used — in total, by day, by chat and
   // by model — with what they would cost at API prices.
   import { onMount, untrack } from 'svelte';
@@ -58,8 +59,7 @@
 
 {#snippet plansS()}
   <section aria-labelledby="u-plans">
-    <h2 id="u-plans">{t('r10-usage.plans')}</h2>
-    <p class="muted sm">{t('r10-usage.plansHint')}</p>
+    <h2 id="u-plans">{t('r10-usage.plans')} <HelpTip text={t('r10-usage.plansHint')} /></h2>
     <div class="grid2">
       {#each plansShown as p (p)}
         <div class="card"><PlanBars provider={p} plan={data?.plans?.[p] ?? null} /></div>

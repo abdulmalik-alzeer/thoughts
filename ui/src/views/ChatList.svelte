@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // The Chats page: every chat with a filter box, pinning, archiving, selecting several to delete,
   // and the choice to delete old chats automatically.
   import { onMount } from 'svelte';
@@ -222,8 +223,7 @@
   {#if app.chats.length}
     {#if shows('chats', 'keep')}
     <section class="keep card" aria-labelledby="chatb-keep">
-      <h2 id="chatb-keep" class="head first">{t('chatb.keep.title')}</h2>
-      <p class="muted sm">{t('chatb.keep.body')}</p>
+      <h2 id="chatb-keep" class="head first">{t('chatb.keep.title')} <HelpTip text={t('chatb.keep.body')} /></h2>
       {#if keep}
         <p class="sm" role="status">{keep.days ? t('chatb.keep.statusOn', { n: fmtNum(keep.days) }) : t('chatb.keep.statusOff')}</p>
         <div class="row" style="flex-wrap:wrap">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../../lib/HelpTip.svelte';
   // The note editor: a plain text box with writing aids for people who do not know Markdown. A
   // toolbar and shortcuts (text style, bold, italic, link, bulleted / numbered lists, checklists,
   // indent, pictures), lists that continue on Enter and end on an empty item, Tab / Shift+Tab to move
@@ -580,9 +581,8 @@
       <label class="fld"><span>{t('edtr.linkText')}</span><input bind:value={linking.label} dir="auto" /></label>
       <label class="fld"><span>{t('edtr.linkAddress')}</span>
         <!-- svelte-ignore a11y_autofocus -->
-        <input bind:value={linking.address} dir="ltr" placeholder={t('edtr.linkPh')} autofocus autocomplete="off" spellcheck="false" aria-describedby="{uid}-lh" />
-      </label>
-      <p class="muted sm" id="{uid}-lh">{t('edtr.linkHint')}</p>
+        <input bind:value={linking.address} dir="ltr" placeholder={t('edtr.linkPh')} autofocus autocomplete="off" spellcheck="false" />
+       <HelpTip text={t('edtr.linkHint')} /></label>
       <div class="row end">
         {#if linking.old}<button type="button" class="btn danger" onclick={() => closeLink('unlink')}>{t('edtr.unlink')}</button>{/if}
         <span class="grow"></span>
@@ -625,7 +625,5 @@
   .dlg h2 { margin: 0; font-size: 17px; }
   .fld { display: grid; gap: 4px; font-size: var(--fs-sm); }
   .fld input { width: 100%; }
-  .dlg p { margin: 0; }
-  .sm { font-size: var(--fs-xs); }
   .end { gap: 8px; margin-top: 4px; flex-wrap: wrap; align-items: center; }
 </style>

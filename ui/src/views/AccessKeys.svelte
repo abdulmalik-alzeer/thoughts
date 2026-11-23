@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Settings → Privacy → Keys for other programs (FEAT-37). A key lets a shortcut or a script on
   // this computer add todos and notes, or read the library — never more (the background service
   // decides that, see tokens.rs). A new key is shown once, here, and then only its name remains.
@@ -83,8 +84,7 @@
 </script>
 
 <div class="card keys">
-  <h3 id="secb-keys-title">{t('secb.keys.title')}</h3>
-  <p class="muted sm">{t('secb.keys.intro')}</p>
+  <h3 id="secb-keys-title">{t('secb.keys.title')} <HelpTip text={t('secb.keys.intro')} /></h3>
 
   {#if made}
     <div class="made" role="region" aria-labelledby="secb-made-title">
@@ -118,9 +118,8 @@
     {#if form}
       <form class="new" onsubmit={create} aria-labelledby="secb-new-title">
         <h4 id="secb-new-title">{t('secb.keys.new')}</h4>
-        <label for="secb-name">{t('secb.keys.name')}</label>
+        <label for="secb-name">{t('secb.keys.name')} <HelpTip text={t('secb.keys.nameHint')} /></label>
         <input id="secb-name" bind:this={nameBox} dir="auto" maxlength="60" autocomplete="off" bind:value={form.name} oninput={() => (formError = '')} aria-describedby="secb-name-hint" aria-invalid={!!formError} />
-        <p class="muted sm" id="secb-name-hint">{t('secb.keys.nameHint')}</p>
         <fieldset class="what">
           <legend>{t('secb.keys.what')}</legend>
           {#each choices as c (c.id)}

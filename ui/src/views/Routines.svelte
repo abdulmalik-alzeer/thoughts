@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Settings → Customisations → Routines: the step-by-step routines the assistant follows. Change one
   // or make a new one — by hand or from an assistant draft — then review exactly what will be saved
   // and Keep it. The background service writes the routine; the assistant itself never can.
@@ -157,8 +158,7 @@
           <button type="button" class="btn primary" disabled={!complete || !changed || !!problem || busy.draft} onclick={() => (reviewing = true)}>{t('auto.rt.review')}</button>
         </div>
       {:else}
-        <h2 id="rt-title">{t('auto.rt.reviewTitle')}</h2>
-        <p class="muted sm">{t('auto.rt.reviewHint')}</p>
+        <h2 id="rt-title">{t('auto.rt.reviewTitle')} <HelpTip text={t('auto.rt.reviewHint')} /></h2>
         {#if editing.base?.extra?.length}<p class="sm note" role="note">{t('auto.rt.extra')}</p>{/if}
         {#each [['auto.rt.title', 'title'], ['auto.rt.when', 'description']] as [label, key] (key)}
           {@const a = before ? (before as any)[key] : ''}

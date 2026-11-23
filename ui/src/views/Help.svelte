@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   import Icon from '../lib/Icon.svelte';
   import { app, command, go, APP_VERSION } from '../lib/store.svelte';
   import { t, fmtMoney } from '../lib/i18n';
@@ -66,8 +67,7 @@
   </section>
 
   <section aria-labelledby="h-work">
-    <h2 id="h-work" class="row"><Icon name="docs" size={18} /> {t('final-docs.title')}</h2>
-    <p class="muted">{t('final-docs.lead')}</p>
+    <h2 id="h-work" class="row"><Icon name="docs" size={18} /> {t('final-docs.title')} <HelpTip text={t('final-docs.lead')} /></h2>
     <dl>
       {#each work as k}
         <dt>{t(`final-docs.${k}T`)}</dt><dd>{t(`final-docs.${k}`)}</dd>
@@ -106,8 +106,7 @@
   </section>
 
   <section aria-labelledby="h-guides">
-    <h2 id="h-guides" class="row"><Icon name="book" size={18} /> {t('help.guides')}</h2>
-    <p class="muted">{t('help.guidesBody')}</p>
+    <h2 id="h-guides" class="row"><Icon name="book" size={18} /> {t('help.guides')} <HelpTip text={t('help.guidesBody')} /></h2>
     <div class="row wrap">
       {#each guideNames as g}<button class="btn" onclick={() => openGuide(g)}><Icon name="book" size={15} /> <span dir="auto">{guideTitle(g)}</span></button>{/each}
     </div>

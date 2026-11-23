@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Every add-on and page, on or off, with what it may do and what it saved. Switching one off,
   // removing it or taking a permission away is one History entry (with Undo).
   // Since 0.5.0 this is the details part of Customise › Plugins (views/PluginDetails.svelte shows it
@@ -196,8 +197,7 @@
   {/if}
 
   {#if leftover.length}
-    <h3 class="gap">{t('ldc.left.title')}</h3>
-    <p class="muted sm">{t('ldc.left.hint')}</p>
+    <h3 class="gap">{t('ldc.left.title')} <HelpTip text={t('ldc.left.hint')} /></h3>
     <ul class="list">
       {#each leftover as l (l.name)}
         <li class="card item">

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Customise › Plugins: everything the user customised, as a list. Named plugins (from a file, a
   // ready-made pack, or a change kept "as one plugin") first, then what stands on its own: each
   // add-on, page, automatic task and theme, Home, the sidebar, the Todos page, the app pages, your
@@ -208,13 +209,11 @@
   </div>
 {:else}
   {#if named.length}
-    <h3>{t('plg.named')}</h3>
-    <p class="muted sm">{t('plg.namedHint')}</p>
+    <h3>{t('plg.named')} <HelpTip text={t('plg.namedHint')} /></h3>
     <ul class="list">{#each named as p (p.id)}{@render row(p)}{/each}</ul>
   {/if}
   {#if loose.length}
-    <h3>{t('plg.loose')}</h3>
-    <p class="muted sm">{t('plg.looseHint')}</p>
+    <h3>{t('plg.loose')} <HelpTip text={t('plg.looseHint')} /></h3>
     <ul class="list">{#each loose as p (p.id)}{@render row(p)}{/each}</ul>
   {/if}
 {/if}

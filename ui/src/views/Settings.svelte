@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   import { sectionPlan } from '../lib/pages.svelte';
   import Icon from '../lib/Icon.svelte';
   import { onDestroy, onMount, tick, untrack } from 'svelte';
@@ -814,18 +815,15 @@
         {@render err('permission')}
       {/if}
       {#if vis(c, 'set.wrapNag')}
-        <label for="st-nag">{t('set.wrapNag')}</label>
+        <label for="st-nag">{t('set.wrapNag')} <HelpTip text={t('set.wrapDef')} /></label>
         <input id="st-nag" class="num" type="number" min="1" step="1" bind:value={s.wrapNagThreshold} aria-invalid={!!errors.wrapNagThreshold} aria-describedby="st-nag-hint" />
         {@render err('wrapNagThreshold')}
-        <p class="muted sm" id="st-nag-hint">{t('set.wrapDef')}</p>
       {/if}
       {#if vis(c, 'chatc.set.suggest')}
-        <label class="check"><input type="checkbox" checked={!!s.ai.claude.suggestNext} onchange={(e) => (s.ai.claude.suggestNext = e.currentTarget.checked)} aria-describedby="st-suggest-hint" /> {t('chatc.set.suggest')}</label>
-        <p class="muted sm" id="st-suggest-hint">{t('chatc.set.suggestHint')}</p>
+        <label class="check"><input type="checkbox" checked={!!s.ai.claude.suggestNext} onchange={(e) => (s.ai.claude.suggestNext = e.currentTarget.checked)} /> {t('chatc.set.suggest')} <HelpTip text={t('chatc.set.suggestHint')} /></label>
       {/if}
       {#if vis(c, 'r10-chatview.set.title')}
-        <label class="check"><input type="checkbox" checked={!!s.chatSteps} onchange={(e) => (s.chatSteps = e.currentTarget.checked)} aria-describedby="st-steps-hint" /> {t('r10-chatview.set.title')}</label>
-        <p class="muted sm" id="st-steps-hint">{t('r10-chatview.set.hint')}</p>
+        <label class="check"><input type="checkbox" checked={!!s.chatSteps} onchange={(e) => (s.chatSteps = e.currentTarget.checked)} /> {t('r10-chatview.set.title')} <HelpTip text={t('r10-chatview.set.hint')} /></label>
       {/if}
     </div>
     {#if vis(c, ...adv.ai)}
@@ -847,9 +845,8 @@
           <p class="muted sm">{t('set.binaryHint')}{#if claude.version} <bdi>({claude.version})</bdi>{/if}</p>
         {/if}
         {#if vis(c, 'set.miniModel')}
-          <label for="st-mini">{t('set.miniModel')}</label>
+          <label for="st-mini">{t('set.miniModel')} <HelpTip text={t('set.miniHint')} /></label>
           <input id="st-mini" dir="ltr" bind:value={s.ai.claude.miniWrapModel} placeholder="haiku" autocomplete="off" />
-          <p class="muted sm">{t('set.miniHint')}</p>
         {/if}
         {#if vis(c, 'set.idle')}
           <label for="st-idle">{t('set.idle')}</label>
@@ -857,16 +854,14 @@
           {@render err('idleMinutes')}
         {/if}
         {#if vis(c, 'set.provider', 'set.baseUrl', 'set.apiKey')}
-          <h3>{t('set.provider')}</h3>
+          <h3>{t('set.provider')} <HelpTip text={t('prov5.litellm')} /></h3>
           <p class="muted sm">{t('set.providerHint')} {t('runa.prov.how')}</p>
           <ProviderPresets url={provUrl} disabled={readOnly} onpick={(u, noKey) => { provUrl = u; provNoKey = noKey; provTest = null; }} />
-          <p class="muted sm">{t('prov5.litellm')}</p>
           <label for="st-base">{t('set.baseUrl')}</label>
           <input id="st-base" dir="ltr" bind:value={provUrl} placeholder="https://api.anthropic.com" aria-invalid={!!provErr} aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly} />
           {#if onHomeNetwork(provUrl, fullOn)}<p class="muted sm" role="note">{t('prov5.lan')}</p>{/if}
           {#if noKeyOffered}
-            <label class="check"><input type="checkbox" bind:checked={provNoKey} disabled={readOnly} aria-describedby="st-nokey-hint" /> {t('prov5.noKey')}</label>
-            <p class="muted sm" id="st-nokey-hint">{t('prov5.noKeyHint')}</p>
+            <label class="check"><input type="checkbox" bind:checked={provNoKey} disabled={readOnly} /> {t('prov5.noKey')} <HelpTip text={t('prov5.noKeyHint')} /></label>
           {/if}
           <label for="st-key">{t('set.apiKey')} {#if hasKey}<span class="pill accent">{t('set.keyOn')}</span>{:else if savedKeyless && provKind === 'service'}<span class="pill">{t('prov5.keylessPill')}</span>{/if}</label>
           <input id="st-key" dir="ltr" type="password" bind:value={apiToken} placeholder="sk-…" aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly || sendNoKey} />
@@ -895,10 +890,9 @@
   {:else if c === 'git'}
     <div class="card">
       {#if vis(c, 'set.libraryPath')}
-        <label for="st-lib">{t('set.libraryPath')}</label>
+        <label for="st-lib">{t('set.libraryPath')} <HelpTip text={t('set.libraryHint')} /></label>
         <div class="row"><input id="st-lib" class="grow" dir="ltr" bind:value={s.libraryPath} aria-invalid={!!errors.libraryPath} autocomplete="off" /><button type="button" class="btn" onclick={browseLibrary}><Icon name="folder" size={14} /> {t('set.browse')}</button></div>
         {@render err('libraryPath')}
-        <p class="muted sm">{t('set.libraryHint')}</p>
       {/if}
       {#if vis(c, 'hista.historyTitle', 'hista.keep')}
         <h3>{t('hista.historyTitle')}</h3>
@@ -944,8 +938,7 @@
           </select>
         {/if}
         {#if vis(c, 'hista.backup.online', 'histb.backup.drive', 'libf-sync.set.check')}
-          <label class="check"><input type="checkbox" bind:checked={s.sync.checkRemote} aria-describedby="st-check-remote-hint" /> {t('libf-sync.set.check')}</label>
-          <p class="muted sm" id="st-check-remote-hint">{t('libf-sync.set.checkHint')}</p>
+          <label class="check"><input type="checkbox" bind:checked={s.sync.checkRemote} /> {t('libf-sync.set.check')} <HelpTip text={t('libf-sync.set.checkHint')} /></label>
           {#if base.sync?.checkRemote && s.sync.checkRemote}<IncomingStatus />{/if}
         {/if}
         {#if (syncKind === 'git' || signIns.length) && vis(c, 'hista.backup.online', 'set.credStore')}
@@ -1033,10 +1026,8 @@
   {:else if c === 'privacy'}
     {#if vis(c, 'set.privTitle', 'appr.strict.title', 'seca.access.title')}
       <div class="card">
-        <h3>{t('set.privSentTitle')}</h3>
-        <p class="muted sm">{t('set.privSent')}</p>
-        <h3>{t('set.privTitle')}</h3>
-        <p class="muted sm">{t('appr.privBody')}</p>
+        <h3>{t('set.privSentTitle')} <HelpTip text={t('set.privSent')} /></h3>
+        <h3>{t('set.privTitle')} <HelpTip text={t('appr.privBody')} /></h3>
         {#each s.privatePaths as p (p)}
           <div class="row remote"><Icon name="shield" size={15} /><code class="grow path"><bdi>{p}</bdi></code><button type="button" class="btn ghost danger" onclick={() => removePrivate(p)}>{t('set.remove')}</button></div>
         {:else}
@@ -1044,8 +1035,7 @@
         {/each}
         {#if privErr}<p class="err" role="alert">{privErr}</p>{/if}
         <div class="row gap-top"><button type="button" class="btn" onclick={addPrivate}><Icon name="plus" size={14} /> {t('set.privAdd')}</button></div>
-        <h3>{t('appr.strict.title')}</h3>
-        <p class="muted sm" id="st-strict-hint">{t('appr.strict.body')}</p>
+        <h3>{t('appr.strict.title')} <HelpTip text={t('appr.strict.body')} /></h3>
         {#if !s.privatePaths.length}<p class="muted sm">{t('appr.strict.none')}</p>{/if}
         <label class="check"><input type="checkbox" bind:checked={s.strictPrivate} disabled={readOnly} aria-describedby="st-strict-hint" /> {t('appr.strict.toggle')}</label>
         {#if openToOthers !== null}
@@ -1061,23 +1051,20 @@
     {/if}
     {#if vis(c, 'wrapa.set.auto')}
       <div class="card">
-        <h3>{t('wrapa.set.auto')}</h3>
-        <p class="muted sm" id="st-autosum-hint">{t('wrapa.set.autoHint')}</p>
+        <h3>{t('wrapa.set.auto')} <HelpTip text={t('wrapa.set.autoHint')} /></h3>
         <label class="check"><input type="checkbox" bind:checked={s.autoSummaries} aria-describedby="st-autosum-hint" /> {t('wrapa.set.auto')}</label>
       </div>
     {/if}
     {#if vis(c, 'wording.reports.title')}
       <!-- SEC-50: what the assistant program sends its maker on its own; off unless switched on. -->
       <div class="card">
-        <h3>{t('wording.reports.title')}</h3>
-        <p class="muted sm" id="st-reports-hint">{t('wording.reports.hint')}</p>
+        <h3>{t('wording.reports.title')} <HelpTip text={t('wording.reports.hint')} /></h3>
         <label class="check"><input type="checkbox" bind:checked={s.assistantReports} aria-describedby="st-reports-hint" /> {t('wording.reports.toggle')}</label>
       </div>
     {/if}
     {#if vis(c, 'layer.signalsTitle')}
       <div class="card">
-        <h3>{t('layer.signalsTitle')}</h3>
-        <p class="muted sm" id="st-signals-hint">{t('layer.signalsBody')}</p>
+        <h3>{t('layer.signalsTitle')} <HelpTip text={t('layer.signalsBody')} /></h3>
         <label class="check"><input type="checkbox" bind:checked={s.usageSignals} aria-describedby="st-signals-hint" /> {t('layer.signalsToggle')}</label>
       </div>
     {/if}
@@ -1092,8 +1079,7 @@
         <p class="muted sm">{t('set.costHint')}</p>
         {#if vis(c, 'runc.spend.title')}<SpendingGuard bind:value={s.spending} disabled={readOnly} error={errors.spending ?? ''} buildError={errors.buildHold ?? ''} />{/if}
         {#if vis(c, 'ui.set.showCost')}
-          <label class="check"><input type="checkbox" checked={app.settings?.showCost ?? app.showCost} disabled={readOnly} onchange={(e) => { const el = e.currentTarget; setShowCost(el.checked).catch((err) => { el.checked = !el.checked; failed(t('ui.set.saveFailed'), err); }); }} aria-describedby="st-cost-hint" /> {t('ui.set.showCost')}</label>
-          <p class="muted sm" id="st-cost-hint">{t('ui.set.showCostHint')}</p>
+          <label class="check"><input type="checkbox" checked={app.settings?.showCost ?? app.showCost} disabled={readOnly} onchange={(e) => { const el = e.currentTarget; setShowCost(el.checked).catch((err) => { el.checked = !el.checked; failed(t('ui.set.saveFailed'), err); }); }} /> {t('ui.set.showCost')} <HelpTip text={t('ui.set.showCostHint')} /></label>
         {/if}
       </div>
     {/if}
@@ -1135,8 +1121,7 @@
     {#if vis(c, 'care.upd.title')}
       <div class="card">
         <h3>{t('care.upd.title')}</h3>
-        <label class="check"><input type="checkbox" bind:checked={s.releaseCheck} aria-describedby="st-release-hint" /> {t('care.upd.toggle')}</label>
-        <p class="muted sm" id="st-release-hint">{t('care.upd.hint')}</p>
+        <label class="check"><input type="checkbox" bind:checked={s.releaseCheck} /> {t('care.upd.toggle')} <HelpTip text={t('care.upd.hint')} /></label>
         {#if app.status?.newerVersion?.version}<p class="muted sm" role="status">{t('care.upd.available', { version: app.status.newerVersion.version })}</p>{/if}
         {#if download.active}
           {@const mb = (n: number) => (n / 1048576).toFixed(n >= 10 * 1048576 ? 0 : 1)}

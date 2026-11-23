@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Settings › Maintenance: the check-up with its fixes, moving to another computer, and removing
   // Thoughts from this computer. (The weekly version check is a setting; Settings shows it.)
   import Icon from '../lib/Icon.svelte';
@@ -188,8 +189,7 @@
 
 {#if show('care.health.title')}
   <div class="card">
-    <h3>{t('care.health.title')}</h3>
-    <p class="muted sm">{t('care.health.intro')}</p>
+    <h3>{t('care.health.title')} <HelpTip text={t('care.health.intro')} /></h3>
     {#if issues === null && checking}
       <p class="muted sm" role="status">{t('care.health.checking')}</p>
     {:else if checkErr}
@@ -216,8 +216,7 @@
 
 {#if show('care.move.title')}
   <div class="card">
-    <h3>{t('care.move.title')}</h3>
-    <p class="muted sm">{t('care.move.intro')}</p>
+    <h3>{t('care.move.title')} <HelpTip text={t('care.move.intro')} /></h3>
     {#if libs.list.length > 1}<p class="muted sm">{t('cln.move.oneLibrary', { name: openLib()?.displayName ?? '' })}</p>{/if}
     <div class="row wrap gap-top">
       <button type="button" class="btn" disabled={exporting} aria-busy={exporting} onclick={exportMove}><Icon name="download" size={14} /> {exporting ? t('care.move.exporting') : t('care.move.export')}</button>
@@ -261,14 +260,12 @@
           <p class="muted sm sub" id="care-data-hint">{t('ldc.move.dataHint')}</p>
           {#if pick.addonData && inspected.addonDataExisting > 0}
             <div class="sub">
-              <label class="check"><input type="checkbox" bind:checked={pick.addonDataReplace} aria-describedby="care-data-rep-hint" /> {t('ldc.move.dataReplace', { n: fmtNum(inspected.addonDataExisting) })}</label>
-              <p class="muted sm" id="care-data-rep-hint">{t('ldc.move.dataReplaceHint')}</p>
+              <label class="check"><input type="checkbox" bind:checked={pick.addonDataReplace} /> {t('ldc.move.dataReplace', { n: fmtNum(inspected.addonDataExisting) })} <HelpTip text={t('ldc.move.dataReplaceHint')} /></label>
             </div>
           {/if}
         {/if}
         {#if pick.chats && inspected.projects?.length}
-          <h4>{t('care.move.folders')}</h4>
-          <p class="muted sm">{t('care.move.foldersHint')}</p>
+          <h4>{t('care.move.folders')} <HelpTip text={t('care.move.foldersHint')} /></h4>
           {#each inspected.projects as p (p.id)}
             <div class="row wrap folder">
               <div class="grow">
@@ -301,8 +298,7 @@
 
 {#if show('care.rm.title')}
   <div class="card dangerzone">
-    <h3>{t('care.rm.title')}</h3>
-    <p class="muted sm">{t('care.rm.intro')}</p>
+    <h3>{t('care.rm.title')} <HelpTip text={t('care.rm.intro')} /></h3>
     {#if !rmOpen}
       <button type="button" class="btn danger" onclick={startRemove}><Icon name="trash" size={14} /> {t('care.rm.start')}</button>
     {:else if rmPlan}

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Customise › Automate: "Suggest automations". Only when the person presses the button, the
   // background service sends their own assistant a short summary of how they use Thoughts (shown
   // word for word under "See what will be sent") and gets back a few suggestions: a Routine, a
@@ -254,8 +255,7 @@
 
   {#if st.blocked !== 'noLibrary'}
     <section class="card" aria-labelledby="au-ppl-h">
-      <h3 id="au-ppl-h">{t('auto-ui.ppl.title')}</h3>
-      <p class="muted sm">{t('auto-ui.ppl.hint')}</p>
+      <h3 id="au-ppl-h">{t('auto-ui.ppl.title')} <HelpTip text={t('auto-ui.ppl.hint')} /></h3>
       {#if !peopleStep}<PeopleEditor />{/if}
     </section>
   {/if}

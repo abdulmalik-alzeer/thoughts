@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Customise, a page of its own (sidebar): start a new customisation (a chat of its own), the add-ons one at a time, ready-made
   // packs, automatic tasks and routines, sharing, and the app history. Recovery and Rollback are
   // core code: nothing here is part of the customisation layer.
@@ -115,13 +116,11 @@
       <ReadyPacks />
     {:else if tab === 'tasks'}
       <div class="card">
-        <h3>{t('layer.workflows')}</h3>
-        <p class="muted sm">{t('layer.workflowsHint')}</p>
+        <h3>{t('layer.workflows')} <HelpTip text={t('layer.workflowsHint')} /></h3>
         <AutomaticTasks />
       </div>
       <div class="card">
-        <h3>{t('auto.routines')}</h3>
-        <p class="muted sm">{t('auto.routinesHint')}</p>
+        <h3>{t('auto.routines')} <HelpTip text={t('auto.routinesHint')} /></h3>
         <Routines />
       </div>
     {:else if tab === 'share'}
@@ -130,8 +129,7 @@
       <div class="card"><Rollback embedded /></div>
     {:else}
       <div class="card">
-        <h3>{t('layer.appUpdates')}</h3>
-        <p class="muted sm">{t('layer.appUpdatesHint')}</p>
+        <h3>{t('layer.appUpdates')} <HelpTip text={t('layer.appUpdatesHint')} /></h3>
         <button type="button" class="btn" class:checking={check.busy} disabled={check.busy} aria-busy={check.busy} onclick={() => checkAppUpdate(true)}><Icon name="sync" size={15} /> {t('layer.upd.check')}</button>
         <UpdateChoices />
       </div>

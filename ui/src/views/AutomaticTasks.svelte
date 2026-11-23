@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Settings → Customisations → Automatic tasks: what each one does, how it last ended, Run now,
   // allow / turn off, and its time and spending limits.
   import Icon from '../lib/Icon.svelte';
@@ -142,8 +143,7 @@
             {/each}
           </ul>
         {/if}
-        <h4>{t('auto.limits')}</h4>
-        <p class="muted sm">{t('auto.limitsHint')}</p>
+        <h4>{t('auto.limits')} <HelpTip text={t('auto.limitsHint')} /></h4>
         {#if edits[w.file]}
           <form class="row wrap limits" onsubmit={(e) => { e.preventDefault(); if (limitsValid(edits[w.file]) && limitsChanged(w)) saveLimits(w); }}>
             <div><label for={'m-' + w.file}>{t('auto.minutes')}</label><input id={'m-' + w.file} type="number" min="1" max="240" step="1" bind:value={edits[w.file].minutes} /></div>

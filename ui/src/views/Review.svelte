@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Review panel for a staged change to the customisation layer: nothing here is loaded into the app
   // until the user chooses Try it or Keep.
   //
@@ -314,8 +315,7 @@
               {#if (w as any).valid === false}<p class="muted">{t('layer.wfInvalid')}</p>{/if}
             {/each}
             {#if canAllow}
-              <label class="allow"><input type="checkbox" bind:checked={allowWorkflows} /> {t('layer.wfAllow')}</label>
-              <p class="muted">{t('layer.wfAllowHint')}</p>
+              <label class="allow"><input type="checkbox" bind:checked={allowWorkflows} /> {t('layer.wfAllow')} <HelpTip text={t('layer.wfAllowHint')} /></label>
             {:else}
               <p class="muted">{t('layer.wfAllowLater')}</p>
             {/if}
@@ -355,9 +355,8 @@
           <div class="grow">
             <b id="rv-plug">{t('plg.rv.title')}</b>
             {#if plugChoice}
-              <label class="allow"><input type="checkbox" checked={plug.target === 'new'} disabled={!!busy} onchange={(e) => choosePlugin((e.currentTarget as HTMLInputElement).checked)} /> {t('plg.rv.keepAs')}</label>
+              <label class="allow"><input type="checkbox" checked={plug.target === 'new'} disabled={!!busy} onchange={(e) => choosePlugin((e.currentTarget as HTMLInputElement).checked)} /> {t('plg.rv.keepAs')} <HelpTip text={t('plg.rv.keepHint')} /></label>
               <input class="plugname" type="text" dir="auto" maxlength="80" aria-label={t('plg.rv.nameLabel')} disabled={plug.target !== 'new' || !!busy} bind:value={plugName} onblur={renamePlugin} onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); renamePlugin(); } }} />
-              <p class="muted">{t('plg.rv.keepHint')}</p>
             {:else if plug.target === 'all'}
               <p>{t('plg.rv.all')}</p>
             {:else}

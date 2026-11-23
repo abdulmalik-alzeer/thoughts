@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../../lib/HelpTip.svelte';
   // The build: the app does the planned work itself, on a copy of the project, a few pieces side
   // by side. This view shows where it stands, lets the user start, pause, resume or stop it, try a
   // failed piece again, and — only once everything is done — bring the result into their own branch.
@@ -230,8 +231,7 @@
   {#if screens || status === 'checking'}
     <section class="card phase" aria-labelledby="mado-screens">
       <h4 id="mado-screens"><ScanEye size={17} aria-hidden="true" /> {t('mado.screens.title')}
-        <span class="st t-{screens?.status === 'done' ? (screens.failed ? 'bad' : 'ok') : screens?.status === 'skipped' ? 'wait' : 'run'}" role="status">{t(`mado.screens.${screens?.status ?? 'waiting'}`)}</span></h4>
-      <p class="muted sm">{t('mado.screens.what')}</p>
+        <span class="st t-{screens?.status === 'done' ? (screens.failed ? 'bad' : 'ok') : screens?.status === 'skipped' ? 'wait' : 'run'}" role="status">{t(`mado.screens.${screens?.status ?? 'waiting'}`)}</span> <HelpTip text={t('mado.screens.what')} /></h4>
       {#if screens?.status === 'done'}
         <p class="sm">{tn('mado.screens.count', screens.count ?? 0)}{' · '}{#if screens.failed}<b class="badtxt">{tn('mado.screens.failed', screens.failed)}</b>{:else}{t('mado.screens.allFine')}{/if}</p>
       {:else if screens?.status === 'skipped'}
@@ -248,8 +248,7 @@
     <section class="card phase" id="mado-review" aria-labelledby="mado-review-h" tabindex="-1">
       <h4 id="mado-review-h"><ClipboardCheck size={17} aria-hidden="true" /> {t('mado.breview.title')}
         <span class="st t-{review.status === 'passed' ? 'ok' : review.status === 'failed' ? 'bad' : review.status === 'running' ? 'run' : 'wait'}" role="status">{t(`mado.breview.${review.status}`)}</span>
-        <span class="muted sm">{t('mado.breview.round', { n: fmtNum(Math.max(1, Number(review.round) || 1)) })}</span></h4>
-      <p class="muted sm">{t('mado.breview.what')}</p>
+        <span class="muted sm">{t('mado.breview.round', { n: fmtNum(Math.max(1, Number(review.round) || 1)) })}</span> <HelpTip text={t('mado.breview.what')} /></h4>
       {#if review.note}<p class="note bad" role="status"><TriangleAlert size={15} aria-hidden="true" /> <span dir="auto">{String(review.note).slice(0, 2000)}</span></p>{/if}
       <div class="row chats">
         {#if review.chatId}<button type="button" class="btn ghost sm" onclick={() => openChat(review.chatId!)} title={t('mado.breview.chatTip')}><MessageCircle size={13} aria-hidden="true" /> {t('mado.breview.chat')}</button>{/if}

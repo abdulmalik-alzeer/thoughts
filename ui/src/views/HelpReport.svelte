@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // "Report a problem": prepares a report the user reads in full, then copies or saves themselves.
   // Nothing is sent anywhere from here.
   import Icon from '../lib/Icon.svelte';
@@ -60,8 +61,7 @@
 </section>
 
 <section aria-labelledby="rep-prev">
-  <h2 id="rep-prev">{t('help.rep.preview')}</h2>
-  <p class="muted">{t('help.rep.previewBody')}</p>
+  <h2 id="rep-prev">{t('help.rep.preview')} <HelpTip text={t('help.rep.previewBody')} /></h2>
   {#if phase === 'loading'}<p class="muted" role="status">{t('help.rep.loading')}</p>
   {:else if phase === 'basic'}<p class="muted" role="status">{t('help.rep.basicOnly')}</p>{/if}
   <textarea class="preview" rows="16" readonly dir="ltr" aria-labelledby="rep-prev" value={report}></textarea>

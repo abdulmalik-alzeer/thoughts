@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../../lib/HelpTip.svelte';
   // Building a Routine or a Helper from a suggestion: the draft (the app's own template at once, or
   // one the assistant writes after the person agreed to that one request), an editor, then a review
   // of exactly what will be saved. Keep is the only thing that writes; the service does the writing.
@@ -69,10 +70,9 @@
 <div class="modal-bg no-print" role="presentation" use:toBody onclick={(e) => e.target === e.currentTarget && close()}>
   <div class="modal ed" role="dialog" aria-modal="true" aria-labelledby={id('h')} tabindex="-1" use:trapFocus={{ onEscape: close }}>
     {#if phase === 'ask' || phase === 'drafting'}
-      <h2 id={id('h')} dir="auto">{title}</h2>
-      <p dir="auto">{what}</p>
-      <p class="muted sm">{t(k('askIntro'))}</p>
+      <h2 id={id('h')} dir="auto">{title} <HelpTip text={t(k('askIntro'))} /></h2>
       <p class="muted sm">{t('auto-ui.ed.askCost')}</p>
+      <p dir="auto">{what}</p>
       {#if draftError}<p class="err" role="alert"><bdi>{draftError}</bdi></p>{/if}
       {#if phase === 'drafting'}<p class="row status" role="status"><span class="spin" aria-hidden="true"></span> {t('auto-ui.ed.drafting')}</p>{/if}
       <div class="row end">
@@ -82,8 +82,7 @@
         </button>
       </div>
     {:else if phase === 'edit'}
-      <h2 id={id('h')}>{t(k('editTitle'))}</h2>
-      <p class="muted sm">{t(k('editHint'))}</p>
+      <h2 id={id('h')}>{t(k('editTitle'))} <HelpTip text={t(k('editHint'))} /></h2>
       <label for={id('name')}>{t(k('name'))}</label>
       <input id={id('name')} dir="auto" maxlength="80" bind:value={draft.title} />
       <label for={id('when')}>{t(k('when'))}</label>
@@ -98,8 +97,7 @@
         <button type="button" class="btn primary" disabled={!ready || unsafe} onclick={() => (phase = 'review')}>{t('auto-ui.ed.review')}</button>
       </div>
     {:else}
-      <h2 id={id('h')}>{t(k('reviewTitle'))}</h2>
-      <p class="muted sm">{t(k('reviewHint'))}</p>
+      <h2 id={id('h')}>{t(k('reviewTitle'))} <HelpTip text={t(k('reviewHint'))} /></h2>
       <div class="field"><div class="lbl">{t(k('name'))}</div><div dir="auto">{shown.title}</div></div>
       <div class="field"><div class="lbl">{t(k('when'))}</div><div dir="auto">{shown.description}</div></div>
       <div class="field"><div class="lbl">{t(k('body'))}</div><div class="body" dir="auto">{shown.body}</div></div>

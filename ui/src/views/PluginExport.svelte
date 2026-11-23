@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Customise › Plugins › Export…: the name, version, maker and description the file will carry.
   // A loose item gets its name here and becomes a named plugin (one History entry), so later exports
   // keep its id and version. Then the file is saved, and its fingerprint shown.
@@ -45,8 +46,7 @@
 
 <div class="modal-bg no-print" role="presentation" use:portal onclick={(e) => e.target === e.currentTarget && close()}>
   <div class="modal share" role="dialog" aria-modal="true" aria-labelledby="pe-title" tabindex="-1" use:trapFocus={{ onEscape: close }}>
-    <h2 id="pe-title" dir="auto">{t('plg.exp.title', { name: start.name })}</h2>
-    <p class="muted sm">{t('plg.exp.intro')}</p>
+    <h2 id="pe-title" dir="auto">{t('plg.exp.title', { name: start.name })} <HelpTip text={t('plg.exp.intro')} /></h2>
     {#if !start.named}<p class="muted sm">{t('plg.exp.looseNote')}</p>{/if}
     <form class="fields" onsubmit={(e) => { e.preventDefault(); save(); }}>
       <label>{t('plg.exp.name')}<input dir="auto" maxlength="80" required bind:value={who.name} aria-invalid={error === t('plg.exp.needName')} /></label>

@@ -483,7 +483,7 @@
       </div>
       <label for="ob-name">{t('ob.nameLabel')}</label>
       <input id="ob-name" dir="auto" bind:value={s.userName} placeholder={t('ob.namePh')} autocomplete="off" />
-      <label for="ob-prof">{t('layer.prof.label')}</label>
+      <label for="ob-prof">{t('layer.prof.label')} <HelpTip text={t('layer.prof.hint')} /></label>
       <select id="ob-prof" bind:value={profession}>
         <option value="">{t('layer.prof.choose')}</option>
         {#each professions as p}<option value={p}>{t('layer.prof.' + p)}</option>{/each}
@@ -492,7 +492,6 @@
         <label for="ob-prof-other">{t('sa.prof.otherLabel')}</label>
         <input id="ob-prof-other" dir="auto" bind:value={professionOther} placeholder={t('sa.prof.otherPh')} maxlength="160" autocomplete="off" />
       {/if}
-      <p class="muted sm">{t('layer.prof.hint')}</p>
     {:else if step === 1}
       <h1 tabindex="-1">{t('ob.aiTitle')}</h1>
       <p>{onCodex ? t('ux-onboarding.ai.bodyCodex') : t('ob.aiBody')}</p>
@@ -635,8 +634,7 @@
         <label for="ob-seeds">{t('ob.seeds')}</label>
         <textarea id="ob-seeds" rows="2" dir="auto" bind:value={seeds} placeholder={t('ob.seedsPh')}></textarea>
 
-        <h2 id="ob-bring">{t('sb.bring.label')}</h2>
-        <p class="muted sm">{t('sb.bring.hint')}</p>
+        <h2 id="ob-bring">{t('sb.bring.label')} <HelpTip text={t('sb.bring.hint')} /></h2>
         {#if bringing}
           <div class="card status" aria-labelledby="ob-bring">
             <p class="row"><Icon name="folder" size={16} /> <b class="grow path">{t('sb.bring.from', { path: importFrom.trim() })}</b></p>
@@ -663,8 +661,7 @@
       <details class="adv backup" bind:open={backupOpen}>
         <summary><span>{t('ux-onboarding.backup.section')}</span> <span class="muted cur">{syncLabel} · {t('hista.historyTitle')}: {t(historyOn ? 'hista.on' : 'hista.off')}{#if historyOn && !git.installed} · {t('hista.sumNeedsGit')}{/if}</span></summary>
         <h3 id="ob-history">{t('hista.historyTitle')}</h3>
-        <label class="check"><input type="checkbox" checked={historyOn} disabled={isGit} onchange={(e) => (s.keepHistory = e.currentTarget.checked)} /> {t('hista.keep')}</label>
-        <p class="muted sm">{t(isGit ? 'hista.keepForced' : historyOn ? 'hista.keepHint' : 'hista.keepOffHint')}</p>
+        <label class="check"><input type="checkbox" checked={historyOn} disabled={isGit} onchange={(e) => (s.keepHistory = e.currentTarget.checked)} /> {t('hista.keep')} <HelpTip text={t(isGit ? 'hista.keepForced' : historyOn ? 'hista.keepHint' : 'hista.keepOffHint')} /></label>
         {#if gitSaid && git.installed}<p class="okline"><Icon name="check" size={15} /> <span>{gitSaid}</span></p>{/if}
         {#if historyOn && !git.installed}
           <div class="card status" role="note">
@@ -678,8 +675,7 @@
           </div>
         {/if}
 
-        <h3 id="ob-backup">{t('ob3.backupTitle')}</h3>
-        <p class="muted">{t('hista.backupBody')}</p>
+        <h3 id="ob-backup">{t('ob3.backupTitle')} <HelpTip text={t('hista.backupBody')} /></h3>
         <div class="opts four" role="group" aria-labelledby="ob-backup">
           <button type="button" class="opt" class:sel={s.sync.mode === 'none'} aria-pressed={s.sync.mode === 'none'} onclick={() => setBackup('none')}><b>{t('hista.backup.none')}</b><span class="muted">{t('hista.backup.noneHint')}</span></button>
           <button type="button" class="opt" class:sel={s.sync.mode === 'folder'} aria-pressed={s.sync.mode === 'folder'} onclick={() => setBackup('folder')}><b>{t('hista.backup.folder')}</b><span class="muted">{t('hista.backup.folderHint')}</span></button>
@@ -741,9 +737,8 @@
                 <div class="grow"><label for="ob-rtoken">{t('ob.remoteToken')}</label><input id="ob-rtoken" dir="ltr" type="password" bind:value={remoteToken} autocomplete="off" /></div>
               </div>
               <RemoteTokenHelp />
-              <label for="ob-cred">{t('ob.credStore')}</label>
+              <label for="ob-cred">{t('ob.credStore')} <HelpTip text={t(s.sync.credentialStore === 'file' ? 'ob3.credFileNote' : 'ob3.credKeychainNote')} /></label>
               <select id="ob-cred" bind:value={s.sync.credentialStore}><option value="keychain">{t('ob.credKeychain')}</option><option value="file">{t('ob.credFile')}</option></select>
-              <p class="muted sm">{t(s.sync.credentialStore === 'file' ? 'ob3.credFileNote' : 'ob3.credKeychainNote')}</p>
             {/if}
           </div>
         {/if}

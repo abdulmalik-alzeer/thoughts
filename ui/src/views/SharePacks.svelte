@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // Customise › Share: save a pack with a name, its maker and a version (and see its fingerprint),
   // and add a pack someone sent, after seeing what it says it is and the fingerprint the app works out.
   import Icon from '../lib/Icon.svelte';
@@ -68,8 +69,7 @@
 </script>
 
 <div class="card">
-  <h3>{t('ldc.share.title')}</h3>
-  <p class="muted sm">{t('layer.shareHint')}</p>
+  <h3>{t('ldc.share.title')} <HelpTip text={t('layer.shareHint')} /></h3>
   <div class="row wrap">
     <button type="button" class="btn" disabled={busy.open || busy.save} onclick={() => openForm(false)}><Icon name="download" size={15} /> {t('ldc.share.all')}</button>
     <button type="button" class="btn" disabled={busy.open || busy.save} onclick={() => openForm(true)}>{t('ldc.share.some')}</button>
@@ -89,8 +89,7 @@
 </div>
 
 <div class="card">
-  <h3>{t('ldc.imp.title')}</h3>
-  <p class="muted sm">{t('layer.importHint')}</p>
+  <h3>{t('ldc.imp.title')} <HelpTip text={t('layer.importHint')} /></h3>
   <PackImport />
 </div>
 

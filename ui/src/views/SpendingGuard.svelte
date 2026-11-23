@@ -1,4 +1,5 @@
 <script lang="ts">
+  import HelpTip from '../lib/HelpTip.svelte';
   // The monthly spending limit (Settings › Privacy and cost). Edits the draft `value`
   // ({ monthlyLimitUsd, warnPercent }); the page saves it with the rest.
   import { app, saveSettings } from '../lib/store.svelte';
@@ -39,8 +40,7 @@
   }
 </script>
 
-<h3>{t('runc.spend.title')}</h3>
-<p class="muted sm" id="st-spend-hint">{t('runc.spend.hint')}</p>
+<h3>{t('runc.spend.title')} <HelpTip text={t('runc.spend.hint')} /></h3>
 <label class="check"><input type="checkbox" checked={on} {disabled} onchange={(e) => toggle(e.currentTarget.checked)} aria-describedby="st-spend-hint" /> {t('runc.spend.on')}</label>
 {#if on}
   <div class="row wrap fields">
@@ -62,8 +62,7 @@
   {/if}
 {/if}
 
-<h3 class="buildh">{t('runc.build.title')}</h3>
-<p class="muted sm" id="st-build-hint">{t('runc.build.hint')}</p>
+<h3 class="buildh">{t('runc.build.title')} <HelpTip text={t('runc.build.hint')} /></h3>
 <div class="fields">
   <div>
     <label for="st-build-hold">{t('runc.build.hold')}</label>
@@ -71,8 +70,7 @@
   </div>
 </div>
 {#if buildError}<p class="err" role="alert">{buildError}</p>{/if}
-<label class="check confine"><input type="checkbox" checked={confined} disabled={disabled || confining} onchange={(e) => setConfine(e.currentTarget.checked, e.currentTarget)} aria-describedby="st-confine-hint" /> {t('runc.build.confine')}</label>
-<p class="muted sm" id="st-confine-hint">{t('runc.build.confineHint')}</p>
+<label class="check confine"><input type="checkbox" checked={confined} disabled={disabled || confining} onchange={(e) => setConfine(e.currentTarget.checked, e.currentTarget)} /> {t('runc.build.confine')} <HelpTip text={t('runc.build.confineHint')} /></label>
 
 <style>
   .fields { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
