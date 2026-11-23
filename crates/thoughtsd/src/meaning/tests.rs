@@ -311,9 +311,21 @@ fn a_redirect_to_another_host_is_refused() {
     let e = model::download_files(&home, &format!("http://127.0.0.1:{}", srv.port), std::slice::from_ref(&f), &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
     assert!(e.to_string().contains(&crate::tr::err("meaning.bad_host", &[]).to_string()), "{e}");
     // Only the preset host and the Hub's CDN, over https.
-    for ok in ["https://huggingface.co/x", "https://cdn-lfs.huggingface.co/x", "https://us.aws.cdn.hf.co/x?y=1"] { assert!(model::allowed(ok), "{ok}"); }
+    for ok in ["https://huggingface.co/x", "https://HuggingFace.co/x", "https://huggingface.co:443/x", "https://us.aws.cdn.hf.co/x?y=1", "https://cas-bridge.xethub.hf.co/a"] {
+        assert!(model::allowed(ok), "{ok}");
+    }
     for bad in ["http://huggingface.co/x", "https://huggingface.co.evil.com/x", "https://evil.com/huggingface.co", "https://user@huggingface.co/x",
-        "https://huggingface.co:444/x", "https://hf.co.evil/x", "ftp://huggingface.co/x"] { assert!(!model::allowed(bad), "{bad}"); }
+        "https://user:pw@huggingface.co/x", "https://evil.com@huggingface.co/x", "https://huggingface.co@evil.com/x",
+        "https://huggingface.co:444/x", "https://hf.co.evil/x", "ftp://huggingface.co/x", "https://evilhuggingface.co/x", "https://evilhf.co/x",
+        "https://hf.co/x", "https://.hf.co/x", "https://a..hf.co/x", "https://huggingface.co./x", "https://us.cdn.hf.co./x",
+        "https://huggingface.co\\@evil.com/x", "https://evil.com\\.huggingface.co/x", "https://huggingface.co/x\ny", "https://hugging face.co/x",
+        "https://evil.com%2f.huggingface.co/x", "https://evil.com%2F@huggingface.co/x", "https://evil%2ecom/x",
+        "https://13.33.0.1/x", "https://[::1]/x", "https://0x7f000001/x", "http://127.0.0.1.evil.com/x", "huggingface.co/x", ""] {
+        assert!(!model::allowed(bad), "{bad}");
+    }
+    // What passes is what is asked for: the parsed address names an allowed host.
+    let u = model::checked_url("https://us.aws.cdn.hf.co/a/../b?x=1").unwrap();
+    assert_eq!((u.host_str(), u.path()), (Some("us.aws.cdn.hf.co"), "/b"));
     std::fs::remove_dir_all(home).unwrap();
 }
 

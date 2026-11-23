@@ -5759,6 +5759,7 @@ dependencies = [
  "tokio",
  "tower-http 0.5.2",
  "ureq",
+ "url",
  "uuid",
  "walkdir",
  "yaml_serde",

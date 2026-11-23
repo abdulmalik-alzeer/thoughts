@@ -60,20 +60,30 @@ pub fn installed(home: &Path) -> bool {
 /// Where the files come from: the Hub at the pinned commit. Tests point it at a local server.
 pub fn base_url() -> String { format!("https://{HOST}/{REPO}/resolve/{COMMIT}") }
 
-/// May a download go to `url`? https to the preset host or the Hub's CDN hosts only.
-pub fn allowed(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("https://") else { return test_host(url) };
-    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if host.contains('@') || host.contains(':') || host.is_empty() { return false; }
-    let host = host.to_ascii_lowercase();
-    host == HOST || host == "hf.co" || host.ends_with(".huggingface.co") || host.ends_with(".hf.co")
+/// The address a download may go to, parsed by the same parser the HTTP client uses (`url`), so
+/// what is checked is what is asked for: https, no user name or password, no port but 443, and a
+/// host that is the preset one or the Hub's CDN. `huggingface.co` sends the large files on to a
+/// regional CDN host under `hf.co` (seen 2026-11-23: `us.aws.cdn.hf.co`; the region part varies),
+/// which is why that one suffix is allowed. A backslash, a control character or a space anywhere
+/// is refused before parsing.
+pub fn checked_url(raw: &str) -> Option<url::Url> {
+    if raw.chars().any(|c| c == '\\' || c.is_control() || c.is_whitespace()) { return None; }
+    let u = url::Url::parse(raw).ok()?;
+    if test_url(&u) { return Some(u); }
+    if u.scheme() != "https" || !u.username().is_empty() || u.password().is_some() { return None; }
+    if u.port().map_or(false, |p| p != 443) { return None; }
+    let Some(url::Host::Domain(host)) = u.host() else { return None };
+    let ok = host == HOST || host.strip_suffix(".hf.co").map_or(false, |sub| !sub.is_empty() && sub.split('.').all(|l| !l.is_empty()));
+    ok.then_some(u)
 }
+
+pub fn allowed(raw: &str) -> bool { checked_url(raw).is_some() }
 
 /// Tests serve the files from a server on this computer, over plain http.
 #[cfg(test)]
-fn test_host(url: &str) -> bool { url.starts_with("http://127.0.0.1:") }
+fn test_url(u: &url::Url) -> bool { u.scheme() == "http" && u.host_str() == Some("127.0.0.1") && u.username().is_empty() && u.password().is_none() }
 #[cfg(not(test))]
-fn test_host(_url: &str) -> bool { false }
+fn test_url(_u: &url::Url) -> bool { false }
 
 /// Why a download stopped early.
 #[derive(Debug, PartialEq)]
@@ -135,10 +145,10 @@ fn agent() -> ureq::Agent {
 /// Ask for `url` from byte `from` on, following allowed redirects by hand.
 fn request(url: &str, from: u64, etag: Option<&str>) -> anyhow::Result<ureq::Response> {
     let a = agent();
-    let mut at = url.to_string();
+    let mut at = checked_url(url).ok_or_else(|| crate::tr::err("meaning.bad_host", &[]))?;
     for _ in 0..=MAX_REDIRECTS {
-        if !allowed(&at) { return Err(crate::tr::err("meaning.bad_host", &[])); }
-        let mut r = a.get(&at);
+        // The very address that was checked is the one asked for.
+        let mut r = a.request_url("GET", &at);
         if from > 0 {
             r = r.set("Range", &format!("bytes={from}-"));
             if let Some(t) = etag { r = r.set("If-Range", t); }
@@ -152,11 +162,10 @@ fn request(url: &str, from: u64, etag: Option<&str>) -> anyhow::Result<ureq::Res
         };
         if (300..400).contains(&res.status()) {
             let Some(next) = res.header("location").map(str::to_string) else { return Err(crate::tr::err("meaning.download_failed", &[])) };
-            // A relative address stays on the host that sent it.
-            at = if next.starts_with('/') {
-                let scheme_host: String = at.splitn(4, '/').take(3).collect::<Vec<_>>().join("/");
-                format!("{scheme_host}{next}")
-            } else { next };
+            // Every hop is checked like the first; a relative address is read against the one that sent it.
+            if next.chars().any(|c| c == '\\' || c.is_control()) { return Err(crate::tr::err("meaning.bad_host", &[])); }
+            let joined = at.join(&next).map_err(|_| crate::tr::err("meaning.bad_host", &[]))?;
+            at = checked_url(joined.as_str()).ok_or_else(|| crate::tr::err("meaning.bad_host", &[]))?;
             continue;
         }
         return Ok(res);
