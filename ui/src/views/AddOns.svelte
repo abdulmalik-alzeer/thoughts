@@ -1,6 +1,9 @@
 <script lang="ts">
-  // Customise › Add-ons: every add-on and page, on or off, with what it may do and what it saved.
-  // Switching one off, removing it or taking a permission away is one History entry (with Undo).
+  // Every add-on and page, on or off, with what it may do and what it saved. Switching one off,
+  // removing it or taking a permission away is one History entry (with Undo).
+  // Since 0.5.0 this is the details part of Customise › Plugins (views/PluginDetails.svelte shows it
+  // for the add-ons and pages of one plugin: `only`), and the list of saved data that add-ons no
+  // longer in the app left behind (`only` empty).
   import Icon from '../lib/Icon.svelte';
   import { onMount } from 'svelte';
   import { go, toast } from '../lib/store.svelte';
@@ -11,7 +14,13 @@
   import { permText, revertChange } from '../lib/layer';
   import { addOns, clearData, forgetData, removeAddOn, restoreData, sizeText, switchAddOn, withdrawPermission, type AddOn, type DataInfo, type Leftover } from '../lib/packs';
 
-  let { open }: { open: (tab: string) => void } = $props();
+  let { open, only = null, whole = true }: {
+    open: (tab: string) => void;
+    /** Show just these add-ons and pages (by path); `[]` shows only the saved data left behind. `null`: all of them. */
+    only?: string[] | null;
+    /** Each row has its own switch and Remove. `false` inside a named plugin, which is switched and removed as a whole. */
+    whole?: boolean;
+  } = $props();
 
   let items = $state<AddOn[]>([]);
   let leftover = $state<Leftover[]>([]);
@@ -21,7 +30,12 @@
 
   async function load() {
     loadError = '';
-    try { ({ items, leftover } = await addOns()); }
+    try {
+      const all = await addOns();
+      items = only ? all.items.filter((a) => only.includes(a.path)) : all.items;
+      // (Saved data left behind is listed once, by the page, not under every plugin.)
+      leftover = only?.length ? [] : all.leftover;
+    }
     catch (e: any) { loadError = e?.message || t('ldc.addons.loadFailed'); }
     finally { loading = false; }
   }
@@ -114,7 +128,7 @@
   </div>
 {/snippet}
 
-<p class="muted sm">{t('ldc.addons.intro')}</p>
+{#if !only}<p class="muted sm">{t('ldc.addons.intro')}</p>{/if}
 
 {#if loading}
   <div class="card" aria-busy="true"><span class="sr-only">{t('ldc.addons.loading')}</span><div class="skel"></div><div class="skel w70"></div></div>
@@ -124,7 +138,9 @@
     <button type="button" class="btn" onclick={() => { loading = true; load(); }}><Icon name="retry" size={14} /> {t('shell.retry')}</button>
   </div>
 {:else}
-  {#if !items.length}
+  {#if !items.length && only}
+    {#if only.length}<p class="muted sm">{t('plg.details.none')}</p>{/if}
+  {:else if !items.length}
     <div class="card empty">
       <Icon name="plugin" size={26} />
       <p>{t('ldc.addons.empty')}</p>
@@ -162,7 +178,9 @@
             <p class="muted sm">{t('ldc.addons.nothing')}</p>
           {/if}
           {#if a.data}{@render data(a.name, a.label, a.data, false)}{/if}
-          {#if a.manageable}
+          {#if !whole}
+            <!-- part of a named plugin: switched and removed with it -->
+          {:else if a.manageable}
             <div class="row wrap acts">
               <button type="button" class="btn" class:primary={!a.on} disabled={!!busy} aria-busy={busy === 'switch:' + a.path} onclick={() => flip(a)}>
                 <Icon name={a.on ? 'stop' : 'retry'} size={14} /> {t(a.on ? 'ldc.addons.switchOff' : 'ldc.addons.switchOn')}
