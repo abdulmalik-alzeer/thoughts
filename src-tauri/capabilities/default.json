@@ -67,6 +67,7 @@
         { "url": "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition" }
       ]
     },
-    "allow-mado-screen-check"
+    "allow-mado-screen-check",
+    "allow-present-fullscreen"
   ]
 }

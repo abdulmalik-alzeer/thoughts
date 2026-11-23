@@ -250,8 +250,9 @@ pub fn import_file(root: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<Stri
     save_numbered(root, "imports", &name, bytes)
 }
 
-/// Document types the app itself makes from a note (see `save_output`).
-pub const OUTPUT_EXT: &[&str] = &["docx"];
+/// Document types the app itself makes from a note (see `save_output`). An HTML file only as a slide
+/// deck the app saved (`<note>.slides.html`, lib/slides/standalone.ts), never any other page.
+pub const OUTPUT_EXT: &[&str] = &["docx", "html"];
 
 /// Save a document the app generated (a note exported as Word) as `<folder>/<name>` in the library,
 /// never overwriting: `name (2).docx`… Only the types in `OUTPUT_EXT`. Returns the library-relative path.
@@ -259,6 +260,7 @@ pub fn save_output(root: &Path, folder: &str, name: &str, bytes: &[u8]) -> anyho
     let name = sanitize_file_name(name);
     let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
     if !OUTPUT_EXT.contains(&ext.as_str()) { return Err(crate::tr::err("invalid.path", &[])); }
+    if ext == "html" && !name.to_lowercase().ends_with(".slides.html") { return Err(crate::tr::err("invalid.path", &[])); }
     if bytes.len() > IMPORT_MAX_BYTES { return Err(crate::tr::err("too_large", &[("name", &name)])); }
     let folder = folder.trim().replace('\\', "/");
     let folder = folder.trim_end_matches('/');
@@ -1995,6 +1997,10 @@ mod tests {
         assert_eq!(save_output(&root, "apps/one/outputs/", "Plan.docx", b"b").unwrap(), "apps/one/outputs/Plan (2).docx");
         assert_eq!(std::fs::read(root.join("apps/one/outputs/Plan.docx")).unwrap(), b"a");
         assert_eq!(save_output(&root, "", "خطة.docx", b"c").unwrap(), "خطة.docx");
+        // A slide deck saved as one HTML file: numbered too, never replacing the first.
+        assert_eq!(save_output(&root, "apps/one/outputs", "Talk.slides.html", b"<p>1</p>").unwrap(), "apps/one/outputs/Talk.slides.html");
+        assert_eq!(save_output(&root, "apps/one/outputs", "Talk.slides.html", b"<p>2</p>").unwrap(), "apps/one/outputs/Talk.slides (2).html");
+        assert_eq!(std::fs::read(root.join("apps/one/outputs/Talk.slides.html")).unwrap(), b"<p>1</p>");
         for (folder, name) in [("apps", "x.html"), ("apps", "x.sh"), ("../out", "x.docx"), (".git", "x.docx"), ("/tmp", "x.docx"), ("a/.claude", "x.docx")] {
             assert!(save_output(&root, folder, name, b"x").is_err(), "{folder}/{name}");
         }

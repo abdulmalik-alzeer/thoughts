@@ -36,6 +36,7 @@ rather than word-for-word translations of the English.
 | Command palette | لوحة الأوامر | Opened with ⌘K / Ctrl+K. |
 | Quick capture | التدوين السريع | Write a todo or a note from any app. |
 | Keyboard shortcuts | اختصارات لوحة المفاتيح | Settings › Keyboard «الإعدادات › لوحة المفاتيح»: every key the app answers to; change one, add one, remove one, Reset «إعادة», Reset all «إعادة الكل». Keys that cannot change are «مفاتيح ثابتة» (Fixed keys). |
+| Present / Slides | عرض / شرائح | A note with `slides: true` shown full screen (Present «عرض»); the presenter panel «لوحة المقدّم»; Save slides as HTML «حفظ الشرائح بصيغة HTML». |
 | Inbox | صندوق الوارد | Quick notes and phone captures waiting to be filed. |
 | Recovery (menu) | الاستعادة | The native menu that works even when the window does not. |
 | Safe mode | الوضع الآمن | Customisations switched off. |

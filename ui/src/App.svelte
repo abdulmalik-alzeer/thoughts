@@ -770,6 +770,7 @@
     if (!app.safeMode && !secondary) add('sidebar.edit', t('sbe.open'), g.act, 'edit', { keywords: 'sidebar order rename hide icon group start الشريط ترتيب', run: () => { if (railed) toggleSidebar(); editingNav = true; } });
     add('tour', t('shell.pal.tour'), g.act, 'book');
     add('print', t('shell.pal.print'), g.act, 'print');
+    if (app.view.kind === 'docs') add('slides.present', t('kb.k.slides.present'), g.act, 'present', { keywords: 'present slides deck show presentation عرض شرائح تقديم' });
     add('zoom.in', t('a11y.zoomIn'), g.look, 'zoomIn', { keywords: 'zoom bigger larger text size تكبير' });
     add('zoom.out', t('a11y.zoomOut'), g.look, 'zoomOut', { keywords: 'zoom smaller text size تصغير' });
     add('zoom.reset', t('a11y.zoomReset'), g.look, 'zoomOut', { keywords: 'zoom reset 100 actual size الحجم' });

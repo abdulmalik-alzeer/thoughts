@@ -75,6 +75,28 @@ pub(crate) fn toggle(app: &AppHandle) {
     }
 }
 
+/// Whether the window was already full screen when a deck started (so leaving the deck keeps it so).
+static BEFORE_DECK: AtomicU8 = AtomicU8::new(2);
+
+/// Present a slide deck full screen, and back (`ui/src/lib/slides/Present.svelte`). The app window
+/// only; a window that was full screen before the deck stays full screen after it.
+#[tauri::command]
+pub(crate) fn present_fullscreen(window: tauri::Window, on: bool) -> Result<(), String> {
+    crate::main_only(&window)?;
+    let app = window.app_handle();
+    let Some(w) = app.get_webview_window(window.label()) else { return Err("no window".into()) };
+    let full = w.is_fullscreen().unwrap_or(false);
+    let target = if on {
+        BEFORE_DECK.store(full as u8, Ordering::SeqCst);
+        true
+    } else {
+        BEFORE_DECK.swap(2, Ordering::SeqCst) == 1
+    };
+    if full != target { w.set_fullscreen(target).map_err(|e| e.to_string())?; }
+    sync(app);
+    Ok(())
+}
+
 /// A window was resized or came to the front: make the item say what it would do now. (A window
 /// reports a resize once it has finished going in or out of full screen, however that happened.)
 pub(crate) fn sync(app: &AppHandle) {

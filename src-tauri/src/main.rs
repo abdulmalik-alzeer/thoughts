@@ -1429,7 +1429,8 @@ fn main() {
             voice::voice_transcribe_cancel,
             voice::voice_result,
             voice::voice_result_clear,
-            screen_check::mado_screen_check
+            screen_check::mado_screen_check,
+            fullscreen::present_fullscreen
         ])
         // A page that starts loading holds nothing unsaved yet, whatever the last one reported.
         .on_page_load(|webview, payload| {

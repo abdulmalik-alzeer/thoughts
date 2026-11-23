@@ -9,7 +9,7 @@ use crate::state::AppState;
 pub async fn all(state: &AppState, kind: &str, prompt: &str, library: Option<&Path>) -> Vec<String> {
     let mut notes = vec![];
     // slides
-    if let Some(n) = crate::slides::run_note().await { notes.push(n); }
+    if let Some(n) = crate::slides::run_note(kind).await { notes.push(n); }
     // meaning
     if let Some(n) = crate::meaning::run_note(state, kind, prompt, library).await { notes.push(n); }
     notes
@@ -20,7 +20,7 @@ mod tests {
     #[tokio::test]
     async fn with_nothing_to_say_a_run_is_told_nothing_more() {
         let st = crate::state::AppState::for_test();
-        assert!(super::all(&st, "chat", "hi", None).await.is_empty());
+        assert!(super::all(&st, "wrap", "hi", None).await.is_empty());
         assert!(crate::keys::problems(std::path::Path::new("."), false).is_empty());
         assert!(!crate::keys::act_title(false).is_empty() && !crate::keys::act_title(true).is_empty());
     }
