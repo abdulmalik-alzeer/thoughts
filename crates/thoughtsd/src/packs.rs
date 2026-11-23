@@ -12,7 +12,7 @@ pub const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 
 // (`addons.json`, the switched-off list, is not one: only the app's own switch and remove write it,
 // so no pack, review or outside edit can switch an add-on back on.)
-const TOP_FILES: &[&str] = &["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json", "pages.json"];
+const TOP_FILES: &[&str] = &["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json", "pages.json", "keys.json"];
 const TOP_DIRS: &[&str] = &["plugins", "views", "workflows"];
 
 /// Is `path` a place a customisation may live? Relative, forward slashes, no `..`, no dotfiles,
@@ -35,7 +35,7 @@ pub fn check_path(path: &str) -> anyhow::Result<()> {
         1 => TOP_FILES.contains(&parts[0]),
         n => TOP_DIRS.contains(&parts[0]) && n <= 6,
     };
-    if !ok { return Err(bad("not a customisation file (allowed: custom.css, themes.json, home.json, nav.json, todos.json, pages.json, manifest.json, plugins/, views/, workflows/)")); }
+    if !ok { return Err(bad("not a customisation file (allowed: custom.css, themes.json, home.json, nav.json, todos.json, pages.json, keys.json, manifest.json, plugins/, views/, workflows/)")); }
     Ok(())
 }
 
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn path_rules() {
-        for ok in ["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json", "plugins/a.json", "views/board.json", "plugins/a.js", "views/board.html", "workflows/weekly.json", "plugins/lib/util.js"] {
+        for ok in ["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json", "keys.json", "plugins/a.json", "views/board.json", "plugins/a.js", "views/board.html", "workflows/weekly.json", "plugins/lib/util.js"] {
             assert!(check_path(ok).is_ok(), "{ok}");
         }
         for bad in ["", "/etc/passwd", "../x", "plugins/../../x", "plugins/./a.js", ".git/config", "plugins/.hidden.js", ".claude/settings.json",

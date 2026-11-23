@@ -127,6 +127,8 @@ pub fn problems(staging: &Path, files: &[(String, &str)], arabic: bool) -> Vec<V
         out.add("", format!("The change touches too many files ({}; the limit is {MAX_FILES}).", live.len()),
             format!("يشمل التغيير عدداً كبيراً من الملفات ({}، والحد الأقصى {MAX_FILES}).", live.len()));
     }
+    // Keyboard shortcuts (`keys.rs`) are checked as a whole, against the rest of the staged layer.
+    let touches_keys = live.contains(&"keys.json");
     let mut total = 0usize;
     for path in live {
         let full = staging.join(path);
@@ -185,6 +187,7 @@ pub fn problems(staging: &Path, files: &[(String, &str)], arabic: bool) -> Vec<V
     if total > MAX_TOTAL_BYTES {
         out.add("", "The change is too large in total (the limit is 4 MB).", "حجم التغيير الإجمالي كبير جداً (الحد الأقصى ٤ ميغابايت).");
     }
+    if touches_keys { out.list.extend(crate::keys::problems(staging, arabic)); }
     out.list
 }
 

@@ -89,6 +89,13 @@ pub mod mado_stray;
 pub mod mado_validate;
 pub mod mado_build;
 pub mod mado_design;
+// round 0.5.0: plugins, keyboard, search by meaning, slides, the notes runs are told, the code graph
+pub mod bundles;
+pub mod keys;
+pub mod meaning;
+pub mod slides;
+pub mod run_notes;
+pub mod code_graph;
 #[cfg(test)]
 mod mado_e2e_tests;
 #[cfg(test)]

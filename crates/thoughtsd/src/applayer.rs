@@ -359,6 +359,7 @@ fn manifest_with(dir: &dyn LayerFiles, arabic: bool, off: &BTreeSet<String>) -> 
         "todos": object("todos.json"),
         "nav": object("nav.json"),
         "pages": object("pages.json"),
+        "keys": object("keys.json"),
         "workflows": dir.workflows(),
         "off": off.iter().filter(|p| dir.has_file(p)).collect::<Vec<_>>(),
         // Built-in pages the user chose to keep although a customisation replaces them (`builtin_in`).
@@ -404,7 +405,7 @@ fn write_off(dir: &Path, off: &BTreeSet<String>) -> anyhow::Result<()> {
 /// files it names, and they (nothing else) become one history entry, marked as `act`. Whatever was
 /// in the live layer without a review is set aside first, and if anything fails the layer is put
 /// back exactly as it was. Returns the new entry (empty when nothing changed).
-async fn app_change(g: Git<'_>, dir: &Path, subject: &str, act: Act, edit: impl FnOnce(&Path) -> anyhow::Result<Vec<String>>) -> anyhow::Result<String> {
+pub(crate) async fn app_change(g: Git<'_>, dir: &Path, subject: &str, act: Act, edit: impl FnOnce(&Path) -> anyhow::Result<Vec<String>>) -> anyhow::Result<String> {
     crate::staging::set_aside(g, &Dirs::of_layer(dir)).await?;
     let head = g.rev(dir, "HEAD").await?;
     let done: anyhow::Result<String> = async {
@@ -845,6 +846,7 @@ fn title_of(marks: &Marks, hash: &str, parents: &str, raw: &str, ar: bool, depth
             let n = marks.packs.get(hash).map(|p| p.name.clone()).unwrap_or_default();
             if ar { format!("إضافة الحزمة «{n}»") } else { format!("Added the pack \u{201c}{n}\u{201d}") }
         }
+        "keys" => crate::keys::act_title(ar),
         _ => stored,
     }
 }

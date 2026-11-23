@@ -1985,14 +1985,17 @@ pub async fn start_run(
     let full_note = full.then(|| crate::full_access::run_note(settings.full_access.source_dir.as_deref()));
     // How diagrams and charts are written so that the app draws them (`figures.rs`).
     let figures_note = crate::figures::run_note().await;
+    // The notes of the features that have something to tell this run (`run_notes`); none, and the text is as it was.
+    let extra = crate::run_notes::all(&state, &kind, &spec.prompt, library.as_deref()).await;
+    let extra_note = (!extra.is_empty()).then(|| extra.join("\n\n"));
     let system_text = |named: bool| {
         if let Some(note) = &full_note {
-            return [spec.append_system.as_deref(), Some(note.as_str()), Some(figures_note.as_str()), Some(estimates_note()), Some(language_note(&settings.language))]
+            return [spec.append_system.as_deref(), Some(note.as_str()), Some(figures_note.as_str()), extra_note.as_deref(), Some(estimates_note()), Some(language_note(&settings.language))]
                 .into_iter().flatten().collect::<Vec<_>>().join("\n\n");
         }
         let private = private_note(library.as_deref(), &private_paths, named);
         let (asking, strictly) = (asks.then_some(crate::approvals::NOTE), strict.then(|| crate::approvals::strict_note(prof.shell)));
-        [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(figures_note.as_str()), Some(estimates_note()), Some(language_note(&settings.language))]
+        [spec.append_system.as_deref(), managed_note(&kind), Some(standing_rules_note(&prof)), private.as_deref(), asking, strictly, Some(figures_note.as_str()), extra_note.as_deref(), Some(estimates_note()), Some(language_note(&settings.language))]
             .into_iter().flatten().collect::<Vec<_>>().join("\n\n")
     };
     let stopped = if settings.language == "ar" { "تم الإيقاف." } else { "Stopped." };
@@ -2039,6 +2042,14 @@ pub async fn start_run(
     }
 
     if on_codex {
+        // Codex is told the same notes, after the caller's own instructions (`codex::instructions`).
+        let mut spec = spec;
+        if let Some(note) = &extra_note {
+            spec.append_system = Some(match spec.append_system.as_deref().filter(|a| !a.trim().is_empty()) {
+                Some(a) => format!("{a}\n\n{note}"),
+                None => note.clone(),
+            });
+        }
         let launched = crate::codex::launch(state, crate::codex::Launch { spec, kind, mode, profile: prof, standing, record, touches_library, on_done,
             library, private: settings.private_paths.clone(), language: settings.language.clone(), full_access: full,
             full_note: full_note.clone() }).await;

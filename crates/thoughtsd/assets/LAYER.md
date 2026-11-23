@@ -57,6 +57,7 @@ of the layer).
 | `nav.json` | Sidebar: hidden pages, order, names, icons, groups, the start page |
 | `todos.json` | Todos page: grouping, sorting, filter |
 | `pages.json` | The app's own pages: headings, wording, hidden parts, their sections (order, hidden, size, one replaced, boxes between), an add-on page in place of a whole page |
+| `keys.json` | Keyboard shortcuts: the keys set for the app's actions (see "Keyboard shortcuts" below) |
 | `plugins/<name>.js` | A plugin (ES module) using the Plugin API below |
 | `plugins/<name>.json` | That plugin's declaration: permissions, write folders |
 | `views/<name>.html` | A static page shown in the sidebar, in a sandboxed frame |
@@ -1142,3 +1143,7 @@ side at the top; call Ideas 'Clients', hide Graph, and open the app on Todos."
 `SUMMARY.md`: "Todos shows your lists first, without the quick-add box. Home starts with your todos
 and chats side by side. Ideas is now called Clients, Graph is out of the sidebar, and the app opens
 on Todos."
+
+## Plugins
+
+## Keyboard shortcuts (keys.json)

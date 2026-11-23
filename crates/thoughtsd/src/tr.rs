@@ -219,6 +219,7 @@ const TABLE: &[Entry] = &[
     e("picture.too_large", "too_large", 413, "",
         "This picture is larger than 15 MB, too large to add to a note.",
         "حجم هذه الصورة يتجاوز 15 ميغابايت، وهو أكبر من أن تُضاف إلى ملاحظة."),
+    // --- slides (slides.rs) ---
     // --- saving over something that changed ---
     e("stale.changed", "stale", 409, "STALE::",
         "This file was changed somewhere else after you opened it. Reload it to see the latest version before saving.",
@@ -455,6 +456,7 @@ const TABLE: &[Entry] = &[
     e("login_item.unsupported", "validation", 422, "",
         "Starting when you log in is not available on this system.",
         "التشغيل عند تسجيل الدخول غير متاح في هذا النظام."),
+    // --- keyboard (keys.rs) ---
     // --- wording pass: plain sentences for what used to reach the person as raw text ---
     e("folder.name_needed", "validation", 422, "",
         "Give the folder a name.",
@@ -548,6 +550,7 @@ const TABLE: &[Entry] = &[
     e("assistant.signed_out", "signed_out", 409, "SIGNED_OUT::",
         "The assistant is not signed in to Claude, or the sign-in has expired. Sign in, then send your message again.",
         "المساعد غير مسجّل الدخول إلى Claude، أو انتهت صلاحية تسجيل الدخول. سجّل الدخول ثم أرسل رسالتك مرة أخرى."),
+    // --- search by meaning (meaning/) ---
     // --- Codex (codex.rs) ---
     e("codex.missing", "assistant_missing", 409, "",
         "Codex is not installed, or could not be found. Install it, or choose Claude Code under Settings › Assistant.",
@@ -586,6 +589,7 @@ const TABLE: &[Entry] = &[
     e("codex.tool.change", "info", 500, "", "Changes files: {what}", "يعدّل ملفات: {what}"),
     e("codex.tool.search", "info", 500, "", "Web search: {what}", "بحث في الويب: {what}"),
     e("codex.tool.plan", "info", 500, "", "Plan", "الخطة"),
+    // --- other providers ---
     // --- moving a chat to the other assistant (handoff.rs) ---
     e("handoff.replay", "info", 500, "",
         "This chat now uses {to}. Your next message passes the whole conversation so far on to it.",
@@ -1099,6 +1103,7 @@ const TABLE: &[Entry] = &[
     e("gallery.gone", "not_found", 404, "",
         "This ready-made pack is not part of this version of Thoughts.",
         "هذه الحزمة الجاهزة ليست ضمن هذا الإصدار من Thoughts."),
+    // --- plugins (bundles.rs) ---
     // --- several libraries (libs) ---
     e("libs.not_found", "not_found", 404, "",
         "That library is no longer in your list.",
@@ -1644,6 +1649,7 @@ const TABLE: &[Entry] = &[
     e("mado.options.effort", "validation", 422, "",
         "The assistant does not offer that effort level. It offers: {levels}.",
         "المساعد لا يقدّم مستوى الجهد هذا. المستويات المتاحة: {levels}."),
+    // --- code graph and existing projects (mado) ---
 ];
 
 fn entry(key: &str) -> &'static Entry {
