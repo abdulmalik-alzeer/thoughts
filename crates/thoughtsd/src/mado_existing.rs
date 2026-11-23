@@ -6,7 +6,7 @@
 //!   existing mode as a data block (`found_text`).
 //! - `secret_read_deny`: the Read rules that keep the files holding a project's secrets (`.env`,
 //!   keys, `.npmrc`…) out of an existing-mode run, which is told to read the whole project.
-//! - `code_map`: the code-review-graph map for planning runs (a stub until `v050-graph` lands).
+//! - `code_map`: the code-review-graph map for planning runs (`crate::code_graph::code_map`).
 //!
 //! The mode itself (`MadoState.mode`) and its checks are the core's (`mado.rs`).
 
@@ -235,8 +235,7 @@ pub fn secret_read_deny(project: &Path) -> Vec<String> {
 
 /// The code-review-graph map of the project for a planning run (files, main symbols, how they
 /// connect), at most `budget` characters, or `None` (no tool, no graph, anything failed).
-// v050-graph: swap for crate::code_graph::code_map
-async fn graph_code_map(_state: &crate::state::AppState, _project: &crate::settings::Project, _budget: usize) -> Option<String> { None }
+async fn graph_code_map(state: &crate::state::AppState, project: &crate::settings::Project, budget: usize) -> Option<String> { crate::code_graph::code_map(state, &crate::code_graph::Project::linked(state, &project.id).await.ok()?, budget).await }
 
 /// The most characters of the code map a planning run is handed (about six thousand tokens).
 pub const CODE_MAP_CHARS: usize = 24_000;

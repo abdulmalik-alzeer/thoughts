@@ -1702,3 +1702,50 @@ async fn the_projects_model_is_never_handed_to_codex() {
     assert_eq!(options_for(&st, "codex-guard").await, (None, None), "under full access it runs on Codex, with Codex's own defaults");
     TEST_OPTIONS.lock().unwrap().retain(|(p, _)| p != "codex-guard");
 }
+
+// ---------- round 0.5.0: without the code graph, every build prompt is what it was ----------
+
+/// The prompts of a 0.4.x plan's build runs, for fixed inputs, with each data block's random code
+/// put as `X`: what they were before the code graph (`code_graph::around`/`impact`) was joined.
+fn prompts_without_the_graph() -> Vec<(&'static str, String)> {
+    let plan: PlanDoc = serde_json::from_value(json!({"version": 1, "tasks": [task("t-a", &["src/a/**"], &[], &["npm test"]), task("t-b", &["src/b.ts"], &["t-a"], &["npm test"])]})).unwrap();
+    let findings = vec![finish::Finding { severity: finish::Severity::Must, at: Some("src/a/x.ts:4".into()), text: "Broken.".into() }];
+    let out = vec![
+        ("task", task_brief(&plan.tasks[1], &plan, None, None)),
+        ("task-retry-conv", task_brief(&plan.tasks[0], &plan, Some("FAIL"), Some("# Conventions\n"))),
+        ("retry", retry_brief(&plan.tasks[0], "FAIL")),
+        ("wave-fix", wave_fix_brief("FAIL")),
+        ("clash", clash_brief(&["src/a/x.ts".into()], &["t-a (\"Task t-a\")".into()])),
+        ("gate-fix", prompts::gate_fix("FAIL", Some("# Conventions\n"))),
+        ("gate-retry", prompts::gate_retry("FAIL", &["contracts/x.json".into()])),
+        ("review-1", prompts::review(1, true, "a comment", "a screen", &[])),
+        ("review-2", prompts::review(2, false, "", "", &findings)),
+        ("review-fix", prompts::review_fix(&findings, None)),
+    ];
+    let code = regex::Regex::new("DATA-[0-9A-F]{12}").unwrap();
+    out.into_iter().map(|(k, p)| (k, code.replace_all(&p, "DATA-X").to_string())).collect()
+}
+
+/// sha256 of each prompt above, taken from the code of round 0.4.1 before the graph was joined.
+const PROMPTS_041: [(&str, &str); 10] = [
+    ("task", "4eae12863cf322d57750eacf559d14b010a6d1b18a305a2ea1989793cd9ccd5f"),
+    ("task-retry-conv", "f44cec3a0e86c3043f3b3b39b1aa9fd334a4c69d7efa0ab55e1bf412e8b35be0"),
+    ("retry", "43e6c7fd737a223ea48872fe72e88b7fedcc8ca69eb93e0013709d9de7eed82a"),
+    ("wave-fix", "6aad7e36286495ef536821dc7f2c2de10c5268da831468931c4129d32bfffabf"),
+    ("clash", "643bad1ef4b1176ca107fd498736f7ab6e75c0a490a1aad51ddc60fcd6e06b86"),
+    ("gate-fix", "908944457cb739c478f09e3a432cfcbd67bf809942b85959ada1023ab9c2519b"),
+    ("gate-retry", "a715c9629e34f3f5d73f99f053793ef7a0dff665167ef8309b864cc1b0a216a4"),
+    ("review-1", "902e679f0e471e5a78751eb1447e2e051c94dab12b267396562b761fcaf1fd32"),
+    ("review-2", "b46aee59f0cb800e0fad0e02e0a254046aa5e09a9ab8dbb60469c269d9acf9d6"),
+    ("review-fix", "26fdfd4fe4f5538e45eb173091a4a518256e34fe57d8cf697b2ff9f9bb53f92e"),
+];
+
+#[test]
+fn without_the_code_graph_every_build_prompt_is_byte_for_byte_what_it_was() {
+    use sha2::Digest;
+    let got = prompts_without_the_graph();
+    assert_eq!(got.len(), PROMPTS_041.len());
+    for ((k, p), (k0, h0)) in got.iter().zip(PROMPTS_041) {
+        assert_eq!((*k, format!("{:x}", sha2::Sha256::digest(p.as_bytes()))), (k0, h0.to_string()), "{k} changed:\n{p}");
+    }
+}
