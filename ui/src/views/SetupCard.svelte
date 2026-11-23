@@ -3,6 +3,7 @@
   // not finish (and how to run it again), or that the library is ready and where to go from there.
   import { onMount } from 'svelte';
   import Icon from '../lib/Icon.svelte';
+  import SubscriptionRisk from '../lib/SubscriptionRisk.svelte';
   import { on, post } from '../lib/api';
   import { app, command, go } from '../lib/store.svelte';
   import { failed } from '../lib/errors';
@@ -65,11 +66,12 @@
     <div class="grow">
       <b>{t(connected ? 'sb.wait.readyTitle' : 'sb.wait.title')}</b>
       <p class="muted">{connected ? t('sb.wait.readyBody') : t('ux-onboarding.wait.body', { name: programName(program) })}</p>
+      {#if !connected && app.settings && !(program === 'claude' && app.settings.ai?.claude?.hasApiToken)}<SubscriptionRisk bind:ack={app.settings.subscriptionRiskAck} />{/if}
     </div>
     {#if connected}
       <button type="button" class="btn primary" disabled={starting} aria-busy={starting} onclick={again}><Icon name="ai" size={14} /> {starting ? t('sb.wait.starting') : t('sb.wait.run')}</button>
     {:else}
-      <button type="button" class="btn primary" onclick={() => go({ kind: 'settings', id: 'ai' })}>{t('sb.wait.connect')}</button>
+      <button type="button" class="btn primary" disabled={!(app.settings as any)?.subscriptionRiskAck && !(program === 'claude' && app.settings?.ai?.claude?.hasApiToken)} onclick={() => go({ kind: 'settings', id: 'ai' })}>{t('sb.wait.connect')}</button>
     {/if}
   </div>
 {:else if notFinished}

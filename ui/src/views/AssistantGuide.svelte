@@ -11,7 +11,7 @@
 
   /** `claude`: the assistant's status (`{installed, loggedIn, auth…}`), kept current here.
    *  `keyInstead`: the user pays with an API key, so signing in is not needed. */
-  let { claude = $bindable({}), keyInstead = false }: { claude?: any; keyInstead?: boolean } = $props();
+  let { claude = $bindable({}), keyInstead = false, signInLocked = false }: { claude?: any; keyInstead?: boolean; signInLocked?: boolean } = $props();
 
   // Anthropic's recommended installer (code.claude.com/docs/en/setup), one line per kind of system.
   const UNIX = 'curl -fsSL https://claude.ai/install.sh | bash';
@@ -142,7 +142,7 @@
     {:else}
       <p class="muted">{t('sb.guide.step2Body')} <a href={PLANS_URL} target="_blank" rel="noreferrer">{t('sb.guide.plans')} <Icon name="external" size={12} /></a></p>
       <div class="row">
-        <button type="button" class="btn primary" disabled={signingIn} aria-busy={signingIn} onclick={signIn}>{signingIn ? t('sb.guide.opening') : opened ? t('sb.guide.signInAgain') : t('sb.guide.signIn')}</button>
+        <button type="button" class="btn primary" disabled={signingIn || signInLocked} aria-busy={signingIn} onclick={signIn}>{signingIn ? t('sb.guide.opening') : opened ? t('sb.guide.signInAgain') : t('sb.guide.signIn')}</button>
       </div>
       {#if opened}<p class="live" role="status"><span class="dot" aria-hidden="true"></span> {t('sb.guide.waitingSignIn')}</p>{/if}
     {/if}

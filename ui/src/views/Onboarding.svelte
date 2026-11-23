@@ -14,6 +14,7 @@
   import AssistantGuide from './AssistantGuide.svelte';
   import CodexSettings from './CodexSettings.svelte';
   import HelpTip from '../lib/HelpTip.svelte';
+  import SubscriptionRisk from '../lib/SubscriptionRisk.svelte';
   import RemoteTokenHelp from './RemoteTokenHelp.svelte';
   import { isReady, primaryOf, statusOf } from '../lib/assistantReady';
   import { fmtSize } from '../lib/content/util';
@@ -182,7 +183,6 @@
   // Signing in with a Claude or ChatGPT subscription needs the user's explicit acknowledgement of the
   // terms risk (stored as `subscriptionRiskAck`, an ISO time, in settings). An API key needs none.
   const onSubscription = $derived(!later && (onCodex || !useApi));
-  function ackRisk(on: boolean) { s.subscriptionRiskAck = on ? new Date().toISOString() : null; }
 
   async function pickNotes() {
     try {
@@ -516,17 +516,13 @@
         <button type="button" class="opt" class:sel={onCodex} aria-pressed={onCodex} onclick={() => setProgram('codex')}><b><bdi>Codex</bdi></b><span class="muted">{t('ux-onboarding.ai.codexHint')}</span></button>
       </div>
       {#if onSubscription}
-        <div class="card status risk" role="group" aria-labelledby="ob-risk">
-          <p class="row"><Icon name="warning" size={16} /> <b id="ob-risk">{t('subRisk.title')}</b></p>
-          <p>{t('subRisk.body')}</p>
-          <label class="check"><input type="checkbox" checked={!!s.subscriptionRiskAck} onchange={(e) => ackRisk(e.currentTarget.checked)} /> {t('subRisk.ack')}</label>
-        </div>
+        <SubscriptionRisk bind:ack={s.subscriptionRiskAck} />
       {/if}
       {#if onCodex}
         <CodexSettings bind:ai={s.ai} part="codex" vis={() => true} />
       {:else}
         <h2>{t('sb.guide.title')}</h2>
-        <AssistantGuide bind:claude keyInstead={useApi} />
+        <AssistantGuide bind:claude keyInstead={useApi} signInLocked={!useApi && !s.subscriptionRiskAck} />
 
         <details class="adv" open={useApi}>
           <summary>{t('ob.advApi')}</summary>
@@ -853,8 +849,6 @@
   .warn.box { border: var(--border-w) solid var(--danger); border-radius: var(--radius); padding: 10px 12px; background: color-mix(in srgb, var(--danger) 7%, transparent); }
   .path { overflow-wrap: anywhere; }
   .later.sel { border-color: var(--accent); }
-  .risk { border-color: var(--danger); }
-  .risk .row :global(svg) { color: var(--danger); }
   .plain { margin: 6px 0 0; padding-inline-start: 20px; }
   .plain li { margin-bottom: 4px; }
   .sum { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 16px 0; }

@@ -34,6 +34,7 @@
   import IncomingStatus from '../lib/IncomingStatus.svelte';
   import TesterUpdates from './TesterUpdates.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
+  import SubscriptionRisk from '../lib/SubscriptionRisk.svelte';
   import AccessKeys from './AccessKeys.svelte';
   import UsageSettings from './usage/UsageSettings.svelte';
   import { checkAppUpdate } from '../lib/updates';
@@ -789,7 +790,7 @@
             <span class="pill">{t('runa.acct.incomplete')}</span>
           {:else if claude.installed}
             <span class="pill" class:accent={claude.loggedIn}>{t(claude.loggedIn ? 'set.signedIn' : 'set.notSignedIn')}</span>
-            {#if !claude.loggedIn}<button type="button" class="btn primary" disabled={busy.login} onclick={signIn}>{t('set.signIn')}</button>{/if}
+            {#if !claude.loggedIn}<button type="button" class="btn primary" disabled={busy.login || !s.subscriptionRiskAck} onclick={signIn}>{t('set.signIn')}</button>{/if}
           {:else}
             <span class="pill">{t('set.notInstalled')}</span>
             <a href="https://claude.com/claude-code" target="_blank" rel="noreferrer">{t('set.installClaude')} <Icon name="external" size={13} /></a>
@@ -798,8 +799,9 @@
         </div>
         {#if (app.wrap as any)?.summariesFailing}<p class="err sm" role="status">{t('runc.sumFail')}</p>{/if}
         <p class="muted sm">{t(provKind === 'incomplete' ? 'runa.acct.incompleteHint' : provKind === 'account' ? 'set.accountHint' : provKind === 'service' && savedKeyless && !hasKey ? 'prov5.acct.keylessHint' : 'runa.acct.keyHint')}</p>
+        {#if claude.installed && provKind === 'account' && !claude.loggedIn}<SubscriptionRisk bind:ack={s.subscriptionRiskAck} disabled={readOnly} />{/if}
         <!-- Not installed, or not signed in: the steps to get there, checked as they happen (FEAT-07). -->
-        {#if !claude.installed || (provKind === 'account' && !claude.loggedIn)}<AssistantGuide bind:claude keyInstead={provKind === 'anthropicKey' || provKind === 'service'} />{/if}
+        {#if !claude.installed || (provKind === 'account' && !claude.loggedIn)}<AssistantGuide bind:claude keyInstead={provKind === 'anthropicKey' || provKind === 'service'} signInLocked={provKind === 'account' && !s.subscriptionRiskAck} />{/if}
       {/if}
       <CodexSettings bind:ai={s.ai} part="codex" vis={(...k) => vis(c, ...k)} {readOnly} />
       {#if vis(c, 'set.perm')}
