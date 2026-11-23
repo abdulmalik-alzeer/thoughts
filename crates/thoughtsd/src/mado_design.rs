@@ -177,6 +177,10 @@ async fn put_tokens(State(st): S, UrlPath(project): UrlPath<String>, Json(body):
     Ok(Json(tokens.json()))
 }
 
+/// `GET /design/styles` as the tests ask it.
+#[cfg(test)]
+pub(crate) async fn tests_list_styles(st: &Arc<AppState>, project: &str) -> Value { list_styles(State(st.clone()), UrlPath(project.to_string())).await.unwrap().0 }
+
 fn mock_path(id: &str) -> String { format!("design/screens/{id}.html") }
 
 /// `GET /design/screens` → `[{id, label, hasMock}]`, the flow's screens in its order.

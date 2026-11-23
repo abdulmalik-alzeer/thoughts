@@ -696,14 +696,23 @@ pub fn read_text(mado: &Path, rel: &str, full: bool) -> anyhow::Result<Option<St
 /// A diagram file, validated. `Ok(None)` when it is not there; an invalid one is an error naming what is wrong.
 pub fn read_graph(mado: &Path, file: &str, kind: &str, full: bool) -> anyhow::Result<Option<GraphDoc>> {
     let Some(bytes) = read_in(mado, file, full, DOC_MAX)? else { return Ok(None) };
+    refuse_secret(file, &bytes)?;
     match crate::mado_validate::graph(&bytes, kind) {
         Ok(g) => Ok(Some(g)),
         Err(list) => Err(crate::tr::err_detail("mado.invalid", &[("path", file)], list.join("\n"))),
     }
 }
 
+/// A file that holds what looks like a key or an access token is not shown (`mado_validate::looks_secret`),
+/// whatever wrote it: a deny list of secret files can never be complete.
+pub fn refuse_secret(rel: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    if crate::mado_validate::looks_secret(&String::from_utf8_lossy(bytes)) { return Err(crate::tr::err("mado.secret", &[("path", rel)])); }
+    Ok(())
+}
+
 pub fn read_plan(mado: &Path, full: bool) -> anyhow::Result<Option<PlanDoc>> {
     let Some(bytes) = read_in(mado, PLAN, full, DOC_MAX)? else { return Ok(None) };
+    refuse_secret(PLAN, &bytes)?;
     match crate::mado_validate::plan(&bytes) {
         Ok(p) => Ok(Some(p)),
         Err(list) => Err(crate::tr::err_detail("mado.invalid", &[("path", PLAN)], list.join("\n"))),
@@ -1013,7 +1022,13 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
         allowed = allow;
         // Reading stays as for every planning run (the project, nothing outside it); an existing-mode
         // run is told to read all of it, so the files that hold its secrets are closed to it.
-        if existing { spec.extra_deny.extend(existing::secret_read_deny(&project)); }
+        // It reads text nobody vetted, so nothing may carry it out: no web (whatever its chat says),
+        // like the shell and connected tools, which no planning run has (`claude::profile`).
+        if existing {
+            spec.extra_deny.extend(existing::secret_read_deny(&project));
+            spec.options.web = false;
+            spec.extra_deny.extend(["WebFetch".to_string(), "WebSearch".to_string()]);
+        }
         // The records beside the approval (the approval itself, the fingerprint, the strays check's
         // "before") are not the run's to read or change.
         if let Some(d) = record_dir(&role.project_id) {
@@ -1384,6 +1399,7 @@ async fn doc_get(State(st): S, UrlPath((pid, name)): UrlPath<(String, String)>) 
     let (_, mado, full) = ctx(&st, &pid).await?;
     let file = doc_file(&name).ok_or_else(|| crate::tr::err("mado.unknown_name", &[("name", &name)]))?;
     let text = read_text(&mado, file, full)?;
+    if let Some(t) = &text { refuse_secret(file, t.as_bytes())?; }
     Ok(Json(json!({"text": text.clone().unwrap_or_default(), "exists": text.is_some()})))
 }
 

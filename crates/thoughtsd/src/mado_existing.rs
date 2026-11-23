@@ -203,22 +203,30 @@ pub fn found_text(found: &Found, readme: Option<&str>) -> String {
     t
 }
 
-/// Names of files that hold secrets, closed to Read in every existing-mode run: `.env` files (the
-/// examples too — the code that reads a setting names it), keys and certificates, package-registry
-/// and network passwords, git's own config (a remote address can carry a token).
-pub const SECRET_NAMES: &[&str] = &[".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore", "id_rsa*", "id_dsa*", "id_ecdsa*",
-    "id_ed25519*", ".npmrc", ".yarnrc.yml", ".pypirc", ".netrc", ".git-credentials", ".htpasswd", ".pgpass", ".dockercfg", "*.tfvars"];
+/// Names of files that hold secrets, closed to Read at any depth in every existing-mode run: `.env`
+/// files (the examples too — the code that reads a setting names it), keys and certificates, key
+/// stores, package-registry, cloud and network passwords. The app has no such list for chats (their
+/// secret rules are the app's own data folder, `paths::secret_paths_in`, and the user's private
+/// folders), so this one is MADO's. A deny list is never complete: the run is also told not to open
+/// or quote anything secret-looking, and `mado_validate` refuses a document holding an obvious key.
+pub const SECRET_NAMES: &[&str] = &[".env", ".env.*", ".envrc", "secrets.*", "credentials*", "*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore",
+    "*.kdbx", "*-key.json", "id_rsa*", "id_dsa*", "id_ecdsa*", "id_ed25519*", ".npmrc", ".yarnrc.yml", ".pypirc", ".netrc", ".git-credentials",
+    ".htpasswd", ".pgpass", ".dockercfg", "*.tfvars"];
+/// Folders closed whole, at any depth: git's own (its config can carry a token in a remote address;
+/// nested repositories and `.git/modules` included), cloud and ssh credentials.
+pub const SECRET_DIRS: &[&str] = &[".git", ".aws", ".ssh"];
+/// Single files inside a folder that is otherwise readable.
+pub const SECRET_PATHS: &[&str] = &[".docker/config.json"];
 
-/// The Read rules for `SECRET_NAMES` at any depth of `project` (absolute, and relative to it, which
-/// Claude Code reads like a gitignore line: a name without a folder matches at any depth), plus
-/// `.git/config`, each in every letter case too.
+/// The Read rules for `SECRET_NAMES`, `SECRET_DIRS` and `SECRET_PATHS` at any depth of `project`
+/// (absolute, and relative to it, which Claude Code reads like a gitignore line), each in every
+/// letter case too (`claude::every_case`, as the planning runs' other rules).
 pub fn secret_read_deny(project: &Path) -> Vec<String> {
     let p = crate::claude::rule_path(project);
+    let at_any_depth = |n: &str| [format!("./{n}"), format!("./**/{n}"), format!("{p}/{n}"), format!("{p}/**/{n}")];
     let mut deny = vec![];
-    for n in SECRET_NAMES {
-        for at in [format!("./{n}"), format!("./**/{n}"), format!("{p}/{n}"), format!("{p}/**/{n}")] { deny.push(format!("Read({at})")); }
-    }
-    for at in ["./.git/config".to_string(), format!("{p}/.git/config")] { deny.push(format!("Read({at})")); }
+    for n in SECRET_NAMES.iter().chain(SECRET_PATHS) { for at in at_any_depth(n) { deny.push(format!("Read({at})")); } }
+    for d in SECRET_DIRS { for at in at_any_depth(d).into_iter().chain(at_any_depth(&format!("{d}/**"))) { deny.push(format!("Read({at})")); } }
     crate::claude::every_case(&mut deny);
     let mut seen = std::collections::HashSet::new();
     deny.retain(|r| seen.insert(r.clone()));

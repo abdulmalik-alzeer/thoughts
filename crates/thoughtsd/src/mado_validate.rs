@@ -297,8 +297,32 @@ fn mock(bytes: &[u8]) -> Vec<String> {
 /// Everything wrong with file `rel` (relative to `mado/`) holding `bytes`.
 pub fn file(rel: &str, bytes: &[u8]) -> Vec<String> { file_in(rel, bytes, false) }
 
+/// Does `text` hold something that plainly looks like a secret: a private key's header, or an
+/// access token with a well-known prefix (cloud, code hosting, chat, payment and AI services)?
+/// A bounded, plain check (the first `DOC_MAX` bytes), not a scanner: it catches the obvious.
+pub fn looks_secret(text: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(concat!(
+        r"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----|",
+        r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b|",
+        r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}|\bgithub_pat_[A-Za-z0-9_]{30,}|\bglpat-[A-Za-z0-9_-]{20,}|",
+        r"\bxox[abposr]-[A-Za-z0-9-]{10,}|\b[sr]k_live_[A-Za-z0-9]{16,}|\bsk-ant-[A-Za-z0-9_-]{20,}|\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}|",
+        r"\bAIza[0-9A-Za-z_-]{35}|\bnpm_[A-Za-z0-9]{36}")).unwrap());
+    let cut = text.char_indices().nth(crate::mado::DOC_MAX).map_or(text, |(i, _)| &text[..i]);
+    re.is_match(cut)
+}
+
 /// `file` for a plan in its mode: `existing` (round 0.5.0) accepts 1 to 4 style candidates.
+/// Any file holding what looks like a secret (`looks_secret`) is refused, whatever the mode.
 pub fn file_in(rel: &str, bytes: &[u8], existing: bool) -> Vec<String> {
+    let mut p = file_shape(rel, bytes, existing);
+    if looks_secret(&String::from_utf8_lossy(&bytes[..bytes.len().min(crate::mado::DOC_MAX)])) {
+        p.push("it holds what looks like a secret (a private key or an access token): take it out, and write only the name of the setting it belongs to".into());
+    }
+    p
+}
+
+fn file_shape(rel: &str, bytes: &[u8], existing: bool) -> Vec<String> {
     let flow = crate::mado::GRAPHS.iter().find(|(_, f, _)| *f == rel).map(|(_, _, k)| *k);
     if let Some(kind) = flow { return graph(bytes, kind).err().unwrap_or_default(); }
     match rel {
