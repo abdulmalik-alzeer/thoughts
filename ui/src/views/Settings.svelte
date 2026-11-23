@@ -779,7 +779,7 @@
     </div>
   {:else if c === 'ai'}
     <div class="card">
-      <CodexSettings bind:ai={s.ai} part="which" vis={(...k) => vis(c, ...k)} {readOnly} />
+      <CodexSettings bind:ai={s.ai} bind:riskAck={s.subscriptionRiskAck} part="which" vis={(...k) => vis(c, ...k)} {readOnly} />
       {#if vis(c, 'set.account')}
         <h3>{t('set.account')}</h3>
         <div class="row wrap">
@@ -802,7 +802,7 @@
         <!-- Not installed, or not signed in: the steps to get there, checked as they happen (FEAT-07). -->
         {#if !claude.installed || (provKind === 'account' && !claude.loggedIn)}<AssistantGuide bind:claude keyInstead={provKind === 'anthropicKey' || provKind === 'service'} signInLocked={provKind === 'account' && !s.subscriptionRiskAck} />{/if}
       {/if}
-      <CodexSettings bind:ai={s.ai} part="codex" vis={(...k) => vis(c, ...k)} {readOnly} />
+      <CodexSettings bind:ai={s.ai} bind:riskAck={s.subscriptionRiskAck} part="codex" vis={(...k) => vis(c, ...k)} {readOnly} />
       {#if vis(c, 'set.perm')}
         <fieldset class="perm" aria-describedby={errors.permission ? 'st-err-permission' : undefined}>
           <legend>{t('set.perm')}</legend>
@@ -882,7 +882,7 @@
           <p class="muted sm">{t('set.apiKeyHint')}</p>
           <CodexProvider onsaved={syncServerFields} {readOnly} />
         {/if}
-        <CodexSettings bind:ai={s.ai} part="advanced" vis={(...k) => vis(c, ...k)} {readOnly} />
+        <CodexSettings bind:ai={s.ai} bind:riskAck={s.subscriptionRiskAck} part="advanced" vis={(...k) => vis(c, ...k)} {readOnly} />
       </details>
     {/if}
   {:else if c === 'usage'}
