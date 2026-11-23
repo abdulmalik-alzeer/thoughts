@@ -137,11 +137,11 @@ fn sign_in_is_read_from_what_codex_says() {
 /// Every option and value of a command line, as text.
 fn strs(a: &[OsString]) -> Vec<String> { a.iter().map(|x| x.to_string_lossy().to_string()).collect() }
 fn plan<'a>(sandbox: &'a str, own_setup: bool) -> Plan<'a> {
-    Plan { help: HELP_0_27, sandbox, model: None, effort: None, web: false, own_setup, mcp: own_setup, network: false, images: &[], writable: &[], resume: None }
+    Plan { help: HELP_0_27, sandbox, model: None, effort: None, web: false, own_setup, mcp: own_setup, network: false, images: &[], writable: &[], resume: None, provider: None }
 }
 fn plan_of(sw: Switches) -> Plan<'static> {
     Plan { help: HELP_0_27, sandbox: sw.sandbox, model: None, effort: None, web: sw.web, own_setup: sw.own_setup, mcp: sw.mcp, network: sw.network,
-        images: &[], writable: &[], resume: None }
+        images: &[], writable: &[], resume: None, provider: None }
 }
 fn set(a: &[String], kv: &str) -> bool { a.windows(2).any(|w| w[0] == "-c" && w[1] == kv) }
 
@@ -411,6 +411,7 @@ n=$(ls "$D" | grep -c '^args-')
 printf '%s\n' "$@" > "$D/args-$n"
 cat > "$D/prompt-$n"
 pwd > "$D/cwd-$n"
+env > "$D/env-$n"
 case "$*" in *experimental_resume*) ;; *)
   mkdir -p '{day}'
   id="{tag}-1111-4222-8333-$(printf '%012d' "$n")"
@@ -831,5 +832,58 @@ async fn a_codex_run_ended_by_the_daemon_stopping_puts_back_what_it_may_not_chan
     assert!(crate::snapshots::wait_put_back(&[id.clone()], Duration::ZERO).await, "and its copy on disk with them");
     // It stays marked as running, so the next start says it was cut off.
     assert!(st.chats.get(&id).await.unwrap().running);
+    std::fs::remove_dir_all(base).unwrap();
+}
+
+#[test]
+fn a_run_through_another_provider_adds_exactly_its_settings_and_otherwise_none() {
+    let svc = crate::providers::CodexService { base_url: "http://localhost:11434/v1".into(), key: "sk-secret".into() };
+    let pr = crate::providers::codex_args(&svc, &[]);
+    let own = strs(&exec_args(&plan("read-only", false)));
+    let through = strs(&exec_args(&Plan { provider: Some(&pr), ..plan("read-only", false) }));
+    // Without a provider the command line is what it always was (the other tests pin it).
+    assert!(!own.iter().any(|a| a.contains("model_provider") || a.contains("shell_environment_policy")));
+    for kv in &pr { assert!(set(&through, kv), "{kv} missing: {through:?}"); }
+    // The same command line with those settings, and nothing else, added.
+    let mut rest = through.clone();
+    for kv in &pr { let i = rest.iter().position(|a| a == kv).unwrap(); rest.drain(i - 1..=i); }
+    assert_eq!(rest, own);
+    assert!(!through.iter().any(|a| a.contains("sk-secret")), "the key never travels on the command line");
+    assert_eq!(through.last().map(String::as_str), Some("-"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_chat_and_a_summary_go_to_the_saved_provider_with_its_key_only_in_their_environment() {
+    let base = std::env::temp_dir().join(format!("thoughts-codex-provider-{}", uuid::Uuid::new_v4()));
+    let (dir, work) = (base.join("bin"), base.join("work"));
+    std::fs::create_dir_all(&work).unwrap();
+    let st = codex_state(&dir, RUN_0_27).await;
+    { let mut s = st.settings.write().await; s.ai.codex.base_url = Some("https://openrouter.ai/api/v1".into()); s.ai.codex.has_api_token = true; }
+    // ChatGPT says "not signed in": with another provider that does not matter.
+    std::fs::write(dir.join("login.txt"), "Not logged in").unwrap();
+    crate::codex::require_signed_in(&st).await.unwrap();
+    assert_eq!(status(&st).await["provider"], "service");
+    run_chat(&st, "chat", "acceptEdits", &work, None).await.unwrap();
+    crate::claude::complete_cheap(&st, "Summarise this chat.", None).await.unwrap();
+    for n in 0..2 {
+        let args = lines(&dir.join(format!("args-{n}")));
+        assert!(args.iter().any(|a| a == "model_provider=\"thoughts\""), "{args:?}");
+        assert!(args.iter().any(|a| a == "model_providers.thoughts.base_url=\"https://openrouter.ai/api/v1\""));
+        assert!(args.iter().any(|a| a.starts_with("shell_environment_policy.exclude=") && a.contains("THOUGHTS_PROVIDER_KEY")));
+        assert!(!args.iter().any(|a| a.contains("test-codex-key")), "the key is not on the command line");
+        let env = std::fs::read_to_string(dir.join(format!("env-{n}"))).unwrap();
+        assert!(env.lines().any(|l| l == "THOUGHTS_PROVIDER_KEY=test-codex-key"));
+        assert!(!env.lines().any(|l| l.starts_with("OPENAI_API_KEY=") || l.starts_with("OPENAI_BASE_URL=") || l.starts_with("CODEX_API_KEY=")));
+        assert!(!std::fs::read_to_string(dir.join(format!("prompt-{n}"))).unwrap().contains("test-codex-key"), "nor in the prompt");
+    }
+    // The options: none of OpenAI's catalogue, only what the service is known to have.
+    let o = options(&st).await;
+    assert_eq!(o["throughProvider"], true);
+    assert!(o["modelsSource"] != "debugModels" && o["modelInfo"] == json!([]));
+    // An address left without its key: nothing starts.
+    st.settings.write().await.ai.codex.has_api_token = false;
+    assert!(run_chat(&st, "chat", "acceptEdits", &work, None).await.is_err());
+    assert!(!dir.join("args-2").exists());
     std::fs::remove_dir_all(base).unwrap();
 }

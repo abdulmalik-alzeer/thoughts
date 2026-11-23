@@ -5778,6 +5778,7 @@ dependencies = [
  "sha2",
  "tokenizers",
  "tokio",
+ "toml 0.8.2",
  "tower-http 0.5.2",
  "ureq",
  "url",

@@ -96,6 +96,7 @@ pub mod meaning;
 pub mod slides;
 pub mod run_notes;
 pub mod code_graph;
+pub mod providers;
 #[cfg(test)]
 mod mado_e2e_tests;
 #[cfg(test)]
