@@ -275,3 +275,34 @@ fn the_loaded_list_belongs_to_one_program_and_one_address() {
     assert!(loaded_models("codex", "http://localhost:1").is_empty());
     assert!(loaded_models("codex", "").is_empty());
 }
+
+/// Rule 14: the real `claude` and `codex` programs, started exactly as the app starts them (its own
+/// one-shot paths, its environment, its command line), against a stand-in service that records what
+/// arrives. Never run by `cargo test`: started by hand with a throwaway HOME, CODEX_HOME and
+/// CLAUDE_CONFIG_DIR holding planted fake sign-ins, sentinel credentials in the environment, and
+/// `THOUGHTS_PROOF_PORT` (the stand-in) and `THOUGHTS_PROOF_CLAUDE` / `THOUGHTS_PROOF_CODEX` (the
+/// programs). What the stand-in recorded is checked afterwards (report `v050-providers`).
+#[tokio::test]
+#[ignore]
+async fn real_programs_send_no_real_credential_to_another_address() {
+    let port = std::env::var("THOUGHTS_PROOF_PORT").unwrap();
+    let st = AppState::for_test();
+    let base = format!("http://127.0.0.1:{port}");
+    {
+        let mut s = st.settings.write().await;
+        s.ai.claude.binary = Some(std::env::var("THOUGHTS_PROOF_CLAUDE").unwrap());
+        s.ai.claude.base_url = Some(base.clone());
+        s.ai.claude.keyless = true;
+        s.ai.codex.binary = Some(std::env::var("THOUGHTS_PROOF_CODEX").unwrap());
+        s.ai.codex.base_url = Some(format!("{base}/v1"));
+        s.ai.codex.keyless = true;
+    }
+    println!("PROOF claude keyless: {:?}", crate::claude::complete_claude(&st, "Reply with OK.", Some("standin-model".into())).await);
+    println!("PROOF codex keyless: {:?}", crate::codex::complete(&st, "Reply with OK.", Some("standin-model".into()), false).await);
+    // With a saved key (under test: "test-codex-key"), for the commands' environment check.
+    { let mut s = st.settings.write().await; s.ai.codex.keyless = false; s.ai.codex.has_api_token = true; }
+    println!("PROOF codex keyed: {:?}", crate::codex::complete(&st, "Reply with OK.", Some("standin-model".into()), false).await);
+    // "Load models", through the app's own request.
+    println!("PROOF models claude: {:?}", load_claude_models(&st).await.map(|v| v["models"].clone()));
+    println!("PROOF models codex: {:?}", load_codex_models(&st).await.map(|v| v["models"].clone()));
+}
