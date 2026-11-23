@@ -6,16 +6,18 @@
   import { lang, t } from '../lib/i18n';
   import Icon from '../lib/Icon.svelte';
 
-  let { url = '', disabled = false, onpick }: { url?: string; disabled?: boolean; onpick: (baseUrl: string) => void } = $props();
-  type Preset = { id: string; name: string; nameAr: string; baseUrl: string; hint: string; hintAr: string; keysUrl: string };
+  // `program`: Claude Code's services (Anthropic-compatible) or Codex's (OpenAI-compatible). `noKey`:
+  // the service runs on this computer and takes no key.
+  let { url = '', disabled = false, program = 'claude', onpick }: { url?: string; disabled?: boolean; program?: 'claude' | 'codex'; onpick: (baseUrl: string, noKey: boolean) => void } = $props();
+  type Preset = { id: string; name: string; nameAr: string; baseUrl: string; hint?: string; hintAr?: string; keysUrl: string; noKey?: boolean };
   let presets = $state<Preset[]>([]);
-  onMount(() => { api<Preset[]>('/ai/claude/presets').then((p) => (presets = p)).catch(() => {}); });
+  onMount(() => { api<Preset[]>(`/ai/${program}/presets`).then((p) => (presets = p)).catch(() => {}); });
 
   const same = (a: string, b: string) => a.trim().replace(/\/+$/, '').toLowerCase() === b.trim().replace(/\/+$/, '').toLowerCase();
   const anthropic = (u: string) => !u.trim() || /^https:\/\/api\.anthropic\.com(?:[:/?#]|$)/i.test(u.trim());
   const chosen = $derived(presets.find((p) => (p.baseUrl ? same(url, p.baseUrl) : anthropic(url))));
   const name = (p: Preset) => (lang() === 'ar' ? p.nameAr : p.name);
-  const hint = (p: Preset) => (lang() === 'ar' ? p.hintAr : p.hint);
+  const hint = (p: Preset) => (program === 'codex' ? t('prov5.codex.preset.' + p.id) : (lang() === 'ar' ? p.hintAr : p.hint) ?? '');
 </script>
 
 {#if presets.length}
@@ -23,7 +25,7 @@
     <span class="muted sm">{t('runc.preset.pick')}</span>
     <div class="row wrap">
       {#each presets as p (p.id)}
-        <button type="button" class="btn" class:primary={chosen?.id === p.id} aria-pressed={chosen?.id === p.id} {disabled} onclick={() => onpick(p.baseUrl)}>{name(p)}</button>
+        <button type="button" class="btn" class:primary={chosen?.id === p.id} aria-pressed={chosen?.id === p.id} {disabled} onclick={() => onpick(p.baseUrl, !!p.noKey)}>{name(p)}</button>
       {/each}
     </div>
     {#if chosen}

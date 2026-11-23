@@ -70,4 +70,8 @@
   Every planning and build run takes its model and effort from `mado::options_for_run` (the project's record outside
   the project, else Settings; never a Claude choice for Codex); `mado_e2e_tests.rs` walks a whole 0.4.0 project
   over HTTP and checks the command line of every run.
+- Other providers (`providers.rs`, round 0.5.0): the app never bundles or starts a gateway (no LiteLLM), and
+  subscription sign-in stays inside the unmodified CLIs. Another service is Claude Code's own `ANTHROPIC_BASE_URL`
+  or Codex's own `model_providers` (`-c` per run, key only in `THOUGHTS_PROVIDER_KEY`, kept from commands); a keyless
+  service on this computer gets the stand-in `NO_KEY`, never the sign-in. Only the address check yields to full access.
 - Verify with `cargo test -p thoughtsd`, `npx vite build` and `cargo build -p thoughts`.

@@ -16,6 +16,8 @@
   import { settleJoin } from '../lib/join.svelte';
   import { cloudFor } from '../lib/cloud.svelte';
   import ProviderPresets from './ProviderPresets.svelte';
+  import CodexProvider from './CodexProvider.svelte';
+  import { keylessAllowed, onHomeNetwork } from '../lib/providers';
   import CodexSettings from './CodexSettings.svelte';
   import SpendingGuard from './SpendingGuard.svelte';
   import RemoteTokenHelp from './RemoteTokenHelp.svelte';
@@ -495,6 +497,9 @@
     app.settings = await api('/settings');
     s.ai.claude.hasApiToken = base.ai.claude.hasApiToken = app.settings.ai.claude.hasApiToken;
     s.ai.claude.baseUrl = base.ai.claude.baseUrl = app.settings.ai.claude.baseUrl;
+    // The other providers' server-owned fields (round 0.5.0): saved through their own routes only.
+    s.ai.claude.keyless = base.ai.claude.keyless = !!app.settings.ai.claude.keyless;
+    if (s.ai.codex && base.ai.codex) for (const k of ['baseUrl', 'hasApiToken', 'keyless'] as const) s.ai.codex[k] = base.ai.codex[k] = (app.settings.ai.codex as any)?.[k] ?? null;
     s.modules = structuredClone($state.snapshot(app.settings.modules));
     base.modules = structuredClone($state.snapshot(app.settings.modules));
   }
@@ -511,24 +516,32 @@
   let provTest = $state<{ ok: boolean; message?: string } | null>(null);
   const savedUrl = $derived(String(app.settings?.ai?.claude?.baseUrl ?? '').trim());
   const hasKey = $derived(!!app.settings?.ai?.claude?.hasApiToken);
+  /** A service on this computer saved as taking no key: it gets a stand-in, never the Claude sign-in. */
+  const savedKeyless = $derived(!!app.settings?.ai?.claude?.keyless);
+  const fullOn = $derived(!!app.settings?.fullAccess?.on);
+  let provNoKey = $state<boolean>(!!app.settings?.ai?.claude?.keyless);
   /** Where requests go when it is not Anthropic itself ('' for no address and for Anthropic's own). */
   const dest = (u: string) => (!u.trim() || /^https:\/\/api\.anthropic\.com(?:[:/?#]|$)/i.test(u.trim()) ? '' : u.trim());
+  const noKeyOffered = $derived(!!dest(provUrl) && keylessAllowed(provUrl, fullOn));
+  const sendNoKey = $derived(noKeyOffered && provNoKey && !apiToken.trim());
   /** Who answers the assistant, as saved: the Claude account, an Anthropic key, another service, or an address with no key. */
-  const provKind = $derived(dest(savedUrl) ? (hasKey ? 'service' : 'incomplete') : hasKey ? 'anthropicKey' : 'account');
-  const provDirty = $derived(provUrl.trim() !== savedUrl || !!apiToken.trim());
+  const provKind = $derived(dest(savedUrl) ? (hasKey || savedKeyless ? 'service' : 'incomplete') : hasKey ? 'anthropicKey' : 'account');
+  const provDirty = $derived(provUrl.trim() !== savedUrl || !!apiToken.trim() || (!!dest(provUrl) && provNoKey) !== savedKeyless);
   const provErr = $derived.by(() => {
     const u = provUrl.trim();
     if (u && !/^https?:\/\/\S+$/.test(u)) return t('set.errUrl');
-    if (provDirty && dest(u) && !apiToken.trim() && !(hasKey && dest(savedUrl) === dest(u))) return t('runa.prov.needKey');
+    if (provDirty && dest(u) && provNoKey && !apiToken.trim() && !noKeyOffered) return t('prov5.noKeyOnlyLocal');
+    if (provDirty && dest(u) && !apiToken.trim() && !sendNoKey && !((hasKey || savedKeyless) && dest(savedUrl) === dest(u))) return t('runa.prov.needKey');
     return '';
   });
 
   const saveProvider = () => run('token', async () => {
     if (provErr || !provDirty) return;
-    const r = await put('/ai/claude/provider', { baseUrl: provUrl.trim() || null, token: apiToken.trim() || null });
+    const r = await put('/ai/claude/provider', { baseUrl: provUrl.trim() || null, token: apiToken.trim() || null, noKey: sendNoKey });
     apiToken = ''; provTest = null;
     await syncServerFields();
     provUrl = app.settings.ai.claude.baseUrl ?? '';
+    provNoKey = !!app.settings.ai.claude.keyless;
     refreshClaude();
     toast(t('runa.prov.saved.' + r.provider) + (r.keyRemoved ? ' ' + t('runa.prov.oldKeyRemoved') : ''), { kind: 'success' });
   });
@@ -540,19 +553,31 @@
       await del('/ai/claude/provider');
       apiToken = ''; provTest = null;
       await syncServerFields();
-      provUrl = '';
+      provUrl = ''; provNoKey = false;
       refreshClaude();
       toast(t('runa.prov.removed'));
     });
   }
 
   /** Can a test be made: a key is typed, or the one saved for this very address is there. */
-  const canTest = $derived(!provErr && (!!apiToken.trim() || (hasKey && dest(savedUrl) === dest(provUrl))));
+  const canTest = $derived(!provErr && (!!apiToken.trim() || sendNoKey || ((hasKey || savedKeyless) && dest(savedUrl) === dest(provUrl))));
   // What is typed is tried as it stands, saved or not; with nothing typed, the saved set-up is.
   const testProvider = () => run('provtest', async () => {
     provTest = null;
-    provTest = await post('/ai/claude/provider/test', provDirty ? { baseUrl: provUrl.trim() || null, token: apiToken.trim() || null } : undefined);
+    provTest = await post('/ai/claude/provider/test', provDirty ? { baseUrl: provUrl.trim() || null, token: apiToken.trim() || null, noKey: sendNoKey } : undefined);
   });
+
+  /** "Load models": the saved service's own list, asked only now, put into the model list. */
+  async function loadServiceModels() {
+    if (busy.models) return;
+    busy.models = true;
+    try {
+      const r = await post<{ models: string[] }>('/ai/claude/provider/models');
+      opts = await api('/ai/claude/options');
+      toast(t('prov5.models.loaded', { n: r.models.length }), { kind: 'success' });
+    } catch (e) { failed(t('prov5.models.failed'), e); }
+    finally { busy.models = false; }
+  }
 
   async function browseLibrary() {
     try {
@@ -833,11 +858,17 @@
         {#if vis(c, 'set.provider', 'set.baseUrl', 'set.apiKey')}
           <h3>{t('set.provider')}</h3>
           <p class="muted sm">{t('set.providerHint')} {t('runa.prov.how')}</p>
-          <ProviderPresets url={provUrl} disabled={readOnly} onpick={(u) => { provUrl = u; provTest = null; }} />
+          <ProviderPresets url={provUrl} disabled={readOnly} onpick={(u, noKey) => { provUrl = u; provNoKey = noKey; provTest = null; }} />
+          <p class="muted sm">{t('prov5.litellm')}</p>
           <label for="st-base">{t('set.baseUrl')}</label>
           <input id="st-base" dir="ltr" bind:value={provUrl} placeholder="https://api.anthropic.com" aria-invalid={!!provErr} aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly} />
-          <label for="st-key">{t('set.apiKey')} {#if hasKey}<span class="pill accent">{t('set.keyOn')}</span>{/if}</label>
-          <input id="st-key" dir="ltr" type="password" bind:value={apiToken} placeholder="sk-…" aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly} />
+          {#if onHomeNetwork(provUrl, fullOn)}<p class="muted sm" role="note">{t('prov5.lan')}</p>{/if}
+          {#if noKeyOffered}
+            <label class="check"><input type="checkbox" bind:checked={provNoKey} disabled={readOnly} aria-describedby="st-nokey-hint" /> {t('prov5.noKey')}</label>
+            <p class="muted sm" id="st-nokey-hint">{t('prov5.noKeyHint')}</p>
+          {/if}
+          <label for="st-key">{t('set.apiKey')} {#if hasKey}<span class="pill accent">{t('set.keyOn')}</span>{:else if savedKeyless && provKind === 'service'}<span class="pill">{t('prov5.keylessPill')}</span>{/if}</label>
+          <input id="st-key" dir="ltr" type="password" bind:value={apiToken} placeholder="sk-…" aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly || sendNoKey} />
           {#if provErr}<p class="err" id="st-err-provider" role="alert">{provErr}</p>{/if}
           <div class="row wrap gap-top">
             <button type="button" class="btn primary" disabled={!provDirty || !!provErr || busy.token || readOnly} aria-busy={busy.token} onclick={saveProvider}>{t('runa.prov.save')}</button>
@@ -846,7 +877,14 @@
           </div>
           {#if provTest}<p class="sm" class:err={!provTest.ok} role="status" dir="auto">{provTest.ok ? t('runa.prov.testOk') : provTest.message}</p>{/if}
           <p class="muted sm">{t('runc.prov.testHint')}</p>
+          {#if provKind === 'service'}
+            <div class="row wrap gap-top">
+              <button type="button" class="btn" disabled={provDirty || busy.models} aria-busy={busy.models} aria-describedby="st-models-hint" onclick={loadServiceModels}><Icon name="sync" size={14} /> {busy.models ? t('prov5.models.loading') : t('prov5.models.load')}</button>
+            </div>
+            <p class="muted sm" id="st-models-hint">{t('prov5.models.hint')}</p>
+          {/if}
           <p class="muted sm">{t('set.apiKeyHint')}</p>
+          <CodexProvider onsaved={syncServerFields} {readOnly} />
         {/if}
         <CodexSettings bind:ai={s.ai} part="advanced" vis={(...k) => vis(c, ...k)} {readOnly} />
       </details>
