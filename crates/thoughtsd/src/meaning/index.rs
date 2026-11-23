@@ -24,6 +24,10 @@ use walkdir::WalkDir;
 use super::model::{Embedder, DIMS};
 
 pub const MIN_PIECE: usize = 400;
+/// How far below the best note another may score and still be shown (see `Index::top`). Measured
+/// with the real model on Arabic and English notes (the `real_model_…` test): a related note
+/// scored 0.79–0.88, the best unrelated one up to 0.80 but always at least 0.055 under the best.
+pub const MARGIN: f32 = 0.05;
 pub const MAX_PIECE: usize = 1200;
 /// Pieces turned into vectors at once.
 pub const BATCH: usize = 16;
@@ -255,7 +259,11 @@ impl Index {
             let e = best.entry(c.path.as_str()).or_insert((i, f32::MIN));
             if s > e.1 { *e = (i, s); }
         }
-        let mut out: Vec<(usize, f32)> = best.into_values().filter(|(_, s)| *s >= threshold).collect();
+        // Above the threshold, and not far below the best: a note far behind the best one is
+        // about something else, even when its score alone would pass (`MARGIN`).
+        let top = best.values().map(|(_, s)| *s).fold(f32::MIN, f32::max);
+        let floor = if threshold > 0.0 { threshold.max(top - MARGIN) } else { threshold };
+        let mut out: Vec<(usize, f32)> = best.into_values().filter(|(_, s)| *s >= floor).collect();
         out.sort_by(|a, b| b.1.total_cmp(&a.1).then(self.chunks[a.0].path.cmp(&self.chunks[b.0].path)));
         out.truncate(limit);
         out

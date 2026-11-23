@@ -202,6 +202,11 @@ fn the_best_piece_of_each_file_ranks_and_the_threshold_holds() {
     assert_eq!(top[0].0, 1, "the better piece of a.md");
     assert!((top[0].1 - 0.95).abs() < 1e-5);
     assert_eq!(ix.top(&q, 1, 0.0).len(), 1);
+    // A note far behind the best one is left out even above the threshold (`index::MARGIN`).
+    ix.put("d.md", FileMeta::default(), vec![c("d.md")], vec![unit(5, 0.85)]);
+    assert!(!ix.top(&q, 10, 0.8).iter().any(|(i, _)| ix.chunks[*i].path == "d.md"));
+    assert!(ix.top(&q, 10, 0.0).iter().any(|(i, _)| ix.chunks[*i].path == "d.md"), "not with no threshold");
+    ix.drop_where(|p| p == "d.md");
     // Taking a file out takes its vectors with it.
     ix.drop_where(|p| p == "a.md");
     assert_eq!((ix.chunks.len(), ix.vecs.len()), (2, 2 * DIMS));
@@ -577,12 +582,26 @@ fn real_model_an_arabic_question_finds_the_english_note() {
         let v = e5.embed(&[model::query_text(q)]).unwrap().pop().unwrap();
         ix.top(&v, 3, 0.0).into_iter().map(|(i, s)| (ix.chunks[i].path.clone(), s)).collect()
     };
+    // What the app shows: the threshold and the margin together.
+    let shown = |q: &str| -> Vec<String> {
+        let v = e5.embed(&[model::query_text(q)]).unwrap().pop().unwrap();
+        ix.top(&v, 10, THRESHOLD).into_iter().map(|(i, _)| ix.chunks[i].path.clone()).collect()
+    };
     for (q, want) in [("أشجار التفاح في المزرعة", "farm/orchard.md"), ("ضريبة القيمة المضافة", "work/taxes.md"), ("تغيير زيت المحرك", "car/repairs.md"),
-        ("fruit trees", "farm/orchard.md"), ("fixing the vehicle", "car/repairs.md")] {
+        ("fruit trees", "farm/orchard.md"), ("fixing the vehicle", "car/repairs.md"), ("المحاسب والإقرار الضريبي", "work/taxes.md"),
+        ("brakes", "car/repairs.md"), ("planting in spring", "farm/orchard.md")] {
         let got = ask(q);
         eprintln!("{q}: {got:?}");
         assert_eq!(got[0].0, want, "{q}");
-        assert!(got[0].1 >= THRESHOLD, "{q}: {} is under the threshold", got[0].1);
+        if std::env::var("MEANING_PRINT_ONLY").is_ok() { continue; }
+        assert_eq!(shown(q), [want], "{q}: the one related note, and only it, is shown");
+    }
+    // Something no note is about finds nothing.
+    for q in ["كرة القدم", "quantum chromodynamics lecture", "wedding invitations"] {
+        let got = ask(q);
+        eprintln!("{q}: {got:?}");
+        if std::env::var("MEANING_PRINT_ONLY").is_ok() { continue; }
+        assert!(shown(q).is_empty(), "{q}");
     }
     std::fs::remove_dir_all(root).unwrap();
 }

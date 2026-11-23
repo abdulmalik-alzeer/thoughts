@@ -40,7 +40,9 @@ use model::Embedder;
 /// The line an assistant ends an answer with to suggest search by meaning (ordinary chats only).
 pub const MARKER: &str = "[[thoughts:meaning-search]]";
 /// Lowest similarity a note is shown or named with (cosine of unit vectors; E5 scores sit high).
-pub const THRESHOLD: f32 = 0.80;
+/// Measured with the real model (`real_model_…` test): related notes 0.79–0.88 across Arabic and
+/// English, questions about nothing in the library at most 0.75. Used with `index::MARGIN`.
+pub const THRESHOLD: f32 = 0.78;
 /// "Not now" lasts this long.
 const SNOOZE_DAYS: i64 = 30;
 /// Chats remembered as already asked.
