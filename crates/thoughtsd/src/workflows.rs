@@ -149,10 +149,12 @@ fn save_approved(home: &Path, a: &Approved) -> anyhow::Result<()> {
 
 fn is_approved(a: &Approved, l: &Loaded) -> bool { a.get(&l.file) == Some(&l.hash) }
 
-/// The workflows the runner may start: valid, and approved in their current form.
+/// The workflows the runner may start: valid, approved in their current form, and not switched off.
 pub fn approved_workflows(layer: &Path, home: &Path) -> Vec<Loaded> {
     let a = load_approved(home);
-    load_files(layer).into_iter().filter(|l| is_approved(&a, l)).collect()
+    // Nor those of a plugin that is switched off, or switched off on their own (`bundles.rs`).
+    let off = crate::bundles::inactive_workflows(layer);
+    load_files(layer).into_iter().filter(|l| is_approved(&a, l) && !off.contains(&l.file)).collect()
 }
 
 /// The workflow in file `file` — looked up by its file only, never by its name.

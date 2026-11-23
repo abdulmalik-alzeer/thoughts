@@ -37,6 +37,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/layer/pending/continue", post(pending_continue))
         .route("/api/layer/pending/review-again", post(pending_review_again))
         .route("/api/layer/pending/details", get(pending_details))
+        .route("/api/layer/pending/plugin", post(pending_plugin))
         .route("/api/layer/drafts", get(draft_list))
         .route("/api/layer/drafts/open", post(draft_open))
         .route("/api/layer/drafts/discard", post(draft_discard))
@@ -319,6 +320,21 @@ async fn pending_review_again(State(st): S) -> R {
 
 /// `GET /api/layer/pending/details` — what each file of the open change changes, line by line
 /// (see `staging::details`).
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct PluginChoice { target: String, id: String, name: String }
+
+/// `POST /api/layer/pending/plugin {target: "none" | "new" | "existing", id?, name?}` — how the change
+/// under review is kept: as it is, as one new plugin called `name`, or as part of the named plugin
+/// `id`. → the pending change again.
+async fn pending_plugin(State(st): S, Json(c): Json<PluginChoice>) -> R {
+    let _g = LAYER_LOCK.lock().await;
+    let (d, ar) = (Dirs::real(), arabic(&st).await);
+    let target = match c.target.as_str() { "existing" => c.id.as_str(), "new" => "new", _ => "none" };
+    staging::set_bundle(&d, target, &c.name)?;
+    Ok(Json(staging::pending(Git(Some(&st)), &d, ar).await))
+}
+
 async fn pending_details(State(st): S) -> R {
     let _g = LAYER_LOCK.lock().await;
     Ok(Json(staging::details(Git(Some(&st)), &Dirs::real()).await))
@@ -521,14 +537,20 @@ async fn addon_data_forget(Json(r): Json<DataRef>) -> R {
 }
 
 #[derive(Deserialize)]
-struct Import { pack: Value }
+struct Import {
+    pack: Value,
+    /// For a plugin that is already here: `update` (the default) replaces that version, so what the
+    /// new one dropped goes away; `new` adds it as another plugin beside it.
+    #[serde(default, rename = "as")]
+    mode: String,
+}
 
 async fn import(State(st): S, Json(i): Json<Import>) -> R {
     let _g = LAYER_LOCK.lock().await;
     let d = Dirs::real();
     applayer::ensure_in(Git(Some(&st)), &d).await?;
     let ar = arabic(&st).await;
-    packs::import(Git(Some(&st)), &d, &i.pack, ar).await?;
+    packs::import_as(Git(Some(&st)), &d, &i.pack, ar, None, i.mode == "new").await?;
     st.emit(json!({"type": "layer.pending"}));
     Ok(Json(staging::pending(Git(Some(&st)), &d, ar).await))
 }

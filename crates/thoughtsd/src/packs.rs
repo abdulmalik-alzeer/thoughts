@@ -105,7 +105,8 @@ pub fn claims(pack: &Value) -> (String, String, String, String) {
 /// maker's words), its fingerprint as calculated here (`fingerprint` in full, `code` to show),
 /// whether the fingerprint written in it matches in full (`null` when it has none), how many of its
 /// files differ from the layer at `layer`, and the newest earlier pack of the same name kept here
-/// (`same`: exactly this pack, by full fingerprint). Refusals are in the UI language.
+/// (`same`: exactly this pack, by full fingerprint), and `plugin`: its plugin lines compared with
+/// the plugins here. Refusals are in the UI language.
 pub fn inspect(pack: &Value, layer: &Path, kept: &[(String, crate::applayer::PackMark)]) -> anyhow::Result<Value> {
     let files = check_pack(pack)?;
     let kind = if pack["kind"] == "feature" { "feature" } else { "full" };
@@ -124,6 +125,8 @@ pub fn inspect(pack: &Value, layer: &Path, kept: &[(String, crate::applayer::Pac
         "claimed": claimed.as_deref().map(fingerprint_code),
         "matches": claimed.as_ref().map(|c| full_fingerprint(c) && c.eq_ignore_ascii_case(&print)),
         "changes": changes, "earlier": earlier, "appVersion": clean_line(pack["appVersion"].as_str().unwrap_or(""), 30),
+        // What it says of itself as a plugin, and how that compares with the plugins here (`bundles::inspect_plugin`).
+        "plugin": crate::bundles::inspect_plugin(pack, layer)?,
     }))
 }
 
@@ -148,7 +151,7 @@ pub fn collect(dir: &Path) -> BTreeMap<String, String> {
 
 /// One line of someone else's text, as it will be shown: no control characters, and anything that
 /// would not show (zero-width, direction-changing…) written out.
-fn clean_line(text: &str, max: usize) -> String {
+pub(crate) fn clean_line(text: &str, max: usize) -> String {
     let line: String = text.chars().filter(|c| !c.is_control()).collect();
     crate::staging::validate::show_hidden(&line, false).chars().take(max).collect::<String>().trim().to_string()
 }
@@ -177,37 +180,53 @@ pub fn export_with(dir: &Path, name: &str, description: &str, paths: Option<&[St
 /// written from its `manifest.json` entry. The pack carries its maker's name, author and version,
 /// and the fingerprint of what it holds (see `fingerprint`).
 pub fn export_as(dir: &Path, who: &Identity, paths: Option<&[String]>) -> anyhow::Result<Value> {
-    let (name, description) = (who.name, who.description);
-    let all = collect(dir);
     let (kind, files) = match paths {
-        None => ("full", all),
+        None => ("full", collect(dir)),
         Some(wanted) => {
-            let shared: Value = all.get("manifest.json").and_then(|t| serde_json::from_str(t).ok()).unwrap_or(Value::Null);
-            let mut out = BTreeMap::new();
-            for w in wanted.iter().map(|w| w.trim()).filter(|w| !w.is_empty()) {
-                for (path, text) in all.iter().filter(|(p, _)| p.as_str() == w || (w.ends_with('/') && p.starts_with(w))) {
-                    out.insert(path.clone(), text.clone());
-                    let (sub, ext) = if path.starts_with("plugins/") { ("plugins", ".js") } else if path.starts_with("views/") { ("views", ".html") } else { continue };
-                    let Some(file) = path.strip_prefix(sub).and_then(|f| f.strip_prefix('/')).filter(|f| !f.contains('/') && f.ends_with(ext)) else { continue };
-                    let decl_path = format!("{sub}/{}.json", file.trim_end_matches(ext));
-                    if let Some(own) = all.get(&decl_path) {
-                        out.insert(decl_path, own.clone());
-                    } else if let Some(entry) = shared[sub][file].as_object() {
-                        let mut decl = entry.clone();
-                        decl.entry("apiVersion").or_insert(json!(shared["apiVersion"].as_u64().unwrap_or(crate::applayer::API_VERSION)));
-                        out.insert(decl_path, serde_json::to_string_pretty(&decl)? + "\n");
-                    }
-                }
-            }
+            let out = feature_files(dir, wanted)?;
             if out.is_empty() { return Err(crate::tr::err("pack.nothing", &[])); }
             ("feature", out)
         }
     };
-    let name = clean_line(name, 80);
+    let mut pack = pack_json(kind, files, who);
+    // A pack of everything says which plugins it holds, so they are plugins again where it is imported
+    // (their names and claims are checked there like everything else a pack says).
+    let plugins = if kind == "full" { crate::bundles::plugins_list(dir) } else { vec![] };
+    if !plugins.is_empty() { pack["plugins"] = json!(plugins); }
+    Ok(pack)
+}
+
+/// The files of the layer at `dir` that `wanted` names (files, or folders ending in `/`), each
+/// add-on and page with its declaration (see `export_as`). Empty when none of them is there.
+pub(crate) fn feature_files(dir: &Path, wanted: &[String]) -> anyhow::Result<BTreeMap<String, String>> {
+    let all = collect(dir);
+    let shared: Value = all.get("manifest.json").and_then(|t| serde_json::from_str(t).ok()).unwrap_or(Value::Null);
+    let mut out = BTreeMap::new();
+    for w in wanted.iter().map(|w| w.trim()).filter(|w| !w.is_empty()) {
+        for (path, text) in all.iter().filter(|(p, _)| p.as_str() == w || (w.ends_with('/') && p.starts_with(w))) {
+            out.insert(path.clone(), text.clone());
+            let (sub, ext) = if path.starts_with("plugins/") { ("plugins", ".js") } else if path.starts_with("views/") { ("views", ".html") } else { continue };
+            let Some(file) = path.strip_prefix(sub).and_then(|f| f.strip_prefix('/')).filter(|f| !f.contains('/') && f.ends_with(ext)) else { continue };
+            let decl_path = format!("{sub}/{}.json", file.trim_end_matches(ext));
+            if let Some(own) = all.get(&decl_path) {
+                out.insert(decl_path, own.clone());
+            } else if let Some(entry) = shared[sub][file].as_object() {
+                let mut decl = entry.clone();
+                decl.entry("apiVersion").or_insert(json!(shared["apiVersion"].as_u64().unwrap_or(crate::applayer::API_VERSION)));
+                out.insert(decl_path, serde_json::to_string_pretty(&decl)? + "\n");
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A pack of `files`, with what its maker says it is and the fingerprint of what it holds.
+pub(crate) fn pack_json(kind: &str, files: BTreeMap<String, String>, who: &Identity) -> Value {
+    let name = clean_line(who.name, 80);
     let mut pack = json!({
         "format": "thoughts-pack", "version": 1, "apiVersion": crate::applayer::API_VERSION, "kind": kind,
         "name": if name.is_empty() { "My customisations" } else { name.as_str() },
-        "description": clean_line(description, 400),
+        "description": clean_line(who.description, 400),
         "appVersion": env!("CARGO_PKG_VERSION"),
         "fingerprint": fingerprint(kind, &files),
         "files": files,
@@ -216,7 +235,7 @@ pub fn export_as(dir: &Path, who: &Identity, paths: Option<&[String]>) -> anyhow
         let v = clean_line(value, max);
         if !v.is_empty() { pack[key] = json!(v); }
     }
-    Ok(pack)
+    pack
 }
 
 /// Key-wise merge of a pack's JSON into the user's: objects merge per key, lists are unioned (the
@@ -247,7 +266,7 @@ pub fn merge_json(mine: &Value, theirs: &Value) -> Value {
 }
 
 /// The pack's name as it appears in the CSS markers (nothing that could end a comment).
-fn marker_name(name: &str) -> String {
+pub(crate) fn marker_name(name: &str) -> String {
     let n: String = name.chars().map(|c| if c.is_alphanumeric() || " ._-".contains(c) { c } else { '-' }).take(60).collect();
     if n.trim().is_empty() { "pack".into() } else { n.trim().to_string() }
 }
@@ -313,9 +332,26 @@ pub async fn import(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool) -> anyhow:
 /// `import`, with the app's own description of the change in place of the usual one (for the
 /// ready-made packs that come with the app, whose words are the app's).
 pub async fn import_with(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool, own_summary: Option<String>) -> anyhow::Result<()> {
-    let files = check_pack(pack)?;
+    import_as(g, d, pack, arabic, own_summary, false).await
+}
+
+/// `import_with`. A feature pack is staged as a plugin: one made for a newer Thoughts is refused,
+/// one in an older layer format is brought up to date first, and when it is a newer version of a
+/// plugin that is already here, that version's things are taken out of the staging copy before the
+/// merge, so what the new version dropped goes away (`as_new`: stage it as another plugin instead).
+pub async fn import_as(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool, own_summary: Option<String>, as_new: bool) -> anyhow::Result<()> {
+    let received = check_pack(pack)?;
     let feature = pack["kind"] == "feature";
-    let print = fingerprint(if feature { "feature" } else { "full" }, &files);
+    // The fingerprint is of the pack as it came, whatever a format update then does to its files.
+    let print = fingerprint(if feature { "feature" } else { "full" }, &received);
+    let plugin = if feature { Some(crate::bundles::check_compatible(pack)?) } else { None };
+    let mut files = received.clone();
+    let mut updated = false;
+    if let Some(p) = &plugin {
+        updated = crate::bundles::migrate_files(&mut files, p.layer_format).map_err(|e| crate::tr::err_detail("plugin.migrate_failed", &[], e))?;
+        // What a format update wrote is checked like the pack itself was.
+        if updated { files = check_pack(&json!({"format": "thoughts-pack", "version": 1, "files": files}))?; }
+    }
     let (_, author, version, _) = claims(pack);
     let name = clean_line(pack["name"].as_str().unwrap_or(""), 80);
     let name = if name.is_empty() { "pack".to_string() } else { name };
@@ -327,7 +363,12 @@ pub async fn import_with(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool, own_s
         return Err(e);
     }
     let mut replaced: Vec<&str> = vec![];
+    let mut record: Option<Value> = if feature { None } else { crate::bundles::staged_all(pack) };
     let result: anyhow::Result<()> = (|| {
+        if let Some(p) = &plugin {
+            let origin = if own_summary.is_some() { "ready" } else { "pack" };
+            record = Some(crate::bundles::before_merge(d, p, &files, &css_key, origin, &print, as_new, updated)?);
+        }
         for (path, text) in &files {
             let target = d.staging.join(path);
             if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
@@ -355,6 +396,7 @@ pub async fn import_with(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool, own_s
     let pack_words = if own_summary.is_some() { String::new() } else { clean_line(pack["description"].as_str().unwrap_or(""), 400) };
     crate::staging::set_pack(d, &name, &pack_words);
     crate::staging::set_pack_identity(d, &author, &version, &print);
+    crate::staging::set_bundle_pack(d, record);
     let name = quoted_name(&name);
     let mut summary = match (own_summary, arabic, feature) {
         (Some(s), _, _) => s,
