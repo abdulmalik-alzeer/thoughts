@@ -551,6 +551,18 @@ const TABLE: &[Entry] = &[
         "The assistant is not signed in to Claude, or the sign-in has expired. Sign in, then send your message again.",
         "المساعد غير مسجّل الدخول إلى Claude، أو انتهت صلاحية تسجيل الدخول. سجّل الدخول ثم أرسل رسالتك مرة أخرى."),
     // --- search by meaning (meaning/) ---
+    e("meaning.not_ready", "not_ready", 409, "",
+        "Search by meaning is not ready yet. Switch it on in Settings › Features, and wait until your notes are ready.",
+        "البحث بالمعنى غير جاهز بعد. فعّله من «الإعدادات › المزايا»، وانتظر حتى تجهز ملاحظاتك."),
+    e("meaning.download_failed", "network", 502, "",
+        "The search-by-meaning model could not be downloaded. Check your internet connection, then press Continue: the download goes on from where it stopped.",
+        "تعذّر تنزيل نموذج البحث بالمعنى. تحقّق من اتصالك بالإنترنت ثم اضغط «متابعة»: يُستأنف التنزيل من حيث توقّف."),
+    e("meaning.bad_download", "invalid", 422, "",
+        "The downloaded model was not the expected file, so it was deleted and not used. Press Continue to download it again.",
+        "لم يكن النموذج الذي نُزّل هو الملف المتوقّع، فحُذف ولم يُستخدم. اضغط «متابعة» لتنزيله من جديد."),
+    e("meaning.bad_host", "not_allowed", 403, "",
+        "The model's download was sent to an address the app does not trust, so it was stopped.",
+        "حُوِّل تنزيل النموذج إلى عنوان لا يثق به التطبيق، فأُوقف."),
     // --- Codex (codex.rs) ---
     e("codex.missing", "assistant_missing", 409, "",
         "Codex is not installed, or could not be found. Install it, or choose Claude Code under Settings › Assistant.",

@@ -924,6 +924,8 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     if new.private_paths != old.private_paths || new.library_path != old.library_path {
         let home = paths::home();
         let _ = tokio::task::spawn_blocking(move || crate::run_files::forget_library_texts(&home)).await;
+        // …and so do the pieces search by meaning had of what is private now.
+        crate::meaning::private_changed(&st).await;
     }
     if full_on { crate::log::warn(format!("full access switched ON by the user, confirmed in the app's own warning, at {}", new.full_access.since.as_deref().unwrap_or(""))); }
     if full_off && old.full_access.on {

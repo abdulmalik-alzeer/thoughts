@@ -37,6 +37,17 @@ encoding_rs = "0.8"
 # Reading a screen mock-up the way a browser does before cleaning it (mado_design_clean.rs). MIT or Apache-2.0,
 # and already built for the desktop shell (tauri-utils reads its pages with it): the same version, pinned.
 html5ever = "=0.39.0"
+# Search by meaning (meaning/): a small multilingual model run on this computer. candle is MIT OR
+# Apache-2.0 and pure Rust; on macOS it uses Apple's Accelerate framework, built per architecture.
+# tokenizers is Apache-2.0, with the pure-Rust regex engine candle itself asks for (no C or C++
+# build, no progress bars or downloads). The model
+# file is fetched with ureq (MIT OR Apache-2.0, the version the desktop shell already builds), only
+# after the user asked for it.
+candle-core = "0.11.1"
+candle-nn = "0.11.1"
+candle-transformers = "0.11.1"
+tokenizers = { version = "0.23.2", default-features = false, features = ["fancy-regex"] }
+ureq = "2.12"
 
 [dev-dependencies]
 # Builds the old-format (.xls, .ppt) test files of as_text.rs. MIT.
@@ -44,5 +55,10 @@ cfb = "0.14"
 
 # Linux: the kernel keyring alone forgets everything at reboot, so secrets also go to the desktop's
 # Secret Service (GNOME Keyring / KWallet). libdbus is built in, so no system package is needed.
+[target.'cfg(target_os = "macos")'.dependencies]
+candle-core = { version = "0.11.1", features = ["accelerate"] }
+candle-nn = { version = "0.11.1", features = ["accelerate"] }
+candle-transformers = { version = "0.11.1", features = ["accelerate"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["linux-native-sync-persistent", "crypto-rust", "vendored"] }

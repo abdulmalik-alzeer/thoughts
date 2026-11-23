@@ -204,6 +204,8 @@ pub async fn run() -> anyhow::Result<()> {
     tokio::spawn(release::weekly(state.clone()));
     // Old and never-used chats are removed in the background (the old-chat part only when the person asked for it).
     tidy::start(state.clone());
+    // Search by meaning goes on where it was, when it is switched on (nothing at all when off).
+    meaning::start(state.clone());
     // Streaming chats are written to disk at most every couple of seconds; this picks up the rest.
     let flusher = state.clone();
     tokio::spawn(async move {

@@ -2206,9 +2206,12 @@ pub async fn start_run(
 }
 
 pub async fn push(state: &AppState, chat_id: &str, m: Msg) {
+    // Search by meaning: an ordinary chat's marker line becomes a suggestion (`meaning::screen`).
+    let (m, offer) = crate::meaning::screen(state, chat_id, m).await;
     let mv = serde_json::to_value(&m).unwrap_or(Value::Null);
     state.chats.update(chat_id, |c| c.messages.push(m)).await;
     state.emit(json!({"type": "chat.message", "chatId": chat_id, "message": mv}));
+    if let Some(o) = offer { state.emit(o); }
 }
 
 /// What a run was working with, for saying why something was refused.

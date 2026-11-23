@@ -502,6 +502,24 @@ pub struct SearchSettings {
     pub file_threshold: usize,
     pub prompt_dismissed: bool,
     pub install_offered: bool,
+    /// Search by meaning (`meaning/`). Changed only through its own routes (`sanitize_update`).
+    pub meaning: MeaningSettings,
+}
+
+/// Search by meaning: off until the user switches it on and the model is fetched.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MeaningSettings {
+    /// The user pressed "Switch on and download" (and has not removed it since).
+    pub on: bool,
+    /// "Don't ask again": it is never suggested again.
+    pub never: bool,
+    /// "Not now": no suggestion before this time (RFC 3339).
+    pub snooze_until: Option<String>,
+    /// The chats it was already suggested in (the last 50): once per chat.
+    pub suggested_chats: Vec<String>,
+    /// The download was paused by the user: it does not go on by itself at the next start.
+    pub paused: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -762,6 +780,7 @@ impl Settings {
         // Full access is switched only by `PUT /api/settings` itself, after this (see `api::put_settings`).
         self.full_access.on = old.full_access.on;
         self.full_access.since = old.full_access.since.clone();
+        self.search.meaning = old.search.meaning.clone(); // search by meaning changes only through /api/meaning
         self.full_access.source_dir = match self.full_access.source_dir.take().map(|d| d.trim().to_string()).filter(|d| !d.is_empty()) {
             None => None,
             Some(d) if Some(&d) == old.full_access.source_dir.as_ref() => Some(d),

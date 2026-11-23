@@ -18,9 +18,9 @@ use std::time::SystemTime;
 use walkdir::WalkDir;
 
 /// Text files whose contents are searched. Every other file is still found by its name.
-const TEXT_EXT: &[&str] = &["md", "markdown", "txt", "csv", "tsv", "json", "yaml", "yml", "toml", "log", "xml", "html", "htm", "org", "rst"];
+pub(crate) const TEXT_EXT: &[&str] = &["md", "markdown", "txt", "csv", "tsv", "json", "yaml", "yml", "toml", "log", "xml", "html", "htm", "org", "rst"];
 /// Larger files are found by name only.
-const TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
+pub(crate) const TEXT_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_TERMS: usize = 8;
 const MAX_TERM_CHARS: usize = 80;
 /// Longest snippet, in characters.
@@ -189,7 +189,7 @@ pub(crate) fn title_of(text: &str) -> Option<String> {
     lines.take(40).find_map(|l| l.strip_prefix("# ").and_then(clean))
 }
 
-fn is_text(p: &Path) -> bool {
+pub(crate) fn is_text(p: &Path) -> bool {
     p.extension().and_then(|e| e.to_str()).map_or(false, |e| TEXT_EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 

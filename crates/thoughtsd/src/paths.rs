@@ -71,7 +71,9 @@ pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
     const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "wrap-copies", "run-tmp", "plugin-data", "history", "app-layer-held",
         "chats-set-aside", "chat-files",
         // The copy of Archify that draws diagrams (`figures.rs`): run by the app, so never a run's to touch.
-        "archify"];
+        "archify",
+        // Search by meaning's model and index (`meaning/`): closed even before it is first made.
+        "meaning"];
     const OPEN: &[&str] = &["app-layer-staging", "app-layer"];
     let mut files: Vec<PathBuf> = FILES.iter().map(|f| home.join(f)).collect();
     let mut dirs: Vec<PathBuf> = DIRS.iter().map(|d| home.join(d)).collect();
