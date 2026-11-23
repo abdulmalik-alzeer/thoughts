@@ -531,7 +531,8 @@
     const u = provUrl.trim();
     if (u && !/^https?:\/\/\S+$/.test(u)) return t('set.errUrl');
     if (provDirty && dest(u) && provNoKey && !apiToken.trim() && !noKeyOffered) return t('prov5.noKeyOnlyLocal');
-    if (provDirty && dest(u) && !apiToken.trim() && !sendNoKey && !((hasKey || savedKeyless) && dest(savedUrl) === dest(u))) return t('runa.prov.needKey');
+    // Unticking "No key needed" means a key is to come: the saved one only if there is one for this address.
+    if (provDirty && dest(u) && !apiToken.trim() && !sendNoKey && !(hasKey && dest(savedUrl) === dest(u))) return t('runa.prov.needKey');
     return '';
   });
 
@@ -795,7 +796,7 @@
           <button type="button" class="btn ghost" disabled={busy.claude} aria-busy={busy.claude} onclick={refreshClaude}><Icon name="sync" size={14} /> {busy.claude ? t('set.checking') : t('set.checkAgain')}</button>
         </div>
         {#if (app.wrap as any)?.summariesFailing}<p class="err sm" role="status">{t('runc.sumFail')}</p>{/if}
-        <p class="muted sm">{t(provKind === 'incomplete' ? 'runa.acct.incompleteHint' : provKind === 'account' ? 'set.accountHint' : 'runa.acct.keyHint')}</p>
+        <p class="muted sm">{t(provKind === 'incomplete' ? 'runa.acct.incompleteHint' : provKind === 'account' ? 'set.accountHint' : provKind === 'service' && savedKeyless && !hasKey ? 'prov5.acct.keylessHint' : 'runa.acct.keyHint')}</p>
         <!-- Not installed, or not signed in: the steps to get there, checked as they happen (FEAT-07). -->
         {#if !claude.installed || (provKind === 'account' && !claude.loggedIn)}<AssistantGuide bind:claude keyInstead={provKind === 'anthropicKey' || provKind === 'service'} />{/if}
       {/if}

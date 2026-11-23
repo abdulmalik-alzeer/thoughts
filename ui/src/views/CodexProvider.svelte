@@ -34,7 +34,7 @@
     const u = url.trim();
     if (u && !/^https?:\/\/\S+$/.test(u)) return t('set.errUrl');
     if (dirty && u && noKey && !token.trim() && !noKeyOffered) return t('prov5.noKeyOnlyLocal');
-    if (dirty && u && !token.trim() && !sendNoKey && !(same && (saved.hasApiToken || saved.keyless))) return t('runa.prov.needKey');
+    if (dirty && u && !token.trim() && !sendNoKey && !(same && saved.hasApiToken)) return t('runa.prov.needKey');
     return '';
   });
   const canTest = $derived(!err && !!url.trim() && (!!token.trim() || sendNoKey || (same && (saved.hasApiToken || saved.keyless))));
@@ -89,7 +89,7 @@
   {#if onHomeNetwork(url, fullOn)}<p class="muted sm" role="note">{t('prov5.lan')}</p>{/if}
   {#if noKeyOffered}
     <label class="check"><input type="checkbox" bind:checked={noKey} disabled={readOnly} aria-describedby="st-cx-nokey" /> {t('prov5.noKey')}</label>
-    <p class="muted sm" id="st-cx-nokey">{t('prov5.noKeyHint')}</p>
+    <p class="muted sm" id="st-cx-nokey">{t('prov5.codex.noKeyHint')}</p>
   {/if}
   <label for="st-cx-key">{t('prov5.codex.key')} {#if saved.hasApiToken}<span class="pill accent">{t('prov5.codex.keyOn')}</span>{:else if saved.keyless && kind === 'service'}<span class="pill">{t('prov5.keylessPill')}</span>{/if}</label>
   <input id="st-cx-key" dir="ltr" type="password" bind:value={token} placeholder="sk-…" aria-describedby={err ? 'st-cx-err' : undefined} autocomplete="off" disabled={readOnly || sendNoKey} />
@@ -111,8 +111,12 @@
 {/if}
 
 <style>
+  /* The same look as the rest of Settings › Assistant (Settings.svelte). */
+  h3 { font-size: 14px; font-weight: 600; margin: 18px 0 6px; }
   .row { display: flex; gap: 8px; }
   .wrap { flex-wrap: wrap; }
-  .gap-top { margin-top: 8px; }
-  p { margin: 4px 0; }
+  .gap-top { margin-top: 10px; }
+  .check { display: flex; gap: 8px; align-items: center; color: var(--fg); font-size: 13px; }
+  .err { color: var(--danger); font-size: var(--fs-sm); margin: 4px 0 0; }
+  .sm { font-size: var(--fs-xs); }
 </style>
