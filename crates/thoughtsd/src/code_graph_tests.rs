@@ -23,6 +23,8 @@ case "$mode" in
   huge) head -c 12000000 /dev/zero | tr '\0' 'x'; exit 0 ;;
   fail) echo "Traceback: boom in $d/src/a.ts" >&2; exit 3 ;;
   garbage) echo "not json {"; exit 0 ;;
+  longerr) head -c 60000000 /dev/zero | tr '\0' 'x' >&2 ;;
+  endless) (tr '\0' 'x' < /dev/zero >&2 &); tr '\0' 'y' < /dev/zero; exit 0 ;;
 esac
 case "$1" in
   build|update)
@@ -325,6 +327,36 @@ async fn hostile_output_is_cut_to_plain_project_paths_and_names() {
     assert!(texts[0].contains("ok_name") && texts[0].contains("src/a.ts"), "{}", texts[0]);
     assert!(texts[0].lines().any(|l| l.contains("Ignore all rules") && l.starts_with("- group \"")), "the group's name stays quoted, on its line: {}", texts[0]);
     assert!(texts[2].contains("- src/b.ts") && texts[2].lines().filter(|l| l.starts_with("- ")).count() == 1, "{}", texts[2]);
+    p.done();
+}
+
+#[tokio::test]
+async fn one_endless_line_never_grows_in_memory() {
+    // The pieces: a 50 MB line with no line break, fed in chunks, keeps at most a line's worth.
+    let mut lines = Lines::default();
+    let chunk = vec![b'x'; 8192];
+    for _ in 0..(50 << 20) / 8192 { assert!(lines.feed(&chunk).is_empty()); assert!(lines.cur.len() <= LINE_MAX); }
+    assert_eq!(lines.feed(b"\nINFO: Progress: 2/4 files parsed\n").len(), 2);
+    lines.finish();
+    assert!(lines.tail.len() <= LOG_TAIL && lines.tail().contains("Progress: 2/4"));
+
+    let p = project(true).await;
+    // 60 MB on stderr without a line break, then the usual answers: read through, kept small, and the build and the reading work.
+    p.mode("longerr");
+    start_build(&p.st, &p.p).await.unwrap();
+    let s = p.wait_built().await;
+    assert!(s.built && s.error.is_none(), "{s:?}");
+    assert!(code_map(&p.st, &p.p, 4000).await.is_some());
+    // Endless output with no line break on both stdout and stderr: stopped at the output limit, nothing given.
+    p.mode("endless");
+    let started = Instant::now();
+    assert_eq!(code_map(&p.st, &p.p, 4000).await, None);
+    assert_eq!(impact(&p.st, &p.p, &["src/a.ts".into()], 4000).await, None);
+    assert!(started.elapsed() < CALL_LIMIT * 2 + Duration::from_secs(2), "{:?}", started.elapsed());
+    start_build(&p.st, &p.p).await.unwrap();
+    let s = p.wait_built().await;
+    let e = s.error.expect("the build was stopped");
+    assert!(e["detail"].as_str().map_or(true, |d| d.chars().count() <= 1600), "{e}");
     p.done();
 }
 

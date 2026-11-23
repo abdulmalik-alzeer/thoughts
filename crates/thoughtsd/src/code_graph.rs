@@ -203,10 +203,22 @@ async fn ask_version(bin: &Path) -> Option<String> {
     let mut c = crate::proc::command(bin);
     c.arg("--version").env_clear().env("PATH", crate::claude::shell_path()).env("HOME", &home).env("CRG_HOME", home.join("crg"))
         .env("NO_COLOR", "1").env("PYTHONDONTWRITEBYTECODE", "1").current_dir(&home).stdin(std::process::Stdio::null()).kill_on_drop(true);
+    c.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null());
     crate::proc::own_group(&mut c);
-    let out = crate::proc::output_timeout(&mut c, VERSION_LIMIT).await.ok()?;
-    if !out.status.success() { return None; }
-    parse_version(&String::from_utf8_lossy(&out.stdout[..out.stdout.len().min(4096)]))
+    let mut child = c.spawn().ok()?;
+    let id = child.id();
+    let out = child.stdout.take()?;
+    // Its first 4 kB only; the rest is read and dropped, never kept.
+    let read = async {
+        let mut head: Vec<u8> = vec![];
+        drain(out, |chunk| { let room = 4096usize.saturating_sub(head.len()); head.extend_from_slice(&chunk[..chunk.len().min(room)]); }).await;
+        (head, child.wait().await)
+    };
+    match tokio::time::timeout(VERSION_LIMIT, read).await {
+        Ok((head, Ok(status))) if status.success() => parse_version(&String::from_utf8_lossy(&head)),
+        Ok(_) => None,
+        Err(_) => { if let Some(id) = id { crate::proc::end_tree(id).await; } None }
+    }
 }
 
 // ---------- cleaning what the tool prints ----------
@@ -414,6 +426,44 @@ fn tool_env(cx: &Ctx, read_only: bool) -> Vec<(String, String)> {
 #[derive(Debug, PartialEq)]
 enum Fail { NoSandbox, Timeout, TooLarge, Exit(String) }
 
+/// The longest line of the tool's other output that is looked at; the rest of a longer one is dropped unread into memory.
+const LINE_MAX: usize = 4096;
+
+/// Read `r` to its end in fixed chunks, handing each to `f` (which keeps what it wants, bounded):
+/// the child never blocks on a full pipe, and nothing here grows with what it prints.
+async fn drain<R: tokio::io::AsyncRead + Unpin>(mut r: R, mut f: impl FnMut(&[u8])) {
+    let mut buf = [0u8; 8192];
+    loop {
+        match r.read(&mut buf).await { Ok(0) | Err(_) => break, Ok(n) => f(&buf[..n]) }
+    }
+}
+
+/// Lines out of chunks: each at most `LINE_MAX` bytes (the rest of a longer one is dropped), and
+/// only the last `LOG_TAIL` bytes of them all kept.
+#[derive(Default)]
+struct Lines { cur: Vec<u8>, tail: std::collections::VecDeque<u8> }
+
+impl Lines {
+    /// The lines `chunk` ends.
+    fn feed(&mut self, chunk: &[u8]) -> Vec<String> {
+        let mut done = vec![];
+        for &b in chunk {
+            if b == b'\n' { done.push(self.end_line()); } else if self.cur.len() < LINE_MAX { self.cur.push(b); }
+        }
+        done
+    }
+    fn end_line(&mut self) -> String {
+        let text = String::from_utf8_lossy(&self.cur).to_string();
+        self.cur.clear();
+        self.tail.extend(text.bytes().chain(std::iter::once(b'\n')));
+        while self.tail.len() > LOG_TAIL { self.tail.pop_front(); }
+        text
+    }
+    /// The last line, when it had no line break.
+    fn finish(&mut self) { if !self.cur.is_empty() { self.end_line(); } }
+    fn tail(&self) -> String { String::from_utf8_lossy(&self.tail.iter().copied().collect::<Vec<u8>>()).to_string() }
+}
+
 /// `INFO: Progress: 65/120 files parsed` → 65 of 120.
 pub fn parse_progress(line: &str) -> Option<Progress> {
     let rest = line.split("Progress:").nth(1)?.trim();
@@ -443,27 +493,35 @@ async fn run(cx: &Ctx, args: &[String], limit: Duration, max_out: usize, read_on
     let read_out = async move {
         let mut buf = vec![];
         let Some(out) = out else { return Ok(buf) };
-        let _ = out.take(max_out as u64 + 1).read_to_end(&mut buf).await;
-        if buf.len() > max_out {
+        // Chunks into a budget: past it, nothing more is kept and the tool is stopped.
+        let mut over = false;
+        let mut out = out;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match out.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) if buf.len() + n > max_out => { over = true; break; }
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+        }
+        if over {
+            buf = vec![];
+            drop(out);
             if let Some(id) = id { crate::proc::end_tree(id).await; }
             return Err(Fail::TooLarge);
         }
         Ok(buf)
     };
     let read_err = async move {
-        use tokio::io::AsyncBufReadExt;
-        let mut tail = std::collections::VecDeque::<u8>::new();
         let Some(err) = err else { return String::new() };
-        let mut lines = tokio::io::BufReader::new(err).split(b'\n');
-        while let Ok(Some(line)) = lines.next_segment().await {
-            let text = String::from_utf8_lossy(&line[..line.len().min(4096)]).to_string();
-            if let (Some(pid), Some(p)) = (progress_of, parse_progress(&text)) {
+        let mut lines = Lines::default();
+        drain(err, |chunk| for line in lines.feed(chunk) {
+            if let (Some(pid), Some(p)) = (progress_of, parse_progress(&line)) {
                 with_runs(|r| if let Some(slot) = r.building.get_mut(pid) { *slot = Some(p); });
             }
-            tail.extend(text.bytes().chain(std::iter::once(b'\n')));
-            while tail.len() > LOG_TAIL { tail.pop_front(); }
-        }
-        String::from_utf8_lossy(&tail.into_iter().collect::<Vec<u8>>()).to_string()
+        }).await;
+        lines.finish();
+        lines.tail()
     };
     let all = async { let (o, e) = tokio::join!(read_out, read_err); (o, e, child.wait().await) };
     match tokio::time::timeout(limit, all).await {
