@@ -413,3 +413,12 @@ async fn real_codex() {
     }
     std::fs::remove_dir_all(&home).unwrap();
 }
+
+#[test]
+fn through_another_provider_only_its_own_list_is_offered() {
+    let o = service_part(&["qwen3:32b".into(), "--bad".into()], &["seen-1".into()], [Some("mine".into()), None]);
+    assert_eq!(o["models"], json!(["qwen3:32b", "seen-1", "mine"]));
+    assert_eq!((o["modelsSource"].as_str(), o["modelsDetected"].as_bool(), o["throughProvider"].as_bool()), (Some(SERVICE), Some(true), Some(true)));
+    let o = service_part(&[], &[], [None, None]);
+    assert_eq!((o["models"].clone(), o["modelsSource"].as_str()), (json!([]), Some(NONE)));
+}

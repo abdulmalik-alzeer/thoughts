@@ -32,7 +32,8 @@
   onMount(() => {
     if (codex.installed && part !== 'which') loadOpts();
     // The models are asked of Codex in the background; the list comes in when it has answered.
-    return on((e) => { if (e.type === 'codex.models' && part !== 'which' && codex.installed) loadOpts(); });
+    // …and when a service's own list was loaded for Codex's other provider (Settings › Assistant).
+    return on((e) => { if ((e.type === 'codex.models' || (e.type === 'provider.models' && (e as any).program === 'codex') || e.type === 'settings.changed') && part !== 'which' && codex.installed) loadOpts(); });
   });
 
   /** "Refresh models": ask the installed Codex again now. */
@@ -149,11 +150,16 @@
     <input id="st-cx-model" dir="ltr" list="st-cx-models" bind:value={ai.codex.model} placeholder={t('codex.set.auto')} autocomplete="off" />
     <datalist id="st-cx-models">{#each opts.models as m (m)}<option value={m}></option>{/each}</datalist>
     <p class="muted sm">{t('codex.set.modelHint')}</p>
-    <div class="row wrap models-src" aria-live="polite">
-      <span class="muted sm">{modelsLooking ? t('codex.models.refreshing') : opts.modelsSource ? t('codex.models.source.' + opts.modelsSource) : ''}</span>
-      <button type="button" class="btn ghost tiny" disabled={modelsLooking} aria-busy={modelsLooking} onclick={refreshModels}><Icon name="sync" size={12} /> {t('codex.models.refresh')}</button>
-    </div>
-    {#if modelsNote}<p class="sm note-old" role="status"><Icon name="info" size={13} /> <span>{modelsNote}</span></p>{/if}
+    {#if opts.throughProvider}
+      <!-- Another provider: its own list ("Load models from the service"), never OpenAI's catalogue. -->
+      <p class="muted sm" role="status">{t('prov5.codex.modelsNote')}</p>
+    {:else}
+      <div class="row wrap models-src" aria-live="polite">
+        <span class="muted sm">{modelsLooking ? t('codex.models.refreshing') : opts.modelsSource ? t('codex.models.source.' + opts.modelsSource) : ''}</span>
+        <button type="button" class="btn ghost tiny" disabled={modelsLooking} aria-busy={modelsLooking} onclick={refreshModels}><Icon name="sync" size={12} /> {t('codex.models.refresh')}</button>
+      </div>
+      {#if modelsNote}<p class="sm note-old" role="status"><Icon name="info" size={13} /> <span>{modelsNote}</span></p>{/if}
+    {/if}
   {/if}
   {#if vis('codex.set.effort') && opts.efforts.length}
     <label for="st-cx-effort">{t('codex.set.effort')}</label>

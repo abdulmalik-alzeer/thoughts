@@ -130,10 +130,16 @@ export type ClaudeSettings = {
   miniWrapModel: string | null;
   baseUrl: string | null;
   hasApiToken: boolean;
+  /** A service on this computer saved as taking no key (round 0.5.0). Server-owned. */
+  keyless?: boolean;
   suggestNext: boolean;
 };
 
-export type CodexSettings = { binary: string | null; model: string | null; effort: string | null; miniWrapModel: string | null };
+export type CodexSettings = {
+  binary: string | null; model: string | null; effort: string | null; miniWrapModel: string | null;
+  /** Another OpenAI-compatible provider (round 0.5.0), with its key in the password store. Server-owned. */
+  baseUrl?: string | null; hasApiToken?: boolean; keyless?: boolean;
+};
 
 export type AiSettings = { primary: string; secondary: string | null; claude: ClaudeSettings; codex: CodexSettings };
 

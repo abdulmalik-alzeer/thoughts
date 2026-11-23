@@ -315,6 +315,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::mado_build::routes())
         .merge(crate::mado_design::routes())
         .merge(crate::code_graph::routes())
+        .merge(crate::providers::routes())
         .layer(middleware::from_fn_with_state(state.clone(), plugin_gate))
         .layer(middleware::from_fn_with_state(state.clone(), crate::libraries::gate))
         .layer(middleware::from_fn(note_errors))
@@ -1668,10 +1669,10 @@ async fn save_ai_token(State(st): S, Json(t): Json<Token>) -> R {
 
 #[derive(Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
-struct ProviderBody { base_url: Option<String>, token: Option<String> }
+struct ProviderBody { base_url: Option<String>, token: Option<String>, no_key: bool }
 /// Set who answers the assistant: a service address and its key, saved together (see `claude::set_provider`).
 async fn save_provider(State(st): S, Json(b): Json<ProviderBody>) -> R {
-    let saved = claude::set_provider(&st, &claude::Keychain, b.base_url.as_deref(), b.token.as_deref()).await?;
+    let saved = claude::set_provider_with(&st, &claude::Keychain, b.base_url.as_deref(), b.token.as_deref(), b.no_key).await?;
     st.emit(json!({"type": "settings.changed"}));
     Ok(Json(json!({"ok": true, "provider": saved.provider.name(), "keyRemoved": saved.key_removed})))
 }
@@ -1690,8 +1691,8 @@ async fn provider_presets() -> R { Ok(Json(claude::presets_json())) }
 /// inside the first chat. With a body (`baseUrl`, `token`, as for saving) it tries what was typed
 /// and not saved yet; without, the saved set-up. `{ok}` or `{ok:false, refused, message}`.
 async fn test_provider(State(st): S, body: Option<Json<ProviderBody>>) -> R {
-    let typed = body.filter(|b| b.base_url.is_some() || b.token.is_some());
-    Ok(Json(claude::test_connection(&st, typed.as_ref().map(|b| (b.base_url.as_deref(), b.token.as_deref()))).await))
+    let typed = body.filter(|b| b.base_url.is_some() || b.token.is_some() || b.no_key);
+    Ok(Json(claude::test_connection_with(&st, typed.as_ref().map(|b| (b.base_url.as_deref(), b.token.as_deref(), b.no_key))).await))
 }
 
 /// Opens Claude Code's browser login flow. One attempt at a time: asking again ends the attempt

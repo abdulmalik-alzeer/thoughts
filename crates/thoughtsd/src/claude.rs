@@ -270,12 +270,29 @@ pub fn destination(base_url: Option<&str>) -> Option<&str> {
     base_url.map(str::trim).filter(|u| !u.is_empty() && !crate::settings::is_anthropic_url(u))
 }
 
+/// Who answers, as saved. An address passes the same check it was saved with (`check_base_url_for`:
+/// with full access off, an address on the home network saved under full access is `Incomplete`).
+/// A service saved as taking no key (`keyless`, only for this computer) is a `Service` too: its runs
+/// get the stand-in key (`run_key`), never the Claude sign-in.
 pub fn provider_of(c: &crate::settings::ClaudeSettings) -> Provider {
+    let full = crate::full_access::on();
     match (destination(c.base_url.as_deref()), c.has_api_token) {
         (None, false) => Provider::Account,
         (None, true) => Provider::AnthropicKey,
-        (Some(u), true) if crate::settings::check_base_url(u).is_ok() => Provider::Service(u.to_string()),
+        (Some(u), true) if crate::settings::check_base_url_for(u, full).is_ok() => Provider::Service(u.to_string()),
+        (Some(u), false) if c.keyless && crate::settings::keyless_allowed(u, full) => Provider::Service(u.to_string()),
         (Some(_), _) => Provider::Incomplete,
+    }
+}
+
+/// The key a run of `c` sends: the saved one (read from the password store by `saved`), or for a
+/// service that takes none, the stand-in `providers::NO_KEY`. Never empty for a `Service`, so
+/// Claude Code never falls back to the Claude sign-in for another address.
+pub fn run_key(c: &crate::settings::ClaudeSettings, saved: impl FnOnce() -> Option<String>) -> Option<String> {
+    match provider_of(c) {
+        Provider::Service(_) if !c.has_api_token => Some(crate::providers::NO_KEY.to_string()),
+        p if p.uses_key() => saved(),
+        _ => None,
     }
 }
 
@@ -308,7 +325,8 @@ pub fn provider_env_for(provider: &Provider, key: Option<String>) -> anyhow::Res
         }
         Provider::Service(url) => {
             let key = key.ok_or_else(|| crate::tr::err("provider.key_unreadable", &[]))?;
-            Ok(ProviderEnv { set: vec![("ANTHROPIC_BASE_URL", url.clone()), ("ANTHROPIC_AUTH_TOKEN", key)], unset: vec!["ANTHROPIC_API_KEY"] })
+            // An inherited sign-in token of the Claude account is dropped too: only this key goes there.
+            Ok(ProviderEnv { set: vec![("ANTHROPIC_BASE_URL", url.clone()), ("ANTHROPIC_AUTH_TOKEN", key)], unset: vec!["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] })
         }
     }
 }
@@ -336,8 +354,9 @@ fn saved_key() -> Option<String> {
 
 /// The provider environment for a run that is about to start, or the reason it may not start.
 async fn provider_env(state: &AppState) -> anyhow::Result<ProviderEnv> {
-    let provider = provider_of(&state.settings.read().await.ai.claude);
-    let key = if provider.uses_key() { saved_key() } else { None };
+    let c = state.settings.read().await.ai.claude.clone();
+    let provider = provider_of(&c);
+    let key = run_key(&c, saved_key);
     provider_env_for(&provider, key).map_err(|e| { crate::log::warn(format!("assistant not started: {e}")); e })
 }
 
@@ -367,16 +386,43 @@ pub const PRESETS: &[Preset] = &[
         hint_ar: "مفتاح واحد لنماذج كثيرة من شركات مختلفة. اختر نموذجاً تقدّمه الخدمة من «الإعدادات › المساعد › النموذج».",
         keys_url: "https://openrouter.ai/keys" },
     Preset { id: "gateway", name: "A service on this computer", name_ar: "خدمة على هذا الجهاز", base_url: "http://localhost:4000", key_header: "bearer",
-        hint: "For a gateway such as LiteLLM running on your own computer. Change the address if yours uses another one.",
-        hint_ar: "لبوابة مثل LiteLLM تعمل على جهازك. غيّر العنوان إن كان عنوان بوابتك مختلفاً.",
+        hint: "For a gateway such as LiteLLM running on your own computer. Change the address if yours uses another one. LiteLLM is a separate program you install and keep updated yourself; the app does not install it.",
+        hint_ar: "لبوابة مثل LiteLLM تعمل على جهازك. غيّر العنوان إن كان عنوان بوابتك مختلفاً. LiteLLM برنامج مستقل تثبّته وتحدّثه بنفسك، ولا يثبّته التطبيق.",
         keys_url: "" },
+    // The presets below were each checked in the provider's own documentation (round 0.5.0 report,
+    // `v050-providers`): the address Claude Code is pointed at, and that it takes the key as a bearer token.
+    // docs.ollama.com/api/anthropic-compatibility: ANTHROPIC_BASE_URL=http://localhost:11434, the token is "required but ignored".
+    Preset { id: "ollama", name: "Ollama on this computer", name_ar: "Ollama على هذا الجهاز", base_url: "http://localhost:11434", key_header: "none",
+        hint: "Models you run yourself with Ollama. No key needed. Load its models below, under Model.",
+        hint_ar: "نماذج تشغّلها بنفسك عبر Ollama. لا حاجة إلى مفتاح. حمّل نماذجه من الأسفل، تحت «النموذج».",
+        keys_url: "" },
+    // api-docs.deepseek.com/guides/anthropic_api: https://api.deepseek.com/anthropic, x-api-key or Bearer.
+    Preset { id: "deepseek", name: "DeepSeek", name_ar: "DeepSeek", base_url: "https://api.deepseek.com/anthropic", key_header: "bearer",
+        hint: "DeepSeek's own models, with a key from DeepSeek. You pay DeepSeek for what you use.",
+        hint_ar: "نماذج DeepSeek نفسها، بمفتاح من DeepSeek. تدفع لشركة DeepSeek مقابل ما تستخدمه.",
+        keys_url: "https://platform.deepseek.com/api_keys" },
+    // platform.kimi.ai/docs/guide/claude-code-kimi.md: https://api.moonshot.ai/anthropic, ANTHROPIC_AUTH_TOKEN.
+    Preset { id: "moonshot", name: "Kimi (Moonshot AI)", name_ar: "Kimi (Moonshot AI)", base_url: "https://api.moonshot.ai/anthropic", key_header: "bearer",
+        hint: "Moonshot AI's Kimi models, with a key from its platform. You pay Moonshot AI for what you use.",
+        hint_ar: "نماذج Kimi من Moonshot AI، بمفتاح من منصتها. تدفع لها مقابل ما تستخدمه.",
+        keys_url: "https://platform.kimi.ai/console/api-keys" },
+    // docs.z.ai/devpack/tool/claude: https://api.z.ai/api/anthropic, ANTHROPIC_AUTH_TOKEN.
+    Preset { id: "zai", name: "Z.ai (GLM)", name_ar: "Z.ai (GLM)", base_url: "https://api.z.ai/api/anthropic", key_header: "bearer",
+        hint: "Z.ai's GLM models, with a key from Z.ai. You pay Z.ai for what you use.",
+        hint_ar: "نماذج GLM من Z.ai، بمفتاح منها. تدفع لها مقابل ما تستخدمه.",
+        keys_url: "https://z.ai/manage-apikey/apikey-list" },
+    // platform.minimax.io/docs/token-plan/claude-code: https://api.minimax.io/anthropic, ANTHROPIC_AUTH_TOKEN.
+    Preset { id: "minimax", name: "MiniMax", name_ar: "MiniMax", base_url: "https://api.minimax.io/anthropic", key_header: "bearer",
+        hint: "MiniMax's models, with a key from MiniMax. You pay MiniMax for what you use.",
+        hint_ar: "نماذج MiniMax، بمفتاح منها. تدفع لها مقابل ما تستخدمه.",
+        keys_url: "https://platform.minimax.io/user-center/basic-information/interface-key" },
 ];
 
 /// What `GET /api/ai/claude/presets` returns.
 pub fn presets_json() -> Value {
     json!(PRESETS.iter().map(|p| json!({
         "id": p.id, "name": p.name, "nameAr": p.name_ar, "baseUrl": p.base_url, "keyHeader": p.key_header,
-        "hint": p.hint, "hintAr": p.hint_ar, "keysUrl": p.keys_url,
+        "hint": p.hint, "hintAr": p.hint_ar, "keysUrl": p.keys_url, "noKey": p.key_header == "none",
     })).collect::<Vec<_>>())
 }
 
@@ -408,6 +454,12 @@ pub fn explain_test_failure(text: &str) -> (bool, String) {
 /// before it is saved; otherwise the saved set-up. Returns `{ok}` or `{ok:false, refused, message}`,
 /// the message in plain words.
 pub async fn test_connection(state: &AppState, typed: Option<(Option<&str>, Option<&str>)>) -> Value {
+    test_result(try_connection(state, typed.map(|(u, k)| (u, k, false))).await)
+}
+
+/// `test_connection`, where the typed set-up may say "no key needed" (`no_key`: a service on this
+/// computer, tried with the stand-in key).
+pub async fn test_connection_with(state: &AppState, typed: Option<(Option<&str>, Option<&str>, bool)>) -> Value {
     test_result(try_connection(state, typed).await)
 }
 
@@ -428,20 +480,25 @@ pub fn test_result(r: anyhow::Result<()>) -> Value {
     }
 }
 
-async fn try_connection(state: &AppState, typed: Option<(Option<&str>, Option<&str>)>) -> anyhow::Result<()> {
+async fn try_connection(state: &AppState, typed: Option<(Option<&str>, Option<&str>, bool)>) -> anyhow::Result<()> {
     let (saved, mini, main) = {
         let s = state.settings.read().await;
         (s.ai.claude.clone(), s.ai.claude.mini_wrap_model.clone(), s.ai.claude.model.clone())
     };
     let (provider, key) = match typed {
-        None => { let p = provider_of(&saved); let k = if p.uses_key() { saved_key() } else { None }; (p, k) }
-        Some((url, token)) => {
+        None => { let p = provider_of(&saved); let k = run_key(&saved, saved_key); (p, k) }
+        Some((url, token, no_key)) => {
+            let full = crate::full_access::on();
             let url = url.map(str::trim).filter(|u| !u.is_empty());
-            if let Some(u) = url { crate::settings::check_base_url(u)?; }
+            if let Some(u) = url { crate::settings::check_base_url_for(u, full)?; }
             let token = token.map(str::trim).filter(|k| !k.is_empty()).map(String::from);
             // No key typed: the saved one, which belongs to the saved address and no other.
-            let keep = token.is_none() && saved.has_api_token && destination(saved.base_url.as_deref()) == destination(url);
-            let key = if keep { saved_key() } else { token };
+            let same = destination(saved.base_url.as_deref()) == destination(url);
+            let keep = token.is_none() && saved.has_api_token && same;
+            // "No key needed" (typed, or saved for this very address): the stand-in, never a real key.
+            let keyless = token.is_none() && !keep && destination(url).is_some() && (no_key || (saved.keyless && same));
+            if keyless && !url.map_or(false, |u| crate::settings::keyless_allowed(u, full)) { return Err(crate::tr::err("provider.key_remote", &[])); }
+            let key = if keep { saved_key() } else if keyless { Some(crate::providers::NO_KEY.to_string()) } else { token };
             let p = match (destination(url), key.is_some()) {
                 (None, false) => Provider::Account,
                 (None, true) => Provider::AnthropicKey,
@@ -478,21 +535,33 @@ pub struct ProviderSaved {
 /// - Changing to another service without giving its key is refused, and nothing changes.
 /// - Going back to Anthropic without a key removes a key that belonged to another service.
 pub async fn set_provider(state: &AppState, store: &dyn KeyStore, base_url: Option<&str>, key: Option<&str>) -> anyhow::Result<ProviderSaved> {
+    set_provider_with(state, store, base_url, key, false).await
+}
+
+/// `set_provider`, where `no_key` says the service takes no key ("No key needed"): only for an
+/// address on this computer (`settings::keyless_allowed`), and runs then send the stand-in key
+/// (`providers::NO_KEY`). A key saved before goes, like any key whose address it no longer is.
+/// Without `no_key`, a service already saved as keyless keeps that while its address stays.
+pub async fn set_provider_with(state: &AppState, store: &dyn KeyStore, base_url: Option<&str>, key: Option<&str>, no_key: bool) -> anyhow::Result<ProviderSaved> {
     if crate::settings::read_only() { return Err(crate::tr::err("newer_settings", &[])); }
+    let full = crate::full_access::on();
     let url = base_url.map(str::trim).filter(|u| !u.is_empty());
-    if let Some(u) = url { crate::settings::check_base_url(u)?; }
+    if let Some(u) = url { crate::settings::check_base_url_for(u, full)?; }
     let key = key.map(str::trim).filter(|k| !k.is_empty());
     let mut s = state.settings.write().await;
     let cur = s.ai.claude.clone();
     let moved = destination(cur.base_url.as_deref()) != destination(url);
-    let keeps_key = cur.has_api_token && !moved;
-    if destination(url).is_some() && key.is_none() && !keeps_key { return Err(crate::tr::err("provider.key_needed", &[])); }
-    let drops_old_key = key.is_none() && cur.has_api_token && moved;
+    let keyless = destination(url).is_some() && key.is_none() && (no_key || (cur.keyless && !moved));
+    if keyless && !url.map_or(false, |u| crate::settings::keyless_allowed(u, full)) { return Err(crate::tr::err("provider.key_remote", &[])); }
+    let keeps_key = cur.has_api_token && !moved && !keyless;
+    if destination(url).is_some() && key.is_none() && !keeps_key && !keyless { return Err(crate::tr::err("provider.key_needed", &[])); }
+    let drops_old_key = key.is_none() && cur.has_api_token && (moved || keyless);
     // The change is made on a copy, saved, and only then swapped in, so a refused save leaves
     // memory and disk agreeing.
     let mut next = s.clone();
     next.ai.claude.base_url = url.map(String::from);
     next.ai.claude.has_api_token = key.is_some() || keeps_key;
+    next.ai.claude.keyless = keyless;
     // A new key goes into the password store before the settings say it is there…
     if let Some(k) = key { store.set(k)?; }
     if let Err(e) = next.save() {
@@ -519,6 +588,7 @@ pub async fn clear_provider(state: &AppState, store: &dyn KeyStore) -> anyhow::R
     let mut next = s.clone();
     next.ai.claude.base_url = None;
     next.ai.claude.has_api_token = false;
+    next.ai.claude.keyless = false;
     // "No key, no address" is saved first: if that is refused, the key is still there and still described.
     next.save()?;
     *s = next;
@@ -669,7 +739,10 @@ pub async fn options(state: &AppState) -> Value {
         (s.ai.claude.model.clone(), s.ai.claude.mini_wrap_model.clone(), destination(s.ai.claude.base_url.as_deref()).unwrap_or("").to_string())
     };
     json!({
-        "models": model_choices(quoted(&flag_block(&help, "--model")), &models_seen(&dest), [own, mini]),
+        // A service's own list ("Load models"), when it was asked for, comes before the program's
+        // aliases (which name Anthropic's models).
+        "models": model_choices([crate::providers::loaded_models("claude", &dest), quoted(&flag_block(&help, "--model"))].concat(), &models_seen(&dest), [own, mini]),
+        "modelsLoaded": !dest.is_empty() && !crate::providers::loaded_models("claude", &dest).is_empty(),
         "efforts": paren_list(&flag_block(&help, "--effort")),
         // Only the modes the daemon accepts, in a stable order. The last one (bypassPermissions) is
         // only switched on after the user confirmed it.
@@ -3011,7 +3084,7 @@ pub(crate) mod tests {
         // Another service: its address and a bearer token; an Anthropic key from the environment stays home.
         let e = env(Some("https://gateway.example.com/v1"), true).unwrap();
         assert_eq!(e.set, [pair("ANTHROPIC_BASE_URL", "https://gateway.example.com/v1"), pair("ANTHROPIC_AUTH_TOKEN", "sk-test")]);
-        assert_eq!(e.unset, ["ANTHROPIC_API_KEY"]);
+        assert_eq!(e.unset, ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"]);
         // An address without a key (the user's Claude sign-in would go to it), or one that is not a valid address: no run.
         for (url, has) in [("https://gateway.example.com", false), ("http://localhost:4000", false), ("http://plain.example.com", true), ("gateway.example.com", true)] {
             let p = provider_of(&claude_settings(Some(url), has));
@@ -3059,6 +3132,67 @@ pub(crate) mod tests {
         fn get(&self) -> Option<String> { self.0.lock().unwrap().clone() }
         fn set(&self, key: &str) -> anyhow::Result<()> { *self.0.lock().unwrap() = Some(key.into()); Ok(()) }
         fn delete(&self) -> anyhow::Result<()> { *self.0.lock().unwrap() = None; Ok(()) }
+    }
+
+    #[test]
+    fn a_keyless_service_gets_the_stand_in_key_never_the_claude_sign_in() {
+        let keyless = |url: &str| crate::settings::ClaudeSettings { base_url: Some(url.into()), keyless: true, ..Default::default() };
+        // On this computer: a service, whose runs carry the stand-in as their bearer token.
+        let c = keyless("http://localhost:11434");
+        assert_eq!(provider_of(&c), Provider::Service("http://localhost:11434".into()));
+        let key = run_key(&c, || panic!("no saved key is read for a service that takes none"));
+        assert_eq!(key.as_deref(), Some(crate::providers::NO_KEY));
+        let e = provider_env_for(&provider_of(&c), key).unwrap();
+        assert_eq!(e.set, [("ANTHROPIC_BASE_URL", "http://localhost:11434".to_string()), ("ANTHROPIC_AUTH_TOKEN", crate::providers::NO_KEY.to_string())]);
+        assert!(e.unset.contains(&"ANTHROPIC_API_KEY") && e.unset.contains(&"CLAUDE_CODE_OAUTH_TOKEN"));
+        // Anywhere else "keyless" (a settings file edited by hand) runs nothing.
+        for url in ["https://gateway.example.com", "http://192.168.1.5:11434"] {
+            assert_eq!(provider_of(&keyless(url)), Provider::Incomplete, "{url}");
+            assert_eq!(run_key(&keyless(url), || Some("k".into())), None, "{url}");
+        }
+        // A saved key wins over the flag; the Claude account and an Anthropic key are untouched.
+        let both = crate::settings::ClaudeSettings { has_api_token: true, ..keyless("http://localhost:4000") };
+        assert_eq!(run_key(&both, || Some("real".into())).as_deref(), Some("real"));
+        assert_eq!(run_key(&claude_settings(None, false), || Some("k".into())), None);
+        assert_eq!(run_key(&claude_settings(None, true), || Some("k".into())).as_deref(), Some("k"));
+    }
+
+    #[test]
+    fn an_address_on_the_home_network_only_runs_while_full_access_is_on() {
+        let c = claude_settings(Some("http://192.168.1.5:11434"), true);
+        assert_eq!(provider_of(&c), Provider::Incomplete);
+        crate::full_access::set_on(true);
+        assert_eq!(provider_of(&c), Provider::Service("http://192.168.1.5:11434".into()));
+        let lan_keyless = crate::settings::ClaudeSettings { has_api_token: false, keyless: true, ..c.clone() };
+        assert_eq!(run_key(&lan_keyless, || None).as_deref(), Some(crate::providers::NO_KEY));
+        crate::full_access::set_on(false);
+        assert_eq!(provider_of(&c), Provider::Incomplete);
+        assert_eq!(provider_of(&lan_keyless), Provider::Incomplete);
+    }
+
+    #[tokio::test]
+    async fn no_key_needed_is_only_for_a_service_on_this_computer_and_drops_a_key() {
+        let st = AppState::for_test();
+        let keys = MemKeys::default();
+        let now = |st: &AppState| { let c = st.settings.try_read().unwrap().ai.claude.clone(); (c.base_url, c.has_api_token, c.keyless) };
+        let code = |r: anyhow::Result<ProviderSaved>| crate::tr::classify_in(false, &r.unwrap_err()).message;
+        assert!(code(set_provider_with(&st, &keys, Some("https://gateway.example.com"), None, true).await).contains("this computer"));
+        set_provider(&st, &keys, Some("http://localhost:4000"), Some("gw")).await.unwrap();
+        let r = set_provider_with(&st, &keys, Some("http://localhost:4000"), None, true).await.unwrap();
+        assert_eq!(r, ProviderSaved { provider: Provider::Service("http://localhost:4000".into()), key_removed: true });
+        assert_eq!((now(&st), keys.get()), ((Some("http://localhost:4000".into()), false, true), None));
+        // Saving the same address again (an older window, no flag) keeps it keyless; moving needs a key.
+        set_provider(&st, &keys, Some("http://localhost:4000"), None).await.unwrap();
+        assert!(now(&st).2);
+        assert!(code(set_provider(&st, &keys, Some("https://gateway.example.com"), None).await).contains("Enter the key"));
+        // The settings save cannot set the flag.
+        let old = st.settings.read().await.clone();
+        let mut sent = old.clone();
+        sent.ai.claude.keyless = false;
+        sent.sanitize_update(&old).unwrap();
+        assert!(sent.ai.claude.keyless);
+        clear_provider(&st, &keys).await.unwrap();
+        assert_eq!(now(&st), (None, false, false));
     }
 
     #[tokio::test]
@@ -3503,7 +3637,10 @@ pub(crate) mod tests {
         assert_eq!(PRESETS[0].id, "anthropic");
         for p in PRESETS {
             assert!(p.base_url.is_empty() || crate::settings::check_base_url(p.base_url).is_ok(), "{}", p.id);
-            assert_eq!(p.key_header, if p.base_url.is_empty() { "x-api-key" } else { "bearer" }, "{}", p.id);
+            // "none": a service on this computer that takes no key (it gets the stand-in, as a bearer token).
+            let local_no_key = p.key_header == "none" && crate::settings::keyless_allowed(p.base_url, false);
+            assert!(p.key_header == if p.base_url.is_empty() { "x-api-key" } else { "bearer" } || local_no_key, "{}", p.id);
+            assert!(!p.base_url.starts_with("http://") || p.base_url.starts_with("http://localhost"), "{}", p.id);
             assert!(!p.hint_ar.is_empty() && !p.name_ar.is_empty());
         }
         // The key header a preset names is the one the run is started with.

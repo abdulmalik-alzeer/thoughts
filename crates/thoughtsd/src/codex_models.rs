@@ -465,6 +465,21 @@ pub fn options_part(d: Option<&Detected>, config: &[String], seen: &[String], pi
     })
 }
 
+/// Where the list came from when Codex answers through another provider (`modelsSource`).
+pub const SERVICE: &str = "service";
+
+/// `options_part` for a run through another provider: none of the catalogue rungs (they list
+/// OpenAI's models), only the service's own list (`providers::loaded_models`), then the models runs
+/// answered with and the user's picks.
+pub fn service_part(loaded: &[String], seen: &[String], picks: [Option<String>; 2]) -> Value {
+    let names = crate::claude::model_choices(loaded.to_vec(), seen, picks);
+    let source = if !loaded.is_empty() { SERVICE } else if !seen.is_empty() { SEEN } else { NONE };
+    json!({
+        "models": names, "modelInfo": [], "modelsSource": source, "modelsDetected": !loaded.is_empty(), "modelsTooOld": false,
+        "modelsCheckedAt": null, "modelsTried": [], "modelsRefreshing": false, "codexVersion": "", "throughProvider": true,
+    })
+}
+
 #[cfg(test)]
 #[path = "codex_models_tests.rs"]
 mod tests;

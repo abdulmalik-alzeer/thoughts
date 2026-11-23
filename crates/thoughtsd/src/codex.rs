@@ -264,8 +264,11 @@ pub async fn status(state: &AppState) -> Value {
     let version = version(state).await;
     let said = login_status(&bin).await;
     let failed = state.codex.auth_failed.load(Ordering::Relaxed);
-    json!({"installed": true, "path": bin, "version": version, "known": said.is_some(),
-        "loggedIn": said.map_or(false, |s| s.0) && !failed, "method": said.and_then(|s| s.1), "authFailed": failed})
+    // Through another provider, the ChatGPT sign-in is beside the point: the key (or none) is what counts.
+    let provider = crate::providers::codex_provider_of(&state.settings.read().await.ai.codex);
+    let service = matches!(provider, crate::providers::CodexProvider::Service(_));
+    json!({"installed": true, "path": bin, "version": version, "known": said.is_some() || service,
+        "loggedIn": (said.map_or(false, |s| s.0) || service) && !failed, "method": said.and_then(|s| s.1), "authFailed": failed, "provider": provider.name()})
 }
 
 /// How long a "signed in" answer is trusted before a chat asks again.
@@ -274,6 +277,11 @@ const AUTH_TTL: Duration = Duration::from_secs(30);
 /// Before a message is sent: Codex is there and signed in. A "yes" is remembered for `AUTH_TTL`;
 /// "cannot tell" lets the run go (its answer will say).
 pub async fn require_signed_in(state: &AppState) -> anyhow::Result<()> {
+    match crate::providers::codex_provider_of(&state.settings.read().await.ai.codex) {
+        crate::providers::CodexProvider::Incomplete => return Err(crate::tr::err("codex.provider_incomplete", &[])),
+        crate::providers::CodexProvider::Service(_) => return Ok(()),
+        crate::providers::CodexProvider::Own => {}
+    }
     if state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).is_some() { return Ok(()); }
     let fresh = state.codex.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()).map_or(false, |at| at.elapsed() < AUTH_TTL);
     if fresh { return Ok(()); }
@@ -395,10 +403,16 @@ async fn options_with(state: &AppState, bin: &Path, detected: Option<crate::code
     let help = exec_help(state).await;
     let offered = sandboxes(&help);
     let modes: Vec<&str> = crate::settings::PERMISSION_MODES.iter().copied().filter(|m| offered.iter().any(|s| s == sandbox_for(m))).collect();
-    let (own, mini) = { let s = state.settings.read().await; (s.ai.codex.model.clone(), s.ai.codex.mini_wrap_model.clone()) };
-    let config = std::fs::read_to_string(codex_home().join("config.toml")).map(|t| crate::codex_models::config_models(&t)).unwrap_or_default();
-    let refreshing = crate::codex_models::refreshing();
-    let mut models = crate::codex_models::options_part(detected.as_ref().filter(|d| d.key.bin == bin), &config, &seen().models, [own, mini], refreshing);
+    let (own, mini, provider) = { let s = state.settings.read().await; (s.ai.codex.model.clone(), s.ai.codex.mini_wrap_model.clone(), crate::providers::codex_provider_of(&s.ai.codex)) };
+    let mut models = if let crate::providers::CodexProvider::Service(dest) = &provider {
+        // Another provider: OpenAI's catalogue and the models of the user's own set-up are not its
+        // models. Only its own list ("Load models"), what its runs answered with, and the user's picks.
+        crate::codex_models::service_part(&crate::providers::loaded_models("codex", dest), &seen().models, [own, mini])
+    } else {
+        let config = std::fs::read_to_string(codex_home().join("config.toml")).map(|t| crate::codex_models::config_models(&t)).unwrap_or_default();
+        let refreshing = crate::codex_models::refreshing();
+        crate::codex_models::options_part(detected.as_ref().filter(|d| d.key.bin == bin), &config, &seen().models, [own, mini], refreshing)
+    };
     if models["codexVersion"].as_str().map_or(true, str::is_empty) { models["codexVersion"] = json!(version(state).await); }
     let mut out = json!({
         "efforts": efforts(state).await,
@@ -477,6 +491,8 @@ pub struct Plan<'a> {
     /// Folders besides the one it works in that the run may change (`workspace-write` only).
     pub writable: &'a [PathBuf],
     pub resume: Option<&'a Resume>,
+    /// Another provider's settings (`providers::codex_args`), when one is set up; `None` = Codex's own.
+    pub provider: Option<&'a [String]>,
 }
 
 /// A JSON string, as `-c key=value` reads values.
@@ -496,6 +512,7 @@ pub fn exec_args(p: &Plan) -> Vec<OsString> {
     let mut kv: Vec<String> = vec![];
     if let Some(m) = p.model.filter(|m| !m.is_empty()) { kv.push(format!("model={}", quoted(m))); }
     if let Some(e) = p.effort.filter(|e| !e.is_empty()) { kv.push(format!("model_reasoning_effort={}", quoted(e))); }
+    if let Some(pr) = p.provider { kv.extend(pr.iter().cloned()); }
     if p.web { kv.push("tools.web_search=true".into()); }
     // The app's prompts (they name private folders) stay out of Codex's own message history.
     kv.push(format!("history.persistence={}", quoted("none")));
@@ -1190,6 +1207,10 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     // Strict private folders close commands where the user cannot be asked; Codex cannot close its
     // commands at all, so such a chat does not run on Codex.
     if l.profile.strict { return Err(crate::tr::err("codex.strict", &[])); }
+    // Another provider (Settings › Assistant): its address on the command line, its key only in the
+    // environment. An address that may not run stops here.
+    let service = crate::providers::codex_service(&state).await?;
+    let provider_args = service.as_ref().map(crate::providers::codex_args_now);
     let sw = switches(&l.kind, &l.mode, &l.profile);
     // Full access: the program's own unrestricted mode for every kind of run (Plan still reads only).
     let sandbox = if l.full_access { sandbox_for(&l.mode) } else { sw.sandbox };
@@ -1261,7 +1282,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         }
     }
     let args = exec_args(&Plan { help: &help, sandbox, model: l.spec.options.model.as_deref(), effort: effort.as_deref(), web: sw.web,
-        own_setup: sw.own_setup, mcp: sw.mcp, network: sw.network, images: &images, writable: &writable, resume: resume.as_ref() });
+        own_setup: sw.own_setup, mcp: sw.mcp, network: sw.network, images: &images, writable: &writable, resume: resume.as_ref(), provider: provider_args.as_deref() });
     let args = match &unrestricted { Some(flag) => without_sandbox(args, flag), None => args };
     let mut c = if outer {
         let folders = outer_folders(&crate::paths::home(), dirs::home_dir().as_deref(), &l.spec.cwd, &writable, files.0.as_deref());
@@ -1269,6 +1290,7 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         c.arg("-p").arg(outer_profile(&folders)).arg(&bin);
         c
     } else { cmd(&bin) };
+    crate::providers::apply_codex_env(&mut c, service.as_ref());
     c.current_dir(&l.spec.cwd).args(&args)
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = c.spawn().map_err(|e| { crate::log::error(format!("run {id}: could not start Codex: {e}")); e })?;
@@ -1409,8 +1431,16 @@ async fn session_gone(state: Arc<AppState>, l: Launch, sid: &str) -> anyhow::Res
 /// nothing changed, none of the user's Codex set-up. `cheap`: a summary the app makes by itself,
 /// run at the lowest effort this Codex lists.
 pub async fn complete(state: &AppState, prompt: &str, model: Option<String>, cheap: bool) -> anyhow::Result<String> {
+    complete_through(state, prompt, model, cheap, None).await
+}
+
+/// `complete`, through `over` (a provider typed and not saved yet: the connection test) instead of
+/// the saved one.
+pub async fn complete_through(state: &AppState, prompt: &str, model: Option<String>, cheap: bool, over: Option<crate::providers::CodexService>) -> anyhow::Result<String> {
     let hook = state.complete_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
     if let Some(hook) = hook { return hook(prompt.to_string(), model).await; }
+    let service = match over { Some(s) => Some(s), None => crate::providers::codex_service(state).await? };
+    let provider_args = service.as_ref().map(crate::providers::codex_args_now);
     crate::settings::check_cli_value("model", model.as_deref())?;
     let bin = binary(state).await.ok_or_else(|| crate::tr::err("codex.missing", &[]))?;
     let help = exec_help(state).await;
@@ -1421,10 +1451,11 @@ pub async fn complete(state: &AppState, prompt: &str, model: Option<String>, che
     let dir = files.dir()?;
     let mark = uuid::Uuid::new_v4().simple().to_string();
     let args = exec_args(&Plan { help: &help, sandbox: "read-only", model: model.as_deref(), effort: effort.as_deref(), web: false, own_setup: false, mcp: false, network: false,
-        images: &[], writable: &[], resume: None });
+        images: &[], writable: &[], resume: None, provider: provider_args.as_deref() });
     let note = format!("<thoughts_app_instructions>\nAnswer with text only, from what is written below. Do not run commands, read files or use any \
         tool.\n\n{}\n\n(Thoughts run {mark})\n</thoughts_app_instructions>\n\n", crate::claude::language_note(&lang));
     let mut c = cmd(&bin);
+    crate::providers::apply_codex_env(&mut c, service.as_ref());
     c.current_dir(&dir).args(&args).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let since = SystemTime::now();
     let mut child = c.spawn()?;

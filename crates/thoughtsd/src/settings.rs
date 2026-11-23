@@ -386,11 +386,33 @@ pub fn check_cli_value(what: &str, v: Option<&str>) -> anyhow::Result<()> {
 }
 
 /// `https://…` anywhere, or plain `http://` only for this machine (localhost / 127.0.0.1).
-pub fn check_base_url(url: &str) -> anyhow::Result<()> { base_url_host(url).map(|_| ()) }
+pub fn check_base_url(url: &str) -> anyhow::Result<()> { check_base_url_for(url, false) }
+
+/// `check_base_url`, and with full access on (`full`) also plain `http://` to an address on the
+/// user's own network (a private IPv4 address such as `192.168.1.5`): the one guard of the other
+/// providers that yields to full access. A login in the address is refused either way.
+pub fn check_base_url_for(url: &str, full: bool) -> anyhow::Result<()> { base_url_host_for(url, full).map(|_| ()) }
+
+/// Is this address on this computer (`localhost` / `127.0.0.1`), or — only where full access let
+/// it through — a private address on the user's own network? Only such a service may be used
+/// without a key (`keyless`): it gets a stand-in key, never the user's sign-in.
+pub fn keyless_allowed(url: &str, full: bool) -> bool {
+    base_url_host_for(url, full).map_or(false, |h| is_this_computer(h) || (full && is_private_ipv4(h)))
+}
+
+fn is_this_computer(host: &str) -> bool { host == "localhost" || host == "127.0.0.1" }
+
+/// 10/8, 172.16/12 and 192.168/16, written as four plain numbers.
+fn is_private_ipv4(host: &str) -> bool {
+    let Ok(ip) = host.parse::<std::net::Ipv4Addr>() else { return false };
+    host.split('.').count() == 4 && ip.is_private()
+}
+
+fn base_url_host(url: &str) -> anyhow::Result<&str> { base_url_host_for(url, false) }
 
 /// The host of a provider address that passes validation. The refusals are worded for the person
 /// (`tr.rs`), in both languages.
-fn base_url_host(url: &str) -> anyhow::Result<&str> {
+fn base_url_host_for(url: &str, full: bool) -> anyhow::Result<&str> {
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) { return Err(crate::tr::err("provider.url_blank", &[])); }
     let (https, rest) = if let Some(r) = url.strip_prefix("https://") { (true, r) }
         else if let Some(r) = url.strip_prefix("http://") { (false, r) }
@@ -399,7 +421,7 @@ fn base_url_host(url: &str) -> anyhow::Result<&str> {
     if authority.contains('@') { return Err(crate::tr::err("provider.url_login", &[])); }
     let host = authority.rsplit_once(':').filter(|(_, p)| p.chars().all(|c| c.is_ascii_digit())).map_or(authority, |(h, _)| h);
     if host.is_empty() { return Err(crate::tr::err("provider.url_host", &[])); }
-    if !https && host != "localhost" && host != "127.0.0.1" { return Err(crate::tr::err("provider.url_http", &[])); }
+    if !https && !is_this_computer(host) && !(full && is_private_ipv4(host)) { return Err(crate::tr::err("provider.url_http", &[])); }
     Ok(host)
 }
 
@@ -436,6 +458,15 @@ pub struct CodexSettings {
     pub effort: Option<String>,
     /// Model for background summaries; None = Codex's own default, at its lowest effort.
     pub mini_wrap_model: Option<String>,
+    /// Address of another OpenAI-compatible service Codex is to use (its Responses API); None =
+    /// Codex's own set-up (the ChatGPT sign-in or OpenAI key, and the user's `config.toml`).
+    /// Server-owned, like `has_api_token` and `keyless`: they change together, through
+    /// `providers::set_codex_provider` only.
+    pub base_url: Option<String>,
+    /// A key for that address is saved in the password store (never in this file).
+    pub has_api_token: bool,
+    /// The service at that address (on this computer) takes no key: it gets a stand-in.
+    pub keyless: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -453,6 +484,9 @@ pub struct ClaudeSettings {
     pub base_url: Option<String>,
     /// A key for that address is saved in the password store (never in this file).
     pub has_api_token: bool,
+    /// The service at that address (on this computer) takes no key: runs send a stand-in key
+    /// (`providers::NO_KEY`), so the Claude sign-in never goes there. Server-owned, like the two above.
+    pub keyless: bool,
     /// A suggested next message under each answer. Off unless switched on: asking for one makes
     /// every answer wait about two seconds longer and costs one more short request. (An earlier
     /// test build stored the opposite switch, `suggestionsOff`; it is ignored, so whoever never
@@ -795,6 +829,11 @@ impl Settings {
         // leave an address behind without one.
         self.ai.claude.has_api_token = old.ai.claude.has_api_token;
         self.ai.claude.base_url = old.ai.claude.base_url.clone();
+        self.ai.claude.keyless = old.ai.claude.keyless;
+        // The same for Codex's other provider (`providers::set_codex_provider`).
+        self.ai.codex.base_url = old.ai.codex.base_url.clone();
+        self.ai.codex.has_api_token = old.ai.codex.has_api_token;
+        self.ai.codex.keyless = old.ai.codex.keyless;
 
         let c = &mut self.ai.claude;
         for v in [&mut c.binary, &mut c.base_url, &mut c.model, &mut c.effort, &mut c.permission_mode, &mut c.mini_wrap_model] { none_if_blank(v); }
@@ -1211,6 +1250,23 @@ mod tests {
                       "https://user@api.anthropic.com", "https://gateway.example.com", ""] {
             assert!(!is_anthropic_url(other), "{other}");
         }
+    }
+
+    #[test]
+    fn the_address_check_widens_only_with_full_access_and_only_to_the_home_network() {
+        for url in ["https://api.example.com", "http://localhost:11434", "http://127.0.0.1/v1", "http://api.example.com", "http://localhost@evil.com",
+                    "http://192.168.1.5:11434", "ftp://x", "https://", "api.example.com"] {
+            assert_eq!(check_base_url_for(url, false).is_ok(), check_base_url(url).is_ok(), "{url}");
+        }
+        for ok in ["http://192.168.1.5:11434", "http://10.0.0.2/v1", "http://172.16.4.4:8080"] {
+            assert!(check_base_url_for(ok, false).is_err() && check_base_url_for(ok, true).is_ok(), "{ok}");
+        }
+        for bad in ["http://user@192.168.1.5", "http://8.8.8.8", "http://172.32.0.1", "http://192.168.1.5.evil.com", "http://192.168.1", "http://example.com"] {
+            assert!(check_base_url_for(bad, true).is_err(), "{bad}");
+        }
+        assert!(keyless_allowed("http://localhost:11434", false) && keyless_allowed("https://127.0.0.1:4000", false));
+        assert!(!keyless_allowed("https://api.example.com", true) && !keyless_allowed("http://192.168.1.5", false));
+        assert!(keyless_allowed("http://192.168.1.5", true));
     }
 
     #[test]
