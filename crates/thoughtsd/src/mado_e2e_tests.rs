@@ -524,3 +524,229 @@ async fn a_round_four_project_goes_from_brief_to_landed_over_http_checked_looked
     assert_eq!((s, &g), (200, &json!({"start": format!("python3 -m http.server {port} --bind 127.0.0.1"), "url": format!("http://127.0.0.1:{port}"), "readme": "shop\n"})), "{g}");
     w.done();
 }
+
+// ---------- round 0.5.0: a project that is already built, with and without the code graph tool ----------
+
+/// A stand-in `code-review-graph` 2.4.0 for the shop below (answer shapes as in `code_graph_tests`):
+/// `src/report.ts` and `src/export.ts` use `src/orders.ts`; nothing uses the others. Every call is
+/// logged beside the graph's database (the one place it may write).
+const FAKE_GRAPH: &str = r#"#!/bin/sh
+if [ "$1" = "--version" ]; then echo "code-review-graph 2.4.0"; exit 0; fi
+echo "$*" >> "$CRG_DATA_DIR/../calls.log"
+d=$(pwd -P)
+case "$1" in
+  build|update) echo "INFO: Progress: 6/6 files parsed" >&2; echo db > "$CRG_DATA_DIR/graph.db"; echo "Full build: 6 files"; exit 0 ;;
+  status) echo '{"nodes": 20, "edges": 30, "files": 6, "build_incomplete": false}'; exit 0 ;;
+  architecture) printf '%s\n' "{\"status\":\"ok\",\"communities\":[{\"id\":1,\"name\":\"shop-orders\",\"size\":4,\"dominant_language\":\"typescript\",\"members\":[\"$d/src/orders.ts::listOrders\",\"$d/src/report.ts::monthly\"]}],\"cross_community_edges\":[{\"source\":\"$d/src/report.ts::monthly\",\"target\":\"$d/src/orders.ts::listOrders\",\"edge_kind\":\"CALLS\"}]}"; exit 0 ;;
+  impact) case "$*" in
+    *src/orders.ts*) echo '{"status":"ok","impacted_files":["src/report.ts","src/export.ts","src/orders.ts"],"unresolved_call_sites":0}' ;;
+    *) echo '{"status":"ok","impacted_files":[],"unresolved_call_sites":0}' ;;
+  esac; exit 0 ;;
+esac
+case "$1 $2" in
+  "query file_summary") echo "{\"status\":\"ok\",\"results\":[{\"kind\":\"Function\",\"name\":\"listOrders\",\"file_path\":\"$d/$3\",\"line_start\":1}]}"; exit 0 ;;
+  "query importers_of") echo "{\"status\":\"ok\",\"results\":[],\"edges\":[{\"kind\":\"IMPORTS_FROM\",\"source\":\"$d/src/report.ts\",\"target\":\"$d/$3\"}]}"; exit 0 ;;
+  "query imports_of") echo '{"status":"ok","results":[],"edges":[]}'; exit 0 ;;
+  "query tests_for") echo "{\"status\":\"ok\",\"results\":[{\"kind\":\"Test\",\"name\":\"lists\",\"file_path\":\"$d/src/orders.test.ts\",\"line_start\":2}]}"; exit 0 ;;
+esac
+echo '{"status":"error"}'; exit 0
+"#;
+
+const SPEC_BUILT: &str = "# Shop — Spec\n\n## Features\n\n### F1 — Orders\n- Status: built\nPeople see their orders (found in the code: src/orders.ts).\n\n\
+    ### F2 — Export\n- Status: planned\nOrders can be exported (assumed).\n";
+
+/// What the stand-in writes for a step of existing mode: documents of what is there, one current
+/// look and no mock-up, then a change with its tasks.
+fn write_existing_step(mado: &Path, step: &str, prompt: &str) {
+    let w = |rel: &str, v: String| { let p = mado.join(rel); std::fs::create_dir_all(p.parent().unwrap()).unwrap(); std::fs::write(p, v).unwrap(); };
+    match step {
+        "brief" => w("brief.md", "# Shop — Brief\n\n## What it does today\nIt lists orders (found in the code: src/orders.ts).\n".into()),
+        "spec" => { w("spec.md", SPEC_BUILT.into()); w("flow.graph.json", flow(false).to_string()); }
+        "design" => {
+            w("design.md", "# Design\n\nThe look it has (found in the code: src/style.css).\n".into());
+            w("design/styles.json", json!({"version": 1, "styles": [{"id": "current", "name": "Today", "description": "As it looks.", "source": "assistant", "tokens": tokens()}]}).to_string());
+        }
+        "plan" => {
+            assert!(prompt.contains("Export the orders as CSV."), "the change request is the run's note: {prompt}");
+            w("change.md", "# Export — Change\n\n## What the user asked\nExport the orders as CSV.\n".into());
+            let task = |id: &str, owns: &str| json!({"id": id, "title": format!("Task {id}"), "description": "Change it.", "owns": [owns], "dependsOn": [],
+                "acceptance": [format!("test -f {owns}")], "feature": "F2"});
+            w("plan.json", json!({"version": 1, "verify": ["test -f docs/export.md"],
+                "change": {"title": "Orders can be exported", "features": ["F2"], "files": ["src/orders.ts", "src/export.ts"]},
+                "tasks": [task("t-export", "src/export.ts"), task("t-orders", "src/orders.ts"), task("t-docs", "docs/export.md")]}).to_string());
+        }
+        other => write_step(mado, other, prompt),
+    }
+}
+
+/// The shop as built: code and a package file, committed; the stand-in graph tool on its PATH or not.
+async fn built_shop(tool: bool) -> (World, PathBuf) {
+    let w = world_with(Arc::new(|st: Arc<AppState>, kind: String, meta: Value, info: RunInfo| Box::pin(async move {
+        if kind == "mado" {
+            let step = meta["mado"]["step"].as_str().unwrap_or_default().to_string();
+            write_existing_step(&info.cwd.join("mado"), &step, &info.prompt);
+            return step;
+        }
+        let what = build_run_of(&info);
+        match what.as_str() {
+            "t-export" => t::write(&info.cwd, "src/export.ts", "export const toCsv = () => '';\n"),
+            "t-orders" => t::write(&info.cwd, "src/orders.ts", "export const listOrders = () => [];\nexport const forExport = listOrders;\n"),
+            "t-docs" => t::write(&info.cwd, "docs/export.md", "# Export\n"),
+            "review" => { st.chats.update(&info.chat_id, |c| c.messages.push(crate::chats::Msg::new("assistant", "Read it.\n\n```json\n{\"findings\": []}\n```\n".to_string()))).await; }
+            _ => {}
+        }
+        what
+    }))).await;
+    for (f, body) in [("package.json", "{\"name\": \"shop\"}\n"), ("src/orders.ts", "export const listOrders = () => [];\n"), ("src/report.ts", "import { listOrders } from './orders';\n"),
+        ("src/export.ts", "export {};\n"), ("src/orders.test.ts", "listOrders();\n"), ("src/main.ts", "import './orders';\n"), ("src/style.css", "body {}\n")] { t::write(&w.dir, f, body); }
+    t::sh(&w.dir, &["add", "-A"]);
+    t::sh(&w.dir, &["commit", "-q", "-m", "the shop as built"]);
+    let bin = w.root.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let bin = dunce::canonicalize(bin).unwrap();
+    if tool {
+        let f = bin.join(crate::code_graph::PROGRAM);
+        std::fs::write(&f, FAKE_GRAPH).unwrap();
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+    }
+    crate::code_graph::test_paths().lock().unwrap().insert(w.pid.clone(), format!("{}:/usr/bin:/bin", bin.display()));
+    (w, bin)
+}
+
+async fn walk_a_built_project(tool: bool) {
+    let (w, _bin) = built_shop(tool).await;
+    w.st.settings.write().await.ai.claude.binary = Some("/nonexistent/claude".into());
+    let before = t::sh(&w.dir, &["rev-parse", "HEAD"]);
+
+    // Detection: the folder holds a built project, and there is no plan yet.
+    let (s, o) = w.get("").await;
+    assert_eq!((s, o["exists"].as_bool(), o["detected"]["hasCode"].as_bool()), (200, Some(false), Some(true)), "{o}");
+    assert!(o["detected"]["languages"].as_array().unwrap().iter().any(|l| l["lang"] == "TypeScript"), "{o}");
+
+    // The code graph card: the tool there or not, never blocking.
+    let (s, g) = w.get("/graph").await;
+    assert_eq!(s, 200, "{g}");
+    assert_eq!(g["recommend"]["command"], "pipx install code-review-graph");
+    if tool {
+        assert_eq!((g["tool"]["found"].as_bool(), g["tool"]["usable"].as_bool(), g["built"].as_bool()), (Some(true), Some(true), Some(false)), "{g}");
+        assert!(g["reason"].is_null(), "{g}");
+        let (s, v) = w.post("/graph/build", json!({})).await;
+        assert_eq!((s, v["building"].as_bool()), (200, Some(true)), "{v}");
+        let mut g = Value::Null;
+        for _ in 0..1000 {
+            g = w.get("/graph").await.1;
+            if g["building"] == false { break; }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!((g["built"].as_bool(), g["stale"].as_bool(), g["files"].as_u64()), (Some(true), Some(false), Some(6)), "{g}");
+    } else {
+        assert_eq!((g["tool"]["found"].as_bool(), g["reason"]["code"].as_str()), (Some(false), Some("missing")), "{g}");
+        assert_eq!(w.post("/graph/build", json!({})).await.0, 409, "nothing to build with");
+    }
+
+    // Document it as it is.
+    let (s, v) = w.post("/start", json!({"mode": "existing"})).await;
+    assert_eq!((s, v["state"]["mode"].as_str()), (200, Some("existing")), "{v}");
+    for step in ["brief", "spec", "tech"] { w.run(step).await; w.approve(step).await; }
+    assert!(w.get("").await.1["state"]["documented"]["at"].is_string(), "documented once the technical design is approved");
+    w.run("design").await;
+    let (_, styles) = w.get("/design/styles").await;
+    assert_eq!((styles["current"].as_str(), styles["styles"][0]["id"].as_str()), (Some("current"), Some("current")), "{styles}");
+    assert_eq!(w.post("/design/style", json!({"id": "current"})).await.0, 200);
+    w.approve("design").await;
+    // Plan a change: the change request is the Run box's note.
+    let (s, v) = w.post("/steps/plan/run", json!({"note": "Export the orders as CSV."})).await;
+    assert_eq!(s, 200, "{v}");
+    w.until("plan", "review").await;
+    let (s, c) = w.get("/doc/change").await;
+    assert_eq!((s, c["exists"].as_bool()), (200, Some(true)), "{c}");
+    w.approve("plan").await;
+
+    // The Final check: F1 is built, so only the change's feature must be traced; the graph's
+    // findings are there with the tool and never block.
+    let (s, r) = w.get("/review").await;
+    assert_eq!(s, 200, "{r}");
+    let problems: Vec<crate::mado::Problem> = serde_json::from_value(r["problems"].clone()).unwrap();
+    let kinds: Vec<&str> = problems.iter().map(|p| p.kind.as_str()).collect();
+    assert!(!kinds.contains(&"untraced-feature"), "{r}");
+    assert!(problems.iter().all(|p| !crate::mado_review::blocks(p)), "{r}");
+    let graph_kinds = ["untouched-impact", "hidden-dependency", "change-outside-scope"];
+    if tool {
+        for k in graph_kinds { assert!(kinds.contains(&k), "{k}: {r}"); }
+        let find = |k: &str| problems.iter().find(|p| p.kind == k).unwrap().clone();
+        assert!(find("untouched-impact").message.contains("src/report.ts"), "{r}");
+        assert_eq!(find("hidden-dependency").tasks, Some(vec!["t-export".to_string(), "t-orders".into()]), "{r}");
+        assert!(find("change-outside-scope").message.contains("docs/export.md") && problems.iter().filter(|p| p.kind == "change-outside-scope").count() == 1, "{r}");
+    } else {
+        for k in graph_kinds { assert!(!kinds.contains(&k), "{k}: {r}"); }
+    }
+    let yes = crate::consent::test_mado_approval(&w.pid, r["planHash"].as_str().unwrap());
+    assert_eq!(w.post(&format!("/steps/review/approve?approval={yes}"), json!({"planHash": r["planHash"]})).await.0, 200);
+
+    // Build, checked and reviewed, then land.
+    let (s, v) = w.post("/build/start", json!({"maxParallel": 3})).await;
+    assert_eq!(s, 200, "{v}");
+    let mut b = Value::Null;
+    for _ in 0..3000 {
+        b = w.get("/build").await.1;
+        if b["status"] == "done" || b["status"] == "waiting" || b["status"] == "failed" { break; }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(b["status"], "done", "{b}");
+    assert_eq!(b["review"]["status"], "passed", "{b}");
+    assert_eq!(t::sh(&w.dir, &["rev-parse", "HEAD"]), before, "the user's branch is untouched during the build");
+
+    // The command line and the prompt of every run.
+    {
+        let runs = w.runs.lock().unwrap();
+        let did: Vec<String> = runs.iter().map(|(k, s, _)| format!("{k}:{s}")).collect();
+        assert_eq!(did.iter().filter(|d| d.starts_with("mado:")).count(), 5, "{did:?}");
+        let mut built: Vec<&str> = runs.iter().filter(|(k, _, _)| k == "mado-build").map(|(_, s, _)| s.as_str()).collect();
+        built.sort();
+        assert_eq!(built, ["review", "t-docs", "t-export", "t-orders"], "{did:?}");
+        for (kind, what, info) in runs.iter() {
+            let flag = |f: &str| info.args.iter().position(|a| a == f).and_then(|i| info.args.get(i + 1)).cloned();
+            assert_eq!(info.setting_sources.as_deref(), Some(""), "{kind} {what}: no user or project settings");
+            if kind == "mado" {
+                // Existing mode: documented from the code, its secrets closed, no web, no shell.
+                assert!(info.system.contains("This project is already built"), "{what}");
+                for rule in ["WebFetch", "WebSearch", "Bash"] { assert!(info.deny.iter().any(|d| d == rule), "{what}: {rule}"); }
+                assert!(info.deny.iter().any(|d| d.contains("[Ee][Nn][Vv]")), "{what}: the secret files are closed");
+                assert_eq!(info.system.contains("The code map, made by the code-review-graph tool"), tool, "{what}");
+                if tool { assert!(info.system.contains("\"shop-orders\"") && info.system.contains("src/report.ts → src/orders.ts"), "{what}: {}", info.system); }
+            } else {
+                assert_eq!(flag("--permission-mode").as_deref(), Some(if what == "review" { "plan" } else { "acceptEdits" }), "{kind} {what}: {:?}", info.args);
+            }
+            if !tool { assert!(!info.prompt.contains("code-review-graph") && !info.system.contains("code-review-graph"), "{kind} {what}: nothing of the tool without it"); }
+        }
+        let prompt = |id: &str| runs.iter().find(|(_, s, _)| s == id).unwrap().2.prompt.clone();
+        if tool {
+            let orders = prompt("t-orders");
+            assert!(orders.contains("What the code-review-graph tool on this computer knows") && orders.contains("## src/orders.ts") && orders.contains("Used by (keep what they rely on working): src/report.ts"), "{orders}");
+            assert!(orders.contains("Tests: src/orders.test.ts line 2"), "{orders}");
+            let review = prompt("review");
+            assert!(review.contains("which files depend on the files this build changed") && review.contains("- src/report.ts") && !review.contains("- src/orders.ts\n"), "{review}");
+        }
+    }
+
+    // Land: the change is in the user's branch, mado/ is not.
+    let (s, v) = w.post("/build/land", json!({})).await;
+    assert_eq!(s, 200, "{v}");
+    assert_eq!(t::read(&w.dir, "docs/export.md"), "# Export\n");
+    assert!(t::read(&w.dir, "src/orders.ts").contains("forExport"));
+    assert_eq!(t::sh(&w.dir, &["status", "--porcelain"]), "?? mado/", "mado/ was never committed");
+    if tool {
+        assert_eq!(w.get("/graph").await.1["stale"], true, "the graph is behind the landed change");
+        let log = std::fs::read_to_string(crate::code_graph::graph_dir(&w.pid).unwrap().join("work/calls.log")).unwrap();
+        assert!(!log.lines().any(|l| l.starts_with("install")), "the tool's own install is never run: {log}");
+        assert!(!w.dir.join(".code-review-graph").exists());
+    }
+    crate::code_graph::test_paths().lock().unwrap().remove(&w.pid);
+    w.done();
+}
+
+#[tokio::test]
+async fn a_built_project_is_documented_changed_and_landed_over_http_with_the_code_graph_tool() { walk_a_built_project(true).await; }
+
+#[tokio::test]
+async fn a_built_project_is_documented_changed_and_landed_over_http_without_the_code_graph_tool() { walk_a_built_project(false).await; }

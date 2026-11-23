@@ -1035,7 +1035,7 @@ async fn run_task(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSta
         let (chat, brief, resume) = match (earlier, session, failure.as_deref().filter(|f| !f.trim().is_empty())) {
             (Some(c), Some(sid), Some(f)) => (c, retry_brief(task, f), Some(sid)),
             _ => (new_chat(state, pid, &task.id, &format!("{} — {}", tr("mado_build.chat_title", &[]), one_line(&task.title, 80))).await,
-                task_brief(task, plan, failure.as_deref(), finish::conventions(project, full(state).await).as_deref()), None),
+                task_brief(task, plan, failure.as_deref(), finish::conventions(project, full(state).await).as_deref(), graph_around(state, pid, project, &task.owns).await.as_deref()), None),
         };
         update(pid, project, |b| if let Some(t) = b.task_mut(wi, li, ti) { t.attempts += 1; t.status = TaskStatus::Running; t.chat_id = Some(chat.clone()); t.commit = None; }).await?;
         mado::tell(state, pid, "build").await;
@@ -1157,7 +1157,7 @@ const SYSTEM: &str = "This run is one task of a build the Thoughts app runs by i
 do not ask questions, do the work the task describes, and end with a short plain-language summary of what you did. \
 Work only in the current folder, by reading and editing files: you have no shell and run no commands. The app runs the checks and commits your work itself.";
 
-fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>, conventions: Option<&str>) -> String {
+fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>, conventions: Option<&str>, around: Option<&str>) -> String {
     // The task's words come from plan.json: quoted as data, apart from the app's own instructions.
     let mut out = format!("Task {}: {}\n\nWhat the task is (from the plan):\n{}\n", task.id,
         crate::mado_prompts::inline(&one_line(&task.title, 200)), crate::mado_prompts::block(&task.description.chars().take(8000).collect::<String>()));
@@ -1169,6 +1169,7 @@ fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>, convention
     out.push_str("\nRead first, for context (copies of the plan's documents; do not change them): mado/brief.md, mado/spec.md, mado/tech.md, mado/design.md, mado/plan.json, and mado/design/ for the look.\n");
     if let Some(c) = conventions { out.push_str(&prompts::conventions(c)); }
     if task.locks() { out.push_str(prompts::LOCKING_TASK); }
+    if let Some(a) = around { out.push_str(&prompts::code_around(a)); }
     out.push_str("\nStay inside the files you own; if you must touch another file, say so in your final message.\n");
     out.push_str("You cannot run commands in this task. When you finish, the app runs the commands above itself, in this folder; \
         if one fails it comes back to you in this chat with the command and what it printed.\n");
@@ -1180,19 +1181,82 @@ fn task_brief(task: &PlanTask, plan: &PlanDoc, failure: Option<&str>, convention
     out
 }
 
+// ---------- round 0.5.0: the code graph, when the user installed code-review-graph ----------
+
+/// The most characters of the graph's text a build run is handed (`around` and `impact`).
+const AROUND_CHARS: usize = 8_000;
+const IMPACT_CHARS: usize = 6_000;
+/// The most files the graph is asked about for one run.
+const GRAPH_FILES: usize = 12;
+
+/// Has the graph of this project been built (the tool's database in the daemon's folder)? Cheap:
+/// with none, nothing is walked or asked, and every prompt is what it was before 0.5.0.
+pub(crate) fn has_graph(pid: &str) -> bool { crate::code_graph::graph_dir(pid).map_or(false, |g| g.join("work/db/graph.db").is_file()) }
+
+/// The plain project files that `owns` (paths or patterns, project-relative) names, at most `max`,
+/// each once. A path is taken as it is; a pattern is matched against the names under its fixed
+/// start (a bounded walk of names: no link followed, no hidden folder, `mado/` or dependency folder).
+pub(crate) fn files_of(project: &Path, owns: &[String], max: usize) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let skip = ["node_modules", "target", "dist", "build", "vendor", "mado"];
+    let left_out = |rel: &str| rel.split('/').any(|s| s.is_empty() || s.starts_with('.') || skip.iter().any(|k| s.eq_ignore_ascii_case(k)));
+    for own in owns {
+        if out.len() >= max { break; }
+        let own = own.trim().trim_start_matches("./").trim_end_matches('/');
+        if own.is_empty() || own.starts_with('/') || own.split('/').any(|s| s == "..") { continue; }
+        if !own.contains(['*', '?', '[']) {
+            if left_out(own) { continue; }
+            if !out.iter().any(|o| o == own) { out.push(own.to_string()); }
+            continue;
+        }
+        let fixed: Vec<&str> = own.split('/').take_while(|s| !s.contains(['*', '?', '['])).collect();
+        let start = project.join(fixed.join("/"));
+        let walk = walkdir::WalkDir::new(&start).follow_links(false).max_depth(8).into_iter()
+            .filter_entry(|e| e.depth() == 0 || { let n = e.file_name().to_string_lossy(); !n.starts_with('.') && !skip.iter().any(|s| n.eq_ignore_ascii_case(s)) });
+        for e in walk.take(5000).flatten() {
+            if !e.file_type().is_file() { continue; }
+            let Ok(rel) = e.path().strip_prefix(project) else { continue };
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            if !left_out(&rel) && crate::mado_review::overlaps(own, &rel) && !out.contains(&rel) { out.push(rel); }
+            if out.len() >= max { break; }
+        }
+    }
+    out
+}
+
+/// What the graph knows around the files `owns` names (`code_graph::around`), or `None`: no tool,
+/// no graph, a guard said no, or it failed. Nothing waits on it for long, and nothing fails with it.
+pub(crate) async fn graph_around(state: &AppState, pid: &str, project: &Path, owns: &[String]) -> Option<String> {
+    if !has_graph(pid) { return None; }
+    let files = files_of(project, owns, GRAPH_FILES);
+    if files.is_empty() { return None; }
+    crate::code_graph::around(state, &crate::code_graph::Project::new(pid, project), &files, AROUND_CHARS).await
+}
+
+/// The files that depend on `changed` and were not changed (`code_graph::impact`), or `None`.
+pub(crate) async fn graph_impact(state: &AppState, pid: &str, project: &Path, changed: &[String]) -> Option<String> {
+    if !has_graph(pid) || changed.is_empty() { return None; }
+    crate::code_graph::impact(state, &crate::code_graph::Project::new(pid, project), changed, IMPACT_CHARS).await
+}
+
+/// The owned files of the plan's tasks `ids`.
+fn owns_of(plan: &PlanDoc, ids: &[String]) -> Vec<String> {
+    plan.tasks.iter().filter(|t| ids.contains(&t.id)).flat_map(|t| t.owns.iter().cloned()).collect()
+}
+
 /// The one fix run of a wave whose tasks' checks fail once put together (`out`: what failed).
-fn wave_fix_brief(out: &str) -> String {
+fn wave_fix_brief(out: &str, around: Option<&str>) -> String {
     format!("This folder holds the build so far: the work of several tasks, just put together. One of their checks now fails here (what it printed):\n{}\n\
         Fix the code so that every task's checks pass, keeping the work of every task. Stay with the files that need it. \
-        Commit nothing: the app runs the checks again and commits the result.\n\n{}", crate::mado_prompts::block(&clip_note(out)), crate::mado_prompts::DATA_NOTE)
+        Commit nothing: the app runs the checks again and commits the result.\n{}\n{}", crate::mado_prompts::block(&clip_note(out)), around.map(prompts::code_around).unwrap_or_default(), crate::mado_prompts::DATA_NOTE)
 }
 
 /// The run that settles a clash when a lane is merged: the files with conflicts and the side merged in.
-fn clash_brief(clash: &[String], titles: &[String]) -> String {
+fn clash_brief(clash: &[String], titles: &[String], around: Option<&str>) -> String {
     format!("Two parts of this build changed the same files, and git could not combine them. Files with conflicts:\n{}\n\n\
         Settle every conflict in those files (the lines between <<<<<<<, ======= and >>>>>>>) so that the work of both sides is kept. \
-        The side being merged in is: {}. Do not change other files. Commit nothing: the app checks and commits the result.\n\n{}",
-        clash.iter().map(|f| format!("- {}", crate::mado_prompts::inline(f))).collect::<Vec<_>>().join("\n"), titles.join("; "), crate::mado_prompts::DATA_NOTE)
+        The side being merged in is: {}. Do not change other files. Commit nothing: the app checks and commits the result.\n{}\n{}",
+        clash.iter().map(|f| format!("- {}", crate::mado_prompts::inline(f))).collect::<Vec<_>>().join("\n"), titles.join("; "), around.map(prompts::code_around).unwrap_or_default(), crate::mado_prompts::DATA_NOTE)
 }
 
 /// What a try after a failed one is told, in the same chat.
@@ -1719,7 +1783,7 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
     let fix = new_chat(state, pid, &task, &format!("{} — {}", tr("mado_build.chat_title_wave", &[]), wi + 1)).await;
     update(pid, project, |b| if let Some(w) = b.waves.get_mut(wi) { w.fix_chat_id = Some(fix.clone()); }).await?;
     mado::tell(state, pid, "build").await;
-    let brief = wave_fix_brief(&out);
+    let brief = wave_fix_brief(&out, graph_around(state, pid, project, &owns_of(&plan, &[task.clone()])).await.as_deref());
     let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, None, deny_for(project, pid, &b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { reset_wt(state, project, &bwt).await; return Ok(()); }
     // The fix may not change what a done `contracts` or `tests` task agreed on: that is undone, and
@@ -1791,7 +1855,7 @@ async fn merge_lane(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     }).await?;
     mado::tell(state, pid, "build").await;
     let titles: Vec<String> = lane.tasks.iter().filter_map(|t| plan.tasks.iter().find(|p| p.id == t.id)).map(|t| format!("{} ({})", t.id, crate::mado_prompts::inline(&one_line(&t.title, 100)))).collect();
-    let brief = clash_brief(&clash, &titles);
+    let brief = clash_brief(&clash, &titles, graph_around(state, pid, project, &clash).await.as_deref());
     let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, None, deny_for(project, pid, b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { let _ = git(state, &bwt, &["merge", "--abort"]).await; return Ok(LaneEnd::Stopped); }
     if let Err(why) = ended { return fix_failed(state, project, pid, &bwt, wi, li, &why).await; }

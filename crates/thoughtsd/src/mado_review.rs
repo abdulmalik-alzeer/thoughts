@@ -2,8 +2,10 @@
 //! what traces to what, what is wrong, the waves and lanes the build will run, and every command
 //! the build will run (shown verbatim; approving the review is what allows the daemon to run them).
 
-use crate::mado::{FeatureTrace, GraphDoc, Lane, PlanDoc, Problem, Review, ScreenTrace, Wave};
+use crate::mado::{FeatureTrace, GraphDoc, Lane, PlanChange, PlanDoc, Problem, Review, ScreenTrace, Wave};
+use crate::state::AppState;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 /// The plan's fingerprint: sha256 of the bytes of `plan.json`, as lowercase hex.
 pub fn plan_hash(bytes: &[u8]) -> String {
@@ -148,7 +150,12 @@ pub fn review(spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) -> Review { r
 
 /// The review of `plan` against the spec's features and the flow's screens, its messages in Arabic
 /// (`ar`) or English.
-pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) -> Review {
+pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) -> Review { review_scoped(ar, spec, flow, plan, None) }
+
+/// `review_in`, with the untraced-feature advice kept to the features in `scope` when one is given
+/// (round 0.5.0: the plan of an existing project is a change, which builds only `change.features`;
+/// the other features are already built). Everything else is the same.
+pub fn review_scoped(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc, scope: Option<&[String]>) -> Review {
     let feats = crate::mado_validate::features(spec);
     let screens = flow.map(crate::mado::screens_of).unwrap_or_default();
     let ids: HashSet<&str> = plan.tasks.iter().map(|t| t.id.as_str()).collect();
@@ -193,7 +200,7 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
             }
         }
     }
-    for f in features.iter().filter(|f| f.tasks.is_empty()) {
+    for f in features.iter().filter(|f| f.tasks.is_empty() && scope.map_or(true, |s| s.contains(&f.id))) {
         problems.push(problem(ar, "untraced-feature", "mado.p.untraced_feature", &[("feature", &format!("{} — {}", f.id, f.name))], vec![]));
     }
     for s in screen_traces.iter().filter(|s| s.tasks.is_empty()) {
@@ -224,4 +231,131 @@ pub fn review_in(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) 
         // A refused command is shown escaped (it blocks approval, so it never reaches an approval record).
         .map(|c| if crate::mado_validate::command_ok(&c) { c } else { crate::mado_validate::escaped(&c) }).collect();
     Review { features, screens: screen_traces, problems, waves: ws, commands, plan_hash: String::new() }
+}
+
+// ---------- round 0.5.0: the change of an existing project, and the code graph ----------
+
+/// The Final check `GET /review` shows: `review_in`, with the untraced-feature advice kept to
+/// `change.features` when the plan is a change of an existing project, then what the user's
+/// code-review-graph tool says when it has a graph of the project (`graph_findings`, none blocks).
+/// With no tool or no graph, and for a plan of a new project, it is `review_in` exactly.
+#[allow(clippy::too_many_arguments)]
+pub async fn final_check(st: &AppState, pid: &str, project: &Path, mado: &Path, full: bool, plan_bytes: &[u8], spec: &str, flow: Option<&GraphDoc>, plan: &PlanDoc) -> Review {
+    let ar = crate::tr::arabic();
+    let change = if crate::mado::existing_in(mado, full) { crate::mado::plan_change(plan_bytes) } else { None };
+    let mut r = review_scoped(ar, spec, flow, plan, change.as_ref().map(|c| c.features.as_slice()));
+    r.problems.extend(graph_findings(st, pid, project, plan, change.as_ref(), ar).await);
+    r
+}
+
+/// The files an `impact` text lists (its `- path` lines; the paths were checked by the code graph).
+pub fn impacted(text: &str) -> Vec<String> {
+    text.lines().filter_map(|l| l.strip_prefix("- ")).map(|f| f.trim().to_string()).filter(|f| !f.is_empty()).collect()
+}
+
+/// Does task `a` come after task `b` (directly or through others)?
+fn after(plan: &PlanDoc, a: &str, b: &str) -> bool {
+    let (mut todo, mut seen) = (vec![a.to_string()], HashSet::new());
+    while let Some(t) = todo.pop() {
+        if !seen.insert(t.clone()) { continue; }
+        for d in plan.tasks.iter().find(|x| x.id == t).map(|x| x.depends_on.clone()).unwrap_or_default() {
+            if d == b { return true; }
+            todo.push(d);
+        }
+    }
+    false
+}
+
+/// A short list for a message: at most `n` names, then how many more.
+fn few(list: &[String], n: usize, ar: bool) -> String {
+    let mut s = list.iter().take(n).cloned().collect::<Vec<_>>().join(", ");
+    if list.len() > n { s.push_str(&if ar { format!(" و{} غيرها", list.len() - n) } else { format!(" and {} more", list.len() - n) }); }
+    s
+}
+
+/// The most tasks whose dependents are asked for one by one (`hidden-dependency`).
+const GRAPH_TASKS: usize = 12;
+
+/// What the code graph adds to the Final check, when the user installed the tool and built the
+/// graph (else nothing, without asking anything). None blocks: the graph can miss and can be wrong.
+/// - `untouched-impact`: files that use what the tasks change, that no task owns;
+/// - `hidden-dependency`: a task owning a file that uses another task's files, with no order between them;
+/// - `change-outside-scope` (a change with `files`): a task owning files the change does not name
+///   and that do not use the files it names.
+pub async fn graph_findings(st: &AppState, pid: &str, project: &Path, plan: &PlanDoc, change: Option<&PlanChange>, ar: bool) -> Vec<Problem> {
+    use crate::mado_build::{files_of, graph_impact, has_graph};
+    if !has_graph(pid) { return vec![]; }
+    let owned: Vec<String> = plan.tasks.iter().flat_map(|t| t.owns.iter().cloned()).collect();
+    let owned_by_any = |f: &str| owned.iter().any(|o| overlaps(o, f));
+    let mut changed = files_of(project, &owned, 60);
+    for f in change.and_then(|c| c.files.as_ref()).into_iter().flatten() { if !changed.contains(f) { changed.push(f.clone()); } }
+    let mut out = vec![];
+    if let Some(text) = graph_impact(st, pid, project, &changed).await {
+        let left: Vec<String> = impacted(&text).into_iter().filter(|f| !owned_by_any(f)).collect();
+        if !left.is_empty() { out.push(problem(ar, "untouched-impact", "mado.p.untouched_impact", &[("files", &few(&left, 8, ar))], vec![])); }
+    }
+    let mut asked = 0;
+    for a in &plan.tasks {
+        if asked >= GRAPH_TASKS { break; }
+        let files = files_of(project, &a.owns, 12);
+        if files.is_empty() { continue; }
+        asked += 1;
+        let Some(text) = graph_impact(st, pid, project, &files).await else { continue };
+        let users = impacted(&text);
+        for b in plan.tasks.iter().filter(|b| b.id != a.id && !after(plan, &b.id, &a.id) && !after(plan, &a.id, &b.id)) {
+            if let Some(f) = users.iter().find(|f| b.owns.iter().any(|o| overlaps(o, f))) {
+                out.push(problem(ar, "hidden-dependency", "mado.p.hidden_dependency", &[("task", &b.id), ("file", f), ("dep", &a.id)], vec![b.id.clone(), a.id.clone()]));
+            }
+        }
+    }
+    if let Some(named) = change.and_then(|c| c.files.as_ref()).filter(|f| !f.is_empty()) {
+        let mut reach = named.clone();
+        if let Some(text) = graph_impact(st, pid, project, named).await { reach.extend(impacted(&text)); }
+        for t in &plan.tasks {
+            let outside: Vec<String> = t.owns.iter().filter(|o| !reach.iter().any(|f| overlaps(o, f))).cloned().collect();
+            if !outside.is_empty() { out.push(problem(ar, "change-outside-scope", "mado.p.change_outside_scope", &[("task", &t.id), ("paths", &few(&outside, 5, ar))], vec![t.id.clone()])); }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod round5_tests {
+    use super::*;
+
+    fn plan(v: serde_json::Value) -> PlanDoc { serde_json::from_value(v).unwrap() }
+
+    #[test]
+    fn a_change_is_held_only_to_its_own_features_and_a_plan_without_one_is_as_before() {
+        let spec = "### F1 — Orders\n- Status: built\n\n### F2 — Export\n- Status: planned\n\n### F3 — Pay\n";
+        let p = plan(serde_json::json!({"version": 1, "tasks": [{"id": "t-a", "title": "A", "description": "d", "owns": ["src/a.ts"], "dependsOn": [], "acceptance": ["npm test"], "feature": "F2"}]}));
+        let untraced = |r: &Review| r.problems.iter().filter(|x| x.kind == "untraced-feature").map(|x| x.message.clone()).collect::<Vec<_>>();
+        assert_eq!(review_scoped(false, spec, None, &p, None), review_in(false, spec, None, &p));
+        assert_eq!(untraced(&review_in(false, spec, None, &p)).len(), 2);
+        assert!(untraced(&review_scoped(false, spec, None, &p, Some(&["F2".into()]))).is_empty());
+        let left = untraced(&review_scoped(false, spec, None, &p, Some(&["F2".into(), "F3".into()])));
+        assert!(left.len() == 1 && left[0].contains("F3"), "{left:?}");
+    }
+
+    #[test]
+    fn the_files_of_an_impact_text_and_the_order_of_tasks() {
+        let text = "Files that depend on the changed files and were not changed, from the code-review-graph tool (most affected first):\n- src/b.ts\n- src/c.ts\n(The tool could not follow 2 calls, so files may be missing from this list.)";
+        assert_eq!(impacted(text), vec!["src/b.ts".to_string(), "src/c.ts".into()]);
+        assert!(impacted("The code-review-graph tool found no other file that depends on the changed files.").is_empty());
+        let p = plan(serde_json::json!({"version": 1, "tasks": [
+            {"id": "a", "title": "A", "description": "d", "owns": ["x"], "dependsOn": [], "acceptance": ["t"], "feature": "F1"},
+            {"id": "b", "title": "B", "description": "d", "owns": ["y"], "dependsOn": ["a"], "acceptance": ["t"], "feature": "F1"},
+            {"id": "c", "title": "C", "description": "d", "owns": ["z"], "dependsOn": ["b"], "acceptance": ["t"], "feature": "F1"}]}));
+        assert!(after(&p, "c", "a") && after(&p, "b", "a") && !after(&p, "a", "c") && !after(&p, "a", "a"));
+        assert_eq!(few(&["a".into(), "b".into(), "c".into()], 2, false), "a, b and 1 more");
+    }
+
+    #[tokio::test]
+    async fn without_a_graph_nothing_is_asked_and_nothing_is_added() {
+        let st = AppState::for_test();
+        let p = plan(serde_json::json!({"version": 1, "tasks": [{"id": "a", "title": "A", "description": "d", "owns": ["src/**"], "dependsOn": [], "acceptance": ["t"], "feature": "F1"}]}));
+        let started = std::time::Instant::now();
+        assert!(graph_findings(&st, "no-graph-here", Path::new("/nonexistent"), &p, None, false).await.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+    }
 }

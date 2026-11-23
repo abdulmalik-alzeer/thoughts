@@ -13,13 +13,32 @@ pub fn conventions(text: &str) -> String {
         talks to its API, and the shared helpers that exist and how they must be called. Follow them exactly; do not invent a second way:\n{}\n", block(text))
 }
 
+/// Round 0.5.0: what the code-review-graph tool (installed by the user) knows about the code
+/// around the files a run works on (`code_graph::around`, cleaned text), as a data block. Only
+/// called when the tool gave something: without it a brief is exactly what it was.
+pub fn code_around(text: &str) -> String {
+    format!("\nWhat the code-review-graph tool on this computer knows about the code around these files: what they define, which files use them, \
+        what they use, and their tests. Keep what other files rely on working, and change the tests that cover what you change. \
+        It can miss things; the code itself is the truth:\n{}\n", block(text))
+}
+
+/// Round 0.5.0: for the build's review, the files that depend on what the build changed and that
+/// it did not change (`code_graph::impact`, cleaned text), as a data block.
+pub fn code_impact(text: &str) -> String {
+    format!("\nThe code-review-graph tool on this computer was asked which files depend on the files this build changed. Its answer \
+        (files the build did not change, which may now be broken by the change; check that each still works with the changed code):\n{}\n", block(text))
+}
+
+/// The graph's part of a prompt, or nothing.
+fn graph_part(around: Option<&str>) -> String { around.map(code_around).unwrap_or_default() }
+
 /// Added to the brief of a `contracts` or `tests` task.
 pub const LOCKING_TASK: &str = "\nWhat this task writes is the agreement the other tasks build on (the example answers of every endpoint or \
     module boundary, or the acceptance tests of a feature from mado/spec.md). Once it is done, no later task may change these files: \
     write them completely and exactly now.\n";
 
 /// The first fix run of a failed `verify` in the build's copy.
-pub fn gate_fix(output: &str, conventions_text: Option<&str>) -> String {
+pub fn gate_fix(output: &str, conventions_text: Option<&str>, around: Option<&str>) -> String {
     let mut out = format!("Checks of the whole product: this folder holds the build so far, the work of every task up to now put together, and the plan's \
         checks of the whole product (its test suite, type check and linter) now fail here. What they printed:\n{}\n\n\
         Fix the code so that these checks pass, keeping the work of every task. Change only what the failure needs. \
@@ -27,6 +46,7 @@ pub fn gate_fix(output: &str, conventions_text: Option<&str>) -> String {
         (changes to them are undone). You cannot run commands: the app runs the checks again when you finish. \
         Commit nothing: the app commits the result.\n", block(output));
     if let Some(c) = conventions_text { out.push_str(&conventions(c)); }
+    out.push_str(&graph_part(around));
     out.push_str(&format!("\n{DATA_NOTE}\n"));
     out
 }
@@ -46,7 +66,7 @@ do not ask questions. Only read: you have no shell and you may not change any fi
 
 /// The review: a fresh run that reads the build's copy against the spec, the conventions, the
 /// comments and what the screens showed. `earlier`: what the review before this one found (after fixes).
-pub fn review(round: u32, has_conventions: bool, comments: &str, screens: &str, earlier: &[Finding]) -> String {
+pub fn review(round: u32, has_conventions: bool, comments: &str, screens: &str, earlier: &[Finding], impact: Option<&str>) -> String {
     let mut out = format!("Review {round} of this build. This folder holds the whole product as the app built it, every task's work put together. \
         Each task passed its own checks; what goes wrong now is usually where one task's work meets another's: a screen and the API it calls \
         (paths, field names, the shape of data and of errors), shared helpers called in different ways, a form that sends what the server does not read, \
@@ -67,6 +87,7 @@ pub fn review(round: u32, has_conventions: bool, comments: &str, screens: &str, 
             f.at.as_deref().map(|w| format!("{w}: ")).unwrap_or_default(), f.text)).collect();
         out.push_str(&format!("\nThe review before this one found these, and a fix was made since. Check each again, and look for what the fix may have broken:\n{}\n", block(&list.join("\n"))));
     }
+    if let Some(i) = impact { out.push_str(&code_impact(i)); }
     out.push_str("\nReport only real faults you can point to in the code (a file, and a line when you can). `must`: the product is broken there, or a pass/fail \
         item of the spec fails; `should`: worth fixing, but nothing is broken. At most 30 findings, the most important first.\n\
         End your final message with exactly one fenced block in this form, and nothing after it (an empty list when nothing is wrong):\n\
@@ -76,13 +97,14 @@ pub fn review(round: u32, has_conventions: bool, comments: &str, screens: &str, 
 }
 
 /// The fix of a review's `must` findings, in the build's copy.
-pub fn review_fix(musts: &[Finding], conventions_text: Option<&str>) -> String {
+pub fn review_fix(musts: &[Finding], conventions_text: Option<&str>, around: Option<&str>) -> String {
     let list: Vec<String> = musts.iter().map(|f| format!("- {}{}", f.at.as_deref().map(|w| format!("{w}: ")).unwrap_or_default(), f.text)).collect();
     let mut out = format!("This folder holds the whole product the app built. A review found these faults that must be fixed:\n{}\n\n\
         Fix each of them in the code, keeping everything else as it is. Files written by a contracts or tests task are agreed and locked: \
         make the code fit them (changes to them are undone). You cannot run commands: the app runs the product's checks afterwards and reviews it again. \
         Commit nothing: the app commits the result.\n", block(&list.join("\n")));
     if let Some(c) = conventions_text { out.push_str(&conventions(c)); }
+    out.push_str(&graph_part(around));
     out.push_str(&format!("\n{DATA_NOTE}\n"));
     out
 }
