@@ -64,6 +64,10 @@ pub(crate) enum Subject {
     MadoApprove { project: String, commands: Vec<String> },
     /// Switching off the confinement of a MADO build's commands.
     ConfineOff,
+    /// Auto mode in one chat (its title): Claude Code's own classifier approves what it does.
+    ChatAuto { title: String },
+    /// Auto mode as the default for new chats.
+    DefaultAuto,
 }
 
 /// How many commands the Final check's dialog lists before it says how many more there are.
@@ -129,6 +133,10 @@ pub(crate) fn ask_text(subject: &Subject, ar: bool) -> Ask {
     const CODEX_NOTE: (&str, &str) = (
         "Even in its other modes, Codex cannot keep the assistant out of your private folders or the app’s own data. You can switch back at any time.",
         "حتى في أوضاعه الأخرى لا يستطيع Codex أن يُبعد المساعد عن مجلداتك الخاصة ولا عن بيانات التطبيق نفسه. ويمكنك التراجع في أي وقت.",
+    );
+    const AUTO_RISK: (&str, &str) = (
+        "In auto mode Claude Code’s own safety check, not you, decides which commands and changes go ahead without asking. It can be wrong, and an instruction hidden in a file or web page Claude reads could lead it to run commands or change files you did not want.",
+        "في الوضع التلقائي يقرّر فحص الأمان الخاص بـ Claude Code، لا أنت، أيّ الأوامر والتعديلات تمضي دون أن يستأذن. وقد يخطئ، وقد تدفعه تعليمات مخفية في ملف أو صفحة ويب يقرؤها Claude إلى تشغيل أوامر أو تعديل ملفات لم تُردها.",
     );
     let pick = |pair: (&'static str, &'static str)| if ar { pair.1 } else { pair.0 };
     let cancel = pick(("Cancel", "إلغاء"));
@@ -216,6 +224,27 @@ pub(crate) fn ask_text(subject: &Subject, ar: bool) -> Ask {
                 no: cancel,
             }
         }
+        Subject::ChatAuto { title } => {
+            let which = if ar { format!("المحادثة: «{}»", named(title, 160)) } else { format!("Chat: “{}”", named(title, 160)) };
+            Ask {
+                title: pick(("Use auto mode in this chat?", "استخدام الوضع التلقائي في هذه المحادثة؟")),
+                body: format!("{which}\n\n{}\n\n{}", pick(AUTO_RISK), pick((
+                    "It applies to this chat until you change it back. Your private folders and the app’s own data stay blocked for Claude’s file tools.",
+                    "يسري هذا على هذه المحادثة إلى أن تغيّره. وتبقى مجلداتك الخاصة وبيانات التطبيق نفسه محجوبة عن أدوات الملفات لدى Claude.",
+                ))),
+                yes: pick(("Use auto mode", "استخدم الوضع التلقائي")),
+                no: cancel,
+            }
+        }
+        Subject::DefaultAuto => Ask {
+            title: pick(("Use auto mode in new chats?", "استخدام الوضع التلقائي في المحادثات الجديدة؟")),
+            body: format!("{}\n\n{}", pick(AUTO_RISK), pick((
+                "This becomes the default for new chats you start yourself. Chats started for you by an add-on or a shortcut chip use Accept edits.",
+                "سيصبح هذا هو الوضع الافتراضي للمحادثات التي تبدؤها بنفسك. أما المحادثات التي تبدؤها إضافة أو زر اختصار فتستخدم «قبول التعديلات».",
+            ))),
+            yes: pick(("Use auto mode", "استخدم الوضع التلقائي")),
+            no: cancel,
+        },
         Subject::ConfineOff => Ask {
             title: pick(("Let the build's commands change files outside its copy of the project?", "السماح لأوامر البناء بتغيير ملفات خارج نسختها من المشروع؟")),
             body: pick((
@@ -293,7 +322,16 @@ fn learn(i: &DaemonInfo, what: Action, subject: &str) -> Option<(Subject, String
             let title = chat["title"].as_str().unwrap_or("").to_string();
             Some((Subject::Chat { title, codex: provider == "codex" }, consent::chat_subject(subject, provider)))
         }
+        Action::ChatAuto => {
+            let chat = get(i, &format!("/chats/{subject}"))?;
+            if chat["id"] != subject {
+                return None;
+            }
+            let provider = chat["provider"].as_str()?;
+            Some((Subject::ChatAuto { title: chat["title"].as_str().unwrap_or("").to_string() }, consent::chat_subject(subject, provider)))
+        }
         Action::SettingsBypass => Some((Subject::Default, String::new())),
+        Action::SettingsAuto => Some((Subject::DefaultAuto, String::new())),
         Action::FullAccess => Some((Subject::FullAccess, String::new())),
         Action::ConfineOff => Some((Subject::ConfineOff, String::new())),
         Action::MadoApprove => {
@@ -328,8 +366,8 @@ fn unknown(what: Action, ar: bool) -> String {
 }
 
 /// `approve_action(action, subject)` → an approval for exactly that action, which the window sends
-/// with the request it confirms. `action`: "chat-bypass" (subject: the chat id), "settings-bypass"
-/// (no subject) or "trust" (subject: the trust question id). The app window only. The shell asks the
+/// with the request it confirms. `action`: "chat-bypass" or "chat-auto" (subject: the chat id),
+/// "settings-bypass" or "settings-auto" (no subject), "trust" (subject: the trust question id), …. The app window only. The shell asks the
 /// user first in a native dialog; a "no", or a second call while one is open, fails with `DECLINED::`.
 #[tauri::command]
 pub async fn approve_action(app: tauri::AppHandle, window: tauri::Window, action: String, subject: String) -> Result<String, String> {
@@ -377,7 +415,9 @@ pub async fn approve_action(app: tauri::AppHandle, window: tauri::Window, action
 mod tests {
     use super::*;
 
-    const ALL: [fn() -> Subject; 7] = [
+    const ALL: [fn() -> Subject; 9] = [
+        || Subject::ChatAuto { title: "Budget".into() },
+        || Subject::DefaultAuto,
         || Subject::MadoApprove { project: "Shop".into(), commands: vec!["npm ci".into(), "npm test".into()] },
         || Subject::ConfineOff,
         || Subject::FullAccess,
@@ -399,7 +439,7 @@ mod tests {
             assert!(arabic(ar.title) && arabic(&ar.body) && arabic(ar.yes) && arabic(ar.no), "{ar:?}");
             assert!(!arabic(en.title) && !arabic(&en.body) && !arabic(en.yes) && !arabic(en.no), "{en:?}");
         }
-        for what in [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess, Action::MadoApprove, Action::ConfineOff] {
+        for what in Action::ALL {
             assert_ne!(unknown(what, false), unknown(what, true));
         }
     }
@@ -413,6 +453,9 @@ mod tests {
         assert!(codex.title.contains("Codex") && codex.body.contains("no sandbox") && !codex.body.contains("Claude"), "{codex:?}");
         let default = ask_text(&Subject::Default, false);
         assert!(default.title.contains("new chats") && default.body.contains("default for new chats"), "{default:?}");
+        let auto = ask_text(&Subject::ChatAuto { title: "Budget".into() }, false);
+        assert!(auto.title.contains("auto mode") && auto.body.contains("Budget") && auto.body.contains("this chat"), "{auto:?}");
+        assert!(ask_text(&Subject::DefaultAuto, false).body.contains("default for new chats"));
         let folder = ask_text(&Subject::Folder("/Users/me/Thoughts".into()), true);
         assert_eq!((folder.yes, folder.no), ("أثق به", "لا أثق به"));
         assert!(folder.body.contains("/Users/me/Thoughts"), "{}", folder.body);

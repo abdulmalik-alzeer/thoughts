@@ -666,16 +666,18 @@
   // user agreed to the warning, which the desktop app shows itself (`approval`; the service refuses
   // the switch otherwise).
   const BYPASS = 'bypassPermissions';
+  // Auto mode (Claude Code's own classifier approves) is held the same way: the shell's own warning.
+  const AUTO = 'auto';
   let savedPerm = $state<string | null>(null);
   let pendingPerm: string | null | undefined; // picked, with its warning still on screen
   async function permChanged() {
     let yes: string | undefined; // the desktop app's approval of the switch
     const want: string | null = chat.options.permissionMode ?? null;
-    const turnsOn = want === BYPASS && savedPerm !== BYPASS;
+    const turnsOn = (want === BYPASS && savedPerm !== BYPASS) || (want === AUTO && savedPerm !== AUTO && savedPerm !== BYPASS);
     if (turnsOn) {
       pendingPerm = want;
       let ok: string | null | undefined;
-      try { ok = await approval('chat-bypass', id); }
+      try { ok = await approval(want === AUTO ? 'chat-auto' : 'chat-bypass', id); }
       catch (e) { pendingPerm = undefined; chat.options.permissionMode = savedPerm; failed(t('chat3.optionsFailed'), e); return; }
       pendingPerm = undefined;
       if (ok === null) { chat.options.permissionMode = savedPerm; return; }

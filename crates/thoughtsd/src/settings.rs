@@ -333,6 +333,14 @@ pub fn bypass_needs_confirm(old: Option<&str>, new: Option<&str>) -> bool {
     new == Some(BYPASS) && old != Some(BYPASS)
 }
 
+/// Does going from `old` to `new` switch auto mode on? Like Claude Code itself, which asks before
+/// auto mode is first used, that step needs the user's yes. (Coming down to it from bypass does not.)
+pub fn auto_needs_confirm(old: Option<&str>, new: Option<&str>) -> bool {
+    new == Some(AUTO) && old != Some(AUTO) && old != Some(BYPASS)
+}
+/// What a client sends along (`?confirm=…` on settings) once the user said yes to auto mode.
+pub const AUTO_CONFIRM: &str = AUTO;
+
 /// The mode used wherever none is stored or asked for: the assistant may edit notes.
 pub const DEFAULT_PERMISSION_MODE: &str = "acceptEdits";
 

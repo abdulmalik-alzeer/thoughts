@@ -62,22 +62,51 @@ fn options_list_the_agents_choices_under_its_names() {
 
 #[test]
 fn a_permission_answer_never_switches_permission_checks_off() {
-    // Leaving plan mode, as Claude Code offers it.
+    // Leaving plan mode, as the pinned adapter offers it (`permissions/options/tools.js`).
     let exit_plan = json!([
-        {"optionId": "bypassPermissions", "name": "Yes, and bypass permissions", "kind": "allow_always"},
-        {"optionId": "acceptEdits", "name": "Yes, and auto-accept edits", "kind": "allow_always"},
-        {"optionId": "default", "name": "Yes, and manually approve edits", "kind": "allow_once"},
-        {"optionId": "plan", "name": "No, keep planning", "kind": "reject_once"},
+        {"optionId": "exit-plan-clear-auto", "name": "Yes, clear context and use auto mode", "kind": "allow_always"},
+        {"optionId": "exit-plan-auto", "name": "Yes, and use auto mode", "kind": "allow_always"},
+        {"optionId": "exit-plan-bypass", "name": "Yes, and bypass permissions", "kind": "allow_always"},
+        {"optionId": "exit-plan-default", "name": "Yes, manually approve edits", "kind": "allow_once"},
+        {"optionId": "reject", "name": "No, keep planning", "kind": "reject_once"},
     ]);
-    assert_eq!(pick_option(&exit_plan, true, false).as_deref(), Some("default"));
-    assert_eq!(pick_option(&exit_plan, false, false).as_deref(), Some("plan"));
-    let only_bypass = json!([{"optionId": "bypassPermissions", "kind": "allow_always"}, {"optionId": "no", "kind": "reject_once"}]);
-    assert_eq!(pick_option(&only_bypass, true, false), None);
-    assert_eq!(pick_option(&only_bypass, true, true).as_deref(), Some("bypassPermissions"));
-    let tool = json!([{"optionId": "allow", "kind": "allow_once"}, {"optionId": "always", "kind": "allow_always"}, {"optionId": "reject", "kind": "reject_once"}]);
-    assert_eq!(pick_option(&tool, true, false).as_deref(), Some("allow"));
+    assert_eq!(pick_option(&exit_plan, true, "acceptEdits", false).as_deref(), Some("exit-plan-default"));
+    assert_eq!(pick_option(&exit_plan, false, "acceptEdits", false).as_deref(), Some("reject"));
+    // Only standing choices that switch to auto or bypass: never picked by a chat checked for less.
+    let elevated = json!([{"optionId": "exit-plan-auto", "kind": "allow_always"}, {"optionId": "exit-plan-clear-auto", "kind": "allow_always"},
+        {"optionId": "exit-plan-bypass", "kind": "allow_always"}, {"optionId": "reject", "kind": "reject_once"}]);
+    for checked in ["plan", "default", "acceptEdits"] { assert_eq!(pick_option(&elevated, true, checked, false), None, "{checked}"); }
+    assert_eq!(pick_option(&elevated, true, "auto", false).as_deref(), Some("exit-plan-auto"));
+    assert_eq!(pick_option(&elevated, true, crate::settings::BYPASS, false).as_deref(), Some("exit-plan-auto"));
+    // A chat checked for plan mode never leaves it through an answer.
+    assert_eq!(pick_option(&exit_plan, true, "plan", false), None);
+    let mode_ids = json!([{"optionId": "bypassPermissions", "kind": "allow_always"}, {"optionId": "acceptEdits", "kind": "allow_always"}, {"optionId": "no", "kind": "reject_once"}]);
+    assert_eq!(pick_option(&mode_ids, true, "default", false), None);
+    assert_eq!(pick_option(&mode_ids, true, "acceptEdits", false).as_deref(), Some("acceptEdits"));
+    // Allowlist: an option the app does not know is never picked, whatever its kind says.
+    let unknown = json!([{"optionId": "yolo-mode", "kind": "allow_once"}, {"optionId": "skip-all", "kind": "allow_always"}, {"optionId": "nope-forever", "kind": "reject_once"}]);
+    assert_eq!(pick_option(&unknown, true, crate::settings::BYPASS, false), None);
+    assert_eq!(pick_option(&unknown, false, "default", false), None);
+    // Full access: this guard yields like every other.
+    assert_eq!(pick_option(&unknown, true, "default", true).as_deref(), Some("yolo-mode"));
+    assert_eq!(pick_option(&elevated, true, "plan", true).as_deref(), Some("exit-plan-auto"));
+    let tool = json!([{"optionId": "allow-once", "kind": "allow_once"}, {"optionId": "allow-with-updates", "kind": "allow_always"}, {"optionId": "reject", "kind": "reject_once"}]);
+    assert_eq!(pick_option(&tool, true, "default", false).as_deref(), Some("allow-once"));
     assert_eq!(permission_answer(None), json!({"outcome": {"outcome": "cancelled"}}));
     assert_eq!(permission_answer(Some("allow".into())), json!({"outcome": {"outcome": "selected", "optionId": "allow"}}));
+}
+
+#[test]
+fn modes_are_ranked_and_unknown_ones_are_never_within() {
+    assert!(mode_within("acceptEdits", "plan") && mode_within("acceptEdits", "default") && mode_within("acceptEdits", "acceptEdits"));
+    assert!(!mode_within("acceptEdits", "auto") && !mode_within("auto", crate::settings::BYPASS) && !mode_within("plan", "default"));
+    assert!(!mode_within("acceptEdits", "dontAsk") && !mode_within("dontAsk", "plan") && !mode_within("default", ""));
+    let mut tr = Translator::default();
+    tr.update(&json!({"sessionUpdate": "config_option_update", "configOptions": [{"id": "model", "category": "model", "currentValue": "opus"},
+        {"id": "mode", "category": "mode", "currentValue": "auto"}]}));
+    assert_eq!(tr.mode.as_deref(), Some("auto"));
+    tr.update(&json!({"sessionUpdate": "current_mode_update", "currentModeId": "plan"}));
+    assert_eq!(tr.mode.as_deref(), Some("plan"));
 }
 
 #[test]
@@ -118,7 +147,10 @@ fn updates_become_the_stream_the_chat_already_shows() {
 
 /// A fake ACP agent as a shell script over stdio: it answers by request id and plays one turn
 /// (text, a tool call, a permission request, the end). Every line it reads is kept in `log.txt`.
-fn fake_agent(dir: &std::path::Path, mode_after_set: &str) -> std::path::PathBuf {
+fn fake_agent(dir: &std::path::Path, mode_after_set: &str) -> std::path::PathBuf { fake_agent_with(dir, mode_after_set, "") }
+
+/// The fake agent, sending `turn_update` (a `session/update` update, as JSON) first in its turn.
+fn fake_agent_with(dir: &std::path::Path, mode_after_set: &str, turn_update: &str) -> std::path::PathBuf {
     let script = dir.join("agent.sh");
     let log = dir.join("log.txt");
     let session = claude_like_session().to_string();
@@ -133,6 +165,7 @@ while IFS= read -r line; do
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id"
       printf '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"current_mode_update","currentModeId":"{mode}"}}}}}}\n' ;;
     *'"method":"session/prompt"'*)
+      [ -n '{turn}' ] && printf '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":%s}}}}\n' '{turn}'
       printf '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"Hi there"}}}}}}}}\n'
       printf '{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"s1","update":{{"sessionUpdate":"tool_call","toolCallId":"t1","title":"Bash","status":"pending","rawInput":{{"command":"ls"}},"_meta":{{"claudeCode":{{"toolName":"Bash"}}}}}}}}}}\n'
       printf '{{"jsonrpc":"2.0","id":"perm-1","method":"session/request_permission","params":{{"sessionId":"s1","toolCall":{{"toolCallId":"t1","rawInput":{{"command":"ls"}}}},"options":[{{"optionId":"allow","kind":"allow_once"}},{{"optionId":"reject","kind":"reject_once"}}]}}}}\n'
@@ -142,14 +175,15 @@ while IFS= read -r line; do
       printf '{{"jsonrpc":"2.0","id":%s,"result":{{"stopReason":"end_turn"}}}}\n' "$id" ;;
   esac
 done
-"#, log = log.display(), session = session, mode = mode_after_set);
+"#, log = log.display(), session = session, mode = mode_after_set, turn = turn_update);
     std::fs::write(&script, text).unwrap();
     script
 }
 
 fn spec(dir: &std::path::Path, mode: &str) -> crate::acp_agent::ChatSpec {
     crate::acp_agent::ChatSpec { cwd: dir.to_path_buf(), add_dirs: vec![], resume: None, fork: false, model: Some("opus".into()), effort: Some("max".into()),
-        mode: mode.into(), rules: Some(dir.join("rules.json")), system: "app notes".into(), budget: Some(2.0), prompt: "hello".into() }
+        mode: mode.into(), rules: Some(dir.join("rules.json")), system: "app notes".into(), budget: Some(2.0), prompt: "hello".into(),
+        setting_sources: None, strict_mcp: false }
 }
 
 fn sh(script: &std::path::Path) -> tokio::process::Command {
@@ -173,7 +207,7 @@ async fn a_chat_turn_runs_over_acp_with_a_fake_agent() {
     st.chats.insert(chat.clone()).await;
     let (_kill_tx, mut kill_rx) = tokio::sync::oneshot::channel();
     // Nobody can be asked: the permission request is refused.
-    let f = crate::acp_agent::drive(&st, &chat.id, child, conn, rx, session, s.prompt.clone(), crate::acp_agent::Asker { token: None, bypass_ok: false }, &mut kill_rx).await;
+    let f = crate::acp_agent::drive(&st, &chat.id, child, conn, rx, session, s.prompt.clone(), asker("acceptEdits"), &mut kill_rx).await;
     assert_eq!(f.ended, crate::claude::Ended::Result(true));
     let saved = st.chats.get(&chat.id).await.unwrap();
     assert_eq!(saved.session_id.as_deref(), Some("s1"));
@@ -212,7 +246,7 @@ async fn a_mode_the_agent_does_not_offer_never_starts_and_a_switch_to_bypass_sto
     let chat = crate::chats::Chat::default();
     st.chats.insert(chat.clone()).await;
     let (_k, mut kill_rx) = tokio::sync::oneshot::channel();
-    let f = crate::acp_agent::drive(&st, &chat.id, child, conn, rx, session, "x".into(), crate::acp_agent::Asker { token: None, bypass_ok: false }, &mut kill_rx).await;
+    let f = crate::acp_agent::drive(&st, &chat.id, child, conn, rx, session, "x".into(), asker("acceptEdits"), &mut kill_rx).await;
     assert!(matches!(f.ended, crate::claude::Ended::Lost(_)), "{:?}", f.ended);
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -251,4 +285,71 @@ fn adapters_are_pinned_and_installed_without_scripts() {
     std::fs::write(pkg.join("package.json"), format!(r#"{{"version":"{}"}}"#, CLAUDE.version)).unwrap();
     assert_eq!(entry_in(&d, &CLAUDE), Some(pkg.join("dist/index.js")));
     std::fs::remove_dir_all(&d).unwrap();
+}
+
+fn asker(mode: &str) -> crate::acp_agent::Asker { crate::acp_agent::Asker { token: None, mode: mode.into(), full: false } }
+
+/// One turn of a chat checked for `checked`, with the agent sending `turn_update` first.
+async fn turn_with(checked: &str, turn_update: &str) -> crate::claude::Ended {
+    let dir = std::env::temp_dir().join(format!("thoughts-acp-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = fake_agent_with(&dir, checked, turn_update);
+    let (child, conn, rx) = crate::acp_agent::connect(sh(&script)).await.unwrap();
+    let (session, _) = crate::acp_agent::open_chat(&conn, &spec(&dir, checked)).await.unwrap();
+    let st = Arc::new(AppState::for_test());
+    let chat = crate::chats::Chat::default();
+    st.chats.insert(chat.clone()).await;
+    let (_k, mut kill_rx) = tokio::sync::oneshot::channel();
+    let f = crate::acp_agent::drive(&st, &chat.id, child, conn, rx, session, "x".into(), asker(checked), &mut kill_rx).await;
+    std::fs::remove_dir_all(&dir).unwrap();
+    f.ended
+}
+
+#[tokio::test]
+async fn a_switch_mid_turn_to_any_mode_that_does_more_ends_the_turn() {
+    let mode_update = |m: &str| json!({"sessionUpdate": "current_mode_update", "currentModeId": m}).to_string();
+    let config_update = |m: &str| json!({"sessionUpdate": "config_option_update", "configOptions": [{"id": "mode", "category": "mode", "currentValue": m}]}).to_string();
+    // Auto (not only bypass), by either kind of update, ends a chat checked for accept-edits.
+    for u in [mode_update("auto"), config_update("auto"), config_update(crate::settings::BYPASS), mode_update("dontAsk")] {
+        assert!(matches!(turn_with("acceptEdits", &u).await, crate::claude::Ended::Lost(_)), "{u}");
+    }
+    assert!(matches!(turn_with("plan", &config_update("default")).await, crate::claude::Ended::Lost(_)));
+    // The same mode or a stricter one goes on.
+    assert_eq!(turn_with("acceptEdits", &mode_update("plan")).await, crate::claude::Ended::Result(true));
+    assert_eq!(turn_with("auto", &config_update("acceptEdits")).await, crate::claude::Ended::Result(true));
+}
+
+#[tokio::test]
+async fn the_profile_guards_travel_to_the_adapter() {
+    let dir = std::env::temp_dir().join(format!("thoughts-acp-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let script = fake_agent(&dir, "acceptEdits");
+    let (mut child, conn, _rx) = crate::acp_agent::connect(sh(&script)).await.unwrap();
+    // A chat with web lookups: no connected tools (`--strict-mcp-config` on the command line).
+    let web = crate::claude::profile("chat", "acceptEdits", true);
+    assert!(!web.mcp);
+    let mut s = spec(&dir, "acceptEdits");
+    s.setting_sources = web.setting_sources().map(String::from);
+    s.strict_mcp = !web.mcp;
+    crate::acp_agent::open_chat(&conn, &s).await.unwrap();
+    crate::acp_agent::end(&mut child).await;
+    let log = std::fs::read_to_string(dir.join("log.txt")).unwrap();
+    let new: Value = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).find(|l| l["method"] == "session/new").unwrap();
+    let o = &new["params"]["_meta"]["claudeCode"]["options"];
+    assert_eq!(o["strictMcpConfig"], true);
+    assert_eq!(o["mcpServers"], json!({}));
+    assert_eq!(o["disallowedTools"], json!(["mcp__*"]));
+    assert!(o.get("settingSources").is_none(), "an ordinary chat keeps the user's own set-up");
+    std::fs::remove_dir_all(&dir).unwrap();
+    // Setting sources as the command line names them: some, or none at all.
+    s.setting_sources = Some("project,local".into());
+    assert_eq!(crate::acp_agent::claude_options(&s)["settingSources"], json!(["project", "local"]));
+    s.setting_sources = Some(String::new());
+    assert_eq!(crate::acp_agent::claude_options(&s)["settingSources"], json!([]));
+    s.strict_mcp = false;
+    assert!(crate::acp_agent::claude_options(&s).get("strictMcpConfig").is_none());
+    // `--restricted` has no equivalent over ACP: such a profile is never run there.
+    for kind in ["chat", "customize"] { assert!(crate::acp_agent::carries(&crate::claude::profile(kind, "acceptEdits", false)), "{kind}"); }
+    assert!(crate::acp_agent::carries(&crate::full_access::profile()));
+    for kind in ["workflow", "module", "mado", "mado-build", "wrap"] { assert!(!crate::acp_agent::carries(&crate::claude::profile(kind, "acceptEdits", false)), "{kind}"); }
 }

@@ -49,21 +49,28 @@ pub enum Action {
     MadoApprove,
     /// Switch off the confinement of a MADO build's commands (no subject; `spending.confineCommands`).
     ConfineOff,
+    /// Switch one chat (subject: its id, as for `ChatBypass`) to auto mode, where Claude Code's own
+    /// classifier approves what it does.
+    ChatAuto,
+    /// Make auto mode the default for chats started by hand (no subject).
+    SettingsAuto,
 }
 
 impl Action {
+    pub const ALL: [Action; 8] = [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess, Action::MadoApprove, Action::ConfineOff,
+        Action::ChatAuto, Action::SettingsAuto];
     pub fn name(self) -> &'static str {
         match self { Action::ChatBypass => "chat-bypass", Action::SettingsBypass => "settings-bypass", Action::Trust => "trust", Action::FullAccess => "full-access",
-            Action::MadoApprove => "mado-approve", Action::ConfineOff => "confine-off" }
+            Action::MadoApprove => "mado-approve", Action::ConfineOff => "confine-off", Action::ChatAuto => "chat-auto", Action::SettingsAuto => "settings-auto" }
     }
     pub fn from_name(s: &str) -> Option<Action> {
-        [Action::ChatBypass, Action::SettingsBypass, Action::Trust, Action::FullAccess, Action::MadoApprove, Action::ConfineOff].into_iter().find(|a| a.name() == s)
+        Action::ALL.into_iter().find(|a| a.name() == s)
     }
     /// Is `subject` the kind of thing this action names? Checked by the shell before it signs.
     pub fn subject_ok(self, subject: &str) -> bool {
         match self {
-            Action::ChatBypass => crate::chats::valid_id(subject),
-            Action::SettingsBypass | Action::FullAccess | Action::ConfineOff => subject.is_empty(),
+            Action::ChatBypass | Action::ChatAuto => crate::chats::valid_id(subject),
+            Action::SettingsBypass | Action::SettingsAuto | Action::FullAccess | Action::ConfineOff => subject.is_empty(),
             Action::MadoApprove => mado_parts(subject).is_some(),
             Action::Trust => (16..=64).contains(&subject.len()) && subject.bytes().all(|b| b.is_ascii_hexdigit()),
         }

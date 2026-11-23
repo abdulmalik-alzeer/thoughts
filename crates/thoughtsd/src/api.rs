@@ -893,6 +893,12 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
             && crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::SettingsBypass, "")) {
         return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
     }
+    // So does making auto mode the default (`?confirm=auto&approval=`, `Action::SettingsAuto`).
+    if crate::settings::auto_needs_confirm(old.ai.claude.permission_mode.as_deref(), new.ai.claude.permission_mode.as_deref())
+        && !(q.get("confirm").map(String::as_str) == Some(crate::settings::AUTO_CONFIRM)
+            && crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::SettingsAuto, "")) {
+        return Err(crate::tr::err("auto.unconfirmed", &[]).into());
+    }
     // The confinement of a MADO build's commands: switching it off needs the shell's yes (`?confirm=confine-off&approval=`); on is free.
     if old.spending.confine_commands() && !new.spending.confine_commands()
         && !(q.get("confirm").map(String::as_str) == Some("confine-off") && crate::consent::verify(q.get("approval").map(String::as_str), crate::consent::Action::ConfineOff, "")) {
@@ -1294,6 +1300,9 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
     // Setup has no warning dialog, so it can never switch "bypass permissions" on (same rule as PUT /api/settings).
     if crate::settings::bypass_needs_confirm(old.ai.claude.permission_mode.as_deref(), s.ai.claude.permission_mode.as_deref()) {
         return Err(crate::tr::err("bypass.unconfirmed", &[]).into());
+    }
+    if crate::settings::auto_needs_confirm(old.ai.claude.permission_mode.as_deref(), s.ai.claude.permission_mode.as_deref()) {
+        return Err(crate::tr::err("auto.unconfirmed", &[]).into());
     }
     let remote_url = o.remote_url.trim().to_string();
     if s.sync_enabled() && !remote_url.is_empty() { check_remote_url(&remote_url)?; }
@@ -2606,7 +2615,9 @@ fn check_run_options(o: &RunOptions) -> anyhow::Result<()> {
 /// add-on (`chat.start`), a chip, a customise run — gets "accept edits" instead, so a prompt the user
 /// did not write never runs with every check switched off.
 fn inherited_mode(default: Option<String>, kind: &str, by_user: bool) -> Option<String> {
-    if default.as_deref() == Some(crate::settings::BYPASS) && !(by_user && kind == "chat") { return Some("acceptEdits".into()); }
+    // Auto mode likewise: Claude Code's classifier approving a prompt the user did not write.
+    let gated = matches!(default.as_deref(), Some(crate::settings::BYPASS | crate::settings::AUTO));
+    if gated && !(by_user && kind == "chat") { return Some("acceptEdits".into()); }
     default
 }
 
@@ -2614,17 +2625,24 @@ fn inherited_mode(default: Option<String>, kind: &str, by_user: bool) -> Option<
 /// (`confirmed`: the client showed the warning, the user agreed, and the desktop shell proved it
 /// with an approval for this chat — see `confirmed_for`). Staying on it does not. `confirmed` is
 /// only asked when a yes is needed, so an approval is not spent on a change that needs none.
-fn check_bypass(kind: &str, current: Option<&str>, wanted: Option<&str>, confirmed: impl FnOnce() -> bool) -> anyhow::Result<()> {
+/// Auto mode is held the same way (`Action::ChatAuto`): `confirmed` is asked with the action the
+/// approval must be for.
+fn check_bypass(kind: &str, current: Option<&str>, wanted: Option<&str>, confirmed: impl FnOnce(crate::consent::Action) -> bool) -> anyhow::Result<()> {
+    if wanted == Some(crate::settings::AUTO) {
+        if kind != "chat" { return Err(crate::tr::err("auto.chat_only", &[])); }
+        if crate::settings::auto_needs_confirm(current, wanted) && !confirmed(crate::consent::Action::ChatAuto) { return Err(crate::tr::err("auto.unconfirmed", &[])); }
+        return Ok(());
+    }
     if wanted != Some(crate::settings::BYPASS) { return Ok(()); }
     if kind != "chat" { return Err(crate::tr::err("bypass.chat_only", &[])); }
-    if crate::settings::bypass_needs_confirm(current, wanted) && !confirmed() { return Err(crate::tr::err("bypass.unconfirmed", &[])); }
+    if crate::settings::bypass_needs_confirm(current, wanted) && !confirmed(crate::consent::Action::ChatBypass) { return Err(crate::tr::err("bypass.unconfirmed", &[])); }
     Ok(())
 }
 
 /// The client says the user confirmed (`confirm_bypass`) and the shell's approval for chat `id`, as
 /// the program `provider` answers in it now, proves it (the shell's dialog named that program).
-fn confirmed_for<'a>(id: &'a str, provider: &'a str, confirm_bypass: bool, approval: Option<&'a str>) -> impl FnOnce() -> bool + 'a {
-    move || confirm_bypass && crate::consent::verify(approval, crate::consent::Action::ChatBypass, &crate::consent::chat_subject(id, provider))
+fn confirmed_for<'a>(id: &'a str, provider: &'a str, confirm_bypass: bool, approval: Option<&'a str>) -> impl FnOnce(crate::consent::Action) -> bool + 'a {
+    move |action| confirm_bypass && crate::consent::verify(approval, action, &crate::consent::chat_subject(id, provider))
 }
 
 /// A chat always carries a real permission mode. Options that name none keep the chat's `current`
@@ -5748,17 +5766,61 @@ mod tests {
     fn bypassing_permissions_needs_a_yes_and_an_ordinary_chat() {
         let b = Some("bypassPermissions");
         // Switching it on: only with the user's confirmation.
-        assert_eq!(shown(check_bypass("chat", Some("plan"), b, || false).map(|_| Json(json!({}))).map_err(ApiErr)).code, "confirm_needed");
-        assert!(check_bypass("chat", Some("plan"), b, || true).is_ok());
-        assert!(check_bypass("chat", None, b, || true).is_ok());
+        assert_eq!(shown(check_bypass("chat", Some("plan"), b, |_| false).map(|_| Json(json!({}))).map_err(ApiErr)).code, "confirm_needed");
+        assert!(check_bypass("chat", Some("plan"), b, |_| true).is_ok());
+        assert!(check_bypass("chat", None, b, |_| true).is_ok());
         // Already on (saving the model or effort of such a chat): nothing to confirm again.
-        assert!(check_bypass("chat", b, b, || false).is_ok());
+        assert!(check_bypass("chat", b, b, |_| false).is_ok());
         // Never for what the app runs itself, confirmed or not.
         for kind in ["customize", "wrap", "workflow", "setup", "module", "reorganize"] {
-            assert_eq!(shown(check_bypass(kind, None, b, || true).map(|_| Json(json!({}))).map_err(ApiErr)).status, 403, "{kind}");
+            assert_eq!(shown(check_bypass(kind, None, b, |_| true).map(|_| Json(json!({}))).map_err(ApiErr)).status, 403, "{kind}");
         }
         // Every other mode passes untouched.
-        for m in [None, Some("plan"), Some("acceptEdits")] { assert!(check_bypass("wrap", b, m, || false).is_ok()); }
+        for m in [None, Some("plan"), Some("acceptEdits")] { assert!(check_bypass("wrap", b, m, |_| false).is_ok()); }
+    }
+
+    #[tokio::test]
+    async fn auto_mode_needs_the_shells_yes_like_bypass() {
+        use crate::consent::{test_approval, Action};
+        let auto = Some(crate::settings::AUTO);
+        // Switching a chat to it needs a yes, made for auto (a bypass yes is not one).
+        assert_eq!(shown(check_bypass("chat", Some("acceptEdits"), auto, |_| false).map(|_| Json(json!({}))).map_err(ApiErr)).code, "confirm_needed");
+        assert!(check_bypass("chat", Some("acceptEdits"), auto, |a| a == Action::ChatAuto).is_ok());
+        assert!(check_bypass("chat", Some("acceptEdits"), auto, |a| a == Action::ChatBypass).is_err());
+        // Staying on it, or coming down to it from bypass, needs none; never for what the app runs itself.
+        assert!(check_bypass("chat", auto, auto, |_| false).is_ok() && check_bypass("chat", Some(crate::settings::BYPASS), auto, |_| false).is_ok());
+        for kind in ["customize", "wrap", "workflow", "module"] {
+            assert_eq!(shown(check_bypass(kind, None, auto, |_| true).map(|_| Json(json!({}))).map_err(ApiErr)).status, 403, "{kind}");
+        }
+        // A default of auto is only inherited by chats the user starts by hand.
+        let a = || Some(crate::settings::AUTO.to_string());
+        assert_eq!(inherited_mode(a(), "chat", true), a());
+        assert_eq!(inherited_mode(a(), "chat", false).as_deref(), Some("acceptEdits"));
+        assert_eq!(inherited_mode(a(), "customize", true).as_deref(), Some("acceptEdits"));
+
+        let st = Arc::new(AppState::for_test());
+        let chat = Chat::default();
+        let id = chat.id.clone();
+        st.chats.insert(chat).await;
+        let patch = |approval: Option<String>| Json(ChatPatch { options: Some(RunOptions { permission_mode: auto.map(String::from), ..Default::default() }), confirm_bypass: true, approval, ..Default::default() });
+        for bad in [None, Some(crate::consent::test_chat_approval(&id))] {
+            assert_eq!(shown(chat_patch(State(st.clone()), Path(id.clone()), patch(bad)).await).code, "confirm_needed");
+        }
+        assert!(st.chats.get(&id).await.unwrap().options.permission_mode.is_none());
+        let yes = test_approval(Action::ChatAuto, &crate::consent::chat_subject(&id, "claude"));
+        chat_patch(State(st.clone()), Path(id.clone()), patch(Some(yes))).await.unwrap();
+        assert_eq!(st.chats.get(&id).await.unwrap().options.permission_mode.as_deref(), auto);
+
+        // The settings default: `?confirm=auto` with the shell's settings-auto approval, nothing less.
+        let mut wanted = st.settings.read().await.clone();
+        wanted.ai.claude.permission_mode = auto.map(String::from);
+        let bypass_yes = test_approval(Action::SettingsBypass, "");
+        for query in [vec![], vec![("confirm", crate::settings::AUTO_CONFIRM)], vec![("confirm", crate::settings::AUTO_CONFIRM), ("approval", bypass_yes.as_str())]] {
+            assert_eq!(shown(put_settings(State(st.clone()), q(&query), Json(wanted.clone())).await).code, "confirm_needed", "{query:?}");
+        }
+        let yes = test_approval(Action::SettingsAuto, "");
+        put_settings(State(st.clone()), q(&[("confirm", crate::settings::AUTO_CONFIRM), ("approval", yes.as_str())]), Json(wanted.clone())).await.unwrap();
+        assert_eq!(st.settings.read().await.ai.claude.permission_mode.as_deref(), auto);
     }
 
     #[tokio::test]

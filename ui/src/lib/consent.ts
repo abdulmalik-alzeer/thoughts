@@ -10,7 +10,7 @@
 
 import { isSecondary, showInMain } from './windows';
 
-export type ConsentAction = 'chat-bypass' | 'settings-bypass' | 'trust' | 'full-access' | 'mado-approve' | 'confine-off';
+export type ConsentAction = 'chat-bypass' | 'settings-bypass' | 'chat-auto' | 'settings-auto' | 'trust' | 'full-access' | 'mado-approve' | 'confine-off';
 
 /** The approval, `null` when the user said no in the shell's dialog (or one was already open: say
  *  nothing then either), `undefined` outside the desktop app. Throws only for a real problem. */
@@ -19,7 +19,7 @@ export async function approval(action: ConsentAction, subject = ''): Promise<str
   // The desktop app asks only in the main window (src-tauri/src/windows.rs): a second window brings
   // it forward, at the chat in question, and says so.
   if (isSecondary()) {
-    await showInMain(action === 'chat-bypass' && subject ? { kind: 'chat', id: subject } : undefined);
+    await showInMain((action === 'chat-bypass' || action === 'chat-auto') && subject ? { kind: 'chat', id: subject } : undefined);
     const { t } = await import('./i18n');
     throw new Error(t(action === 'trust' ? 'chatfWindow.trustInMain' : 'chatfWindow.confirmInMain'));
   }

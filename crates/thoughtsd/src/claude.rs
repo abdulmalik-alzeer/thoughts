@@ -2015,7 +2015,8 @@ pub async fn start_run(
     // (Codex has no way to ask: its runs never get the prompt tool.)
     // An ordinary Claude Code chat runs through the ACP adapter once it is installed (`acp_agent.rs`);
     // until then (and with `ai.classicChats`) through the command line. Its questions come over ACP.
-    let acp_entry = if hook.is_none() && !on_codex && kind == "chat" && !settings.ai.classic_chats {
+    // (A profile whose guards the adapter cannot carry stays on the command line: `acp_agent::carries`.)
+    let acp_entry = if hook.is_none() && !on_codex && kind == "chat" && !settings.ai.classic_chats && crate::acp_agent::carries(&prof) {
         let e = crate::acp_install::ready(crate::assistant::Program::Claude);
         if e.is_none() { crate::acp_install::ensure_in_background(state.clone(), crate::assistant::Program::Claude); }
         e
@@ -2143,7 +2144,8 @@ pub async fn start_run(
     if let Some(entry) = acp_entry {
         let system = system_text(true);
         return start_acp_chat(state, spec, entry, AcpStart { mode, deny, system, ticket, standing, record, touches_library,
-            watching, on_done, full, kind, stopped, prof_name: prof.name, asks, strict }).await;
+            watching, on_done, full, stopped, prof_name: prof.name, asks, strict,
+            setting_sources: prof.setting_sources().map(String::from), strict_mcp: !prof.mcp }).await;
     }
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
@@ -2305,11 +2307,13 @@ pub(crate) struct AcpStart {
     watching: Option<crate::changesets::Watching>,
     on_done: Option<OnDone>,
     full: bool,
-    kind: String,
     stopped: &'static str,
     prof_name: &'static str,
     asks: bool,
     strict: bool,
+    /// The profile's guards the command line passes as flags (`profile_flags`).
+    setting_sources: Option<String>,
+    strict_mcp: bool,
 }
 
 /// An ordinary Claude Code chat's turn through the ACP adapter (`acp_agent.rs`). Everything the
@@ -2325,11 +2329,11 @@ async fn start_acp_chat(state: Arc<AppState>, spec: RunSpec, entry: PathBuf, a: 
         Some(d) => Some(temp.add(&crate::paths::run_tmp_dir(), "settings.json", d)?),
         None => None,
     };
-    let bypass_ok = a.mode == crate::settings::BYPASS && (a.full || a.kind == "chat");
     let cs = crate::acp_agent::ChatSpec {
         cwd: spec.cwd.clone(), add_dirs: spec.add_dirs.clone(), resume: spec.resume.clone(), fork: spec.options.fork_session && spec.resume.is_some(),
         model: spec.options.model.clone(), effort: spec.options.effort.clone(), mode: a.mode.clone(), rules, system: a.system.clone(),
         budget: spec.options.max_budget_usd, prompt: spec.prompt.clone(),
+        setting_sources: a.setting_sources.clone(), strict_mcp: a.strict_mcp,
     };
     let mut c = crate::acp_agent::adapter_command(&state, crate::assistant::Program::Claude, &entry).await?;
     c.current_dir(&spec.cwd);
@@ -2358,7 +2362,7 @@ async fn start_acp_chat(state: Arc<AppState>, spec: RunSpec, entry: PathBuf, a: 
     if let Some(ch) = state.chats.update(&id, |c| c.running = true).await {
         state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
     }
-    let asker = crate::acp_agent::Asker { token: a.ticket.as_ref().map(|t| t.token().to_string()), bypass_ok };
+    let asker = crate::acp_agent::Asker { token: a.ticket.as_ref().map(|t| t.token().to_string()), mode: a.mode.clone(), full: a.full };
     let started = std::time::Instant::now();
     tokio::spawn(async move {
         let guard = RunGuard::new(&state, &id);

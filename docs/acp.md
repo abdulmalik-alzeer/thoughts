@@ -13,8 +13,10 @@ The daemon speaks ACP (agentclientprotocol.com) to the official adapters over th
   unstable features). `catalog` reads models / effort levels / modes from `configOptions`
   (categories `model`, `thought_level`, `mode`), else the older `modes` / `models` fields.
   `Translator` turns `session/update` into the `stream-json` events `claude::handle_event` already
-  shows. `pick_option` answers permission requests and never picks an option that switches
-  permission checks off unless bypass is allowed.
+  shows. `pick_option` answers permission requests from an allowlist only: the plain yes/no
+  answers, and options that switch the mode only to the chat's checked mode or a stricter one
+  (`acp::mode_within`: plan < default < acceptEdits < auto < bypassPermissions; unknown = never).
+  Full access lifts it.
 - **Detection** (`acp_agent::catalog` / `probe`): `session/options` (else `session/new`) in an empty
   folder of the app's own, cached per program and provider address, read in the background;
   `acp.options` is announced when it is in. `GET /api/ai/{claude,codex}/options` add `models`
@@ -25,8 +27,12 @@ The daemon speaks ACP (agentclientprotocol.com) to the official adapters over th
   (`claude::start_acp_chat`; `ai.classicChats` keeps the command line). Every guard of the
   command-line path travels: the rules file (deny/allow/ask rules + the `shell_guard` hooks) as the
   SDK `settings`, the app's notes appended to Claude Code's system prompt, the spending limit,
-  `allowDangerouslySkipPermissions` only for a confirmed bypass, the mode set over ACP and checked
-  (a mode not offered refuses the turn; a switch to bypass the chat may not use ends it). Permission
+  `allowDangerouslySkipPermissions` only for a confirmed bypass, the profile's flag guards
+  (`settingSources` for `--setting-sources`; `strictMcpConfig` + no servers + `disallowedTools: mcp__*`
+  for `--strict-mcp-config`; a profile needing `--restricted` stays on the command line,
+  `acp_agent::carries`), the mode set over ACP and checked (a mode not offered refuses the turn; a
+  switch mid-turn — `current_mode_update` or `config_option_update` — to any mode doing more than
+  the checked one ends it). Permission
   requests become the chat's approval cards (`approvals::ask`) or are refused when nobody can be
   asked. Resume is `session/resume` of the stored session id (the same id the CLI path uses), a
   branch is `session/fork`. Providers: `ANTHROPIC_*` env for Claude Code; Codex's

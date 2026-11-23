@@ -153,6 +153,11 @@ pub struct ChatSpec {
     pub system: String,
     pub budget: Option<f64>,
     pub prompt: String,
+    /// The profile's guards that the command line passes as flags (`claude::profile_flags`):
+    /// which of Claude Code's setting sources load (`None`: all of them; `Some("")`: none), and
+    /// whether no MCP server may start (`--strict-mcp-config`).
+    pub setting_sources: Option<String>,
+    pub strict_mcp: bool,
 }
 
 /// The SDK options the adapter starts Claude Code with: the rules file, the app's notes on top of
@@ -169,8 +174,22 @@ pub fn claude_options(s: &ChatSpec) -> Value {
     if let Some(b) = s.budget.filter(|b| b.is_finite() && *b > 0.0) { o["maxBudgetUsd"] = json!(b); }
     if let Some(m) = s.model.as_ref().filter(|m| !m.is_empty()) { o["model"] = json!(m); }
     if let Some(e) = s.effort.as_ref().filter(|e| !e.is_empty()) { o["effort"] = json!(e); }
+    // The adapter starts the SDK with every setting source unless told otherwise.
+    if let Some(src) = &s.setting_sources {
+        o["settingSources"] = json!(src.split(',').map(str::trim).filter(|x| !x.is_empty()).collect::<Vec<_>>());
+    }
+    // No connected tools: only the (empty) servers handed over start, and their tools are refused too.
+    if s.strict_mcp {
+        o["strictMcpConfig"] = json!(true);
+        o["mcpServers"] = json!({});
+        o["disallowedTools"] = json!(["mcp__*"]);
+    }
     o
 }
+
+/// Can the ACP path carry every guard of profile `p`? `--restricted` (no own set-up and no commands)
+/// has no checked equivalent over the adapter: such a run stays on the command line.
+pub fn carries(p: &crate::claude::Profile) -> bool { p.own_setup || p.shell }
 
 /// The request that opens the session of a turn: a new one, the chat's own (`session/resume`), or a
 /// copy of it for a branch (`session/fork`).
@@ -208,7 +227,13 @@ pub async fn open_chat(conn: &Conn, s: &ChatSpec) -> anyhow::Result<(String, Cat
 /// Who answers the agent's permission requests: the app's approval cards for a chat that asks, a
 /// refusal otherwise (as `--permission-prompts none` on the command line).
 #[derive(Clone)]
-pub struct Asker { pub token: Option<String>, pub bypass_ok: bool }
+pub struct Asker {
+    pub token: Option<String>,
+    /// The chat's checked permission mode: the session never goes on in a mode that does more.
+    pub mode: String,
+    /// Full access is on: this guard yields, like every other.
+    pub full: bool,
+}
 
 async fn answer_permission(state: Arc<AppState>, conn: Arc<Conn>, id: Value, params: Value, asker: Asker) {
     let call = &params["toolCall"];
@@ -224,7 +249,7 @@ async fn answer_permission(state: Arc<AppState>, conn: Arc<Conn>, id: Value, par
         None => false,
     };
     // A yes with no safe option to say it with is answered "cancelled", like a no without one.
-    let _ = conn.respond(&id, acp::permission_answer(acp::pick_option(&params["options"], allow, asker.bypass_ok))).await;
+    let _ = conn.respond(&id, acp::permission_answer(acp::pick_option(&params["options"], allow, &asker.mode, asker.full))).await;
 }
 
 /// One turn: send the prompt, show what comes back in the chat (`claude::handle_event`), answer
@@ -277,11 +302,11 @@ pub async fn drive(state: &Arc<AppState>, chat_id: &str, mut child: Child, conn:
                 None => break Ended::Lost("the adapter's output ended".into()),
                 Some(Incoming::Notification { method, params }) if method == "session/update" => {
                     for ev in tr.update(&params["update"]) { crate::claude::handle_event(state, chat_id, &ev).await; }
-                    // A session that may not skip permission checks never goes on in that mode.
-                    if !asker.bypass_ok && tr.mode.as_deref() == Some(crate::settings::BYPASS) {
-                        crate::log::error(format!("run {chat_id}: the agent switched to bypass permissions; stopped"));
+                    // The session never goes on in a mode that does more than the one checked.
+                    if let Some(now) = tr.mode.as_deref().filter(|m| !asker.full && !acp::mode_within(&asker.mode, m)) {
+                        crate::log::error(format!("run {chat_id}: the agent switched to mode \"{now}\" (checked: {}); stopped", asker.mode));
                         let _ = conn.notify("session/cancel", json!({"sessionId": session})).await;
-                        break Ended::Lost("the agent switched permission checks off".into());
+                        break Ended::Lost("the agent switched to a permission mode the chat does not use".into());
                     }
                 }
                 Some(Incoming::Notification { .. }) => {}

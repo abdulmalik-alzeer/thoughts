@@ -20,6 +20,8 @@
   answer, carries an approval from the desktop shell made with a key the window never sees
   (`consent.rs` in the daemon and in `src-tauri`): the app token alone is not a yes. Runs the app starts itself never use it,
   and a bypass default in settings is only inherited by chats the user starts by hand (`byUser`).
+  Auto mode (`settings::AUTO`, Claude Code's classifier approves) is held the same way: chats only,
+  the shell's yes (`Action::ChatAuto` / `Action::SettingsAuto`, `?confirm=auto`), `byUser` only.
 - Full access (`settings.fullAccess`, `full_access.rs`, Settings › Privacy & cost) is the exception the
   owner chose: while it is on, every guard the app itself adds yields — every kind of run bypasses
   permissions (Codex: its own unrestricted mode), no rules file, sandbox, command check, trust check or

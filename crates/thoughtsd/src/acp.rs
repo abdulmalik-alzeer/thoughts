@@ -217,19 +217,52 @@ pub async fn choose(conn: &Conn, session: &str, option: Option<&str>, offered: &
 
 // ---------- permission requests ----------
 
+/// How much a permission mode lets the agent do without asking, least first. A mode not listed is
+/// unknown and counts as no mode at all (never "within" another).
+pub fn strictness(mode: &str) -> Option<u8> {
+    match mode { "plan" => Some(0), "default" => Some(1), "acceptEdits" => Some(2), crate::settings::AUTO => Some(3), crate::settings::BYPASS => Some(4), _ => None }
+}
+
+/// May a session checked for mode `checked` be in mode `now`? Only the same mode or a stricter one.
+pub fn mode_within(checked: &str, now: &str) -> bool {
+    matches!((strictness(checked), strictness(now)), (Some(c), Some(n)) if n <= c)
+}
+
+/// The permission mode an option switches the session to, as the agent names it (the mode ids
+/// themselves, or Claude Code's adapter's "leave plan mode" choices).
+fn option_mode(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "default" | "exit-plan-default" => "default",
+        "acceptEdits" | "exit-plan-accept-edits" | "exit-plan-clear-accept-edits" => "acceptEdits",
+        "auto" | "exit-plan-auto" | "exit-plan-clear-auto" => crate::settings::AUTO,
+        "bypassPermissions" | "exit-plan-bypass" | "exit-plan-clear-bypass" => crate::settings::BYPASS,
+        "plan" => "plan",
+        _ => return None,
+    })
+}
+
+/// The plain answers that change no mode: a yes (once, or with the rule the agent proposes) or a no.
+const PLAIN_ALLOW: &[&str] = &["allow-once", "allow_once", "allow", "allow-always", "allow_always", "always", "allow-with-updates", "allow-skill-exact", "allow-skill-prefix"];
+const PLAIN_REJECT: &[&str] = &["reject", "reject-once", "reject_once", "reject-always", "reject_always", "no", "deny"];
+
 /// The option to answer a permission request with. `allow` picks a one-time (else standing) yes,
-/// `false` a one-time (else standing) no; an option that would switch permission checks off for the
-/// rest of the session (leaving plan mode for "bypass permissions") is never picked unless
-/// `bypass_ok`. `None`: answer "cancelled".
-pub fn pick_option(options: &Value, allow: bool, bypass_ok: bool) -> Option<String> {
+/// `false` a one-time (else standing) no. Only options on an allowlist are ever picked: the plain
+/// answers (`PLAIN_ALLOW` / `PLAIN_REJECT`), and options that switch the mode only when the new mode
+/// is the chat's checked mode `checked` or a stricter one (`mode_within`). With full access on
+/// (`full`) every option is allowed, as every other guard yields. `None`: answer "cancelled".
+pub fn pick_option(options: &Value, allow: bool, checked: &str, full: bool) -> Option<String> {
     let list: Vec<&Value> = options.as_array().into_iter().flatten().collect();
-    let unsafe_id = |o: &Value| {
-        let id = o["optionId"].as_str().unwrap_or("").to_ascii_lowercase();
-        !bypass_ok && (id.contains("bypass") || id.contains("dangerous") || id.contains("full-access") || id.contains("full_access"))
+    let allowed = |o: &Value| {
+        let id = o["optionId"].as_str().unwrap_or("");
+        if full { return !id.is_empty(); }
+        match option_mode(id) {
+            Some(m) => mode_within(checked, m),
+            None => if allow { PLAIN_ALLOW.contains(&id) } else { PLAIN_REJECT.contains(&id) },
+        }
     };
     let kinds: &[&str] = if allow { &["allow_once", "allow_always"] } else { &["reject_once", "reject_always"] };
     for k in kinds {
-        if let Some(o) = list.iter().find(|o| o["kind"] == *k && !unsafe_id(o)) { return o["optionId"].as_str().map(String::from); }
+        if let Some(o) = list.iter().find(|o| o["kind"] == *k && allowed(o)) { return o["optionId"].as_str().map(String::from); }
     }
     None
 }
@@ -290,6 +323,15 @@ impl Translator {
             }
             "tool_call_update" => out.extend(self.result_of(u)),
             "current_mode_update" => self.mode = u["currentModeId"].as_str().map(String::from),
+            // The mode as a config option: whatever the agent now says its value is.
+            "config_option_update" => {
+                let opts = if u["configOptions"].is_array() { u["configOptions"].clone() } else { json!([u["configOption"].clone()]) };
+                for o in opts.as_array().into_iter().flatten() {
+                    if o["category"] == "mode" || o["id"] == "mode" {
+                        self.mode = Some(o["currentValue"].as_str().unwrap_or("").to_string());
+                    }
+                }
+            }
             "usage_update" => if let Some(a) = u["cost"]["amount"].as_f64() { self.cost = a; },
             _ => {}
         }
