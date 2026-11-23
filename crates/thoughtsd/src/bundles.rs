@@ -55,6 +55,11 @@ pub struct BundlesFile {
     pub off: BTreeSet<String>,
     /// The app version that listed the packs kept before plugins existed (empty: not done yet).
     pub migrated: String,
+    /// The file is there but could not be read as the record the app writes (too large, not JSON, out
+    /// of shape, over the limits). Nothing is then known about which plugin is off, so nothing of the
+    /// layer is loaded and nothing is written until the file is put right (History, Rollback).
+    #[serde(skip)]
+    pub unreadable: bool,
 }
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
@@ -186,7 +191,7 @@ impl BundlesFile {
     /// made outside the app could have put anything).
     fn clean(&mut self) {
         let mut kept = BTreeMap::new();
-        for (id, mut b) in std::mem::take(&mut self.bundles).into_iter().filter(|(id, _)| valid_id(id)).take(MAX_BUNDLES) {
+        for (id, mut b) in std::mem::take(&mut self.bundles).into_iter().filter(|(id, _)| valid_id(id)) {
             b.id = id.clone();
             b.name = plain_name(&b.name);
             if b.name.is_empty() { b.name = id.clone(); }
@@ -198,15 +203,19 @@ impl BundlesFile {
             if semver(&b.min_app).is_none() { b.min_app = String::new(); }
             if !packs::full_fingerprint(&b.fingerprint) { b.fingerprint = String::new(); }
             b.claims.retain(Claim::valid);
-            b.claims.truncate(MAX_CLAIMS);
             kept.insert(id, b);
         }
         self.bundles = kept;
-        self.off = std::mem::take(&mut self.off).into_iter().filter(|id| valid_id(id) || valid_loose(id)).take(MAX_OFF).collect();
+        self.off = std::mem::take(&mut self.off).into_iter().filter(|id| valid_id(id) || valid_loose(id)).collect();
         self.migrated = packs::clean_line(&self.migrated, 30);
     }
 
     fn is_off(&self, b: &Bundle) -> bool { self.off.contains(&b.id) }
+
+    /// Is the record within what the app will read back?
+    fn within_limits(&self) -> bool {
+        self.bundles.len() <= MAX_BUNDLES && self.off.len() <= MAX_OFF && self.bundles.values().all(|b| b.claims.len() <= MAX_CLAIMS)
+    }
 
     /// Claims of every named plugin.
     fn claimed(&self) -> Vec<&Claim> { self.bundles.values().flat_map(|b| b.claims.iter()).collect() }
@@ -227,17 +236,38 @@ fn compatible(b: &Bundle) -> bool { !needs_newer_app(&b.min_app) && b.layer_form
 
 pub fn load(dir: &Path) -> BundlesFile { load_from(&dir) }
 
+/// The record of plugins in the layer at `dir`. Only a file that is not there means "no plugins
+/// yet"; one that is there but cannot be read as the app wrote it comes back `unreadable`, never as
+/// an empty record (which would switch everything back on).
 pub fn load_from(dir: &dyn LayerFiles) -> BundlesFile {
-    let Some(bytes) = dir.plain_file(FILE, MAX_BYTES) else { return BundlesFile::default() };
-    let mut f: BundlesFile = serde_json::from_slice(&bytes).unwrap_or_default();
+    let unreadable = || BundlesFile { unreadable: true, ..Default::default() };
+    let Some(bytes) = dir.plain_file(FILE, MAX_BYTES) else { return if dir.has_file(FILE) { unreadable() } else { BundlesFile::default() } };
+    // The app's own record is an object that says its format; anything else is not that record.
+    let Ok(raw) = serde_json::from_slice::<Value>(&bytes) else { return unreadable() };
+    if !raw.is_object() || raw["format"].as_u64().is_none() { return unreadable(); }
+    let Ok(mut f) = serde_json::from_value::<BundlesFile>(raw) else { return unreadable() };
+    if !f.within_limits() { return unreadable(); }
     f.clean();
     f
 }
 
+fn unreadable_err() -> anyhow::Error { crate::tr::err("plugin.unreadable", &[]) }
+
+/// `load`, for something that is about to change plugins: refused while the record cannot be read.
+fn load_ok(dir: &Path) -> anyhow::Result<BundlesFile> {
+    let f = load(dir);
+    if f.unreadable { Err(unreadable_err()) } else { Ok(f) }
+}
+
+/// The record as it is written. Refused when the app could not read it back: over the limits on
+/// plugins, claims or size (so the app can never write itself into the unreadable state).
 fn text_of(f: &BundlesFile) -> anyhow::Result<String> {
+    if f.unreadable { return Err(unreadable_err()); }
     let mut f = f.clone();
     if f.format == 0 { f.format = FORMAT; }
-    Ok(serde_json::to_string_pretty(&f)? + "\n")
+    let text = serde_json::to_string_pretty(&f)? + "\n";
+    if !f.within_limits() || text.len() > MAX_BYTES { return Err(crate::tr::err("plugin.too_many", &[])); }
+    Ok(text)
 }
 
 /// Write `bundles.json` (the caller records it in the history).
@@ -245,9 +275,10 @@ fn save(dir: &Path, f: &BundlesFile) -> anyhow::Result<()> {
     let mut f = f.clone();
     // Whoever writes the file after the first start of this version has already listed the kept packs.
     if f.migrated.is_empty() { f.migrated = env!("CARGO_PKG_VERSION").into(); }
+    let text = text_of(&f)?;
     let target = dir.join(FILE);
     if std::fs::symlink_metadata(&target).map_or(false, |m| !m.is_file()) { std::fs::remove_file(&target)?; }
-    std::fs::write(target, text_of(&f)?)?;
+    std::fs::write(target, text)?;
     Ok(())
 }
 
@@ -511,6 +542,14 @@ fn prune(f: &mut BundlesFile, snap: &Snap) {
 /// Take out of the manifest the UI loads (`applayer::manifest_with`) everything owned by a plugin
 /// that is switched off, or that this version of the app cannot run.
 pub fn subtract_for_load(dir: &dyn LayerFiles, f: &BundlesFile, out: &mut Value) {
+    if f.unreadable {
+        // Which plugins are off is not known: nothing of the layer is loaded, and the app says why.
+        for key in ["plugins", "views", "themes", "workflows"] { out[key] = json!([]); }
+        for key in ["home", "todos", "nav", "pages", "keys"] { out[key] = Value::Null; }
+        out["css"] = json!("");
+        out["pluginsUnreadable"] = json!(true);
+        return;
+    }
     if f.bundles.is_empty() && f.off.is_empty() { return; }
     let inactive: Vec<&Bundle> = f.bundles.values().filter(|b| f.is_off(b) || !compatible(b)).collect();
     let mut gone: Vec<Claim> = inactive.iter().flat_map(|b| b.claims.iter().cloned()).collect();
@@ -556,6 +595,8 @@ pub fn subtract_for_load(dir: &dyn LayerFiles, f: &BundlesFile, out: &mut Value)
 /// switched off or cannot run here, and those switched off on their own.
 pub fn inactive_workflows(layer: &Path) -> BTreeSet<String> {
     let f = load(layer);
+    // An unreadable record: none of them runs.
+    if f.unreadable { return crate::workflows::load_files(layer).into_iter().map(|l| l.file).collect(); }
     let mut out: BTreeSet<String> = f.bundles.values().filter(|b| f.is_off(b) || !compatible(b)).flat_map(|b| b.claims.iter())
         .filter_map(|c| match c { Claim::File { path } => task_file(path).map(String::from), _ => None }).collect();
     out.extend(f.off.iter().filter_map(|id| id.strip_prefix("task:")).filter(|p| f.owner_of_file(p).is_none()).filter_map(task_file).map(String::from));
@@ -638,6 +679,7 @@ fn item(id: &str, kind: &str, name: &str, on: bool, state: &str, contains: Vec<V
 pub fn list(d: &Dirs, ar: bool) -> Vec<Value> {
     let layer = d.layer.as_path();
     let f = load(layer);
+    if f.unreadable { return vec![]; }
     let snap = Snap::of(&layer);
     let addons = applayer::addons_of(layer, ar);
     let tasks = crate::workflows::load_files(layer);
@@ -708,6 +750,7 @@ fn gone() -> anyhow::Error { crate::tr::err("plugin.gone", &[]) }
 
 /// The listed plugin `id` (named or loose), or the refusal that it is no longer there.
 fn listed(d: &Dirs, id: &str) -> anyhow::Result<Value> {
+    load_ok(&d.layer)?;
     if !(valid_id(id) || valid_loose(id)) { return Err(gone()); }
     list(d, false).into_iter().find(|p| p["id"] == id).ok_or_else(gone)
 }
@@ -763,7 +806,7 @@ pub fn system_title(entry: &str, stored: &str, ar: bool) -> String {
 pub async fn switch_in(g: Git<'_>, d: &Dirs, id: &str, on: bool) -> anyhow::Result<String> {
     let layer = d.layer.as_path();
     if let Some(path) = id.strip_prefix("addon:").or_else(|| id.strip_prefix("page:")) {
-        if load(layer).owner_of_file(path).is_some() { return Err(gone()); }
+        if load_ok(layer)?.owner_of_file(path).is_some() { return Err(gone()); }
         return applayer::switch_in(g, layer, path, on).await;
     }
     let p = listed(d, id)?;
@@ -777,7 +820,7 @@ pub async fn switch_in(g: Git<'_>, d: &Dirs, id: &str, on: bool) -> anyhow::Resu
     let items: Vec<String> = f.bundles.get(id).map(|b| b.claims.iter().filter_map(|c| match c { Claim::File { path } if applayer::item_path(path).is_some() => Some(path.clone()), _ => None }).collect()).unwrap_or_default();
     let subject = format!("{} plugin {id}", if on { "Switch on" } else { "Switch off" });
     applayer::app_change(g, layer, &subject, act(if on { "plugin-on" } else { "plugin-off" }, id, &name), |dir| {
-        let mut f = load(dir);
+        let mut f = load_ok(dir)?;
         if on { f.off.remove(id); } else { f.off.insert(id.to_string()); }
         if let Some(b) = f.bundles.get_mut(id) { if on { b.message.clear(); } }
         save(dir, &f)?;
@@ -838,13 +881,13 @@ pub(crate) fn remove_claims(dir: &Path, claims: &[Claim]) -> anyhow::Result<Vec<
 pub async fn remove_in(g: Git<'_>, d: &Dirs, id: &str) -> anyhow::Result<String> {
     let layer = d.layer.as_path();
     if let Some(path) = id.strip_prefix("addon:").or_else(|| id.strip_prefix("page:")) {
-        if load(layer).owner_of_file(path).is_some() { return Err(gone()); }
+        if load_ok(layer)?.owner_of_file(path).is_some() { return Err(gone()); }
         return applayer::remove_in(g, layer, path).await;
     }
     let p = listed(d, id)?;
     let name = p["name"].as_str().unwrap_or(id).to_string();
     applayer::app_change(g, layer, &format!("Remove plugin {id}"), act("plugin-remove", id, &name), |dir| {
-        let mut f = load(dir);
+        let mut f = load_ok(dir)?;
         let had = dir.join(FILE).is_file();
         let mut touched = match f.bundles.remove(id) {
             Some(b) => remove_claims(dir, &b.claims)?,
@@ -878,10 +921,10 @@ pub async fn describe_in(g: Git<'_>, d: &Dirs, w: &Describe) -> anyhow::Result<(
     let f = load(layer);
     let named = f.bundles.contains_key(&w.id);
     let id = if named { w.id.clone() } else { (0..8).map(|_| new_id()).find(|i| !f.bundles.contains_key(i)).unwrap_or_else(new_id) };
-    if !named && f.bundles.len() >= MAX_BUNDLES { return Err(crate::tr::err("pack.too_many", &[("count", &MAX_BUNDLES.to_string())])); }
+    if !named && f.bundles.len() >= MAX_BUNDLES { return Err(crate::tr::err("plugin.too_many", &[])); }
     let (version, now) = (clean_version(&w.version), chrono::Utc::now().to_rfc3339());
     let hash = applayer::app_change(g, layer, &format!("Describe plugin {id}"), act("plugin-describe", &id, &name), |dir| {
-        let mut f = load(dir);
+        let mut f = load_ok(dir)?;
         let mut touched = vec![FILE.to_string()];
         if !named {
             let mut claims = loose_claims(dir, &f, &w.id);
@@ -934,7 +977,7 @@ fn manifest_of(b: &Bundle) -> Value {
 /// plugin's own lines (`plugin`). 0.4.x imports it as a feature pack.
 pub fn export_in(d: &Dirs, id: &str) -> anyhow::Result<Value> {
     let layer = d.layer.as_path();
-    let f = load(layer);
+    let f = load_ok(layer)?;
     let b = f.bundles.get(id).filter(|_| valid_id(id)).ok_or_else(gone)?;
     if needs_newer_app(&b.min_app) { return Err(crate::tr::err("plugin.newer_app", &[("version", &b.min_app)])); }
     let snap = Snap::of(&layer);
@@ -964,6 +1007,7 @@ pub fn export_in(d: &Dirs, id: &str) -> anyhow::Result<Value> {
 /// Everything as one file: the whole layer as a full pack, with the list of plugins (`plugins_list`).
 /// What add-ons saved is not in it (that travels in the move file).
 pub fn export_all(d: &Dirs, name: &str) -> anyhow::Result<Value> {
+    load_ok(&d.layer)?;
     packs::export_as(&d.layer, &packs::Identity { name, ..Default::default() }, None)
 }
 
@@ -1122,7 +1166,7 @@ pub fn migrate_files(files: &mut BTreeMap<String, String>, from: u64) -> anyhow:
 /// changed, and the named plugins made for the older format are switched off with the reason.
 pub async fn migrate_format(g: Git<'_>, d: &Dirs) -> anyhow::Result<()> {
     let layer = d.layer.as_path();
-    if !layer.join(FILE).is_file() { return Ok(()); }
+    if !layer.join(FILE).is_file() || load(layer).unreadable { return Ok(()); }
     let raw: Value = std::fs::read_to_string(layer.join(FILE)).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
     let Some(from) = raw["format"].as_u64().filter(|f| *f < FORMAT) else { return Ok(()) };
     let before = packs::collect(layer);
@@ -1211,7 +1255,8 @@ pub struct Plan { pub text: String, pub extra: Vec<(String, String)>, pub id: St
 /// plugin and the record needs no tidying.
 pub fn plan(d: &Dirs, m: &crate::staging::Meta, files: &BTreeMap<String, Option<Vec<u8>>>, summary: &str) -> anyhow::Result<Option<Plan>> {
     let layer = d.layer.as_path();
-    let before = load(layer);
+    // (A record that cannot be read stops every Keep: nothing is added on top of it.)
+    let before = load_ok(layer)?;
     let had = layer.join(FILE).is_file();
     let mut f = before.clone();
     let old = Snap::of(&layer);
@@ -1266,7 +1311,7 @@ pub fn plan(d: &Dirs, m: &crate::staging::Meta, files: &BTreeMap<String, Option<
             claims.truncate(MAX_CLAIMS);
             if claims.is_empty() && target == "new" { id.clear(); name.clear(); }
             else {
-                if !f.bundles.contains_key(&id) && f.bundles.len() >= MAX_BUNDLES { return Err(crate::tr::err("pack.too_many", &[("count", &MAX_BUNDLES.to_string())])); }
+                if !f.bundles.contains_key(&id) && f.bundles.len() >= MAX_BUNDLES { return Err(crate::tr::err("plugin.too_many", &[])); }
                 f.take_over(&id, &claims);
                 let b = f.bundles.entry(id.clone()).or_insert_with(|| Bundle { id: id.clone(), origin: "made".into(), created: now.clone(), ..Default::default() });
                 if name.is_empty() { name = if b.name.is_empty() { id.clone() } else { b.name.clone() }; }
@@ -1302,7 +1347,7 @@ pub fn staged_all(pack: &Value) -> Option<Value> {
 /// change is kept: the pack's plugin lines (cleaned) with the claims its files stand for, as worked
 /// out here. `origin`: "pack" or "ready"; `migrated`: its files were updated from an older format.
 pub fn before_merge(d: &Dirs, p: &PackPlugin, files: &BTreeMap<String, String>, css_key: &str, origin: &str, fingerprint: &str, as_new: bool, migrated: bool) -> anyhow::Result<Value> {
-    let f = load(&d.layer);
+    let f = load_ok(&d.layer)?;
     let old = replaced_by(&f, p).filter(|_| !as_new);
     let id = match old { Some(b) => b.id.clone(), None if !p.id.is_empty() && !f.bundles.contains_key(&p.id) => p.id.clone(), None => new_id() };
     if let Some(b) = old.filter(|b| b.fingerprint != fingerprint) { remove_claims(&d.staging, &b.claims)?; }
@@ -1378,7 +1423,7 @@ pub async fn settle_undo(g: Git<'_>, dir: &Path, entry: &str) -> anyhow::Result<
 pub async fn migrate_kept(g: Git<'_>, d: &Dirs) -> anyhow::Result<bool> {
     let layer = d.layer.as_path();
     let mut f = load(layer);
-    if !f.migrated.is_empty() { return Ok(false); }
+    if f.unreadable || !f.migrated.is_empty() { return Ok(false); }
     let kept = applayer::kept_packs_in_effect(g, layer).await;
     if kept.is_empty() { return Ok(false); }
     let now = chrono::Utc::now().to_rfc3339();
@@ -1497,7 +1542,10 @@ async fn list_route(State(st): S) -> R {
     let _g = crate::layer_api::LAYER_LOCK.lock().await;
     let (d, ar) = (Dirs::real(), arabic(&st).await);
     if crate::staging::guard(Git(Some(&st)), &d, ar).await { st.emit(json!({"type": "layer.pending"})); }
-    Ok(Json(json!({"format": FORMAT, "appVersion": env!("CARGO_PKG_VERSION"), "plugins": list(&d, ar)})))
+    let mut v = json!({"format": FORMAT, "appVersion": env!("CARGO_PKG_VERSION"), "plugins": list(&d, ar)});
+    // The record cannot be read: said in plain words, with the way out (History, Rollback).
+    if load(&d.layer).unreadable { v["problem"] = json!(crate::tr::user_err_in(ar, "plugin.unreadable", &[]).message); }
+    Ok(Json(v))
 }
 
 #[derive(Deserialize, Default)]
@@ -1553,7 +1601,7 @@ async fn export_route(State(st): S, Query(q): Query<HashMap<String, String>>) ->
 async fn customise_route(State(st): S, Json(r): Json<Ref>) -> R {
     let _g = crate::layer_api::LAYER_LOCK.lock().await;
     let d = Dirs::real();
-    let f = load(&d.layer);
+    let f = load_ok(&d.layer)?;
     let b = f.bundles.get(&r.id).ok_or_else(gone)?;
     let title = if arabic(&st).await { format!("تعديل الملحق «{}»", b.name) } else { format!("Change the plugin \u{201c}{}\u{201d}", b.name) };
     let chat = crate::api::start_customize(st.clone(), String::new(), "customize", Some(title)).await?;

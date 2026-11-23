@@ -494,8 +494,6 @@ async fn the_plugin_lines_of_a_file_are_claims_never_grants() {
     assert_eq!(f.bundles.keys().collect::<Vec<_>>(), ["p-aaaaaaaaaaaa"]);
     let a = &f.bundles["p-aaaaaaaaaaaa"];
     assert_eq!((a.name.as_str(), a.origin.as_str(), a.min_app.as_str(), a.fingerprint.as_str(), a.claims.clone()), ("A[U+202E]", "made", "", "", vec![file("plugins/mine.js")]));
-    w(&d.layer, FILE, &"x".repeat(MAX_BYTES + 1));
-    assert_eq!(load(&d.layer), BundlesFile::default(), "an oversized record is not read at all");
     done(&d);
 }
 
@@ -751,7 +749,7 @@ async fn everything_exports_as_one_file_and_imports_through_one_review() {
 #[test]
 fn undoing_an_entry_takes_back_only_what_it_did_to_the_record() {
     let b = |id: &str, name: &str, claims: Vec<Claim>| Bundle { id: id.into(), name: name.into(), claims, ..Default::default() };
-    let file_of = |list: Vec<Bundle>, off: &[&str]| BundlesFile { format: 1, bundles: list.into_iter().map(|x| (x.id.clone(), x)).collect(), off: off.iter().map(|s| s.to_string()).collect(), migrated: "0.5.0".into() };
+    let file_of = |list: Vec<Bundle>, off: &[&str]| BundlesFile { format: 1, bundles: list.into_iter().map(|x| (x.id.clone(), x)).collect(), off: off.iter().map(|s| s.to_string()).collect(), migrated: "0.5.0".into(), unreadable: false };
     let (a, a2, c) = (b("p-aaaaaaaaaaaa", "A", vec![file("plugins/a.js")]), b("p-aaaaaaaaaaaa", "A2", vec![file("plugins/a.js"), file("plugins/a2.js")]), b("p-cccccccccccc", "C", vec![file("plugins/c.js")]));
     // The entry added C and switched "home" off; since then A was renamed and "look" switched off.
     let (before, after, now) = (file_of(vec![a.clone()], &[]), file_of(vec![a.clone(), c.clone()], &["home"]), file_of(vec![a2.clone(), c.clone()], &["home", "look"]));
@@ -808,4 +806,108 @@ async fn access_keys_and_add_ons_never_reach_the_plugin_addresses() {
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!((&v["format"], v["appVersion"].as_str(), v["plugins"].is_array()), (&json!(FORMAT), Some(env!("CARGO_PKG_VERSION")), true));
     server.abort();
+}
+
+/// A record that is there but cannot be read is never taken for "no plugins": that would switch
+/// everything that was off back on. Nothing of the layer loads, no task runs, nothing is written on
+/// top of it, the user is told, and undoing the entry that broke it is the way out.
+#[tokio::test]
+async fn a_record_that_cannot_be_read_fails_closed() {
+    let (st, d) = mine("unreadable").await;
+    keep_pack(st, &d, &kanban("1.0.0")).await;
+    let weekly = workflows::load_files(&d.layer).remove(0);
+    workflows::approve(&d.layer, &d.home, &weekly.file, &weekly.hash).unwrap();
+    switch_in(st, &d, ID, false).await.unwrap();
+    let good = read(&d.layer, FILE);
+    assert!(!load(&d.layer).unreadable && !load(&Path::new("/nowhere/at/all")).unreadable, "a file that is not there is simply no plugins yet");
+    let mut over = serde_json::from_str::<Value>(&good).unwrap();
+    over["off"] = json!((0..=MAX_OFF).map(|i| format!("theme:t{i}")).collect::<Vec<_>>());
+    let unknown = good.replace("\"kind\": \"file\"", "\"kind\": \"everything\"");
+    assert_ne!(unknown, good);
+    for (why, broken) in [("too large", format!("{{\"pad\":\"{}\"}}", "x".repeat(MAX_BYTES))), ("not JSON", "{\"format\": 1, \"bundles\": {".to_string()),
+        ("cut short", good[..good.len() / 2].to_string()), ("another shape", "[]".to_string()), ("an object that is not the record", "{\"off\": []}".to_string()), ("over the limits", over.to_string()), ("a claim of a kind this version does not know", unknown)] {
+        w(&d.layer, FILE, &broken);
+        st.commit_all(&d.layer, "the record was damaged").await.unwrap();
+        assert!(load(&d.layer).unreadable, "{why}");
+        // The plugin that was off does not come back on: nothing of the layer is handed to the UI…
+        let m = applayer::manifest_of(&d.layer);
+        assert_eq!((&m["plugins"], &m["views"], &m["workflows"], &m["themes"], &m["css"], &m["home"], &m["nav"], &m["pluginsUnreadable"]),
+            (&json!([]), &json!([]), &json!([]), &json!([]), &json!(""), &Value::Null, &Value::Null, &json!(true)), "{why}");
+        assert_eq!(applayer::manifest_preview(&d.layer, &d.layer, false)["plugins"], json!([]), "{why}: nor while a change is tried");
+        // …and no automatic task runs, by schedule or by hand.
+        assert!(workflows::approved_workflows(&d.layer, &d.home).is_empty(), "{why}");
+        assert!(inactive_workflows(&d.layer).contains("weekly.json"));
+        // Nothing is written on top of it: switch, remove, describe, export, import and Keep are refused, in plain words.
+        let said = |e: anyhow::Error| { let e = e.to_string(); assert!(e.contains("is damaged") && e.contains("History"), "{why}: {e}"); };
+        said(switch_in(st, &d, ID, true).await.unwrap_err());
+        said(switch_in(st, &d, "home", false).await.unwrap_err());
+        said(switch_in(st, &d, "addon:plugins/mine.js", false).await.unwrap_err());
+        said(remove_in(st, &d, ID).await.unwrap_err());
+        said(remove_in(st, &d, "look").await.unwrap_err());
+        said(describe_in(st, &d, &Describe { id: "home".into(), name: "X".into(), ..Default::default() }).await.unwrap_err());
+        said(export_in(&d, ID).unwrap_err());
+        said(export_all(&d, "x").unwrap_err());
+        said(packs::import(st, &d, &kanban("1.1.0"), false).await.unwrap_err());
+        assert!(!d.staging.exists(), "{why}: nothing was staged");
+        staging::recreate(st, &d, "customize", None).await.unwrap();
+        w(&d.staging, "custom.css", "body { margin: 0 }\n");
+        let p = staging::pending(st, &d, false).await;
+        said(staging::apply(st, &d, false, p["signature"].as_str()).await.unwrap_err());
+        assert!(!read(&d.layer, "custom.css").contains("margin: 0"), "{why}: the change was not kept");
+        staging::discard(st, &d).await.unwrap();
+        assert_eq!(read(&d.layer, FILE), broken, "{why}: the file was not written over");
+        assert!(list(&d, false).is_empty());
+        assert!(crate::tr::user_err_in(true, "plugin.unreadable", &[]).message.contains("السجل"));
+        // The way out: undo the entry that damaged it (or go back to before it), and all is as it was.
+        let entry = applayer::history_in(st, &d.layer).await[0]["hash"].as_str().unwrap().to_string();
+        applayer::revert_in(st, &d.layer, &entry).await.unwrap();
+        let f = load(&d.layer);
+        assert!(!f.unreadable && f.off.contains(ID) && f.bundles.contains_key(ID), "{why}: {f:?}");
+        assert_eq!(applayer::manifest_of(&d.layer)["plugins"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect::<Vec<_>>(), ["mine.js"], "{why}: still off");
+    }
+    done(&d);
+}
+
+/// The app never writes a record it could not read back: past the limits on plugins, claims or
+/// size the change is refused whole, and what was there stays.
+#[tokio::test]
+async fn the_record_is_never_written_past_what_is_read_back() {
+    let big = |n: usize, claims: usize| BundlesFile { format: 1, migrated: "x".into(), bundles: (0..n).map(|i| {
+        let id = id_of(&i.to_string());
+        (id.clone(), Bundle { id, name: format!("P{i}"), origin: "made".into(), layer_format: 1, claims: (0..claims).map(|c| file(&format!("plugins/p{i}-{c}.js"))).collect(), ..Default::default() })
+    }).collect(), ..Default::default() };
+    assert!(text_of(&big(MAX_BUNDLES, 1)).is_ok());
+    for too_much in [big(MAX_BUNDLES + 1, 1), big(1, MAX_CLAIMS + 1), big(MAX_BUNDLES, 60)] {
+        assert!(text_of(&too_much).unwrap_err().to_string().contains("too many plugins"));
+    }
+    let mut off = big(1, 1);
+    off.off = (0..=MAX_OFF).map(|i| format!("theme:t{i}")).collect();
+    assert!(text_of(&off).is_err() && text_of(&BundlesFile { unreadable: true, ..Default::default() }).is_err());
+    // What is written is read back as it was.
+    let (st, d) = mine("limits").await;
+    let full = big(MAX_BUNDLES, 1);
+    save(&d.layer, &full).unwrap();
+    assert_eq!(load(&d.layer), full);
+    assert!(read(&d.layer, FILE).len() <= MAX_BYTES);
+    st.commit_all(&d.layer, "as many plugins as there can be").await.unwrap();
+    let before = (read(&d.layer, FILE), files_of(&d), count(st, &d).await);
+    // One more is refused wherever it would come from, and nothing is half-done.
+    assert!(describe_in(st, &d, &Describe { id: "home".into(), name: "One more".into(), ..Default::default() }).await.unwrap_err().to_string().contains("too many plugins"));
+    packs::import(st, &d, &kanban("1.0.0"), false).await.unwrap();
+    let p = staging::pending(st, &d, false).await;
+    assert!(staging::apply(st, &d, false, p["signature"].as_str()).await.unwrap_err().to_string().contains("too many plugins"));
+    staging::discard(st, &d).await.unwrap();
+    let many: Vec<String> = (0..=MAX_OFF).map(|i| format!("theme:t{i}")).collect();
+    w(&d.layer, "themes.json", &json!(many.iter().map(|t| json!({"id": &t[6..], "name": "T"})).collect::<Vec<_>>()).to_string());
+    st.commit_all(&d.layer, "a great many themes").await.unwrap();
+    let mut f = load(&d.layer);
+    f.off = many.iter().take(MAX_OFF).cloned().collect();
+    save(&d.layer, &f).unwrap();
+    st.commit_all(&d.layer, "all but one off").await.unwrap();
+    let entries = count(st, &d).await;
+    assert!(switch_in(st, &d, &many[MAX_OFF], false).await.unwrap_err().to_string().contains("too many plugins"));
+    assert_eq!((count(st, &d).await, load(&d.layer).off.len(), load(&d.layer).unreadable), (entries, MAX_OFF, false), "refused whole: the record is as it was");
+    assert_eq!(before.1.get("home.json"), files_of(&d).get("home.json"));
+    assert!(before.2 > 0 && before.0.len() <= MAX_BYTES);
+    done(&d);
 }
