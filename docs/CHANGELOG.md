@@ -1,5 +1,33 @@
 # What's new in Thoughts
 
+## 0.5.0
+
+A large release: your customisations become plugins you can carry to another computer, every keyboard shortcut can be changed, notes can be presented as slides, search can work by meaning, and MADO can document a project that already exists. Read "Before you rely on it": none of it has been seen in the app window yet.
+
+### New
+- **Plugins.** Customise › Plugins lists every customisation as a named thing: switch it off and on, remove it, describe it, or export it to one file. **Export all** carries everything to another computer. A plugin file you add goes through the same review as any other change, and a newer version of a plugin replaces the older one. What you already had is kept as it was: packs you kept become named plugins, and History still undoes every earlier step.
+- **Keyboard shortcuts you can change.** Settings › Keyboard lists every shortcut, with search, a warning when two clash, and reset for one or for all. Your keys are part of your customisations, so a change can be undone in History and travels with an export. A few keys stay fixed, each with its reason on the page.
+- **Slides.** A note that starts with `slides: true` is a deck: a line of `---` starts a new slide, and `Note:` starts speaker notes. Press **Present** in Docs, in a file preview or on a chat's answer. **Save slides as HTML** writes one file you can open anywhere. Arabic decks run right to left. Ask the assistant for "slides about …" and it writes one.
+- **Search by meaning (optional).** Off until you switch it on in Settings › Features. It finds notes about the same thing even when they share no word. It needs a model of about 465 MB, downloaded only when you press the button, with pause and cancel; everything then runs on your computer. Private folders are never read. Thoughts suggests it when your library is large, when a search by words finds nothing, or when the assistant thinks it would help; you can say "Don't ask again". Switching it off removes the model and the index.
+- **MADO for a project that already exists.** When a linked folder already holds code, choose **Document this project as it is**: the brief, what it does, how it's built and its look are written from the code, each statement marked as found in the code, taken from the README, or assumed. The work-plan step then plans a change on top, and the Final check and Build work as before.
+- **A code graph, when you have the tool.** If [code-review-graph](https://code-review-graph.com/) is installed on your computer, MADO uses it to see how the files of a project depend on each other: for documenting, for each task's instructions, for the review, and for three new notes in the Final check. Without it everything works as before, and the Plan view shows how to install it. Thoughts never installs it for you.
+- **Other AI services.** Settings has a "No key needed" option for a service on this computer (such as Ollama), a button that loads the model list from the service itself, a connection for Codex to another provider with its key kept in the system keychain, and more ready-made addresses. A LiteLLM you run yourself works through "A service on this computer".
+
+### Changed
+- The Customise tab "Add-ons" is now **Plugins**.
+- The quick-capture keys moved from Settings › General to Settings › Keyboard.
+- An automatic task that belongs to a switched-off plugin does not run, and cannot be started by hand.
+
+### Before you rely on it
+- **Nothing here has been seen in the app window.** It was tested automatically and in a browser against a separate copy of the service. The menu keys, the global key, full screen and the save dialogs have not been tried in the real app.
+- **No real assistant has documented a real project yet**, so how good the documents written from code are is not known.
+- **The model download** has not run against the real server from inside the app.
+- **code-review-graph** was tried for real from a temporary folder only; a copy installed in your home folder (the usual place) has not been tried. Only git repositories get a graph.
+- **Search by meaning** can show loosely related notes near its cut-off, mostly for very short notes.
+- While search by meaning is off and you have not declined it, ordinary chats carry one line that lets the assistant suggest it.
+- When MADO documents a project it is not allowed to open files that look like secrets (`.env`, keys, the `.git` folder). Such a list is never complete: do not keep secrets in a project you ask it to read.
+- No other AI service was tried for real, only stand-ins that record what is sent.
+
 ## 0.4.1
 
 ### Improved
