@@ -4,7 +4,6 @@ import { EditorState } from '@codemirror/state';
 import { parser, GFM } from '@lezer/markdown';
 import { composerKey, sendKeys } from './keys';
 import { decorate } from './mdLive';
-import { shortcuts, matchShortcut } from '../shortcuts';
 
 const key = (k: string, o: Partial<KeyboardEventInit> & { keyCode?: number } = {}) => {
   const e = new KeyboardEvent('keydown', { key: k, ...o });
@@ -44,11 +43,13 @@ describe('composerKey', () => {
     expect(sendKeys(false)).toBe('Ctrl+Enter');
   });
 
-  it('has its own listed shortcut, taken by no other', () => {
-    const s = shortcuts.find((x) => x.id === 'chat.composer.expand')!;
+  it('has its own listed shortcut, taken by no other', async () => {
+    window.matchMedia ??= ((q: string) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} })) as any;
+    const { matchShortcut } = await import('../shortcuts');
+    const { KEYS, conflicts, effective } = await import('../keys/registry');
+    const s = KEYS.find((x) => x.id === 'chat.composer.expand')!;
     expect(s && !s.hidden).toBe(true);
-    const clash = shortcuts.filter((x) => x.code === s.code && !!x.mod === !!s.mod && !!x.shift === !!s.shift);
-    expect(clash).toHaveLength(1);
+    expect(conflicts(s.id, effective(s.id)[0])).toHaveLength(0);
     const e = new KeyboardEvent('keydown', { code: 'KeyE', key: 'E', shiftKey: true, metaKey: /Mac/.test(navigator.platform), ctrlKey: !/Mac/.test(navigator.platform) });
     expect(matchShortcut(e)).toBe('chat.composer.expand');
   });

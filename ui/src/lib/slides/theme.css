@@ -1,0 +1,57 @@
+/* The app's look on reveal.js slides (Present.svelte). reveal's own theme files are never loaded:
+   its custom properties take the app's tokens, so a deck follows the user's theme, day or night.
+   standalone.ts reads the computed values of these to write a saved deck's colours. */
+.present .reveal {
+  --r-background-color: var(--bg);
+  --r-main-color: var(--fg);
+  --r-heading-color: var(--fg);
+  --r-link-color: var(--accent);
+  --r-link-color-hover: var(--accent-2);
+  --r-selection-background-color: var(--accent);
+  --r-selection-color: var(--accent-fg);
+  --r-main-font: var(--font);
+  --r-heading-font: var(--font);
+  --r-code-font: var(--mono);
+  --r-main-font-size: 34px;
+  --r-heading-font-weight: 650;
+  --r-heading-text-transform: none;
+  --r-heading-letter-spacing: normal;
+  --r-heading-line-height: 1.2;
+  --r-heading1-size: 2.2em;
+  --r-heading2-size: 1.5em;
+  --r-heading3-size: 1.2em;
+  --r-block-margin: 18px;
+  --deck-panel: var(--panel);
+  --deck-border: var(--border);
+  --deck-muted: var(--muted);
+  background: var(--r-background-color);
+  color: var(--r-main-color);
+  font-family: var(--r-main-font);
+  font-size: var(--r-main-font-size);
+}
+.present .reveal[dir='rtl'] { --r-main-font: var(--font-ar, var(--font)); --r-heading-font: var(--font-ar, var(--font)); }
+.present .reveal .slides section { text-align: start; line-height: 1.4; }
+.present .reveal .slides section > :first-child:is(h1) { text-align: center; }
+.present .reveal h1, .present .reveal h2, .present .reveal h3, .present .reveal h4 {
+  color: var(--r-heading-color); font-family: var(--r-heading-font); font-weight: var(--r-heading-font-weight); line-height: var(--r-heading-line-height);
+  margin: 0 0 var(--r-block-margin); text-transform: none;
+}
+.present .reveal h1 { font-size: var(--r-heading1-size); }
+.present .reveal h2 { font-size: var(--r-heading2-size); }
+.present .reveal h3 { font-size: var(--r-heading3-size); }
+.present .reveal p, .present .reveal ul, .present .reveal ol, .present .reveal blockquote, .present .reveal .md-table, .present .reveal .md-code { margin: 0 0 var(--r-block-margin); }
+.present .reveal ul, .present .reveal ol { padding-inline-start: 1.2em; }
+.present .reveal a { color: var(--r-link-color); }
+.present .reveal img { max-width: 100%; max-height: 520px; display: block; margin-inline: auto; }
+.present .reveal pre { font-family: var(--r-code-font); font-size: .55em; background: var(--deck-panel); border: 1px solid var(--deck-border); border-radius: var(--radius, 8px);
+  padding: 12px 16px; white-space: pre-wrap; text-align: start; direction: ltr; max-height: 520px; overflow: auto; }
+.present .reveal code { font-family: var(--r-code-font); }
+.present .reveal table { border-collapse: collapse; font-size: .7em; }
+.present .reveal th, .present .reveal td { border: 1px solid var(--deck-border); padding: 6px 12px; text-align: start; }
+.present .reveal blockquote { border-inline-start: 4px solid var(--r-link-color); padding-inline-start: 16px; font-style: normal; background: none; box-shadow: none; width: auto; }
+/* What md() adds for the page and a slide does not need: copy buttons and code headers. */
+.present .reveal .md-codehead, .present .reveal [data-md-copy] { display: none; }
+.present .reveal .md-fig .fig-bar { display: none; }
+.present .reveal .md-fig[data-fig-state="drawn"] > pre { display: none; }
+.present .reveal .controls { color: var(--r-link-color); }
+.present .reveal .progress { color: var(--r-link-color); }

@@ -1147,3 +1147,31 @@ on Todos."
 ## Plugins
 
 ## Keyboard shortcuts (keys.json)
+
+The user's own keys for the app's commands. Write it only when the user asks to change a shortcut;
+otherwise leave it out (the app's own keys apply). Settings › Keyboard writes the same file.
+
+```json
+{ "format": 1, "bindings": { "chat.new": ["Mod+KeyJ"], "palette": [], "plugin:hours.open": ["Mod+Alt+KeyH"] } }
+```
+
+- Each entry replaces that command's keys; `[]` takes its key away. At most 3 keys per command and
+  300 commands. Only `format` (1) and `bindings` at the top.
+- A key is modifiers in this order — `Mod` (⌘ on a Mac, Ctrl elsewhere), `Control`, `Alt`, `Shift`,
+  `Super` — then the physical key as `KeyboardEvent.code` names it: `KeyA`…`KeyZ`, `Digit0`…`Digit9`,
+  `F1`…`F24`, `Numpad0`…`Numpad9`, `NumpadAdd`, `Comma`, `Period`, `Slash`, `Semicolon`, `Quote`,
+  `BracketLeft`, `BracketRight`, `Backslash`, `Backquote`, `Minus`, `Equal`, the arrows, `Enter`,
+  `Space`, `Backspace`, `Delete`, `Home`, `End`, `PageUp`, `PageDown`. Use `Mod`, not `Control`, so
+  the set works on every computer.
+- Command ids are the ones Settings › Keyboard lists: `palette`, `chat.new`, `find`, `search.focus`,
+  `nav.1`…`nav.6`, `wrap.start`, `sidebar.toggle`, `back`, `forward`, `zoom.in`/`zoom.out`/`zoom.reset`,
+  `settings`, `window.close`, `app.quit`, `window.fullscreen`, the palette's commands (`help`, `tour`,
+  `print`, `history`, `rollback`, `sync`, `theme.<id>`, `mode.light|dark|system`, `slides.present`),
+  `plugin:<command id>` for an add-on's command, and the keys of single views (`docs.save`,
+  `docs.editor.bold`, `find.next`, `graph.zoomIn`, `mado-graph.undo`, `image.fit`, `comments.send`, …).
+  An id the app does not know is ignored.
+- Refused (the review shows why): keys the system uses (copy, paste, undo, select all, Esc, Tab, Enter,
+  Space and the arrows alone, ⌘H/⌘M/⌘Tab on a Mac, Alt+F4 and the Windows key on Windows) and ⌘R / Ctrl+R,
+  which belongs to the Recovery menu. Esc, Tab, the arrows, the message box keys, the Edit menu and the
+  slide show's keys cannot be changed. The quick capture key is set in Settings (it belongs to the
+  computer) and is not part of this file.

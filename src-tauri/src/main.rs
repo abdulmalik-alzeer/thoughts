@@ -848,12 +848,44 @@ fn quit_app(app: tauri::AppHandle, window: tauri::Window) {
     app.exit(0);
 }
 
-/// Rebuild the native menus after the UI language changed.
+/// Rebuild the native menus after the UI language or the keyboard shortcuts changed. `bare`: while
+/// Settings › Keyboard records a key the menu carries no keys of its own, so the combination reaches
+/// the page; they come back with `bare: false`, or by themselves after a minute.
 #[tauri::command]
-fn refresh_menu(app: tauri::AppHandle, window: tauri::Window) -> Result<(), String> {
+fn refresh_menu(app: tauri::AppHandle, window: tauri::Window, bare: Option<bool>) -> Result<(), String> {
     main_only(&window)?;
-    recovery::refresh_versions_soon(&app);
+    if let Some(on) = bare {
+        let gen = BARE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        BARE_MENU.store(on, Ordering::SeqCst);
+        if on {
+            let a = app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(60));
+                if BARE_MENU.load(Ordering::SeqCst) && BARE_GEN.load(Ordering::SeqCst) == gen {
+                    BARE_MENU.store(false, Ordering::SeqCst);
+                    let b = a.clone();
+                    let _ = a.run_on_main_thread(move || { let _ = install_menus(&b); });
+                }
+            });
+        }
+    } else {
+        recovery::refresh_versions_soon(&app);
+    }
     install_menus(&app).map_err(|e| e.to_string())
+}
+
+/// The menu shows no keys of its own right now (`refresh_menu { bare: true }`).
+static BARE_MENU: AtomicBool = AtomicBool::new(false);
+static BARE_GEN: AtomicU32 = AtomicU32::new(0);
+
+/// The keys of the menu's own items: the user's (`keys.json` in the layer, `thoughtsd::keys::native`),
+/// the app's own with customisations off, none at all while a key is being recorded.
+pub(crate) fn menu_keys() -> thoughtsd::keys::NativeKeys {
+    if BARE_MENU.load(Ordering::SeqCst) {
+        return thoughtsd::keys::NativeKeys { settings: None, close_window: None, quit: None, fullscreen: None, close_changed: true };
+    }
+    let full = thoughtsd::settings::Settings::load().full_access();
+    thoughtsd::keys::native_on(&thoughtsd::applayer::Dirs::real().layer, recovery::safe_mode(), thoughtsd::keys::Os::here(), full)
 }
 
 /// The page turned customisations off or back on (its own "Reload without customisations" and
@@ -1008,11 +1040,14 @@ fn std_text(ar: bool, kind: &str) -> Option<&'static str> {
 /// close-window as predefined items, so there they are ordinary items (`std-<kind>`) handled in
 /// `on_menu_event`. Quit is never predefined: see `quit_requested`. Linux is UNTESTED.
 fn std_item(h: &tauri::AppHandle, ar: bool, kind: &str) -> tauri::Result<Box<dyn IsMenuItem<tauri::Wry>>> {
-    if cfg!(target_os = "linux") && matches!(kind, "undo" | "redo" | "minimize" | "maximize" | "close_window") {
+    let keys = menu_keys();
+    // Close Window with a key the user chose (or none) is the app's own item: the system's has ⌘W fixed.
+    let own_close = kind == "close_window" && keys.close_changed;
+    if own_close || cfg!(target_os = "linux") && matches!(kind, "undo" | "redo" | "minimize" | "maximize" | "close_window") {
         let id = format!("std-{}", if kind == "close_window" { "close" } else { kind });
         // No accelerator for undo/redo: the web view already handles Ctrl+Z itself.
-        let accel = (kind == "close_window").then_some("CmdOrCtrl+W");
-        return Ok(Box::new(MenuItem::with_id(h, &id, label(ar, &id), true, accel)?));
+        let accel = if kind == "close_window" { keys.close_window.clone() } else { None };
+        return Ok(Box::new(keyed_item(h, &id, label(ar, &id), accel.as_deref())?));
     }
     let text = std_text(ar, kind);
     Ok(Box::new(match kind {
@@ -1036,8 +1071,20 @@ fn std_item(h: &tauri::AppHandle, ar: bool, kind: &str) -> tauri::Result<Box<dyn
 /// `quit_requested` on every platform (and works on Linux, where predefined Quit does not exist).
 fn quit_item(h: &tauri::AppHandle, ar: bool) -> tauri::Result<MenuItem<tauri::Wry>> {
     // Windows closes with Alt+F4; Ctrl+Q is not a convention there.
-    let accel = if cfg!(windows) { None } else { Some("CmdOrCtrl+Q") };
-    item(h, ar, "quit", accel)
+    // Windows closes with Alt+F4; Ctrl+Q is not a convention there (`keys::native_defaults`).
+    let accel = menu_keys().quit;
+    keyed_item(h, "quit", label(ar, "quit"), accel.as_deref())
+}
+
+/// An item with the user's key, or without one if the system will not take that key.
+pub(crate) fn keyed_item(h: &tauri::AppHandle, id: &str, text: &str, accel: Option<&str>) -> tauri::Result<MenuItem<tauri::Wry>> {
+    MenuItem::with_id(h, id, text, true, accel).or_else(|_| MenuItem::with_id(h, id, text, true, None::<&str>))
+}
+
+/// "Settings…" with the user's key.
+fn settings_item(h: &tauri::AppHandle, ar: bool) -> tauri::Result<MenuItem<tauri::Wry>> {
+    let accel = menu_keys().settings;
+    keyed_item(h, "settings", label(ar, "settings"), accel.as_deref())
 }
 
 /// "Quick capture…", showing the shortcut while it works (a menu that cannot show those keys gets
@@ -1087,7 +1134,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
             &PredefinedMenuItem::about(h, std_text(ar, "about"), Some(about_metadata(h)))?,
             &item(h, ar, "check-updates", None)?,
             &PredefinedMenuItem::separator(h)?,
-            &item(h, ar, "settings", Some("CmdOrCtrl+Comma"))?,
+            &settings_item(h, ar)?,
             &PredefinedMenuItem::separator(h)?,
             &*std_item(h, ar, "services")?,
             &PredefinedMenuItem::separator(h)?,
@@ -1127,7 +1174,7 @@ fn build_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>>
         true,
         &[
             &capture_item(h, ar, "capture")?,
-            &item(h, ar, "settings", Some("CmdOrCtrl+Comma"))?,
+            &settings_item(h, ar)?,
             &PredefinedMenuItem::separator(h)?,
             &*std_item(h, ar, "close_window")?,
             &quit_item(h, ar)?,
@@ -1382,7 +1429,8 @@ fn main() {
             voice::voice_transcribe_cancel,
             voice::voice_result,
             voice::voice_result_clear,
-            screen_check::mado_screen_check
+            screen_check::mado_screen_check,
+            fullscreen::present_fullscreen
         ])
         // A page that starts loading holds nothing unsaved yet, whatever the last one reported.
         .on_page_load(|webview, payload| {

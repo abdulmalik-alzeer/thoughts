@@ -17,7 +17,8 @@
   import { t, tn, lang } from '../../lib/i18n';
   import { failed } from '../../lib/errors';
   import { fmtSize, notify, rawBlobUrl, readAsDataURL } from '../../lib/content/util';
-  import { isMac } from '../../lib/shortcuts';
+  import { isMac, isolatedKeys, tip } from '../../lib/shortcuts';
+  import { matchKey, ariaKeys as ariaOf, iso as isoK, label as keyName } from '../../lib/keys/registry';
   import { trapFocus } from '../../lib/focus';
   import * as E from './editing';
   import DictateButton from '../../lib/voice/DictateButton.svelte';
@@ -109,11 +110,10 @@
   let composing = false;
   /** Escape was the last key: the next Tab leaves the text box instead of indenting. */
   let tabLeaves = false;
-  const MOD = isMac ? '⌘' : 'Ctrl+';
-  /** Keys isolated so they read correctly inside Arabic text. */
-  const iso = (k: string) => String.fromCharCode(0x2066) + k + String.fromCharCode(0x2069);
-  const keyLabel = (k: string) => iso(MOD + k);
-  const ariaKeys = (k: string) => `${isMac ? 'Meta' : 'Control'}+${k}`;
+  /** A command's keys, isolated so they read correctly inside Arabic text. */
+  const keyLabel = (id: string) => isolatedKeys('docs.editor.' + id);
+  const keyTip = (label: string, id: string) => tip(label, 'docs.editor.' + id);
+  const ariaKeys = (id: string) => ariaOf('docs.editor.' + id);
 
   function onKeydown(e: KeyboardEvent) {
     // Never while an input method (Chinese, Japanese, Korean…) is composing: its Enter picks a word.
@@ -135,23 +135,19 @@
       if (r) { e.preventDefault(); apply(r); }
       return;
     }
-    if (!mod) return;
-    // Physical keys, so the shortcuts also work with an Arabic keyboard.
-    if (e.altKey) {
-      if (e.getModifierState?.('AltGraph') || e.shiftKey) return;
-      const level = { Digit0: 0, Digit1: 1, Digit2: 2, Digit3: 3, Numpad0: 0, Numpad1: 1, Numpad2: 2, Numpad3: 3 }[e.code];
-      if (level !== undefined) { e.preventDefault(); heading(level); }
-      return;
-    }
-    if (e.shiftKey) {
-      const k = ({ Digit7: 'number', Digit8: 'bullet', Digit9: 'task' } as const)[e.code as 'Digit7'];
-      if (k) { e.preventDefault(); list(k); }
-      return;
-    }
-    if (e.code === 'KeyB') { e.preventDefault(); inline('**'); }
-    else if (e.code === 'KeyI') { e.preventDefault(); inline('*'); }
-    // ⌘K on selected words (or inside a link) makes a link; otherwise it still opens the palette.
-    else if (e.code === 'KeyK' && (s !== en || E.linkAt(ta.value, s, en))) { e.preventDefault(); openLink(); }
+    if (e.altKey && e.getModifierState?.('AltGraph')) return;
+    // The keys are the user's (Settings › Keyboard, lib/keys/registry.ts); physical keys, so they
+    // also work with an Arabic keyboard.
+    const id = matchKey(e, 'docs.editor');
+    if (!id) return;
+    const level = /^docs\.editor\.heading(\d)$/.exec(id);
+    if (level) { e.preventDefault(); heading(+level[1]); return; }
+    const k = ({ 'docs.editor.list.number': 'number', 'docs.editor.list.bullet': 'bullet', 'docs.editor.list.task': 'task' } as const)[id as 'docs.editor.list.number'];
+    if (k) { e.preventDefault(); list(k); return; }
+    if (id === 'docs.editor.bold') { e.preventDefault(); inline('**'); }
+    else if (id === 'docs.editor.italic') { e.preventDefault(); inline('*'); }
+    // The link key on selected words (or inside a link) makes a link; otherwise ⌘K still opens the palette.
+    else if (id === 'docs.editor.link' && (s !== en || E.linkAt(ta.value, s, en))) { e.preventDefault(); openLink(); }
   }
 
   // ---------- toolbar actions ----------
@@ -514,7 +510,7 @@
    *  right-to-left note, and lines with no letters of their own (an empty line, a new "3. ") follow it.
    *  Lines with letters still each take their own direction. */
   const dir = $derived(E.textDir(shown) || (lang() === 'ar' ? 'rtl' : 'ltr'));
-  const hint = $derived(t('edtr.hint', { b: keyLabel('B'), i: keyLabel('I'), k: keyLabel('K') }));
+  const hint = $derived(t('edtr.hint', { b: keyLabel('bold'), i: keyLabel('italic'), k: keyLabel('link') }));
   /** The link dialog sits on the page itself (the Docs column is a size container). */
   function portal(node: HTMLElement) { document.body.appendChild(node); return { destroy() { node.remove(); } }; }
 </script>
@@ -537,22 +533,22 @@
         </select>
         <span class="sep" aria-hidden="true"></span>
         <button type="button" class="tb glyph b" data-tool tabindex={active === 1 ? 0 : -1} onmousedown={keep} onclick={() => inline('**')}
-          aria-label={t('edtr.bold')} title={`${t('edtr.bold')} (${keyLabel('B')})`} aria-keyshortcuts={ariaKeys('B')}><span aria-hidden="true">{t('edtr.boldGlyph')}</span></button>
+          aria-label={t('edtr.bold')} title={keyTip(t('edtr.bold'), 'bold')} aria-keyshortcuts={ariaKeys('bold')}><span aria-hidden="true">{t('edtr.boldGlyph')}</span></button>
         <button type="button" class="tb glyph i" data-tool tabindex={active === 2 ? 0 : -1} onmousedown={keep} onclick={() => inline('*')}
-          aria-label={t('edtr.italic')} title={`${t('edtr.italic')} (${keyLabel('I')})`} aria-keyshortcuts={ariaKeys('I')}><span aria-hidden="true">{t('edtr.italicGlyph')}</span></button>
+          aria-label={t('edtr.italic')} title={keyTip(t('edtr.italic'), 'italic')} aria-keyshortcuts={ariaKeys('italic')}><span aria-hidden="true">{t('edtr.italicGlyph')}</span></button>
         <button type="button" class="tb" data-tool tabindex={active === 3 ? 0 : -1} onmousedown={keep} onclick={openLink}
-          aria-label={t('edtr.link')} title={`${t('edtr.link')} (${keyLabel('K')})`} aria-keyshortcuts={ariaKeys('K')} aria-haspopup="dialog"><Link size={16} strokeWidth={1.9} /></button>
+          aria-label={t('edtr.link')} title={keyTip(t('edtr.link'), 'link')} aria-keyshortcuts={ariaKeys('link')} aria-haspopup="dialog"><Link size={16} strokeWidth={1.9} /></button>
         <span class="sep" aria-hidden="true"></span>
         <button type="button" class="tb" data-tool tabindex={active === 4 ? 0 : -1} onmousedown={keep} onclick={() => list('bullet')} aria-pressed={kind.list === 'bullet'}
-          aria-label={t('edtr.bullets')} title={`${t('edtr.bullets')} (${keyLabel(isMac ? '⇧8' : 'Shift+8')})`}><List size={17} strokeWidth={1.9} class="flip-rtl" /></button>
+          aria-label={t('edtr.bullets')} title={keyTip(t('edtr.bullets'), 'list.bullet')}><List size={17} strokeWidth={1.9} class="flip-rtl" /></button>
         <button type="button" class="tb" data-tool tabindex={active === 5 ? 0 : -1} onmousedown={keep} onclick={() => list('number')} aria-pressed={kind.list === 'number'}
-          aria-label={t('edtr.numbers')} title={`${t('edtr.numbers')} (${keyLabel(isMac ? '⇧7' : 'Shift+7')})`}><ListOrdered size={17} strokeWidth={1.9} class="flip-rtl" /></button>
+          aria-label={t('edtr.numbers')} title={keyTip(t('edtr.numbers'), 'list.number')}><ListOrdered size={17} strokeWidth={1.9} class="flip-rtl" /></button>
         <button type="button" class="tb" data-tool tabindex={active === 6 ? 0 : -1} onmousedown={keep} onclick={() => list('task')} aria-pressed={kind.list === 'task'}
-          aria-label={t('edtr.checklist')} title={`${t('edtr.checklist')} (${keyLabel(isMac ? '⇧9' : 'Shift+9')})`}><ListTodo size={17} strokeWidth={1.9} class="flip-rtl" /></button>
+          aria-label={t('edtr.checklist')} title={keyTip(t('edtr.checklist'), 'list.task')}><ListTodo size={17} strokeWidth={1.9} class="flip-rtl" /></button>
         <button type="button" class="tb" data-tool tabindex={active === 7 ? 0 : -1} onmousedown={keep} onclick={() => shift(-1)} aria-disabled={!kind.list}
-          aria-label={t('edtr.outdent')} title={`${t('edtr.outdent')} (${iso('Shift+Tab')})`}><ListIndentDecrease size={17} strokeWidth={1.9} class="flip-rtl" /></button>
+          aria-label={t('edtr.outdent')} title={`${t('edtr.outdent')} (${isoK(keyName('Shift+Tab'))})`}><ListIndentDecrease size={17} strokeWidth={1.9} class="flip-rtl" /></button>
         <button type="button" class="tb" data-tool tabindex={active === 8 ? 0 : -1} onmousedown={keep} onclick={() => shift(1)} aria-disabled={!kind.list}
-          aria-label={t('edtr.indent')} title={`${t('edtr.indent')} (${iso('Tab')})`}><ListIndentIncrease size={17} strokeWidth={1.9} class="flip-rtl" /></button>
+          aria-label={t('edtr.indent')} title={`${t('edtr.indent')} (${isoK(keyName('Tab'))})`}><ListIndentIncrease size={17} strokeWidth={1.9} class="flip-rtl" /></button>
         <span class="sep" aria-hidden="true"></span>
         <button type="button" class="tb" data-tool tabindex={active === 9 ? 0 : -1} onclick={() => { if (!adding) picker?.click(); }} aria-disabled={adding > 0}
           aria-label={t('edtr.picture')} title={t('edtr.pictureTip')}><ImagePlus size={17} strokeWidth={1.9} /></button>

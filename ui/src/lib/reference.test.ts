@@ -34,6 +34,8 @@ describe('the built-in pages reference', () => {
   it('Settings categories are its sections', () => {
     const m = here('../views/Settings.svelte').match(/const cats = \[([^\]]*)\]/);
     expect(m![1].split(',').map((x: string) => x.trim().replace(/'/g, ''))).toEqual(ref.pages.settings.sections);
+    expect(ref.pages.settings.sections).toContain('keyboard');
+    expect(ref.pages.settings.locked).not.toContain('keyboard');
   });
   it('every part the reference lists is used by its page', () => {
     const files2: Record<string, string> = { ...files, home: '../views/Home.svelte', docs: '../views/Docs.svelte' };

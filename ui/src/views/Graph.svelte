@@ -25,6 +25,7 @@
   import { runLayout } from '../lib/graph/layoutClient';
   import { draw, colourOf } from '../lib/graph/draw';
   import { readTheme, type Ink } from '../lib/graph/palette';
+  import { matchKey } from '../lib/keys/registry';
 
   let { path }: { path?: string } = $props();
   const focusPath = $derived(String(path ?? '').trim());
@@ -322,7 +323,10 @@
     return best;
   }
   function onKey(e: KeyboardEvent) {
-    if (!model || e.altKey || e.metaKey || e.ctrlKey) return;
+    if (!model) return;
+    // The user's keys first (lib/keys/registry.ts); arrows, Enter and Esc stay fixed below.
+    const mine = matchKey(e, 'graph');
+    if (!mine && (e.altKey || e.metaKey || e.ctrlKey)) return;
     const dirs: Record<string, 'left' | 'right' | 'up' | 'down'> = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' };
     const d = dirs[e.key];
     if (d && e.shiftKey) { e.preventDefault(); const s = 80; panBy(d === 'left' ? s : d === 'right' ? -s : 0, d === 'up' ? s : d === 'down' ? -s : 0); return; }
@@ -339,10 +343,11 @@
       return;
     }
     if (e.key === 'Enter' || e.key === ' ') { if (active >= 0) { e.preventDefault(); openNode(active); } return; }
-    if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomBy(1.25); return; }
-    if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(0.8); return; }
-    if (e.key === '0') { e.preventDefault(); fitAll(); return; }
-    if (e.key === 'Home') { e.preventDefault(); active = start(); if (active >= 0) { keepInView(active); say(describe(active)); } return; }
+    const id = mine;
+    if (id === 'graph.zoomIn') { e.preventDefault(); zoomBy(1.25); return; }
+    if (id === 'graph.zoomOut') { e.preventDefault(); zoomBy(0.8); return; }
+    if (id === 'graph.fit') { e.preventDefault(); fitAll(); return; }
+    if (id === 'graph.home') { e.preventDefault(); active = start(); if (active >= 0) { keepInView(active); say(describe(active)); } return; }
     if (e.key === 'Escape' && active >= 0) { e.stopPropagation(); active = -1; paint(); }
   }
   function onFocus() { if (active < 0 && model) say(t('libf-graph.canvasHint')); }

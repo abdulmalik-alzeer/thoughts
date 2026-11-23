@@ -18,6 +18,10 @@ const FIG_MARK = secret();
 /** The languages of a code block that the app draws instead of showing. */
 export const FIGURE_LANGS = ['archify', 'chart'];
 let figuresStarted = false;
+/** Marks the wrapper of a `slides` code block (a deck in an answer): slides/hydrate.ts turns only
+ *  wrappers carrying it into a card with Present and Save as note. */
+const SLIDES_MARK = secret();
+let slidesStarted = false;
 /** Changes on every md() call; the task-list renderer stamps it on its markers (see below). */
 let taskMark = '';
 
@@ -96,6 +100,7 @@ const MEMO_MAX_CHARS = 100_000;
 function render(src: string): string {
   const body = src.replace(/^---\n[\s\S]*?\n---\n?/, '');
   let hasFigure = false;
+  let hasSlides = false;
   taskMark = secret();
   // Sanitise to a DOM fragment, then add the wrappers with DOM APIs (never by editing the HTML string).
   const frag = DOMPurify.sanitize(marked.parse(body, { async: false }) as string, PURIFY) as DocumentFragment;
@@ -156,6 +161,12 @@ function render(src: string): string {
       wrap.setAttribute('data-fig-kind', lang.toLowerCase());
       hasFigure = true;
     }
+    // A slide deck (`slides`): stamped the same way, and shown as a card once it is on the page.
+    if (lang.toLowerCase() === 'slides') {
+      wrap.classList.add('md-slides');
+      wrap.setAttribute('data-md-slides', SLIDES_MARK);
+      hasSlides = true;
+    }
   }
   for (const table of Array.from(frag.querySelectorAll('table'))) {
     const wrap = document.createElement('div');
@@ -171,6 +182,10 @@ function render(src: string): string {
   if (hasFigure && !figuresStarted) {
     figuresStarted = true;
     void import('./figures/hydrate').then((m) => m.startFigures(FIG_MARK), () => { figuresStarted = false; });
+  }
+  if (hasSlides && !slidesStarted) {
+    slidesStarted = true;
+    void import('./slides/hydrate').then((m) => m.startSlides(SLIDES_MARK), () => { slidesStarted = false; });
   }
   return host.innerHTML;
 }

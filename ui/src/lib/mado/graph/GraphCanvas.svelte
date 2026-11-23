@@ -20,6 +20,7 @@
   import MadoEdge from './parts/MadoEdge.svelte';
   import Outline from './parts/Outline.svelte';
   import SelBar from './parts/SelBar.svelte';
+  import { matchKey } from '../../keys/registry';
 
   let { doc, comments = [], editable = true, pendingOps = [], onops, onpositions, oncomment, onselect }: {
     doc: GraphDoc; comments?: Comment[]; editable?: boolean; pendingOps?: GraphOp[];
@@ -360,9 +361,11 @@
     if (typing(e.target) || e.isComposing) return;
     const mod = e.metaKey || e.ctrlKey;
     const k = e.key;
-    if (mod && !e.altKey && k.toLowerCase() === 'z') { e.preventDefault(); if (e.shiftKey) travel(redo, 'mado-graph.said.redone'); else travel(undo, 'mado-graph.said.undone'); return; }
-    if (e.ctrlKey && !e.metaKey && !e.altKey && k.toLowerCase() === 'y') { e.preventDefault(); travel(redo, 'mado-graph.said.redone'); return; }
-    if (mod) return;
+    // The user's keys (lib/keys/registry.ts); Esc, Enter and the arrows stay fixed.
+    const id = matchKey(e, 'mado-graph');
+    if (id === 'mado-graph.undo') { e.preventDefault(); travel(undo, 'mado-graph.said.undone'); return; }
+    if (id === 'mado-graph.redo') { e.preventDefault(); travel(redo, 'mado-graph.said.redone'); return; }
+    if (mod && !id) return;
     if (k === 'Escape') {
       if (adding) { adding = false; e.preventDefault(); }
       else if (fieldsFor) { fieldsFor = null; e.preventDefault(); focusEl(sel); }
@@ -372,21 +375,21 @@
     }
     const onButton = e.target instanceof HTMLElement && !!e.target.closest('button, a, [role="menu"], [role="dialog"], [role="toolbar"]');
     if (onButton) return;
-    if (!asList && !e.altKey) {
-      if (k === '+' || k === '=') { e.preventDefault(); zoomBy(1.3); return; }
-      if (k === '-' || k === '_') { e.preventDefault(); zoomBy(1 / 1.3); return; }
-      if (k === '0') { e.preventDefault(); fit(); return; }
+    if (!asList) {
+      if (id === 'mado-graph.zoomIn') { e.preventDefault(); zoomBy(1.3); return; }
+      if (id === 'mado-graph.zoomOut') { e.preventDefault(); zoomBy(1 / 1.3); return; }
+      if (id === 'mado-graph.fit') { e.preventDefault(); fit(); return; }
     }
     if (!sel) return;
-    if (k === 'Enter' || k === 'F2') { if (canEdit) { e.preventDefault(); rename(sel); } return; }
-    if (k === 'Delete' || k === 'Backspace') {
+    if (k === 'Enter' || id === 'mado-graph.rename') { if (canEdit) { e.preventDefault(); rename(sel); } return; }
+    if (id === 'mado-graph.delete') {
       if (!canEdit) return;
       e.preventDefault();
       const v = sel.kind === 'node' ? byKey.get(sel.key) : edgeByKey.get(sel.key);
       if (v && v.state !== 'removed') remove(sel);
       return;
     }
-    if (k.toLowerCase() === 'c' && !e.altKey) { e.preventDefault(); comment(sel); return; }
+    if (id === 'mado-graph.comment') { e.preventDefault(); comment(sel); return; }
     const d = ARROWS[k];
     if (!d || asList) return;
     e.preventDefault();

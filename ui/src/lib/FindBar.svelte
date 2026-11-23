@@ -9,6 +9,7 @@
   import { fold } from './CommandPalette.svelte';
   import { foldMap, registerFind, takeFind } from './search';
   import { isMac } from './shortcuts';
+  import { matchKey } from './keys/registry';
 
   let { root, editor, where = '', anchors = '', bottom = false }: {
     /** The element whose text is searched. */
@@ -264,8 +265,10 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.isComposing) return;
-    const modKey = isMac ? e.metaKey : e.ctrlKey;
-    if (e.key === 'Enter' || e.key === 'F3' || (modKey && e.code === 'KeyG')) { e.preventDefault(); clearTimeout(inputTimer); if (!count && query.trim()) refresh(false); else step(e.shiftKey ? -1 : 1); }
+    // Enter / ⇧Enter in the box stay fixed; the other keys are the user's (lib/keys/registry.ts).
+    const id = matchKey(e, 'find');
+    const enter = e.key === 'Enter' && !e.metaKey && !e.ctrlKey && !e.altKey;
+    if (enter || id === 'find.next' || id === 'find.prev') { e.preventDefault(); clearTimeout(inputTimer); if (!count && query.trim()) refresh(false); else step((enter ? e.shiftKey : id === 'find.prev') ? -1 : 1); }
     else if (e.key === 'ArrowDown' && !e.shiftKey) { e.preventDefault(); step(1); }
     else if (e.key === 'ArrowUp' && !e.shiftKey) { e.preventDefault(); step(-1); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }

@@ -32,6 +32,9 @@
   import { canOpenWindows } from '../lib/windows';
   import { openWindow } from '../lib/openWindow';
   import { presence } from './docs/editLock';
+  import { matchKey } from '../lib/keys/registry';
+  import { tip } from '../lib/shortcuts';
+  import { isDeck, parseDeck } from '../lib/slides/deck';
 
   let { path }: { path?: string } = $props();
 
@@ -206,10 +209,14 @@
 
   function beforeUnload(e: BeforeUnloadEvent) { if (dirty) { e.preventDefault(); e.returnValue = ''; } }
   function onKey(e: KeyboardEvent) {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && editing) { e.preventDefault(); save(); }
+    if (editing && matchKey(e, 'docs') === 'docs.save') { e.preventDefault(); save(); }
   }
   // The shell leaves "Print" to this view while a document is open.
-  function onCommand(e: Event) { if ((e as CustomEvent).detail?.id === 'print') printDoc(); }
+  function onCommand(e: Event) {
+    const id = (e as CustomEvent).detail?.id;
+    if (id === 'print') printDoc();
+    else if (id === 'slides.present') void presentDeck();
+  }
   function onDocClick(e: MouseEvent) { if (menu && !(e.target as HTMLElement)?.closest?.('.menuwrap')) menu = false; }
 
   let off: (() => void) | undefined;
@@ -820,6 +827,62 @@
     if (c === 'new') newDoc(dir); else if (c === 'rename') renamePath(dir, true); else if (c === 'move') movePath(dir, true); else if (c === 'delete') removePath(dir, true);
   }
 
+  // ---------- slide decks (lib/slides/): a note with `slides: true` ----------
+  const deckNote = $derived(!!doc && !doc.binary && isMd(current) && isDeck(String(doc.content ?? '')));
+  async function presentDeck() {
+    if (!deckNote || editing) { notify(t('slides.notDeck'), { kind: 'info' }); return; }
+    const d = parseDeck(String(doc.content));
+    if (d.cut) notify(t('slides.cut'), { kind: 'info' });
+    (await import('../lib/slides/present')).present(d, current);
+  }
+  let savingSlides = false;
+  /** The deck as one HTML file that opens in any browser, saved with the idea's outputs (never replacing one). */
+  async function exportSlides() {
+    if (savingSlides || !deckNote) return;
+    savingSlides = true;
+    const p = current;
+    const d = parseDeck(String(doc.content));
+    // The slides are drawn off screen first (pictures fetched, diagrams and charts drawn), then written out.
+    const host = document.createElement('div');
+    host.className = 'present';
+    host.setAttribute('aria-hidden', 'true');
+    host.style.cssText = 'position:fixed;inset-inline-start:-20000px;top:0;width:1280px;visibility:hidden';
+    const reveal = document.createElement('div');
+    reveal.className = 'reveal';
+    host.append(reveal);
+    document.body.append(host);
+    try {
+      const { toHtml, readLook, embedPictures } = await import('../lib/slides/standalone');
+      const sections = d.slides.map((s) => {
+        const sec = document.createElement('section');
+        sec.innerHTML = md(s.body); // md(): the app's sanitiser
+        reveal.append(sec);
+        return sec;
+      });
+      const fetches: Promise<void>[] = [];
+      for (const img of Array.from(host.querySelectorAll('img'))) {
+        const src = img.getAttribute('src') || '';
+        if (/^data:image\//i.test(src)) continue;
+        img.removeAttribute('src');
+        if (!src || /^([a-z][a-z0-9+.-]*:|\/\/|#)/i.test(src)) continue;
+        fetches.push(rawBlobUrl(resolveLink(p, src)).then((u) => { if (u) img.src = u; }));
+      }
+      await Promise.all(fetches);
+      for (let i = 0; i < 80 && host.querySelector('.md-fig:not([data-fig-state="drawn"]):not([data-fig-state="failed"]):not([data-fig-state="source"])'); i++) await new Promise((r) => setTimeout(r, 100));
+      await embedPictures(host);
+      const html = toHtml(d, sections, readLook(document.documentElement), lang());
+      for (const img of Array.from(host.querySelectorAll('img'))) if (img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+      const folder = outputsFolder(p);
+      const name = baseName(p).replace(/\.[a-z0-9]+$/i, '') + '.slides.html';
+      const bytes = new TextEncoder().encode(html);
+      const r = await post('/library/output', { folder, name, dataBase64: await readAsDataURL(new Blob([bytes], { type: 'text/html' })) });
+      await loadTree();
+      const out = String(r?.path ?? '');
+      notify(t('slides.exported', { folder }), { kind: 'success', duration: 12000, action: out ? { label: t('docsa.open'), run: () => openOutput(out) } : undefined });
+    } catch (e) { failed(t('slides.exportFailed'), e); }
+    finally { host.remove(); savingSlides = false; }
+  }
+
   // ---------- "More" menu for the open document ----------
   type MenuItem = { id: string; label: string; icon: string; run: () => void; danger?: boolean };
   const menuItems = $derived.by((): MenuItem[] => {
@@ -829,6 +892,7 @@
         { id: 'versions', label: t('docs3.versions'), icon: 'rollback', run: () => (showVersions = true) },
         ...(isMd(current) ? [{ id: 'docx', label: t('docsb.saveWord'), icon: 'download', run: exportDocx }, { id: 'docx-as', label: t(desktop ? 'nativeb.word.saveAs' : 'nativeb.word.download'), icon: 'download', run: exportDocxAs }, { id: 'pdf', label: t('docsb.savePdf'), icon: 'print', run: savePdf }] : []),
         { id: 'html', label: t('docs3.exportHtml'), icon: 'download', run: exportHtml },
+        ...(deckNote ? [{ id: 'slides-html', label: t('slides.exportHtml'), icon: 'present', run: exportSlides }] : []),
         { id: 'rich', label: t('docs3.copyRich'), icon: 'copy', run: copyRich },
         { id: 'copy', label: t('docs.copyText'), icon: 'copy', run: copyDoc },
         ...(isMd(current) ? [{ id: 'source', label: t(showSource ? 'docsa.showFormatted' : 'docsa.showSource'), icon: 'eye', run: () => (showSource = !showSource) }] : []),
@@ -1025,6 +1089,7 @@
           <button class="btn" onclick={cancelEdit} title={t('docsa.doneTip')}>{t('docsa.done')}</button>
           <button class="btn primary" onclick={save} disabled={!dirty || saving} title={t('docs.saveTip')}>{t(saving ? 'docs.saving' : 'save')}</button>
         {:else}
+          {#if deckNote}<button class="btn primary" onclick={presentDeck} title={tip(t('slides.presentTip'), 'slides.present')}><Icon name="present" size={15} /> {t('slides.present')}</button>{/if}
           {#if !doc.binary}
             <button class="btn ghost ic" onclick={printDoc} title={t('docs.print')} aria-label={t('docs.print')}><Icon name="print" size={16} /></button>
             <button class="btn ghost" onclick={() => (showVersions = true)} title={t('docs3.versionsTitle')}><Icon name="rollback" size={15} /> {t('docs3.versions')}</button>

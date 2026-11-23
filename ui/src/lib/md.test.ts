@@ -223,3 +223,14 @@ describe('md: kept renders', () => {
     parse.mockRestore();
   });
 });
+
+describe('md: slide decks in an answer', () => {
+  it('marks a `slides` block, and only one it made itself', () => {
+    const d = render('```slides\n# A\n\n---\n\n# B\n```\n\n<div class="md-slides" data-md-slides="x">fake</div>');
+    const marked = d.querySelectorAll('.md-slides');
+    expect(marked).toHaveLength(1);
+    expect(marked[0].getAttribute('data-md-slides')).toMatch(/^[0-9a-f]{24}$/);
+    expect(marked[0].querySelector('pre code')?.textContent).toContain('# B');
+    expect(render('```js\nx\n```').querySelector('.md-slides')).toBeNull();
+  });
+});

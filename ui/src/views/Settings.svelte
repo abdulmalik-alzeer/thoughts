@@ -23,7 +23,7 @@
   import { keepLibraryToMe, libraryOpenToOthers, offerIndexCleanup } from '../lib/privacy';
   import ThemePicker from './ThemePicker.svelte';
   import CalendarPrefs from '../lib/CalendarPrefs.svelte';
-  import QuickCapturePrefs from '../lib/QuickCapturePrefs.svelte';
+  import KeyboardPrefs from './KeyboardPrefs.svelte';
   import FullAccessPrefs from '../lib/FullAccessPrefs.svelte';
   import MeaningPrefs from '../lib/MeaningPrefs.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
@@ -38,9 +38,9 @@
 
   let { reload }: { reload: () => Promise<void> } = $props();
 
-  const cats = ['general', 'accessibility', 'ai', 'usage', 'git', 'privacy', 'modules', 'daemon', 'appLayer', 'maintenance'] as const;
+  const cats = ['general', 'accessibility', 'ai', 'usage', 'git', 'privacy', 'modules', 'daemon', 'appLayer', 'maintenance', 'keyboard'] as const;
   type Cat = (typeof cats)[number];
-  const catIcon: Record<Cat, string> = { general: 'settings', accessibility: 'accessibility', ai: 'ai', usage: 'usage', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette', maintenance: 'tool' };
+  const catIcon: Record<Cat, string> = { general: 'settings', accessibility: 'accessibility', ai: 'ai', usage: 'usage', git: 'sync', privacy: 'shield', modules: 'modules', daemon: 'daemon', appLayer: 'palette', maintenance: 'tool', keyboard: 'keyboard' };
   // Row labels per category (i18n keys) — used by the search box. `adv` rows live behind the Advanced disclosure.
   const basic: Record<Cat, string[]> = {
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates', 'nativeb.set.title', 'nativeb.set.switch'],
@@ -53,6 +53,7 @@
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'ldc.tab.addons', 'ldc.tab.ready', 'ldc.tab.updates'],
     maintenance: ['care.health.title', 'care.upd.title', 'ux-settings.gh.title', 'care.move.title', 'care.rm.title'],
+    keyboard: ['kb.title', 'kb.search', 'nativeb.set.title', 'kb.resetAll'],
   };
   const adv: Record<Cat, string[]> = {
     general: [],
@@ -65,6 +66,7 @@
     daemon: ['set.restart'],
     appLayer: ['set.safeMode'],
     maintenance: [],
+    keyboard: [],
   };
   // Claude Code's own mode names. "Ask before changes" (`default`) was removed — the app has no way
   // to answer the questions — so a stored `default` means plan mode. Bypass is confirmed in a dialog.
@@ -722,7 +724,7 @@
         </div>
       {/if}
       {#if vis(c, 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates') && s.calendar}<CalendarPrefs bind:cal={s.calendar} />{/if}
-      {#if vis(c, 'nativeb.set.title', 'nativeb.set.switch')}<QuickCapturePrefs />{/if}
+      {#if vis(c, 'nativeb.set.title', 'nativeb.set.switch')}<p class="muted sm row wrap gap-top"><span>{t('kb.captureMoved')}</span> <button type="button" class="btn ghost" onclick={() => { tab = 'keyboard'; query = ''; }}>{t('kb.open')}</button></p>{/if}
     </div>
   {:else if c === 'accessibility'}
     <div class="card">
@@ -1126,6 +1128,7 @@
         <button type="button" class="btn" onclick={() => reloadApp('safe=1')}>{t('set.safeMode')}</button>
       </details>
     {/if}
+  {:else if c === 'keyboard'}<KeyboardPrefs />
   {/if}
   {@render resetRow(c)}
 {/snippet}

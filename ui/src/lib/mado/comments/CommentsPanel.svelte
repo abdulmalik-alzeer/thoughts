@@ -11,6 +11,7 @@
   import { MessageSquareText, Pencil, Trash2, Undo2, MapPin } from '@lucide/svelte';
   import { t, tn, ago } from '../../i18n';
   import { imeKey } from '../../ime';
+  import { matchKey } from '../../keys/registry';
   import type { Comment, CommentStatus, CommentTarget } from '../types';
 
   let { comments, draft = null, canComment, describe, focusId = null, onadd, oncancel, onedit, onremove, onstatus, onlocate }: {
@@ -54,7 +55,7 @@
   }
   function draftKey(e: KeyboardEvent) {
     if (imeKey(e)) return;
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); add(); }
+    if (matchKey(e, 'comments') === 'comments.send') { e.preventDefault(); add(); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); body = ''; oncancel(); }
   }
   function startEdit(c: Comment) { editing = c.id; editBody = c.body; }
@@ -66,7 +67,7 @@
   }
   function editKey(e: KeyboardEvent, c: Comment) {
     if (imeKey(e)) return;
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveEdit(c); }
+    if (matchKey(e, 'comments') === 'comments.send') { e.preventDefault(); saveEdit(c); }
     else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); editing = null; }
   }
 </script>

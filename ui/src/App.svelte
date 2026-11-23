@@ -13,7 +13,8 @@
   import { announceWhatsNew, markWhatsNewSeen } from './lib/whatsnew';
   import { startupChecks } from './lib/maintenance';
   import { t, tn, ago, fmtDate, fmtNum, lang } from './lib/i18n';
-  import { matchShortcut, keys, tip, isMac, isTyping } from './lib/shortcuts';
+  import { keys, tip, isMac, isTyping } from './lib/shortcuts';
+  import { matchKey } from './lib/keys/registry';
   import { confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
   import LibrarySwitcher from './lib/LibrarySwitcher.svelte';
@@ -545,7 +546,7 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.defaultPrevented) return;
-    let id = matchShortcut(e);
+    let id = matchKey(e, 'app');
     if (!id) return;
     // A key pressed inside an add-on's page runs only moving around and the palette (lib/layer.ts).
     if (keyFromAddOn(e) && !keyMayComeFromAddOn(id)) return;
@@ -555,7 +556,7 @@
     const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour || showRecent
       || !!document.querySelector('[aria-modal="true"]:not(.pal)');
     if (modal || (app.showPalette && id !== 'palette')) return;
-    if (id.startsWith('nav.')) {
+    if (/^nav\.\d$/.test(id)) {
       const it = navItems[+id.slice(4) - 1];
       if (!it) return;
       e.preventDefault();
@@ -563,7 +564,9 @@
       return;
     }
     e.preventDefault();
-    command(id);
+    // A palette command the user gave a key (Settings › Keyboard) runs exactly as from the palette.
+    const p = paletteItems.find((x) => x.id === id);
+    if (p) p.run(); else command(id);
   }
 
   function openPalette(v: boolean) {
@@ -767,6 +770,7 @@
     if (!app.safeMode && !secondary) add('sidebar.edit', t('sbe.open'), g.act, 'edit', { keywords: 'sidebar order rename hide icon group start الشريط ترتيب', run: () => { if (railed) toggleSidebar(); editingNav = true; } });
     add('tour', t('shell.pal.tour'), g.act, 'book');
     add('print', t('shell.pal.print'), g.act, 'print');
+    if (app.view.kind === 'docs') add('slides.present', t('kb.k.slides.present'), g.act, 'present', { keywords: 'present slides deck show presentation عرض شرائح تقديم' });
     add('zoom.in', t('a11y.zoomIn'), g.look, 'zoomIn', { keywords: 'zoom bigger larger text size تكبير' });
     add('zoom.out', t('a11y.zoomOut'), g.look, 'zoomOut', { keywords: 'zoom smaller text size تصغير' });
     add('zoom.reset', t('a11y.zoomReset'), g.look, 'zoomOut', { keywords: 'zoom reset 100 actual size الحجم' });

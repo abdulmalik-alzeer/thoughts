@@ -18,6 +18,7 @@
   import { looksLikeText } from './text';
   import { renderers, type RendererProps } from './renderers';
   import { openImage } from '../imageOpen.svelte';
+  import { isDeck, parseDeck } from '../slides/deck';
 
   let {
     name,
@@ -98,6 +99,20 @@
   /** Pictures open in the app's one picture viewer (lib/ImageViewer.svelte). */
   const zoom = (src: string, alt: string) => openImage({ src, alt, name: alt });
 
+  // A markdown file that is a slide deck (`slides: true`) can be presented from here too (lib/slides/).
+  let deckText = $state('');
+  $effect(() => {
+    const d = data, isMdFile = /\.md$/i.test(name);
+    deckText = '';
+    if (!d || !isMdFile || phase !== 'ready') return;
+    d.slice(0, 256 * 1024).text().then((tx) => { if (data === d && isDeck(tx)) deckText = tx; }, () => {});
+  });
+  async function presentDeck() {
+    const deck = parseDeck(deckText);
+    if (deck.cut) notify(t('slides.cut'), { kind: 'info' });
+    (await import('../slides/present')).present(deck, name);
+  }
+
   async function reveal() {
     try { await onReveal?.(); }
     catch (e) { notify(t('docs.revealFailed'), { kind: 'error', detail: errDetail(e) }); }
@@ -124,6 +139,7 @@
       {#if onReveal}<button type="button" class="btn" onclick={reveal}><Icon name="folder" size={14} /> {t(revealLabelKey())}</button>{/if}
     </div>
   {:else if Comp && data}
+    {#if deckText}<div class="deckbar"><button type="button" class="btn primary" onclick={presentDeck} title={t('slides.presentTip')}><Icon name="present" size={14} /> {t('slides.present')}</button></div>{/if}
     <Comp {data} name={base} {kind} lang={codeLang(name)} {fill} {unsupported} {zoom} />
   {/if}
 </section>
@@ -143,6 +159,7 @@
   .skel { height: 13px; margin: 5px 6px; border-radius: 8px; background: linear-gradient(90deg, var(--fill), var(--fill-2), var(--fill)); background-size: 200% 100%; animation: shimmer 1.4s linear infinite; }
   .skel.h { height: 26px; width: 45%; }
   .w70 { width: 70%; }
+  .deckbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
   @keyframes shimmer { to { background-position: -200% 0; } }
   @media (prefers-reduced-motion: reduce) { .skel { animation: none; } }
   :global([data-motion="reduce"]) .skel { animation: none; }

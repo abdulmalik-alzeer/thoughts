@@ -51,6 +51,14 @@ Click a picture to see it large. Pictures follow the app's day or night look, an
 
 When a diagram cannot be drawn, Thoughts shows what is wrong with it. **Copy message**, paste it to the assistant, and it corrects the diagram.
 
+## Slides
+
+Any note can be a slide deck. Put `slides: true` at the top (in the frontmatter, between the two `---` lines) and separate the slides with a line holding only `---`, with an empty line before and after it. A line starting with `Note:` begins that slide's speaker notes. Diagrams, charts and pictures work as they do in any note. Ask the assistant for a deck ("make slides about our quarterly review") and it writes one this way; in a chat it shows as a card with **Present** and **Save as note**.
+
+**Present** (in Docs, in a file preview, on the card, or from the command palette) shows the deck full screen. The arrow keys, Space and Page Up/Down move between slides, **O** shows every slide, **S** opens the presenter panel (your notes, the next slide, a timer) and **Esc** leaves. A deck written in Arabic runs right to left by itself. With "Reduce motion" on (Settings › Accessibility) slides change without animation.
+
+**More › Save slides as HTML** in Docs saves the deck as one file in the idea's `outputs` folder. It opens in any web browser, on any computer, with pictures and charts inside it and nothing loaded from the internet.
+
 ## Plan and build a project (MADO)
 
 Thoughts can take a software idea from a first conversation to working code, one step at a time, with you reading and approving each step. Open **Projects**, pick a project folder you linked, and choose **Build with MADO**. Planning starts a `mado` folder inside the project; everything the plan says lives there.

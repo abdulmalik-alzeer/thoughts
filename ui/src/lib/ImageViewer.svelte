@@ -9,6 +9,7 @@
   import { t } from './i18n';
   import { a11y } from './store.svelte';
   import { imageViewer, closeImage } from './imageOpen.svelte';
+  import { matchKey } from './keys/registry';
   import {
     type Size, type View, fitView, clampPan, clampScale, scaleRange, zoomAt, zoomStep, panBy, arrowPan,
     toggleZoom, isFit, percent, wheelFactor, wheelPixels, nameFromSrc,
@@ -170,10 +171,11 @@
         else if (!e.shiftKey && i === list.length - 1) { e.preventDefault(); list[0].focus(); }
         return;
       }
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === '+' || e.key === '=') api.zoomIn();
-      else if (e.key === '-' || e.key === '_') api.zoomOut();
-      else if (e.key === '0') api.fit();
+      const id = matchKey(e, 'image');
+      if (id === 'image.zoomIn') api.zoomIn();
+      else if (id === 'image.zoomOut') api.zoomOut();
+      else if (id === 'image.fit') api.fit();
+      else if (e.metaKey || e.ctrlKey || e.altKey) return;
       else if (e.key.startsWith('Arrow')) {
         if (!ready()) return;
         const next = arrowPan(v, e.key, pic, room, e.shiftKey);

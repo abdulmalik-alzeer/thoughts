@@ -53,7 +53,7 @@
     },
     "settings": {
       "title": false, "intro": false, "boxes": false, "replace": false,
-      "sections": ["general", "accessibility", "ai", "usage", "git", "privacy", "modules", "daemon", "appLayer", "maintenance"],
+      "sections": ["general", "accessibility", "ai", "usage", "git", "privacy", "modules", "daemon", "appLayer", "maintenance", "keyboard"],
       "locked": ["general", "privacy", "appLayer", "maintenance"],
       "parts": [], "labels": []
     }

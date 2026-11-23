@@ -1,5 +1,6 @@
-// Every keyboard shortcut in one place. App.svelte listens for keys, matches them here and runs
-// the command; tooltips and the Help page read the same table so they can never drift apart.
+// The app's keyboard shortcuts now live in one registry, lib/keys/registry.ts (every key, its
+// defaults, the user's own keys from the layer's `keys.json`, and the keys that stay fixed). This
+// file keeps the old names working for the code that imports them.
 //
 // Command ids (also the `detail.id` of the window CustomEvent `thoughts:command`):
 //   nav.<view>            home | chats | ideas | todos | docs | projects | me
@@ -11,84 +12,23 @@
 //   back / forward        through the views visited this session   history (notes history)
 //   zoom.in / zoom.out / zoom.reset   size of everything in the window (Settings › Accessibility)
 //   chat.composer.expand  the open chat's message box made tall, or small again (views/Chat.svelte)
+//   slides.present        present the open deck (lib/slides/)
 //   plugin:<command id>   a command registered by a plugin was run
+import { matchKey, keys as keysOf, iso } from './keys/registry';
 
-export const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/i.test(navigator.platform || navigator.userAgent);
+export { isMac, isTyping, KEYS, matchKey, effective, label, conflicts, recording } from './keys/registry';
 
-export type Shortcut = {
-  /** Command id, or `nav.N` (N = position in the sidebar) / `escape`. */
-  id: string;
-  /** i18n key describing it (Help page). */
-  label: string;
-  /** Physical key (layout-independent, so it also works on an Arabic keyboard). */
-  code: string;
-  /** Character shown to the user. */
-  key: string;
-  mod?: boolean;
-  shift?: boolean;
-  /** Only when the user is not typing in a field. */
-  plain?: boolean;
-  /** Listed in Help? */
-  hidden?: boolean;
-};
-
-export const shortcuts: Shortcut[] = [
-  { id: 'palette', label: 'shell.sc.palette', code: 'KeyK', key: 'K', mod: true },
-  { id: 'chat.new', label: 'shell.sc.newChat', code: 'KeyN', key: 'N', mod: true },
-  { id: 'find', label: 'srch.sc.find', code: 'KeyF', key: 'F', mod: true },
-  { id: 'search.focus', label: 'srch.sc.search', code: 'KeyF', key: 'F', mod: true, shift: true },
-  { id: 'search.focus', label: 'shell.sc.searchSlash', code: 'Slash', key: '/', plain: true },
-  ...[1, 2, 3, 4, 5, 6].map((n) => ({ id: 'nav.' + n, label: 'shell.sc.nav', code: 'Digit' + n, key: String(n), mod: true, hidden: n > 1 })),
-  { id: 'wrap.start', label: 'shell.sc.wrap', code: 'KeyW', key: 'W', mod: true, shift: true },
-  { id: 'sidebar.toggle', label: 'shell.sc.sidebar', code: 'Backslash', key: '\\', mod: true },
-  { id: 'settings', label: 'shell.sc.settings', code: 'Comma', key: ',', mod: true },
-  { id: 'back', label: 'ui.sc.back', code: 'BracketLeft', key: '[', mod: true },
-  { id: 'forward', label: 'ui.sc.forward', code: 'BracketRight', key: ']', mod: true },
-  { id: 'zoom.in', label: 'a11y.sc.zoomIn', code: 'Equal', key: '+', mod: true },
-  { id: 'zoom.in', label: 'a11y.sc.zoomIn', code: 'Equal', key: '+', mod: true, shift: true, hidden: true },
-  { id: 'zoom.in', label: 'a11y.sc.zoomIn', code: 'NumpadAdd', key: '+', mod: true, hidden: true },
-  { id: 'zoom.out', label: 'a11y.sc.zoomOut', code: 'Minus', key: '-', mod: true },
-  { id: 'zoom.out', label: 'a11y.sc.zoomOut', code: 'NumpadSubtract', key: '-', mod: true, hidden: true },
-  { id: 'zoom.reset', label: 'a11y.sc.zoomReset', code: 'Digit0', key: '0', mod: true },
-  { id: 'chat.composer.expand', label: 'chatg.sc.expand', code: 'KeyE', key: 'E', mod: true, shift: true },
-  { id: 'escape', label: 'shell.sc.escape', code: 'Escape', key: 'Esc' },
-];
-
-export function isTyping(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  return !!el?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]');
-}
-
-/** The command id for a key press, or null. */
-export function matchShortcut(e: KeyboardEvent): string | null {
-  if (e.isComposing) return null;
-  const mod = isMac ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
-  for (const s of shortcuts) {
-    if (e.code !== s.code && !(e.code === '' && e.key.toUpperCase() === s.key.toUpperCase())) continue;
-    if (s.id === 'escape') return e.metaKey || e.ctrlKey || e.altKey ? null : 'escape';
-    if (e.altKey) continue;
-    if (s.plain) { if (!mod && !e.metaKey && !e.ctrlKey && !e.shiftKey && !isTyping(e.target)) return s.id; continue; }
-    if (!!s.mod === mod && !!s.shift === e.shiftKey) return s.id;
-  }
-  return null;
-}
+/** The command id for a key press anywhere in the window, or null (`matchKey(e, 'app')`). */
+export function matchShortcut(e: KeyboardEvent): string | null { return matchKey(e, 'app'); }
 
 /** Human-readable keys for a command, e.g. "⌘N" on a Mac and "Ctrl+N" elsewhere. Empty when it has none. */
-export function keys(idOrShortcut: string | Shortcut): string {
-  const s = typeof idOrShortcut === 'string' ? shortcuts.find((x) => x.id === idOrShortcut && !x.plain) : idOrShortcut;
-  if (!s) return '';
-  if (isMac) return (s.mod ? '⌘' : '') + (s.shift ? '⇧' : '') + s.key;
-  return [s.mod ? 'Ctrl' : '', s.shift ? 'Shift' : '', s.key].filter(Boolean).join('+');
-}
+export function keys(id: string): string { return keysOf(id); }
 
 /** The keys for a command, isolated so they read correctly inside Arabic text. Empty when it has none. */
-export function isolatedKeys(id: string): string {
-  const k = keys(id);
-  return k ? `⁦${k}⁩` : '';
-}
+export function isolatedKeys(id: string): string { return iso(keysOf(id)); }
 
 /** "Label (⌘N)" for tooltips. The keys are isolated so they read correctly inside Arabic text. */
 export function tip(label: string, id: string): string {
-  const k = keys(id);
-  return k ? `${label} (⁦${k}⁩)` : label;
+  const k = keysOf(id);
+  return k ? `${label} (${iso(k)})` : label;
 }
