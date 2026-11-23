@@ -24,7 +24,8 @@ use tauri::{AppHandle, Manager, Wry};
 /// The menu item's id (handled in `on_menu_event`).
 pub(crate) const ID: &str = "fullscreen";
 
-/// The keys shown on the item: the system's own ⌃⌘F on a Mac, F11 elsewhere.
+/// The item's usual keys: the system's own ⌃⌘F on a Mac, F11 elsewhere (`thoughtsd::keys::native_defaults`).
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn accelerator() -> &'static str {
     if cfg!(target_os = "macos") { "Ctrl+Super+F" } else { "F11" }
 }
@@ -59,7 +60,8 @@ fn front_is_full(app: &AppHandle) -> bool {
 /// Build the item for a new menu bar.
 pub(crate) fn item(h: &AppHandle, ar: bool) -> tauri::Result<MenuItem<Wry>> {
     let full = front_is_full(h);
-    let it = MenuItem::with_id(h, ID, label(ar, full), true, Some(accelerator()))?;
+    // The user's key (Settings › Keyboard, `window.fullscreen`), or the system's own by default.
+    let it = crate::keyed_item(h, ID, label(ar, full), crate::menu_keys().fullscreen.as_deref())?;
     *ITEM.lock().unwrap_or_else(|e| e.into_inner()) = Some((it.clone(), ar));
     SHOWN.store(full as u8, Ordering::SeqCst);
     Ok(it)
@@ -207,6 +209,27 @@ mod tests {
         // The system's own keys: ⌃⌘F on a Mac (as AppKit's own item shows), F11 elsewhere.
         let keys = accelerator();
         if cfg!(target_os = "macos") { assert_eq!(keys, "Ctrl+Super+F") } else { assert_eq!(keys, "F11") }
+    }
+
+    #[test]
+    fn the_menu_keys_from_keys_json_parse_as_menu_accelerators() {
+        use std::str::FromStr;
+        use thoughtsd::keys::{accelerator as accel, native_defaults, Os};
+        // The defaults are what the menu had before 0.5.0.
+        assert_eq!(native_defaults(Os::here()).fullscreen.as_deref(), Some(accelerator()));
+        for os in [Os::Mac, Os::Windows, Os::Linux] {
+            let d = native_defaults(os);
+            for k in [d.settings, d.close_window, d.quit, d.fullscreen].into_iter().flatten() {
+                assert!(muda::accelerator::Accelerator::from_str(&k).is_ok(), "{k}");
+            }
+        }
+        // Every kind of key the registry can store becomes a key the menu takes.
+        for b in ["Mod+Comma", "Mod+Shift+KeyW", "Mod+Control+KeyF", "F11", "Mod+Alt+Digit3", "Control+Alt+Shift+Super+Slash", "Mod+NumpadAdd",
+            "Mod+BracketLeft", "Mod+Backquote", "Mod+Semicolon", "Mod+Quote", "Mod+Period", "Mod+Minus", "Mod+Equal", "Mod+Enter", "Mod+Space",
+            "Mod+ArrowUp", "Mod+PageDown", "Mod+Home", "Mod+Delete", "Mod+Backspace", "F24", "Mod+IntlBackslash"] {
+            let a = accel(b).unwrap();
+            assert!(muda::accelerator::Accelerator::from_str(&a).is_ok(), "{b} -> {a}");
+        }
     }
 
     #[cfg(target_os = "macos")]

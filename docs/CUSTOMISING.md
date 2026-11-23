@@ -196,6 +196,14 @@ With **Full access** switched on (Settings › Privacy & cost; see [Using Though
 
 Frames may also ask for the camera, microphone, screen capture and the other device features the system webview offers (macOS asks you first). Web Bluetooth, serial and USB are not available in the macOS webview: use `machine.run` with a command-line tool instead. A change you are only trying never reaches `machine`. Changes keep being recorded in History, so they can still be undone, unless something removed that too. Everything stops the moment full access is turned off.
 
+### Keyboard shortcuts
+
+**Settings › Keyboard** lists every key the app answers to, grouped by where it works (General, Navigating, Chats, the Docs editor, Find, Graph, MADO, Pictures, Window and menu). Search by words or by keys ("cmd k", "ctrl+k"). Press **Change** and then the new keys, and Enter to keep them; Esc cancels and Backspace leaves the command with no key. **+** gives a command a second key, **×** on a key takes it away, and **Reset** puts back the usual one. If the keys are already used somewhere that can be open at the same time, the page says so and offers to move them. Commands of the command palette and of your add-ons have no key until you give them one.
+
+Your keys are part of your customisations: each change is one entry in History, so it can be undone, and they are off while customisations are off. You can also ask in a customise chat ("make ⌘J start a new chat"). The keys of the menu bar (Settings, Close Window, Quit, Full Screen) change too. The quick capture key is set on the same page but belongs to this computer, so it is not part of what you share.
+
+Some keys never change: Esc, Tab and the arrow keys, the message box's Enter, the Edit menu (undo, copy, paste…), the keys the system itself uses, ⌘R / Ctrl+R (kept for the Recovery menu) and the keys of a slide show. They are listed under **Fixed keys** with the reason.
+
 ### What is not possible yet
 
 - **Changing where customisations are undone.** History, the review of a change, Customise, Rollback and the Recovery menu always stay as the app made them, so a customisation can never take away the way back. Settings cannot be replaced as a whole, and Help is not customisable. After an update, anything a customisation names that the new version no longer has is left out and the page says so; renamed sections keep working.

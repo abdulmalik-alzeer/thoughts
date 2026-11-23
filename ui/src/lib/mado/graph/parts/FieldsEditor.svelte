@@ -4,6 +4,7 @@
   import type { ErdField } from '../../types';
   import { t } from '../../../i18n';
   import { ICON } from '../icons';
+  import { matchKey } from '../../../keys/registry';
   import { FIELDS_MAX, FIELD_TEXT_MAX, cleanFields } from '../ops';
 
   let { name, fields, dir, onapply, oncancel }: { name: string; fields: ErdField[]; dir: 'ltr' | 'rtl'; onapply: (fields: ErdField[]) => void; oncancel: () => void } = $props();
@@ -19,7 +20,7 @@
 
 <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
 <div class="fields nodrag nopan nowheel" {dir} bind:this={box} role="dialog" tabindex="-1" aria-label={t('mado-graph.fields.title', { name })}
-  onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') { e.preventDefault(); oncancel(); } else if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); apply(); } }}>
+  onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') { e.preventDefault(); oncancel(); } else if (matchKey(e, 'mado-fields') === 'mado-fields.apply') { e.preventDefault(); apply(); } }}>
   <p class="title" dir="auto">{t('mado-graph.fields.title', { name })}</p>
   {#if rows.length}
     <ul>

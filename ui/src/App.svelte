@@ -13,7 +13,8 @@
   import { announceWhatsNew, markWhatsNewSeen } from './lib/whatsnew';
   import { startupChecks } from './lib/maintenance';
   import { t, tn, ago, fmtDate, fmtNum, lang } from './lib/i18n';
-  import { matchShortcut, keys, tip, isMac, isTyping } from './lib/shortcuts';
+  import { keys, tip, isMac, isTyping } from './lib/shortcuts';
+  import { matchKey } from './lib/keys/registry';
   import { confirmDialog, dialogs, dismissDialog } from './lib/dialog.svelte';
   import Onboarding from './views/Onboarding.svelte';
   import LibrarySwitcher from './lib/LibrarySwitcher.svelte';
@@ -545,7 +546,7 @@
 
   function onKey(e: KeyboardEvent) {
     if (e.defaultPrevented) return;
-    let id = matchShortcut(e);
+    let id = matchKey(e, 'app');
     if (!id) return;
     // A key pressed inside an add-on's page runs only moving around and the palette (lib/layer.ts).
     if (keyFromAddOn(e) && !keyMayComeFromAddOn(id)) return;
@@ -555,7 +556,7 @@
     const modal = !!dialogs.current || app.showRollback || app.showReview || app.showWrapNag || showTour || showRecent
       || !!document.querySelector('[aria-modal="true"]:not(.pal)');
     if (modal || (app.showPalette && id !== 'palette')) return;
-    if (id.startsWith('nav.')) {
+    if (/^nav\.\d$/.test(id)) {
       const it = navItems[+id.slice(4) - 1];
       if (!it) return;
       e.preventDefault();
@@ -563,7 +564,9 @@
       return;
     }
     e.preventDefault();
-    command(id);
+    // A palette command the user gave a key (Settings › Keyboard) runs exactly as from the palette.
+    const p = paletteItems.find((x) => x.id === id);
+    if (p) p.run(); else command(id);
   }
 
   function openPalette(v: boolean) {

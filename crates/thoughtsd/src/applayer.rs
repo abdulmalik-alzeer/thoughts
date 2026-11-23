@@ -768,6 +768,7 @@ fn entry_of(marks: &Marks, hash: &str, parents: &str, stored: &str) -> &'static 
         Some("permission") => "permission",
         Some("sidebar") => "sidebar",
         Some("builtin") => "builtin",
+        Some("keys") => "keys",
         _ if marks.packs.contains_key(hash) => "pack",
         _ => "change",
     }

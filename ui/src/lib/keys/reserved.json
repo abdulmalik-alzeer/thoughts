@@ -1,0 +1,21 @@
+{
+  "about": "Keys a keyboard shortcut set (keys.json) may not use. Read by the window (lib/keys/registry.ts) and by the service (crates/thoughtsd/src/keys.rs), so both refuse the same ones. Bindings are canonical: Mod (Cmd on a Mac, Ctrl elsewhere), Control, Alt, Shift, Super, then a KeyboardEvent.code. 'Super+*' means any binding that uses the Windows key.",
+  "all": [
+    "Escape", "Tab", "Shift+Tab", "Enter", "Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight",
+    "Mod+KeyC", "Mod+KeyX", "Mod+KeyV", "Mod+KeyA", "Mod+KeyZ", "Mod+Shift+KeyZ", "Control+KeyY",
+    "Mod+KeyR"
+  ],
+  "macos": [
+    "Mod+KeyH", "Mod+Alt+KeyH", "Mod+KeyM", "Mod+Backquote", "Mod+Tab", "Mod+Space", "Control+Space",
+    "Mod+Alt+Escape", "Mod+Shift+Digit3", "Mod+Shift+Digit4", "Mod+Shift+Digit5"
+  ],
+  "windows": ["Alt+F4", "Super+*"],
+  "linux": [],
+  "recovery": ["Mod+KeyR"],
+  "keptDefaults": {
+    "mado-graph.undo": ["Mod+KeyZ"],
+    "mado-graph.redo": ["Mod+Shift+KeyZ", "Control+KeyY"],
+    "mado-design.undo": ["Mod+KeyZ"],
+    "mado-design.redo": ["Mod+Shift+KeyZ"]
+  }
+}

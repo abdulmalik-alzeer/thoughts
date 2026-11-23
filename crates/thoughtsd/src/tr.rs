@@ -457,6 +457,9 @@ const TABLE: &[Entry] = &[
         "Starting when you log in is not available on this system.",
         "التشغيل عند تسجيل الدخول غير متاح في هذا النظام."),
     // --- keyboard (keys.rs) ---
+    e("keys.invalid", "validation", 422, "",
+        "These keyboard shortcuts cannot be kept:\n{problems}",
+        "لا يمكن اعتماد اختصارات لوحة المفاتيح هذه:\n{problems}"),
     // --- wording pass: plain sentences for what used to reach the person as raw text ---
     e("folder.name_needed", "validation", 422, "",
         "Give the folder a name.",

@@ -36,6 +36,11 @@ ureq = "2"
 dunce = "1"
 thoughtsd = { path = "../crates/thoughtsd" }
 
+# Tests only: the menu library Tauri uses, to check that the keyboard shortcut keys parse as menu keys
+# (already in the tree through tauri, same version).
+[dev-dependencies]
+muda = "=0.20.0"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSImage", "NSResponder", "NSRunningApplication", "NSWorkspace", "libc"] }

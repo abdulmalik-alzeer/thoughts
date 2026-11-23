@@ -7,6 +7,7 @@
   import type { Comment, DesignTokens } from '../types';
   import { isHex } from './contrast';
   import { FONTS, fontStack } from './fonts';
+  import { matchKey } from '../../keys/registry';
   import { COLOR_ROLES, DENSITIES, FONT_ROLES, HARMONIES, RADIUS, SHADOWS, SPACING, fixAll, fixed, harmony, lowRoles, reading, setToken, type ColorRole, type Harmony } from './tokens';
 
   let {
@@ -44,12 +45,13 @@
   const doneTyping = (role: ColorRole) => { delete typing[role]; };
 
   function keys(e: KeyboardEvent) {
-    if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'z') return;
+    const id = matchKey(e, 'mado-design');
+    if (id !== 'mado-design.undo' && id !== 'mado-design.redo') return;
     // A text box keeps its own undo while it is being typed in.
     const el = e.target as HTMLElement;
     if (el instanceof HTMLInputElement && el.type === 'text') return;
     e.preventDefault();
-    if (e.shiftKey) { if (canRedo) onredo(); } else if (canUndo) onundo();
+    if (id === 'mado-design.redo') { if (canRedo) onredo(); } else if (canUndo) onundo();
   }
 
   const fontGroups = (role: string) => (['sans', 'serif', 'mono'] as const)

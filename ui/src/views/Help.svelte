@@ -2,7 +2,8 @@
   import Icon from '../lib/Icon.svelte';
   import { app, command, go, APP_VERSION } from '../lib/store.svelte';
   import { t, fmtMoney } from '../lib/i18n';
-  import { shortcuts, keys } from '../lib/shortcuts';
+  import { keys } from '../lib/shortcuts';
+  import { KEYS, effective, label, labelOf } from '../lib/keys/registry';
   import HelpGuide from './HelpGuide.svelte';
   import HelpReport from './HelpReport.svelte';
   import { guideNames, guideTitle, guideSource, changelogSource, hasGuide } from '../lib/guides';
@@ -10,9 +11,10 @@
   const terms = ['library', 'chat', 'wrap', 'sync', 'rollback'];
   // "Working with notes and chats": i18n stems in final-docs.ts (`final-docs.<k>T` and `final-docs.<k>`).
   const work = ['pic', 'preview', 'pdf', 'pane', 'edit', 'window', 'graph', 'need', 'sync'];
-  const rows = $derived(shortcuts.filter((s) => !s.hidden).map((s) => ({
-    keys: s.id === 'nav.1' ? `${keys(s)} … ${keys(shortcuts.find((x) => x.id === 'nav.6')!)}` : keys(s),
-    label: t(s.label),
+  // The window-wide keys as they are now (the user may have changed them in Settings › Keyboard).
+  const rows = $derived(KEYS.filter((s) => !s.hidden && s.editable && (s.scope === 'app' || s.scope === 'native') && keys(s.id)).map((s) => ({
+    keys: s.id === 'nav.1' && keys('nav.6') ? `${keys('nav.1')} … ${keys('nav.6')}` : effective(s.id).map((b) => label(b)).join('  ·  '),
+    label: s.id === 'nav.1' ? t('shell.sc.nav') : labelOf(s),
   })));
   // The six tour cards, kept here for reference (icon + i18n stem).
   const around = [['home', 'home'], ['chats', 'chat'], ['wrap', 'wrap'], ['docs', 'files'], ['projects', 'folders'], ['palette', 'yours']];
@@ -119,6 +121,7 @@
         {#each rows as r}<tr><td><kbd dir="ltr">{r.keys}</kbd></td><td>{r.label}</td></tr>{/each}
       </tbody>
     </table>
+    <button class="btn" onclick={() => go({ kind: 'settings', id: 'keyboard' })}><Icon name="keyboard" size={15} /> {t('kb.help.change')}</button>
   </section>
 
   <section aria-labelledby="h-priv">

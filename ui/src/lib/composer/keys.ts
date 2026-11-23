@@ -3,7 +3,7 @@
 // new line and only ⌘/Ctrl+Enter sends; Esc makes the box small again, the text staying.
 // Never while an input method is composing a word (lib/ime.ts).
 import { imeKey } from '../ime';
-import { isMac } from '../shortcuts';
+import { isMac } from '../keys/platform';
 
 export type ComposerAction = 'send' | 'newline' | 'collapse' | null;
 

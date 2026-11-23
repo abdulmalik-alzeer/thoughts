@@ -32,6 +32,7 @@
   import { canOpenWindows } from '../lib/windows';
   import { openWindow } from '../lib/openWindow';
   import { presence } from './docs/editLock';
+  import { matchKey } from '../lib/keys/registry';
 
   let { path }: { path?: string } = $props();
 
@@ -206,7 +207,7 @@
 
   function beforeUnload(e: BeforeUnloadEvent) { if (dirty) { e.preventDefault(); e.returnValue = ''; } }
   function onKey(e: KeyboardEvent) {
-    if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 's' && editing) { e.preventDefault(); save(); }
+    if (editing && matchKey(e, 'docs') === 'docs.save') { e.preventDefault(); save(); }
   }
   // The shell leaves "Print" to this view while a document is open.
   function onCommand(e: Event) { if ((e as CustomEvent).detail?.id === 'print') printDoc(); }

@@ -62,7 +62,8 @@ import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
 import { app, toast, go, refreshChats, onSettingsChanged, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
 import { confirmDialog, promptDialog, dialogs } from './dialog.svelte';
 import { saveFile as offerFile } from './download';
-import { matchShortcut } from './shortcuts';
+import { matchKey } from './keys/registry';
+import { keysLoaded } from './keys/native';
 import { aboveShield, LAYER_CSS_ID } from './layer/shield';
 import { fullAccessOn } from './fullAccess';
 import { machineHandle, FULL_ACCESS_ALLOW } from './layer/machine';
@@ -728,7 +729,7 @@ function pressKey(f: Frame, m: any) {
     return;
   }
   const ev = new KeyboardEvent('keydown', { key, code, metaKey: meta, ctrlKey: ctrl, shiftKey: shift, altKey: alt, bubbles: true, cancelable: true });
-  const id = matchShortcut(ev);
+  const id = matchKey(ev, 'app');
   if (!id || !FORWARDED.test(id)) return;
   fromAddOn.add(ev);
   window.dispatchEvent(ev);
@@ -1234,7 +1235,7 @@ const strings = (v: any) => (Array.isArray(v) ? v.filter((x) => typeof x === 'st
  *  A preview names the signature of the change the user chose to try (`sig`, else the one being tried
  *  now); the service refuses (`CHANGED`) when the staged files are no longer exactly that change. */
 export async function loadLayer(opts: { preview?: boolean; sig?: string } = {}) {
-  if (app.safeMode) { app.nav = null; app.todosCfg = null; setPages(null); setLayerItems([]); return; }
+  if (app.safeMode) { app.nav = null; app.todosCfg = null; setPages(null); setLayerItems([]); keysLoaded(null); return; }
   kit = null;
   const boot = firstLoad;
   firstLoad = false;
@@ -1267,6 +1268,7 @@ export async function loadLayer(opts: { preview?: boolean; sig?: string } = {}) 
   // `order` may also name `widget:<id>` and `suggestions`; Home places them.
   app.nav = navConfig(m.nav);
   app.todosCfg = todosConfig(m.todos);
+  keysLoaded(m.keys);
   setPages(m.pages, m.builtin);
   (app as any).layerOff = Array.isArray(m.off) ? m.off : [];
   (app as any).addonFailures = {};

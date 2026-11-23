@@ -31,10 +31,11 @@ rather than word-for-word translations of the English.
 | Library | المكتبة | The folder on the computer that holds the user's notes as plain files. |
 | Assistant | المساعد | The AI program Thoughts works with (Claude Code). |
 | Background service | خدمة الخلفية | The part of Thoughts that keeps running and does the work. |
-| Settings | الإعدادات | Categories: General «عام» · Accessibility «تسهيلات الاستخدام» · Assistant «المساعد» · Usage «الاستخدام» · Library & backup «المكتبة والنسخ الاحتياطي» · Privacy & cost «الخصوصية والتكلفة» · Features «المزايا» · Background service «خدمة الخلفية» · Customise «التخصيص» · Maintenance «الصيانة». |
+| Settings | الإعدادات | Categories: General «عام» · Accessibility «تسهيلات الاستخدام» · Assistant «المساعد» · Usage «الاستخدام» · Library & backup «المكتبة والنسخ الاحتياطي» · Privacy & cost «الخصوصية والتكلفة» · Features «المزايا» · Background service «خدمة الخلفية» · Customise «التخصيص» · Maintenance «الصيانة» · Keyboard «لوحة المفاتيح». |
 | Help | المساعدة | The Help page. |
 | Command palette | لوحة الأوامر | Opened with ⌘K / Ctrl+K. |
 | Quick capture | التدوين السريع | Write a todo or a note from any app. |
+| Keyboard shortcuts | اختصارات لوحة المفاتيح | Settings › Keyboard «الإعدادات › لوحة المفاتيح»: every key the app answers to; change one, add one, remove one, Reset «إعادة», Reset all «إعادة الكل». Keys that cannot change are «مفاتيح ثابتة» (Fixed keys). |
 | Inbox | صندوق الوارد | Quick notes and phone captures waiting to be filed. |
 | Recovery (menu) | الاستعادة | The native menu that works even when the window does not. |
 | Safe mode | الوضع الآمن | Customisations switched off. |
