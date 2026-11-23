@@ -22,6 +22,10 @@ use std::sync::Arc;
 
 pub use crate::mado_review::{plan_hash, review, waves};
 
+/// Round 0.5.0: a project that already has code (detection, the Read rules for its secrets, the code map).
+#[path = "mado_existing.rs"]
+pub mod existing;
+
 type S = State<Arc<AppState>>;
 type R = Result<Json<Value>, ApiErr>;
 
@@ -58,11 +62,32 @@ pub struct MadoState {
     pub style: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan_hash: Option<String>,
+    /// Round 0.5.0: `"existing"` when the plan documents a project that is already built (its
+    /// documents are written from the code, its plan is a change). Absent: a new project, exactly as
+    /// before 0.5.0 (a plan of 0.3.x/0.4.x has none). `normalize` keeps no other value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// Round 0.5.0: when the technical design of an existing project was last approved (its documents
+    /// then describe the code as it was). Display only: `distrust` drops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub documented: Option<Documented>,
+}
+
+/// When the documents of an existing project were approved as its description (`MadoState.documented`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Documented { pub at: String }
+
+/// The one value `MadoState.mode` may hold.
+pub const EXISTING: &str = "existing";
+
+impl MadoState {
+    /// Does this plan document a project that is already built (round 0.5.0)?
+    pub fn existing(&self) -> bool { self.mode.as_deref() == Some(EXISTING) }
 }
 
 impl Default for MadoState {
     fn default() -> Self {
-        let mut s = MadoState { version: 1, steps: BTreeMap::new(), style: None, plan_hash: None };
+        let mut s = MadoState { version: 1, steps: BTreeMap::new(), style: None, plan_hash: None, mode: None, documented: None };
         normalize(&mut s);
         s
     }
@@ -241,6 +266,26 @@ pub struct Review {
     pub plan_hash: String,
 }
 
+/// Round 0.5.0: what a plan of an existing project changes (`plan.json` `change`, optional).
+/// Read apart from `PlanDoc` (`plan_change`), so every `PlanDoc` stays as it was; checked by
+/// `mado_validate::plan` whenever it is there.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct PlanChange {
+    pub title: String,
+    /// The spec's features the change touches or adds (`F2`, `F9`).
+    #[serde(default)]
+    pub features: Vec<String>,
+    /// Project-relative files the change is expected to touch (each passes `owned_path_ok`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
+}
+
+/// The `change` of the bytes of a `plan.json` that `mado_validate::plan` accepted; `None` when it has none.
+pub fn plan_change(bytes: &[u8]) -> Option<PlanChange> {
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    serde_json::from_value(v.get("change").filter(|c| !c.is_null())?.clone()).ok()
+}
+
 // ---------- the files ----------
 
 /// The folder everything lives in, inside the project.
@@ -249,7 +294,8 @@ pub const DIR: &str = "mado";
 pub const DAEMON_FILES: [&str; 3] = ["state.json", "comments.json", "build.json"];
 /// The documents (`GET/PUT /doc/:name`).
 /// `conventions` is the tech step's and optional: a plan made before 0.4.0 has none (`step_optional`).
-pub const DOCS: [(&str, &str); 5] = [("brief", "brief.md"), ("spec", "spec.md"), ("tech", "tech.md"), ("design", "design.md"), ("conventions", "conventions.md")];
+/// `change` is the plan step's in existing mode (round 0.5.0: what the user wants changed), optional too.
+pub const DOCS: [(&str, &str); 6] = [("brief", "brief.md"), ("spec", "spec.md"), ("tech", "tech.md"), ("design", "design.md"), ("conventions", "conventions.md"), ("change", "change.md")];
 /// The diagrams (`GET /graph/:name`): name, file, kind. `tasks` is derived from `plan.json`.
 pub const GRAPHS: [(&str, &str, &str); 3] = [("flow", "flow.graph.json", "flow"), ("architecture", "architecture.graph.json", "architecture"), ("schema", "schema.graph.json", "erd")];
 pub const PLAN: &str = "plan.json";
@@ -277,6 +323,8 @@ pub fn step_outputs(step: &str) -> &'static [&'static str] {
 pub fn step_optional(step: &str) -> &'static [&'static str] {
     match step {
         "tech" => &["conventions.md"],
+        // Round 0.5.0: the change a plan of an existing project is for.
+        "plan" => &["change.md"],
         _ => &[],
     }
 }
@@ -464,6 +512,8 @@ fn is_approved(st: &MadoState, step: &str) -> bool { st.steps.get(step).map_or(f
 /// from the steps before (a step that is further along keeps its status and its files).
 pub fn normalize(st: &mut MadoState) {
     st.version = 1;
+    // Absent is a new project; nothing but "existing" is kept (a stored "new" is the same as none).
+    if !st.existing() { st.mode = None; st.documented = None; }
     st.steps.retain(|k, _| STEPS.contains(&k.as_str()));
     for s in STEPS {
         let e = st.steps.entry(s.to_string()).or_default();
@@ -495,6 +545,8 @@ pub fn approve_in(st: &mut MadoState, step: &str, now: &str) {
 pub fn reopen_in(st: &mut MadoState, step: &str) {
     if let Some(e) = st.steps.get_mut(step) { if e.status == "approved" || e.status == "stale" { e.status = "review".into(); e.approved_at = None; } }
     if step == "review" { st.plan_hash = None; }
+    // The documents of an existing project are no longer the approved description of it.
+    if step == "tech" { st.documented = None; }
     normalize(st);
 }
 
@@ -575,6 +627,9 @@ pub fn distrust(st: &mut MadoState) {
     }
     st.plan_hash = None;
     st.style = None;
+    // The mode stays (it only changes what the runs are told and which shapes are accepted); the
+    // record of when the documents were approved is display only and goes with the approvals.
+    st.documented = None;
     normalize(st);
 }
 
@@ -641,14 +696,23 @@ pub fn read_text(mado: &Path, rel: &str, full: bool) -> anyhow::Result<Option<St
 /// A diagram file, validated. `Ok(None)` when it is not there; an invalid one is an error naming what is wrong.
 pub fn read_graph(mado: &Path, file: &str, kind: &str, full: bool) -> anyhow::Result<Option<GraphDoc>> {
     let Some(bytes) = read_in(mado, file, full, DOC_MAX)? else { return Ok(None) };
+    refuse_secret(file, &bytes)?;
     match crate::mado_validate::graph(&bytes, kind) {
         Ok(g) => Ok(Some(g)),
         Err(list) => Err(crate::tr::err_detail("mado.invalid", &[("path", file)], list.join("\n"))),
     }
 }
 
+/// A file that holds what looks like a key or an access token is not shown (`mado_validate::looks_secret`),
+/// whatever wrote it: a deny list of secret files can never be complete.
+pub fn refuse_secret(rel: &str, bytes: &[u8]) -> anyhow::Result<()> {
+    if crate::mado_validate::looks_secret(&String::from_utf8_lossy(bytes)) { return Err(crate::tr::err("mado.secret", &[("path", rel)])); }
+    Ok(())
+}
+
 pub fn read_plan(mado: &Path, full: bool) -> anyhow::Result<Option<PlanDoc>> {
     let Some(bytes) = read_in(mado, PLAN, full, DOC_MAX)? else { return Ok(None) };
+    refuse_secret(PLAN, &bytes)?;
     match crate::mado_validate::plan(&bytes) {
         Ok(p) => Ok(Some(p)),
         Err(list) => Err(crate::tr::err_detail("mado.invalid", &[("path", PLAN)], list.join("\n"))),
@@ -687,22 +751,28 @@ pub fn screens_of(flow: &GraphDoc) -> Vec<(String, String)> {
 /// Everything wrong with the files of `step` as they are now, in words for the assistant (English).
 /// `missing` lists the files that are not there. A step whose files are all missing is still a
 /// conversation (the brief's interview), not a mistake.
+/// In existing mode (round 0.5.0) the design step's mock-ups are optional (checked when there) and
+/// its `styles.json` may hold one to four candidates (`mado_validate::file_in`).
 pub fn check_step(mado: &Path, step: &str, full: bool) -> (Vec<String>, Vec<String>) {
     let (mut missing, mut wrong) = (vec![], vec![]);
+    let existing = existing_in(mado, full);
     let mut outputs: Vec<String> = step_outputs(step).iter().map(|s| s.to_string()).collect();
+    let mut mocks: Vec<String> = vec![];
     if step == "design" {
         if let Ok(Some(flow)) = read_graph(mado, "flow.graph.json", "flow", full) {
-            for (id, _) in screens_of(&flow) { outputs.push(format!("design/screens/{id}.html")); }
+            for (id, _) in screens_of(&flow) { mocks.push(format!("design/screens/{id}.html")); }
         }
+        if !existing { outputs.append(&mut mocks); }
     }
-    for rel in &outputs {
+    for rel in outputs.iter().chain(mocks.iter()) {
         let max = if rel.ends_with(".html") { MOCK_MAX } else { DOC_MAX };
         let bytes = match read_in(mado, rel, full, max) {
             Ok(Some(b)) => b,
-            Ok(None) => { missing.push(rel.clone()); continue; }
+            // (A mock-up of existing mode is checked only when it is there.)
+            Ok(None) => { if !mocks.contains(rel) { missing.push(rel.clone()); } continue; }
             Err(e) => { wrong.push(format!("{rel}: {}", crate::tr::classify_in(false, &e).message)); continue; }
         };
-        let problems = crate::mado_validate::file(rel, &bytes);
+        let problems = crate::mado_validate::file_in(rel, &bytes, existing);
         wrong.extend(problems.into_iter().map(|p| format!("{rel}: {p}")));
     }
     // A file a step may do without (`step_optional`) is held to its shape whenever it is there.
@@ -734,9 +804,24 @@ pub fn check_step(mado: &Path, step: &str, full: bool) -> (Vec<String>, Vec<Stri
             for p in crate::mado_review::review_in(false, &spec, flow.as_ref(), &plan).problems.iter().filter(|p| crate::mado_review::blocks(p)) {
                 wrong.push(format!("plan.json: {}", p.message));
             }
+            // What a change says it touches must be features of the spec.
+            if let Some(change) = read_in(mado, PLAN, full, DOC_MAX).ok().flatten().as_deref().and_then(plan_change) {
+                let known: Vec<String> = crate::mado_validate::features(&spec).into_iter().map(|(id, _)| id).collect();
+                for f in change.features.iter().filter(|f| !known.contains(f)) {
+                    wrong.push(format!("plan.json: change.features names {f}, which is not a feature heading of spec.md (add the new feature to spec.md as \"### {f} — Name\" first)"));
+                }
+            }
         }
     }
     (missing, wrong)
+}
+
+/// The mode `state.json` records, read as written (`distrust` keeps the mode too, so a state file
+/// the daemon did not write says the same). For the checks and the prompts, which only read `mado/`.
+pub fn existing_in(mado: &Path, full: bool) -> bool {
+    read_in(mado, "state.json", full, DOC_MAX).ok().flatten()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .map_or(false, |v| v["mode"] == EXISTING)
 }
 
 /// A fingerprint of every file of `mado/` a run may write (to tell whether a run changed anything).
@@ -926,6 +1011,8 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
     // No link or shared file in `mado/` that a write of the run would go through.
     require_plain(&project.join(DIR), full)?;
     let mut allowed = vec![];
+    // Round 0.5.0: a plan of a project that is already built (its runs read the whole project).
+    let existing = existing_in(&project.join(DIR), full);
     if !full {
         // Its folder is the project, and nothing besides it.
         if crate::paths::canonical(&spec.cwd).ok().as_deref() != Some(project.as_path()) { return Err(crate::tr::err("mado.path", &[("path", &spec.cwd.display().to_string())])); }
@@ -933,6 +1020,15 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
         let (deny, allow) = write_rules(&project);
         spec.extra_deny.extend(deny);
         allowed = allow;
+        // Reading stays as for every planning run (the project, nothing outside it); an existing-mode
+        // run is told to read all of it, so the files that hold its secrets are closed to it.
+        // It reads text nobody vetted, so nothing may carry it out: no web (whatever its chat says),
+        // like the shell and connected tools, which no planning run has (`claude::profile`).
+        if existing {
+            spec.extra_deny.extend(existing::secret_read_deny(&project));
+            spec.options.web = false;
+            spec.extra_deny.extend(["WebFetch".to_string(), "WebSearch".to_string()]);
+        }
         // The records beside the approval (the approval itself, the fingerprint, the strays check's
         // "before") are not the run's to read or change.
         if let Some(d) = record_dir(&role.project_id) {
@@ -949,7 +1045,14 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
     }
     let mado = mado_dir_of(&project, full)?;
     std::fs::create_dir_all(&mado)?;
-    let ctx = crate::mado_prompts::Context::read(&mado, full);
+    let mut ctx = crate::mado_prompts::Context::read(&mado, full);
+    if existing {
+        // What is in the folder, and the code map when the graph tool has one: data, never instructions.
+        let found = existing::detect_trusted(&project, full).await;
+        let readme = { let p = project.clone(); tokio::task::spawn_blocking(move || crate::mado_build::finish::readme(&p, full)).await.ok().flatten() };
+        ctx.found = found.map(|f| existing::found_text(&f, readme.as_deref()));
+        ctx.code_map = existing::code_map(state, &role.project_id).await;
+    }
     let step_text = crate::mado_prompts::system(&role.step, &ctx);
     spec.append_system = Some(match spec.append_system.take() { Some(a) => format!("{step_text}\n\n{a}"), None => step_text });
     // The model and the effort are the plan's own (`/options`), whatever the step's chat was made with.
@@ -1168,7 +1271,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/api/mado", get(plans))
         .route("/api/mado/:project", get(overview))
         .route("/api/mado/:project/options", get(options_get).put(options_put))
-        .route("/api/mado/:project/start", post(start))
+        .route("/api/mado/:project/start", post(start_route))
         .route("/api/mado/:project/doc/:name", get(doc_get).put(doc_put))
         .route("/api/mado/:project/graph/:name", get(graph_get))
         .route("/api/mado/:project/graph/:name/positions", put(graph_positions))
@@ -1216,34 +1319,87 @@ fn reconcile(_pid: &str, mado: &Path, st: &MadoState, full: bool) -> bool {
 async fn overview(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
     let (project, mado, full) = ctx(&st, &pid).await?;
     let name = st.settings.read().await.projects.iter().find(|p| p.id == pid).map(|p| p.name.clone()).unwrap_or_default();
+    // Round 0.5.0: what the folder holds (names only, bounded; only for a folder the user trusted).
+    let detected = existing::detect_trusted(&project, full).await.map(|f| f.detected);
     let lock = lock_of(&pid);
     let _held = lock.lock().await;
     let state = load_state(&pid, &mado, full)?;
     if let Some(s) = state.as_ref() { if reconcile(&pid, &mado, s, full) { save_state(&pid, &mado, s, full)?; } }
     let files = if mado.is_dir() { files_of(&mado) } else { vec![] };
-    Ok(Json(json!({"project": {"id": pid, "name": name, "path": project.to_string_lossy()}, "exists": state.is_some(), "state": state, "files": files})))
+    Ok(Json(json!({"project": {"id": pid, "name": name, "path": project.to_string_lossy()}, "exists": state.is_some(), "state": state, "files": files, "detected": detected})))
 }
 
 /// `POST /start`: make `mado/` and its state (trust required, as for linking the project).
-async fn start(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
-    let (project, mado, full) = ctx(&st, &pid).await?;
+/// (The tests' way in; the route is `start_route`.)
+#[cfg(test)]
+async fn start(State(st): S, UrlPath(pid): UrlPath<String>) -> R { Ok(Json(start_in(&st, &pid, None).await?)) }
+
+/// `POST /start {mode?: "new" | "existing"}` (round 0.5.0). No body, or no `mode`: as before 0.5.0 (a
+/// new plan is a new project's; a started plan keeps its mode). Anything else in the body is refused.
+async fn start_route(State(st): S, UrlPath(pid): UrlPath<String>, body: axum::body::Bytes) -> R {
+    let mode = parse_mode(&body)?;
+    Ok(Json(start_in(&st, &pid, mode).await?))
+}
+
+/// The mode a `POST /start` body asks for: `None` (nothing asked), `Some(None)` (a new project),
+/// `Some(Some("existing"))`.
+pub fn parse_mode(body: &[u8]) -> anyhow::Result<Option<Option<String>>> {
+    if body.iter().all(u8::is_ascii_whitespace) { return Ok(None); }
+    if body.len() > 4096 { return Err(crate::tr::err("mado.bad_mode", &[])); }
+    let v: Value = serde_json::from_slice(body).map_err(|_| crate::tr::err("mado.bad_mode", &[]))?;
+    let Some(o) = v.as_object() else { return Err(crate::tr::err("mado.bad_mode", &[])) };
+    if o.keys().any(|k| k != "mode") { return Err(crate::tr::err("mado.bad_mode", &[])); }
+    match o.get("mode") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(m)) if m == "new" => Ok(Some(None)),
+        Some(Value::String(m)) if m == EXISTING => Ok(Some(Some(EXISTING.into()))),
+        _ => Err(crate::tr::err("mado.bad_mode", &[])),
+    }
+}
+
+/// Start the plan (or answer with the one there is), in `mode` when one is asked. The mode of a
+/// started plan changes only while none of its steps is approved (or stale) and no run of its brief
+/// is under way: an approved step was written for the mode it has.
+pub async fn start_in(st: &AppState, pid: &str, mode: Option<Option<String>>) -> anyhow::Result<Value> {
+    let (project, mado, full) = ctx(st, pid).await?;
     if !full { crate::trust::require(&project)?; }
     require_plain(&mado, full)?;
-    let lock = lock_of(&pid);
+    let lock = lock_of(pid);
     let held = lock.lock().await;
-    let state = match load_state(&pid, &mado, full)? {
-        Some(s) => s,
-        None => { let s = MadoState::default(); save_state(&pid, &mado, &s, full)?; s }
+    let state = match load_state(pid, &mado, full)? {
+        Some(mut s) => {
+            if let Some(m) = mode.filter(|m| *m != s.mode) {
+                let brief = s.steps.get("brief").cloned().unwrap_or_default();
+                if s.steps.values().any(|e| matches!(e.status.as_str(), "approved" | "stale")) {
+                    return Err(crate::tr::err("mado.mode_locked", &[]));
+                }
+                if let Some(chat) = brief.chat_id.as_deref() {
+                    if st.chats.with(chat, |c| c.running).await == Some(true) { return Err(crate::tr::err("mado.busy", &[])); }
+                }
+                s.mode = m;
+                normalize(&mut s);
+                save_state(pid, &mado, &s, full)?;
+            }
+            s
+        }
+        None => {
+            let mut s = MadoState::default();
+            s.mode = mode.flatten();
+            normalize(&mut s);
+            save_state(pid, &mado, &s, full)?;
+            s
+        }
     };
     drop(held);
-    tell(&st, &pid, "state").await;
-    Ok(Json(json!({"ok": true, "state": state})))
+    tell(st, pid, "state").await;
+    Ok(json!({"ok": true, "state": state}))
 }
 
 async fn doc_get(State(st): S, UrlPath((pid, name)): UrlPath<(String, String)>) -> R {
     let (_, mado, full) = ctx(&st, &pid).await?;
     let file = doc_file(&name).ok_or_else(|| crate::tr::err("mado.unknown_name", &[("name", &name)]))?;
     let text = read_text(&mado, file, full)?;
+    if let Some(t) = &text { refuse_secret(file, t.as_bytes())?; }
     Ok(Json(json!({"text": text.clone().unwrap_or_default(), "exists": text.is_some()})))
 }
 
@@ -1380,6 +1536,8 @@ async fn step_approve(State(st): S, UrlPath((pid, step)): UrlPath<(String, Strin
     let pid2 = pid.clone();
     let out = with_state(&st, &pid, move |state| {
         approve_in(state, &s, &now);
+        // Round 0.5.0: the documents of an existing project now describe it as approved.
+        if s == "tech" && state.existing() { state.documented = Some(Documented { at: now.clone() }); }
         if let Some((h, commands)) = hash.clone() {
             // What allows the build to run commands: kept outside the project, never in state.json.
             write_approval(&pid2, &Approval { plan_hash: h.clone(), commands, approved_at: now.clone() })?;

@@ -1692,6 +1692,16 @@ const TABLE: &[Entry] = &[
         "The assistant does not offer that effort level. It offers: {levels}.",
         "المساعد لا يقدّم مستوى الجهد هذا. المستويات المتاحة: {levels}."),
     // --- code graph and existing projects (mado) ---
+    // existing projects
+    e("mado.secret", "validation", 422, "",
+        "{path} is not shown: it seems to hold a secret, such as a private key or an access token. Ask the assistant in the step's chat to take it out and name only the setting.",
+        "لا يُعرض «{path}»: يبدو أنه يحوي سراً، مثل مفتاح خاص أو رمز وصول. اطلب من المساعد في محادثة الخطوة أن يزيله ويذكر اسم الإعداد فقط."),
+    e("mado.bad_mode", "validation", 422, "",
+        "The planner can start a plan for a new project or document a project that is already built; nothing else was asked for.",
+        "يستطيع المخطِّط أن يبدأ خطة لمشروع جديد أو أن يوثّق مشروعاً مبنياً بالفعل، ولم يُطلب غير ذلك."),
+    e("mado.mode_locked", "conflict", 409, "",
+        "This plan's kind can no longer be changed: some of its steps were already approved as they are.",
+        "لم يعد ممكناً تغيير نوع هذه الخطة: فقد وُوفق على بعض خطواتها كما هي."),
 ];
 
 fn entry(key: &str) -> &'static Entry {

@@ -394,3 +394,124 @@ A plan with none of `verify`, `run`, a task `kind` builds exactly as in 0.3.x: n
 `done` after the last wave, the same `build.json` shape. The window then shows no phase cards and, once landed,
 says the plan was made before builds were checked and reviewed; the guide (USING.md) says the phases apply to plans
 made with this version.
+
+## Round 0.5.0: documenting a project that is already built (as built, daemon side)
+
+Why: the owner's words, "make MADO read already built projects to document it; it should not be plan only when
+linked to a folder." A plan now has a **mode**. A new project's plan (no mode) is exactly what it was in 0.4.x; a
+built project's plan (`mode: "existing"`) has the same seven steps, the same files and the same shapes, but its
+documents are written **from the code**, and its work-plan step plans **a change** on top of it. The Final check and
+the build are unchanged. Everything below is additive; a `state.json` or `plan.json` of 0.3.x/0.4.x is read, shown,
+checked and built exactly as before.
+
+### `GET /api/mado/:projectId` gains `detected`
+
+```ts
+detected: { hasCode: boolean; languages: { lang: string; files: number }[]; files: number;
+            hasReadme: boolean; manifests: string[]; capped: boolean } | null
+```
+
+- What the linked folder holds, from a walk of **names only** (`mado::existing::detect`): no file is opened, no program
+  (git included) is run, no link is followed (a link is neither entered nor counted). Not entered: `mado/` (any letter
+  case), every hidden folder (`.git`, `.venv`…), and `node_modules`, `bower_components`, `jspm_packages`, `target`,
+  `dist`, `build`, `out`, `vendor`, `venv`, `env`, `__pycache__`, `site-packages`, `coverage`, `Pods`, `DerivedData`,
+  `obj`, `tmp`, `temp`, `logs`. Bounded: 20 000 entries, 8 levels, 1.5 s; `capped: true` when a limit stopped it (the
+  numbers are then a lower bound).
+- `files`: source files counted by extension; `languages`: per language, most files first (at most 12; HTML and CSS
+  are listed but do not count as a program). `manifests`: package and build files at most 3 levels down
+  (`package.json`, `Cargo.toml`, `pyproject.toml`, `requirements.txt`, `go.mod`, `composer.json`, `Gemfile`, `pom.xml`,
+  `build.gradle*`, `Package.swift`, `pubspec.yaml`, `*.csproj`, …), project-relative, at most 20, names with control or
+  direction characters left out. `hasReadme`: a plain `README*` file at the top.
+- **`hasCode`** is what the window decides on: true when there is a package or build file, or at least 5 program
+  source files. It means "this folder looks like a project that is already built".
+- `detected` is `null` when the app may not look: the folder is not trusted (`trust::require`, which yields to full
+  access) or could not be read. Detection needs no plan (`exists: false` still has it).
+
+### `POST /api/mado/:projectId/start` takes an optional body
+
+`{ mode?: "new" | "existing" }`. No body, `{}` or `mode: null`: as before (a new plan is a new project's; a started plan
+keeps its mode). `"new"` stores no mode at all. Anything else — another value, another field, not an object — is
+refused (422 `mado.bad_mode`) and starts nothing. On a started plan the mode changes only while **no step is approved or
+stale** and no brief run is under way; otherwise 409 `mado.mode_locked` (asking for the mode it already has is fine).
+Answer as before: `{ ok: true, state }`.
+
+### `MadoState` gains (both optional, absent in every plan before 0.5.0)
+
+- `mode?: "existing"` — `normalize` keeps no other value. A `state.json` the daemon did not write keeps its mode
+  (`distrust`): the mode only changes what runs are told and which shapes are accepted, never what may run.
+- `documented?: { at: string }` — RFC 3339 time the tech step was last approved in existing mode: the documents are
+  then the approved description of the code. Cleared when tech is reopened, when the mode is not `existing`, and by
+  `distrust`. Display only. (No commit is recorded yet: a later "the code moved since" needs git and the rule-15 guards.)
+
+### The steps in existing mode
+
+Same steps, same files, same validation, except:
+
+| Step | What the run is told (`mado_prompts::system_existing`) | Checks |
+|---|---|---|
+| brief | Draft the whole brief from the code first, then ask at most five questions about what code cannot tell (who, what hurts, what next). Headings: Problem, People and roles, **What it does today**, **What it does not do**, **What we want next**, Success, Constraints, Feel, Assumptions, Open questions. | `brief.md` required |
+| spec | **As built**: one `### F<n> — Name` per feature the product has, a `- Status: built` / `partial` line, acceptance as the code behaves; real screens, each flow screen node with its real `route` and `props.source: "path:line"`. | as before |
+| tech | **As is**: stack and versions from the manifests, real structure, every real route, data from migrations and models, the project's real check commands (missing ones "(proposed)"); `conventions.md` from the code with real examples; architecture/schema nodes carry `props.files`. | as before |
+| design | **Current look**: `design.md` describes the look the product has; `design/styles.json` holds **1 to 4** candidates, the first `id: "current"` (tokens from the project's styles); mock-ups **optional** (a mock-up that is there is checked as always). | `styles.json` 1–4 (new mode still 3–4); mock-ups not required |
+| plan | **Plan a change**: the change is what the user writes in the step's chat (the Run box note); vague → ask first. Writes `mado/change.md` (`# <title> — Change`: What the user asked, What changes, What must not change, Features, Files likely touched, Assumptions, Open questions) and `plan.json` with `change`. A new feature is first added to `spec.md` as `### F<n>` with `- Status: planned` (and its screens to the flow) — the one edit a plan run makes to an earlier step's files. Tasks only for the change; `verify` is the project's whole existing suite. | `plan.json` as before + `change`; `change.features` must be headings of `spec.md` |
+| review, build | unchanged | unchanged |
+
+Every statement in the documents ends with where it comes from: "(found in the code: path[:line])", "(from the
+README)" or "(assumed)", so the user can check claims against the code. Comments, change requests, approve and reopen
+are as before.
+
+- `plan.json` `change?: { title: string; features: string[]; files?: string[] }` (`mado::PlanChange`, read with
+  `mado::plan_change(bytes)` beside `PlanDoc`, which is unchanged). `title` 1–300 characters; `features` 1–100 distinct
+  feature ids; `files` at most 100 paths that pass `owned_path_ok`; no other field. Absent or `null`: a plan as before.
+  The review (`mado_review`, round C) may narrow `untraced-feature` to `change.features`.
+- `mado/change.md` is a document of the plan step (`step_optional("plan")`): never required, checked when there, listed
+  in `files`, served and saved by `GET/PUT /doc/change` (`{text, exists}`; an edit reopens the plan step), commentable.
+- `GET /design/styles` adds `current: "current"` in existing mode when the assistant wrote that candidate; it is then
+  listed first (before the app's own examples). Picking stays the user's (`POST /design/style`).
+
+### What an existing-mode run may read, and what it never gets
+
+- Reading is what every planning run had already: Claude Code's `default` mode reads inside its working folder (the
+  project) without asking; the file tools stay inside it (`--restricted`), the app's records are denied. No rule was
+  widened. Writing is unchanged: only `mado/**`, never the daemon's files, the same deny layers and stray check.
+- Added for existing mode only (`mado::existing::secret_read_deny`, every letter case, absolute and project-relative,
+  at any depth): Read is denied for `.env`, `.env.*` (examples too), `.envrc`, `secrets.*`, `credentials*`, `*.pem`,
+  `*.key`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`, `*.kdbx`, `*-key.json`, `id_rsa*`, `id_dsa*`, `id_ecdsa*`,
+  `id_ed25519*`, `.npmrc`, `.yarnrc.yml`, `.pypirc`, `.netrc`, `.git-credentials`, `.htpasswd`, `.pgpass`, `.dockercfg`,
+  `*.tfvars`, `.docker/config.json`, and the whole of `.git/`, `.aws/` and `.ssh/` (nested repositories and
+  `.git/modules` included). The search tool obeys the same rules.
+- **A deny list is never complete.** So the run is also told not to open further, quote or repeat anything that looks
+  like a secret, to write setting names only, and every file of `mado/` that holds an obvious key or token (a private-key
+  header; AWS, GitHub, GitLab, Slack, Stripe, Anthropic, OpenAI, Google and npm token prefixes — `mado_validate::looks_secret`,
+  a bounded plain check) is refused: the run is sent it back like any invalid file, and `GET /doc/:name`, `GET /graph/:name`
+  and `GET /plan` answer 422 `mado.secret` ("… is not shown: it seems to hold a secret …") instead of the text. This check
+  holds in both modes.
+- Nothing it reads can leave: no shell, no connected tools (as for every planning run) and, in existing mode, **no web
+  even when the step's chat has web lookups on** (`WebFetch`/`WebSearch` denied).
+- Project text reaches the prompt only as data blocks: "What the app found in the folder" (`existing::found_text`:
+  the counts, languages, manifests, the names at the top, and the first 6000 characters of a plain, not hard-linked
+  `README.md`), and the code map when the code-review-graph tool has one (`existing::code_map`, at most 24 000
+  characters; `None` until `v050-graph` is merged, then `crate::code_graph::code_map`).
+- Proven against the installed Claude Code (2.1.295) with the rules a real existing-mode run is started with
+  (`real_claude_code_keeps_an_existing_project_run_to_reading_code_and_writing_mado`, run by hand with `--ignored`):
+  a source file is read; `.env`, `sub/.env.local`, `.git/config` and a nested `lib/x/.git/config` are refused; a search
+  of the project finds nothing in them; a write outside `mado/` and a write of `mado/state.json` are refused;
+  `mado/brief.md` is written.
+
+### For the Plan view (round C)
+
+- No plan yet (`exists: false`) and `detected?.hasCode`: offer two choices — "Document this project as it is"
+  (`POST /start {mode:"existing"}`) and "Plan a new project here" (`POST /start {mode:"new"}`). `detected` null (not
+  trusted yet): offer both too; the start then asks for trust as today. `hasCode` false: the usual start (no body).
+  Show what was found in a line: the languages (`lang` and `files`), "and more" when `capped`.
+- Header: the mode ("Documenting an existing project" / "New project"). While nothing is approved the user may switch
+  (start again with the other mode; a 409 `mado.mode_locked` is shown as its message).
+- Step labels in existing mode: brief "Brief, from the code", spec "What it does (as built)", tech "How it's built",
+  design "How it looks now", plan "Plan a change" (its Run box asks "What do you want to change?" and its note is the
+  change request), review and build as before. The plan step shows `change.md` as a tab ("The change") when it exists
+  (`GET /doc/change`), and `plan.change.title`/`features` above the tasks.
+- Once tech is approved in existing mode (`state.documented`): "Documented. Plan a change, or keep these as the
+  project's documentation" — no further step is required.
+- Design step in existing mode: `current` first and pre-selected in the picker when nothing is picked (picking still
+  calls `POST /design/style`); no "missing mock-up" state for screens without one.
+- `mado.secret` on a document: show its message in place of the document, like `mado.invalid`.
