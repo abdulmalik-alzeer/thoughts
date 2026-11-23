@@ -7,6 +7,7 @@ const { neighbour, statusKey, stepperItems, tabKey, tabsOf } = await import('./s
 const { blockingProblems, canApprove, canReopen, canRun, firstOpenStep, isEditable, statusOf } = await import('../../lib/mado/store.svelte');
 const dict = (await import('../../lib/i18n/mado-plan')).default;
 const more = (await import('../../lib/i18n/mado-v040')).default;
+const v050 = (await import('../../lib/i18n/mado-v050')).default;
 import { STEPS, type MadoOverview, type ProblemKind, type Review, type StepId, type StepStatus } from '../../lib/mado/types';
 
 function overview(s: Partial<Record<StepId, StepStatus>>): MadoOverview {
@@ -136,7 +137,7 @@ describe('the review gate', () => {
   });
   it('every kind of problem has plain words in both languages', () => {
     const kinds: ProblemKind[] = ['cycle', 'missing-dep', 'overlap', 'untraced-feature', 'untraced-screen', 'unknown-feature', 'empty-acceptance', 'bad-path'];
-    for (const k of kinds) { expect(dict.en[`mado.problem.${k}`], k).toBeTruthy(); expect(dict.ar[`mado.problem.${k}`], k).toBeTruthy(); }
+    for (const k of kinds) { expect((dict.en as Record<string, string>)[`mado.problem.${k}`], k).toBeTruthy(); expect((dict.ar as Record<string, string>)[`mado.problem.${k}`], k).toBeTruthy(); }
   });
 });
 
@@ -150,7 +151,7 @@ describe('round 0.4.0', () => {
   });
   it('has plain words for the new kinds of problem, none of which blocks the build', () => {
     const kinds: ProblemKind[] = ['no-verify', 'no-run', 'no-contracts', 'no-tests', 'unchecked-screen'];
-    for (const k of kinds) { expect(dict.en[`mado.problem.${k}`], k).toBeTruthy(); expect(dict.ar[`mado.problem.${k}`], k).toBeTruthy(); }
+    for (const k of kinds) { expect((dict.en as Record<string, string>)[`mado.problem.${k}`], k).toBeTruthy(); expect((dict.ar as Record<string, string>)[`mado.problem.${k}`], k).toBeTruthy(); }
     expect(blockingProblems(review(kinds))).toEqual([]);
   });
 });
@@ -177,5 +178,22 @@ describe('the dictionary', () => {
       }
     }
     expect(missing).toEqual([]);
+  });
+});
+
+describe('round 0.5.0', () => {
+  it('names the steps of a built project for what they do, and shows its change at the plan step once written', () => {
+    const o = { ...overview({ brief: 'review' }), state: { ...overview({ brief: 'review' }).state!, mode: 'existing' as const } };
+    expect(stepperItems(o, 'brief').map((i) => i.nameKey)).toEqual(['mado-v050.step.brief', 'mado-v050.step.spec', 'mado-v050.step.tech', 'mado-v050.step.design', 'mado-v050.step.plan', 'mado.step.review', 'mado.step.build']);
+    expect(stepperItems(overview({ brief: 'review' }), 'brief').map((i) => i.nameKey)).toEqual(STEPS.map((s) => `mado.step.${s}`));
+    expect(tabsOf('plan').map((x) => x.id)).toEqual(['graph:tasks', 'tasks']);
+    expect(tabsOf('plan', ['plan.json', 'change.md']).map((x) => x.id)).toEqual(['graph:tasks', 'tasks', 'doc:change']);
+    expect(tabKey({ id: 'doc:change', kind: 'change' })).toBe('mado-v050.change.tab');
+  });
+  it('has plain words for the code graph’s findings, none of which blocks the build', () => {
+    const kinds: ProblemKind[] = ['untouched-impact', 'hidden-dependency', 'change-outside-scope'];
+    const d = v050 as { en: Record<string, string>; ar: Record<string, string> };
+    for (const k of kinds) { expect(d.en[`mado.problem.${k}`], k).toBeTruthy(); expect(d.ar[`mado.problem.${k}`], k).toBeTruthy(); }
+    expect(blockingProblems(review(kinds))).toEqual([]);
   });
 });

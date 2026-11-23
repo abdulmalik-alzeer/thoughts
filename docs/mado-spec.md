@@ -515,3 +515,23 @@ are as before.
 - Design step in existing mode: `current` first and pre-selected in the picker when nothing is picked (picking still
   calls `POST /design/style`); no "missing mock-up" state for screens without one.
 - `mado.secret` on a document: show its message in place of the document, like `mado.invalid`.
+
+### Round C: the code graph in the build and the Final check, and the Plan view (`v050-madoui`)
+
+- Planning runs of existing mode get `code_graph::code_map` (the stub of `mado_existing.rs` is swapped).
+- Build runs, when the user's code-review-graph tool has a graph of the project (`mado_build::has_graph`): every task brief,
+  the wave fix, the clash fix, the `verify` fix and the review fix get `code_graph::around` for the files they work on
+  (`mado_build::files_of`: plain owned paths, patterns matched by a bounded walk of names); the review gets
+  `code_graph::impact` of the files the build changed (`git diff <baseCommit>..HEAD`, after `git_safe`). Each is a data
+  block (`mado_build_prompts::code_around`/`code_impact`). Without the tool or a graph nothing is asked and every prompt is
+  byte for byte what it was (pinned by `without_the_code_graph_every_build_prompt_is_byte_for_byte_what_it_was`).
+- `GET /review` (`mado_review::final_check`): in existing mode with `plan.change`, `untraced-feature` is kept to
+  `change.features`. With a graph, three findings that never block: `untouched-impact` (files that use what the tasks
+  change and that no task owns), `hidden-dependency` (task B owns a file that uses task A's files, with no order between
+  them; `tasks: [B, A]`), `change-outside-scope` (a change with `files`: a task owning paths the change does not name and
+  that do not use the files it names). At most 12 tasks are asked about one by one.
+- Plan view: the two choices (`startChoice`), the mode pill and switch in the header (only while `modeSwitchable`), step
+  names and words of existing mode (`mado-v050.step.*`), the change request box at the plan step, the `change.md` tab
+  ("The change") and `plan.change` above the tasks, the documented banner, the current look first and marked in the design
+  picker, a 422 on a document/diagram/plan shown in its place, and the Code graph card (header button with its state; open by
+  default for a built project when the tool is there; one recommending line instead when it is not; dismissible per project).

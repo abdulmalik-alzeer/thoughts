@@ -1772,6 +1772,16 @@ const TABLE: &[Entry] = &[
     e("code_graph.recommend_found", "info", 500, "",
         "code-review-graph is installed. Build the code graph to give MADO a map of this project's code. The graph is kept in the app's own folder, not in your project.",
         "أداة code-review-graph مثبّتة. ابنِ مخطط الشيفرة ليحصل MADO على خريطة لشيفرة هذا المشروع. يُحفظ المخطط في مجلد التطبيق نفسه لا في مشروعك."),
+    // plan view and review
+    e("mado.p.untouched_impact", "text", 422, "",
+        "These files use what the plan changes, and no task owns them: {files}. Check that the change keeps them working, or give a task that work. (From the code graph.)",
+        "هذه الملفات تستعمل ما تغيّره الخطة، ولا تملكها أي مهمة: {files}. تحقّق من أن التغيير يُبقيها عاملة، أو أسند هذا العمل إلى مهمة. (من مخطط الشيفرة.)"),
+    e("mado.p.hidden_dependency", "text", 422, "",
+        "Task {task} owns {file}, which uses files of task {dep}, but it does not wait for {dep}: the two may run at the same time. Consider making {task} depend on {dep}. (From the code graph.)",
+        "المهمة {task} تملك {file} الذي يستعمل ملفات المهمة {dep}، لكنها لا تنتظر {dep}: فقد تعملان في الوقت نفسه. فكّر في جعل {task} تعتمد على {dep}. (من مخطط الشيفرة.)"),
+    e("mado.p.change_outside_scope", "text", 422, "",
+        "Task {task} changes {paths}, which the change does not name and which does not use the files it names. Check that this belongs to the change. (From the code graph.)",
+        "المهمة {task} تغيّر {paths}، وهو ما لا يذكره التغيير ولا يستعمل الملفات التي يذكرها. تحقّق من أن هذا جزء من التغيير. (من مخطط الشيفرة.)"),
 ];
 
 fn entry(key: &str) -> &'static Entry {

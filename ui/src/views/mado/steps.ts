@@ -3,6 +3,7 @@
 import type { DocName } from '../../lib/mado/api';
 import { STEP_DOCS, STEP_GRAPHS } from '../../lib/mado/comments/batch';
 import { statusOf } from '../../lib/mado/store.svelte';
+import { isExisting, stepNameKey } from '../../lib/mado/existing';
 import { STEPS, type GraphName, type MadoOverview, type StepId, type StepStatus } from '../../lib/mado/types';
 
 export type Tone = 'off' | 'next' | 'busy' | 'you' | 'done' | 'warn';
@@ -41,7 +42,7 @@ export function statusKey(step: StepId, status: StepStatus, build?: { status?: s
 export function stepperItems(o: MadoOverview | null, current: StepId, build?: { status?: string; landedAt?: string } | null): StepperItem[] {
   return STEPS.map((id, i) => {
     const status = statusOf(o, id);
-    return { id, n: i + 1, status, tone: TONE[status], nameKey: `mado.step.${id}`, statusKey: statusKey(id, status, build), locked: status === 'locked', current: id === current };
+    return { id, n: i + 1, status, tone: TONE[status], nameKey: stepNameKey(id, isExisting(o)), statusKey: statusKey(id, status, build), locked: status === 'locked', current: id === current };
   });
 }
 
@@ -58,6 +59,7 @@ export type Tab =
   | { id: string; kind: 'graph'; name: GraphName }
   | { id: string; kind: 'tasks' }
   | { id: string; kind: 'conventions' }
+  | { id: string; kind: 'change' }
   | { id: string; kind: 'design' };
 
 /** The tabs of a step's workspace, in the order they are shown. */
@@ -69,6 +71,8 @@ export function tabsOf(step: StepId, files: readonly string[] = []): Tab[] {
   if (step === 'tech' && files.includes('conventions.md')) tabs.push({ id: 'doc:conventions', kind: 'conventions' });
   for (const name of STEP_GRAPHS[step]) tabs.push({ id: `graph:${name}`, kind: 'graph', name });
   if (step === 'plan') tabs.push({ id: 'tasks', kind: 'tasks' });
+  // Round 0.5.0: what the user wants changed in a built project, once the run wrote it.
+  if (step === 'plan' && files.includes('change.md')) tabs.push({ id: 'doc:change', kind: 'change' });
   return tabs;
 }
-export const tabKey = (tab: Tab) => (tab.kind === 'doc' ? `mado.tab.${tab.name}` : tab.kind === 'graph' ? (tab.name === 'tasks' ? 'mado.tab.graph.tasks' : `mado.tab.${tab.name}`) : tab.kind === 'design' ? 'mado.tab.designStep' : tab.kind === 'conventions' ? 'mado.tab.conventions' : 'mado.tab.tasks');
+export const tabKey = (tab: Tab) => (tab.kind === 'doc' ? `mado.tab.${tab.name}` : tab.kind === 'graph' ? (tab.name === 'tasks' ? 'mado.tab.graph.tasks' : `mado.tab.${tab.name}`) : tab.kind === 'design' ? 'mado.tab.designStep' : tab.kind === 'conventions' ? 'mado.tab.conventions' : tab.kind === 'change' ? 'mado-v050.change.tab' : 'mado.tab.tasks');

@@ -313,7 +313,9 @@ pub async fn verify_gate(state: &Arc<AppState>, pid: &str, project: &Path, b: &B
             (Some(c), Some(sid)) => (c.clone(), prompts::gate_retry(&out, &undone), Some(sid)),
             _ => {
                 let id = new_chat_with(state, pid, json!({"mado": {"projectId": pid, "phase": "verify", "wave": wi + 1}}), &format!("{} {}", tr("mado_build.chat_title_gate", &[]), wi + 1), false).await;
-                (id, prompts::gate_fix(&out, conventions(project, full(state).await).as_deref()), None)
+                let ids: Vec<String> = b.waves.get(wi).map(|w| w.lanes.iter().flat_map(|l| l.tasks.iter().map(|t| t.id.clone())).collect()).unwrap_or_default();
+                let around = graph_around(state, pid, project, &owns_of(plan, &ids)).await;
+                (id, prompts::gate_fix(&out, conventions(project, full(state).await).as_deref(), around.as_deref()), None)
             }
         };
         chat = Some(id.clone());
@@ -792,6 +794,15 @@ async fn review_step(state: &Arc<AppState>, pid: &str, project: &Path, b: &Build
     }
 }
 
+/// Round 0.5.0: the files the build changed since it started (its copy against the commit it
+/// started from), `mado/` left out; empty when git cannot say (after the git-settings guard).
+async fn build_changed(state: &AppState, b: &BuildState, bwt: &Path) -> Vec<String> {
+    if b.base_commit.is_empty() || git_safe(state, bwt).await.is_err() { return vec![]; }
+    let range = format!("{}..HEAD", b.base_commit);
+    git(state, bwt, &["diff", "--name-only", "-z", "--no-renames", &range]).await.unwrap_or_default()
+        .split('\0').filter(|f| !f.is_empty() && !f.starts_with("mado/")).take(200).map(String::from).collect()
+}
+
 /// Review number `round`: a fresh run with no memory of the build reads the build's copy and reports.
 async fn review_run(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildState, bwt: &Path, round: u32) -> anyhow::Result<()> {
     if round > MAX_REVIEWS {
@@ -807,7 +818,8 @@ async fn review_run(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildS
     }).await?;
     mado::tell(state, pid, "build").await;
     let full = full(state).await;
-    let brief = prompts::review(round, conventions(project, full).is_some(), &comments_text(project, full), &screens_text(pid), if round > 1 { &earlier } else { &[] });
+    let impact = match has_graph(pid) { true => graph_impact(state, pid, project, &build_changed(state, b, bwt).await).await, false => None };
+    let brief = prompts::review(round, conventions(project, full).is_some(), &comments_text(project, full), &screens_text(pid), if round > 1 { &earlier } else { &[] }, impact.as_deref());
     // It only reads: Claude Code's plan mode (`mode_of`), and no edit of its folder either.
     let mut deny = deny_for(project, pid, b, bwt);
     let own = claude::rule_path(bwt);
@@ -852,7 +864,9 @@ async fn fix_round(state: &Arc<AppState>, pid: &str, project: &Path, b: &BuildSt
     update(pid, project, |b| if let Some(r) = &mut b.review { r.fix_chat_id = Some(chat.clone()); }).await?;
     mado::tell(state, pid, "build").await;
     let full = full(state).await;
-    let brief = prompts::review_fix(&musts, conventions(project, full).as_deref());
+    let named: Vec<String> = musts.iter().filter_map(|f| f.at.as_deref()).map(|w| w.split(':').next().unwrap_or(w).trim().to_string()).collect();
+    let around = graph_around(state, pid, project, &named).await;
+    let brief = prompts::review_fix(&musts, conventions(project, full).as_deref(), around.as_deref());
     let ended = run_and_wait(state, project, pid, &chat, bwt, &brief, None, deny_for(project, pid, b, bwt)).await;
     if status_now(project) != BuildStatus::Reviewing { reset_wt(state, project, bwt).await; return Ok(()); }
     let locked = locked_by(plan, &load_build(project)?.unwrap_or_default(), &[]);

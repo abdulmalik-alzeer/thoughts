@@ -1799,7 +1799,7 @@ async fn review_get(State(st): S, UrlPath(pid): UrlPath<String>) -> R {
     let plan = crate::mado_validate::plan(&bytes).map_err(|l| crate::tr::err_detail("mado.invalid", &[("path", PLAN)], l.join("\n")))?;
     let spec = read_text(&mado, "spec.md", full)?.unwrap_or_default();
     let flow = read_graph(&mado, "flow.graph.json", "flow", full).ok().flatten();
-    let mut r = review(&spec, flow.as_ref(), &plan);
+    let mut r = crate::mado_review::final_check(&st, &pid, &project, &mado, full, &bytes, &spec, flow.as_ref(), &plan).await;
     r.problems.extend(repo_problems(&st, &project).await);
     r.plan_hash = plan_hash(&bytes);
     Ok(Json(serde_json::to_value(r)?))

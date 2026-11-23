@@ -11,7 +11,7 @@
   import { DEVICES, LENGTHS, ZOOM, type Device } from './srcdoc';
 
   let {
-    projectId, screens, tokens, comments = [], locked = false, rev = 0, unchecked = false, onpin,
+    projectId, screens, tokens, comments = [], locked = false, rev = 0, unchecked = false, optional = false, onpin,
   }: {
     projectId: string;
     screens: ScreenInfo[];
@@ -21,6 +21,8 @@
     /** Changes when the drawings may have changed: fetch them again. */
     rev?: number;
     unchecked?: boolean;
+    /** Round 0.5.0, a built project: a screen without a mock-up is not missing anything (its own screen is the look). */
+    optional?: boolean;
     onpin?: (screenId: string, x: number, y: number) => void;
   } = $props();
 
@@ -90,7 +92,7 @@
             <button type="button" class="tile" aria-label={t('madoDesign.screens.open', { name: s.label })} onclick={() => (open = s.id)}>
               <span class="shot">
                 {#if !s.hasMock}
-                  <span class="blank"><Icon name="edit" size={18} /> {t('madoDesign.screens.notDrawnShort')}</span>
+                  <span class="blank"><Icon name="edit" size={18} /> {t(optional ? 'mado-v050.design.noMockShort' : 'madoDesign.screens.notDrawnShort')}</span>
                 {:else if g?.html !== undefined}
                   <MockFrame html={g.html} {tokens} name={s.label} device="desktop" thumb {unchecked} />
                 {:else if g?.error}
@@ -141,7 +143,7 @@
 
     <div class="canvas scroll">
       {#if !cur.hasMock}
-        <p class="state muted"><Icon name="edit" size={22} /> {t('madoDesign.screens.notDrawn')}</p>
+        <p class="state muted"><Icon name="edit" size={22} /> {t(optional ? 'mado-v050.design.noMock' : 'madoDesign.screens.notDrawn')}</p>
       {:else if g?.html !== undefined}
         <MockFrame html={g.html} {tokens} name={cur.label} {device} {length} {zoom} pins={pinsOf(cur.id)} {unchecked} bind:scale
           onpin={canPin ? (x, y) => onpin?.(cur.id, x, y) : undefined} />

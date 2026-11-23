@@ -20,6 +20,7 @@
     comments = [],
     locked = false,
     version = 0,
+    existing = false,
     oncomment,
   }: {
     /** The project whose design this is; the component talks to /api/mado/:projectId/design/* itself. */
@@ -30,6 +31,8 @@
     locked?: boolean;
     /** Changes whenever the daemon said the design changed: fetch again. */
     version?: number;
+    /** Round 0.5.0: the project is already built — its current look comes first, mock-ups are optional. */
+    existing?: boolean;
     /** The user asked to comment on a token or dropped a pin on a screen. */
     oncomment?: (target: Extract<CommentTarget, { kind: 'token' | 'screen' }>) => void;
   } = $props();
@@ -42,6 +45,7 @@
 
   let styles = $state<StyleCandidate[]>([]);
   let picked = $state<string | null>(null);
+  let current = $state<string | null>(null);
   let dropped = $state(0);
   let screens = $state<ScreenInfo[]>([]);
   let rev = $state(0);
@@ -81,6 +85,7 @@
       if (mine !== loads || pid !== projectId) return;
       styles = Array.isArray(st?.styles) ? st.styles : [];
       picked = typeof st?.picked === 'string' ? st.picked : null;
+      current = typeof st?.current === 'string' && st.styles?.some((x) => x.id === st.current) ? st.current : null;
       dropped = Number(st?.dropped) || 0;
       screens = Array.isArray(sc) ? sc : [];
       rev++;
@@ -213,7 +218,7 @@
 
     <div id="mdd-panel" role="tabpanel" aria-labelledby="mdd-tab-{tab}" class="panel">
       {#if tab === 'style'}
-        <StyleGallery {styles} {picked} {dropped} {changed} {locked} busy={picking} error={pickError} onpick={pick} ontune={() => (tab = 'tune')} />
+        <StyleGallery {styles} {picked} {current} {dropped} {changed} {locked} busy={picking} error={pickError} onpick={pick} ontune={() => (tab = 'tune')} />
       {:else if tab === 'tune'}
         {#if !tokens}
           <div class="state">
@@ -249,7 +254,7 @@
           </div>
         {/if}
       {:else}
-        <Screens {projectId} {screens} tokens={tokens ?? pickedStyle?.tokens ?? null} comments={screenComments} {locked} {rev}
+        <Screens {projectId} {screens} optional={existing} tokens={tokens ?? pickedStyle?.tokens ?? null} comments={screenComments} {locked} {rev}
           onpin={oncomment ? (screenId, x, y) => oncomment?.({ kind: 'screen', screenId, x, y }) : undefined} />
       {/if}
     </div>

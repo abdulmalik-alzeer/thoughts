@@ -7,10 +7,12 @@
   import StylePreview from './StylePreview.svelte';
 
   let {
-    styles, picked = null, dropped = 0, changed = false, locked = false, busy = null, error = '', onpick, ontune,
+    styles, picked = null, current = null, dropped = 0, changed = false, locked = false, busy = null, error = '', onpick, ontune,
   }: {
     styles: StyleCandidate[];
     picked?: string | null;
+    /** Round 0.5.0: the candidate that is a built product's look today (shown first; suggested while nothing is picked). */
+    current?: string | null;
     /** Suggestions of the assistant that were not valid and are not shown. */
     dropped?: number;
     /** The user changed the picked style: picking another replaces those changes, so ask first. */
@@ -55,11 +57,12 @@
       <ul class="grid">
         {#each g.list as s (s.id)}
           {@const on = s.id === picked}
-          <li class="cardx" class:on>
+          <li class="cardx" class:on class:suggested={!picked && s.id === current}>
             <div class="sample"><StylePreview tokens={s.tokens} /></div>
             <div class="meta">
               <div class="row">
                 <strong class="grow name">{s.name}</strong>
+                {#if s.id === current}<span class="pill now">{t('mado-v050.design.current')}</span>{/if}
                 {#if on}<span class="pill accent"><Icon name="check" size={12} /> {t('madoDesign.gallery.picked')}</span>{/if}
               </div>
               {#if s.description}<p class="desc muted">{s.description}</p>{/if}
@@ -101,6 +104,8 @@
   }
   .cardx:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
   .cardx.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent), var(--shadow); }
+  .cardx.suggested { border-color: color-mix(in srgb, var(--accent) 55%, var(--hairline)); border-style: dashed; }
+  .pill.now { background: var(--tint); color: var(--on-tint); }
   .sample { height: 262px; overflow: hidden; border-bottom: var(--border-w) solid var(--border); }
   .meta { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
   .meta .btn { align-self: flex-start; margin-top: auto; }

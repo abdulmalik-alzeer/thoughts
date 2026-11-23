@@ -5,7 +5,7 @@ import { ApiError } from '../api';
 import { madoApi, type DocName, type MadoApi } from './api';
 import { changeRequest, GRAPH_FILES, STEP_DOCS, STEP_GRAPHS, type PendingOps } from './comments/batch';
 import type {
-  BuildGuide, BuildView, Comment, CommentStatus, CommentTarget, GraphDoc, GraphName, GraphOp, MadoEvent, MadoOverview, PlanDoc,
+  BuildGuide, BuildView, CodeGraphStatus, Comment, CommentStatus, CommentTarget, GraphDoc, GraphName, GraphOp, MadoEvent, MadoMode, MadoOverview, PlanDoc,
   Pos, Review, StepId, StepState, StepStatus,
 } from './types';
 import { STEPS } from './types';
@@ -44,6 +44,9 @@ export function firstOpenStep(o: MadoOverview | null): StepId {
 }
 
 const gone = (e: unknown) => e instanceof ApiError && e.status === 404;
+/** A file the service will not show as it is (422: not valid, or it seems to hold a secret, `mado.secret`):
+ *  its message is shown in place of the file. */
+const refused = (e: unknown) => e instanceof ApiError && e.status === 422;
 /** The service refused an approval because plan.json is not the plan that was shown. */
 export const planChanged = (e: unknown) => e instanceof ApiError && (e.status === 409 || e.status === 412 || /^(PLAN_CHANGED|plan_changed|CHANGED|CONFLICT)$/.test(e.code));
 
@@ -72,6 +75,13 @@ export class MadoStore {
   edits = $state<Partial<Record<DocName, string>>>({});
   /** Goes up whenever the service says the design changed (DesignStep fetches again). */
   designVersion = $state(0);
+  /** Round 0.5.0: why a document, diagram or the plan is not shown (the service's own words), by
+   *  `doc:<name>`, `graph:<name>`, `plan` or `change`. */
+  refusals = $state<Record<string, string>>({});
+  /** `mado/change.md` of a built project's plan (undefined: not fetched · null: not there). */
+  change = $state<string | null | undefined>(undefined);
+  /** The code graph card (undefined: not fetched · null: the service has none, before 0.5.0). */
+  codeGraph = $state<CodeGraphStatus | null | undefined>(undefined);
 
   private tickets: Record<string, number> = {};
 
@@ -90,8 +100,18 @@ export class MadoStore {
     const ticket = (this.tickets[key] = (this.tickets[key] ?? 0) + 1);
     let v: T | null;
     try { v = await get(); }
-    catch (e) { if (!gone(e)) throw e; v = null; }
-    if (this.tickets[key] === ticket) use(v);
+    catch (e) {
+      if (refused(e)) {
+        if (this.tickets[key] === ticket) { this.refusals = { ...this.refusals, [key]: (e as Error).message }; use(null); }
+        return;
+      }
+      if (!gone(e)) throw e;
+      v = null;
+    }
+    if (this.tickets[key] === ticket) {
+      if (key in this.refusals) { const { [key]: _, ...rest } = this.refusals; this.refusals = rest; }
+      use(v);
+    }
   }
 
   /** `first`: called once the plan is known, in the same tick it is first shown (to pick the step to open). */
@@ -122,6 +142,14 @@ export class MadoStore {
   refreshReview() { return this.latest('review', () => this.api.review(), (v) => { this.review = v; }); }
   refreshBuild() { return this.latest('build', () => this.api.build(), (v) => { this.build = v; }); }
   refreshConventions() { return this.latest('conventions', () => this.api.conventions(), (v) => { this.conventions = v ? String(v.text ?? '') : null; }); }
+  refreshChange() { return this.latest('change', () => this.api.change(), (v) => { this.change = v && v.exists !== false ? String(v.text ?? '') : null; }); }
+  /** A service from before 0.5.0 has no code graph: then there is simply none (null). */
+  refreshCodeGraph() {
+    return this.latest('codeGraph', () => this.api.codeGraph(), (v) => { this.codeGraph = v && typeof v === 'object' && v.tool ? v : null; })
+      .catch((e) => { if (this.codeGraph === undefined) this.codeGraph = null; throw e; });
+  }
+  /** Why a file is not shown, or ''. */
+  refusal(key: string): string { return this.refusals[key] ?? ''; }
   /** A service from before 0.4.0 has no guide: then there is simply none (null). */
   refreshGuide() {
     return this.latest('guide', () => this.api.buildGuide(), (v) => {
@@ -138,6 +166,7 @@ export class MadoStore {
     for (const g of STEP_GRAPHS[step]) if (force || this.graphs[g] === undefined) jobs.push(this.refreshGraph(g));
     if (step === 'tech' && this.has('conventions.md') && (force || this.conventions === undefined)) jobs.push(this.refreshConventions().catch(() => { this.conventions = null; }));
     if (step === 'plan' && (force || this.plan === undefined)) jobs.push(this.refreshPlan());
+    if (step === 'plan' && this.has('change.md') && (force || this.change === undefined)) jobs.push(this.refreshChange().catch(() => { this.change = null; }));
     if (step === 'review') { jobs.push(this.refreshReview()); if (force || this.plan === undefined) jobs.push(this.refreshPlan()); }
     if (step === 'build') { jobs.push(this.refreshBuild()); if (force || this.plan === undefined) jobs.push(this.refreshPlan()); }
     await Promise.all(jobs);
@@ -157,8 +186,9 @@ export class MadoStore {
     };
     switch (ev.what) {
       case 'state': jobs.push(this.refreshOverview()); derived(); if (this.build !== undefined) jobs.push(this.refreshBuild()); break;
-      case 'doc': jobs.push(this.refreshOverview(), ...loadedDocs()); if (this.conventions !== undefined) jobs.push(this.refreshConventions().catch(() => {})); derived(); break;
-      case 'graph': jobs.push(this.refreshOverview(), ...loadedGraphs()); derived(); break;
+      case 'doc': jobs.push(this.refreshOverview(), ...loadedDocs()); if (this.conventions !== undefined) jobs.push(this.refreshConventions().catch(() => {})); if (this.change !== undefined) jobs.push(this.refreshChange().catch(() => {})); derived(); break;
+      // (The plan's diagrams and the code graph card both answer to 'graph'.)
+      case 'graph': jobs.push(this.refreshOverview(), ...loadedGraphs()); if (this.codeGraph !== undefined) jobs.push(this.refreshCodeGraph().catch(() => {})); derived(); break;
       case 'comments': jobs.push(this.refreshComments()); break;
       case 'design': this.designVersion++; jobs.push(this.refreshOverview()); if (this.docs.design !== undefined) jobs.push(this.refreshDoc('design')); break;
       case 'build': jobs.push(this.refreshBuild()); if (this.guide !== undefined) jobs.push(this.refreshGuide()); break;
@@ -180,12 +210,21 @@ export class MadoStore {
     if (this.build !== undefined) jobs.push(this.refreshBuild());
     if (this.conventions !== undefined) jobs.push(this.refreshConventions().catch(() => {}));
     if (this.guide !== undefined) jobs.push(this.refreshGuide());
+    if (this.change !== undefined) jobs.push(this.refreshChange().catch(() => {}));
+    if (this.codeGraph !== undefined) jobs.push(this.refreshCodeGraph().catch(() => {}));
     await Promise.all(jobs);
   }
 
   // ---------- what the user does ----------
 
-  async start(): Promise<void> { await this.api.start(); await this.load(); }
+  /** Start the plan; `mode` (round 0.5.0) documents a built project ('existing') or plans a new one ('new').
+   *  Again on a started plan with the other mode, it switches while nothing is approved (else the service refuses). */
+  async start(mode?: MadoMode): Promise<void> { await (mode ? this.api.start(mode) : this.api.start()); await this.load(); }
+  /** Build or update the code graph; the service says when it ends (an event), the card fetches again. */
+  async buildCodeGraph(): Promise<void> {
+    const v = await this.api.buildCodeGraph();
+    if (v && typeof v === 'object' && v.tool) this.codeGraph = v; else await this.refreshCodeGraph();
+  }
 
   private setStep(step: StepId, change: Partial<StepState>) {
     const steps = this.overview?.state?.steps;
