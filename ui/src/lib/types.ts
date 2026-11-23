@@ -320,3 +320,19 @@ export type DaemonEvent =
   | { type: 'daemon.stale'; stale: boolean };
 
 export type DaemonEventType = DaemonEvent['type'];
+
+// --- search by meaning (lib/meaning.svelte.ts; GET /api/meaning) ---
+export type MeaningState = 'off' | 'downloading' | 'paused' | 'indexing' | 'ready' | 'error';
+export type MeaningInfo = {
+  state: MeaningState;
+  model: { id: string; name: string; bytes: number; license: string; languages: string };
+  download?: { got: number; total: number };
+  index?: { files: number; chunks: number; done?: number; total?: number; updated?: string | null };
+  diskBytes: number;
+  suggest: null | { why: 'size' | 'chat'; files?: number };
+  error?: string;
+  /** "Not now" or "Don't ask again" is in force: no suggestion is shown. */
+  quiet?: boolean;
+  offers?: { chatId: string; messageId: string }[];
+};
+export type MeaningResult = { path: string; title: string; score: number; snippet: string | null; line: number | null };

@@ -25,6 +25,7 @@
   import CalendarPrefs from '../lib/CalendarPrefs.svelte';
   import QuickCapturePrefs from '../lib/QuickCapturePrefs.svelte';
   import FullAccessPrefs from '../lib/FullAccessPrefs.svelte';
+  import MeaningPrefs from '../lib/MeaningPrefs.svelte';
   import { fold } from '../lib/CommandPalette.svelte';
   import Maintenance from './Maintenance.svelte';
   import IncomingStatus from '../lib/IncomingStatus.svelte';
@@ -1075,6 +1076,7 @@
         {/each}
       {/if}
     </div>
+    <MeaningPrefs />
   {:else if c === 'daemon'}
     <div class="card">
       <p class="muted">{t('set.daemonIntro')}</p>

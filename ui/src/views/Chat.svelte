@@ -31,6 +31,8 @@
   import { openReview } from '../lib/layer';
   import WrapPanel from './WrapPanel.svelte';
   import StreamText from './chat/StreamText.svelte';
+  import MeaningOffer from '../lib/MeaningOffer.svelte';
+  import { meaning, watchMeaning, hideMarker } from '../lib/meaning.svelte';
   import ChatOptions from './chat/ChatOptions.svelte';
   import DictateButton from '../lib/voice/DictateButton.svelte';
   import Attachments from './chat/Attachments.svelte';
@@ -302,6 +304,7 @@
   function ontouchmove(e: TouchEvent) { const y = e.touches[0]?.clientY ?? 0; if (y > touchY) letGo(); touchY = y; }
 
   onMount(() => {
+    watchMeaning(); // suggestions of search by meaning under answers (lib/meaning.svelte.ts)
     load(true);
     const off = on((e) => {
       if (e.type === 'resync') { load(); return; }
@@ -904,6 +907,7 @@
                 {/if}
               </div>
             </div>
+            {#if meaning.offers[id] === m.id}<MeaningOffer chatId={id} />{/if}
           {:else if m.role === 'tool' && !allSteps}
             {#if stepRuns.has(String(m.id))}<StepGroup steps={stepRuns.get(String(m.id))} running={!!chat.running} />{/if}
           {:else if m.role === 'tool'}
@@ -975,7 +979,7 @@
         {/if}
         {#if thinking && allSteps}<div class="msg sys muted ell think"><Icon name="thinking" size={13} /> <span class="ell" dir="auto">{thinking.slice(-160)}</span></div>{/if}
         {#if streaming}
-          <div class="msg ai" aria-busy="true"><StreamText text={streaming} onrender={() => scrollDown()} onclick={msgLink} /></div>
+          <div class="msg ai" aria-busy="true"><StreamText text={hideMarker(streaming)} onrender={() => scrollDown()} onclick={msgLink} /></div>
         {/if}
         {#if chat.running && !streaming}<div class="msg sys muted working" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span> {allSteps ? t('chat.working') : liveLine(chat.messages, !!thinking)}</div>{/if}
       </div>
