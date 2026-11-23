@@ -119,7 +119,7 @@ freely.
 
 | English | Arabic | What it is |
 |---|---|---|
-| Customise | التخصيص | The page (in the sidebar) and the verb. What the user kept are customisations «تخصيصات». Tabs: Ask «اطلب» · Automate «أتمتة» · Add-ons «الإضافات» · Ready-made «حزم جاهزة» · Automatic tasks «المهام التلقائية» · Share «المشاركة» · History «السجل» · App updates «تحديثات التطبيق». |
+| Customise | التخصيص | The page (in the sidebar) and the verb. What the user kept are customisations «تخصيصات». Tabs: Ask «اطلب» · Automate «أتمتة» · Plugins «الملحقات» (called Add-ons «الإضافات» before 0.5) · Ready-made «حزم جاهزة» · Automatic tasks «المهام التلقائية» · Share «المشاركة» · History «السجل» · App updates «تحديثات التطبيق». |
 | Change | تغيير | A prepared customisation waiting to be kept. |
 | Review | المراجعة | Looking at a change before it is kept. The only meaning of «مراجعة» in the app. |
 | Try it · Keep · Discard | تجربة · اعتماد · تجاهل | The three buttons of a review. |
@@ -129,6 +129,7 @@ freely.
 | Weekly review | المراجعة الأسبوعية | The ready-made automatic task that writes up the week, on Thursday in Arabic. |
 | Monthly tune-up (of the app) | الضبط الشهري للتطبيق | Home's monthly suggestion for one customisation. |
 | Pack · Ready-made packs | حزمة · حزم جاهزة | A file of customisations to share or import. |
+| Plugin · Plugins · plugin file | ملحق · ملحقات · ملف ملحق | A customisation as one named thing that can be switched off and on, removed, exported and updated. It may hold several kinds (an add-on, a Home shortcut, a look, an automatic task). Never «إضافة», which is an add-on. Not named: "on its own" «عنصر منفرد». In code the module and file are `bundles`, so they are not confused with the layer's `plugins/` folder (which holds add-ons). |
 | App updates | تحديثات التطبيق | Where a new release and the user's changes meet. |
 | Go back to an earlier version | العودة إلى نسخة سابقة | Puts the whole app back to an earlier point (History › App changes, or the Recovery menu). |
 

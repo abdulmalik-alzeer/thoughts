@@ -1146,4 +1146,38 @@ on Todos."
 
 ## Plugins
 
+The user sees everything customised as a list of **plugins** (Customise › Plugins): things with a
+name that can be switched off and on, removed, exported to a file and updated as a whole. A plugin
+is not a folder. It is a record, kept by the app, of which parts of this layer belong together: whole
+files (`plugins/…`, `views/…`, `workflows/…`), single members and list items of the shared files
+(`home.json`, `nav.json`, `todos.json`, `pages.json`, `keys.json`, `themes.json`) and marked blocks
+of `custom.css`. Whatever no named plugin holds is listed on its own. (The layer's `plugins/` folder
+holds add-ons, for historical reasons; an add-on can be one part of a plugin.)
+
+Rules for you:
+
+- **Never create or edit `bundles.json`** (nor `addons.json`). The app writes both itself; a change to
+  either is ignored, and your change is kept without it.
+- **One change is one plugin.** Keep what belongs to one request together and leave everything else
+  alone, so the user can keep it "as one plugin" and later switch it off or remove it cleanly. Do not
+  fold two unrelated requests into the same files' members.
+- **When the instructions name a plugin id** (`p-` and twelve letters or digits), this change updates
+  that plugin. Change only what belongs to it unless the user asks for more, and put any CSS for it
+  between its own two marker lines in `custom.css`, exactly:
+
+  ```css
+  /* plugin:p-k3j9x0ab12cd */
+  .board { gap: 8px }
+  /* end plugin:p-k3j9x0ab12cd */
+  ```
+
+  Create the block if it is missing; edit it in place if it is there; never nest blocks and never
+  touch another plugin's block or a `/* pack:… */` block.
+- **When no id is named**, write CSS as usual. It then counts as the user's own look, not as part of a
+  plugin; that is fine.
+- **Give things names that can be told apart.** List items are recognised by their `id`, else their
+  `label`, else their text: two Home shortcuts with the same label are one item to the app.
+- Switching a plugin off, removing it and exporting it are the app's own steps. Do not imitate them
+  by deleting files or commenting code out; tell the user where the switch is instead.
+
 ## Keyboard shortcuts (keys.json)

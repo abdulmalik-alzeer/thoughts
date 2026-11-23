@@ -1004,10 +1004,10 @@ pub async fn revert_in(g: Git<'_>, dir: &Path, hash: &str) -> anyhow::Result<()>
     // when it is the only file git could not merge, the undo goes ahead with the record settled that way.
     let unmerged = if reverted.is_err() { g.run(dir, &["diff", "--name-only", "--diff-filter=U"]).await.unwrap_or_default() } else { String::new() };
     let only_record = unmerged.lines().map(str::trim).filter(|l| !l.is_empty()).eq([crate::bundles::FILE]);
-    let settled = if reverted.is_ok() || only_record { crate::bundles::settle_undo(g, dir, &full).await } else { Ok(false) };
+    let settled = if reverted.is_ok() || only_record { crate::bundles::settle_undo(g, dir, &full, only_record).await } else { Ok(()) };
     let failed = match (&reverted, &settled) {
         (_, Err(e)) => Some(e.to_string()),
-        (Err(e), Ok(done)) if !(only_record && *done) => Some(e.to_string()),
+        (Err(e), Ok(())) if !only_record => Some(e.to_string()),
         _ => None,
     };
     if let Some(e) = failed {

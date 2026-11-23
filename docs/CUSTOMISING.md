@@ -93,15 +93,24 @@ Every change you keep is recorded. Under **Customise › History** you can undo 
 
 If a customisation ever leaves the app unusable, even with a blank or frozen window, the **Recovery** menu in the menu bar still works, because the desktop app does it itself: undo the last change, go back to an earlier version, discard a change waiting for review, switch customisations off (they stay off until you switch them back on), reload, or open a fresh window. Each step says what it will change and asks first, and afterwards offers to put things back. Customisations cannot remove that menu.
 
-### Your add-ons, one at a time
+### Your plugins, one at a time
 
-Under **Customise › Add-ons** every add-on and page you have is listed with what it may do.
+Under **Customise › Plugins** everything you customised is listed, one item at a time. (Before version 0.5 this tab was called Add-ons and listed only add-ons and pages.)
 
-- **Switch off** stops one from loading without removing it, and **Switch on** brings it back. Useful when one misbehaves.
-- **Remove** takes it out of the app.
-- **Take away** beside a permission withdraws just that permission. The add-on may then stop working in the parts that needed it.
+- **Plugins** come first. A plugin is a customisation with a name that groups what belongs together: for example an add-on, its shortcut on Home, its look and its automatic task. A pack you added, a ready-made pack and a change you kept "as one plugin" are plugins.
+- **On their own** is everything else: each add-on, page, automatic task and theme, and one item each for your Home arrangement, the sidebar, the Todos page, the app pages, your look and your keyboard shortcuts.
 
-Each of these is one entry in History and can be undone, even when later changes built on the add-on.
+Each item shows what it contains, what it may do and whether its automatic tasks are allowed to run. It has a switch and a menu:
+
+- **The switch** turns it off without removing it. Nothing of it is loaded and its automatic tasks do not run, also not with Run now, until you switch it on again. Switching it back on gives you exactly what you had. Useful when one misbehaves.
+- **Export…** saves it as one file (see "Plugins as files" below).
+- **Change with the assistant** opens a chat whose change updates that plugin.
+- **Details** shows its parts. For an add-on or page: **Take away** beside a permission withdraws just that permission (it may then stop working in the parts that needed it), and **Earlier copies** of what it saved.
+- **Remove…** takes everything that belongs to it out of the app.
+
+Each of these is one entry in History and can be undone, even when later changes built on it.
+
+A plugin made for a newer version of Thoughts than yours says "Needs Thoughts X or newer". It stays off and cannot be switched on until you update.
 
 What an add-on saved (an hours tracker's entries, for example) stays on this computer when you remove the add-on, so undoing the removal brings it back with its data. Thoughts also keeps up to twelve earlier copies of each add-on's saved data (the newest few, then one a day), so one bad save never loses it: open **Earlier copies** to put one back. The saved data travels with you in the move file (**Settings › Maintenance › Move to another computer**).
 
@@ -164,9 +173,24 @@ An imported pack is never applied directly. It goes through the same review, wit
 
 Only import packs from people you trust: a pack can change how the app behaves.
 
+### Plugins as files: export, add, update
+
+A plugin file is how one customisation travels: to your other computer, to a colleague, or into a backup.
+
+- **Export…** in a plugin's menu asks for its name, a version (1.0.0 to begin with), who made it and a line about what it does, then saves `<name>.thoughts-plugin.json`. It is a feature pack, so its fingerprint is shown afterwards and an older Thoughts can still import it. Exporting an item that stands on its own gives it that name and makes it a plugin in your list (one entry in History), so later exports keep its name and version.
+- **Add a plugin file…** shows what the file says it is, its fingerprint, and what it is to you: **new**, an **update** of a plugin you have ("1.0 → 1.2"), or **older than the one you have**. Then it goes through the usual review: Try it, Keep, Discard; its automatic tasks need your approval separately; its permissions are shown. Nothing is switched on before you keep it.
+- **An update replaces the older version.** What the new version no longer has is taken out, and your own changes around it stay. (A plain pack only ever adds.)
+- **Export all…** saves every plugin in one file, with which are on and which are off. Add that file on another computer and, after one review, the same plugins are there, and what was off is still off. What add-ons saved is not in the file; that travels in the move file (**Settings › Maintenance › Move to another computer**), which carries your plugins too.
+
+What a plugin file says about itself (its name, maker and version) is shown as its maker's words. Thoughts works out what it contains and what it may do from the files themselves, never from what the file claims.
+
+When you keep a change you asked the assistant for, the review offers **Keep as one plugin named …** (ticked when the change touches two or more things). Leave it ticked and the change is one item you can switch off, remove or export as a whole; untick it and its parts are listed on their own.
+
 ### What happens when Thoughts is updated
 
-An update never touches your library.
+An update never touches your library, and it keeps every customisation and its whole History.
+
+The first time version 0.5 starts, the packs you kept earlier are listed as plugins. That is one entry in History of the app's own ("Customisations listed as plugins"); none of your files changes, and every earlier entry can still be undone or gone back to. If a future version changes how customisations are stored, Thoughts updates yours in one entry ("Updated your customisations for Thoughts X") that Rollback can go back from. A plugin it cannot update is switched off, with the reason shown.
 
 To get a new version, choose **Check for Updates…** in the menu, or switch on **Check for new
 versions automatically** under **Settings › Maintenance** to be told when one is out. Thoughts

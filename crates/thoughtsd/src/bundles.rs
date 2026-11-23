@@ -1387,23 +1387,34 @@ pub fn merge_undo(ours: &BundlesFile, base: &BundlesFile, theirs: &BundlesFile) 
     out
 }
 
-/// After `git revert --no-commit` of `entry` in `dir` (whether git could merge the file or not): if
-/// that entry changed `bundles.json`, write the file as `merge_undo` gives it and mark it settled.
-/// → whether the entry had changed the file.
-pub async fn settle_undo(g: Git<'_>, dir: &Path, entry: &str) -> anyhow::Result<bool> {
+/// After `git revert --no-commit` of `entry` in `dir` (whether git could merge the file or not):
+/// settle `bundles.json`. If that entry changed the record, the file is written as `merge_undo` gives
+/// it; and whatever the undo took out of the layer is dropped from the plugins that claimed it (a
+/// plugin left with nothing goes), in the same undo entry, so undoing the undo brings both back.
+/// `must`: git left the file unmerged, so it has to be written and marked settled whatever comes out.
+pub async fn settle_undo(g: Git<'_>, dir: &Path, entry: &str, must: bool) -> anyhow::Result<()> {
     let show = |rev: String| async move {
         let text = g.run(dir, &["show", &format!("{rev}:{FILE}")]).await.ok();
-        let mut f: BundlesFile = text.as_deref().and_then(|t| serde_json::from_str(t).ok()).unwrap_or_default();
-        f.clean();
+        let f: Option<BundlesFile> = text.as_deref().and_then(|t| serde_json::from_str(t).ok());
         (text, f)
     };
     let (base_text, base) = show(entry.to_string()).await;
     let (theirs_text, theirs) = show(format!("{entry}^")).await;
     let (ours_text, ours) = show("HEAD".to_string()).await;
-    if base_text == theirs_text { return Ok(false); }
-    let mut merged = merge_undo(&ours, &base, &theirs);
-    // Claims on things the undo itself takes out or brings back are judged against the files as they now are.
+    let touched = base_text != theirs_text;
+    if !touched && !must && ours_text.is_none() { return Ok(()); }
+    // A record that cannot be read now is left alone unless this very undo is what puts it right.
+    let Some(mut ours) = ours.or_else(|| touched.then(BundlesFile::default)) else { return Ok(()) };
+    ours.clean();
+    let clean = |f: Option<BundlesFile>| { let mut f = f.unwrap_or_default(); f.clean(); f };
+    let mut merged = if touched { merge_undo(&ours, &clean(base), &clean(theirs)) } else { ours.clone() };
+    // Claims are judged against the files as the undo leaves them.
+    let had: BTreeSet<String> = merged.bundles.iter().filter(|(_, b)| !b.claims.is_empty()).map(|(id, _)| id.clone()).collect();
     prune(&mut merged, &Snap::of(&dir));
+    merged.bundles.retain(|id, b| !b.claims.is_empty() || !had.contains(id));
+    let live: BTreeSet<String> = merged.bundles.keys().cloned().collect();
+    merged.off.retain(|id| !valid_id(id) || live.contains(id));
+    if !touched && !must && merged == ours { return Ok(()); }
     if merged.bundles.is_empty() && merged.off.is_empty() && (theirs_text.is_none() || ours_text.is_none()) {
         let _ = std::fs::remove_file(dir.join(FILE));
         let _ = g.run(dir, &["rm", "-q", "--cached", "--ignore-unmatch", "--", FILE]).await;
@@ -1411,7 +1422,7 @@ pub async fn settle_undo(g: Git<'_>, dir: &Path, entry: &str) -> anyhow::Result<
         std::fs::write(dir.join(FILE), text_of(&merged)?)?;
         g.run(dir, &["add", "--", FILE]).await?;
     }
-    Ok(true)
+    Ok(())
 }
 
 // ---------- packs kept before plugins existed ----------
