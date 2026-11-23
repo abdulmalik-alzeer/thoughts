@@ -93,6 +93,8 @@ fn flow_screens(mado: &Path) -> Vec<(String, String)> {
 }
 
 /// The app's examples first, then the assistant's valid candidates; how many were left out.
+/// For a project that is already built (round 0.5.0) the assistant's `current` (the look the
+/// product has now, read from its code) comes before everything else.
 fn candidates(mado: &Path) -> (Vec<Value>, usize) {
     let mut all = app_styles();
     let dropped = match read_text(mado, STYLES, MAX_STYLES) {
@@ -101,8 +103,14 @@ fn candidates(mado: &Path) -> (Vec<Value>, usize) {
         // Too large, or not a file inside the folder: nothing of it is shown.
         Err(_) => 1,
     };
+    if core::existing_in(mado, full()) {
+        if let Some(i) = all.iter().position(|s| s["id"] == CURRENT && s["source"] == "assistant") { let c = all.remove(i); all.insert(0, c); }
+    }
     (all, dropped)
 }
+
+/// The id of the candidate that is a built project's own look (round 0.5.0).
+const CURRENT: &str = "current";
 
 /// The id of the picked style: the core's record (`state.json`, `style`). An id is only ever an id.
 fn picked(project_id: &str, mado: &Path) -> Option<String> {
@@ -123,12 +131,15 @@ fn require_open(project_id: &str, mado: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `GET /design/styles` → `{styles: StyleCandidate[], picked?: id, dropped: n}`.
+/// `GET /design/styles` → `{styles: StyleCandidate[], picked?: id, dropped: n, current?: "current"}`.
 async fn list_styles(State(st): S, UrlPath(project): UrlPath<String>) -> R {
     let mado = mado_dir(&st, &project).await?;
     let (styles, dropped) = candidates(&mado);
+    // Round 0.5.0: the candidate that is the product's look today, for the window to offer first.
+    let current = core::existing_in(&mado, full()) && styles.first().map_or(false, |s| s["id"] == CURRENT);
     let mut out = json!({"styles": styles, "dropped": dropped});
     if let Some(id) = picked(&project, &mado) { out["picked"] = json!(id); }
+    if current { out["current"] = json!(CURRENT); }
     Ok(Json(out))
 }
 

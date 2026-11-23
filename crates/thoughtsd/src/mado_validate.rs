@@ -186,7 +186,46 @@ pub fn plan(bytes: &[u8]) -> Result<PlanDoc, Vec<String>> {
         }
         for s in t.screens.iter().flatten() { if !id_ok(s) { p.push(format!("task \"{}\": screen \"{s}\" is not a screen id", t.id)); } }
     }
+    p.extend(change(bytes));
     if p.is_empty() { Ok(plan) } else { Err(capped(p)) }
+}
+
+/// Round 0.5.0: `change` of a plan (optional; absent or `null` is a plan as before 0.5.0):
+/// `{title, features: ["F2"], files?: ["src/a.ts"]}`, nothing else.
+fn change(bytes: &[u8]) -> Vec<String> {
+    let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return vec![] };
+    let Some(c) = v.get("change").filter(|c| !c.is_null()) else { return vec![] };
+    let Some(o) = c.as_object() else { return vec!["\"change\" must be an object {title, features, files?}".into()] };
+    let mut p = vec![];
+    for k in o.keys().filter(|k| !matches!(k.as_str(), "title" | "features" | "files")) {
+        p.push(format!("\"change\" has an unknown field \"{}\" (only title, features and files)", k.chars().take(40).collect::<String>()));
+    }
+    if !o.get("title").and_then(Value::as_str).map_or(false, |t| text_ok(t, MAX_LABEL)) { p.push(format!("\"change.title\" must be a short non-empty text (at most {MAX_LABEL} characters)")); }
+    match o.get("features").and_then(Value::as_array) {
+        None => p.push("\"change.features\" must be a list of feature ids like [\"F2\"]".into()),
+        Some(list) => {
+            if list.is_empty() { p.push("\"change.features\" names no feature: name every feature the change touches or adds".into()); }
+            if list.len() > MAX_LIST { p.push(format!("\"change.features\" has more than {MAX_LIST} entries")); }
+            let mut seen = HashSet::new();
+            for f in list.iter().take(MAX_LIST) {
+                match f.as_str() {
+                    Some(id) if feature_ok(id) => { if !seen.insert(id) { p.push(format!("\"change.features\" names {id} twice")); } }
+                    _ => p.push(format!("\"change.features\": {} is not a feature id like F2", f.to_string().chars().take(40).collect::<String>())),
+                }
+            }
+        }
+    }
+    match o.get("files") {
+        None | Some(Value::Null) => {}
+        Some(Value::Array(list)) => {
+            if list.len() > MAX_LIST { p.push(format!("\"change.files\" has more than {MAX_LIST} entries")); }
+            for f in list.iter().take(MAX_LIST) {
+                if !f.as_str().map_or(false, owned_path_ok) { p.push(format!("\"change.files\": {} is not a project-relative path (no /, .., mado/ or .git/ at the start)", f.to_string().chars().take(80).collect::<String>())); }
+            }
+        }
+        Some(_) => p.push("\"change.files\" must be a list of project-relative paths".into()),
+    }
+    p
 }
 
 /// The features of a spec, from its headings `### F<n> — <name>`, in order.
@@ -218,12 +257,16 @@ fn doc(rel: &str, bytes: &[u8]) -> Vec<String> {
     p
 }
 
-fn styles(bytes: &[u8]) -> Vec<String> {
+/// `design/styles.json`: 3 or 4 candidates; for a project that is already built (`existing`,
+/// round 0.5.0) 1 to 4, the look it has now (`current`) first.
+fn styles(bytes: &[u8], existing: bool) -> Vec<String> {
     let Ok(v) = serde_json::from_slice::<Value>(bytes) else { return vec!["not valid JSON".into()] };
     let mut p = vec![];
     if v["version"] != 1 { p.push("\"version\" must be 1".into()); }
     let Some(list) = v["styles"].as_array() else { p.push("\"styles\" must be a list".into()); return p };
-    if !(3..=4).contains(&list.len()) { p.push(format!("{} style candidates: write 3 or 4", list.len())); }
+    if existing {
+        if !(1..=4).contains(&list.len()) { p.push(format!("{} style candidates: write 1 to 4, the current look (id \"current\") first", list.len())); }
+    } else if !(3..=4).contains(&list.len()) { p.push(format!("{} style candidates: write 3 or 4", list.len())); }
     let mut seen = HashSet::new();
     for (i, s) in list.iter().enumerate() {
         let id = s["id"].as_str().unwrap_or_default();
@@ -252,12 +295,15 @@ fn mock(bytes: &[u8]) -> Vec<String> {
 }
 
 /// Everything wrong with file `rel` (relative to `mado/`) holding `bytes`.
-pub fn file(rel: &str, bytes: &[u8]) -> Vec<String> {
+pub fn file(rel: &str, bytes: &[u8]) -> Vec<String> { file_in(rel, bytes, false) }
+
+/// `file` for a plan in its mode: `existing` (round 0.5.0) accepts 1 to 4 style candidates.
+pub fn file_in(rel: &str, bytes: &[u8], existing: bool) -> Vec<String> {
     let flow = crate::mado::GRAPHS.iter().find(|(_, f, _)| *f == rel).map(|(_, _, k)| *k);
     if let Some(kind) = flow { return graph(bytes, kind).err().unwrap_or_default(); }
     match rel {
         crate::mado::PLAN => plan(bytes).err().unwrap_or_default(),
-        "design/styles.json" => styles(bytes),
+        "design/styles.json" => styles(bytes, existing),
         r if r.starts_with("design/screens/") && r.ends_with(".html") => mock(bytes),
         r if r.ends_with(".md") => if bytes.len() > crate::mado::DOC_MAX { vec!["the file is larger than 1 MB".into()] } else { doc(r, bytes) },
         _ => vec![],

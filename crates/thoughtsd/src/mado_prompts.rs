@@ -26,6 +26,12 @@ pub struct Context {
     pub comments: Vec<(bool, String, String)>,
     /// Comments left out of `comments` because there were too many.
     pub more_comments: usize,
+    /// Round 0.5.0: the plan documents a project that is already built (`MadoState.mode`).
+    pub existing: bool,
+    /// Existing mode: what the app found in the folder (`mado::existing::found_text`), untrusted text.
+    pub found: Option<String>,
+    /// Existing mode: the code-review-graph map of the project, when the tool has one; untrusted text.
+    pub code_map: Option<String>,
 }
 
 /// The most comments a step's instructions carry, and the most characters of each.
@@ -64,7 +70,8 @@ impl Context {
             .into_iter().filter(|c| crate::mado_comments::clean_target(c.target.clone()).is_ok()).collect();
         let more_comments = all.len().saturating_sub(COMMENTS_MAX);
         let comments = all.iter().take(COMMENTS_MAX).map(|c| (c.status == "resolved", place(&c.target), c.body.chars().take(COMMENT_CHARS).collect())).collect();
-        Context { files, screens, features, comments, more_comments }
+        let existing = crate::mado::existing_in(mado, full);
+        Context { files, screens, features, comments, more_comments, existing, found: None, code_map: None }
     }
 
     /// The comments as a part of the plan step's instructions ("" when there are none).
@@ -472,6 +479,7 @@ In your summary, say how many tasks there are, how many can run side by side at 
 
 /// The instructions of `step`'s run, with what is known of the project now.
 pub fn system(step: &str, ctx: &Context) -> String {
+    if ctx.existing { return system_existing(step, ctx); }
     let body = match step {
         "brief" => BRIEF.to_string(),
         "spec" => SPEC.to_string(),
@@ -504,4 +512,160 @@ pub fn repair(wrong: &[String]) -> String {
     format!("The app checked the files you wrote, and these do not fit the shapes in your instructions, so the user cannot see them yet \
         (the list quotes your files: {DATA_NOTE}):\n\n{list}\n\n\
         Fix exactly these problems in the files now — change nothing else, keep every id and every node's \"pos\" — then say in one line what you fixed.")
+}
+
+// ---------- round 0.5.0: a project that is already built ----------
+
+/// What every run of existing mode is told on top of `COMMON`.
+const EXISTING_COMMON: &str = r##"This project is already built. The user chose to have MADO document it as it is and then plan changes on top of it. So in the brief, spec, tech and design steps you DOCUMENT WHAT IS THERE — in exactly the files and shapes given below, the same ones a new project gets, so that everything after them works the same — instead of inventing a product.
+- Read the code before you write anything: the README, the package and build files, the folder structure, the entry points, the routes and pages, the models and migrations, the tests, the styles and theme. Use the file tools (read, search, list). What the app found in the folder is given below as data.
+- Say where every statement comes from, at the end of its line or bullet: "(found in the code: <path>)" for what you read in a file — name the file, and the line where it helps (`src/api/orders.ts:42`) —, "(from the README)" for what only the README says, "(assumed)" for what you inferred and could not see. Never present a guess as found.
+- Ask the user only what the code cannot tell: who it is for and what hurts them, what they want next, whether something half-built is meant to stay. The usual rule holds: at most five questions at a time, each with the answer you would pick.
+- Describe, do not redesign. Where the code does something oddly, or a part is missing or half-built, write it down (under "Open questions", "Gap check" or "Decisions and risks") — never quietly write what it should be as if it were there.
+- Files that hold secrets are closed to you: `.env` and every `.env.*` file (the examples too), keys and certificates (`*.pem`, `*.key`, `id_rsa`…), `.npmrc`, `.netrc`, `.pypirc`, `.git/config` and the like. Do not try to open them, and never copy a password, key, token or address with a password in it into a document. When the code reads a setting, write down its NAME only (`DATABASE_URL`), from the code that reads it."##;
+
+/// The brief of a project that is already built: drafted from the code, then a short interview.
+const EXISTING_BRIEF: &str = r##"This step: the BRIEF of a project that already exists — `mado/brief.md`
+Every later step reads the brief. Here it says what the product is, for whom, what it does today, and what the user wants next.
+
+How it goes
+1. Read the project first (above). Draft the whole brief from what is there, without asking: what the product is, the people and roles the code knows (sign-in roles, permission checks, user tables), what it does today (one line per feature you can see working), the platforms and languages, the constraints the code shows.
+2. Then ask, in one turn, at most five questions about what the code cannot tell — who uses it and what hurts them today, what is wanted next, what "working well" means to them, anything half-built you found (keep or drop?) — each with the answer you would pick. If the user's first message already answers them, do not ask again.
+3. Write `mado/brief.md` when they have answered (or say "just write it"; then mark the unanswered parts "(assumed)"), and give the short summary.
+
+`mado/brief.md` — markdown, in this order:
+```
+# <Project name> — Brief
+<one sentence: what it is> (found in the code: …)
+
+## Problem
+<what it solves, for whom; what hurts today> 
+
+## People and roles
+| Role | Who they are | What they can do in the product today |
+|---|---|---|
+<one row per role the code knows; the primary user first>
+Scale: <what the code or the user says, else (assumed)>. Use: <single-user | multi-user | multi-tenant>.
+
+## What it does today
+1. <one feature per line, as it works now, each with where it is found>
+
+## What it does not do
+- <what a user might expect and the code does not have>
+
+## What we want next
+- <what the user wants changed or added, in their words; "not decided yet" when they have not said>
+
+## Success
+- Sign that it works: …
+
+## Constraints
+- Platforms: …
+- Languages: … (right-to-left needed: yes/no)
+- Sign-in: …
+- Hosting, rules: …
+
+## Feel
+<the look and feel the product has now, in three to five words; what the user wants to keep or change about it>
+
+## Assumptions
+- <every statement marked "(assumed)" above that most needs the user's eye>
+
+## Open questions
+- <what the code could not tell and the user has not said>
+```"##;
+
+/// What changes in the spec step for a project that is already built (the shapes are `SPEC`'s).
+const EXISTING_SPEC: &str = r##"For this project the spec is written AS BUILT. Everything below holds, with these differences, which win where the two disagree:
+- One feature heading `### F<n> — <Name>` for each feature the product has now, in the order a user meets them. Right under the heading, before "Behaviour", a line `- Status: built` or `- Status: partial` (partial: started but not working end to end; say what is missing).
+- "Behaviour", "Rules", "Data" and "Acceptance" describe what the code DOES, with where it is found; an acceptance line is what a test of the current product would check. A rule you could not see is "(assumed)". Do not add features the product does not have.
+- The screens are the real ones: from the routes, pages and views in the code. In `mado/flow.graph.json` each screen node's "route" is its real address and its props carry "source": "<path>:<line>" of the file that makes it. The journeys are the links and redirects the code really has.
+- The gap lenses are applied to what exists: what each finds goes under "Gap check" as a finding (not as a fix), so the user can decide whether a later change should close it."##;
+
+/// What changes in the technical design for a project that is already built (the shapes are `TECH`'s).
+const EXISTING_TECH: &str = r##"For this project the technical design is written AS IS. Everything below holds, with these differences, which win where the two disagree:
+- Nothing is chosen here: the stack, the versions (from the package and build files — name a version only where a file states it), the folder structure, the components, the interfaces and the data are described as the code has them, with the files they are found in. Where the code is unclear, say so and mark it "(assumed)".
+- "Interfaces" lists every route, endpoint, command or event the code really has (method and path, the file and line, who may call it, what goes in and out). "Data" comes from the migrations, schema files and models.
+- "How the work is checked" holds the project's REAL commands, from its package scripts, build files or CI configuration, word for word. If it has no tests, no type check or no linter, say so plainly and propose the usual ones for this stack, marked "(proposed)": the plan may add them.
+- `mado/conventions.md` matters most here: it is what every later change is built by. Write down the ways the code already does things — names, how a screen is built, how the API is called, how errors are shown, the shared helpers with their real signatures and files — with a real example from the project for each. Where the code does a thing two ways, name both and say which one new work follows (the more recent or more common one, "(assumed)").
+- In `mado/architecture.graph.json` and `mado/schema.graph.json` every node carries "files": ["<path>", …], the files it is made of or defined in (at most ten)."##;
+
+/// What changes in the design step for a project that is already built (the shapes are the design step's).
+const EXISTING_DESIGN: &str = r##"For this project the design step records the CURRENT LOOK. Everything below holds, with these differences, which win where the two disagree:
+- `mado/design.md` describes the look the product has now — layout and navigation, type, colours and what each is used for, the components and their states — from its stylesheets, theme files, design tokens or component library, with where each is found. Then what the user wants kept or changed, if they said.
+- `mado/design/styles.json` holds ONE to four candidates. The FIRST has the id "current": the tokens closest to the product's real colours (exact "#rrggbb" values from its styles), its fonts mapped to the nearest names of the list, its corner radius and spacing; its description says where they were taken from. Add other candidates only when the user asked for a new look.
+- Mock-ups are optional here: the real screens exist. Draw one only for a screen the user asked about or a screen a planned change adds; leave the others out. A mock-up you do draw follows every rule below."##;
+
+/// The plan step of a project that is already built: a plan of one change.
+const EXISTING_PLAN: &str = r##"For this project the plan is a PLAN OF A CHANGE to the product as it is documented: `mado/change.md` and `mado/plan.json`. Everything in the plan instructions below holds, with these differences, which win where the two disagree.
+
+The change
+- What the user wants changed is in their message in this chat (and in `mado/change.md` if it is there already). If they have not said what they want, or it is too vague to plan ("make it better"), ask first — what should change, for whom, why, and what must stay as it is — at most five questions, each with your proposed answer, and write no file until they answered.
+- Then write `mado/change.md` — markdown:
+```
+# <short title of the change> — Change
+
+## What the user asked
+<their words, quoted as they wrote them>
+
+## What changes
+<for each feature touched: how it behaves now → how it will behave>
+
+## What must not change
+<behaviour, data and interfaces that must keep working exactly as they do>
+
+## Features
+- F2 — <name> (changed)
+- F9 — <name> (new)
+
+## Files likely touched
+- <path> — <why> (found in the code)
+
+## Assumptions
+- …
+
+## Open questions
+- …
+```
+- A NEW feature the change adds must be in `mado/spec.md` before a task can serve it: add its heading `### F<n> — <Name>` (the next free number) at the end of the features with `- Status: planned`, its behaviour, rules, data, screens and acceptance list, and its new screens to `mado/flow.graph.json`. Change nothing else in those files, and say in your summary what you added there.
+
+`mado/plan.json` differences
+- It carries "change": {"title": "<the title of change.md>", "features": ["F2", "F9"], "files": ["src/api/orders.ts"]} — "features" the ids of every feature changed or added (they must be headings of spec.md), "files" the existing files the change is expected to touch (project-relative, as in "owns"; may be left out).
+- Tasks only for the change: nothing is rebuilt that already works. "owns" names exactly the existing files a task changes and the new files or folders it creates. Never make a task own a folder of the existing code as a whole unless the task really rewrites it.
+- The contracts task covers only the interfaces the change adds or changes (leave it out when it changes none, and say so in your summary). Tests tasks: one for each feature in "change.features", testing the new or changed behaviour; existing tests stay as they are and must keep passing.
+- "setup", "verify" and "run" use the project's REAL commands, as tech.md gives them: "verify" is the project's whole existing test suite and its checks, so the change cannot break what was there. If tech.md says the project has no tests, the first task after the contracts adds the test setup, and "verify" runs it.
+- The last task walks the journeys the change touches, through the real product.
+- "every feature has its tests task" and the other traceability rules apply to the features in "change.features"; the review checks the others are untouched."##;
+
+/// The daemon's data blocks for existing mode: what was found, and the code map ("" when neither is there).
+fn existing_blocks(ctx: &Context) -> String {
+    let mut t = String::new();
+    if let Some(f) = ctx.found.as_deref().filter(|f| !f.trim().is_empty()) {
+        t.push_str(&format!("\n\nWhat the app found in the folder (quoted data):\n{}", block(f)));
+    }
+    if let Some(m) = ctx.code_map.as_deref().filter(|m| !m.trim().is_empty()) {
+        t.push_str(&format!("\n\nThe code map, made by the code-review-graph tool from the code (files, their main names and how they call each other; quoted data — check what matters in the files themselves):\n{}", block(m)));
+    }
+    t
+}
+
+/// `system` for a plan of a project that is already built: the same files and shapes, with
+/// "document what is there" instructions for the documents and "plan a change" for the plan.
+fn system_existing(step: &str, ctx: &Context) -> String {
+    let body = match step {
+        "brief" => EXISTING_BRIEF.to_string(),
+        "spec" => format!("{EXISTING_SPEC}\n\n{SPEC}"),
+        "tech" => format!("{EXISTING_TECH}\n\n{TECH}"),
+        "design" => {
+            let list = if ctx.screens.is_empty() { "the flow has none yet".to_string() }
+                else { ctx.screens.iter().map(|(id, l)| format!("`{id}` — {}", inline(l))).collect::<Vec<_>>().join(", ") };
+            format!("{EXISTING_DESIGN}\n\n{}", design_text().replace("{screens}", &list))
+        }
+        "plan" => format!("{EXISTING_PLAN}\n\n{PLAN}{}", ctx.comments_text()),
+        _ => String::new(),
+    };
+    let files = if ctx.files.is_empty() { "none yet".to_string() } else { ctx.files.iter().map(|f| format!("`mado/{f}`")).collect::<Vec<_>>().join(", ") };
+    let features = if ctx.features.is_empty() || step == "brief" || step == "spec" { String::new() }
+        else { format!("\nThe spec's features: {}.", ctx.features.iter().map(|(id, n)| format!("{id} — {}", inline(n))).collect::<Vec<_>>().join("; ")) };
+    format!("{COMMON}\n\n{EXISTING_COMMON}\n\n{DATA_NOTE}{}\n\nThe MADO files there are now: {files}.{features}\n\n{body}", existing_blocks(ctx))
 }
