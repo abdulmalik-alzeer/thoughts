@@ -1445,6 +1445,40 @@ pub fn sandbox_profile(wt: &Path, project: &Path, cache: &Path, user_home: Optio
     out
 }
 
+/// `sandbox_profile` for the code graph tool (`code_graph`), which the daemon runs on the project
+/// itself rather than in a worktree: it may also read `read` (the project and the tool's own
+/// installation, both often inside the user's home), writes nowhere but inside `wt` (not even the
+/// temporary folders), and reaches no network address at all. The credentials of the home stay
+/// closed, except one that holds a folder of `read` (a project in `~/Documents` is read, nothing else there).
+pub fn graph_profile(wt: &Path, project: &Path, cache: &Path, user_home: Option<&Path>, port: u16, read: &[PathBuf]) -> String {
+    let q = |p: &Path| sb_str(&real(p));
+    let mut out = sandbox_profile(wt, project, cache, user_home, port);
+    let mut tmp: Vec<PathBuf> = vec![PathBuf::from("/private/tmp"), PathBuf::from("/private/var/folders"), std::env::temp_dir()];
+    if let Ok(t) = std::env::var("TMPDIR") { if Path::new(&t).is_absolute() { tmp.push(PathBuf::from(t)); } }
+    out.push_str("(deny file-write*");
+    for p in &tmp { out.push_str(&format!(" (subpath {})", q(p))); }
+    out.push_str(")\n");
+    let read: Vec<PathBuf> = read.iter().map(|p| real(p)).collect();
+    if !read.is_empty() {
+        out.push_str("(allow file-read*");
+        for p in &read { out.push_str(&format!(" (subpath {})", sb_str(p))); }
+        out.push_str(")\n");
+    }
+    out.push_str(&format!("(allow file-read* file-write* (regex #\"^{}/\"))\n", sb_regex(&in_place(wt))));
+    if let Some(h) = user_home {
+        let mut secrets: Vec<PathBuf> = SECRETS_IN_HOME.iter().map(|c| real(&h.join(c))).collect();
+        if let Ok(c) = std::env::var("CLAUDE_CONFIG_DIR") { if Path::new(&c).is_absolute() { secrets.push(real(Path::new(&c))); } }
+        secrets.retain(|s| !read.iter().any(|r| r.starts_with(s)));
+        if !secrets.is_empty() {
+            out.push_str("(deny file-read* file-write*");
+            for p in &secrets { out.push_str(&format!(" (subpath {})", sb_str(p))); }
+            out.push_str(")\n");
+        }
+    }
+    out.push_str("(deny network-outbound (remote ip \"*:*\"))\n(deny network-bind (local ip \"*:*\"))\n");
+    out
+}
+
 /// Read all of `r`, keeping its start and its end.
 async fn read_capped<R: tokio::io::AsyncRead + Unpin>(r: Option<R>) -> (Vec<u8>, Vec<u8>, bool) {
     use tokio::io::AsyncReadExt;
