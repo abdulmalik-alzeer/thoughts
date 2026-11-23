@@ -13,6 +13,7 @@
   import Logo from '../lib/Logo.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
   import CodexSettings from './CodexSettings.svelte';
+  import HelpTip from '../lib/HelpTip.svelte';
   import RemoteTokenHelp from './RemoteTokenHelp.svelte';
   import { isReady, primaryOf, statusOf } from '../lib/assistantReady';
   import { fmtSize } from '../lib/content/util';
@@ -178,6 +179,10 @@
   /** The assistant is not connected and the user chose to connect it later. */
   const assistantReady = $derived(onCodex ? isReady(codex, 'codex') : !!claude.installed && (!!claude.loggedIn || useApi));
   const waitsForAssistant = $derived(later && !assistantReady);
+  // Signing in with a Claude or ChatGPT subscription needs the user's explicit acknowledgement of the
+  // terms risk (stored as `subscriptionRiskAck`, an ISO time, in settings). An API key needs none.
+  const onSubscription = $derived(!later && (onCodex || !useApi));
+  function ackRisk(on: boolean) { s.subscriptionRiskAck = on ? new Date().toISOString() : null; }
 
   async function pickNotes() {
     try {
@@ -305,6 +310,7 @@
 
   /** Why the Next button is disabled on the current step ('' = good to go). */
   const blocker = $derived.by(() => {
+    if (step === 1 && onSubscription && !s.subscriptionRiskAck) return t('subRisk.needAck');
     if (step === 1 && !later && onCodex) {
       if (!codex.installed) return t('ux-onboarding.needCodex');
       if (!isReady(codex, 'codex')) return t('ux-onboarding.needCodexSignIn');
@@ -490,32 +496,36 @@
     {:else if step === 1}
       <h1 tabindex="-1">{t('ob.aiTitle')}</h1>
       <p>{onCodex ? t('ux-onboarding.ai.bodyCodex') : t('ob.aiBody')}</p>
-      <div class="lbl" id="ob-prog">{t('ux-onboarding.ai.which')}</div>
+      <div class="lbl" id="ob-prog">{t('ux-onboarding.ai.which')}
+        <HelpTip>
+          {#if onCodex}
+            <b>{t('ux-onboarding.codex.planTitle')}</b>
+            <span>{t('ux-onboarding.codex.planPaid')}</span>
+            <span>{t('ux-onboarding.codex.planData')}</span>
+            {#if !codex.installed}<span>{t('ux-onboarding.codex.customise')}</span>{/if}
+            <span>{t('ux-onboarding.codex.change')}</span>
+          {:else}
+            <b>{t('ob3.planTitle')}</b>
+            <span>{t('ob3.planPaid')}</span>
+            <span>{t('ob3.planNoBill')}</span>
+            <span>{t('ob3.planData')}</span>
+          {/if}
+        </HelpTip>
+      </div>
       <div class="opts" role="group" aria-labelledby="ob-prog">
         <button type="button" class="opt" class:sel={!onCodex} aria-pressed={!onCodex} onclick={() => setProgram('claude')}><b><bdi>Claude</bdi></b><span class="muted">{t('ux-onboarding.ai.claudeHint')}</span></button>
         <button type="button" class="opt" class:sel={onCodex} aria-pressed={onCodex} onclick={() => setProgram('codex')}><b><bdi>Codex</bdi></b><span class="muted">{t('ux-onboarding.ai.codexHint')}</span></button>
       </div>
+      {#if onSubscription}
+        <div class="card status risk" role="group" aria-labelledby="ob-risk">
+          <p class="row"><Icon name="warning" size={16} /> <b id="ob-risk">{t('subRisk.title')}</b></p>
+          <p>{t('subRisk.body')}</p>
+          <label class="check"><input type="checkbox" checked={!!s.subscriptionRiskAck} onchange={(e) => ackRisk(e.currentTarget.checked)} /> {t('subRisk.ack')}</label>
+        </div>
+      {/if}
       {#if onCodex}
-        <div class="card status">
-          <p class="row"><Icon name="info" size={16} /> <b>{t('ux-onboarding.codex.planTitle')}</b></p>
-          <ul class="plain">
-            <li>{t('ux-onboarding.codex.planPaid')}</li>
-            <li>{t('ux-onboarding.codex.planData')}</li>
-            {#if !codex.installed}<li>{t('ux-onboarding.codex.customise')}</li>{/if}
-          </ul>
-        </div>
         <CodexSettings bind:ai={s.ai} part="codex" vis={() => true} />
-        <p class="muted sm">{t('ux-onboarding.codex.change')}</p>
       {:else}
-        <div class="card status">
-          <p class="row"><Icon name="info" size={16} /> <b>{t('ob3.planTitle')}</b></p>
-          <ul class="plain">
-            <li>{t('ob3.planPaid')}</li>
-            <li>{t('ob3.planNoBill')}</li>
-            <li>{t('ob3.planData')}</li>
-          </ul>
-        </div>
-
         <h2>{t('sb.guide.title')}</h2>
         <AssistantGuide bind:claude keyInstead={useApi} />
 
@@ -525,9 +535,8 @@
           {#if useApi}
             <label for="ob-base">{t('ob.apiUrl')}</label>
             <input id="ob-base" dir="ltr" bind:value={s.ai.claude.baseUrl} placeholder="https://api.anthropic.com" autocomplete="off" />
-            <label for="ob-key">{t('ob.apiKey')}</label>
+            <label for="ob-key">{t('ob.apiKey')} <HelpTip text={t('ob3.apiKeyHint')} /></label>
             <input id="ob-key" dir="ltr" type="password" bind:value={apiToken} autocomplete="off" />
-            <p class="muted sm">{t('ob3.apiKeyHint')}</p>
           {/if}
         </details>
       {/if}
@@ -849,6 +858,8 @@
   .warn.box { border: var(--border-w) solid var(--danger); border-radius: var(--radius); padding: 10px 12px; background: color-mix(in srgb, var(--danger) 7%, transparent); }
   .path { overflow-wrap: anywhere; }
   .later.sel { border-color: var(--accent); }
+  .risk { border-color: var(--danger); }
+  .risk .row :global(svg) { color: var(--danger); }
   .plain { margin: 6px 0 0; padding-inline-start: 20px; }
   .plain li { margin-bottom: 4px; }
   .sum { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 16px 0; }
