@@ -179,11 +179,66 @@ fn a_codex_run_names_the_key_only_by_its_variable_and_keeps_it_from_commands() {
 }
 
 #[test]
-fn every_codex_preset_passes_the_address_check_and_says_whether_it_needs_a_key() {
-    for p in CODEX_PRESETS {
-        assert!(crate::settings::check_base_url(p.base_url).is_ok(), "{}", p.id);
-        if p.no_key { assert!(crate::settings::keyless_allowed(p.base_url, false), "{}", p.id); }
+fn the_ready_made_services_are_few_and_every_address_may_be_saved() {
+    // A handful, each once: the long tail is the page's own "another service" form.
+    assert!(SERVICES.len() <= 6, "the page is meant to stay short");
+    let mut ids: Vec<&str> = SERVICES.iter().map(|p| p.id).collect();
+    ids.dedup();
+    assert_eq!(ids, ["openai", "anthropic", "openrouter", "deepseek", "ollama"]);
+    for p in SERVICES {
+        assert!(p.claude.is_some() || p.codex.is_some(), "{} works with neither program", p.id);
+        for url in [p.claude, p.codex].into_iter().flatten().filter(|u| !u.is_empty()) {
+            // The check a save makes, with full access off; never a trailing slash (the page compares addresses).
+            assert!(crate::settings::check_base_url(url).is_ok() && !url.ends_with('/'), "{} {url}", p.id);
+            assert_eq!(crate::settings::keyless_allowed(url, false), p.no_key, "{}: no key only on this computer", p.id);
+            assert!(url.starts_with("https://") || url.starts_with("http://localhost"), "{} {url}", p.id);
+        }
+        assert_eq!(p.keys_url.is_empty(), p.no_key, "{}: a key has a page to get it from", p.id);
+        assert!(p.keys_url.is_empty() || p.keys_url.starts_with("https://"), "{}", p.id);
     }
+    // Anthropic itself is a key with no address, and only that one is; Codex never gets a blank address.
+    assert!(SERVICES.iter().all(|p| (p.claude == Some("")) == (p.id == "anthropic") && p.codex != Some("")));
+    // What the page is sent: both addresses, null where the service is not for that program.
+    let j = services_json();
+    assert_eq!(j[0], serde_json::json!({"id": "openai", "claude": null, "codex": "https://api.openai.com/v1", "noKey": false, "keysUrl": "https://platform.openai.com/api-keys"}));
+    assert_eq!(j[4]["noKey"], true);
+}
+
+#[test]
+fn a_ready_made_service_runs_as_what_the_page_says() {
+    // Claude Code: a key with no address is Anthropic's own; an address with its key is a service (bearer).
+    use crate::claude::{provider_env_for, provider_of, Provider};
+    let cl = |u: Option<&str>, has, keyless| crate::settings::ClaudeSettings { base_url: u.map(String::from), has_api_token: has, keyless, ..Default::default() };
+    for p in SERVICES {
+        if let Some(u) = p.claude {
+            let c = cl(Some(u).filter(|u| !u.is_empty()), !p.no_key, p.no_key);
+            let want = if u.is_empty() { Provider::AnthropicKey } else { Provider::Service(u.into()) };
+            assert_eq!(provider_of(&c), want, "{}", p.id);
+            let env = provider_env_for(&want, Some("k".into())).unwrap();
+            let var = if u.is_empty() { "ANTHROPIC_API_KEY" } else { "ANTHROPIC_AUTH_TOKEN" };
+            assert!(env.set.iter().any(|(n, _)| *n == var), "{}", p.id);
+        }
+        if let Some(u) = p.codex {
+            let c = codex(Some(u), !p.no_key, p.no_key);
+            assert_eq!(codex_provider_of(&c), CodexProvider::Service(u.into()), "{}", p.id);
+            let svc = codex_service_for(&c, || Some("sk-saved".into())).unwrap().unwrap();
+            assert_eq!(svc.key, if p.no_key { NO_KEY } else { "sk-saved" }, "{}", p.id);
+            // Codex only speaks the Responses API now: every ready-made address is started with it.
+            assert!(codex_args(&svc, &[]).contains(&"model_providers.thoughts.wire_api=\"responses\"".to_string()), "{}", p.id);
+        }
+    }
+}
+
+#[test]
+fn an_address_that_is_no_longer_ready_made_still_runs() {
+    // Saved in 0.5.0 from a preset the page has dropped: nothing about the saved settings changes.
+    for u in ["https://api.moonshot.ai/anthropic", "https://api.z.ai/api/anthropic", "https://api.minimax.io/anthropic", "http://localhost:4000"] {
+        assert!(!SERVICES.iter().any(|p| p.claude == Some(u)), "{u}");
+        let c = crate::settings::ClaudeSettings { base_url: Some(u.into()), has_api_token: true, ..Default::default() };
+        assert_eq!(crate::claude::provider_of(&c), crate::claude::Provider::Service(u.into()));
+    }
+    let c = codex(Some("http://localhost:4000/v1"), true, false);
+    assert_eq!(codex_service_for(&c, || Some("sk-saved".into())).unwrap().unwrap().key, "sk-saved");
 }
 
 #[test]
@@ -259,7 +314,7 @@ async fn a_codex_provider_skips_the_chatgpt_sign_in_and_an_incomplete_one_runs_n
 fn no_access_key_reaches_the_provider_routes() {
     let caller = crate::tokens::Caller { id: "k".into(), scopes: vec![crate::tokens::Scope::Capture, crate::tokens::Scope::Read] };
     for (m, p) in [("PUT", "/api/ai/codex/provider"), ("DELETE", "/api/ai/codex/provider"), ("POST", "/api/ai/codex/provider/test"),
-                   ("POST", "/api/ai/codex/provider/models"), ("POST", "/api/ai/claude/provider/models"), ("GET", "/api/ai/codex/presets"),
+                   ("POST", "/api/ai/codex/provider/models"), ("POST", "/api/ai/claude/provider/models"), ("GET", "/api/ai/services"),
                    ("PUT", "/api/ai/claude/provider"), ("POST", "/api/ai/claude/provider/test")] {
         let uri: axum::http::Uri = p.parse().unwrap();
         assert!(crate::tokens::admit(&caller, &m.parse().unwrap(), &uri).is_none(), "{m} {p}");

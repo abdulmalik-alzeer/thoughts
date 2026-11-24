@@ -195,7 +195,6 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/ai/claude/token", post(save_ai_token))
         .route("/api/ai/claude/provider", axum::routing::put(save_provider).delete(remove_provider))
         .route("/api/ai/claude/provider/test", post(test_provider))
-        .route("/api/ai/claude/presets", get(provider_presets))
         .route("/api/ai/claude/login", post(claude_login))
         .route("/api/ai/claude/recheck", post(claude_recheck))
         .route("/api/ai/claude/status", get(claude_status))
@@ -1698,7 +1697,6 @@ async fn remove_provider(State(st): S) -> R {
 }
 
 /// The ready-made services Settings offers (address and how the key is sent).
-async fn provider_presets() -> R { Ok(Json(claude::presets_json())) }
 
 /// Try the connection with one very short message, so a wrong key or address shows here instead of
 /// inside the first chat. With a body (`baseUrl`, `token`, as for saving) it tries what was typed

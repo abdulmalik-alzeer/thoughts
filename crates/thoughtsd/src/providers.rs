@@ -406,22 +406,46 @@ pub async fn test_codex_provider(state: &AppState, typed: Option<(Option<&str>, 
     crate::claude::test_result(r)
 }
 
-/// A ready-made OpenAI-compatible service for Codex, each address checked in the provider's own
-/// documentation (round 0.5.0 report, `v050-providers`). No model lists: those come from the service.
-pub struct CodexPreset { pub id: &'static str, pub name: &'static str, pub name_ar: &'static str, pub base_url: &'static str, pub no_key: bool, pub keys_url: &'static str }
+/// A service the Settings page offers ready-made (round 0.7.2): the user picks it and pastes a key,
+/// the address is ours. Kept to the few big ones whose own documentation says which of the two
+/// programs they work with; everything else is the page's one "another service" form (address, key,
+/// model), and an address saved before that is no longer here simply shows as that form.
+/// No model lists here: those come from the service ("Load models").
+pub struct Service {
+    pub id: &'static str,
+    /// The address Claude Code is pointed at (`ANTHROPIC_BASE_URL`; the service speaks Anthropic's
+    /// format there). `Some("")` is Anthropic itself: a key and no address. `None`: not for Claude Code.
+    pub claude: Option<&'static str>,
+    /// The address Codex's `model_providers.thoughts.base_url` gets (the service answers OpenAI's
+    /// Responses API there, the only one Codex still speaks). `None`: not for Codex.
+    pub codex: Option<&'static str>,
+    /// Runs on this computer and takes no key (it gets the stand-in `NO_KEY`).
+    pub no_key: bool,
+    /// Where the person gets a key (a page in their browser).
+    pub keys_url: &'static str,
+}
 
-pub const CODEX_PRESETS: &[CodexPreset] = &[
-    // openrouter.ai/docs/api/reference/responses/overview: https://openrouter.ai/api/v1/responses.
-    CodexPreset { id: "openrouter", name: "OpenRouter", name_ar: "OpenRouter", base_url: "https://openrouter.ai/api/v1", no_key: false, keys_url: "https://openrouter.ai/keys" },
-    // docs.ollama.com/integrations/codex: base_url "http://localhost:11434/v1/", wire_api "responses".
-    CodexPreset { id: "ollama", name: "Ollama on this computer", name_ar: "Ollama على هذا الجهاز", base_url: "http://localhost:11434/v1", no_key: true, keys_url: "" },
-    // The user's own gateway (such as LiteLLM); its address is theirs to change.
-    CodexPreset { id: "gateway", name: "A service on this computer", name_ar: "خدمة على هذا الجهاز", base_url: "http://localhost:4000/v1", no_key: false, keys_url: "" },
+/// Each fact was read in the service's own documentation on 2026-11-24 (round 0.7.2 report,
+/// `providers.md`, has the pages). Names and one-line descriptions are the window's (`i18n/providers72.ts`).
+pub const SERVICES: &[Service] = &[
+    // Codex's own configuration reference shows a custom provider at an api.openai.com address with a key from `env_key`.
+    Service { id: "openai", claude: None, codex: Some("https://api.openai.com/v1"), no_key: false, keys_url: "https://platform.openai.com/api-keys" },
+    // A key and no address: Claude Code's own `ANTHROPIC_API_KEY`.
+    Service { id: "anthropic", claude: Some(""), codex: None, no_key: false, keys_url: "https://console.anthropic.com/settings/keys" },
+    // openrouter.ai/docs/guides/coding-agents/codex-cli (base_url https://openrouter.ai/api/v1) and
+    // …/guides/claude-code-integration (ANTHROPIC_BASE_URL https://openrouter.ai/api, ANTHROPIC_AUTH_TOKEN).
+    Service { id: "openrouter", claude: Some("https://openrouter.ai/api"), codex: Some("https://openrouter.ai/api/v1"), no_key: false, keys_url: "https://openrouter.ai/keys" },
+    // api-docs.deepseek.com/quick_start/agent_integrations/codex (base_url https://api.deepseek.com/, wire_api
+    // "responses") and …/guides/anthropic_api (https://api.deepseek.com/anthropic).
+    Service { id: "deepseek", claude: Some("https://api.deepseek.com/anthropic"), codex: Some("https://api.deepseek.com"), no_key: false, keys_url: "https://platform.deepseek.com/api_keys" },
+    // docs.ollama.com/integrations/codex (http://localhost:11434/v1/, wire_api "responses") and
+    // …/api/anthropic-compatibility (ANTHROPIC_BASE_URL http://localhost:11434, the token "required but ignored").
+    Service { id: "ollama", claude: Some("http://localhost:11434"), codex: Some("http://localhost:11434/v1"), no_key: true, keys_url: "" },
 ];
 
-/// What `GET /api/ai/codex/presets` returns.
-pub fn codex_presets_json() -> Value {
-    json!(CODEX_PRESETS.iter().map(|p| json!({"id": p.id, "name": p.name, "nameAr": p.name_ar, "baseUrl": p.base_url, "noKey": p.no_key, "keysUrl": p.keys_url})).collect::<Vec<_>>())
+/// What `GET /api/ai/services` returns: the ready-made services, in the order the page shows them.
+pub fn services_json() -> Value {
+    json!(SERVICES.iter().map(|p| json!({"id": p.id, "claude": p.claude, "codex": p.codex, "noKey": p.no_key, "keysUrl": p.keys_url})).collect::<Vec<_>>())
 }
 
 // ---------- the routes Settings uses (the app's own key only: `tokens::ROUTES` names none of them) ----------
@@ -436,7 +460,7 @@ pub fn routes() -> axum::Router<std::sync::Arc<AppState>> {
         .route("/api/ai/codex/provider", put(save_codex).delete(remove_codex))
         .route("/api/ai/codex/provider/test", post(test_codex))
         .route("/api/ai/codex/provider/models", post(codex_models))
-        .route("/api/ai/codex/presets", get(|| async { axum::Json(codex_presets_json()) }))
+        .route("/api/ai/services", get(|| async { axum::Json(services_json()) }))
 }
 
 #[derive(serde::Deserialize, Default)]

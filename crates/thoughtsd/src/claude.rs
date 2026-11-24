@@ -360,72 +360,6 @@ pub(crate) async fn provider_env(state: &AppState) -> anyhow::Result<ProviderEnv
     provider_env_for(&provider, key).map_err(|e| { crate::log::warn(format!("assistant not started: {e}")); e })
 }
 
-/// A ready-made way to reach a service that speaks the same language as Anthropic's API: its
-/// address and how its key is sent. The user picks one in Settings, pastes the key, and tests it.
-pub struct Preset {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub name_ar: &'static str,
-    /// The address to use; empty for Anthropic itself.
-    pub base_url: &'static str,
-    /// How the key travels: "x-api-key" (Anthropic's own) or "bearer" (what gateways take).
-    pub key_header: &'static str,
-    pub hint: &'static str,
-    pub hint_ar: &'static str,
-    /// Where the person gets a key (a page in their browser).
-    pub keys_url: &'static str,
-}
-
-pub const PRESETS: &[Preset] = &[
-    Preset { id: "anthropic", name: "Anthropic API key", name_ar: "مفتاح Anthropic API", base_url: "", key_header: "x-api-key",
-        hint: "A key from console.anthropic.com. You pay Anthropic for what you use, instead of using a Claude plan.",
-        hint_ar: "مفتاح من console.anthropic.com. تدفع لشركة Anthropic مقابل ما تستخدمه بدلاً من اشتراك Claude.",
-        keys_url: "https://console.anthropic.com/settings/keys" },
-    Preset { id: "openrouter", name: "OpenRouter", name_ar: "OpenRouter", base_url: "https://openrouter.ai/api", key_header: "bearer",
-        hint: "One key for many models from many companies. Pick a model it offers in Settings › Assistant › Model.",
-        hint_ar: "مفتاح واحد لنماذج كثيرة من شركات مختلفة. اختر نموذجاً تقدّمه الخدمة من «الإعدادات › المساعد › النموذج».",
-        keys_url: "https://openrouter.ai/keys" },
-    Preset { id: "gateway", name: "A service on this computer", name_ar: "خدمة على هذا الجهاز", base_url: "http://localhost:4000", key_header: "bearer",
-        hint: "For a gateway such as LiteLLM running on your own computer. Change the address if yours uses another one. LiteLLM is a separate program you install and keep updated yourself; the app does not install it.",
-        hint_ar: "لبوابة مثل LiteLLM تعمل على جهازك. غيّر العنوان إن كان عنوان بوابتك مختلفاً. LiteLLM برنامج مستقل تثبّته وتحدّثه بنفسك، ولا يثبّته التطبيق.",
-        keys_url: "" },
-    // The presets below were each checked in the provider's own documentation (round 0.5.0 report,
-    // `v050-providers`): the address Claude Code is pointed at, and that it takes the key as a bearer token.
-    // docs.ollama.com/api/anthropic-compatibility: ANTHROPIC_BASE_URL=http://localhost:11434, the token is "required but ignored".
-    Preset { id: "ollama", name: "Ollama on this computer", name_ar: "Ollama على هذا الجهاز", base_url: "http://localhost:11434", key_header: "none",
-        hint: "Models you run yourself with Ollama. No key needed. Load its models below, under Model.",
-        hint_ar: "نماذج تشغّلها بنفسك عبر Ollama. لا حاجة إلى مفتاح. حمّل نماذجه من الأسفل، تحت «النموذج».",
-        keys_url: "" },
-    // api-docs.deepseek.com/guides/anthropic_api: https://api.deepseek.com/anthropic, x-api-key or Bearer.
-    Preset { id: "deepseek", name: "DeepSeek", name_ar: "DeepSeek", base_url: "https://api.deepseek.com/anthropic", key_header: "bearer",
-        hint: "DeepSeek's own models, with a key from DeepSeek. You pay DeepSeek for what you use.",
-        hint_ar: "نماذج DeepSeek نفسها، بمفتاح من DeepSeek. تدفع لشركة DeepSeek مقابل ما تستخدمه.",
-        keys_url: "https://platform.deepseek.com/api_keys" },
-    // platform.kimi.ai/docs/guide/claude-code-kimi.md: https://api.moonshot.ai/anthropic, ANTHROPIC_AUTH_TOKEN.
-    Preset { id: "moonshot", name: "Kimi (Moonshot AI)", name_ar: "Kimi (Moonshot AI)", base_url: "https://api.moonshot.ai/anthropic", key_header: "bearer",
-        hint: "Moonshot AI's Kimi models, with a key from its platform. You pay Moonshot AI for what you use.",
-        hint_ar: "نماذج Kimi من Moonshot AI، بمفتاح من منصتها. تدفع لها مقابل ما تستخدمه.",
-        keys_url: "https://platform.kimi.ai/console/api-keys" },
-    // docs.z.ai/devpack/tool/claude: https://api.z.ai/api/anthropic, ANTHROPIC_AUTH_TOKEN.
-    Preset { id: "zai", name: "Z.ai (GLM)", name_ar: "Z.ai (GLM)", base_url: "https://api.z.ai/api/anthropic", key_header: "bearer",
-        hint: "Z.ai's GLM models, with a key from Z.ai. You pay Z.ai for what you use.",
-        hint_ar: "نماذج GLM من Z.ai، بمفتاح منها. تدفع لها مقابل ما تستخدمه.",
-        keys_url: "https://z.ai/manage-apikey/apikey-list" },
-    // platform.minimax.io/docs/token-plan/claude-code: https://api.minimax.io/anthropic, ANTHROPIC_AUTH_TOKEN.
-    Preset { id: "minimax", name: "MiniMax", name_ar: "MiniMax", base_url: "https://api.minimax.io/anthropic", key_header: "bearer",
-        hint: "MiniMax's models, with a key from MiniMax. You pay MiniMax for what you use.",
-        hint_ar: "نماذج MiniMax، بمفتاح منها. تدفع لها مقابل ما تستخدمه.",
-        keys_url: "https://platform.minimax.io/user-center/basic-information/interface-key" },
-];
-
-/// What `GET /api/ai/claude/presets` returns.
-pub fn presets_json() -> Value {
-    json!(PRESETS.iter().map(|p| json!({
-        "id": p.id, "name": p.name, "nameAr": p.name_ar, "baseUrl": p.base_url, "keyHeader": p.key_header,
-        "hint": p.hint, "hintAr": p.hint_ar, "keysUrl": p.keys_url, "noKey": p.key_header == "none",
-    })).collect::<Vec<_>>())
-}
-
 /// Which of the problems a connection test can meet the failure text of an attempt is, in plain words
 /// (`tr.rs`). `refused` = the service did not accept the key. The service's own words are kept only
 /// when none of the known problems fits, with anything shaped like a key blanked out.
@@ -3754,17 +3688,8 @@ pub(crate) mod tests {
             let ar = crate::tr::text_in(true, key, &[]);
             assert!(ar.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)), "{key}");
         }
-        // The ready-made services: Anthropic first, a bearer key for every gateway, every address valid.
-        assert_eq!(PRESETS[0].id, "anthropic");
-        for p in PRESETS {
-            assert!(p.base_url.is_empty() || crate::settings::check_base_url(p.base_url).is_ok(), "{}", p.id);
-            // "none": a service on this computer that takes no key (it gets the stand-in, as a bearer token).
-            let local_no_key = p.key_header == "none" && crate::settings::keyless_allowed(p.base_url, false);
-            assert!(p.key_header == if p.base_url.is_empty() { "x-api-key" } else { "bearer" } || local_no_key, "{}", p.id);
-            assert!(!p.base_url.starts_with("http://") || p.base_url.starts_with("http://localhost"), "{}", p.id);
-            assert!(!p.hint_ar.is_empty() && !p.name_ar.is_empty());
-        }
-        // The key header a preset names is the one the run is started with.
+        // How the key travels: a bearer token to a service, Anthropic's own header to Anthropic
+        // (the ready-made services are `providers::SERVICES`, checked in its tests).
         let e = provider_env_for(&Provider::Service("https://openrouter.ai/api".into()), Some("k".into())).unwrap();
         assert!(e.set.iter().any(|(n, _)| *n == "ANTHROPIC_AUTH_TOKEN"));
         let e = provider_env_for(&Provider::AnthropicKey, Some("k".into())).unwrap();
