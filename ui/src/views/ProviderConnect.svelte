@@ -15,7 +15,6 @@
   import { failed } from '../lib/errors';
   import ModelPicker from '../lib/models/ModelPicker.svelte';
   import { entriesFrom } from '../lib/models/picker';
-  import { autoNote } from '../lib/models/auto';
   import { confirmDialog } from '../lib/dialog.svelte';
   import {
     CUSTOM, PROGRAM_NAME, formState, keylessAllowed, onHomeNetwork, programsOf, savedAs, savedKind, startAddress, startProgram,
@@ -271,7 +270,7 @@
     {#if showModel}
       <label for="pv-model">{t('prov72.model')} <HelpTip text={t('prov72.modelHelp')} /></label>
       <div class="row wrap">
-        <span class="model"><ModelPicker id="pv-model" value={model.trim() || null} models={modelEntries} label={t('prov72.model')} auto={t('prov72.modelAuto')} autoNote={autoNote(modelEntries)} scope={program}
+        <span class="model"><ModelPicker id="pv-model" value={model.trim() || null} models={modelEntries} label={t('prov72.model')} placeholder={t('prov72.modelAuto')} auto={t('models72.unset')} autoNote={t('models72.unsetNote')} scope={program}
           disabled={readOnly} describedby={modelNote ? 'pv-model-note' : undefined} onpick={(v) => { model = v ?? ''; if (connected && !st?.dirty) return applyModel(true); }} /></span>
         {#if connected}
           <button type="button" class="btn" disabled={st.dirty || busy.models} aria-busy={busy.models} onclick={loadModels}><Icon name="sync" size={14} /> {t('prov72.modelLoad')}</button>

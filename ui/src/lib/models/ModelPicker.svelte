@@ -10,9 +10,9 @@
   import Icon from '../Icon.svelte';
   import { t, tn } from '../i18n';
   import { imeKey } from '../ime';
-  import { LONG_LIST, saysDefault, moveBy, nameOf, placeList, recentModels, rememberModel, rowsOf, sectionsFor, startIndex, validName, type Box, type ModelEntry, type Row } from './picker';
+  import { LONG_LIST, saysDefault, showsId, moveBy, nameOf, placeList, recentModels, rememberModel, rowsOf, sectionsFor, startIndex, validName, type Box, type ModelEntry, type Row } from './picker';
 
-  let { value, models, onpick, label, id = '', auto = t('models72.auto'), autoNote = '', typed = true, scope = '', disabled = false, small = false, describedby = undefined }: {
+  let { value, models, onpick, label, id = '', auto = t('models72.auto'), autoNote = '', placeholder = '', typed = true, scope = '', disabled = false, small = false, describedby = undefined }: {
     /** The choice in force: a model's id, or nothing for "Automatic". */
     value: string | null | undefined;
     models: ModelEntry[];
@@ -25,6 +25,8 @@
     auto?: string;
     /** What "no choice" means here, said under it. */
     autoNote?: string;
+    /** What the button says while nothing is chosen, where that is not the name of "no choice". */
+    placeholder?: string;
     /** A name outside the list may be typed. */
     typed?: boolean;
     /** Whose models these are, for "Recently used" (an assistant program's name). */
@@ -49,7 +51,7 @@
   const long = $derived(models.length >= LONG_LIST);
   const sections = $derived(sectionsFor(models, { value, query, recents, auto, typed }));
   const rows = $derived(rowsOf(sections));
-  const shown = $derived(value ? nameOf(models, value) : auto || t('models72.auto'));
+  const shown = $derived(value ? nameOf(models, value) : placeholder || auto || t('models72.auto'));
   const q = $derived(query.trim());
   /** Something is typed that can be neither found nor used as a name. */
   const bad = $derived(!!q && !rows.length && typed && !validName(q));
@@ -143,7 +145,7 @@
 
 <button bind:this={btn} {id} type="button" class="mp-btn" class:small class:open aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? `mp-${uid}-list` : undefined}
   aria-label={t('models72.button', { label, model: shown })} aria-describedby={describedby} {disabled} onclick={() => (open ? close() : show())} onkeydown={btnKey}>
-  <span class="mp-val" class:unset={!value}><bdi>{shown}</bdi></span>
+  <span class="mp-val" class:unset={!value && !!placeholder}><bdi>{shown}</bdi></span>
   <Icon name="down" size={small ? 12 : 14} />
 </button>
 
@@ -185,7 +187,7 @@
                   {/if}
                 {:else if r.entry}
                   <span class="mp-name"><bdi>{r.entry.name}</bdi>{#if r.entry.isDefault && !saysDefault(r.entry.name)}<span class="mp-pill">{t('models72.default')}</span>{/if}</span>
-                  {#if r.entry.name !== r.entry.id}<span class="mp-sub mp-id"><bdi>{r.entry.id}</bdi></span>{/if}
+                  {#if showsId(r.entry)}<span class="mp-sub mp-id"><bdi>{r.entry.id}</bdi></span>{/if}
                   {#if r.entry.note}<span class="mp-sub">{r.entry.note}</span>{/if}
                 {/if}
               </span>
@@ -216,6 +218,7 @@
   .mp-btn.small { font-size: var(--fs-xs); padding: 4px 8px; gap: 6px; }
   :global([data-theme="contrast"]) .mp-btn { border-color: var(--border); background: var(--bg); }
   .mp-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mp-val.unset { color: var(--muted); }
   .mp-btn :global(svg) { flex: none; color: var(--muted); }
 
   /* The list: the app's menu surface (panel, hairline, large shadow), placed by the script. */
@@ -231,7 +234,7 @@
   /* A short list has no search box to look at, but the field is still what the keys go to. */
   .mp-search.quiet { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); border: 0; }
 
-  .mp-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 6px; outline: none; }
+  .mp-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px; outline: none; }
   .mp-sec + .mp-sec { margin-top: 4px; padding-top: 4px; border-top: var(--border-w) solid var(--hairline); }
   .mp-head { position: sticky; top: -6px; z-index: 1; margin: 0 -6px; padding: 7px 16px 4px; font-size: var(--fs-xxs); font-weight: 600; letter-spacing: .02em; color: var(--muted); background: var(--panel); }
   .mp-row { display: flex; align-items: center; gap: 10px; padding: 6px 10px; border-radius: calc(var(--radius) - 1px); cursor: pointer; scroll-margin: 6px; }

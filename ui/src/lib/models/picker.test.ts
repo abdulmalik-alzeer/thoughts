@@ -2,7 +2,7 @@
 // search finds, which row is current or the default, and what the keys do. The model names below
 // are made up for the tests: the app itself has no list of models.
 import { describe, it, expect, beforeEach } from 'vitest';
-import { LONG_LIST, RECENT_MAX, entriesFrom, filterModels, moveBy, nameOf, placeList, recentModels, rememberModel, rowsOf, saysDefault, sectionsFor, splitId, startIndex, validName } from './picker';
+import { LONG_LIST, RECENT_MAX, entriesFrom, filterModels, moveBy, nameOf, placeList, recentModels, rememberModel, rowsOf, saysDefault, sectionsFor, showsId, splitId, startIndex, validName } from './picker';
 
 const short = entriesFrom({ models: ['alpha', 'beta', 'gamma-2-0'] });
 const makers = ['acme', 'bolt', 'crest', 'dune'];
@@ -49,6 +49,11 @@ describe('what is listed', () => {
     expect(nameOf(e, 'bolt/a')).toBe('bolt/a');
     expect(nameOf(e, 'typed-by-hand')).toBe('typed-by-hand');
     expect(nameOf(e, null)).toBe('');
+  });
+
+  it('shows the raw id under a name only where it adds something', () => {
+    const e = entriesFrom({ models: ['opus', 'model-one', 'default', 'acme/a', 'bolt/a', 'x1'], modelNames: { opus: 'Opus', 'model-one': 'Model One', default: 'Default (recommended)', x1: 'Swift' } });
+    expect(e.map(showsId)).toEqual([false, false, true, true, true, true]);
   });
 
   it('knows when a reported name already says it is the default', () => {

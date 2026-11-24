@@ -64,6 +64,13 @@ export function entriesFrom(src: ModelSource | null | undefined): ModelEntry[] {
   });
 }
 
+/** Is the raw id worth a second line under the name? Only where it says something the name does
+ *  not: "Opus" over `opus`, or "Model One" over `model-one`, would only repeat itself. */
+export function showsId(e: ModelEntry): boolean {
+  const bare = (x: string) => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+  return bare(e.name) !== bare(e.id);
+}
+
 /** A model's name for a button or a sentence: the reported one, else the id as it is. */
 export function nameOf(entries: ModelEntry[], id: string | null | undefined): string {
   if (!id) return '';
