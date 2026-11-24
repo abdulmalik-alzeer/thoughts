@@ -5,6 +5,8 @@ import { defineConfig, mergeConfig } from 'vitest/config';
 import viteConfig from './vite.config';
 
 export default mergeConfig(viteConfig, defineConfig({
+  // Svelte's browser build, so a test can mount a component in jsdom (`mount` is not on the server build).
+  resolve: { conditions: ['browser'] },
   test: {
     environment: 'jsdom',
     include: ['src/**/*.test.ts'], // relative to the vite root, ui/
