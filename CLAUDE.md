@@ -13,7 +13,8 @@
   Commands that matter check the caller too (`main_only` / `is_main_label`).
 - Never hard-code model, effort or permission lists: they come from what the agent reports over ACP
   (`acp_agent::catalog`), else `claude --help` (`claude.rs`). Effort levels and permission modes are shown under
-  the agent's own names. ACP design (adapters, pins, which runs use it): `docs/acp.md`.
+  the agent's own names. ACP design (adapters, pins, which runs use it; ordinary chats of both
+  Claude Code and Codex run over it, each guard of the command line carried or the turn kept there): `docs/acp.md`.
 - `bypassPermissions` is only for ordinary chats (`kind == "chat"`) and is only switched on after the
   user confirmed the warning, which the shell shows as a native dialog (`approve_action`); the daemon refuses the switch without that confirmation
   (`check_bypass` in `api.rs`, `?confirm=` on `PUT /api/settings`). That confirmation, like a folder trust

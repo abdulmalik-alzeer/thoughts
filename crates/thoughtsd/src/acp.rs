@@ -6,7 +6,8 @@
 //!   adapter reports (`session/options`, else `session/new`), never from a list in the app (`probe`);
 //! - Claude Code's ordinary chats (`claude::start_run`, kind `chat`): the same rules file, hooks,
 //!   system text and guards as the command-line path, handed to the adapter as SDK options; the
-//!   adapter's permission requests become the app's approval cards (`approvals::ask`).
+//!   adapter's permission requests become the app's approval cards (`approvals::ask`);
+//! - Codex's ordinary chats (`codex_acp.rs`), where every guard of `codex exec` travels.
 //!
 //! The protocol is small and its unstable parts (session config options, resume, fork) are what this
 //! needs, so it is spoken here directly over tokio with `serde_json` rather than through the
