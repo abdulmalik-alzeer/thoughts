@@ -117,6 +117,10 @@ export function navLabel(id: string, fallback?: string): string {
   const l = app.nav?.labels?.[id];
   const custom = l && (lang() === 'ar' ? l.ar || l.en : l.en || l.ar);
   if (custom) return String(custom).slice(0, 40);
+  return navBase(id, fallback);
+}
+/** The sidebar name of a built-in page before any renaming (what "Edit sidebar" offers to go back to). */
+export function navBase(id: string, fallback?: string): string {
   if (id === 'ideas') return term('nav');
   return fallback ?? t(id);
 }

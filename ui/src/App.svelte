@@ -6,7 +6,7 @@
   import { loadLayer, reloadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn, newCustomise, findView } from './lib/layer';
   import { failed } from './lib/errors';
   import { backup, healthWarning, lastBackupText, refreshBackup, syncDone, syncFailed } from './lib/backup.svelte';
-  import { navLabel } from './lib/terms';
+  import { navLabel, navBase } from './lib/terms';
   import { startReminders } from './lib/reminders';
   import { fold } from './lib/CommandPalette.svelte';
   import { checkAppUpdate, checkLayerUpdates, startAutoUpdateChecks } from './lib/updates';
@@ -44,6 +44,9 @@
   import PageSwap from './views/PageSwap.svelte';
   import SidebarEdit from './views/SidebarEdit.svelte';
   import { layoutNav } from './lib/navLayout';
+  import NavMenu, { type MenuItem } from './lib/NavMenu.svelte';
+  import { canHide, canRestyle, isStart, setHidden, setStart, emptyNav } from './lib/navEdit';
+  import { quickNav } from './lib/navQuick.svelte';
   import { pageSwap } from './lib/pages.svelte';
   import Reorganize from './views/Reorganize.svelte';
   import Tour from './views/Tour.svelte';
@@ -677,23 +680,23 @@
   // Sidebar items: built-ins, "Me" and plugin views — then `nav.json` (hidden / order / labels) from the
   // customisation layer. Home can never be hidden; Settings and Help live in the footer, outside this list.
   // `custom`: a page an add-on put there (`from` is the add-on's file, `alias` the short id it chose).
-  type NavItem = { id: string; label: string; icon: string; active: boolean; custom?: boolean; alias?: string; from?: string; run: () => void };
+  type NavItem = { id: string; label: string; base: string; icon: string; active: boolean; custom?: boolean; alias?: string; from?: string; run: () => void };
   const APP_PAGES = ['home', 'chats', 'ideas', 'todos', 'docs', 'projects', 'inbox', 'me', 'graph'];
   const allNavItems = $derived.by((): NavItem[] => {
     const m = app.settings?.modules ?? {};
     const items: NavItem[] = [];
-    const add = (id: string, on = true) => { if (on) items.push({ id, label: navLabel(id), icon: id, active: isActive(id), run: () => { go({ kind: id }); } }); };
+    const add = (id: string, on = true) => { if (on) items.push({ id, label: navLabel(id), base: navBase(id), icon: id, active: isActive(id), run: () => { go({ kind: id }); } }); };
     add('home'); add('chats'); add('ideas'); add('todos', m.todos !== false); add('docs', m.docs !== false); add('projects', m.builds !== false);
-    items.push({ id: 'graph', label: navLabel('graph', t('libf-graph.nav')), icon: 'graph', active: app.view.kind === 'graph', run: () => { go({ kind: 'graph' }); } });
-    if (inbox.count > 0 || app.view.kind === 'inbox') items.push({ id: 'inbox', label: navLabel('inbox', t('inbox.nav')), icon: 'inbox', active: app.view.kind === 'inbox', run: () => { go({ kind: 'inbox' }); } });
-    items.push({ id: 'usage', label: navLabel('usage', t('r10-usage.nav')), icon: 'usage', active: app.view.kind === 'usage', run: () => { go({ kind: 'usage' }); } });
-    if (m.me) items.push({ id: 'me', label: navLabel('me'), icon: 'me', active: meOpen, run: () => { go({ kind: 'docs', path: 'me/README.md' }); } });
+    items.push({ id: 'graph', label: navLabel('graph', t('libf-graph.nav')), base: t('libf-graph.nav'), icon: 'graph', active: app.view.kind === 'graph', run: () => { go({ kind: 'graph' }); } });
+    if (inbox.count > 0 || app.view.kind === 'inbox') items.push({ id: 'inbox', label: navLabel('inbox', t('inbox.nav')), base: t('inbox.nav'), icon: 'inbox', active: app.view.kind === 'inbox', run: () => { go({ kind: 'inbox' }); } });
+    items.push({ id: 'usage', label: navLabel('usage', t('r10-usage.nav')), base: t('r10-usage.nav'), icon: 'usage', active: app.view.kind === 'usage', run: () => { go({ kind: 'usage' }); } });
+    if (m.me) items.push({ id: 'me', label: navLabel('me'), base: navBase('me'), icon: 'me', active: meOpen, run: () => { go({ kind: 'docs', path: 'me/README.md' }); } });
     // An add-on's page is keyed by an id that carries the add-on's name, so two add-ons (or an add-on and
     // the app) can use the same short id; `nav.json` may name it by either.
-    for (const v of app.pluginViews) items.push({ id: v.id, alias: v.short && !APP_PAGES.includes(v.short) ? v.short : undefined, from: v.plugin, label: viewLabel(v), icon: v.icon || 'plugin', custom: true, active: app.view.kind === 'plugin' && app.view.id === v.id, run: () => { go({ kind: 'plugin', id: v.id }); } });
+    for (const v of app.pluginViews) items.push({ id: v.id, alias: v.short && !APP_PAGES.includes(v.short) ? v.short : undefined, from: v.plugin, label: viewLabel(v), base: String(v.title || v.short || v.id).slice(0, 60), icon: v.icon || 'plugin', custom: true, active: app.view.kind === 'plugin' && app.view.id === v.id, run: () => { go({ kind: 'plugin', id: v.id }); } });
     // Customise is where customisations are switched off and undone, so no customisation hides it.
     // Its name and icon stay the app's own too (`nav.fixedLook` in the reference).
-    items.push({ id: 'customise', label: t('layer.customise'), icon: 'palette', active: isActive('customise'), run: () => { go({ kind: 'customise' }); } });
+    items.push({ id: 'customise', label: t('layer.customise'), base: t('layer.customise'), icon: 'palette', active: isActive('customise'), run: () => { go({ kind: 'customise' }); } });
     return items;
   });
   // `nav.json` applied: hidden entries, order, icons, groups (lib/navLayout.ts).
@@ -701,6 +704,30 @@
   const navItems = $derived(navLayout.flat);
   const groupLabel = (l: { en?: string; ar?: string } | null) => (l ? (lang() === 'ar' ? l.ar || l.en : l.en || l.ar) || '' : '');
   let editingNav = $state(false);
+  // Editing the sidebar (views/SidebarEdit.svelte) is opened by its own row, by the palette, or by a
+  // right-click on an entry: that menu renames or re-icons (the editor opens on that entry), hides,
+  // or makes the entry the page the app opens on. Not in safe mode or a second window, as before.
+  let navFirst = $state<{ id: string; act: 'rename' | 'icon' } | null>(null);
+  let navMenu = $state.raw<{ x: number; y: number; label: string; items: MenuItem[]; run: (id: string) => void } | null>(null);
+  function editNav(first: { id: string; act: 'rename' | 'icon' } | null = null) { if (railed) toggleSidebar(); navFirst = first; editingNav = true; }
+  function onNavMenu(e: MouseEvent) {
+    if (app.safeMode || secondary || editingNav) return;
+    e.preventDefault();
+    const id = (e.target as HTMLElement).closest<HTMLElement>('[data-nav]')?.dataset.nav;
+    const it = id ? allNavItems.find((x) => x.id === id) : undefined;
+    const full = fullAccessOn(), nav = ($state.snapshot(app.nav) as typeof app.nav) ?? emptyNav();
+    const items: MenuItem[] = [];
+    if (it && canRestyle(it, full)) items.push({ id: 'rename', label: t('sb72.m.rename'), icon: 'edit' }, { id: 'icon', label: t('sb72.m.icon'), icon: 'palette' });
+    if (it) items.push({ id: 'start', label: t('sb72.m.start'), checked: isStart(nav, it) || (it.id === 'home' && !nav.start), sep: items.length > 0 });
+    if (it && canHide(it, full)) items.push({ id: 'hide', label: t('sb72.m.hide'), icon: 'eyeOff' });
+    items.push({ id: 'edit', label: t('sb72.m.edit'), icon: 'grip', sep: items.length > 0 });
+    navMenu = { x: e.clientX, y: e.clientY, label: it ? t('sb72.menu', { name: it.label }) : t('sb72.menuPlain'), items, run: (pick) => {
+      if (pick === 'edit' || !it) editNav();
+      else if (pick === 'rename' || pick === 'icon') editNav({ id: it.id, act: pick });
+      else if (pick === 'hide') void quickNav(setHidden(nav, it, true, full), t('sb72.t.hidden', { name: it.label }));
+      else if (pick === 'start') { const on = !isStart(nav, it) && it.id !== 'home'; void quickNav(setStart(nav, on ? it : null, full), t('sb72.t.start', { name: on ? it.label : navLabel('home') })); }
+    } };
+  }
 
   // ---------- focus and announcement on navigation ----------
   // The new view's heading takes focus (so keyboard and screen-reader users land in the content) and the
@@ -767,7 +794,7 @@
     add('updates.check', t('layer.upd.check'), g.act, 'download', { keywords: 'update version تحديث' });
     add('search.focus', t('shell.pal.search'), g.act, 'search');
     add('sidebar.toggle', railed ? t('shell.sidebarShow') : t('shell.sidebarHide'), g.act, 'sidebar');
-    if (!app.safeMode && !secondary) add('sidebar.edit', t('sbe.open'), g.act, 'edit', { keywords: 'sidebar order rename hide icon group start الشريط ترتيب', run: () => { if (railed) toggleSidebar(); editingNav = true; } });
+    if (!app.safeMode && !secondary) add('sidebar.edit', t('sbe.open'), g.act, 'edit', { keywords: 'sidebar order rename hide icon group start الشريط ترتيب', run: () => editNav() });
     add('tour', t('shell.pal.tour'), g.act, 'book');
     add('print', t('shell.pal.print'), g.act, 'print');
     if (app.view.kind === 'docs') add('slides.present', t('kb.k.slides.present'), g.act, 'present', { keywords: 'present slides deck show presentation عرض شرائح تقديم' });
@@ -872,14 +899,14 @@
         {/if}
       </form>
       {#if editingNav}
-        <SidebarEdit items={allNavItems} close={() => (editingNav = false)} />
+        <SidebarEdit items={allNavItems} first={navFirst} close={() => { editingNav = false; navFirst = null; }} />
       {:else}
-      <nav aria-label={t('shell.mainNav')}>
+      <nav aria-label={t('shell.mainNav')} oncontextmenu={onNavMenu}>
         {#each navLayout.groups as g (g.id ?? '')}
         {#if g.id}<div class="navgroup" dir="auto">{groupLabel(g.label)}</div>{/if}
         {#each g.items as it (it.id)}
           {@const i = navItems.indexOf(it)}
-          <button class="nav" class:active={it.active} aria-current={it.active ? 'page' : undefined} title={tip(it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label, 'nav.' + (i + 1))} onclick={it.run}>
+          <button class="nav" data-nav={it.id} class:active={it.active} aria-current={it.active ? 'page' : undefined} title={tip(it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label, 'nav.' + (i + 1))} onclick={it.run}>
             <Icon name={it.icon} /><span class="grow ell" dir="auto">{it.label}</span>
             {#if it.custom}<span class="addon" aria-hidden="true"><Icon name="plugin" size={12} /></span><span class="sr-only">({addonTag(it.from)})</span>{/if}
             {#if it.id === 'inbox' && inbox.count > 0}<span class="badge" title={tn('inbox.badge', inbox.count)}><span aria-hidden="true">{fmtNum(inbox.count)}</span><span class="sr-only">{tn('inbox.badge', inbox.count)}</span></span>{/if}
@@ -887,7 +914,7 @@
           </button>
         {/each}
         {/each}
-        {#if !app.safeMode && !secondary}<button class="nav editnav" onclick={() => (editingNav = true)}><Icon name="edit" size={14} /><span class="grow ell">{t('sbe.open')}</span></button>{/if}
+        {#if !app.safeMode && !secondary}<button class="nav editnav" onclick={() => editNav()}><Icon name="edit" size={14} /><span class="grow ell">{t('sbe.open')}</span></button>{/if}
       </nav>
       {/if}
 
@@ -963,9 +990,9 @@
       <div class="drag" data-tauri-drag-region></div>
       <button class="iconbtn" aria-label={t('shell.sidebarShow')} title={tip(t('shell.sidebarShow'), 'sidebar.toggle')} onclick={() => command('sidebar.toggle')}><Icon name="sidebar" class="flip-rtl" /></button>
       <FullAccessBadge compact />
-      <nav aria-label={t('shell.mainNav')}>
+      <nav aria-label={t('shell.mainNav')} oncontextmenu={onNavMenu}>
         {#each navItems as it, i (it.id)}
-          <button class="iconbtn rb" class:on={it.active} aria-current={it.active ? 'page' : undefined} aria-label={it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label} title={tip(it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label, 'nav.' + (i + 1))} onclick={it.run}>
+          <button class="iconbtn rb" data-nav={it.id} class:on={it.active} aria-current={it.active ? 'page' : undefined} aria-label={it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label} title={tip(it.custom ? `${it.label} — ${addonTag(it.from)}` : it.label, 'nav.' + (i + 1))} onclick={it.run}>
             <Icon name={it.icon} />
             {#if it.custom}<span class="rmark" aria-hidden="true"></span>{/if}
             {#if it.id === 'inbox' && inbox.count > 0}<span class="rdot" aria-hidden="true"></span><span class="sr-only">— {tn('inbox.badge', inbox.count)}</span>{/if}
@@ -1092,6 +1119,7 @@
 
 <ImageViewer />
 <Toasts />
+{#if navMenu}<NavMenu x={navMenu.x} y={navMenu.y} label={navMenu.label} items={navMenu.items} pick={navMenu.run} close={() => (navMenu = null)} />{/if}
 {#if linkTip}<div class="linktip no-print" aria-hidden="true" dir="ltr">{linkTip}</div>{/if}
 
 <style>
