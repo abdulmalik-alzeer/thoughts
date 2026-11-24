@@ -13,6 +13,8 @@
   import { app, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
   import { failed } from '../lib/errors';
+  import ModelPicker from '../lib/models/ModelPicker.svelte';
+  import { entriesFrom } from '../lib/models/picker';
   import { confirmDialog } from '../lib/dialog.svelte';
   import {
     CUSTOM, PROGRAM_NAME, formState, keylessAllowed, onHomeNetwork, programsOf, savedAs, savedKind, startAddress, startProgram,
@@ -55,6 +57,9 @@
   let form = $state<Form>({ url: '', token: '', noKey: false });
   let model = $state('');
   let models = $state<string[]>([]);
+  /** What the program said about its models besides their ids (its names, its default); none for a service's own list. */
+  let said72 = $state<any>({});
+  const modelEntries = $derived(entriesFrom({ ...said72, models }));
   /** `models` is the service's own list (not the program's usual one), so a name outside it is worth a word. */
   let fromService = $state(false);
   let listErr = $state('');
@@ -101,6 +106,7 @@
     api(`/ai/${program}/options`).then((o: any) => {
       if (open?.program !== program) return;
       models = Array.isArray(o?.models) ? o.models : [];
+      said72 = { modelNames: o?.modelNames, modelInfo: o?.modelInfo, defaultModel: o?.defaultModel };
       fromService = program === 'claude' ? !!o?.modelsLoaded : !!o?.throughProvider && models.length > 0;
     }).catch(() => {});
   }
@@ -143,7 +149,7 @@
     busy.models = true; listErr = '';
     try {
       const r = await post<{ models: string[] }>(`/ai/${program}/provider/models`);
-      if (open?.program === program) { models = r.models; fromService = true; }
+      if (open?.program === program) { models = r.models; said72 = {}; fromService = true; }
       onmodels?.(program);
     } catch (e) { if (open?.program === program) listErr = e instanceof Error ? e.message : String(e); }
     finally { busy.models = false; }
@@ -264,12 +270,12 @@
     {#if showModel}
       <label for="pv-model">{t('prov72.model')} <HelpTip text={t('prov72.modelHelp')} /></label>
       <div class="row wrap">
-        <input id="pv-model" class="model" dir="ltr" list="pv-models" bind:value={model} placeholder={t('prov72.modelAuto')} autocomplete="off" disabled={readOnly} aria-describedby={modelNote ? 'pv-model-note' : undefined} onchange={() => { if (connected && !st?.dirty) applyModel(true); }} />
+        <span class="model"><ModelPicker id="pv-model" value={model.trim() || null} models={modelEntries} label={t('prov72.model')} placeholder={t('prov72.modelAuto')} auto={t('models72.unset')} autoNote={t('models72.unsetNote')} scope={program}
+          disabled={readOnly} describedby={modelNote ? 'pv-model-note' : undefined} onpick={(v) => { model = v ?? ''; if (connected && !st?.dirty) return applyModel(true); }} /></span>
         {#if connected}
           <button type="button" class="btn" disabled={st.dirty || busy.models} aria-busy={busy.models} onclick={loadModels}><Icon name="sync" size={14} /> {t('prov72.modelLoad')}</button>
         {/if}
       </div>
-      <datalist id="pv-models">{#each models as m (m)}<option value={m}></option>{/each}</datalist>
       {#if modelNote}<p class="muted sm" id="pv-model-note" role="status" dir="auto">{modelNote}</p>{/if}
     {/if}
 

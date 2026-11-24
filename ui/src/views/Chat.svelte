@@ -67,6 +67,9 @@
   import { clickIntent, linkTarget } from './chat/sidePane';
   import type { Chat, DaemonEvent } from '../lib/types';
   import { effortsFor, modelsNoteKey, versionNumber } from '../lib/codexModels';
+  import { entriesFrom } from '../lib/models/picker';
+  import ChatModel from './chat/ChatModel.svelte';
+  import { autoNote } from '../lib/models/auto';
   import { canOpenWindows } from '../lib/windows';
   import { openWindow } from '../lib/openWindow';
 
@@ -328,6 +331,8 @@
   }
   const onCodex = $derived(chat?.provider === 'codex');
   /** The efforts the chosen model takes, where Codex's catalog says; else the program's list. */
+  /** The models as the program reported them: its names, its default (never a list of the app's). */
+  const modelEntries = $derived(entriesFrom(opts));
   const chatEfforts = $derived(onCodex ? effortsFor(opts, chat?.options?.model) : opts.efforts);
   /** Said plainly in the model menu when Codex could not list its models (it can still be typed). */
   const modelNote = $derived.by(() => {
@@ -641,19 +646,15 @@
     catch (e) { failed(t('chat3.optionsFailed'), e); return false; }
   }
 
-  // The model menu lists what the assistant program and past answers name; "Other…" takes any name
-  // the person knows (a full model name, a service's own).
-  const MODEL_OTHER = '__other__';
-  async function modelChanged(e: Event & { currentTarget: HTMLSelectElement }) {
-    const el = e.currentTarget, v = el.value, before = chat.options.model ?? '';
-    // A save that fails puts the menu back on the model the service still has.
-    if (v !== MODEL_OTHER) { chat.options.model = v || null; if (!(await saveOpts())) { chat.options.model = before || null; el.value = before; } return; }
-    const typed = (await promptDialog({ title: t('runc.model.otherTitle'), body: t('runc.model.otherBody'), placeholder: t('runc.model.otherPlaceholder'), confirmLabel: t('save') }))?.trim();
-    el.value = before; // until a name is accepted the menu shows what was there
-    if (!typed) return;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,119}$/.test(typed)) { notify(t('runc.model.otherBad'), { kind: 'error', key: 'model-name' }); return; }
-    chat.options.model = typed;
-    if (await saveOpts()) el.value = typed; else chat.options.model = before || null;
+  // The model list shows what the assistant program and past answers name; any other name the
+  // person knows (a full model name, a service's own) can be typed into it. A save that fails
+  // leaves the chat on the model the service still has.
+  async function modelChanged(v: string | null): Promise<boolean> {
+    const before = chat.options.model ?? null;
+    chat.options.model = v;
+    if (await saveOpts()) return true;
+    chat.options.model = before;
+    return false;
   }
 
   async function effortChanged(v: string | null) {
@@ -1065,12 +1066,14 @@
         <div class="row controls">
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
           <DictateButton target={() => input} />
-          <!-- Model, effort and what the assistant may do: one control; the mode is always named on it. -->
-          <ChatOptions options={chat.options} models={opts.models} modelNames={opts.modelNames ?? {}} efforts={chatEfforts} modes={permModes} label={optLabel} {modelNote}
-            permPrefix={onCodex ? 'codex.perm' : 'chat3.perm'} hintPrefix={onCodex ? 'codex.perm' : 'set.perm'} effortPrefix={onCodex ? 'codex.effort' : 'chat.effort'}
+          <!-- What the assistant may do (and which assistant): one control, the mode always named on it. The model and effort: their own chip beside it. -->
+          <ChatOptions options={chat.options} modes={permModes} label={optLabel}
+            permPrefix={onCodex ? 'codex.perm' : 'chat3.perm'} hintPrefix={onCodex ? 'codex.perm' : 'set.perm'}
             {programs} program={chat.provider} onprogram={programs.every((p) => p.ok) && !chat.running ? moveProgram : undefined}
-            onmodel={modelChanged} extraModel={{ value: MODEL_OTHER, label: t('runc.model.other') }} oneffort={effortChanged}
             onperm={(v) => { chat.options.permissionMode = v; permChanged(); }} />
+          <ChatModel model={chat.options.model} effort={chat.options.effort} models={modelEntries} efforts={chatEfforts} scope={chat.provider} note={modelNote}
+            autoNote={autoNote(modelEntries, app.settings?.ai?.[chat.provider]?.model)} effortName={(v) => optLabel(onCodex ? 'codex.effort' : 'chat.effort', v)}
+            onmodel={modelChanged} oneffort={effortChanged} />
           {#if chat.kind === 'chat' && savedPerm !== BYPASS}
             <label class="btn ghost webtoggle" class:on={!!chat.options.web} title={t('runb.web.tip')}>
               <input type="checkbox" checked={!!chat.options.web} onchange={async (e) => { const box = e.currentTarget; await setWeb(box.checked); box.checked = !!chat.options.web; }} />

@@ -6,23 +6,26 @@
   import Icon from '../../lib/Icon.svelte';
   import { t } from '../../lib/i18n';
   import HelpTip from '../../lib/HelpTip.svelte';
+  import ModelPicker from '../../lib/models/ModelPicker.svelte';
+  import { nameOf, type ModelEntry } from '../../lib/models/picker';
 
-  let { options, models, efforts, modes, label, onmodel, extraModel, oneffort, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram, modelNote = '', plain = false, below = false, busy = false, modelNames = {} }: {
+  let { options, models = [], efforts = [], modes, label, onmodel = () => {}, autoNote = '', scope = '', oneffort = () => {}, onperm, permPrefix = 'chat3.perm', hintPrefix = 'set.perm', effortPrefix = 'chat.effort', programs = [], program = '', onprogram, modelNote = '', plain = false, below = false, busy = false }: {
     options: { model?: string | null; effort?: string | null; permissionMode?: string | null };
-    models: string[]; efforts: string[]; modes: string[];
-    /** The names the agent gives its models (over ACP), shown instead of the bare ids. */
-    modelNames?: Record<string, string>;
+    /** The models as their program reported them (`entriesFrom`: its names, its default). */
+    models?: ModelEntry[]; efforts?: string[]; modes: string[];
     /** Where the names of the modes and efforts are (Codex has names of its own for them). */
     permPrefix?: string; hintPrefix?: string; effortPrefix?: string;
     /** The assistant programs this chat can be moved between, when there are two. */
     programs?: { id: string; label: string; ok: boolean }[]; program?: string; onprogram?: (id: string) => void;
     /** Translated label when there is one, the raw value otherwise. */
     label: (prefix: string, v: string) => string;
-    /** The model menu changed (its value: '' = automatic). The handler may put the menu back. */
-    onmodel: (e: Event & { currentTarget: HTMLSelectElement }) => void;
-    /** One more entry at the end of the model menu (typing a model's name). */
-    extraModel?: { value: string; label: string };
-    oneffort: (v: string | null) => void; onperm?: (v: string) => void;
+    /** A model was picked (`null` = automatic). Answers `false` when it could not be saved. */
+    onmodel?: (v: string | null) => unknown;
+    /** What "Automatic" means here, said under it in the model list. */
+    autoNote?: string;
+    /** Whose models these are (the assistant program), for the list's "Recently used". */
+    scope?: string;
+    oneffort?: (v: string | null) => void; onperm?: (v: string) => void;
     /** Only the model and the effort (a plan's runs have their own fixed rules): the button names them, or the default. */
     plain?: boolean;
     /** Open under the button (in a page header) instead of over it (in the composer). */
@@ -40,21 +43,22 @@
   const uid = Math.random().toString(36).slice(2, 8);
 
   const mode = $derived(options.permissionMode ?? 'acceptEdits');
-  // What the button says: the mode always; model and effort only when they are not the default.
-  const extra = $derived([programs.length > 1 ? programs.find((p) => p.id === program)?.label : null, options.model, options.effort ? label(effortPrefix, options.effort) : null].filter(Boolean).join(' · '));
+  // What the button says: the mode always, and the assistant when there are two; for a plan, the model
+  // and effort when they are not the default (a chat names those on its own chip).
+  const extra = $derived([programs.length > 1 ? programs.find((p) => p.id === program)?.label : null, ...(plain ? [nameOf(models, options.model), options.effort ? label(effortPrefix, options.effort) : null] : [])].filter(Boolean).join(' · '));
   const hint = (m: string) => { const k = `${hintPrefix}.${m}.hint`; const s = t(k); return s === k ? '' : s; };
 
   function close(refocus = true) { open = false; if (refocus) button?.focus(); }
   function onkey(e: KeyboardEvent) { if (e.key === 'Escape' && open) { e.stopPropagation(); e.preventDefault(); close(); } }
 </script>
 
-<svelte:window onclick={(e) => { if (open && root && !root.contains(e.target as Node) && !(e.target as HTMLElement)?.closest?.('[aria-modal="true"]')) open = false; }} />
+<svelte:window onclick={(e) => { if (open && root && !root.contains(e.target as Node) && !(e.target as HTMLElement)?.closest?.('[aria-modal="true"], [data-model-picker]')) open = false; }} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <span class="co" bind:this={root} onkeydown={onkey}>
   <button bind:this={button} type="button" class="cobtn" class:bypass={mode === BYPASS} class:plan={mode === 'plan'}
     aria-haspopup="dialog" aria-expanded={open} aria-controls="co-{uid}" onclick={() => (open = !open)}
-    title={plain ? t('mado.opts.tip') : t('chatc.opt.tip')} aria-label={plain ? t('mado.opts.aria', { what: extra || t('default') }) : t('chatc.opt.aria', { mode: label(permPrefix, mode) })}>
+    title={plain ? t('mado.opts.tip') : t('models72.optTip')} aria-label={plain ? t('mado.opts.aria', { what: extra || t('default') }) : t('chatc.opt.aria', { mode: label(permPrefix, mode) })}>
     {#if plain}
       <Icon name="settings" size={13} />
       {#if extra}<span class="ell extra wide" dir="ltr">{extra}</span>{:else}<span class="ell">{t('mado.opts.default')}</span>{/if}
@@ -91,16 +95,13 @@
           {/each}
         </fieldset>
       {/if}
+      <!-- A chat has the model and the effort on the composer itself (ChatModel.svelte); a plan chooses them here. -->
+      {#if plain}
       <div class="row2">
-        <label class="field">
-          <span class="lbl">{t('model')}</span>
-          <select value={options.model ?? ''} onchange={onmodel} disabled={busy}>
-            <option value="">{t('chatc.opt.auto')}</option>
-            {#each models as m (m)}<option value={m}>{modelNames[m] ?? m}</option>{/each}
-            {#if options.model && !models.includes(options.model)}<option value={options.model}>{options.model}</option>{/if}
-            {#if extraModel}<option value={extraModel.value}>{extraModel.label}</option>{/if}
-          </select>
-        </label>
+        <div class="field">
+          <span class="lbl" id="co-model-{uid}">{t('model')}</span>
+          <ModelPicker small value={options.model} {models} label={t('model')} onpick={onmodel} {autoNote} {scope} disabled={busy} />
+        </div>
         {#if efforts.length}
           <label class="field">
             <span class="lbl">{t('effort')}</span>
@@ -112,7 +113,8 @@
         {/if}
       </div>
       {#if modelNote}<p class="sm note model-note" role="status">{modelNote}</p>{/if}
-      <p class="muted sm note help"><HelpTip text={t(plain ? 'mado.opts.hint' : 'chatc.opt.modelHint')} label={t('model')} /></p>
+      <p class="muted sm note help"><HelpTip text={t('mado.opts.hint')} label={t('model')} /></p>
+      {/if}
     </div>
   {/if}
 </span>
@@ -142,6 +144,7 @@
   .lbl { font-size: var(--fs-xs); font-weight: 600; }
   .field, .lbl { margin: 0; }
   .field select { width: 100%; font-size: var(--fs-xs); padding: 4px 6px; }
+  div.field { flex: 1.4 1 170px; }
   .note { margin: 0; }
   .help { display: flex; justify-content: flex-end; }
   .model-note { margin-bottom: 6px; padding: 6px 8px; border-radius: var(--radius); background: var(--fill); color: var(--fg); }

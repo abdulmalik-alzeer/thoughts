@@ -13,6 +13,9 @@
   import { modelsNoteKey, versionNumber } from '../lib/codexModels';
   import SubscriptionRisk from '../lib/SubscriptionRisk.svelte';
   import HelpTip from '../lib/HelpTip.svelte';
+  import ModelPicker from '../lib/models/ModelPicker.svelte';
+  import { entriesFrom } from '../lib/models/picker';
+  import { autoNote } from '../lib/models/auto';
 
   let { ai = $bindable(), part, vis, readOnly = false, riskAck = $bindable((app.settings as any)?.subscriptionRiskAck ?? null) }: {
     ai: any; part: 'which' | 'codex' | 'advanced';
@@ -29,6 +32,8 @@
   const codex = $derived<any>(app.status?.codex ?? {});
   const claude = $derived<any>(app.status?.claude ?? {});
   let opts = $state<any>({ models: [], efforts: [] });
+  /** Codex's models as it reported them (its names, descriptions and default). */
+  const codexModels = $derived(entriesFrom(opts));
   let busy = $state<Record<string, boolean>>({});
   let copied = $state('');
 
@@ -166,8 +171,8 @@
   <h3><bdi>Codex</bdi></h3>
   {#if vis('codex.set.model')}
     <label for="st-cx-model">{t('codex.set.model')} <HelpTip text={t('codex.set.modelHint')} /></label>
-    <input id="st-cx-model" dir="ltr" list="st-cx-models" bind:value={ai.codex.model} placeholder={t('codex.set.auto')} autocomplete="off" />
-    <datalist id="st-cx-models">{#each opts.models as m (m)}<option value={m}></option>{/each}</datalist>
+    <ModelPicker id="st-cx-model" value={ai.codex.model} models={codexModels} label={t('codex.set.model')} auto={t('codex.set.auto')} autoNote={autoNote(codexModels)} scope="codex"
+      onpick={(v) => { ai.codex.model = v; }} />
     {#if opts.throughProvider}
       <!-- Another provider: its own list ("Load models from the service"), never OpenAI's catalogue. -->
       <p class="muted sm" role="status">{t('prov5.codex.modelsNote')}</p>
@@ -188,7 +193,8 @@
   {/if}
   {#if vis('codex.set.mini')}
     <label for="st-cx-mini">{t('codex.set.mini')} <HelpTip text={t('codex.set.miniHint')} /></label>
-    <input id="st-cx-mini" dir="ltr" list="st-cx-models" bind:value={ai.codex.miniWrapModel} placeholder={t('codex.set.auto')} autocomplete="off" />
+    <ModelPicker id="st-cx-mini" value={ai.codex.miniWrapModel} models={codexModels} label={t('codex.set.mini')} auto={t('codex.set.auto')} scope="codex"
+      onpick={(v) => { ai.codex.miniWrapModel = v; }} />
   {/if}
   {#if vis('codex.set.binary')}
     <label for="st-cx-bin">{t('codex.set.binary')} <HelpTip text={t('codex.set.binaryHint')} /></label>
