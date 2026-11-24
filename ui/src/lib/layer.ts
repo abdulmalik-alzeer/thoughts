@@ -58,9 +58,10 @@
 // * What an add-on shows carries its name (toasts, its pages, its commands). It can start a chat or
 //   move to another page only right after the person pressed something of its own, and chats have an
 //   hourly ceiling per add-on.
+import { fileBody } from './packfile';
 import { api, inTauri, on, post, put, reloadApp, ApiError } from './api';
 import { app, toast, go, refreshChats, onSettingsChanged, type PendingChange, type NavConfig, type TodosConfig, type PluginView } from './store.svelte';
-import { confirmDialog, promptDialog, dialogs } from './dialog.svelte';
+import { confirmDialog, dialogs } from './dialog.svelte';
 import { saveFile as offerFile } from './download';
 import { matchKey } from './keys/registry';
 import { keysLoaded } from './keys/native';
@@ -1574,45 +1575,6 @@ export function packId(name: string): string {
   return ids[key];
 }
 
-/** Save the user's customisations as a pack file. The person names it first (and may add a line
- *  about what it does): the name is what whoever imports it sees, and tells packs apart.
- *  Resolves 'saved', 'copied' (clipboard fallback) or 'cancelled'. */
-export async function exportPack(paths?: string[]): Promise<'saved' | 'copied' | 'cancelled'> {
-  const asked = await promptDialog({ title: t('lua.packNameTitle'), body: t('lua.packNameBody'), placeholder: t('lua.packNameHint'), confirmLabel: t('next') });
-  if (asked === null) return 'cancelled';
-  const title = str(asked, 80).replace(/\s+/g, ' ').trim();
-  if (!title) { toast(t('lua.packNameNeeded'), { kind: 'error', key: 'pack-name' }); return 'cancelled'; }
-  const about = await promptDialog({ title: t('lua.packAboutTitle'), body: t('lua.packAboutBody'), placeholder: t('lua.packAboutHint'), confirmLabel: t('lua.packSave') });
-  if (about === null) return 'cancelled';
-  const q = new URLSearchParams({ name: title, description: str(about, 400).replace(/\s+/g, ' ').trim() });
-  if (paths?.length) q.set('paths', paths.join(','));
-  const pack = await api('/layer/export?' + q.toString());
-  if (pack?.format !== 'thoughts-pack') throw new Error(t('layer.packInvalid'));
-  pack.id = packId(title);
-  const text = JSON.stringify(pack, null, 2);
-  const d = new Date();
-  // The file is named after the pack, in whatever script the person wrote it; only characters a file name cannot hold are dropped.
-  const slug = title.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, '-').replace(/^[-.]+|[-.]+$/g, '').slice(0, 24).replace(/-+$/, '');
-  const name = `thoughts-${paths?.length ? 'feature-' : ''}pack-${slug ? slug + '-' : ''}${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
-  if ((window as any).__TAURI_INTERNALS__) {
-    // The native window has no download bar: the shell opens the save dialog itself and writes the file.
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      return (await invoke('save_pack', { name: name.replace(/\.json$/, ''), contents: text })) ? 'saved' : 'cancelled';
-    } catch {
-      try { await navigator.clipboard.writeText(text); return 'copied'; } catch { /* fall through to a download */ }
-    }
-  }
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-  const a = document.createElement('a');
-  a.href = url; a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
-  return 'saved';
-}
-
 /** The files of the kept layer that can go into a feature pack, grouped for the "choose items" list. */
 export async function packChoices(): Promise<{ path: string; kind: 'plugin' | 'view' | 'workflow' | 'look' | 'layout'; label: string }[]> {
   const m = await api('/layer');
@@ -1629,28 +1591,23 @@ export async function packChoices(): Promise<{ path: string; kind: 'plugin' | 'v
   return out;
 }
 
-/** Read a pack file without staging anything, so the user can see what it is first. */
-export async function readPack(file: File): Promise<{ pack: any; name: string; description: string; kind: 'full' | 'feature'; apiVersion: number; unsupported: boolean; files: string[] }> {
-  if (file.size > 5 * 1024 * 1024) throw new Error(t('layer.packTooBig'));
-  let pack: any;
-  try { pack = JSON.parse(await file.text()); } catch { throw new Error(t('layer.packInvalid')); }
-  if (pack?.format !== 'thoughts-pack' || !pack.files || typeof pack.files !== 'object') throw new Error(t('layer.packInvalid'));
-  const apiVersion = Number(pack.apiVersion ?? 1) || 1;
-  return { pack, name: str(pack.name, 80), description: str(pack.description, 400), kind: pack.kind === 'feature' ? 'feature' : 'full', apiVersion, unsupported: apiVersion > API_VERSION, files: Object.keys(pack.files).slice(0, 200) };
+/** Read a chosen plugin or pack file without staging anything: its bytes as the service takes
+ *  them (a `.thoughts-plugin` / `.thoughts-pack` zip, or a legacy `.json`). The service decides
+ *  what it is; the window never opens it. */
+export async function readPack(file: File): Promise<{ body: { file: string } }> {
+  return { body: await fileBody(file) };
 }
 
 /** Stage a pack (already read with `readPack`) for review. It is never applied directly. */
-export async function stagePack(pack: any) {
-  await post('/layer/import', { pack });
+export async function stagePack(body: { file: string } | { pack: unknown }) {
+  await post('/layer/import', body);
   dismissed = '';
   await checkPending(true);
 }
 
 /** Stage a pack file for review. It is never applied directly. */
 export async function importPack(file: File) {
-  const r = await readPack(file);
-  if (r.unsupported) throw new Error(t('layer3.packNewer'));
-  await stagePack(r.pack);
+  await stagePack((await readPack(file)).body);
 }
 
 export { errDetail as layerErrorText };

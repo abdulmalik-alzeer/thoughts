@@ -5,6 +5,7 @@ import { api, post } from './api';
 import { app } from './store.svelte';
 import { t } from './i18n';
 import { checkPending, loadLayer, packId } from './layer';
+import { asPackFile, savePackFile } from './packfile';
 
 export type DataInfo = { bytes: number | null; saved: string | null; versions: { id: string; saved: string | null; bytes: number }[] };
 export type AddOn = {
@@ -77,9 +78,10 @@ export type PackLook = {
   earlier: { version: string; author: string; code: string; same: boolean } | null; appVersion: string;
 };
 /** Ask the service what a pack is before anything is staged: it checks the whole pack and
- *  calculates the fingerprint itself (the one written in the file is only compared). */
-export async function inspectPack(pack: unknown): Promise<PackLook> {
-  return await post('/layer/pack/inspect', { pack });
+ *  calculates the fingerprint itself (the one written in the file is only compared). `body`: the
+ *  chosen file (`readPack`), or a pack value as it is. */
+export async function inspectPack(body: { file: string } | { pack: unknown }): Promise<PackLook> {
+  return await post('/layer/pack/inspect', body);
 }
 
 export type Identity = { name: string; author: string; version: string; description: string };
@@ -89,42 +91,15 @@ export function fingerprintCode(full: string): string {
   return (String(full ?? '').match(/[0-9a-f]/gi) ?? []).slice(0, 32).join('').toUpperCase().match(/.{1,4}/g)?.join('-') ?? '';
 }
 
-/** A file name made from the pack's name: letters and digits of any language, dashes between. */
-function fileName(name: string): string {
-  const base = name.normalize('NFC').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 60);
-  return base || 'thoughts-pack';
-}
-
-/** Save a pack of the layer (everything, or `paths`) as a file. → how it went and the code of the pack's fingerprint. */
+/** Save a pack of the layer (everything, or `paths`) as a `.thoughts-pack` file: a zip of the real
+ *  files. → how it went and the code of the pack's fingerprint. */
 export async function savePack(who: Identity, paths?: string[]): Promise<{ result: 'saved' | 'copied' | 'cancelled'; fingerprint: string }> {
-  const q = new URLSearchParams({ name: who.name, author: who.author, version: who.version, description: who.description });
-  if (paths?.length) q.set('paths', paths.join(','));
-  const pack = await api('/layer/export?' + q.toString());
-  if (pack?.format !== 'thoughts-pack') throw new Error(t('layer.packInvalid'));
   // The same id for every export under this name from this computer: its look replaces only its own block.
-  pack.id = packId(who.name);
-  const fingerprint = fingerprintCode(String(pack.fingerprint ?? ''));
-  const text = JSON.stringify(pack, null, 2);
-  const name = fileName(who.name) + (who.version ? '-' + fileName(who.version) : '');
-  if ((window as any).__TAURI_INTERNALS__) {
-    // The native window has no download bar: the shell opens the save dialog itself and writes the file.
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      return { result: (await invoke('save_pack', { name, contents: text })) ? 'saved' : 'cancelled', fingerprint };
-    } catch (e) {
-      try { await navigator.clipboard.writeText(text); return { result: 'copied', fingerprint }; }
-      // The native window cannot download a file either: say it was not saved (and why), never "saved".
-      catch { throw e instanceof Error ? e : new Error(String(e)); }
-    }
-  }
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-  const a = document.createElement('a');
-  a.href = url; a.download = name + '.json';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
-  return { result: 'saved', fingerprint };
+  const q = new URLSearchParams({ name: who.name, author: who.author, version: who.version, description: who.description, id: packId(who.name) });
+  if (paths?.length) q.set('paths', paths.join(','));
+  const f = asPackFile(await api('/layer/export?' + q.toString()));
+  const name = who.name + (who.version ? '-' + who.version : '');
+  return { result: await savePackFile(name, f), fingerprint: fingerprintCode(f.fingerprint) };
 }
 
 /** A size in words the user knows (bytes → "12 KB"). */

@@ -179,6 +179,7 @@
   <div class="done" role="status">
     <p>{t(result.copied ? 'plg.exp.copied' : 'plg.exp.saved')} <bdi class="code" dir="ltr">{result.fp}</bdi></p>
     <p class="muted sm">{t('plg.exp.fpHint')}</p>
+    <p class="muted sm">{t('pkf.isZip')}</p>
     <div class="row wrap">
       <button type="button" class="btn sm" onclick={copyFp}><Icon name="copy" size={13} /> {t('ldc.share.copyFp')}</button>
       <button type="button" class="btn ghost sm" onclick={() => (result = null)}>{t('close')}</button>

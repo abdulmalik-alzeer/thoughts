@@ -382,21 +382,40 @@ fn ensure_daemon() -> Result<(thoughtsd::paths::DaemonInfo, bool), String> {
     Err("The Thoughts daemon did not start".into())
 }
 
-/// Save an exported customisation pack. The save dialog is opened here, in native code, so the
-/// destination is always one the user picked; the window never supplies a path.
+/// Save an exported plugin or pack file (0.7.0: a zip of the customisation's real files, made by
+/// the daemon). The save dialog is opened here, in native code, so the destination is always one
+/// the user picked; the window never supplies a path. The bytes come as the raw request body, with
+/// the name (URI-encoded) in `x-file-name` and the kind (`thoughts-plugin` or `thoughts-pack`) in
+/// `x-file-kind`; see `pack_file_name` for what is accepted.
 #[tauri::command]
-async fn save_pack(app: tauri::AppHandle, window: tauri::Window, name: String, contents: String) -> Result<bool, String> {
+async fn save_pack(app: tauri::AppHandle, window: tauri::Window, request: tauri::ipc::Request<'_>) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
     main_only(&window)?;
-    if contents.len() > 8 << 20 { return Err("pack is too large".into()); }
-    let safe: String = name.chars().filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ')).take(60).collect();
-    let file = format!("{}.json", if safe.trim().is_empty() { "thoughts-pack" } else { safe.trim() });
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err("nothing to save".into()) };
+    let header = |k: &str| request.headers().get(k).and_then(|h| h.to_str().ok()).and_then(links::percent_decode).unwrap_or_default();
+    let (file, ext) = pack_file_name(&header("x-file-name"), &header("x-file-kind"), bytes)?;
+    let bytes = bytes.clone();
     let picked = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog().file().set_file_name(&file).add_filter("Thoughts pack", &["json"]).blocking_save_file()
+        let label = if ext == "thoughts-plugin" { "Thoughts plugin" } else { "Thoughts pack" };
+        app.dialog().file().set_file_name(&file).add_filter(label, &[ext]).blocking_save_file()
     }).await.map_err(|e| e.to_string())?;
-    let Some(path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(false) };
-    std::fs::write(&path, contents).map_err(|e| e.to_string())?;
+    let Some(mut path) = picked.and_then(|p| p.into_path().ok()) else { return Ok(false) };
+    // Keep the kind's extension even if the user typed another one in the dialog.
+    if path.extension().and_then(|e| e.to_str()) != Some(ext) { path.set_extension(ext); }
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
     Ok(true)
+}
+
+/// The name a plugin or pack file is offered under, and its extension, or why it is not saved:
+/// only the two kinds, only a zip archive (what the daemon makes), within a sensible size. The name
+/// keeps letters and digits of any language, dashes, underscores and spaces.
+fn pack_file_name(name: &str, kind: &str, bytes: &[u8]) -> Result<(String, &'static str), String> {
+    let ext = match kind { "thoughts-plugin" => "thoughts-plugin", "thoughts-pack" => "thoughts-pack", _ => return Err("this kind of file cannot be saved from Thoughts".into()) };
+    if bytes.len() > 8 << 20 { return Err("pack is too large".into()); }
+    if !bytes.starts_with(b"PK\x03\x04") { return Err("this is not a plugin or pack file".into()); }
+    let stem = name.strip_suffix(&format!(".{ext}")).unwrap_or(name);
+    let safe: String = stem.chars().filter(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | ' ')).take(60).collect();
+    Ok((format!("{}.{ext}", if safe.trim().is_empty() { "thoughts-pack" } else { safe.trim() }), ext))
 }
 
 /// The name a generated file is offered under and its kind (extension), or why it cannot be saved:
@@ -1569,6 +1588,18 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn plugin_and_pack_files_are_saved_only_as_what_they_are() {
+        let zip = b"PK\x03\x04rest";
+        assert_eq!(super::pack_file_name("Kanban-board.thoughts-plugin", "thoughts-plugin", zip).unwrap(), ("Kanban-board.thoughts-plugin".to_string(), "thoughts-plugin"));
+        assert_eq!(super::pack_file_name("ساعات العمل", "thoughts-pack", zip).unwrap().0, "ساعات العمل.thoughts-pack");
+        assert_eq!(super::pack_file_name("../../etc/passwd", "thoughts-pack", zip).unwrap().0, "etcpasswd.thoughts-pack");
+        assert_eq!(super::pack_file_name("", "thoughts-plugin", zip).unwrap().0, "thoughts-pack.thoughts-plugin");
+        assert!(super::pack_file_name("x", "app", zip).is_err() && super::pack_file_name("x", "", zip).is_err());
+        assert!(super::pack_file_name("x", "thoughts-pack", b"{\"format\":\"thoughts-pack\"}").is_err(), "only the archive the daemon made");
+        assert!(super::pack_file_name("x", "thoughts-pack", &[b"PK\x03\x04".as_slice(), &vec![0u8; 8 << 20]].concat()).is_err());
+    }
+
     use super::*;
 
     #[test]
