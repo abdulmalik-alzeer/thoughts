@@ -879,9 +879,8 @@ None is required for the workflow to run.
 immutability, Dependabot alerts and security updates, and the rule that actions are pinned to a
 full commit. Already as they should be: a workflow's own token can only read, workflows cannot
 approve pull requests, and no secret or variable is stored on GitHub. Check them again after the
-repository was made public and its history rewritten. **To be switched on, now that the
-repository is public:** the rulesets for `main` and for the release tags (below), on: ____
-(the lead fills in the date).
+repository was made public and its history rewritten. **Switched on 2026-11-24, once the
+repository was public:** the rulesets for `main` and for the release tags (below).
 
 - **Rules for `main` and for the release tags.** The repository is public, so rulesets are
   available on the free plan (before, they needed GitHub Pro). Both were **switched on 2026-11-24** ("main: only the owner", "release tags: only the owner"), together with secret scanning with push protection, private vulnerability reporting, and approval for every outside contributor's workflow run.
