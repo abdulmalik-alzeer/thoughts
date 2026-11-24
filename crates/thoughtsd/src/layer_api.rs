@@ -377,26 +377,34 @@ async fn mark_kept_pack(g: Git<'_>, d: &Dirs, hash: &str, pending: &Value) {
     applayer::mark_pack(g, &d.layer, hash, applayer::PackMark { name: s("name"), author: s("author"), version: s("version"), fingerprint: s("fingerprint") }).await;
 }
 
-/// `GET /api/layer/export?name=&author=&version=&description=&paths=a,b` — the whole layer, or with
-/// `paths` (files, or folders ending in `/`) a feature pack of just those. The pack carries what
-/// the sharer says it is, and its fingerprint.
+/// `GET /api/layer/export?name=&author=&version=&description=&paths=a,b&id=` — the whole layer, or
+/// with `paths` (files, or folders ending in `/`) a feature pack of just those, as a `.thoughts-pack`
+/// file (`pack_file::answer`: the archive as base64, with its fingerprint). The pack carries what
+/// the sharer says it is; `id` is the window's own code for packs of this name, which keys the
+/// pack's block in `custom.css` where it is added (letters and digits only).
 async fn export(Query(q): Query<HashMap<String, String>>) -> R {
     let get = |k: &str| q.get(k).map_or("", String::as_str);
     let paths: Option<Vec<String>> = q.get("paths").filter(|p| !p.trim().is_empty()).map(|p| p.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect());
     let who = packs::Identity { name: get("name"), author: get("author"), version: get("version"), description: get("description") };
-    Ok(Json(packs::export_as(&Dirs::real().layer, &who, paths.as_deref())?))
+    let mut pack = packs::export_as(&Dirs::real().layer, &who, paths.as_deref())?;
+    let id: String = get("id").chars().filter(char::is_ascii_alphanumeric).take(16).collect();
+    if !id.is_empty() { pack["id"] = json!(id); }
+    Ok(Json(crate::pack_file::answer(&pack)?))
 }
 
+/// A chosen file (`file`: its bytes as base64, an archive or a legacy `.json`), or a pack value as
+/// it is (`pack`, what windows before 0.7.0 send).
 #[derive(Deserialize)]
-struct Inspect { pack: Value }
+struct Inspect { #[serde(default)] pack: Option<Value>, #[serde(default)] file: Option<String> }
 
-/// `POST /api/layer/pack/inspect {pack}` — check a pack before anything is staged and say what it
-/// is (see `packs::inspect`). Nothing is written.
+/// `POST /api/layer/pack/inspect {file | pack}` — check a pack before anything is staged and say what
+/// it is (see `packs::inspect`). Nothing is written.
 async fn pack_inspect(State(st): S, Json(i): Json<Inspect>) -> R {
+    let pack = crate::pack_file::received(i.pack, i.file.as_deref())?;
     let _g = LAYER_LOCK.lock().await;
     let d = Dirs::real();
     let kept = applayer::kept_packs(Git(Some(&st)), &d.layer).await;
-    Ok(Json(packs::inspect(&i.pack, &d.layer, &kept)?))
+    Ok(Json(packs::inspect(&pack, &d.layer, &kept)?))
 }
 
 // ---------- ready-made packs ----------
@@ -538,7 +546,11 @@ async fn addon_data_forget(Json(r): Json<DataRef>) -> R {
 
 #[derive(Deserialize)]
 struct Import {
-    pack: Value,
+    #[serde(default)]
+    pack: Option<Value>,
+    /// The chosen file itself, as base64 (see `Inspect`).
+    #[serde(default)]
+    file: Option<String>,
     /// For a plugin that is already here: `update` (the default) replaces that version, so what the
     /// new one dropped goes away; `new` adds it as another plugin beside it.
     #[serde(default, rename = "as")]
@@ -546,11 +558,12 @@ struct Import {
 }
 
 async fn import(State(st): S, Json(i): Json<Import>) -> R {
+    let pack = crate::pack_file::received(i.pack, i.file.as_deref())?;
     let _g = LAYER_LOCK.lock().await;
     let d = Dirs::real();
     applayer::ensure_in(Git(Some(&st)), &d).await?;
     let ar = arabic(&st).await;
-    packs::import_as(Git(Some(&st)), &d, &i.pack, ar, None, i.mode == "new").await?;
+    packs::import_as(Git(Some(&st)), &d, &pack, ar, None, i.mode == "new").await?;
     st.emit(json!({"type": "layer.pending"}));
     Ok(Json(staging::pending(Git(Some(&st)), &d, ar).await))
 }

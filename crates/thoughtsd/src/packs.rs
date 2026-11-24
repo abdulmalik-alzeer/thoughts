@@ -1,5 +1,8 @@
-//! Customisation packs: the layer as one shareable JSON file. Importing a pack never applies it —
-//! it is validated and staged as a pending change the user previews first.
+//! Customisation packs: what is shared of the layer, as one value (`format: "thoughts-pack"`, every
+//! file as text under `files`). Since 0.7.0 it travels as a zip of the real files (`pack_file.rs`),
+//! which is turned into this same value before any check; a legacy `.json` file is this value as it
+//! is. Importing a pack never applies it — it is validated and staged as a pending change the user
+//! previews first.
 
 use crate::applayer::{Dirs, Git};
 use serde_json::{json, Value};
@@ -13,7 +16,7 @@ pub const MAX_TOTAL_BYTES: usize = 4 * 1024 * 1024;
 // (`addons.json`, the switched-off list, is not one: only the app's own switch and remove write it,
 // so no pack, review or outside edit can switch an add-on back on.)
 const TOP_FILES: &[&str] = &["custom.css", "themes.json", "home.json", "manifest.json", "todos.json", "nav.json", "pages.json", "keys.json"];
-const TOP_DIRS: &[&str] = &["plugins", "views", "workflows"];
+pub(crate) const TOP_DIRS: &[&str] = &["plugins", "views", "workflows"];
 
 /// Is `path` a place a customisation may live? Relative, forward slashes, no `..`, no dotfiles,
 /// and only under the names the layer defines.
@@ -40,7 +43,7 @@ pub fn check_path(path: &str) -> anyhow::Result<()> {
 }
 
 /// A file name from a pack inside one of the app's sentences: one line, anything invisible written out.
-fn shown_path(path: &str) -> String { clean_line(path, 120) }
+pub(crate) fn shown_path(path: &str) -> String { clean_line(path, 120) }
 
 /// Validate a pack and return its files. Refusals are in the UI language.
 pub fn check_pack(pack: &Value) -> anyhow::Result<BTreeMap<String, String>> {

@@ -1599,13 +1599,14 @@ async fn describe_route(State(st): S, Json(w): Json<Describe>) -> R {
     Ok(Json(v))
 }
 
-/// `GET /api/plugins/export?id=<id>` → the plugin file; `?all=1&name=` → everything, with the list of plugins.
+/// `GET /api/plugins/export?id=<id>` → the plugin as a `.thoughts-plugin` file; `?all=1&name=` →
+/// everything, with the list of plugins, as a `.thoughts-pack` file (`pack_file::answer`).
 async fn export_route(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let _g = crate::layer_api::LAYER_LOCK.lock().await;
     let (g, d) = (Git(Some(&st)), Dirs::real());
     ensure(g, &d).await;
-    if q.get("all").map_or(false, |a| a == "1") { return Ok(Json(export_all(&d, q.get("name").map_or("", String::as_str))?)); }
-    Ok(Json(export_in(&d, q.get("id").map_or("", String::as_str))?))
+    let pack = if q.get("all").map_or(false, |a| a == "1") { export_all(&d, q.get("name").map_or("", String::as_str))? } else { export_in(&d, q.get("id").map_or("", String::as_str))? };
+    Ok(Json(crate::pack_file::answer(&pack)?))
 }
 
 /// `POST /api/plugins/customise {id}` → `{chatId}`: a customisation chat whose change updates this plugin.
