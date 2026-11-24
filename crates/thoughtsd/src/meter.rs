@@ -3,7 +3,8 @@
 //! Settings › Usage and the Usage page.
 //!
 //! Nothing here asks the providers anything, spends anything or touches the keychain. Every figure
-//! comes from what the assistant programs print while they run, or (only when the user chose
+//! comes from what the assistant programs print while they run (and, for the plans' limits, what
+//! they answer when `plan_watch.rs` asks them before any run), or (only when the user chose
 //! "Everything on this computer") from the session files they keep on this computer, read and
 //! never written:
 //!
@@ -11,8 +12,8 @@
 //!   when it resets, and in newer versions how much of the 5-hour and weekly windows is used);
 //!   Codex reports `rate_limits` (percent used, window length, reset time) with its token counts,
 //!   on the run's output (older versions) or in the session file of the run (newer ones; the app
-//!   already reads that file to find the run's session). They are only known after a run, so each
-//!   window keeps the time it was seen ("as of …"). Kept in `~/.thoughts/plan-usage.json`.
+//!   already reads that file to find the run's session). From here they are only known after a run
+//!   (`plan_watch.rs` asks without one), so each window keeps the time it was seen ("as of …"). Kept in `~/.thoughts/plan-usage.json`.
 //! - **Tokens and cost.** Every run the app starts adds a line to `~/.thoughts/meter.jsonl`: the
 //!   tokens per model, and the cost Claude Code reported (`modelUsage.*.costUSD`) or, for Codex,
 //!   an estimate from `prices.rs`. A model that is not in the price table has an unknown cost.
@@ -167,6 +168,7 @@ pub async fn record_claude(state: &AppState, chat: Option<&str>, ev: &Value) {
     let recs = claude_records(ev, chat, Utc::now());
     if recs.is_empty() { return; }
     keep(state, recs).await;
+    crate::plan_watch::after_run(CLAUDE);
 }
 
 fn changed(state: &AppState) { state.emit(json!({"type": "meter.changed"})); }
@@ -307,7 +309,7 @@ pub fn codex_windows(rl: &Value, at: DateTime<Utc>) -> Vec<(String, Window)> {
         let pct = pct.clamp(0.0, 100.0);
         let key = match mins { Some(300) => "five_hour".to_string(), Some(10080) => "seven_day".to_string(), Some(m) if m > 0 => format!("m{m}"), _ => fallback.to_string() };
         let resets_at = reset_at.map(normalise_epoch).or_else(|| reset_in.map(|s| at.timestamp() + s.max(0)));
-        out.push((key, Window { percent: Some(pct), resets_at, minutes: mins.filter(|m| *m > 0), status: Some(if pct >= 100.0 { "reached" } else { "ok" }.into()), seen_at: at.timestamp() }));
+        out.push((key, Window { percent: Some(pct), resets_at, minutes: mins.filter(|m| *m > 0), status: Some(if pct >= 100.0 { "reached" } else { "ok" }.into()), seen_at: at.timestamp(), label: None }));
     }
     out
 }
@@ -345,6 +347,7 @@ async fn keep_codex(state: &AppState, chat: Option<&str>, session: Option<String
     let cost_usd = run.cost(&model);
     let rec = Record { t: Utc::now(), provider: CODEX.into(), chat: chat.map(String::from), session, model, tokens, cache_write_long: 0, cost_usd, estimated: true };
     keep(state, vec![rec]).await;
+    crate::plan_watch::after_run(CODEX);
     cost_usd
 }
 
@@ -381,6 +384,9 @@ pub struct Window {
     pub status: Option<String>,
     /// When this was reported, seconds since 1970.
     pub seen_at: i64,
+    /// What a window for one model or one product is for, in the service's own words ("Opus").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 type Plans = BTreeMap<String, BTreeMap<String, Window>>;
@@ -398,7 +404,7 @@ pub fn claude_windows(info: &Value, now: i64) -> Vec<(String, Window)> {
         for (k, w) in ws {
             if k.is_empty() || k.len() > 40 { continue; }
             let p = pct(&w["utilization"]);
-            out.insert(k.clone(), Window { percent: p, resets_at: epoch(&w["resetsAt"]), minutes: None, status: p.map(|p| if p >= 100.0 { "reached" } else { "ok" }.into()), seen_at: now });
+            out.insert(k.clone(), Window { percent: p, resets_at: epoch(&w["resetsAt"]), minutes: None, status: p.map(|p| if p >= 100.0 { "reached" } else { "ok" }.into()), seen_at: now, label: None });
         }
     }
     let status = match info["status"].as_str() { Some("rejected") => Some("reached"), Some("allowed_warning") => Some("warning"), Some("allowed") => Some("ok"), _ => None };
@@ -449,6 +455,16 @@ pub fn update_plans(state: &AppState, provider: &str, windows: Vec<(String, Wind
     }
 }
 
+/// A whole report of `provider`'s plan (`plan_watch.rs` asked the program itself): it replaces what
+/// was known, so a window the plan no longer has does not linger with an old figure.
+pub fn set_plans(provider: &str, windows: Vec<(String, Window)>) {
+    let text = with_plans(|p| {
+        p.insert(provider.to_string(), windows.into_iter().collect());
+        serde_json::to_string_pretty(&*p).unwrap_or_default()
+    });
+    let _ = crate::paths::write_atomic(&plans_file(&crate::paths::home()), text.as_bytes(), true);
+}
+
 /// A `rate_limit_event` of Claude Code's output (the user's own Claude plan).
 pub fn note_claude_limit(state: &AppState, ev: &Value) {
     update_plans(state, CLAUDE, claude_windows(&ev["rate_limit_info"], Utc::now().timestamp()));
@@ -465,7 +481,7 @@ fn plan_json(windows: &BTreeMap<String, Window>, now: i64) -> Value {
         // A window whose reset time has passed says nothing about now.
         let reset = w.resets_at.map_or(false, |r| r <= now);
         json!({"id": k, "percent": if reset { None } else { w.percent }, "resetsAt": w.resets_at, "minutes": w.minutes,
-            "status": if reset { None } else { w.status.clone() }, "seenAt": w.seen_at, "hasReset": reset})
+            "status": if reset { None } else { w.status.clone() }, "seenAt": w.seen_at, "hasReset": reset, "label": w.label})
     }).collect();
     json!({"windows": list, "seenAt": ws.iter().map(|w| w.1.seen_at).max()})
 }
@@ -761,6 +777,7 @@ async fn meter_get(State(st): S, Query(q): Query<Days>) -> R {
     out["scope"] = json!(if everything { "computer" } else { "thoughts" });
     out["scan"] = scan_info;
     out["plans"] = plans_json(now.timestamp());
+    out["watch"] = crate::plan_watch::watch_json();
     out["firstRecord"] = json!(records.iter().map(|r| r.t).min());
     Ok(Json(out))
 }
@@ -783,6 +800,7 @@ async fn meter_chat(State(st): S, Query(q): Query<ChatQ>) -> R {
         "chatCostUsd": chat.as_ref().map(|c| c.cost_usd),
         "provider": chat.as_ref().map(|c| c.provider.clone()),
         "plans": plans_json(Utc::now().timestamp()),
+        "watch": crate::plan_watch::watch_json(),
     })))
 }
 
@@ -890,7 +908,7 @@ mod tests {
     fn codex_limits_are_read_in_every_shape_and_others_are_left_out() {
         let at = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
         let ws = codex_windows(&json!({"primary": {"used_percent": 100.0, "window_minutes": 300, "resets_in_seconds": 60}, "secondary": {"used_percent": 7.0, "window_minutes": 10080, "resets_at": 1_800_500_000}}), at);
-        assert_eq!(ws[0], ("five_hour".into(), Window { percent: Some(100.0), resets_at: Some(1_800_000_060), minutes: Some(300), status: Some("reached".into()), seen_at: 1_800_000_000 }));
+        assert_eq!(ws[0], ("five_hour".into(), Window { percent: Some(100.0), resets_at: Some(1_800_000_060), minutes: Some(300), status: Some("reached".into()), seen_at: 1_800_000_000, label: None }));
         assert_eq!((ws[1].0.as_str(), ws[1].1.resets_at), ("seven_day", Some(1_800_500_000)));
         // The flat shape of some versions, and a window of another length.
         let flat = codex_windows(&json!({"primary_used_percent": 3.0, "primary_window_minutes": 60, "secondary_used_percent": 9.0}), at);

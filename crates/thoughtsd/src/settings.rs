@@ -200,10 +200,14 @@ pub struct SpendingSettings {
     /// (`mado_build::confinement`). `None`: on (the default, `confine_commands`). A save that does not name it keeps the one in force.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confine_commands: Option<bool>,
+    /// Ask Claude Code and Codex how much of the plan is used without waiting for a run
+    /// (`plan_watch.rs`). `None`: on (the default, `auto_usage`). A save that does not name it keeps the one in force.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_usage: Option<bool>,
 }
 
 impl Default for SpendingSettings {
-    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false, build_hold_percent: None, confine_commands: None } }
+    fn default() -> Self { Self { monthly_limit_usd: None, warn_percent: 80, whole_computer: false, build_hold_percent: None, confine_commands: None, auto_usage: None } }
 }
 
 impl SpendingSettings {
@@ -224,6 +228,8 @@ impl SpendingSettings {
     pub fn build_hold(&self) -> u8 { self.build_hold_percent.unwrap_or(Self::BUILD_HOLD_DEFAULT) }
     /// Are a MADO build's own commands confined (on unless the user switched it off)?
     pub fn confine_commands(&self) -> bool { self.confine_commands.unwrap_or(true) }
+    /// Is the plan's usage asked for without a run (on unless the user switched it off)?
+    pub fn auto_usage(&self) -> bool { self.auto_usage.unwrap_or(true) }
 }
 
 /// The keyboard shortcut that opens the quick capture box from any app. Only the desktop app reads
@@ -888,6 +894,7 @@ impl Settings {
         // A window that does not know the build setting (or leaves it out) keeps the one in force.
         if self.spending.build_hold_percent.is_none() { self.spending.build_hold_percent = old.spending.build_hold_percent; }
         if self.spending.confine_commands.is_none() { self.spending.confine_commands = old.spending.confine_commands; }
+        if self.spending.auto_usage.is_none() { self.spending.auto_usage = old.spending.auto_usage; }
         self.spending.sanitize()?;
 
         self.search.extension_repo = self.search.extension_repo.trim().to_string();
@@ -1175,6 +1182,19 @@ mod tests {
         on.sanitize_update(&old).unwrap();
         assert!(on.spending.confine_commands());
         assert_eq!(serde_json::to_value(&old).unwrap()["spending"]["confineCommands"], false);
+    }
+
+    #[test]
+    fn a_save_that_leaves_out_the_usage_switch_keeps_it_as_it_is() {
+        let mut old = Settings::default();
+        assert!(old.spending.auto_usage(), "on by default");
+        old.spending.auto_usage = Some(false);
+        let mut new: Settings = serde_json::from_value(serde_json::json!({"spending": {"warnPercent": 80}})).unwrap();
+        new.sanitize_update(&old).unwrap();
+        assert!(!new.spending.auto_usage());
+        let mut on: Settings = serde_json::from_value(serde_json::json!({"spending": {"warnPercent": 80, "autoUsage": true}})).unwrap();
+        on.sanitize_update(&old).unwrap();
+        assert!(on.spending.auto_usage());
     }
 
     #[test]

@@ -1,0 +1,105 @@
+{
+ "accountChatgpt": {
+  "id": 1,
+  "result": {
+   "account": {
+    "type": "chatgpt",
+    "email": "user@example.com",
+    "planType": "pro"
+   },
+   "requiresOpenaiAuth": true
+  }
+ },
+ "accountApiKey": {
+  "id": 1,
+  "result": {
+   "account": {
+    "type": "apiKey"
+   },
+   "requiresOpenaiAuth": true
+  }
+ },
+ "accountNone": {
+  "id": 1,
+  "result": {
+   "account": null,
+   "requiresOpenaiAuth": true
+  }
+ },
+ "rateLimitsDoc": {
+  "id": 6,
+  "result": {
+   "rateLimits": {
+    "limitId": "codex",
+    "limitName": null,
+    "primary": {
+     "usedPercent": 25,
+     "windowDurationMins": 15,
+     "resetsAt": 1730947200
+    },
+    "secondary": null,
+    "rateLimitReachedType": null
+   },
+   "rateLimitsByLimitId": {
+    "codex": {
+     "limitId": "codex",
+     "limitName": null,
+     "primary": {
+      "usedPercent": 25,
+      "windowDurationMins": 15,
+      "resetsAt": 1730947200
+     },
+     "secondary": null,
+     "rateLimitReachedType": null
+    },
+    "codex_other": {
+     "limitId": "codex_other",
+     "limitName": "codex_other",
+     "primary": {
+      "usedPercent": 42,
+      "windowDurationMins": 60,
+      "resetsAt": 1730950800
+     },
+     "secondary": null,
+     "rateLimitReachedType": null
+    }
+   },
+   "rateLimitResetCredits": {
+    "availableCount": 2,
+    "credits": [
+     {
+      "id": "RateLimitResetCredit_1",
+      "resetType": "codexRateLimits",
+      "status": "available",
+      "grantedAt": 1781654400,
+      "expiresAt": 1784246400,
+      "title": "Rate-limit reset",
+      "description": "Reset an eligible Codex rate-limit window."
+     }
+    ]
+   }
+  }
+ },
+ "rateLimits": {
+  "id": 2,
+  "result": {
+   "rateLimits": {
+    "limitId": "codex",
+    "limitName": null,
+    "primary": {
+     "usedPercent": 25,
+     "windowDurationMins": 300,
+     "resetsAt": 1730947200
+    },
+    "secondary": {
+     "usedPercent": 100,
+     "windowDurationMins": 10080,
+     "resetsAt": 1731400000
+    },
+    "rateLimitReachedType": "rate_limit_reached"
+   },
+   "rateLimitsByLimitId": null,
+   "rateLimitResetCredits": null
+  }
+ }
+}
