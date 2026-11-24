@@ -38,7 +38,7 @@ const CSS = `
   --bg: #1c1c1e; --fg: #f2f2f2; --muted: #b8b8b8; --line: #55555a; --fill: #2c2c2e; --fill2: #3a3a3d;
   --accent: #8ab4ff; --on-accent: #0b1730; --warn: #f0c060; --danger: #ff8a80; --ok: #6fd69a;
 }
-* { box-sizing: border-box; }
+* { box-sizing: border-box; overscroll-behavior: none; }
 .bg { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: grid; place-items: center; }
 .modal { background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 16px; padding: 22px; width: min(640px, 92vw); max-height: 86vh; overflow: auto; box-shadow: 0 20px 50px rgba(0,0,0,.3); display: grid; gap: 10px; outline: none; }
 h1 { font-size: 22px; font-weight: 600; line-height: 1.2; }

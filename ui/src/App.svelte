@@ -1140,7 +1140,7 @@
   /* `main` is a size container so views can adapt to the room they really have (sidebar open or not). */
   /* Only the page scrolls, below the window's top bar: its scroll bar never runs over the sidebar or the bar. */
   .main { position: relative; overflow: hidden; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--aura), var(--bg); background-repeat: no-repeat; container: main / inline-size; }
-  .mainscroll { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; overscroll-behavior: contain; }
+  .mainscroll { position: relative; flex: 1 1 auto; min-height: 0; overflow: auto; }
   .view:focus { outline: none; }
   .main .drag.top { flex: none; height: 26px; z-index: 5; }
   /* macOS with the sidebar collapsed: the window buttons sit in a title-bar strip that runs across the

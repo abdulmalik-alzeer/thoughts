@@ -11,6 +11,7 @@
 // through the DOM (never by building HTML text for the app's own page), so whatever the mock-up
 // contains, `</iframe>` included, it stays text of that attribute.
 import { rootVars } from './tokens';
+import { NO_BOUNCE } from '../../noBounce';
 
 /** The contract's policy for a mock-up. */
 export const MOCK_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:";
@@ -23,7 +24,7 @@ const BASE = 'html{color-scheme:light}body{margin:0;background:var(--mado-color-
  *  placed after `</head>`, so nothing in it can come before the policy; a second policy inside it
  *  could only forbid more (policies add up, the strictest wins). */
 export function sealedPage(mock: string, tokens: unknown): string {
-  return `${HEAD_OPEN}<style>${rootVars(tokens)}${BASE}</style></head>${String(mock ?? '')}`;
+  return `${HEAD_OPEN}<style>${NO_BOUNCE}${rootVars(tokens)}${BASE}</style></head>${String(mock ?? '')}`;
 }
 
 /** Does this look like what the daemon's cleaner writes (style blocks, then one body, nothing

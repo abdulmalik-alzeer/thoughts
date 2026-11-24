@@ -72,6 +72,7 @@ import { setPages } from './pages.svelte';
 import { errCode, errDetail, failed } from './errors';
 import { t, fmtDate , lang, dictionary } from './i18n';
 import REF from './layer/builtin-pages.json';
+import { NO_BOUNCE } from './noBounce';
 
 let styleEl: HTMLStyleElement | null = null;
 
@@ -299,7 +300,8 @@ function themeCss(): string {
   const cs = getComputedStyle(document.documentElement);
   const vars = varNames.map((n) => { const v = cs.getPropertyValue(n).trim(); return v ? `${n}:${v};` : ''; }).join('');
   const font = getComputedStyle(document.body).fontFamily;
-  return `${kitCss()}
+  return `${NO_BOUNCE}
+${kitCss()}
 :root{${vars}}
 html,body{margin:0;padding:0;background:transparent;color:var(--fg);font:13.5px/1.5 ${font};}
 *{box-sizing:border-box}

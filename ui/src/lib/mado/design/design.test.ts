@@ -24,6 +24,8 @@ describe('the sealed page of a mock-up', () => {
     expect([first.tagName, first.getAttribute('http-equiv'), first.getAttribute('content')]).toEqual(['META', 'Content-Security-Policy', MOCK_CSP]);
     const styles = [...doc.querySelectorAll('style')].map((s) => s.textContent ?? '');
     expect(styles[0]).toContain('--mado-color-primary:#3b5bdb');
+    // Elastic scrolling is off in the frame's own document too (a style rule: the policy and sandbox stay as they are).
+    expect(styles[0].startsWith('html,body,*,*::before,*::after{overscroll-behavior:none}')).toBe(true);
     expect(styles[1]).toBe('h1{color:red}');
     expect(doc.body.className).toBe('x');
     expect(doc.querySelector('h1')!.textContent).toBe('Home');
