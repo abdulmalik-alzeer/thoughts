@@ -7,13 +7,16 @@
   import { t } from '../../lib/i18n';
   import { failed } from '../../lib/errors';
   import ChatOptions from '../chat/ChatOptions.svelte';
+  import { entriesFrom, type ModelEntry } from '../../lib/models/picker';
+  import { autoNote } from '../../lib/models/auto';
+  import { app } from '../../lib/store.svelte';
   import UsageRing from '../usage/UsageRing.svelte';
   import type { MadoApi } from '../../lib/mado/api';
   import type { MadoOptions } from '../../lib/mado/types';
 
   let { madoApi: client, running = false }: { madoApi: MadoApi; /** A run of this plan is at work (the ring loads again when it ends). */ running?: boolean } = $props();
 
-  let lists = $state<{ models: string[]; efforts: string[] }>({ models: [], efforts: [] });
+  let lists = $state<{ models: ModelEntry[]; efforts: string[] }>({ models: [], efforts: [] });
   /** null until the service answered: an older service has no such setting, and then nothing is shown. */
   let options = $state<MadoOptions | null>(null);
   let saving = $state(false);
@@ -21,7 +24,7 @@
   const clean = (o: any): MadoOptions => ({ model: typeof o?.model === 'string' && o.model ? o.model : null, effort: typeof o?.effort === 'string' && o.effort ? o.effort : null });
 
   onMount(() => {
-    api('/ai/claude/options').then((o) => { lists = { models: strings(o?.models), efforts: strings(o?.efforts) }; }).catch(() => {});
+    api('/ai/claude/options').then((o) => { lists = { models: entriesFrom(o), efforts: strings(o?.efforts) }; }).catch(() => {});
     client.options().then((o) => { options = clean(o); }).catch(() => {});
   });
 
@@ -37,15 +40,11 @@
     catch (e) { options = before; failed(t('mado.opts.saveFailed'), e); return false; }
     finally { saving = false; }
   }
-  async function modelChanged(e: Event & { currentTarget: HTMLSelectElement }) {
-    const el = e.currentTarget, before = options?.model ?? '';
-    if (!(await save({ model: el.value || null }))) el.value = before;
-  }
 </script>
 
 <div class="row po">
   {#if options}
-    <ChatOptions plain below busy={saving} {options} models={lists.models} efforts={lists.efforts} modes={[]} {label} onmodel={modelChanged} oneffort={(v) => { save({ effort: v }); }} />
+    <ChatOptions plain below busy={saving} {options} models={lists.models} efforts={lists.efforts} modes={[]} {label} scope="claude" autoNote={autoNote(lists.models, app.settings?.ai?.claude?.model)} onmodel={(v) => save({ model: v })} oneffort={(v) => { save({ effort: v }); }} />
   {/if}
   <UsageRing chatId="" provider="claude" {running} below plansOnly />
 </div>

@@ -34,6 +34,9 @@
   import SubscriptionRisk from '../lib/SubscriptionRisk.svelte';
   import AccessKeys from './AccessKeys.svelte';
   import UsageSettings from './usage/UsageSettings.svelte';
+  import ModelPicker from '../lib/models/ModelPicker.svelte';
+  import { entriesFrom } from '../lib/models/picker';
+  import { autoNote } from '../lib/models/auto';
   import { checkAppUpdate } from '../lib/updates';
   import { check, download } from '../lib/updateProgress.svelte';
 
@@ -92,6 +95,8 @@
   let s = $state<any>(fresh());
   let base = $state<any>(fresh()); // last saved state; `s` is the draft
   let opts = $state<any>({ models: [], efforts: [], permissionModes: [] });
+  /** Claude Code's models as it reported them, for the model lists below. */
+  const claudeModels = $derived(entriesFrom(opts));
   let claude = $state<any>(app.status?.claude ?? {});
   let gitStatus = $state<any>({});
   let modules = $state<any[]>([]);
@@ -773,8 +778,8 @@
         <summary>{t('set.advanced')}</summary>
         {#if vis(c, 'set.model')}
           <label for="st-model">{t('set.model')}</label>
-          <input id="st-model" dir="ltr" list="st-models" bind:value={s.ai.claude.model} placeholder={t('set.auto')} autocomplete="off" />
-          <datalist id="st-models">{#each opts.models as m}<option value={m}></option>{/each}</datalist>
+          <ModelPicker id="st-model" value={s.ai.claude.model} models={claudeModels} label={t('set.model')} auto={t('set.auto')} autoNote={autoNote(claudeModels)} scope="claude" disabled={readOnly}
+            onpick={(v) => { s.ai.claude.model = v; }} />
           <p class="muted sm">{t('set.modelHint')}</p>
         {/if}
         {#if vis(c, 'set.effort')}
@@ -788,7 +793,8 @@
         {/if}
         {#if vis(c, 'set.miniModel')}
           <label for="st-mini">{t('set.miniModel')} <HelpTip text={t('set.miniHint')} /></label>
-          <input id="st-mini" dir="ltr" bind:value={s.ai.claude.miniWrapModel} placeholder="haiku" autocomplete="off" />
+          <ModelPicker id="st-mini" value={s.ai.claude.miniWrapModel} models={claudeModels} label={t('set.miniModel')} auto={t('set.auto')} scope="claude" disabled={readOnly}
+            onpick={(v) => { s.ai.claude.miniWrapModel = v; }} />
         {/if}
         {#if vis(c, 'set.idle')}
           <label for="st-idle">{t('set.idle')}</label>
