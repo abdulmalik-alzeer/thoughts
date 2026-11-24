@@ -50,10 +50,13 @@ fn options_list_the_agents_choices_under_its_names() {
     assert_eq!(out["permissionModes"], json!(["default", "acceptEdits", "plan", "auto", "bypassPermissions"]));
     assert_eq!(out["modeNames"]["default"], "Manual");
     assert_eq!(out["modelNames"]["opus"], "Opus");
+    // The model a new session starts with is named, so the list can mark the default.
+    assert_eq!(out["defaultModel"], "default");
     // A mode the daemon does not accept is never offered; Codex's own modes never replace the app's.
     let odd = catalog(&json!({"modes": {"availableModes": [{"id": "dontAsk", "name": "Don't ask"}, {"id": "plan", "name": "Plan"}]}}));
     let mut o2 = json!({"models": [], "permissionModes": ["acceptEdits"]});
     crate::acp_agent::apply_catalog(crate::assistant::Program::Claude, &odd, &mut o2);
+    assert!(o2.get("defaultModel").is_none(), "no default is named when the agent named none");
     assert_eq!(o2["permissionModes"], json!(["plan"]));
     let mut o3 = json!({"models": [], "permissionModes": ["acceptEdits"]});
     crate::acp_agent::apply_catalog(crate::assistant::Program::Codex, &odd, &mut o3);

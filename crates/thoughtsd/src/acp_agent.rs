@@ -412,8 +412,11 @@ pub fn apply_catalog(program: Program, c: &Catalog, out: &mut Value) {
         for m in out["models"].as_array().into_iter().flatten().filter_map(Value::as_str) {
             if !models.iter().any(|x| x == m) { models.push(m.to_string()); }
         }
-        out["models"] = json!(models);
+        out["models"] = json!(&models);
         out["modelNames"] = json!(names(&c.models));
+        // The model a new session starts with, as the agent said (the probe makes no choice): the
+        // model list marks it as the default. Only ever one of the models offered above.
+        if let Some(m) = c.current_model.as_deref().filter(|m| models.iter().any(|x| x == m)) { out["defaultModel"] = json!(m); }
     }
     if !c.efforts.is_empty() {
         out["efforts"] = json!(c.efforts.iter().map(|e| e.id.clone()).filter(|e| ok(e)).collect::<Vec<_>>());
