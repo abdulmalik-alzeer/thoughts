@@ -68,6 +68,7 @@
   import type { Chat, DaemonEvent } from '../lib/types';
   import { effortsFor, modelsNoteKey, versionNumber } from '../lib/codexModels';
   import { entriesFrom } from '../lib/models/picker';
+  import ChatModel from './chat/ChatModel.svelte';
   import { autoNote } from '../lib/models/auto';
   import { canOpenWindows } from '../lib/windows';
   import { openWindow } from '../lib/openWindow';
@@ -1065,12 +1066,14 @@
         <div class="row controls">
           <label class="btn ghost" title={t('chat.attachTip')}><Icon name="attach" /><span class="sr">{t('chat.attachTip')}</span><input type="file" multiple class="sr" onchange={attach} /></label>
           <DictateButton target={() => input} />
-          <!-- Model, effort and what the assistant may do: one control; the mode is always named on it. -->
-          <ChatOptions options={chat.options} models={modelEntries} scope={chat.provider} autoNote={autoNote(modelEntries, app.settings?.ai?.[chat.provider]?.model)} efforts={chatEfforts} modes={permModes} label={optLabel} {modelNote}
-            permPrefix={onCodex ? 'codex.perm' : 'chat3.perm'} hintPrefix={onCodex ? 'codex.perm' : 'set.perm'} effortPrefix={onCodex ? 'codex.effort' : 'chat.effort'}
+          <!-- What the assistant may do (and which assistant): one control, the mode always named on it. The model and effort: their own chip beside it. -->
+          <ChatOptions options={chat.options} modes={permModes} label={optLabel}
+            permPrefix={onCodex ? 'codex.perm' : 'chat3.perm'} hintPrefix={onCodex ? 'codex.perm' : 'set.perm'}
             {programs} program={chat.provider} onprogram={programs.every((p) => p.ok) && !chat.running ? moveProgram : undefined}
-            onmodel={modelChanged} oneffort={effortChanged}
             onperm={(v) => { chat.options.permissionMode = v; permChanged(); }} />
+          <ChatModel model={chat.options.model} effort={chat.options.effort} models={modelEntries} efforts={chatEfforts} scope={chat.provider} note={modelNote}
+            autoNote={autoNote(modelEntries, app.settings?.ai?.[chat.provider]?.model)} effortName={(v) => optLabel(onCodex ? 'codex.effort' : 'chat.effort', v)}
+            onmodel={modelChanged} oneffort={effortChanged} />
           {#if chat.kind === 'chat' && savedPerm !== BYPASS}
             <label class="btn ghost webtoggle" class:on={!!chat.options.web} title={t('runb.web.tip')}>
               <input type="checkbox" checked={!!chat.options.web} onchange={async (e) => { const box = e.currentTarget; await setWeb(box.checked); box.checked = !!chat.options.web; }} />

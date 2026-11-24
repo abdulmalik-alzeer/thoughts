@@ -12,7 +12,7 @@
   import { imeKey } from '../ime';
   import { LONG_LIST, saysDefault, showsId, moveBy, nameOf, placeList, recentModels, rememberModel, rowsOf, sectionsFor, startIndex, validName, type Box, type ModelEntry, type Row } from './picker';
 
-  let { value, models, onpick, label, id = '', auto = t('models72.auto'), autoNote = '', placeholder = '', typed = true, scope = '', disabled = false, small = false, describedby = undefined }: {
+  let { value, models, onpick, label, id = '', auto = t('models72.auto'), autoNote = '', placeholder = '', typed = true, scope = '', disabled = false, small = false, chip = false, note = '', describedby = undefined }: {
     /** The choice in force: a model's id, or nothing for "Automatic". */
     value: string | null | undefined;
     models: ModelEntry[];
@@ -34,6 +34,10 @@
     disabled?: boolean;
     /** The compact size, inside a small menu. */
     small?: boolean;
+    /** Drawn as one of the composer's round chips: as wide as its text, cut short when the row is tight. */
+    chip?: boolean;
+    /** One plain line shown in the list (the program could not list its models, say). */
+    note?: string;
     describedby?: string;
   } = $props();
 
@@ -143,10 +147,11 @@
 <svelte:window onpointerdown={outside} onresize={moved} />
 <svelte:document onscrollcapture={moved} />
 
-<button bind:this={btn} {id} type="button" class="mp-btn" class:small class:open aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? `mp-${uid}-list` : undefined}
-  aria-label={t('models72.button', { label, model: shown })} aria-describedby={describedby} {disabled} onclick={() => (open ? close() : show())} onkeydown={btnKey}>
-  <span class="mp-val" class:unset={!value && !!placeholder}><bdi>{shown}</bdi></span>
-  <Icon name="down" size={small ? 12 : 14} />
+<button bind:this={btn} {id} type="button" class="mp-btn" class:small class:chip class:open aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? `mp-${uid}-list` : undefined}
+  aria-label={t('models72.button', { label, model: value ? shown : auto || shown })} title={chip ? shown : undefined} aria-describedby={describedby} {disabled} onclick={() => (open ? close() : show())} onkeydown={btnKey}>
+  {#if chip}<Icon name="ai" size={13} />{/if}
+  <span class="mp-val" class:unset={!value && !!placeholder} dir="auto">{shown}</span>
+  <Icon name="down" size={small || chip ? 12 : 14} />
 </button>
 
 {#if open && box}
@@ -200,6 +205,7 @@
         <p class="mp-none" role="status">{bad ? t('models72.badName') : q ? t('models72.none') : t(typed ? 'models72.empty' : 'models72.emptyFixed')}</p>
       {/if}
     </div>
+    {#if note}<p class="mp-note" role="status">{note}</p>{/if}
     <!-- A long list says how many there are (or were found); every list says that typing works. -->
     <div class="mp-foot">
       <span class="mp-count" aria-live="polite">{#if q}{tn('models72.found', rows.filter((r) => r.kind === 'model').length)}{:else if long}{tn('models72.count', models.length)}{/if}</span>
@@ -218,6 +224,17 @@
   .mp-btn.small { font-size: var(--fs-xs); padding: 4px 8px; gap: 6px; }
   :global([data-theme="contrast"]) .mp-btn { border-color: var(--border); background: var(--bg); }
   .mp-val { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The composer's chip: the look of its neighbour (the options button), never wider than its share of the row. */
+  .mp-btn.chip { width: auto; max-width: 100%; font-size: var(--fs-xs); border-radius: 99px; border-color: transparent; padding: 4px 10px; gap: 5px; }
+  .mp-btn.chip .mp-val { flex: 0 1 auto; max-width: 22ch; }
+  .mp-btn.chip:hover:not(:disabled), .mp-btn.chip.open { background: var(--fill-2); box-shadow: none; }
+  .mp-btn.chip:focus-visible { background: var(--fill-2); }
+  :global([data-theme="contrast"]) .mp-btn.chip { border-color: var(--border); }
+  .mp-note { flex: none; margin: 0; padding: 8px 12px; border-top: var(--border-w) solid var(--hairline); font-size: var(--fs-xs); background: var(--fill); }
+  /* The name takes its own direction (a Latin model name is cut at its end, not its start, in Arabic too)
+     but stays on the side the page reads from. */
+  .mp-val { text-align: left; }
+  :global([dir="rtl"]) .mp-val { text-align: right; }
   .mp-val.unset { color: var(--muted); }
   .mp-btn :global(svg) { flex: none; color: var(--muted); }
 
