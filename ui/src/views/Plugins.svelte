@@ -128,6 +128,7 @@
           <span class="knob" aria-hidden="true"></span>
         </button>
         <span class="sm state" aria-hidden="true">{t(p.on ? 'plg.on' : 'plg.off')}</span>
+        {#if !p.on && p.state === 'off'}<HelpTip label={t('czh.plugin.off')} text={t('plg.offHint')} />{/if}
       {/if}
       <div class="menuwrap" role="presentation" onkeydown={(e) => menuKey(e, p.id)}>
         <button type="button" class="btn ghost sm" id={'plg-more-' + p.id} aria-haspopup="menu" aria-expanded={menu === p.id} aria-label={t('plg.menu', { name: p.name })} onclick={() => (menu = menu === p.id ? '' : p.id)}>⋯</button>
@@ -144,7 +145,6 @@
     {#if p.description}<p class="sm" dir="auto">{p.description}</p>{/if}
     {#if p.author}<p class="muted sm" dir="auto">{t('plg.madeBy', { author: p.author })}</p>{/if}
     {#if p.message}<p class="sm" role="note" dir="auto">{p.message}</p>{/if}
-    {#if !p.on && p.state === 'off'}<p class="muted sm">{t('plg.offHint')}</p>{/if}
     {#if p.named && p.contains.length}
       <ul class="chips" aria-label={t('plg.contains')}>
         {#each p.contains.slice(0, 12) as c, i (i)}<li class="pill"><Icon name={kindIcon(c.kind)} size={12} /> <span dir="auto">{partText(c)}</span></li>{/each}
@@ -169,10 +169,10 @@
 
 <svelte:document onpointerdown={outside} onfocusin={outside} />
 
-<p class="muted sm">{t('plg.intro')}</p>
 <div class="row wrap tools">
   <PackImport label="plg.import" checking="plg.importChecking" />
   <button type="button" class="btn" disabled={!!busy || !items.length} aria-busy={busy === 'all'} title={t('plg.exportAllTip')} onclick={exportAll}><Icon name="download" size={15} /> {t('plg.exportAll')}</button>
+  <HelpTip label={t('czh.plugins')} text={t('plg.intro')} />
 </div>
 
 {#if result}

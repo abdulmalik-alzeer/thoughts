@@ -5,6 +5,7 @@
   // assistant merge. A part the user kept their own version of stays listed, so the new version can
   // still be taken (or merged) later.
   import { onMount } from 'svelte';
+  import HelpTip from '../lib/HelpTip.svelte';
   import { on } from '../lib/api';
   import { app, toast } from '../lib/store.svelte';
   import { t } from '../lib/i18n';
@@ -88,16 +89,17 @@
 
 {#if open.length || kept.length}
   <div class="upd" role="group" aria-labelledby="ldb-upd">
-    <p id="ldb-upd"><b>{t('ldb.upd.title')}</b></p>
+    <p id="ldb-upd"><b>{t('ldb.upd.title')}</b> <HelpTip label={t('czh.upd')}>
+      {#if open.length}<span>{t('ldb.upd.intro')}</span>{/if}
+      <span>{t('layer.upd.conflictNote')}</span>
+    </HelpTip></p>
     {#if open.length}
-      <p class="muted sm">{t('ldb.upd.intro')}</p>
       <ul class="qs">{#each open as c (c.path)}{@render question(c, true)}{/each}</ul>
     {/if}
     {#if kept.length}
       <p class="muted sm">{t('ldb.upd.keptIntro')}</p>
       <ul class="qs">{#each kept as c (c.path)}{@render question(c, false)}{/each}</ul>
     {/if}
-    <p class="muted sm">{t('layer.upd.conflictNote')}</p>
   </div>
 {/if}
 

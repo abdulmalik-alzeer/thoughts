@@ -1,7 +1,9 @@
 <script lang="ts">
   // The opening of a new customisation chat (nothing written yet): what to do here, and a few
-  // examples that fill in the message box so the person can adjust them before sending.
+  // examples that fill in the message box so the person can adjust them before sending. How a
+  // customisation works is behind the "?" beside the question.
   import Icon from '../lib/Icon.svelte';
+  import HelpTip from '../lib/HelpTip.svelte';
   import { t } from '../lib/i18n';
 
   let { onpick }: { onpick: (text: string) => void } = $props();
@@ -10,8 +12,7 @@
 
 <div class="cstart" role="note">
   <span class="mark" aria-hidden="true"><Icon name="palette" size={22} /></span>
-  <h2>{t('r10-cust-start.emptyTitle')}</h2>
-  <p class="muted">{t('r10-cust-start.emptyBody')}</p>
+  <h2>{t('r10-cust-start.emptyTitle')} <HelpTip label={t('czh.start')} text={t('r10-cust-start.emptyBody')} /></h2>
   <p class="muted sm label">{t('r10-cust-start.examples')}</p>
   <ul class="ex">
     {#each examples as k (k)}

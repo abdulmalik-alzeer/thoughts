@@ -1,6 +1,7 @@
 <script lang="ts">
   // Customise › Ready-made: packs that come with the app. Choosing one stages it for the usual review.
   import Icon from '../lib/Icon.svelte';
+  import HelpTip from '../lib/HelpTip.svelte';
   import { onMount } from 'svelte';
   import { t } from '../lib/i18n';
   import { failed } from '../lib/errors';
@@ -33,7 +34,8 @@
   }
 </script>
 
-<p class="muted sm">{t('ldc.ready.intro')}</p>
+<!-- What trying a pack does stays in view (a review first, nothing downloaded); the rest is behind the "?". -->
+<p class="muted sm intro">{t('czh.ready.safe')} <HelpTip label={t('czh.ask.ready')} text={t('ldc.ready.intro')} /></p>
 
 {#if loading}
   <div class="card" aria-busy="true"><span class="sr-only">{t('ldc.ready.loading')}</span><div class="skel"></div><div class="skel w70"></div></div>
@@ -76,6 +78,7 @@
 {/if}
 
 <style>
+  .intro { margin: 0 0 10px; }
   .grid { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
   .pack { display: grid; gap: 6px; align-content: start; }
   .pack p { margin: 0; }

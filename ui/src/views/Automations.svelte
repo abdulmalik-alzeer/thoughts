@@ -183,8 +183,7 @@
 {:else}
   {#if phase === 'before'}
     <section class="card before" aria-labelledby="au-h">
-      <h3 id="au-h">{t('auto-ui.before.title')}</h3>
-      <p class="lead">{t('auto-ui.before.lead')}</p>
+      <h3 id="au-h">{t('auto-ui.before.title')} <HelpTip label={t('czh.auto.before')} text={t('auto-ui.before.lead')} /></h3>
       <h4>{t('auto-ui.before.sentTitle')}</h4>
       <p class="sm">{t('auto-ui.before.sent')}</p>
       <p class="sm">{t('auto-ui.before.notSent')}</p>
@@ -216,8 +215,7 @@
     </section>
   {:else if phase === 'running'}
     <section class="card run" aria-labelledby="au-h" aria-busy="true">
-      <div class="row status"><span class="spin" aria-hidden="true"></span><h3 id="au-h">{t('auto-ui.run.title')}</h3></div>
-      <p class="muted sm">{t('auto-ui.run.hint')}</p>
+      <div class="row status"><span class="spin" aria-hidden="true"></span><h3 id="au-h">{t('auto-ui.run.title')} <HelpTip label={t('czh.auto.run')} text={t('auto-ui.run.hint')} /></h3></div>
     </section>
   {:else if phase === 'error'}
     <section class="card" aria-labelledby="au-h">
@@ -232,9 +230,8 @@
     </section>
   {:else if phase === 'nothing' || phase === 'done'}
     <section class="card" aria-labelledby="au-h">
-      <h3 id="au-h">{t(phase === 'nothing' ? 'auto-ui.nothing.title' : 'auto-ui.done.title')}</h3>
+      <h3 id="au-h">{t(phase === 'nothing' ? 'auto-ui.nothing.title' : 'auto-ui.done.title')}{#if phase === 'done'} <HelpTip label={t('czh.auto.done')} text={t('auto-ui.done.hint')} />{/if}</h3>
       {#if phase === 'nothing' && st.nothing}<p class="sm" dir="auto">{st.nothing}</p>{/if}
-      {#if phase === 'done'}<p class="muted sm">{t('auto-ui.done.hint')}</p>{/if}
       <div class="row meta">
         {#if st.generatedAt}<span class="muted sm">{t('auto-ui.on', { date: when(st.generatedAt) })}</span>{/if}
         <button type="button" class="btn" onclick={() => (again = true)}><Icon name="sync" size={15} /> {t('auto-ui.again')}</button>
@@ -242,11 +239,10 @@
     </section>
   {:else}
     <div class="row meta head">
-      <h3 class="grow" tabindex="-1" bind:this={listHead}>{t('auto-ui.list.title')}</h3>
+      <h3 class="grow" tabindex="-1" bind:this={listHead}>{t('auto-ui.list.title')} <HelpTip label={t('czh.auto.list')} text={t('auto-ui.list.hint')} /></h3>
       {#if st.generatedAt}<span class="muted sm">{t('auto-ui.on', { date: when(st.generatedAt) })}</span>{/if}
       <button type="button" class="btn" onclick={() => (again = true)}><Icon name="sync" size={15} /> {t('auto-ui.again')}</button>
     </div>
-    <p class="muted sm hint">{t('auto-ui.list.hint')}</p>
     {#if st.error}<p class="err sm" role="alert">{t('auto-ui.list.lastFailed')} <bdi>{st.error}</bdi></p>{/if}
     {#each st.suggestions as s (s.id)}
       <SuggestionCard {s} busy={busyId === s.id} locked={!!busyId && busyId !== s.id} onbuild={() => build(s)} ondismiss={() => dismiss(s)} />
@@ -290,7 +286,6 @@
   h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
   h4 { font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
   .sm { font-size: var(--fs-xs); }
-  .lead { margin: 0 0 4px; }
   .before p { margin: 0 0 6px; line-height: 1.5; }
   .cost { display: flex; gap: 6px; align-items: flex-start; }
   .cost :global(.icon) { flex: none; margin-top: 2px; color: var(--accent-2); }
@@ -301,11 +296,9 @@
   .reason { margin: 8px 0 0; color: var(--muted); }
   .status { gap: 10px; align-items: center; }
   .status h3 { margin: 0; }
-  .run p { margin: 6px 0 0; }
   .meta { gap: 10px; align-items: center; flex-wrap: wrap; }
-  .head { margin: 2px 0 2px; }
+  .head { margin: 2px 0 10px; }
   .head h3 { margin: 0; outline: none; }
-  .hint { margin: 0 0 10px; }
   .err { color: var(--danger); font-size: var(--fs-sm); margin: 0 0 8px; }
   .spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--fill-2); border-top-color: var(--accent); animation: au-spin .7s linear infinite; flex: none; }
   @keyframes au-spin { to { transform: rotate(360deg); } }

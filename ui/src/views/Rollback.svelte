@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from '../lib/Icon.svelte';
+  import HelpTip from '../lib/HelpTip.svelte';
   import { onMount } from 'svelte';
   import { api, post } from '../lib/api';
   import { app, toast } from '../lib/store.svelte';
@@ -10,8 +11,9 @@
   import { reloadApp } from '../lib/api';
   import { failed as failToast } from '../lib/errors';
 
-  /** `embedded`: drawn inline (a tab of the History view) instead of as a dialog. */
-  let { embedded = false }: { embedded?: boolean } = $props();
+  /** `embedded`: drawn inline (a tab of the History view) instead of as a dialog. `compact` (Customise ›
+   *  History): a heading whose "?" holds the introduction and what the two buttons do. */
+  let { embedded = false, compact = false }: { embedded?: boolean; compact?: boolean } = $props();
 
   let history = $state<any[]>([]);
   let loading = $state(true);
@@ -87,7 +89,14 @@
 </script>
 
 {#snippet content()}
-    <p class="muted" id="rb-desc">{t('shell.rb.intro')}</p>
+    {#if compact}
+      <h3 class="rb-h" id="rb-h">{t('ldc.tab.history')} <HelpTip label={t('czh.history')}>
+        <span>{t('shell.rb.intro')}</span>
+        <ul><li>{t('ldc.hist.undoWhat')}</li><li>{t('ldc.hist.backWhat')}</li></ul>
+      </HelpTip></h3>
+    {:else}
+      <p class="muted" id="rb-desc">{t('shell.rb.intro')}</p>
+    {/if}
     <p class="row wrap">
       {#if app.safeMode}
         <button class="btn" onclick={retryLayer}><Icon name="retry" size={15} /> {t('shell.safe.leave')}</button>
@@ -103,10 +112,12 @@
     {:else if !history.length}
       <p class="muted">{t('shell.rb.empty')}</p>
     {:else}
-      <ul class="legend muted sm">
-        <li>{t('ldc.hist.undoWhat')}</li>
-        <li>{t('ldc.hist.backWhat')}</li>
-      </ul>
+      {#if !compact}
+        <ul class="legend muted sm">
+          <li>{t('ldc.hist.undoWhat')}</li>
+          <li>{t('ldc.hist.backWhat')}</li>
+        </ul>
+      {/if}
       <ul class="hist">
         {#each shown as h (h.hash)}
           <li class="item">
@@ -151,7 +162,7 @@
 {/snippet}
 
 {#if embedded}
-  <section class="emb" aria-describedby="rb-desc">{@render content()}</section>
+  <section class="emb" aria-describedby={compact ? undefined : 'rb-desc'}>{@render content()}</section>
 {:else}
 <div class="modal-bg no-print" role="presentation" onclick={(e) => e.target === e.currentTarget && close()}>
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rb-title" aria-describedby="rb-desc" tabindex="-1" use:trapFocus={{ onEscape: close }}>
@@ -163,6 +174,7 @@
 
 <style>
   .hist { list-style: none; margin: 0; padding: 0; }
+  .rb-h { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
   .legend { margin: 0 0 8px; padding-inline-start: 18px; display: grid; gap: 2px; }
   .item { padding: 10px 0; border-bottom: var(--border-w) solid var(--border); display: grid; gap: 6px; }
   .top { align-items: flex-start; }

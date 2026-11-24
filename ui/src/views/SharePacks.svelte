@@ -69,13 +69,15 @@
 </script>
 
 <div class="card">
-  <h3>{t('ldc.share.title')} <HelpTip text={t('layer.shareHint')} /></h3>
+  <h3>{t('ldc.share.title')} <HelpTip label={t('czh.share')}>
+    <span>{t('layer.shareHint')}</span>
+    <span>{t('plg.share.hint')} <button type="button" class="link" onclick={() => open('addons')}>{t('plg.share.open')}</button></span>
+  </HelpTip></h3>
   <div class="row wrap">
     <button type="button" class="btn" disabled={busy.open || busy.save} onclick={() => openForm(false)}><Icon name="download" size={15} /> {t('ldc.share.all')}</button>
     <button type="button" class="btn" disabled={busy.open || busy.save} onclick={() => openForm(true)}>{t('ldc.share.some')}</button>
   </div>
   <p class="muted sm gap"><Icon name="lock" size={13} /> {t('ldc.share.privacy')}</p>
-  <p class="muted sm gap">{t('plg.share.hint')} <button type="button" class="link" onclick={() => open('addons')}>{t('plg.share.open')}</button></p>
   {#if result}
     <div class="done" role="status">
       <p>{t(result.copied ? 'ldc.share.copied' : 'ldc.share.saved')} <bdi class="code" dir="ltr">{result.fp}</bdi></p>

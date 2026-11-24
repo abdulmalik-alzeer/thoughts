@@ -62,12 +62,11 @@
 
 <div class="page cz">
   <div class="row head">
-    <h1 class="grow">{t('layer.customise')}</h1>
+    <h1 class="grow">{t('layer.customise')} <HelpTip label={t('czh.page')} text={t('ldc.intro')} /></h1>
     {#if tab !== 'ask'}
       <button type="button" class="btn primary" onclick={start} disabled={starting} title={t('r10-cust-start.newTip')}><Icon name="palette" size={15} /> {t('r10-cust-start.new')}</button>
     {/if}
   </div>
-  <p class="muted intro">{t('ldc.intro')}</p>
 
   {#if app.pending?.exists}
     <div class="row pend" role="status">
@@ -88,26 +87,31 @@
 
   <div id="cz-panel" class="panel" role="tabpanel" aria-labelledby={'cz-tab-' + tab}>
     {#if tab === 'ask'}
-      <div class="card start">
-        <p class="lead">{t('r10-cust-start.lead')}</p>
-        <ol class="steps muted sm">
-          <li>{t('r10-cust-start.step1')}</li>
-          <li>{t('r10-cust-start.step2')}</li>
-          <li>{t('r10-cust-start.step3')}</li>
-        </ol>
-        <button type="button" class="btn primary go" onclick={start} disabled={starting} title={t('r10-cust-start.newTip')}><Icon name="palette" size={16} /> {starting ? t('set.starting') : t('r10-cust-start.new')}</button>
-        <p class="muted sm gap">{t('ldc.ask.historyHint')}</p>
-      </div>
-      <div class="card row wrap">
-        <Icon name="modules" size={18} />
-        <span class="grow sm">{t('ldc.ask.ideas')}</span>
-        <button type="button" class="btn" onclick={() => open('ready')}>{t('ldc.ask.seeReady')}</button>
-      </div>
-      <div class="card row wrap">
-        <Icon name="ai" size={18} />
-        <span class="grow sm">{t('auto-ui.askCard')}</span>
-        <button type="button" class="btn" onclick={() => open('automate')}>{t('auto-ui.askCardGo')}</button>
-      </div>
+      <!-- Only the controls show; how it works is behind the "?" beside each one (0.7.0). -->
+      <section class="card start" aria-labelledby="cz-ask-h">
+        <h2 id="cz-ask-h">{t('czh.ask.title')} <HelpTip label={t('czh.ask.about')} text={t('ldc.ask.historyHint')} /></h2>
+        <div class="row tipped">
+          <button type="button" class="btn primary go" onclick={start} disabled={starting} title={t('r10-cust-start.newTip')}><Icon name="palette" size={16} /> {starting ? t('set.starting') : t('r10-cust-start.new')}</button>
+          <HelpTip label={t('czh.ask.how')}>
+            <span>{t('r10-cust-start.lead')}</span>
+            <ol>
+              <li>{t('r10-cust-start.step1')}</li>
+              <li>{t('r10-cust-start.step2')}</li>
+              <li>{t('r10-cust-start.step3')}</li>
+            </ol>
+          </HelpTip>
+        </div>
+        <div class="row wrap ideas">
+          <span class="row tipped">
+            <button type="button" class="btn" onclick={() => open('ready')}><Icon name="modules" size={15} /> {t('ldc.ask.seeReady')}</button>
+            <HelpTip label={t('czh.ask.ready')} text={t('ldc.ask.ideas')} />
+          </span>
+          <span class="row tipped">
+            <button type="button" class="btn" onclick={() => open('automate')}><Icon name="ai" size={15} /> {t('auto-ui.askCardGo')}</button>
+            <HelpTip label={t('czh.ask.suggest')} text={t('auto-ui.askCard')} />
+          </span>
+        </div>
+      </section>
     {:else if tab === 'automate'}
       <Automations />
     {:else if tab === 'addons'}
@@ -126,7 +130,7 @@
     {:else if tab === 'share'}
       <SharePacks {open} />
     {:else if tab === 'history'}
-      <div class="card"><Rollback embedded /></div>
+      <div class="card"><Rollback embedded compact /></div>
     {:else}
       <div class="card">
         <h3>{t('layer.appUpdates')} <HelpTip text={t('layer.appUpdatesHint')} /></h3>
@@ -139,20 +143,16 @@
 
 <style>
   .cz { max-width: 860px; }
-  .intro { margin: 0 0 12px; }
   .tabs { flex-wrap: wrap; margin-bottom: 14px; border-radius: var(--radius-lg, 14px); }
   .panel { display: grid; gap: 0; }
   h3 { font-size: 14px; font-weight: 600; margin: 0 0 6px; }
   .card { margin-bottom: 12px; }
-  .card.row { gap: 10px; align-items: center; }
-  .card.row :global(.icon) { color: var(--accent-2); flex: none; }
   .wrap { flex-wrap: wrap; }
-  .gap { margin: 10px 0 0; }
-  .sm { font-size: var(--fs-xs); }
-  .head { gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+  .head { gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
   .head h1 { margin-bottom: 0; }
-  .lead { margin: 0 0 8px; }
-  .steps { margin: 0 0 14px; padding-inline-start: 20px; display: grid; gap: 4px; }
+  .start h2 { font-size: 15px; font-weight: 600; margin: 0 0 10px; }
+  .tipped { gap: 2px; align-items: center; }
+  .ideas { gap: 8px 16px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hairline); }
   .go { padding-block: 9px; padding-inline: 16px; }
   .pend { margin: 0 0 12px; padding: 8px 10px; border-radius: var(--radius); background: var(--fill); font-size: 13px; gap: 8px; align-items: center; }
   .pend :global(.icon) { flex: none; color: var(--accent-2); }
