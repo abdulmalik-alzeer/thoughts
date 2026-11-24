@@ -7,11 +7,13 @@
 // calls the scripts make, with the rules that matter here (a read-only token cannot see drafts,
 // a draft cannot be fetched by tag, a file name can only be uploaded once).
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { FROZEN, frozenFingerprint, frozenPart, kitHistory, OUT as KIT_OUT, parseBefore } from '../kit-history.mjs';
 import { releaseConfig } from '../release-config.mjs';
 import { NO_HOOKS, prepare, RUNNER_CHANNELS } from '../tauri-ci.mjs';
 import { assemble, changelogSection, notesFor, updaterManifest } from './assemble.mjs';
@@ -1001,4 +1003,79 @@ test('compiled app hand-over: only the checked executable reaches the sign job',
   const empty = tmp();
   assert.throws(() => pack({ platform: 'linux', root: empty, out: join(tmp(), 'o') }), stops(/compiled app is missing/));
   assert.ok(!existsSync(join(empty, 'target')));
+});
+
+// ---------------------------------------------------------------------------- kit-history.mjs
+
+/** A stand-in for git: `tags` maps a tag to its starter files ({ path inside the kit: text }). */
+function fakeGit(tags) {
+  const blobs = new Map();
+  return (args) => {
+    if (args[0] === 'tag') return Buffer.from(Object.keys(tags).join('\n'));
+    if (args[0] === 'ls-tree') {
+      const files = tags[args[3]] ?? {};
+      return Buffer.from(Object.entries(files).map(([rel, text]) => {
+        const id = `blob-${blobs.size}`;
+        blobs.set(id, text);
+        return `100644 blob ${id}\tstarter/${rel}\0`;
+      }).join(''));
+    }
+    if (args[0] === 'cat-file') return Buffer.from(blobs.get(args[2]));
+    throw new Error(`unexpected git ${args.join(' ')}`);
+  };
+}
+const sha = (text) => createHash('sha256').update(text).digest('hex');
+const committedKit = () => readFileSync(join(ROOT, KIT_OUT), 'utf8');
+
+test('kit history: with no tag after 0.7.0 the committed file is reproduced, and old tags change nothing', () => {
+  const current = committedKit();
+  assert.equal(kitHistory({ current, git: fakeGit({}) }).text, current, 'no tag at all (the old ones deleted)');
+  assert.equal(kitHistory({ current, before: '0.7.1', git: fakeGit({}) }).text, current, '--before 0.7.1, as the 0.7.1 preflight runs it');
+  // An old tag that still exists somewhere, with other contents: the file wins.
+  assert.equal(kitHistory({ current, git: fakeGit({ 'v0.6.0': { 'CLAUDE.md': 'something else' }, 'v0.7.0': {} }) }).text, current);
+  const frozen = frozenPart(current);
+  assert.ok(frozen.releases.includes(FROZEN) && frozen.releases.includes('0.0.1'));
+  assert.ok(frozen.rows.length > 40, 'every entry of the old releases is kept');
+});
+
+test('kit history: releases tagged after 0.7.0 are added from git, the release being made left out', () => {
+  const current = committedKit();
+  const kept = frozenPart(current).rows.find((r) => r.rel === 'CLAUDE.md' && r.releases.includes(FROZEN));
+  // 0.7.1's CLAUDE.md is byte for byte 0.7.0's when its sha matches; a fake one cannot, so the
+  // new release gets rows of its own, and every old row is still there.
+  const git = fakeGit({ 'v0.7.0': {}, 'v0.7.1': { 'CLAUDE.md': 'new words', 'skills/x.md': 'x' }, 'v0.7.2': { 'CLAUDE.md': 'new words' }, 'v0.8.0-rc.1': { 'CLAUDE.md': 'rc' } });
+  const made = kitHistory({ current, before: '0.7.2', git });
+  assert.deepEqual(made.added, ['v0.7.1']);
+  assert.deepEqual(made.releases.slice(-2), [FROZEN, '0.7.1']);
+  assert.ok(made.rows.some((r) => r.rel === 'CLAUDE.md' && r.sha === kept.sha && r.releases.at(-1) === FROZEN), 'the 0.7.0 row is unchanged');
+  assert.ok(made.rows.some((r) => r.rel === 'CLAUDE.md' && r.sha === sha('new words') && r.releases.join() === '0.7.1'));
+  assert.ok(made.rows.some((r) => r.rel === 'skills/x.md' && r.releases.join() === '0.7.1'));
+  for (const row of frozenPart(current).rows) assert.ok(made.rows.some((r) => r.rel === row.rel && r.sha === row.sha && row.releases.every((v) => r.releases.includes(v))), row.rel);
+  // Written, then read back as the committed file: the next run gives the same text, and 0.7.2 is added.
+  assert.equal(kitHistory({ current: made.text, before: '0.7.2', git }).text, made.text, 'running it twice gives the same file');
+  const next = kitHistory({ current: made.text, git });
+  assert.deepEqual(next.added, ['v0.7.1', 'v0.7.2']);
+  assert.ok(next.rows.some((r) => r.sha === sha('new words') && r.releases.join() === '0.7.1,0.7.2'));
+  // A file that shipped unchanged in 0.7.0 and 0.7.1 gets 0.7.1 added to its row.
+  // (The working tree's copy is 0.7.0's: the kit has not changed since.)
+  const legal = readFileSync(join(ROOT, 'starter', 'presets', 'legal.md'), 'utf8');
+  const before = frozenPart(current).rows.find((r) => r.rel === 'presets/legal.md' && r.sha === sha(legal));
+  assert.ok(before?.releases.includes(FROZEN), "0.7.0's presets/legal.md is in the list");
+  const same = kitHistory({ current, git: fakeGit({ 'v0.7.1': { 'presets/legal.md': legal } }) });
+  assert.deepEqual(same.rows.find((r) => r.rel === 'presets/legal.md' && r.sha === sha(legal)).releases, [...before.releases, '0.7.1']);
+  assert.equal(same.rows.length, frozenPart(current).rows.length, 'no new row');
+});
+
+test('kit history: a changed or missing frozen part is refused, and so is --before an old release', () => {
+  const current = committedKit();
+  const lost = current.replace(/^ {4}\("CLAUDE\.md".*\n/m, '');
+  assert.notEqual(lost, current);
+  assert.throws(() => kitHistory({ current: lost, git: fakeGit({}) }), /not the ones recorded/);
+  assert.throws(() => kitHistory({ current: current.replace(`, "${FROZEN}"];`, '];'), git: fakeGit({}) }), /not the ones recorded/);
+  assert.throws(() => kitHistory({ current: 'nothing', git: fakeGit({}) }), /no RELEASES line/);
+  assert.throws(() => kitHistory({ current, before: '0.6.0', git: fakeGit({}) }), /cannot be listed again/);
+  assert.equal(frozenFingerprint(frozenPart(current)).length, 64);
+  assert.equal(parseBefore(['node', 'x', '--before', '0.7.1-rc.1']), '0.7.1');
+  assert.equal(parseBefore(['node', 'x', '--before', 'soon']), '');
+  assert.equal(parseBefore(['node', 'x', '--check']), null);
 });

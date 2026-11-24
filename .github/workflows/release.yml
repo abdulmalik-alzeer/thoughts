@@ -100,7 +100,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Every release tag, for the starter kit's history below.
+          # Every release tag after 0.7.0, for the starter kit's history below (the releases up
+          # to 0.7.0 are kept in kit_history.rs itself: their tags no longer exist).
           fetch-depth: 0
       - name: Plan this run
         id: plan
@@ -133,7 +134,9 @@ jobs:
           echo "macos-signing=$HAS_APPLE_SIGNING" >> "$GITHUB_OUTPUT"
           echo "macos-notarisation=$HAS_APPLE_NOTARISATION" >> "$GITHUB_OUTPUT"
       # crates/thoughtsd/src/kit_history.rs must list what every earlier release's starter kit
-      # shipped (docs/RELEASING.md, checklist step 2); the release's own tag is not in it.
+      # shipped (docs/RELEASING.md, checklist step 2); the release's own tag is not in it. With no
+      # tag after 0.7.0 (0.7.1, the first release of the public repository) the file is its frozen
+      # part alone, and the check passes as it is.
       - name: The starter kit's history is up to date
         if: steps.plan.outputs.mode != 'warm'
         env:
