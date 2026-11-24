@@ -94,6 +94,22 @@
 /* ---------- base ---------- */
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; }
+/* No elastic scrolling anywhere (macOS stretches a page or pane past its ends and lets it spring back).
+   Two parts, both needed:
+   1. The document itself never scrolls: the window's root (#app) is the scroller for the few
+      screens taller than the window (set-up). A document that cannot scroll cannot stretch, on every
+      macOS the app runs on, including 11 and 12 whose WebKit does not know `overscroll-behavior`.
+   2. Every scroll container stops dead at its ends (WebKit 16 = macOS 13 and later; older ones ignore
+      it and keep their bounce inside panes: nothing in CSS or the shell can switch that off there).
+      The property is not inherited, hence `*`. Momentum scrolling is untouched.
+   The price of `none` is that a pane at its end no longer hands the scroll on to the pane around it.
+   A strip that only scrolls sideways must therefore say `overscroll-behavior-y: auto` next to its
+   `overflow-x`, or the page under the pointer would not scroll up and down over it (WebKit swallows
+   the wheel when both axes say `none`). Sealed frames are documents of their own: see NO_BOUNCE in
+   lib/noBounce.ts. */
+html, body { overflow: hidden; overscroll-behavior: none; }
+#app { height: 100%; overflow: auto; }
+*, *::before, *::after { overscroll-behavior: none; }
 body {
   background: var(--bg); letter-spacing: -.003em; color: var(--fg); font-family: var(--font); font-size: 14px; line-height: 1.55;
   -webkit-font-smoothing: antialiased;
@@ -262,7 +278,8 @@ html.native.os-macos:has(.shell), html.native.os-macos:has(.shell) body { backgr
     color-scheme: light !important;
   }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  html, body { height: auto; background: #fff; color: var(--fg); }
+  html, body { height: auto; overflow: visible; background: #fff; color: var(--fg); }
+  #app { height: auto; overflow: visible; }
   .scroll { overflow: visible !important; }
   .shell { display: block !important; height: auto !important; }
   .main { overflow: visible !important; background: none !important; }

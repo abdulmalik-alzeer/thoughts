@@ -189,7 +189,7 @@
   .body :global(ul), .body :global(ol) { margin: 0 0 6px; padding-inline-start: 1.4em; }
   .body :global(li) { margin: 2px 0; white-space: pre-wrap; }
   .slide img { max-width: 100%; max-height: 60vh; height: auto; align-self: center; border-radius: 4px; }
-  .tw { overflow-x: auto; }
+  .tw { overflow-x: auto; overscroll-behavior-y: auto; }
   table { border-collapse: collapse; font-size: var(--fs-sm, 13px); }
   th, td { border: 1px solid var(--border); padding: 4px 8px; vertical-align: top; text-align: start; white-space: pre-wrap; }
   th { background: var(--fill); font-weight: 600; }

@@ -133,7 +133,7 @@
   .tasks { font-size: var(--fs-xs); }
   .pill.stop { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); font-weight: 600; }
   :global([data-theme="contrast"]) .pill.stop { background: var(--danger); color: var(--bg); }
-  .tablewrap { overflow-x: auto; }
+  .tablewrap { overflow-x: auto; overscroll-behavior-y: auto; }
   table { width: 100%; font-size: 13px; }
   th, td { border: 0; border-top: 1px solid var(--hairline); padding: 8px 6px; text-align: start; vertical-align: top; font-weight: 400; }
   thead th { border-top: 0; color: var(--muted); font-size: var(--fs-xs); font-weight: 500; }

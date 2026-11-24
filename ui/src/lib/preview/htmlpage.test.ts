@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { PAGE_CSP, safePage } from './htmlpage';
+import { NO_BOUNCE } from '../noBounce';
 
 describe('safePage', () => {
   const evil = `<!doctype html><html><head><meta http-equiv="refresh" content="0;url=https://x.example/">
@@ -16,6 +17,10 @@ describe('safePage', () => {
   it('starts with the policy, before anything of the page', () => {
     expect(out.startsWith(`<!doctype html><meta http-equiv="Content-Security-Policy" content="${PAGE_CSP}">`)).toBe(true);
     expect(PAGE_CSP).toContain("default-src 'none'");
+  });
+  it('switches elastic scrolling off before the styles of the page, with a style rule only', () => {
+    expect(out).toContain(`<meta charset="utf-8"><style>${NO_BOUNCE}</style>`);
+    expect(out.indexOf(NO_BOUNCE)).toBeLessThan(out.indexOf('color: red'));
   });
   it('keeps the readable page and its styles', () => {
     expect(out).toContain('Hello');

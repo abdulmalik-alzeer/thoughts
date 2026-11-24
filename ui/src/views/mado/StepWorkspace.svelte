@@ -339,7 +339,7 @@
   @keyframes mado-slide { 0% { inset-inline-start: -34%; } 100% { inset-inline-start: 100%; } }
   .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); gap: 20px; align-items: start; }
   .main { min-width: 0; display: grid; gap: 14px; }
-  .tabs { justify-self: start; max-width: 100%; overflow-x: auto; }
+  .tabs { justify-self: start; max-width: 100%; overflow-x: auto; overscroll-behavior-y: auto; }
   .pane { min-width: 0; padding: 20px 22px; border-radius: var(--radius-lg); background: var(--panel); border: var(--border-w) solid var(--hairline); box-shadow: var(--shadow); }
   .side { position: sticky; top: 12px; display: flex; flex-direction: column; gap: 12px; height: calc(100vh - 86px); min-height: 360px; padding: 14px; border-radius: var(--radius-lg); background: var(--panel); border: var(--border-w) solid var(--hairline); box-shadow: var(--shadow); }
   .side > .seg { align-self: flex-start; }

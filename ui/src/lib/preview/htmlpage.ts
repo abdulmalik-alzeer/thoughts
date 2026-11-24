@@ -7,6 +7,7 @@
 // 3. it is shown in an <iframe sandbox=""> (Html.svelte): no scripts, no same-origin, no popups,
 //    no forms, no top navigation.
 import createDOMPurify from 'dompurify';
+import { NO_BOUNCE } from '../noBounce';
 
 export const PAGE_CSP = "default-src 'none'; img-src data:; style-src 'unsafe-inline'";
 
@@ -43,5 +44,5 @@ export function safePage(html: string): string {
     ADD_TAGS: ['style'], ALLOW_DATA_ATTR: false,
   }) as unknown as string;
   // First thing in the document, so the policy is in force before anything of the page is read.
-  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PAGE_CSP}"><meta charset="utf-8">${clean}`;
+  return `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PAGE_CSP}"><meta charset="utf-8"><style>${NO_BOUNCE}</style>${clean}`;
 }

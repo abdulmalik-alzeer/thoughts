@@ -183,7 +183,7 @@
 <style>
   .sheet { border: var(--border-w) solid var(--border); border-radius: var(--radius); background: var(--panel); overflow: hidden; display: flex; flex-direction: column; }
   .sheet.fill { height: 100%; border: 0; border-radius: 0; }
-  .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: var(--border-w) solid var(--border); overflow-x: auto; flex: none; }
+  .tabs { display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: var(--border-w) solid var(--border); overflow-x: auto; overscroll-behavior-y: auto; flex: none; }
   .tabs button { border: var(--border-w) solid transparent; border-bottom: 0; background: none; color: var(--muted); padding: 6px 12px; border-radius: var(--radius) var(--radius) 0 0; cursor: pointer; white-space: nowrap; font: inherit; font-size: var(--fs-sm, 13px); max-width: 24ch; overflow: hidden; text-overflow: ellipsis; }
   .tabs button:hover { color: var(--fg); background: var(--fill); }
   .tabs button.on { color: var(--fg); background: var(--bg); border-color: var(--border); font-weight: 600; margin-bottom: calc(-1 * var(--border-w)); }
