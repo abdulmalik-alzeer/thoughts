@@ -7,7 +7,7 @@
     Download, Pencil, ExternalLink, CircleQuestionMark, Copy, RotateCw, Printer, Upload, Eye, Lock, Bell, Keyboard,
     PanelLeft, Undo2, Funnel, Info, WifiOff, ChevronLeft, Command, Accessibility, ZoomIn, ZoomOut, Pin, Archive, ArchiveRestore,
     Gauge, AppWindow, Waypoints, Maximize, List, Maximize2, Minimize2,
-    Presentation,
+    Presentation, GripVertical, EyeOff, Ellipsis,
   } from '@lucide/svelte';
 
   // One place for every icon the app uses. Plugins can pass any of these names.
@@ -25,6 +25,8 @@
     offline: WifiOff, left: ChevronLeft, command: Command, pin: Pin, archive: Archive, unarchive: ArchiveRestore,
     usage: Gauge, window: AppWindow, graph: Waypoints, fit: Maximize, list: List, expand: Maximize2, collapse: Minimize2,
     present: Presentation,
+    // Editing the sidebar in place (views/SidebarEdit.svelte).
+    grip: GripVertical, eyeOff: EyeOff, more: Ellipsis,
   };
 </script>
 

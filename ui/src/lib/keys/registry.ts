@@ -21,7 +21,7 @@ import RESERVED_JSON from './reserved.json';
 export { isMac } from './platform';
 
 export type Scope = 'app' | 'native' | 'global' | 'docs' | 'docs.editor' | 'find' | 'graph' | 'mado-graph' | 'mado-design' | 'mado-fields'
-  | 'image' | 'comments' | 'fixed';
+  | 'image' | 'comments' | 'sidebar-edit' | 'fixed';
 export type Binding = string;
 export interface KeyDef {
   id: string;
@@ -136,6 +136,11 @@ export const KEYS: KeyDef[] = [
   local('image', G.pictures, 'image.zoomIn', 'kb.k.zoomIn', ZOOM_IN, { plain: true }),
   local('image', G.pictures, 'image.zoomOut', 'kb.k.zoomOut', ZOOM_OUT, { plain: true }),
   local('image', G.pictures, 'image.fit', 'kb.k.fit', FIT, { plain: true }),
+  // Editing the sidebar in place (views/SidebarEdit.svelte): the row that has the focus.
+  local('sidebar-edit', G.nav, 'sidebar-edit.up', 'sb72.k.up', ['Alt+ArrowUp'], { plain: true }),
+  local('sidebar-edit', G.nav, 'sidebar-edit.down', 'sb72.k.down', ['Alt+ArrowDown'], { plain: true }),
+  local('sidebar-edit', G.nav, 'sidebar-edit.rename', 'sb72.k.rename', ['F2'], { plain: true }),
+  local('sidebar-edit', G.nav, 'sidebar-edit.undo', 'sb72.k.undo', ['Mod+KeyZ']),
   // ---- shown, but fixed ----
   fixed('escape', 'shell.sc.escape', ['Escape'], 'kb.why.escape'),
   fixed('fixed.tab', 'kb.k.fixed.tab', ['Tab', 'Shift+Tab'], 'kb.why.a11y'),
