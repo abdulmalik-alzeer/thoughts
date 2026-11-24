@@ -16,9 +16,7 @@
   import { backup, driveName, lastBackupText, refreshBackup } from '../lib/backup.svelte';
   import { settleJoin } from '../lib/join.svelte';
   import { cloudFor } from '../lib/cloud.svelte';
-  import ProviderPresets from './ProviderPresets.svelte';
-  import CodexProvider from './CodexProvider.svelte';
-  import { keylessAllowed, onHomeNetwork } from '../lib/providers';
+  import ProviderConnect from './ProviderConnect.svelte';
   import CodexSettings from './CodexSettings.svelte';
   import SpendingGuard from './SpendingGuard.svelte';
   import RemoteTokenHelp from './RemoteTokenHelp.svelte';
@@ -62,7 +60,7 @@
     general: [],
     accessibility: [],
     usage: [],
-    ai: ['set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle', 'set.provider', 'set.baseUrl', 'set.apiKey', 'codex.set.model', 'codex.set.effort', 'codex.set.mini', 'codex.set.binary'],
+    ai: ['set.model', 'set.effort', 'set.binary', 'set.miniModel', 'set.idle', 'set.provider', 'set.baseUrl', 'set.apiKey', 'prov72.title', 'prov72.svc.custom', 'prov72.sub.custom', 'codex.set.model', 'codex.set.effort', 'codex.set.mini', 'codex.set.binary'],
     git: [],
     privacy: [],
     modules: [],
@@ -100,7 +98,8 @@
   let loadErr = $state<Record<string, string>>({});
   let loading = $state<Record<string, boolean>>({ modules: true });
   let busy = $state<Record<string, boolean>>({});
-  let apiToken = $state('');
+  /** "Use another service": its form holds what is typed until its own Save (see `unsent`). */
+  let connect = $state<{ typed: () => string[]; canSaveTyped: () => boolean; saveTyped: () => Promise<boolean>; dropTyped: () => void } | undefined>();
   let remote = $state({ name: '', url: '', username: '', token: '' });
   let privErr = $state('');
   /** Can other accounts on this computer open the library folder? null: not known, nothing is shown. */
@@ -418,8 +417,7 @@
 
   /** Text typed into a field that only acts on its own button (a key, a backup address): not a setting, so not saved by itself. */
   const unsent = () => [
-    ...(apiToken.trim() ? [t('set.apiKey')] : []),
-    ...(provUrl.trim() !== savedUrl ? [t('set.baseUrl')] : []),
+    ...(connect?.typed() ?? []),
     ...(remote.url.trim() || remote.username.trim() || remote.token ? [t('shellui.set.typedRemote')] : []),
     ...(signForm?.token ? [t('histb.signin.update')] : []),
   ];
@@ -446,12 +444,12 @@
     if (!typed.length || readOnly) return true;
     const choice = await choiceDialog({
       title: t('shellui.set.typedTitle'), body: t('shellui.set.typedBody'), list: typed, cancelLabel: t('layer.keepEditing'),
-      choices: [{ id: 'leave', label: t('shellui.set.typedLeave'), danger: true }, ...(provDirty && !provErr ? [{ id: 'key', label: t('runa.prov.save'), primary: true }] : [])],
+      choices: [{ id: 'leave', label: t('shellui.set.typedLeave'), danger: true }, ...(connect?.canSaveTyped() ? [{ id: 'key', label: t('runa.prov.save'), primary: true }] : [])],
     });
-    // The key and its address are one form (see saveProvider): saving stores both together.
-    if (choice === 'key') { await saveProvider(); if (provDirty) return false; }
+    // The key and its address are one form (ProviderConnect): saving stores both together.
+    if (choice === 'key') { if (!(await connect?.saveTyped())) return false; }
     else if (choice !== 'leave') return false;
-    apiToken = ''; provUrl = savedUrl; remote = { name: '', url: '', username: '', token: '' }; signForm = null;
+    connect?.dropTyped(); remote = { name: '', url: '', username: '', token: '' }; signForm = null;
     return true;
   }
   onDestroy(() => { if (app.leaveGuard === leaveGuard) app.leaveGuard = null; clearTimeout(savedTimer); reportUnsaved('settings', null); });
@@ -511,75 +509,19 @@
   const signIn = () => run('login', async () => { await post('/ai/claude/login'); toast(t('set.loginToast')); });
 
   // ----- API key or another service -----
-  // The address and its key are saved together and at once, apart from the rest of the page: the
-  // service refuses an address without its key, and never sends a key to an address it was not saved for.
-  let provUrl = $state<string>(app.settings?.ai?.claude?.baseUrl ?? '');
-  let provTest = $state<{ ok: boolean; message?: string } | null>(null);
+  // The page itself is `ProviderConnect`; here is only what the account lines above it say.
   const savedUrl = $derived(String(app.settings?.ai?.claude?.baseUrl ?? '').trim());
   const hasKey = $derived(!!app.settings?.ai?.claude?.hasApiToken);
   /** A service on this computer saved as taking no key: it gets a stand-in, never the Claude sign-in. */
   const savedKeyless = $derived(!!app.settings?.ai?.claude?.keyless);
-  const fullOn = $derived(!!app.settings?.fullAccess?.on);
-  let provNoKey = $state<boolean>(!!app.settings?.ai?.claude?.keyless);
   /** Where requests go when it is not Anthropic itself ('' for no address and for Anthropic's own). */
   const dest = (u: string) => (!u.trim() || /^https:\/\/api\.anthropic\.com(?:[:/?#]|$)/i.test(u.trim()) ? '' : u.trim());
-  const noKeyOffered = $derived(!!dest(provUrl) && keylessAllowed(provUrl, fullOn));
-  const sendNoKey = $derived(noKeyOffered && provNoKey && !apiToken.trim());
   /** Who answers the assistant, as saved: the Claude account, an Anthropic key, another service, or an address with no key. */
   const provKind = $derived(dest(savedUrl) ? (hasKey || savedKeyless ? 'service' : 'incomplete') : hasKey ? 'anthropicKey' : 'account');
-  const provDirty = $derived(provUrl.trim() !== savedUrl || !!apiToken.trim() || (!!dest(provUrl) && provNoKey) !== savedKeyless);
-  const provErr = $derived.by(() => {
-    const u = provUrl.trim();
-    if (u && !/^https?:\/\/\S+$/.test(u)) return t('set.errUrl');
-    if (provDirty && dest(u) && provNoKey && !apiToken.trim() && !noKeyOffered) return t('prov5.noKeyOnlyLocal');
-    // Unticking "No key needed" means a key is to come: the saved one only if there is one for this address.
-    if (provDirty && dest(u) && !apiToken.trim() && !sendNoKey && !(hasKey && dest(savedUrl) === dest(u))) return t('runa.prov.needKey');
-    return '';
-  });
-
-  const saveProvider = () => run('token', async () => {
-    if (provErr || !provDirty) return;
-    const r = await put('/ai/claude/provider', { baseUrl: provUrl.trim() || null, token: apiToken.trim() || null, noKey: sendNoKey });
-    apiToken = ''; provTest = null;
-    await syncServerFields();
-    provUrl = app.settings.ai.claude.baseUrl ?? '';
-    provNoKey = !!app.settings.ai.claude.keyless;
-    refreshClaude();
-    toast(t('runa.prov.saved.' + r.provider) + (r.keyRemoved ? ' ' + t('runa.prov.oldKeyRemoved') : ''), { kind: 'success' });
-  });
-
-  async function removeProvider() {
-    if (provKind === 'account') return;
-    if (!(await confirmDialog({ title: t('runa.prov.removeTitle'), body: t('runa.prov.removeBody'), confirmLabel: t('runa.prov.remove'), danger: true }))) return;
-    await run('token', async () => {
-      await del('/ai/claude/provider');
-      apiToken = ''; provTest = null;
-      await syncServerFields();
-      provUrl = ''; provNoKey = false;
-      refreshClaude();
-      toast(t('runa.prov.removed'));
-    });
-  }
-
-  /** Can a test be made: a key is typed, or the one saved for this very address is there. */
-  const canTest = $derived(!provErr && (!!apiToken.trim() || sendNoKey || ((hasKey || savedKeyless) && dest(savedUrl) === dest(provUrl))));
-  // What is typed is tried as it stands, saved or not; with nothing typed, the saved set-up is.
-  const testProvider = () => run('provtest', async () => {
-    provTest = null;
-    provTest = await post('/ai/claude/provider/test', provDirty ? { baseUrl: provUrl.trim() || null, token: apiToken.trim() || null, noKey: sendNoKey } : undefined);
-  });
-
-  /** "Load models": the saved service's own list, asked only now, put into the model list. */
-  async function loadServiceModels() {
-    if (busy.models) return;
-    busy.models = true;
-    try {
-      const r = await post<{ models: string[] }>('/ai/claude/provider/models');
-      opts = await api('/ai/claude/options');
-      toast(t('prov5.models.loaded', { n: r.models.length }), { kind: 'success' });
-    } catch (e) { failed(t('prov5.models.failed'), e); }
-    finally { busy.models = false; }
-  }
+  /** A service was connected, changed or removed: the server-owned fields are read again, and Claude Code's sign-in line with them. */
+  async function providerSaved() { await syncServerFields(); refreshClaude(); }
+  /** A service's own list of models was loaded: Claude Code's model list above shows it. */
+  function providerModels(program: 'claude' | 'codex') { if (program === 'claude') api('/ai/claude/options').then((o) => (opts = o)).catch(() => {}); }
 
   async function browseLibrary() {
     try {
@@ -853,33 +795,8 @@
           <input id="st-idle" class="num" type="number" min="1" step="1" bind:value={s.idleMinutes} aria-invalid={!!errors.idleMinutes} />
           {@render err('idleMinutes')}
         {/if}
-        {#if vis(c, 'set.provider', 'set.baseUrl', 'set.apiKey')}
-          <h3>{t('set.provider')} <HelpTip text={t('prov5.litellm')} /> <HelpTip>{t('set.providerHint')} {t('runa.prov.how')}</HelpTip></h3>
-          <ProviderPresets url={provUrl} disabled={readOnly} onpick={(u, noKey) => { provUrl = u; provNoKey = noKey; provTest = null; }} />
-          <label for="st-base">{t('set.baseUrl')}</label>
-          <input id="st-base" dir="ltr" bind:value={provUrl} placeholder="https://api.anthropic.com" aria-invalid={!!provErr} aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly} />
-          {#if onHomeNetwork(provUrl, fullOn)}<p class="muted sm" role="note">{t('prov5.lan')}</p>{/if}
-          {#if noKeyOffered}
-            <label class="check"><input type="checkbox" bind:checked={provNoKey} disabled={readOnly} /> {t('prov5.noKey')} <HelpTip text={t('prov5.noKeyHint')} /></label>
-          {/if}
-          <label for="st-key">{t('set.apiKey')} {#if hasKey}<span class="pill accent">{t('set.keyOn')}</span>{:else if savedKeyless && provKind === 'service'}<span class="pill">{t('prov5.keylessPill')}</span>{/if}</label>
-          <input id="st-key" dir="ltr" type="password" bind:value={apiToken} placeholder="sk-…" aria-describedby={provErr ? 'st-err-provider' : undefined} autocomplete="off" disabled={readOnly || sendNoKey} />
-          {#if provErr}<p class="err" id="st-err-provider" role="alert">{provErr}</p>{/if}
-          <div class="row wrap gap-top">
-            <button type="button" class="btn primary" disabled={!provDirty || !!provErr || busy.token || readOnly} aria-busy={busy.token} onclick={saveProvider}>{t('runa.prov.save')}</button>
-            <button type="button" class="btn" disabled={!canTest || busy.provtest} aria-busy={busy.provtest} onclick={testProvider}>{busy.provtest ? t('runa.prov.testing') : t('runa.prov.test')}</button>
-            <button type="button" class="btn danger" disabled={provKind === 'account' || busy.token || readOnly} onclick={removeProvider}>{t('runa.prov.remove')}</button>
-          </div>
-          {#if provTest}<p class="sm" class:err={!provTest.ok} role="status" dir="auto">{provTest.ok ? t('runa.prov.testOk') : provTest.message}</p>{/if}
-          <p class="muted sm">{t('runc.prov.testHint')}</p>
-          {#if provKind === 'service'}
-            <div class="row wrap gap-top">
-              <button type="button" class="btn" disabled={provDirty || busy.models} aria-busy={busy.models} aria-describedby="st-models-hint" onclick={loadServiceModels}><Icon name="sync" size={14} /> {busy.models ? t('prov5.models.loading') : t('prov5.models.load')}</button>
-            </div>
-            <p class="muted sm" id="st-models-hint">{t('prov5.models.hint')}</p>
-          {/if}
-          <p class="muted sm">{t('set.apiKeyHint')}</p>
-          <CodexProvider onsaved={syncServerFields} {readOnly} />
+        {#if vis(c, 'set.provider', 'set.baseUrl', 'set.apiKey', 'prov72.title', 'prov72.svc.custom', 'prov72.sub.custom')}
+          <ProviderConnect bind:this={connect} bind:ai={s.ai} onsaved={providerSaved} savemodel={autoSave} onmodels={providerModels} {readOnly} />
         {/if}
         <CodexSettings bind:ai={s.ai} bind:riskAck={s.subscriptionRiskAck} part="advanced" vis={(...k) => vis(c, ...k)} {readOnly} />
       </details>

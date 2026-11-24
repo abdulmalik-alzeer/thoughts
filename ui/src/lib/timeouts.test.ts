@@ -39,6 +39,8 @@ describe('timeoutFor', () => {
     ['POST', '/layer/pending/accept'],
     ['POST', '/updates/resolve'],
     ['POST', '/ai/claude/provider/test'],
+    ['POST', '/ai/codex/provider/test'],
+    ['PUT', '/ai/codex/provider'],
     ['post', '/library/history/repair?x=1'],
   ])('%s %s has no limit', (m, p) => {
     expect(timeoutFor(m, p)).toBe(0);
