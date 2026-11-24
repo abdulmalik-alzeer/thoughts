@@ -5,7 +5,7 @@
 //! no cookies, no user configuration file, nothing about the user or the library, and a plain
 //! `User-Agent: Thoughts` (GitHub refuses requests without one). It runs only when the user asks
 //! ("Check for updates") or, if they switched it on in Settings, at most once a week.
-//! Whenever the answer is not a clear version number (no network, the repository not public yet,
+//! Whenever the answer is not a clear version number (no network, nothing published yet,
 //! a rate limit) the result is "cannot tell" and nothing is shown.
 
 use crate::state::AppState;
@@ -160,7 +160,7 @@ mod tests {
     fn only_a_clear_answer_counts() {
         let ok = r#"{"tag_name":"v0.1.0","draft":false,"prerelease":false,"html_url":"https://evil.example/"}"#;
         assert_eq!(parse_answer(200, ok).as_deref(), Some("v0.1.0"));
-        // The private repository today: "not found". Rate limits, outages, anything odd: cannot tell.
+        // Nothing published: "not found". Rate limits, outages, anything odd: cannot tell.
         assert_eq!(parse_answer(404, r#"{"message":"Not Found"}"#), None);
         assert_eq!(parse_answer(403, ok), None);
         assert_eq!(parse_answer(200, "<html>"), None);

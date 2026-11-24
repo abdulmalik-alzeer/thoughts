@@ -32,7 +32,6 @@
   import { fold } from '../lib/CommandPalette.svelte';
   import Maintenance from './Maintenance.svelte';
   import IncomingStatus from '../lib/IncomingStatus.svelte';
-  import TesterUpdates from './TesterUpdates.svelte';
   import AssistantGuide from './AssistantGuide.svelte';
   import SubscriptionRisk from '../lib/SubscriptionRisk.svelte';
   import AccessKeys from './AccessKeys.svelte';
@@ -56,7 +55,7 @@
     modules: ['set.modulesIntro'],
     daemon: ['set.keepRunning', 'set.runAtLogin'],
     appLayer: ['layer.customise', 'layer.history', 'layer.share', 'layer.workflows', 'auto.routines', 'ldc.tab.addons', 'ldc.tab.ready', 'ldc.tab.updates'],
-    maintenance: ['care.health.title', 'care.upd.title', 'ux-settings.gh.title', 'care.move.title', 'care.rm.title'],
+    maintenance: ['care.health.title', 'care.upd.title', 'care.move.title', 'care.rm.title'],
     keyboard: ['kb.title', 'kb.search', 'nativeb.set.title', 'kb.resetAll'],
   };
   const adv: Record<Cat, string[]> = {
@@ -1134,7 +1133,6 @@
         {/if}
       </div>
     {/if}
-    {#if vis(c, 'ux-settings.gh.title')}<TesterUpdates />{/if}
     <Maintenance show={(...keys) => vis(c, ...keys)} open={(to) => { tab = to; query = ''; if (to === 'ai') advOpen.ai = true; }} />
   {:else if c === 'appLayer'}
     <!-- Customise has a page of its own (sidebar); this category points there. -->

@@ -23,8 +23,8 @@ export async function checkAppUpdate(manual = false) {
     try { r = await looking(() => invoke('update_check')); }
     catch (e: any) { if (manual) toast(t('layer.upd.checkFailed'), { kind: 'error', detail: String(e?.message ?? e) }); return; }
     if (!r?.configured) { if (manual) await checkRelease(r?.reason === 'deb' ? 'ui.upd.deb' : r?.reason === 'build' ? 'ui.upd.build' : 'layer.upd.notConfigured'); return; }
-    // A check that could not tell (no connection, a release that is not public, the GitHub
-    // fallback not ready): said only when the person asked.
+    // A check that could not tell (no connection, nothing published yet): said only when the
+    // person asked.
     if (r.problem) { if (manual) sayProblem(String(r.problem), typeof r.detail === 'string' ? r.detail : ''); return; }
     if (!r.available) { if (manual) toast(t('layer.upd.none'), { kind: 'success', key: 'upd' }); return; }
     // The dialog speaks in the app's own words only. The notes in the update's description are
@@ -64,12 +64,12 @@ export async function checkAppUpdate(manual = false) {
 }
 
 /** One plain sentence for a check or an install that could not tell or could not finish. The
- *  codes are the shell's (`find_update` in main.rs and `ghfeed::Problem`). */
+ *  codes are the shell's (`no_answer` in main.rs). */
 function sayProblem(code: string, detail = '') {
   const key = `care.upd.p.${code}`;
   const sentence = t(key);
-  // Nothing published, or nothing published yet: news, not a failure.
-  const calm = code === 'unpublished' || code === 'gh-no-release';
+  // Nothing published yet: news, not a failure.
+  const calm = code === 'unpublished';
   toast(sentence === key ? t('layer.upd.checkFailed') : sentence, { key: 'upd', kind: calm ? undefined : 'error', detail: detail || undefined });
 }
 

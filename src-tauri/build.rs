@@ -27,7 +27,6 @@ const COMMANDS: &[&str] = &[
     "set_attention",
     "update_check",
     "update_install",
-    "updates_gh_state",
     "refresh_menu",
     "quit_app",
     "set_safe_mode",

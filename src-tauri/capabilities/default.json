@@ -22,7 +22,6 @@
     "allow-set-attention",
     "allow-update-check",
     "allow-update-install",
-    "allow-updates-gh-state",
     "allow-refresh-menu",
     "allow-quit-app",
     "allow-set-safe-mode",
