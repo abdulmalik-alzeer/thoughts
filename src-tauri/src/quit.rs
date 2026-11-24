@@ -1,8 +1,9 @@
 //! Quitting without losing work.
 //!
-//! Quitting stops the background service (unless "keep running" hides the window instead), and
-//! with it every chat that is still working; it also throws away whatever the page holds unsaved.
-//! So before the app really exits, the shell looks at both and asks, with a native dialog.
+//! Quitting stops the background service (unless "keep running in the background" is on: then
+//! the service carries on without the app), and with it every chat that is still working; it also
+//! throws away whatever the page holds unsaved. So before the app really exits, the shell looks at
+//! both (the running work only when the service will stop) and asks, with a native dialog.
 //!
 //! The page is never asked at that moment. It tells the shell about unsaved work as it happens
 //! (`set_unsaved`), and the shell keeps the last thing it was told. A page that is frozen or gone
@@ -169,6 +170,13 @@ fn ask(app: &tauri::AppHandle, work: Option<&Value>, unsaved: &[Unsaved]) -> Cho
     }
 }
 
+/// Whether this quit stops the background service, and with it what is running there: always for
+/// "Quit Thoughts completely" (`all`), otherwise only with "keep running in the background" off.
+/// The same rule as the exit itself (`RunEvent::Exit` in main.rs).
+pub(crate) fn stops_service(all: bool, keep_running: bool) -> bool {
+    all || !keep_running
+}
+
 /// The user asked to quit for real (not "hide to the tray"). `all`: this is "Quit Thoughts
 /// completely", which stops the background service even when "keep running" is on.
 /// Never blocks, and never waits for the page.
@@ -178,7 +186,9 @@ pub(crate) fn request(app: &tauri::AppHandle, all: bool) {
     }
     let app = app.clone();
     std::thread::spawn(move || {
-        let work = crate::daemon_alive().and_then(|(i, _)| crate::daemon_work(&i));
+        // Work in the background service is only at stake when the service stops with the app.
+        let stops = stops_service(all || crate::QUIT_ALL.load(Ordering::SeqCst), crate::keep_running());
+        let work = if stops { crate::daemon_alive().and_then(|(i, _)| crate::daemon_work(&i)) } else { None };
         let choice = ask(&app, work.as_ref(), &unsaved());
         ASKING.store(false, Ordering::SeqCst);
         match choice {
@@ -241,6 +251,17 @@ mod tests {
 
     fn item(what: &str, kept: bool) -> Unsaved {
         Unsaved { what: what.into(), kept }
+    }
+
+    #[test]
+    fn quitting_stops_the_service_only_when_it_is_not_kept_running_or_everything_is_quit() {
+        assert!(stops_service(false, false), "keep running off: quitting stops the service");
+        assert!(!stops_service(false, true), "keep running on: the service carries on without the app");
+        assert!(stops_service(true, true), "Quit Thoughts completely stops it whatever the setting");
+        assert!(stops_service(true, false));
+        // With the service carrying on, running chats are not at stake: only unsaved edits ask.
+        assert_eq!(question(None, &[]), Question::None);
+        assert_eq!(question(None, &[item("Plan.md", false)]), Question::Lost);
     }
 
     #[test]
