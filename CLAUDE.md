@@ -83,4 +83,10 @@
   Claude Code and/or Codex) and one form for any other; it says which assistant each works with. Keep the list short:
   a service whose own documentation does not show it working with one of the two programs stays out. Codex only speaks
   the Responses API, so "OpenAI-compatible" means a service that answers it.
+- Plan usage before any run (`plan_watch.rs`, round 0.7.2): the daemon asks the unmodified programs themselves, and only in the
+  ways their makers document: Claude Code's own `/usage` command headless (rows from `usage_report`), Codex's
+  `account/rateLimits/read` over `codex app-server`. Never a token or credential store read, never a service called by the app,
+  never anything sent to a model (a Claude Code that hands `/usage` to a model is recorded and not asked again). Nothing is started
+  for a key, another service, a missing or signed-out program, before the subscription notice was read, or with
+  `spending.autoUsage` off. What is shown for each case is decided in `ui/src/lib/planView.ts`.
 - Verify with `cargo test -p thoughtsd`, `npx vite build` and `cargo build -p thoughts`.
