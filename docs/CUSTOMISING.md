@@ -162,7 +162,7 @@ Thoughts can look at how you use it and suggest things that would save you work.
 
 ### Sharing and moving customisations: packs
 
-Under **Customise** you can export what you have made as a pack file.
+Under **Customise** you can export what you have made as a pack file, `<name>.thoughts-pack` (see "What is inside a plugin or pack file" below).
 
 - **A feature pack** holds one thing or a few: a board, a tracker, a theme. Importing a feature pack **merges** it with what you already have. Its add-ons and automatic tasks are added, its Home and sidebar choices are combined with yours, and its styling is added alongside your own. It does not replace your other customisations. Importing a newer version of the same pack updates that pack's part only.
 - **A full pack** holds everything you have changed, for moving to another computer or reinstalling.
@@ -177,10 +177,28 @@ Only import packs from people you trust: a pack can change how the app behaves.
 
 A plugin file is how one customisation travels: to your other computer, to a colleague, or into a backup.
 
-- **Export…** in a plugin's menu asks for its name, a version (1.0.0 to begin with), who made it and a line about what it does, then saves `<name>.thoughts-plugin.json`. It is a feature pack, so its fingerprint is shown afterwards and an older Thoughts can still import it. Exporting an item that stands on its own gives it that name and makes it a plugin in your list (one entry in History), so later exports keep its name and version.
+- **Export…** in a plugin's menu asks for its name, a version (1.0.0 to begin with), who made it and a line about what it does, then saves `<name>.thoughts-plugin`. It is a feature pack, so its fingerprint is shown afterwards. (Thoughts 0.6 and earlier cannot add a file in this form; they read only the older `.json` files.) Exporting an item that stands on its own gives it that name and makes it a plugin in your list (one entry in History), so later exports keep its name and version.
 - **Add a plugin file…** shows what the file says it is, its fingerprint, and what it is to you: **new**, an **update** of a plugin you have ("1.0 → 1.2"), or **older than the one you have**. Then it goes through the usual review: Try it, Keep, Discard; its automatic tasks need your approval separately; its permissions are shown. Nothing is switched on before you keep it.
 - **An update replaces the older version.** What the new version no longer has is taken out, and your own changes around it stay. (A plain pack only ever adds.)
-- **Export all…** saves every plugin in one file, with which are on and which are off. Add that file on another computer and, after one review, the same plugins are there, and what was off is still off. What add-ons saved is not in the file; that travels in the move file (**Settings › Maintenance › Move to another computer**), which carries your plugins too.
+- **Export all…** saves every plugin in one file, `<name>.thoughts-pack`, with which are on and which are off. Add that file on another computer and, after one review, the same plugins are there, and what was off is still off. What add-ons saved is not in the file; that travels in the move file (**Settings › Maintenance › Move to another computer**), which carries your plugins too.
+
+#### What is inside a plugin or pack file
+
+A `.thoughts-plugin` or `.thoughts-pack` file is an ordinary zip archive of the customisation's real files. Unzip it (rename it to end in `.zip` if your computer asks) and you see a normal folder of code:
+
+```
+plugin.json            what the file says it is: name, version, maker, what it needs, fingerprint
+plugins/calendar.js    an add-on, as the JavaScript it is
+plugins/calendar.json  what the add-on may do
+views/agenda.html      a page
+custom.css             its look
+home.json, nav.json, todos.json, pages.json, keys.json, themes.json
+workflows/weekly.json  an automatic task
+```
+
+You can read the code, change it and zip the folder again (your computer's own Compress is fine; what it adds, such as `__MACOSX`, is left out). Adding it needs no assistant: Thoughts checks the files itself, shows the usual review, and keeps exactly those files. If you changed anything, the fingerprint no longer matches the one in `plugin.json`, and the review says the file was changed after it was made.
+
+Thoughts refuses a file that is not text, a link or other special entry, a name that leads outside the folder, the same name twice (also in other capitals), anything outside the places customisations live, more than 200 files, more than 512 KB in one file or 4 MB in all once unpacked, or more than 5 MB as it arrives. Files from before 0.7 (`.json`) can still be added.
 
 What a plugin file says about itself (its name, maker and version) is shown as its maker's words. Thoughts works out what it contains and what it may do from the files themselves, never from what the file claims.
 
