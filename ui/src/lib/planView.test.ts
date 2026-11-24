@@ -22,6 +22,11 @@ describe('what the plan-limit block shows', () => {
     expect(planView('plan', plan(NOW - 86_400), undefined, NOW)).toEqual({ kind: 'known', asOf: NOW - 86_400 });
     // Asking fails: the last figures stay, never passed off as current.
     expect(planView('plan', plan(NOW - 7200), watch('failed'), NOW)).toEqual({ kind: 'known', asOf: NOW - 7200 });
+    expect(planView('plan', plan(NOW - 600), watch('failed'), NOW).asOf).toBe(NOW - 600);
+    expect(planView('plan', plan(NOW - 60), watch('failed'), NOW).asOf).toBeNull();
+    // An assistant that only reports with its answers (too old to be asked): always "as of" its last chat.
+    expect(planView('plan', plan(NOW - 600), watch('unavailable', 'oldProgram'), NOW).asOf).toBe(NOW - 600);
+    expect(planView('plan', plan(NOW - 600), watch('unavailable', 'off'), NOW).asOf).toBe(NOW - 600);
     // A refresh in flight never blanks what is there.
     expect(planView('plan', plan(NOW - 700), watch('known', null, true), NOW).kind).toBe('known');
   });

@@ -29,6 +29,8 @@ export type PlanKind =
 
 /** Figures older than this say when they are from: two rounds of asking have gone by without a newer one. */
 export const OLD_AFTER_S = 25 * 60;
+/** When the service cannot ask (figures only arrive with a chat's answers, or asking fails), they say when they are from after this. */
+export const LAST_KNOWN_AFTER_S = 2 * 60;
 
 export function planView(setup: Setup, plan: Plan, watch: WatchOne, nowS: number): { kind: PlanKind; asOf: number | null } {
   const has = !!plan?.windows?.length;
@@ -36,7 +38,10 @@ export function planView(setup: Setup, plan: Plan, watch: WatchOne, nowS: number
   if (setup === 'key') return { kind: 'key', asOf: null };
   if (has) {
     const seen = plan!.seenAt || 0;
-    return { kind: 'known', asOf: seen && nowS - seen > OLD_AFTER_S ? seen : null };
+    // Kept current by the service: old only when two rounds went by. Not kept current (it could not
+    // ask, or only a chat brings figures): they are from a moment in the past, and say so.
+    const kept = !watch || !watch.state || watch.state === 'known';
+    return { kind: 'known', asOf: seen && nowS - seen > (kept ? OLD_AFTER_S : LAST_KNOWN_AFTER_S) ? seen : null };
   }
   if (setup === 'missing' || setup === 'signedOut') return { kind: setup, asOf: null };
   // Not heard from the service yet, or it is asking right now.

@@ -38,10 +38,10 @@
     </div>
   {/if}
   {#if view.kind === 'loading'}
-    <!-- The size of two windows, so nothing moves when the figures arrive. -->
+    <!-- The size of two windows (the same lines of text, left empty), so nothing moves when the figures arrive. -->
     <ul class="wins" role="status" aria-label={t('usage72.loading', { name })}>
       {#each [0, 1] as i (i)}
-        <li class="win skel" aria-hidden="true"><div class="wl"><span class="sk w1"></span><span class="sk w2"></span></div><div class="bar ok"></div><div class="xs"><span class="sk w3"></span></div></li>
+        <li class="win" aria-hidden="true"><div class="wl"><span>&nbsp;<span class="sk w1"></span></span><span>&nbsp;<span class="sk w2"></span></span></div><div class="bar ok"></div><div class="muted xs">&nbsp;<span class="sk w3"></span></div></li>
       {/each}
     </ul>
   {:else if view.kind === 'known'}
@@ -85,6 +85,5 @@
   .btn.sm { align-self: flex-start; font-size: 12px; padding: 4px 10px; }
   .sk { display: inline-block; block-size: 9px; border-radius: 4px; background: var(--fill); vertical-align: middle; }
   .sk.w1 { inline-size: 84px; } .sk.w2 { inline-size: 56px; } .sk.w3 { inline-size: 132px; max-inline-size: 70%; }
-  .skel .wl, .skel .xs { line-height: 1.5; }
   @media (prefers-reduced-motion: reduce) { .bar span { transition: none; } }
 </style>
