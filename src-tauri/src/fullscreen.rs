@@ -116,6 +116,99 @@ pub(crate) fn on_window_event(window: &tauri::Window, ev: &tauri::WindowEvent) {
     }
 }
 
+// ---------- putting a full-screen window away ----------
+//
+// macOS gives a full-screen window a Space of its own. Hiding the window (`orderOut:`, which is what
+// closing the main window does while "keep running in the background" is on) leaves that Space
+// behind with nothing in it: a black screen the user has to swipe away from. So a full-screen
+// window first leaves full screen, and is hidden only once AppKit says the way out has finished
+// (`NSWindowDidExitFullScreenNotification`; the way out is animated, and hiding during it gives the
+// same black screen). It then comes back from the Dock or the tray as an ordinary window.
+
+/// What putting a window away has to do.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PutAway {
+    /// Hide it now.
+    Hide,
+    /// Leave full screen, and hide it when that has finished.
+    LeaveThenHide,
+    /// It is already on its way out of full screen to be hidden: nothing more to do.
+    Wait,
+}
+
+/// `full`: the window is in full screen; `leaving`: it is already leaving it to be hidden.
+/// Only macOS keeps a Space for a full-screen window; elsewhere it is simply hidden.
+pub(crate) fn put_away_plan(mac: bool, full: bool, leaving: bool) -> PutAway {
+    if !mac { PutAway::Hide } else if leaving { PutAway::Wait } else if full { PutAway::LeaveThenHide } else { PutAway::Hide }
+}
+
+/// The window that is leaving full screen to be hidden: its label, its NSWindow (as a number, to
+/// tell its notification from another window's) and a count that tells one such wait from the next.
+static LEAVING: Mutex<Option<(String, usize, u64)>> = Mutex::new(None);
+static LEAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// If AppKit never says the window left full screen, it is hidden after this long anyway, so
+/// closing the window can never do nothing at all.
+const LEAVE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn leaving(label: &str) -> bool {
+    LEAVING.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(l, _, _)| l == label)
+}
+
+/// Hide `w` (the main window going to the tray), leaving full screen first when it has to.
+pub(crate) fn put_away(app: &AppHandle, w: &tauri::WebviewWindow) {
+    match put_away_plan(cfg!(target_os = "macos"), w.is_fullscreen().unwrap_or(false), leaving(w.label())) {
+        PutAway::Hide => { let _ = w.hide(); }
+        PutAway::Wait => {}
+        PutAway::LeaveThenHide => {
+            #[cfg(target_os = "macos")]
+            {
+                let ns = w.ns_window().map(|p| p as usize).unwrap_or(0);
+                let n = LEAVES.fetch_add(1, Ordering::SeqCst) + 1;
+                *LEAVING.lock().unwrap_or_else(|e| e.into_inner()) = Some((w.label().to_string(), ns, n));
+                let a = app.clone();
+                let _ = app.run_on_main_thread(move || mac::watch_exits(a));
+                let _ = w.set_fullscreen(false);
+                let a = app.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(LEAVE_LIMIT);
+                    left_full_screen(&a, None, Some(n));
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            { let _ = (app, w.hide()); }
+        }
+    }
+}
+
+/// A window finished leaving full screen (`ns`: which one), or the wait `n` ran out: the window
+/// that was waiting for exactly that is hidden now. Anything else changes nothing.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn left_full_screen(app: &AppHandle, ns: Option<usize>, n: Option<u64>) {
+    let label = {
+        let mut waiting = LEAVING.lock().unwrap_or_else(|e| e.into_inner());
+        match waiting.as_ref() {
+            Some((_, w, k)) if is_the_wait(*w, *k, ns, n) => waiting.take().map(|(l, _, _)| l),
+            _ => None,
+        }
+    };
+    if let Some(w) = label.and_then(|l| app.get_webview_window(&l)) {
+        let _ = w.hide();
+    }
+    sync(app);
+}
+
+/// Is this the news the waiting window (`window`, wait number `wait`) was waiting for? Its own
+/// window left full screen, or its own wait ran out; never another window's or an earlier wait's.
+fn is_the_wait(window: usize, wait: u64, ns: Option<usize>, n: Option<u64>) -> bool {
+    ns == Some(window) || n == Some(wait)
+}
+
+/// The window was asked for again (Dock, tray, a menu item) before it was hidden: it stays.
+pub(crate) fn keep(label: &str) {
+    let mut waiting = LEAVING.lock().unwrap_or_else(|e| e.into_inner());
+    if waiting.as_ref().is_some_and(|(l, _, _)| l == label) { *waiting = None; }
+}
+
 /// Should the window ignore this command? Only `cancelOperation:` (Esc, ⌘.) while in full screen.
 pub(crate) fn swallow(is_cancel: bool, in_full_screen: bool) -> bool {
     is_cancel && in_full_screen
@@ -181,6 +274,32 @@ mod mac {
         });
     }
 
+    /// Hear every window of the app finish leaving full screen, from now on (a second call changes
+    /// nothing). On the main thread. The observer is never removed: it lives as long as the app.
+    pub(super) fn watch_exits(app: tauri::AppHandle) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| observe_exits(move |window| super::left_full_screen(&app, Some(window), None)));
+    }
+
+    /// Call `heard` with the NSWindow (as a number) of every window that has left full screen.
+    pub(super) fn observe_exits(heard: impl Fn(usize) + 'static) {
+        use objc2::class;
+        use objc2_foundation::NSString;
+        let name = NSString::from_str("NSWindowDidExitFullScreenNotification");
+        let block = block2::RcBlock::new(move |note: *mut AnyObject| {
+            // SAFETY: AppKit hands the block a live NSNotification; its object is the window.
+            let window: *mut AnyObject = unsafe { msg_send![note, object] };
+            heard(window as usize);
+        });
+        // SAFETY: plain Foundation calls; the centre copies the block and keeps it. No queue:
+        // the block runs where the notification is posted, which AppKit does on the main thread.
+        unsafe {
+            let centre: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+            let nothing: *mut AnyObject = std::ptr::null_mut();
+            let _token: *mut AnyObject = msg_send![centre, addObserverForName: &*name, object: nothing, queue: nothing, usingBlock: &*block];
+        }
+    }
+
     /// AppKit adds an "Enter Full Screen" item of its own to a menu called View, in the system's
     /// language, next to ours. This asks it not to, for this run only (the registration domain is
     /// never saved). Before the menu bar is put in place.
@@ -218,6 +337,57 @@ mod tests {
         assert!(!swallow(true, false), "out of full screen Esc does what it always did");
         assert!(!swallow(false, true), "every other command reaches the window");
         assert!(!swallow(false, false));
+    }
+
+    #[test]
+    fn a_full_screen_window_leaves_full_screen_before_it_is_hidden() {
+        // macOS: hidden as it is, its Space would stay behind, black.
+        assert_eq!(put_away_plan(true, true, false), PutAway::LeaveThenHide);
+        assert_eq!(put_away_plan(true, false, false), PutAway::Hide);
+        // Closed a second time on the way out (the window no longer counts as full screen then):
+        // still not hidden before the way out has finished.
+        assert_eq!(put_away_plan(true, false, true), PutAway::Wait);
+        assert_eq!(put_away_plan(true, true, true), PutAway::Wait);
+        // Elsewhere a full-screen window has no Space of its own.
+        assert_eq!(put_away_plan(false, true, false), PutAway::Hide);
+        assert_eq!(put_away_plan(false, true, true), PutAway::Hide);
+    }
+
+    #[test]
+    fn only_its_own_window_or_its_own_wait_hides_the_waiting_window() {
+        assert!(is_the_wait(0x10, 3, Some(0x10), None), "its window left full screen");
+        assert!(!is_the_wait(0x10, 3, Some(0x20), None), "another window did");
+        assert!(is_the_wait(0x10, 3, None, Some(3)), "its wait ran out");
+        assert!(!is_the_wait(0x10, 3, None, Some(2)), "an earlier wait, already called off");
+        // Called off (the window was asked for again): nothing is waiting, so nothing is hidden.
+        *LEAVING.lock().unwrap() = Some(("main".into(), 0x10, 3));
+        assert!(leaving("main") && !leaving("main-2"));
+        keep("main-2");
+        assert!(leaving("main"));
+        keep("main");
+        assert!(!leaving("main"));
+    }
+
+    /// The real notification centre: the observer is registered, and a notification posted the way
+    /// AppKit posts it reaches it with the window it is about.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_end_of_leaving_full_screen_is_heard_with_its_window() {
+        use objc2::runtime::AnyObject;
+        use objc2::{class, msg_send};
+        use objc2_foundation::NSString;
+        use std::sync::atomic::AtomicUsize;
+        static HEARD: AtomicUsize = AtomicUsize::new(0);
+        mac::observe_exits(|window| HEARD.store(window, Ordering::SeqCst));
+        let name = NSString::from_str("NSWindowDidExitFullScreenNotification");
+        // SAFETY: plain Foundation calls with objects that live through the call.
+        unsafe {
+            let stand_in: *mut AnyObject = msg_send![class!(NSObject), new];
+            let centre: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+            let _: () = msg_send![centre, postNotificationName: &*name, object: stand_in];
+            assert_eq!(HEARD.load(Ordering::SeqCst), stand_in as usize);
+            let _: () = msg_send![stand_in, release];
+        }
     }
 
     #[test]

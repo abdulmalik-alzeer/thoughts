@@ -915,6 +915,8 @@ fn show_main(app: &tauri::AppHandle) {
     // running work to finish is called off.
     quit::still_here(app);
     if let Some(w) = main_window(app) {
+        // Asked for while it was leaving full screen to be hidden: it is not hidden after all.
+        fullscreen::keep(w.label());
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
@@ -1162,25 +1164,36 @@ fn hide_to_tray(app: &tauri::AppHandle) {
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_visible(true);
     }
+    // A full-screen window leaves full screen first: hidden as it is, macOS would keep its empty
+    // Space on screen, black (`fullscreen::put_away`).
     if let Some(w) = main_window(app) {
-        let _ = w.hide();
+        fullscreen::put_away(app, &w);
     }
 }
 
-/// Quit Thoughts (menu item, ⌘Q / Ctrl+Q).
-///   * "keep running in the background" OFF: the app exits and the background service is stopped.
-///   * ON: the background service must stay reachable, so the window is hidden and the app stays
-///     in the tray (same as closing the window). The tray's "Quit Thoughts completely" is the one
-///     action that stops everything.
-/// (macOS Dock ▸ Quit and a logout/shutdown end the process without passing through here; with
-/// keep-running on the service then carries on without a tray until the app is opened again.)
-fn quit_requested(app: &tauri::AppHandle) {
+/// The main window was closed (red button, ⌘W, Close Window).
+///   * "keep running in the background" ON: the window is hidden and the app stays in the tray
+///     and the Dock, with the background service.
+///   * OFF: closing is quitting (`quit_requested`).
+fn close_requested(app: &tauri::AppHandle) {
     if keep_running() && !QUIT_ALL.load(Ordering::SeqCst) {
         hide_to_tray(app);
     } else {
-        // Really quitting stops running chats and drops unsaved edits: `quit` asks first.
-        quit::request(app, false);
+        quit_requested(app);
     }
+}
+
+/// Quit Thoughts (menu item, ⌘Q / Ctrl+Q): the desktop app always exits, window hidden or not.
+/// What happens to the background service is the rule it always had (`RunEvent::Exit`):
+///   * "keep running in the background" OFF: it is stopped, so `quit` first asks about chats
+///     still running;
+///   * ON: it carries on by itself, chats and all, until the app is opened again. The tray's
+///     "Quit Thoughts completely" is the one action that stops it too.
+/// Unsaved edits in a window are asked about either way.
+/// (Until 0.7.1 ⌘Q with "keep running" on only hid the window, like closing it: the app never
+/// left the Dock, which read as "⌘Q does not quit".)
+fn quit_requested(app: &tauri::AppHandle) {
+    quit::request(app, false);
 }
 
 fn tray_menu(h: &tauri::AppHandle, ar: bool) -> tauri::Result<Menu<tauri::Wry>> {
@@ -1475,7 +1488,7 @@ fn main() {
                 // quit it first asks about chats still running and unsaved edits (`quit`).
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     api.prevent_close();
-                    quit_requested(window.app_handle());
+                    close_requested(window.app_handle());
                 }
                 // Back in front: the list of earlier versions in the Recovery menu may be out of date.
                 tauri::WindowEvent::Focused(true) => recovery::refresh_versions_soon(window.app_handle()),
@@ -1517,7 +1530,7 @@ fn main() {
         .expect("error while building Thoughts")
         .run(|_app, ev| match ev {
             tauri::RunEvent::Exit => {
-                if QUIT_ALL.load(Ordering::SeqCst) || !keep_running() {
+                if quit::stops_service(QUIT_ALL.load(Ordering::SeqCst), keep_running()) {
                     stop_daemon(false);
                 }
             }
