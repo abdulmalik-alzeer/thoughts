@@ -457,10 +457,17 @@ pub(crate) async fn start(state: &Arc<AppState>, t: Try<'_>, after: After) -> an
         Ok(c) => c,
         Err(e) => { crate::log::warn(format!("run {id}: Codex chat on the command line: {e}")); return Ok(Some(after)); }
     };
-    // (The provider's key is in the environment only: `adapter_command`, `providers::apply_codex_env`.)
-    c.env("CODEX_CONFIG", session_config(t.args, t.service).to_string()).env("INITIAL_AGENT_MODE", mode);
+    for (k, v) in adapter_env(&t, mode) { c.env(k, v); }
     c.current_dir(&t.spec.cwd);
     go(state, t, after, c).await
+}
+
+/// What the adapter is started with on top of `acp_agent::adapter_command` (which points it at the
+/// user's Codex and puts another provider's key in the environment, and only there): the run's
+/// settings as its session config, and its mode from the very start (never the adapter's default,
+/// `agent`, where a model approves what Codex asks).
+pub fn adapter_env(t: &Try<'_>, mode: &str) -> Vec<(&'static str, String)> {
+    vec![("CODEX_CONFIG", session_config(t.args, t.service).to_string()), ("INITIAL_AGENT_MODE", mode.to_string())]
 }
 
 /// `start` with the adapter command ready (tests hand in a stand-in).
