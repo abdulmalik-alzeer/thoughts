@@ -67,7 +67,7 @@ pub fn secret_paths_in(home: &Path) -> (Vec<PathBuf>, Vec<PathBuf>) {
         // What the user allowed in chats ("Always for this chat"), access keys and the port, and the
         // smaller records: a run must not plant them before they exist, any more than change them.
         "chat-approvals.json", "tokens.json", "port", "calendar-export.json", "release-check.json", "models-seen.json",
-        "codex-seen.json", "context-windows.json", "workflows-library.json", "safe-mode", "meter.jsonl", "plan-usage.json"];
+        "codex-seen.json", "context-windows.json", "workflows-library.json", "safe-mode", "meter.jsonl", "plan-usage.json", "usage-watch.json"];
     const DIRS: &[&str] = &["chats", "attachments", "logs", "base", "backups", "extensions", "reorganize-worktree", "wrap-copies", "run-tmp", "plugin-data", "history", "app-layer-held",
         "chats-set-aside", "chat-files",
         // The copy of Archify that draws diagrams (`figures.rs`): run by the app, so never a run's to touch.

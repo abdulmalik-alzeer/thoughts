@@ -65,6 +65,7 @@ pub mod secrets;
 pub mod settings;
 pub mod spend;
 pub mod meter;
+pub mod plan_watch;
 pub mod prices;
 pub mod shell_guard;
 pub mod snapshots;
@@ -210,6 +211,8 @@ pub async fn run() -> anyhow::Result<()> {
     tokio::spawn(release::weekly(state.clone()));
     // Old and never-used chats are removed in the background (the old-chat part only when the person asked for it).
     tidy::start(state.clone());
+    // How much of the Claude and ChatGPT plans is used, asked now and kept current (nothing when no plan is set up).
+    plan_watch::start(state.clone());
     // Search by meaning goes on where it was, when it is switched on (nothing at all when off).
     meaning::start(state.clone());
     // Streaming chats are written to disk at most every couple of seconds; this picks up the rest.

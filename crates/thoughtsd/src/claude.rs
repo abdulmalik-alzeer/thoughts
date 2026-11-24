@@ -186,7 +186,7 @@ pub fn quiet_env(send: bool) -> &'static [(&'static str, &'static str)] {
     if send { &[] } else { &[("DISABLE_TELEMETRY", "1"), ("DISABLE_ERROR_REPORTING", "1")] }
 }
 
-fn cmd(bin: &Path) -> Command {
+pub(crate) fn cmd(bin: &Path) -> Command {
     let mut c = crate::proc::command(bin);
     c.env("PATH", shell_path());
     c.env(APP_RUN_ENV, "1");

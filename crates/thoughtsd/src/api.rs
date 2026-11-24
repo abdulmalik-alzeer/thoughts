@@ -300,6 +300,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .merge(crate::import::routes())
         // usage: plan limits, tokens and what they would cost
         .merge(crate::meter::routes())
+        .merge(crate::plan_watch::routes())
         // several libraries: the switcher
         .merge(crate::libraries::routes())
         // diagrams in answers and notes, drawn by Archify (`figures.rs`)

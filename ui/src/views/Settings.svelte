@@ -50,7 +50,7 @@
     general: ['language', 'set.name', 'ui.set.profession', 'theme', 'mode', 'set.notify', 'todob.set.title', 'todob.set.weekStart', 'todob.set.dates', 'nativeb.set.title', 'nativeb.set.switch'],
     accessibility: ['a11y.zoom', 'a11y.motion', 'a11y.links', 'a11y.focus', 'a11y.spacing'],
     ai: ['codex.set.which', 'set.account', 'codex.set.title', 'codex.set.limitsTitle', 'set.perm', 'set.wrapNag', 'chatc.set.suggest', 'r10-chatview.set.title'],
-    usage: ['r10-usage.set.glance', 'r10-usage.set.scopeTitle'],
+    usage: ['r10-usage.set.glance', 'usage72.set.title', 'r10-usage.set.scopeTitle'],
     git: ['set.libraryPath', 'hista.historyTitle', 'hista.keep', 'set.backup', 'hista.backup.online', 'histb.backup.drive', 'hista.online.when', 'libf-sync.set.check', 'set.credStore', 'histb.loc.title', 'hista.online.locations', 'histb.signin.update', 'reorganize'],
     privacy: ['set.privTitle', 'appr.strict.title', 'seca.access.title', 'wrapa.set.auto', 'wording.reports.title', 'layer.signalsTitle', 'set.cost', 'runc.spend.title', 'ui.set.showCost', 'secb.keys.title', 'fullaccess.title', 'fullaccess.switch'],
     modules: ['set.modulesIntro'],

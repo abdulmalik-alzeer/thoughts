@@ -43,7 +43,7 @@ On a subscription the practical effect of heavy use is reaching your plan's usag
 - **Settings › Usage**: the last 30 days at a glance, and **What the cost figures cover**. Choose **Only chats in Thoughts** (chats, Wraps and everything else Thoughts asks the assistant to do), or **Everything on this computer**, which also counts what you did with Claude Code and Codex outside Thoughts, for example in Terminal. Thoughts reads their history on this computer to count it, and never changes it. This choice changes what the Usage page and Settings › Usage show; it does not change the month total or the spending limit below.
 - **Settings › Privacy & cost**: the estimated assistant cost this month, and the monthly spending limit.
 
-The plan figures arrive with the assistant's answers, so they are as of your last chat.
+Thoughts keeps the plan figures up to date by itself: when it opens, every few minutes while it is open, and after each chat, it asks Claude Code and Codex how much of your plan is used. This sends nothing to a model and creates no chat. When the figures are not fresh, the time they are from is shown beside them ("As of …"). An older Claude Code or Codex can only report with its answers; the figures are then as of your last chat, and the page says so. With an API key or another service there is no plan limit, so the page shows what you used through Thoughts instead. You can switch the automatic check off in **Settings › Usage**.
 
 ## The "estimated cost" figure in the app
 

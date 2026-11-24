@@ -36,7 +36,8 @@
   $effect(() => { const r = running; if (wasRunning && !r) { clearTimeout(loadTimer); loadTimer = setTimeout(load, 1200); } wasRunning = r; });
   onDestroy(() => { clearTimeout(hoverTimer); clearTimeout(loadTimer); });
 
-  const plan = $derived<Plan>(data?.plans?.[prov] ?? null);
+  // What the window keeps for every view (there before this chat's own figures, and kept current), else what came with them.
+  const plan = $derived<Plan>(meter.plans?.[prov] ?? data?.plans?.[prov] ?? null);
   const top = $derived(fullest(plan));
   const pct = $derived(top?.percent ?? 0);
   const lv = $derived(top ? level(top) : 'ok');

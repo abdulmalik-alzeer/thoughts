@@ -4,11 +4,12 @@
 import { api, on } from './api';
 import { app } from './store.svelte';
 import { fmtDate, fmtMoney, lang, t } from './i18n';
+import type { WatchOne } from './planView';
 
 export const PROVIDERS = ['claude', 'codex'] as const;
 export type Provider = (typeof PROVIDERS)[number];
 
-export type Win = { id: string; percent: number | null; resetsAt: number | null; minutes: number | null; status: string | null; seenAt: number; hasReset: boolean };
+export type Win = { id: string; percent: number | null; resetsAt: number | null; minutes: number | null; status: string | null; seenAt: number; hasReset: boolean; /** What a window for one model or product is for, in the service's words. */ label?: string | null };
 export type Plan = { windows: Win[]; seenAt: number } | null;
 export type Tok = { input: number; output: number; cacheRead: number; cacheWrite: number };
 export type Use = { tokens: Tok; totalTokens: number; costUsd: number; unpricedTokens: number; estimated: boolean; count: number };
@@ -16,14 +17,42 @@ export type Use = { tokens: Tok; totalTokens: number; costUsd: number; unpricedT
 export const meter = $state({
   /** Bumped whenever the service says the figures changed; views reload on it. */
   tick: 0,
+  /** The plans' limits as the service last knew them, for every view at once (`null`: not asked yet). */
+  plans: null as Record<Provider, Plan> | null,
+  /** Whether the service could ask each assistant for its plan's usage without a run (`plan_watch.rs`). */
+  watch: null as Record<Provider, WatchOne> | null,
+  /** The time, moved along once a minute so "as of" appears by itself when figures grow old. */
+  now: Date.now(),
 });
 
+function took(r: any) { if (r?.plans) meter.plans = r.plans; if (r?.watch) meter.watch = r.watch; meter.now = Date.now(); }
+/** The plans' limits, read from the service (which also tells it a window is there). */
+export const loadPlans = () => api<any>('/meter/plans').then(took).catch(() => {});
+/** The window opened or the set-up changed: ask the service for fresh figures (it decides how often is too often). */
+export const refreshPlans = () => api<any>('/meter/refresh', { method: 'POST' }).then(took).catch(() => {});
+
 let listening = false;
-/** Follow `meter.changed` (once for the whole window). */
+let quiet: ReturnType<typeof setTimeout> | undefined;
+/** Follow `meter.changed` (once for the whole window), and keep the plans' limits on screen without
+ *  anyone asking: fresh when the window opens or comes back, read again while it is in view. */
 export function followMeter() {
   if (listening) return;
   listening = true;
-  on((e) => { if (e?.type === 'meter.changed') meter.tick++; });
+  on((e) => {
+    // A sign-in, or a change in Settings (another service, the switch for this): what can be asked has changed.
+    if (e?.type === 'auth.changed' || e?.type === 'settings.changed') { refreshPlans(); return; }
+    if (e?.type !== 'meter.changed') return;
+    meter.tick++;
+    // Runs end in bursts: one read once they have.
+    clearTimeout(quiet);
+    quiet = setTimeout(loadPlans, 300);
+  });
+  refreshPlans();
+  const seen = () => typeof document === 'undefined' || document.visibilityState === 'visible';
+  setInterval(() => { meter.now = Date.now(); }, 60_000);
+  // While the window is in view the service keeps the figures current; a hidden one asks for nothing.
+  setInterval(() => { if (seen()) loadPlans(); }, 5 * 60_000);
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', () => { if (seen()) refreshPlans(); });
 }
 
 /** The usage page's figures for the last `days` days. */
@@ -70,6 +99,7 @@ export function winLabel(w: Win): string {
   if (w.id === 'seven_day_opus') return t('r10-usage.win.weekModel', { model: 'Opus' });
   if (w.id === 'seven_day_sonnet') return t('r10-usage.win.weekModel', { model: 'Sonnet' });
   if (w.id === 'seven_day_overage_included') return t('r10-usage.win.weekExtra');
+  if (w.label && w.id.startsWith('seven_day_')) return t('r10-usage.win.weekModel', { model: w.label });
   const m = w.minutes ?? (/^m(\d+)$/.exec(w.id)?.[1] ? Number(/^m(\d+)$/.exec(w.id)![1]) : null);
   if (m && m % 1440 === 0) return t('r10-usage.win.days', { n: m / 1440 });
   if (m && m % 60 === 0) return t('r10-usage.win.hours', { n: m / 60 });

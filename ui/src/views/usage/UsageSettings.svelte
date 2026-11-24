@@ -8,6 +8,9 @@
   let { value = $bindable(), disabled = false, vis = (..._k: string[]) => true }: { value: any; disabled?: boolean; vis?: (...k: string[]) => boolean } = $props();
   const whole = $derived(!!value?.wholeComputer);
   const set = (on: boolean) => { value = { ...(value ?? { monthlyLimitUsd: null, warnPercent: 80 }), wholeComputer: on }; };
+  // Asking the assistants for the plan's usage without a chat: on unless switched off here.
+  const auto = $derived(value?.autoUsage !== false);
+  const setAuto = (on: boolean) => { value = { ...(value ?? { monthlyLimitUsd: null, warnPercent: 80 }), autoUsage: on }; };
 </script>
 
 {#if vis('r10-usage.set.glance')}
@@ -17,6 +20,13 @@
       <button type="button" class="btn" onclick={() => go({ kind: 'usage' })}><Icon name="usage" size={14} /> {t('r10-usage.set.open')}</button>
     </div>
     <UsageGlance />
+  </div>
+{/if}
+{#if vis('usage72.set.title')}
+  <div class="card">
+    <h3 class="auto-h">{t('usage72.set.title')}</h3>
+    <label class="opt"><input type="checkbox" checked={auto} {disabled} onchange={(e) => setAuto(e.currentTarget.checked)} />
+      <span><b>{t('usage72.set.on')}</b><span class="muted sm">{t('usage72.set.hint')}</span></span></label>
   </div>
 {/if}
 {#if vis('r10-usage.set.scopeTitle')}
@@ -46,4 +56,5 @@
   .opt > span { display: flex; flex-direction: column; gap: 2px; }
   .sm { font-size: var(--fs-xs); }
   .note { margin: 12px 0 0; }
+  .auto-h { margin: 0 0 10px; }
 </style>

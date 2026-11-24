@@ -177,7 +177,7 @@ export type Settings = {
   calendar: { weekStart: number | null; weekend: number[] | null; dates: string; alarm: string | null };
   releaseCheck: boolean;
   assistantReports: boolean;
-  spending: { monthlyLimitUsd: number | null; warnPercent: number; wholeComputer: boolean; /** A MADO build holds new builders at this share of the usage window (10–100; absent = 80). */ buildHoldPercent?: number; /** A MADO build's own commands run confined on macOS (absent = on). Off only through the shell's warning. */ confineCommands?: boolean };
+  spending: { monthlyLimitUsd: number | null; warnPercent: number; wholeComputer: boolean; /** A MADO build holds new builders at this share of the usage window (10–100; absent = 80). */ buildHoldPercent?: number; /** A MADO build's own commands run confined on macOS (absent = on). Off only through the shell's warning. */ confineCommands?: boolean; /** Ask the assistants for the plan's usage without waiting for a chat (absent = on). */ autoUsage?: boolean };
   capture: { shortcutOn: boolean; shortcut: string };
   libraries: LibraryEntry[];
   /** Full access (`settings::FullAccess`): `on` and `since` change only through the shell's approval. */
