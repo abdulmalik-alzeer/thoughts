@@ -1,5 +1,24 @@
 # What's new in Thoughts
 
+## 0.7.0
+
+Plugins and packs now travel as real files instead of one JSON file, the Customise page keeps its explanations behind `?` icons, and Codex chats can run through ACP like Claude Code chats. Read "Before you rely on it": none of it has been seen in the app window yet.
+
+### New
+- **Plugins as real files.** Export saves a plugin as `<name>.thoughts-plugin`: a zip you can open, holding the plugin's own files (its code, styles and settings) at their usual places, plus a short `plugin.json` that describes it. **Export all** and the packs under Share are saved the same way as `.thoughts-pack`.
+- **Adding one needs no assistant.** A plugin or pack file is checked and added by the app itself: choose the file, look at the review, Try it, Keep. Files exported by earlier versions (`.json`) can still be added. A file that was edited after it was made is added too, and the review says so.
+- **A quieter Customise page.** On every tab the explanations moved behind `?` icons beside what they explain. Warnings, costs, permissions and what is sent to your assistant stay on screen.
+- **Codex over ACP.** Ordinary Codex chats run through Codex's official ACP adapter when everything that protects you on the command line can be kept: the same sandbox, the same folders, your key never on a command line. Otherwise the chat runs the old way. It needs Node.js and Codex 0.171.0 or newer; Settings says why when it cannot be used.
+
+### Fixed
+- Claude Code chats over ACP now record the tokens a turn used, not only its cost.
+- With an old Codex installed, reading its models no longer starts Codex's own screen in the background.
+
+### Before you rely on it
+- **Nothing here has been seen in the app window**, and no real Codex chat has run over ACP.
+- Thoughts 0.6 and earlier cannot add the new plugin and pack files. Update the other computer first.
+- Over ACP, Codex is never allowed to leave its sandbox: such a request is refused and listed under the answer. Skip-permissions chats with Codex on macOS still use the command line.
+
 ## 0.6.0
 
 Claude Code chats now run through the Agent Client Protocol (ACP), the chat offers every permission mode the assistant reports, explanations sit behind a `?` icon, and signing in with a subscription shows a clear warning first. Read "Before you rely on it": none of it has been seen in the app window yet.

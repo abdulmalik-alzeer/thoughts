@@ -5723,7 +5723,7 @@ dependencies = [
 
 [[package]]
 name = "thoughts"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "block2",
@@ -5751,7 +5751,7 @@ dependencies = [
 
 [[package]]
 name = "thoughtsd"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",
