@@ -1,5 +1,32 @@
 # What's new in Thoughts
 
+## 0.7.2
+
+Eight things asked for after 0.7.1: no more stretchy scrolling, closing and quitting behave, a shorter page for connecting another service, a model list you can read, a sidebar you edit in place, and plan usage that shows without sending a message first. Read "Before you rely on it": none of it has been seen in the app window yet.
+
+### New
+- **One model list everywhere.** The chat, Settings and "Use another service" share one list. Each model appears under the name its assistant reports, the current one is ticked and the default is marked. A long list gets a search box, your recently used models on top and groups by maker.
+- **The model has its own chip in a chat**, beside the one for what the assistant may do, with effort right next to it. The chat's options menu now holds only the assistant and what it may do.
+- **Edit the sidebar in place.** Choose "Edit sidebar" or right-click a page. Drag pages and groups to reorder them (or Alt+↑ / Alt+↓), hide or show a page with one click, rename it where it stands, pick an icon from a grid. There is no Save button: a change applies at once, Undo steps back, and "Reset…" asks first. Hidden pages wait in a "Hidden" list.
+- **Plan usage without sending a message.** Thoughts asks your assistant for your plan's usage when it starts, when a window opens, every ten minutes while one is open and after each answer, and remembers the last figures. Codex is asked through its own usage request (it needs a recent Codex); Claude Code through its own `/usage` command. With an API key or another service there is no plan limit, and the page says so. Settings › Usage has a switch for it.
+
+### Changed
+- **"Use another service" is one short page** for both assistants: OpenAI, Anthropic, OpenRouter, DeepSeek, Ollama on this computer, and "Another service (OpenAI-compatible)". A ready-made service asks only for its key, each card says which assistant it works with, and the model list is read from the service after you save. A service you saved earlier keeps working and opens as "Another service".
+- **Quit and ⌘Q always quit the app.** Before, with "Let long tasks continue after I close the window" on, they only hid the window. With that setting on, the background service carries on by itself until you open Thoughts again; "Quit Thoughts completely" in the menu bar icon still stops everything. Closing the window behaves as before.
+- **A customisation may write its own working copy in every mode but Plan**, so the assistant no longer reports a missing permission for each file, and it is told not to ask for permissions nobody can give there. Nothing takes effect until you press Keep, as before.
+
+### Fixed
+- Pages and panes no longer stretch and spring back when scrolled past their ends (macOS 13 and later).
+- Closing the window while it fills the screen no longer leaves a black screen: it leaves full screen first.
+- Editing the sidebar no longer forgets the name, icon, group or hidden state of a page that was not in the sidebar at that moment.
+- In Arabic, a long model name is cut at its end, not its start.
+
+### Before you rely on it
+- **Nothing here has been seen in the app window.** The new screens were looked at in a browser only, with stand-in assistants and services; no real key, account or trackpad was used.
+- Plan usage for a Claude subscription has not been tried on a real account. If Claude Code ever answers `/usage` by using tokens, Thoughts records it and does not ask that version again.
+- On macOS 11 and 12 panes can still bounce inside, and so can the PDF preview.
+- A window closed while full screen comes back as an ordinary window.
+
 ## 0.7.1
 
 Thoughts is now open source, and its code and releases are public on GitHub. Nothing else changes from 0.7.0.
