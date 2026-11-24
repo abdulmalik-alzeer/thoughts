@@ -18,7 +18,7 @@ import { assemble, changelogSection, notesFor, updaterManifest } from './assembl
 import { decide, verdict } from './ci-status.mjs';
 import { collect } from './collect.mjs';
 import { GitHub, PLATFORMS, ROOT, Stop } from './lib.mjs';
-import { ALWAYS_ASK_ACCOUNT, checkInstalled, commitsByOthers, findKey, findPassword, installProblem, keychainPath, KEYCHAIN_SERVICE, preflightProblems, publicEndpoint, repoFromRemote, TESTS, workflowsToSwitch } from './local.mjs';
+import { ALWAYS_ASK_ACCOUNT, checkInstalled, commitsByOthers, isOwnersNoreply, sinceWords, findKey, findPassword, installProblem, keychainPath, KEYCHAIN_SERVICE, preflightProblems, publicEndpoint, repoFromRemote, TESTS, workflowsToSwitch } from './local.mjs';
 import { executable, MANIFEST, pack, place } from './compiled.mjs';
 import { checkSignature } from './minisign.mjs';
 import { plan } from './plan.mjs';
@@ -688,6 +688,35 @@ test('local release: commits someone else made are listed, and the build waits u
   const behind = preflightProblems({ ...ready, behind: 2 });
   assert.equal(behind.length, 1);
   assert.match(behind[0], /GitHub's main has 2 commits this Mac does not have/);
+});
+
+test('local release: the first release lists only the commits of other identities, the owner\'s GitHub address counting as theirs', () => {
+  const line = (...fields) => fields.join('\x1f');
+  const owner = 'someone';
+  const noreply = '108473776+someone@users.noreply.github.com';
+  const bot = '49699333+dependabot[bot]@users.noreply.github.com';
+  // A history rewritten so the owner's commits carry GitHub's address, while this Mac's git
+  // address is another one.
+  const log = [
+    line('aaa1111', 'Someone', noreply, noreply, 'the first commit'),
+    line('bbb2222', 'Someone', noreply, noreply, 'a later change'),
+    line('ccc3333', 'dependabot[bot]', bot, 'noreply@github.com', 'Bump a package'),
+    line('ddd4444', 'Other', '5+other@users.noreply.github.com', '5+other@users.noreply.github.com', 'not the owner'),
+  ].join('\n');
+  const others = commitsByOthers(log, ['me@mac.example'], owner);
+  assert.deepEqual(others.map((c) => c.id), ['ccc3333', 'ddd4444']);
+  assert.deepEqual(commitsByOthers(log, ['me@mac.example']).map((c) => c.id), ['aaa1111', 'bbb2222', 'ccc3333', 'ddd4444'], 'without the owner nothing is taken as theirs');
+
+  assert.ok(isOwnersNoreply(noreply, owner) && isOwnersNoreply('SOMEONE@users.noreply.github.com', 'Someone'));
+  for (const no of ['108473776+someone2@users.noreply.github.com', 'someone@example.com', '1+someone@users.noreply.github.com.evil', '', null]) assert.ok(!isOwnersNoreply(no, owner), String(no));
+  assert.ok(!isOwnersNoreply(noreply, ''), 'no owner, no match');
+
+  assert.equal(sinceWords('v1.2.2'), 'since v1.2.2');
+  const ready = { branch: 'main', dirty: false, version: '0.7.1', head: SHA, tagAt: null, key: 'KEY', password: 'pw', publicKey: 'PUB', keysMatch: true, changelog: 'entry', changelogAr: 'مدخل' };
+  const [first] = preflightProblems({ ...ready, others, since: null });
+  assert.match(first, /^2 commits in the whole history \(this is the first release\) were not made by you:/);
+  assert.match(first, /ccc3333 {2}dependabot\[bot\]/);
+  assert.deepEqual(preflightProblems({ ...ready, others, since: null, includeOthers: true }), []);
 });
 
 // A stand-in for /usr/bin/security: a set of keychains, each locked or not, holding items

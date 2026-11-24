@@ -14,10 +14,15 @@
 //   --include-others   build although commits since the last release were made by someone else:
 //                      you have read them
 //
-// Anyone who can see this repository can push to `main` (a collaborator on a personal repository
-// always can, and branch rules need a paid plan or a public repository). So before it builds,
-// this command lists every commit since the last release that you did not make, and every commit
-// on GitHub's `main` that this Mac does not have, and waits until you have read them.
+// A collaborator on a personal repository can always push to `main`, and so can anyone whose
+// change is merged, until rulesets for `main` and the `v*` tags are switched on (docs/RELEASING.md,
+// "Repository settings worth switching on"). So before it builds, this command lists every commit
+// since the last release that you did not make, and every commit on GitHub's `main` that this Mac
+// does not have, and waits until you have read them. "You" is this Mac's git address
+// (`git config user.email`), any address in RELEASE_OWN_EMAILS (comma-separated), and the address
+// GitHub makes for the repository's owner (`<number>+<owner>@users.noreply.github.com`). With no
+// earlier release tag (the first release) "since the last release" is the whole history, so only
+// the commits of other identities are listed (Dependabot's, for instance), not every commit.
 //
 // Before it: set the version (scripts/set-version.mjs), write the entry in docs/CHANGELOG.md and
 // docs/ar/CHANGELOG.md (it becomes the release page and the new version's Help › What's new; it is
@@ -72,8 +77,8 @@ export function repoFromRemote(url) {
   return m ? `${m[1]}/${m[2]}` : null;
 }
 
-/** The address every installed copy asks first. Public repositories answer it; a private one
- *  answers "not found", and a copy with the GitHub fallback switched on goes on from there. */
+/** The address every installed copy asks for updates, with no sign-in: the newest public
+ *  release's `latest.json`. Before anything is published there it answers "not found". */
 export const publicEndpoint = (repo) => `https://github.com/${repo}/releases/latest/download/latest.json`;
 
 /** The private key: what TAURI_SIGNING_PRIVATE_KEY holds (the key, or the path of its file), or
@@ -84,12 +89,22 @@ export function findKey(env, { exists = existsSync, read = (p) => readFileSync(p
   return exists(fallback) ? read(fallback).trim() : null;
 }
 
+/** Is `address` the one GitHub makes for the account `owner` (`<number>+<owner>@users.noreply.github.com`,
+ *  or the older `<owner>@users.noreply.github.com`)? */
+export function isOwnersNoreply(address, owner) {
+  const login = String(owner ?? '').trim().toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,38})$/.test(login)) return false;
+  const m = /^(?:\d+\+)?([a-z0-9-]+)@users\.noreply\.github\.com$/.exec(String(address ?? '').trim().toLowerCase());
+  return !!m && m[1] === login;
+}
+
 /** The commits in `log` that the person releasing did not make: the author or the committer is
- *  not one of `own` (addresses, in any letter case). `log` is one commit a line, as
+ *  not one of `own` (addresses, in any letter case) nor GitHub's address for the account `owner`
+ *  (the repository's owner). `log` is one commit a line, as
  *  `git log --format=%h%x1f%an%x1f%ae%x1f%ce%x1f%s` prints it. */
-export function commitsByOthers(log, own) {
+export function commitsByOthers(log, own, owner = null) {
   const mine = new Set([...own].map((e) => String(e).trim().toLowerCase()).filter(Boolean));
-  const is = (address) => mine.has(String(address ?? '').toLowerCase());
+  const is = (address) => mine.has(String(address ?? '').toLowerCase()) || isOwnersNoreply(address, owner);
   return String(log ?? '')
     .split('\n')
     .filter(Boolean)
@@ -99,6 +114,9 @@ export function commitsByOthers(log, own) {
     })
     .filter((c) => !is(c.author) || !is(c.committer));
 }
+
+/** "since v1.2.2", or for the first release (no earlier tag) "in the whole history". */
+export const sinceWords = (since) => (since ? `since ${since}` : 'in the whole history (this is the first release)');
 
 /** Everything that must hold before a release is built. Returns the reasons it does not.
  *  `others`: the commits since the release `since` that someone else made (`commitsByOthers`);
@@ -110,7 +128,7 @@ export function preflightProblems({ branch, dirty, version, head, tagAt, key, pa
     const one = others.length === 1;
     const shown = others.slice(0, 20).map((c) => `    ${c.id}  ${c.name} <${c.author}>  ${c.subject}`).join('\n');
     const more = others.length > 20 ? `\n    … and ${others.length - 20} more` : '';
-    problems.push(`${others.length} commit${one ? '' : 's'} since ${since ?? 'the first commit'} ${one ? 'was' : 'were'} not made by you:\n${shown}${more}\n  Read ${one ? 'it' : 'them'} (git show <id>), then run this again with --include-others.`);
+    problems.push(`${others.length} commit${one ? '' : 's'} ${sinceWords(since)} ${one ? 'was' : 'were'} not made by you:\n${shown}${more}\n  Read ${one ? 'it' : 'them'} (git show <id>), then run this again with --include-others.`);
   }
   if (branch !== 'main') problems.push(`Releases are made from main; this is "${branch}".`);
   if (dirty) problems.push('There are changes that are not committed. A release is built from a commit.');
@@ -306,13 +324,15 @@ function facts({ withKey = true } = {}) {
   const tag = git('rev-parse', '-q', '--verify', `refs/tags/v${version}^{commit}`);
   // Whose commits go into this release: everything since the release before it.
   const own = [git('config', 'user.email').out, ...(process.env.RELEASE_OWN_EMAILS || '').split(',')];
+  // No earlier tag (the first release): the whole history, of which only other identities are listed.
   const since = git('tag', '--merged', 'HEAD', '--sort=-v:refname', '--list', 'v*').out.split('\n').find((t) => t && t !== `v${version}`) ?? null;
   const log = git('log', '--format=%h%x1f%an%x1f%ae%x1f%ce%x1f%s', since ? `${since}..HEAD` : 'HEAD').out;
+  const repo = repoFromRemote(git('remote', 'get-url', 'origin').out);
   // What GitHub has that this Mac does not. Best effort: with no connection the last known state counts.
   git('fetch', '--quiet', 'origin', 'main');
   return {
     since,
-    others: commitsByOthers(log, own),
+    others: commitsByOthers(log, own, repo?.split('/')[0]),
     behind: Number(git('rev-list', '--count', 'HEAD..origin/main').out) || 0,
     version,
     tag: `v${version}`,
@@ -320,7 +340,7 @@ function facts({ withKey = true } = {}) {
     dirty: git('status', '--porcelain').out !== '',
     head: git('rev-parse', 'HEAD').out,
     tagAt: tag.ok ? tag.out : null,
-    repo: repoFromRemote(git('remote', 'get-url', 'origin').out),
+    repo,
     key,
     password,
     passwordProblem: found.problem,
@@ -490,8 +510,8 @@ if (isMain(import.meta.url)) {
     for (const file of built.release.files) console.log(`  ${file.name}  ${megabytes(file.bytes)}`);
     console.log('  Every signed file verifies against src-tauri/updater.pub, for this version.');
     console.log(f.others.length
-      ? `  It includes ${f.others.length} commit${f.others.length === 1 ? '' : 's'} since ${f.since ?? 'the first commit'} not made by you, which you said you have read (--include-others).`
-      : `  Every commit since ${f.since ?? 'the first commit'} is yours.`);
+      ? `  It includes ${f.others.length} commit${f.others.length === 1 ? '' : 's'} ${sinceWords(f.since)} not made by you, which you said you have read (--include-others).`
+      : `  Every commit ${sinceWords(f.since)} is yours.`);
 
     if (!args.has('--draft')) {
       console.log(`\nNothing was sent anywhere. The files are in release-out/ and release-meta/.\nNext: node scripts/release/local.mjs --draft`);
