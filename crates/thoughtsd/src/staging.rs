@@ -207,6 +207,23 @@ pub fn deny_rules(d: &Dirs, library: Option<&Path>) -> Vec<String> {
     deny
 }
 
+/// What a customise run may do without anyone being asked: read and change the files of its own
+/// staging copy, `cwd`. In accept-edits mode that follows from the mode; in Manual mode (`default`)
+/// every single file would be a question, and a customise run has nobody to answer one, so each
+/// write was refused and the user was told about a permission file after file. The run is confined
+/// to that folder already, so it is opened by rule, the way a planning run's `mado/` is
+/// (`mado::write_rules`). Nothing else is opened: commands, the web, connected tools and every other
+/// folder ask (and are refused) as before, and a deny rule wins over these (`deny_rules`: `.claude`,
+/// `.git`, `.mcp.json`, the library, the live layer, the app's own data; `claude::protective_deny`).
+/// Nothing for Plan mode, which changes no file, nor for a run that works anywhere but in `staging`.
+/// The spelling is exact, never folded: a folded allow would open a sibling in another letter case.
+pub fn allow_rules(staging: &Path, cwd: &Path, mode: &str) -> Vec<String> {
+    if cwd != staging || mode == "plan" || mode == crate::settings::BYPASS { return vec![]; }
+    // (Pattern characters in the folder's own name are escaped: the rule names that folder and no other.)
+    let p = crate::claude::rule_path(staging);
+    vec![format!("Read({p}/**)"), format!("Edit({p}/**)"), "Edit(./**)".to_string()]
+}
+
 /// Remove whatever Claude settings sit in the staging copy, so nothing in it can run code or
 /// loosen permissions. The run's own deny rules (`deny_rules`) are handed to the run directly
 /// (`RunSpec::extra_deny`), never written into the folder.
@@ -394,6 +411,13 @@ pub fn system_prompt(d: &Dirs) -> String {
          The exact ids are in the \"Built-in pages reference\" section of README.md, generated from this version of the app: use only those, \
          never CSS tricks for what these files can do. Only History, the change review, Customise, Rollback and the Recovery menu are out of reach \
          (and Settings cannot be replaced as a whole). Do not tell the user a built-in page cannot be changed when the reference allows it.\n\
+         9. Nobody can approve anything in this chat. The files of that folder are yours to read and write with the file tools \
+         (Read, Write, Edit, Glob, Grep) without asking; Write makes missing folders by itself. Commands that only look (ls, cat, find, grep) \
+         work too. Whatever else would need an approval is refused at once: a command that changes, starts or checks something (node, python, \
+         npm, jq, mkdir, cp, mv, rm, anything in /tmp), a file outside that folder and the library, the web, connected tools. So do not try \
+         those. Never run a command to test or check your files: read the file back instead (the app checks every file itself, and the user \
+         tries the change before keeping it). If something was refused anyway, do NOT ask the user for a permission, an approval or access: \
+         there is nothing they can grant here. Carry on without it, and say so in one plain sentence only if it changes the result.\n\
          Nothing you write takes effect until the user previews it and presses Keep, so do not tell them it is already live. \
          The user cannot answer interactive tool prompts here — ask questions in plain text, and keep the change small.{note}",
         staging = d.staging.display(), layer = d.layer.display(), note = cycle::prompt_note(d).to_owned() + &crate::bundles::prompt_note(d)
@@ -1895,5 +1919,121 @@ mod tests {
         // The run is told how to use what was attached.
         let p = system_prompt(&d);
         assert!(p.contains("attached") && p.contains("Read tool") && p.contains("never point a layer file at one"), "{p}");
+    }
+}
+
+/// Round 0.7.2: a customise run's own staging copy is opened by rule, and nothing else is.
+#[cfg(test)]
+mod allow_tests {
+    use super::*;
+    use crate::chats::{Chat, RunOptions};
+    use crate::claude::tests::denies as matches;
+    use crate::claude::{start_run, RunInfo, RunSpec};
+    use std::sync::Arc;
+
+    #[test]
+    fn the_staging_copy_is_opened_by_rule_and_nothing_outside_it() {
+        let home = Path::new("/Users/u/.thoughts");
+        let d = Dirs::at(home);
+        let lib = Path::new("/Users/u/Library");
+        for mode in ["default", "acceptEdits"] {
+            let allow = allow_rules(&d.staging, &d.staging, mode);
+            // Its own files, at any depth, to read and to change: no question per file.
+            for inside in ["SUMMARY.md", "plugins/calendar.js", "plugins/calendar.json", "views/a/b/c.html", "home.json"] {
+                assert!(matches(&allow, "Edit", &d.staging.join(inside)) && matches(&allow, "Read", &d.staging.join(inside)), "{mode}: {inside} still asks");
+            }
+            // Nothing outside the staging copy is opened: the library, the live layer (core, Recovery and
+            // Rollback are further out still), the app's own data, a folder beside it, another spelling
+            // of it, anywhere else on the computer. Those ask as before, and with nobody to ask are refused.
+            for outside in [lib.join("notes/a.md"), d.layer.join("plugins/a.js"), d.layer.join("manifest.json"), home.join("settings.json"), home.join("secrets.json"),
+                home.join("app-layer-staging-2/x.js"), home.join("app-layer-stagingx"), home.join("APP-LAYER-STAGING/plugins/a.js"), d.held.join("held.json"),
+                PathBuf::from("/tmp/check.mjs"), PathBuf::from("/Users/u/.claude/settings.json"), PathBuf::from("/Applications/Thoughts.app/Contents/MacOS/thoughts")] {
+                assert!(!matches(&allow, "Edit", &outside) && !matches(&allow, "Read", &outside), "{mode}: {} was opened", outside.display());
+            }
+            // Only files: no command, no web, no connected tool is allowed by it.
+            assert!(allow.iter().all(|r| r.starts_with("Read(") || r.starts_with("Edit(")), "{allow:?}");
+            assert_eq!(allow.len(), 3, "{allow:?}");
+        }
+        // Plan mode changes no file, and a run that works anywhere else gets nothing.
+        assert!(allow_rules(&d.staging, &d.staging, "plan").is_empty());
+        assert!(allow_rules(&d.staging, &d.staging, crate::settings::BYPASS).is_empty());
+        assert!(allow_rules(&d.staging, lib, "default").is_empty() && allow_rules(&d.staging, &d.layer, "acceptEdits").is_empty());
+        // A deny rule wins over an allow rule, and the ones that close what must stay closed inside and
+        // around the staging copy are all still there.
+        let deny = deny_rules(&d, Some(lib));
+        for closed in ["Edit(./.claude)", "Edit(./.claude/**)", "Edit(./.git)", "Edit(./.git/**)", "Edit(./.mcp.json)"] { assert!(deny.iter().any(|r| r == closed), "missing {closed}"); }
+        for closed in [lib.join("notes/a.md"), d.layer.join("plugins/a.js"), home.join("settings.json"), home.join("chats/x.json")] {
+            assert!(matches(&deny, "Edit", &closed), "{} can be changed", closed.display());
+        }
+        let protective = crate::claude::protective_deny(&d.staging, &[lib.to_path_buf()], home, "c-1", false);
+        for closed in [d.staging.join(".claude/settings.json"), d.staging.join(".git/config"), d.staging.join(".mcp.json")] {
+            assert!(matches(&protective, "Edit", &closed), "{} can be changed", closed.display());
+        }
+        // A folder whose name holds pattern characters is named exactly.
+        let odd = Path::new("/Users/u/[x]*/app-layer-staging");
+        let allow = allow_rules(odd, odd, "default");
+        assert!(matches(&allow, "Edit", &odd.join("a.js")) && !matches(&allow, "Edit", Path::new("/Users/u/x/other/app-layer-staging/a.js")), "{allow:?}");
+    }
+
+    async fn run_of(st: &Arc<AppState>, seen: &Arc<std::sync::Mutex<Vec<RunInfo>>>, kind: &str, mode: &str, cwd: &Path, lib: &Path) -> RunInfo {
+        let chat = Chat { kind: kind.into(), ..Default::default() };
+        st.chats.insert(chat.clone()).await;
+        let n = seen.lock().unwrap().len();
+        let extra_deny = if kind == "customize" { deny_rules(&Dirs::real(), Some(lib)) } else { vec![] };
+        start_run(st.clone(), RunSpec { chat_id: chat.id.clone(), prompt: "hi".into(), cwd: cwd.to_path_buf(), add_dirs: vec![lib.to_path_buf()],
+            options: RunOptions { permission_mode: Some(mode.into()), ..Default::default() }, resume: None, append_system: None, extra_deny }, None).await.unwrap();
+        for _ in 0..400 { if seen.lock().unwrap().len() > n && !st.chats.get(&chat.id).await.unwrap().running { break; } tokio::time::sleep(std::time::Duration::from_millis(5)).await; }
+        seen.lock().unwrap().last().cloned().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_customise_run_is_started_with_its_own_folder_open_in_every_mode_that_writes() {
+        let st = Arc::new(AppState::for_test());
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<RunInfo>::new()));
+        let log = seen.clone();
+        *st.run_hook.lock().unwrap() = Some(Arc::new(move |info: RunInfo| { log.lock().unwrap().push(info); Box::pin(async { true }) }));
+        let lib = std::env::temp_dir().join(format!("thoughts-cust-allow-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(lib.join("notes")).unwrap();
+        st.settings.write().await.library_path = Some(lib.to_string_lossy().into());
+        let d = Dirs::real();
+        let own = crate::claude::rule_path(&d.staging);
+        let opened = |i: &RunInfo| i.allow.iter().any(|a| *a == format!("Edit({own}/**)"));
+        // Manual mode (every file was a question nobody could answer) and accept-edits alike.
+        for mode in ["default", "acceptEdits"] {
+            let i = run_of(&st, &seen, "customize", mode, &d.staging, &lib).await;
+            assert_eq!(i.permission_mode.as_deref(), Some(mode), "the mode itself is left as chosen");
+            assert!(opened(&i) && matches(&i.allow, "Edit", &d.staging.join("plugins/a.js")), "{mode}: {:?}", i.allow);
+            // Outside the layer nothing is allowed, and what was closed is closed: the library, the live layer, the app's data.
+            for outside in [lib.join("notes/a.md"), d.layer.join("plugins/a.js"), d.home.join("settings.json")] {
+                assert!(!matches(&i.allow, "Edit", &outside), "{mode}: {} was opened", outside.display());
+                assert!(matches(&i.deny, "Edit", &outside), "{mode}: {} is no longer closed", outside.display());
+            }
+            assert!(i.deny.iter().any(|r| r == "Edit(./.claude/**)") && i.deny.iter().any(|r| r == "Edit(./.git/**)"), "{mode}");
+            // No command, web page or connected tool is allowed by rule, and nobody is asked on a card (as before).
+            assert!(!i.allow.iter().any(|a| a.starts_with("Bash") || a.starts_with("Web") || a.starts_with("mcp")), "{:?}", i.allow);
+            assert!(i.prompt_token.is_none() && i.ask.is_empty(), "{mode}");
+        }
+        // Plan mode stays read-only.
+        assert!(!opened(&run_of(&st, &seen, "customize", "plan", &d.staging, &lib).await));
+        // Only the customise run: an ordinary chat is never given the staging copy by rule, wherever it works,
+        // and a customise chat pointed anywhere else gets nothing either.
+        assert!(!opened(&run_of(&st, &seen, "chat", "default", &lib, &lib).await));
+        let elsewhere = run_of(&st, &seen, "customize", "default", &lib, &lib).await;
+        assert!(!elsewhere.allow.iter().any(|a| a.starts_with("Edit(")), "{:?}", elsewhere.allow);
+        // Full access is as it was: no rules at all.
+        st.settings.write().await.full_access.on = true;
+        let full = run_of(&st, &seen, "customize", "default", &d.staging, &lib).await;
+        assert!(full.full_access && full.allow.is_empty() && full.deny.is_empty(), "{:?}", full.allow);
+        std::fs::remove_dir_all(&lib).unwrap();
+    }
+
+    #[test]
+    fn the_run_is_told_not_to_ask_for_what_nobody_can_grant() {
+        let d = Dirs::at(Path::new("/Users/u/.thoughts"));
+        let p = system_prompt(&d);
+        assert!(p.contains("Nobody can approve anything in this chat") && p.contains("do NOT ask the user for a permission"), "{p}");
+        assert!(p.contains("Never run a command to test or check your files"), "{p}");
+        // With full access nothing is refused, so nothing of this is said.
+        assert!(!system_prompt_full(&d).contains("Nobody can approve"));
     }
 }

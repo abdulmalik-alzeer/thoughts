@@ -2034,6 +2034,9 @@ pub async fn start_run(
     let mut prof_allow = prof_allow;
     // (Only for the runs that get copies: the ones a message starts, `api::chat_send`.)
     if !full && matches!(kind.as_str(), "chat" | "customize") { prof_allow.extend(own_copies_allow(&crate::paths::home(), &spec.chat_id)); }
+    // A customise run's own staging copy is opened by rule, so that no mode asks about it file by
+    // file with nobody there to answer (`staging::allow_rules`); the deny rules above still win.
+    if !full && kind == "customize" { prof_allow.extend(crate::staging::allow_rules(&staging, &spec.cwd, &mode)); }
     if !full { prof_allow.extend(mado_allow); }
     let deny = with_allow(deny, &prof_allow);
     let deny = if strict && prof.shell { with_ask(deny, &SHELL_TOOLS) } else { deny };
