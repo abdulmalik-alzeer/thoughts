@@ -464,14 +464,14 @@ when Codex is chosen.
   the user asks, or by itself while "Check for new versions automatically" is on
   (`startAutoUpdateChecks` in `ui/src/lib/updates.ts`; off unless switched on), and installs it
   only when the user agrees. It never installs silently. `find_update`
-  (`src-tauri/src/main.rs`) asks the public address first, with no sign-in. Only a clear "not
-  found" from it leads to the GitHub fallback (`src-tauri/src/ghfeed.rs`), and that asks
-  nothing unless the person switched it on from a terminal (`thoughts updates gh on`: a file
-  of its own in the app's folder, which nothing else writes and no setting reaches). The
-  fallback fetches the release through GitHub's API with the `gh` sign-in and hands the files
-  to the updater library, which checks their signature as it does for any update. The sign-in
-  is sent to the API host only, never stored, and never given to the window or a chat. A build
-  without the key only points to the download page (`release.rs`). Each release ships a hash manifest;
+  (`src-tauri/src/main.rs`) asks the public release's `latest.json`
+  (`https://github.com/<owner>/<repo>/releases/latest/download/latest.json`), with no sign-in,
+  and the updater library checks the signature of what it downloads against the build's key
+  before installing it. "Not found" there means nothing is published yet (`unpublished`). Copies
+  0.0.12 to 0.7.0 also had a GitHub fallback through the `gh` sign-in for the time the
+  repository was private (`thoughts updates gh on`); it was removed in 0.7.1, and
+  `thoughts updates …` now only says that no step is needed. A build without the key only
+  points to the download page (`release.rs`). Each release ships a hash manifest;
   customised files are compared three ways (original, yours, new). Only files changed on both
   sides ask the user: keep mine, use new, or let the assistant merge (previewed like any change).
   Defaults removed or renamed upstream are reported and left in place, an unresolved conflict is

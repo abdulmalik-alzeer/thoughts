@@ -51,9 +51,9 @@ See [Making Thoughts your own](docs/CUSTOMISING.md).
 
 ### Where it runs today
 
-Thoughts is in early testing, and its repository is still private. There is no public download
-yet: copies are shared by hand, and links to its releases (and the instructions for getting the
-source) only work for people who have been given access.
+Thoughts is in early testing. It is open source: the code and every release are public on
+GitHub, and the installers are on the
+[Releases page](https://github.com/abdulmalik-alzeer/thoughts/releases).
 
 - **macOS** is where Thoughts is used today, on Apple Silicon Macs (M1 or later). Each release is
   set up to make one app for Apple Silicon and Intel Macs, but it has not been run on an Intel Mac
@@ -124,22 +124,7 @@ it, checks that it is genuine and restarts as the new version. It never installs
 itself. Version 0.0.11 and older cannot do this: install the next version by hand once, the way
 you installed this one.
 
-**For testers, while the repository is private.** The address Thoughts asks for updates only
-answers once the project is public. Until then a copy can look for updates as you, through the
-GitHub command-line tool. The **Updates for testers** card in Settings › Maintenance walks you
-through it, says whether it is on and what is missing, and has each line ready to copy. In a
-terminal, once:
-
-```bash
-brew install gh        # if you do not have it
-gh auth login
-/Applications/Thoughts.app/Contents/MacOS/thoughts updates gh on
-```
-
-The last command switches this on and says which account it found and whether that account can
-see the releases. `… updates gh off` switches it off again, and `… updates gh status` only
-reports. It is off in every copy until that command is run, and while it is off Thoughts never
-starts `gh`.
+Checking for updates needs no account and no sign-in: Thoughts asks the public Releases page.
 
 If you've customised the app, the new version compares what you changed with the original and
 only asks where both you and the new version changed the same thing: keep mine, use new, or let

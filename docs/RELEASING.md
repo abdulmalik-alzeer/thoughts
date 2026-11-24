@@ -5,10 +5,14 @@ first time; after that the [checklist](#release-checklist) is enough.
 
 **Where things stand today**
 
-- macOS is the only platform that has been built and run. What people have today is an
-  **Apple Silicon build made by hand and shared privately**. The release workflow is set up to
-  produce a universal `.dmg` (Apple Silicon + Intel), but no release has been published from it
-  and the Intel half has never been run. The README states the user-facing version of this in
+- The repository is **public** (from 0.7.1, 2026-11-24): the code, the Releases page and the
+  updater's `latest.json` can be read by anyone, with no sign-in. 0.7.1 is the first release of
+  the public repository and its only tag: the history was rewritten and every earlier release
+  and tag deleted. Copies of 0.0.12 to 0.7.0 still find it (see
+  [Older copies and the public repository](#older-copies-and-the-public-repository)).
+- macOS is the only platform that has been built and run. The releases are universal `.dmg`
+  files (Apple Silicon + Intel) made on a Mac with the local release command; the Intel half has
+  never been run. The README states the user-facing version of this in
   its "Where it runs today" section; change the two together.
 - Windows and Linux builds are wired up in CI but **have never been tested on a real machine**.
   Treat the first Windows/Linux installers as experiments, and run the
@@ -18,11 +22,11 @@ first time; after that the [checklist](#release-checklist) is enough.
   (decided 2026-11-15: no Apple developer account for now). The release workflow works without
   them.
 - The in-app updater is in every build made with the updater key (see
-  [The updater](#the-updater)). No published release has it yet: 0.0.11 and older cannot update
-  themselves, and the first version built with the key is installed by hand.
-- While the repository is private, a copy reaches its releases through the GitHub fallback,
-  which each tester switches on once from a terminal. The user guides (README, CUSTOMISING,
-  PRIVACY) describe all of this; change them together.
+  [The updater](#the-updater)), which is every release from 0.0.12 on: 0.0.11 and older cannot
+  update themselves and are updated by hand once. It asks the public address only, with no
+  sign-in. The GitHub fallback for the time the repository was private (`thoughts updates gh
+  on`, in 0.0.12 to 0.7.0) was removed in 0.7.1. The user guides (README, CUSTOMISING, PRIVACY)
+  describe all of this; change them together.
 - Releases are made on a Mac with one command while the pipeline cannot run (see
   [A release made on this Mac](#a-release-made-on-this-mac)).
 - An update was rehearsed on this Mac on 2026-11-16. [Known unverified](#known-unverified)
@@ -92,8 +96,9 @@ scripts.
   cache). A dependency change that no run on `main` has built yet costs little: the build starts
   from the previous cache. These figures are estimates from the 0.0.8 build times; replace them
   with measured ones after the first releases. Before 0.0.9 a release took about 38 minutes.
-- **What it costs.** The repository is private, so GitHub counts runner minutes, each job
-  rounded up to a whole minute: a macOS minute counts as ten, a Windows minute as two. A warm
+- **What it costs.** On a public repository GitHub's standard runners cost nothing. The figures
+  below are from the time the repository was private, when GitHub counted runner minutes, each
+  job rounded up to a whole minute: a macOS minute counted as ten, a Windows minute as two. A warm
   release is roughly 70 counted minutes (50 of them the macOS build), a cold one roughly 100, a
   cold rehearsal roughly 100 and a warm one roughly 50 (0.0.8: about 125 for the release run,
   plus 25 for testing the same commit on `main` first). A timed warm-up that finds the cache
@@ -166,8 +171,8 @@ only changed something that concerns one platform, rehearse that platform.
 
 ## A release made on this Mac
 
-While the pipeline cannot run (the Actions budget, or a repository that is still private), a
-release is made with one command. It builds macOS only, with the same scripts the pipeline
+While the pipeline is not used (it has not yet published a release), a release is made with one
+command. It builds macOS only, with the same scripts the pipeline
 uses, and sends nothing anywhere until it is asked to:
 
 ```bash
@@ -197,12 +202,17 @@ entries; the kit history; the tests — `cargo test -p thoughtsd`, `cargo test -
 (svelte-check), `npx vitest run` (the UI's own tests) and the release scripts' tests
 (`--skip-tests` leaves them out, and the summary says so).
 
-**Whose commits go into it.** Everyone who can see this repository can also push to `main`
-(see [Repository settings](#repository-settings-worth-switching-on)), so before it builds the
-command lists every commit since the last release that you did not make (the author and the
-committer must both be this Mac's git identity; `RELEASE_OWN_EMAILS` names more addresses of
-yours), and refuses to build until you have read them and run it again with
-`--include-others`. It also refuses while GitHub's `main` has commits this Mac does not have:
+**Whose commits go into it.** Until the rulesets for `main` and the `v*` tags are on, a
+collaborator can push to `main` (see
+[Repository settings](#repository-settings-worth-switching-on)), so before it builds the
+command lists every commit since the last release that you did not make, and refuses to build
+until you have read them and run it again with `--include-others`. A commit is yours when its
+author and its committer are both one of your addresses: this Mac's git identity, the addresses
+in `RELEASE_OWN_EMAILS` (comma-separated), and the address GitHub makes for the repository's
+owner (`<number>+<owner>@users.noreply.github.com`, which the rewritten history uses). With no
+earlier release tag (0.7.1, the first release of the public repository) "since the last release"
+is the whole history; only the commits of other identities are listed then, which are
+Dependabot's and any made on GitHub's website (their committer is GitHub). It also refuses while GitHub's `main` has commits this Mac does not have:
 someone pushed, and you have not looked yet. The summary of a build says which it was: every
 commit yours, or how many were not.
 
@@ -298,20 +308,19 @@ as [the updater](#the-updater) section says.
 
 `node scripts/release/rehearse-update.mjs` runs a whole in-app update on this Mac without the
 installed app, the real key or GitHub. Run it before any release that changes update code
-(`src-tauri/src/ghfeed.rs`, the update commands in `src-tauri/src/main.rs`,
-`ui/src/lib/updates.ts`, the scripts in `scripts/release/`).
+(the update commands in `src-tauri/src/main.rs`, `ui/src/lib/updates.ts`, the scripts in
+`scripts/release/`).
 
 It copies the working tree, builds the app twice, as 0.0.90 and 0.0.91, under the name
-"Thoughts Rehearsal" and with a throwaway key, serves a pretend public address and a pretend
-GitHub from this computer, and for each scenario installs 0.0.90 in the Applications folder,
+"Thoughts Rehearsal" and with a throwaway key, serves a pretend public address from this
+computer, and for each scenario installs 0.0.90 in the Applications folder,
 starts it and reads what happened:
 
 | Scenario | Expected |
 |---|---|
 | The public address answers | 0.0.90 becomes 0.0.91 |
-| Not public, fallback switched on | The same, through the pretend GitHub's API |
-| Not public, fallback off | "No published version"; `gh` never started, the API never asked |
-| No answer at all, fallback on | "Could not reach"; the fallback is not tried |
+| Nothing published ("not found") | "No published version"; 0.0.90 stays |
+| No answer at all | "Could not reach"; 0.0.90 stays |
 | One byte of the download changed | Refused; 0.0.90 stays |
 | Opened from a disk image | The update fails cleanly |
 
@@ -366,7 +375,12 @@ they are (for step 1, the tests are run on this Mac by that command).
    then `node scripts/kit-history.mjs`. It lists every starter file each earlier release shipped,
    so a library made by an older version is not asked for trust again because this release
    reworded one of the kit's routines. (`--check` only says whether the file is current;
-   `--before X.Y.Z` leaves out that release's own tag and anything newer.) The release workflow's
+   `--before X.Y.Z` leaves out that release's own tag and anything newer.) The releases up to
+   and including 0.7.0 are kept in the file itself: their tags were deleted when the repository
+   became public, so the script reads those entries back from the committed file (checked
+   against a fingerprint, `FROZEN_SHA256`; it refuses to go on if one was changed or lost) and
+   adds only the releases tagged after 0.7.0 from git. Never edit or regenerate that part by
+   hand. For 0.7.1 there is no such tag, so the file stays as it is. The release workflow's
    preflight runs `node scripts/kit-history.mjs --check --before X.Y.Z` with every tag fetched and
    stops before building when the file is out of date.
 3. Commit (`Cargo.toml`, `Cargo.lock`, `package.json`, `package-lock.json`,
@@ -554,24 +568,12 @@ not loaded: "Check for Updates…" then asks GitHub for the latest release numbe
 download page (a Linux package says its updates come from the package manager). If it has both,
 the app checks `latest.json`, and installs only an update whose signature matches the public key.
 
-A check asks the public address first, with no sign-in. That is all that ever happens for a
-public repository. When the address answers a clear "not found" (a private repository, or one
-with no release), the app says that no published version was found, unless the person has
-switched on the **GitHub fallback** from a terminal:
-
-```bash
-/Applications/Thoughts.app/Contents/MacOS/thoughts updates gh on      # or: off, status
-```
-
-With the fallback on, the app asks the GitHub command-line tool (`gh`) for its sign-in, reads
-the newest release through GitHub's API as that person, and hands `latest.json` and the update
-file to the updater library, which checks the signature exactly as for a public download
-(`src-tauri/src/ghfeed.rs`). Whoever may see the Releases page gets updates; nobody else does.
-The sign-in is sent to `api.github.com` only, never stored, and never given to the window or
-the assistant. No connection, a time-out or any other error never leads to the fallback. The
-switch is a file of its own in the app's folder (`updates-gh.json`) that only this command
-writes; there is no setting for it. It stays in the product after the repository becomes
-public: from then on the public address answers, and the fallback is simply never reached.
+A check asks the public address, with no sign-in, and nothing else. When it answers "not found"
+(nothing published yet), the app says that no published version was found. No connection, a
+time-out or any other error is said as such. (0.0.12 to 0.7.0 also had a GitHub fallback through
+the `gh` sign-in, switched on from a terminal, for the time the repository was private. 0.7.1
+removed it; `thoughts updates …` in a terminal now only says that no step is needed, and a
+switch file an older copy left in the app's folder, `updates-gh.json`, is ignored.)
 
 The app asks about updates by itself only while "Check for new versions automatically" is on
 (Settings › Maintenance, off unless switched on): once a couple of minutes after it opens, then
@@ -583,9 +585,8 @@ Things to know:
   never offered to users. Publishing the draft is what rolls the update out. The addresses in
   `latest.json` (`…/releases/download/vX.Y.Z/<file>`) only exist once the draft is published.
 - At the public address the updater downloads from this repository's releases without signing
-  in, which only works for a public repository. **While the repository is private, a copy
-  reaches the releases through the GitHub fallback** (above), which each tester switches on
-  once. Only people with access to the repository get updates.
+  in, which only works because the repository is public. Making it private again would stop
+  every copy from 0.7.1 on from finding updates.
 - The first version that contains the public key cannot be reached by the updater from older
   versions. People install that one by hand; from then on updates are automatic.
 - On Linux only the AppImage updates itself. `.deb` users install the new `.deb` by hand (the
@@ -598,6 +599,39 @@ Things to know:
   expected for the microphone and speech permissions (not rehearsed). A signing certificate
   ends this, and a self-made one may be enough: `rehearse-update.mjs --identity "<name>"`
   shows what it changes.
+
+### Older copies and the public repository
+
+How a copy that is already installed finds an update, so that the history rewrite of 2026-11
+(every old release and tag deleted, one new release 0.7.1) still reaches it. Every copy from
+0.0.12 to 0.7.0 was built with the same updater key (`src-tauri/updater.pub`, unchanged since
+0.0.12), the one address
+`https://github.com/abdulmalik-alzeer/thoughts/releases/latest/download/latest.json`,
+`requireSignedVersion`, and `tauri-plugin-updater` 2.14.1. Releases before 0.0.12 have no updater.
+
+1. It asks that address with no sign-in. GitHub forwards `releases/latest/download/<file>` to the
+   newest published, non-draft, non-prerelease release's file of that name, so only the release
+   marked "latest" counts; no API call, no tag list, no older release is read.
+2. If the answer is a `latest.json` (200), the updater compares its `version` with its own
+   (semver: a higher version is an update), picks `platforms["darwin-<arch>-app"]`, else
+   `platforms["darwin-<arch>"]` (`<arch>` is `aarch64` or `x86_64`), downloads that entry's `url`
+   with no sign-in, and installs it only if `signature` verifies against the key **and** the
+   signature's trusted comment names exactly that version. 0.1.0 and later show the app's own
+   words and a link to `https://github.com/<owner>/<repo>/releases/tag/v<version>`; 0.0.12 to
+   0.0.14 show `notes` (or `notes_ar`) from `latest.json`.
+3. Only if the address answers "not found" (no release published, or a private repository) does
+   a 0.0.12–0.7.0 copy go on: with the fallback switched off it says "no published version";
+   with it switched on it signs in with `gh` and reads the newest release through the API. Once
+   0.7.1 is public step 1 answers, so the fallback is never reached, switched on or not.
+
+So the one new release must: be published (not a draft, not a pre-release) and marked latest;
+be tagged `v0.7.1`; carry an asset named exactly `latest.json` with `version` `0.7.1`,
+`platforms` entries `darwin-aarch64`, `darwin-aarch64-app`, `darwin-x86_64`,
+`darwin-x86_64-app` (the local release command writes these, plus `darwin-universal`), each with
+the URL of the release's `.app.tar.gz` and its `.sig` content; and have that `.app.tar.gz` signed
+with the same key, for version 0.7.1 (the local release command checks both). Between deleting
+the old releases and publishing 0.7.1, older copies are told that no published version was found;
+nothing breaks. A copy of 0.7.1 or later never asks anything else.
 
 ## What a release must not break
 
@@ -734,7 +768,7 @@ seen it work and noted the version and date.
   signing and notarisation steps in the workflow have never run.
 - **The updater, as far as it has been seen.** On 2026-11-16 (macOS 26.3, Apple Silicon) a
   rehearsal with a throwaway key and a pretend GitHub on this Mac showed: an update from the
-  public address and one through the GitHub fallback both installed and restarted as the new
+  public address and one through the GitHub fallback (removed in 0.7.1) both installed and restarted as the new
   version; the background service was the new version afterwards; the sign-in went to the API
   only; with the fallback off nothing was asked and `gh` was not started; no answer from the
   public address did not lead to the fallback; a download with one changed byte was refused; a
@@ -742,10 +776,13 @@ seen it work and noted the version and date.
   requests themselves were tried, with the owner's account: the latest release, the forward to
   the file host, the bytes. **Never seen:** an update from a real published release; a
   collaborator's account; the update dialog clicked by a person
-  (`rehearse-update.mjs --by-hand public`); the updater key with a password, and the local
+  (`rehearse-update.mjs --by-hand`); the updater key with a password, and the local
   release command past its checks; the pipeline's signing and `latest.json` steps; the
   microphone permission after an update; an update while a chat is running; a copy downloaded
   through a browser; an Intel Mac; Windows and Linux.
+- **0.7.1 and the public repository.** Nobody has yet updated an installed 0.6.0, 0.7.0 or
+  0.0.12 copy to 0.7.1 from the public Releases page, with or without the old fallback switched
+  on, and the update rehearsal has not been run since its fallback scenarios were removed.
 - **Plugin frames under the bundled CSP.** In bundled builds Tauri adds a nonce to `<style>` in
   HTML assets, which may block inline styles inside add-on and view frames. This cannot be seen
   in `tauri dev`; it needs a look in an installed build (test plan step 8).
@@ -838,26 +875,31 @@ update: bump both sides in one commit, then run a [rehearsal](#rehearsal).
 These are settings on GitHub, not files in the repository; only the owner can change them.
 None is required for the workflow to run.
 
-**Where they stand (2026-11-16).** Switched on: release immutability, Dependabot alerts and
-security updates, and the rule that actions are pinned to a full commit. Already as they should
-be: a workflow's own token can only read, workflows cannot approve pull requests, and no secret
-or variable is stored on GitHub. **Not possible on the current plan:** rules for `main` and for
-the release tags (below).
+**Where they stand (2026-11-16, before the repository became public).** Switched on: release
+immutability, Dependabot alerts and security updates, and the rule that actions are pinned to a
+full commit. Already as they should be: a workflow's own token can only read, workflows cannot
+approve pull requests, and no secret or variable is stored on GitHub. Check them again after the
+repository was made public and its history rewritten. **To be switched on, now that the
+repository is public:** the rulesets for `main` and for the release tags (below), on: ____
+(the lead fills in the date).
 
-- **Rules for `main` and for the release tags.** GitHub offers branch protection and rulesets
-  for a private repository only with GitHub Pro (or once the repository is public). Without
-  them, everyone who can see this repository can also push to `main`, move or create a `v*`
-  tag, and create or delete a release: on a repository owned by a personal account a
-  collaborator always has write access, and read-only access cannot be given. What still holds:
-  an installed copy only installs what the updater key signed, and that key is on the owner's
-  Mac and nowhere on GitHub; a published release can no longer be changed (immutability,
-  below). What does not hold: nothing stops a collaborator's commit from reaching `main`. The
-  release command stands in for that at the one moment it matters: it lists every commit since
-  the last release that the person releasing did not make, and waits until they have been
-  read (see [A release made on this Mac](#a-release-made-on-this-mac)). With Pro (or a public
-  repository), add two rulesets, each with the repository admin as the only one who may bypass:
-  for the branch `main`, restrict updates and deletions and block force pushes; for tags
-  matching `v*`, restrict creations, updates and deletions.
+- **Rules for `main` and for the release tags.** The repository is public, so rulesets are
+  available on the free plan (before, they needed GitHub Pro). They are **to be switched on**.
+  Until they are, everyone with write access (on a repository owned by a personal account, every
+  collaborator) can push to `main`, move or create a `v*` tag, and create or delete a release.
+  What holds either way: an installed copy only installs what the updater key signed, and that
+  key is on the owner's Mac and nowhere on GitHub; a published release can no longer be changed
+  (immutability, below). The release command also lists every commit since the last release
+  that the person releasing did not make, and waits until they have been read (see
+  [A release made on this Mac](#a-release-made-on-this-mac)). Add two rulesets, each with the
+  repository admin as the only one who may bypass: for the branch `main`, restrict updates and
+  deletions and block force pushes (switch this on only after the rewritten history has been
+  pushed, or the admin's bypass has to be used for it); for tags matching `v*`, restrict
+  creations, updates and deletions.
+- **Pull requests from forks.** Anyone can now open a pull request, and `ci.yml` runs on it
+  with a read-only token and no secret. Under Settings → Actions → General, keep "Require
+  approval for all outside collaborators" (or at least first-time contributors) so a stranger's
+  workflow change does not run unseen.
 - **Keep the updater key off GitHub while anyone else can push.** A workflow on any branch can
   read the repository's secrets, and anyone with write access can push such a workflow. The
   protected environment described at the end of this list is what makes it safe to store.
@@ -872,9 +914,9 @@ the release tags (below).
 - **Require actions to be pinned to a full-length commit SHA** (Settings → Actions → General).
   Makes the convention used in the workflows a rule.
 - **A protected `release` environment for the signing secrets**, with a required reviewer:
-  GitHub then asks a person to approve before a job may read the secrets. For a private
-  repository, environment secrets need a paid plan (Pro or Team) and required reviewers need
-  GitHub Enterprise; on a public repository both are free. Limiting the environment to tags
+  GitHub then asks a person to approve before a job may read the secrets. On a public
+  repository both environment secrets and required reviewers are free (for a private one they
+  needed a paid plan). Limiting the environment to tags
   `v*` (also possible on Pro or Team) already keeps the secrets away from every branch and
   rehearsal run. To adopt it: create the environment, move the signing secrets into it, and add
   `environment: release` to the `sign` job in `release.yml` (the only job that reads them). With a tags-only rule a rehearsal

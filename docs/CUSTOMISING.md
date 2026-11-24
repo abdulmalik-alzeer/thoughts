@@ -213,8 +213,7 @@ The first time version 0.5 starts, the packs you kept earlier are listed as plug
 To get a new version, choose **Check for Updates…** in the menu, or switch on **Check for new
 versions automatically** under **Settings › Maintenance** to be told when one is out. Thoughts
 says what changed and, when you agree, downloads the new version, checks that it is genuine and
-restarts as it. It never installs anything by itself. While the project's repository is private,
-testers need one step in a terminal first: see "Updates" in the README.
+restarts as it. It never installs anything by itself, and it needs no account or sign-in.
 
 For your customisations, Thoughts compares three things: the original, your version, and the new version.
 
