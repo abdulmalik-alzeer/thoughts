@@ -460,8 +460,9 @@ pub struct AiSettings {
     pub secondary: Option<String>,
     pub claude: ClaudeSettings,
     pub codex: CodexSettings,
-    /// Ordinary Claude Code chats run through the command line as before (`true`) instead of the
-    /// Agent Client Protocol adapter (`acp_agent.rs`, the default once it is installed).
+    /// Ordinary chats run through the command line as before (`true`) instead of the Agent Client
+    /// Protocol adapters (the default once installed): Claude Code's (`acp_agent.rs`) and Codex's
+    /// (`codex_acp.rs`) alike.
     pub classic_chats: bool,
 }
 

@@ -76,7 +76,8 @@ pub async fn install(p: Program) -> anyhow::Result<PathBuf> {
 
 /// Install in the background (once at a time); `acp.installed` is announced when it is done.
 pub fn ensure_in_background(state: Arc<crate::state::AppState>, p: Program) {
-    if ready(p).is_some() || slot(p).swap(true, Ordering::SeqCst) { return; }
+    // Tests never install anything with the machine's npm.
+    if cfg!(test) || ready(p).is_some() || slot(p).swap(true, Ordering::SeqCst) { return; }
     tokio::spawn(async move {
         match install(p).await {
             Ok(_) => state.emit(serde_json::json!({"type": "acp.installed", "program": p.name()})),

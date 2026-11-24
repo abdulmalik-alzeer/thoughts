@@ -27,6 +27,7 @@ pub mod codex;
 pub mod acp;
 pub mod acp_agent;
 pub mod acp_install;
+pub mod codex_acp;
 pub mod codex_models;
 pub mod git;
 pub mod branch;

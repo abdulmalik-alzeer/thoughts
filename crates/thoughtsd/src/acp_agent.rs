@@ -46,12 +46,17 @@ pub async fn adapter_command(state: &AppState, program: Program, entry: &Path) -
 }
 
 /// Start `c` and say hello over ACP.
-pub async fn connect(mut c: Command) -> anyhow::Result<(Child, Arc<Conn>, UnboundedReceiver<Incoming>)> {
+pub async fn connect(c: Command) -> anyhow::Result<(Child, Arc<Conn>, UnboundedReceiver<Incoming>)> {
+    connect_told(c).await.map(|(child, conn, rx, _)| (child, conn, rx))
+}
+
+/// `connect`, with what the agent answered to `initialize` (its capabilities).
+pub async fn connect_told(mut c: Command) -> anyhow::Result<(Child, Arc<Conn>, UnboundedReceiver<Incoming>, Value)> {
     let mut child = c.spawn()?;
     let (Some(out), Some(inp)) = (child.stdout.take(), child.stdin.take()) else { anyhow::bail!("the adapter has no connection") };
     let (conn, rx) = Conn::start(out, inp);
     match tokio::time::timeout(std::time::Duration::from_secs(60), acp::initialize(&conn)).await {
-        Ok(Ok(_)) => Ok((child, conn, rx)),
+        Ok(Ok(told)) => Ok((child, conn, rx, told)),
         Ok(Err(e)) => { end(&mut child).await; Err(e) }
         Err(_) => { end(&mut child).await; anyhow::bail!("the adapter did not answer") }
     }
@@ -103,7 +108,12 @@ pub async fn catalog(state: &Arc<AppState>, program: Program, refresh: bool) -> 
 /// Ask the adapter what a session would offer, in an empty folder of the app's own, without keeping
 /// a session (`session/options`; `session/new` where the adapter has no such method).
 pub async fn probe(state: &AppState, program: Program) -> anyhow::Result<Catalog> {
+    // The Codex adapter starts `codex app-server`, which an older Codex does not have (0.2x would take
+    // the word for a prompt): it is not started at all for a Codex older than the one it is made for.
     let entry = match acp_ready(program) { Some(e) => e, None => crate::acp_install::install(program).await? };
+    if program == Program::Codex {
+        if let Err(stay) = crate::codex_acp::codex_fits(state, &entry).await { anyhow::bail!("{}", stay.why()); }
+    }
     let dir = crate::paths::run_tmp_dir().join(format!("acp-probe-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&dir)?;
     let res = async {
@@ -211,17 +221,24 @@ pub async fn open_chat(conn: &Conn, s: &ChatSpec) -> anyhow::Result<(String, Cat
     let session = r["sessionId"].as_str().map(String::from).or_else(|| s.resume.clone().filter(|_| !s.fork))
         .ok_or_else(|| anyhow::anyhow!("the agent opened no session"))?;
     let cat = acp::catalog(&r);
-    if cat.current_mode.as_deref() != Some(s.mode.as_str()) {
-        acp::choose(conn, &session, cat.mode_option.as_deref(), &cat.modes, &s.mode, true).await
+    settle(conn, &session, &cat, &s.mode, s.model.as_deref(), s.effort.as_deref()).await?;
+    Ok((session, cat))
+}
+
+/// Put an open session in the chat's mode (which must be offered: else an error, and the turn does
+/// not start), model and effort (each only when offered).
+pub async fn settle(conn: &Conn, session: &str, cat: &Catalog, mode: &str, model: Option<&str>, effort: Option<&str>) -> anyhow::Result<()> {
+    if cat.current_mode.as_deref() != Some(mode) {
+        acp::choose(conn, session, cat.mode_option.as_deref(), &cat.modes, mode, true).await
             .map_err(|e| anyhow::anyhow!("the chat's permission mode could not be set: {e}"))?;
     }
-    if let Some(m) = s.model.as_deref().filter(|m| !m.is_empty() && cat.current_model.as_deref() != Some(*m)) {
-        if cat.models.iter().any(|c| c.id == m) { let _ = acp::choose(conn, &session, cat.model_option.as_deref(), &cat.models, m, false).await; }
+    if let Some(m) = model.filter(|m| !m.is_empty() && cat.current_model.as_deref() != Some(*m)) {
+        if cat.models.iter().any(|c| c.id == m) { let _ = acp::choose(conn, session, cat.model_option.as_deref(), &cat.models, m, false).await; }
     }
-    if let Some(e) = s.effort.as_deref().filter(|e| !e.is_empty() && cat.current_effort.as_deref() != Some(*e)) {
-        if let Some(o) = cat.effort_option.as_deref() { let _ = acp::choose(conn, &session, Some(o), &cat.efforts, e, false).await; }
+    if let Some(e) = effort.filter(|e| !e.is_empty() && cat.current_effort.as_deref() != Some(*e)) {
+        if let Some(o) = cat.effort_option.as_deref() { let _ = acp::choose(conn, session, Some(o), &cat.efforts, e, false).await; }
     }
-    Ok((session, cat))
+    Ok(())
 }
 
 /// Who answers the agent's permission requests: the app's approval cards for a chat that asks, a
@@ -255,8 +272,57 @@ async fn answer_permission(state: Arc<AppState>, conn: Arc<Conn>, id: Value, par
 /// One turn: send the prompt, show what comes back in the chat (`claude::handle_event`), answer
 /// permission requests, and end it all — the adapter and whatever it started — when the turn is
 /// over or Stop is pressed. The outcome reads like the command-line path's (`claude::follow`).
-pub async fn drive(state: &Arc<AppState>, chat_id: &str, mut child: Child, conn: Arc<Conn>, mut rx: UnboundedReceiver<Incoming>,
+pub async fn drive(state: &Arc<AppState>, chat_id: &str, child: Child, conn: Arc<Conn>, rx: UnboundedReceiver<Incoming>,
     session: String, prompt: String, asker: Asker, kill: &mut tokio::sync::oneshot::Receiver<()>) -> Followed {
+    let blocks = vec![json!({"type": "text", "text": prompt})];
+    drive_with(state, chat_id, child, conn, rx, session, blocks, asker, kill, View::Claude(Default::default())).await.0
+}
+
+/// How a turn's updates reach the chat: Claude Code's as its own `stream-json` events
+/// (`acp::Translator` → `claude::handle_event`), Codex's as the events its command-line runs report
+/// (`codex_acp::View` → `codex::handle`), so a chat looks the same whichever way it ran.
+pub enum View { Claude(acp::Translator), Codex(crate::codex_acp::View) }
+
+impl View {
+    async fn start(&mut self, state: &AppState, chat_id: &str, session: &str) {
+        match self {
+            View::Claude(_) => { crate::claude::handle_event(state, chat_id, &json!({"type": "system", "subtype": "init", "session_id": session})).await; }
+            View::Codex(v) => v.start(state, chat_id, session).await,
+        }
+    }
+
+    async fn update(&mut self, state: &AppState, chat_id: &str, u: &Value) {
+        match self {
+            View::Claude(tr) => for ev in tr.update(u) { crate::claude::handle_event(state, chat_id, &ev).await; },
+            View::Codex(v) => v.update(state, chat_id, u).await,
+        }
+    }
+
+    fn mode(&self) -> Option<&str> {
+        match self { View::Claude(tr) => tr.mode.as_deref(), View::Codex(v) => v.mode.as_deref() }
+    }
+
+    /// The end of the turn (`Ok`: the answer to `session/prompt`): `Some(success)` once its result is shown.
+    async fn end(&mut self, state: &AppState, chat_id: &str, stop: Result<&Value, String>, session: &str) -> Option<bool> {
+        match self {
+            View::Claude(tr) => {
+                let mut result = None;
+                let stop = stop.map(|r| r["stopReason"].as_str().unwrap_or("end_turn").to_string());
+                for ev in tr.end(stop.as_deref().map_err(|e| e.clone()), session) {
+                    if let Some(r) = crate::claude::handle_event(state, chat_id, &ev).await { result = Some(r); }
+                }
+                result
+            }
+            View::Codex(v) => v.end(state, chat_id, stop).await,
+        }
+    }
+}
+
+/// `drive` for either program: `prompt` is the turn's content blocks (text, and pictures for Codex).
+/// The view comes back with what it gathered (Codex's tokens, what its sandbox refused).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn drive_with(state: &Arc<AppState>, chat_id: &str, mut child: Child, conn: Arc<Conn>, mut rx: UnboundedReceiver<Incoming>,
+    session: String, prompt: Vec<Value>, asker: Asker, kill: &mut tokio::sync::oneshot::Receiver<()>, mut view: View) -> (Followed, View) {
     let err_text = Arc::new(std::sync::Mutex::new(String::new()));
     let err_task = child.stderr.take().map(|mut e| {
         let t = err_text.clone();
@@ -269,14 +335,12 @@ pub async fn drive(state: &Arc<AppState>, chat_id: &str, mut child: Child, conn:
             }
         })
     });
-    crate::claude::handle_event(state, chat_id, &json!({"type": "system", "subtype": "init", "session_id": session})).await;
+    view.start(state, chat_id, &session).await;
     let c2 = conn.clone();
     let sid = session.clone();
     let mut turn = tokio::spawn(async move {
-        c2.request("session/prompt", json!({"sessionId": sid, "prompt": [{"type": "text", "text": prompt}]})).await
+        c2.request("session/prompt", json!({"sessionId": sid, "prompt": prompt})).await
     });
-    let mut tr = acp::Translator::default();
-    let mut result: Option<bool> = None;
     let ended = loop {
         tokio::select! {
             _ = &mut *kill => {
@@ -286,30 +350,34 @@ pub async fn drive(state: &Arc<AppState>, chat_id: &str, mut child: Child, conn:
             }
             done = &mut turn => {
                 // What was sent before the answer is shown first.
-                while let Ok(m) = rx.try_recv() { if let Incoming::Notification { method, params } = m { if method == "session/update" { for ev in tr.update(&params["update"]) { crate::claude::handle_event(state, chat_id, &ev).await; } } } }
+                while let Ok(m) = rx.try_recv() { if let Incoming::Notification { method, params } = m { if method == "session/update" { view.update(state, chat_id, &params["update"]).await; } } }
                 let stop = match done {
                     Ok(Ok(r)) if r["stopReason"] == "cancelled" => break Ended::Stopped,
-                    Ok(Ok(r)) => Ok(r["stopReason"].as_str().unwrap_or("end_turn").to_string()),
+                    Ok(Ok(r)) => Ok(r),
                     Ok(Err(e)) => Err(e.to_string()),
                     Err(e) => Err(e.to_string()),
                 };
-                for ev in tr.end(stop.as_deref().map_err(|e| e.clone()), &session) {
-                    if let Some(r) = crate::claude::handle_event(state, chat_id, &ev).await { result = Some(r); }
-                }
+                let result = view.end(state, chat_id, stop.as_ref().map_err(|e| e.clone()), &session).await;
                 break result.map_or(Ended::NoResult, Ended::Result);
             }
             m = rx.recv() => match m {
                 None => break Ended::Lost("the adapter's output ended".into()),
                 Some(Incoming::Notification { method, params }) if method == "session/update" => {
-                    for ev in tr.update(&params["update"]) { crate::claude::handle_event(state, chat_id, &ev).await; }
+                    view.update(state, chat_id, &params["update"]).await;
                     // The session never goes on in a mode that does more than the one checked.
-                    if let Some(now) = tr.mode.as_deref().filter(|m| !asker.full && !acp::mode_within(&asker.mode, m)) {
+                    if let Some(now) = view.mode().filter(|m| !asker.full && !acp::mode_within(&asker.mode, m)) {
                         crate::log::error(format!("run {chat_id}: the agent switched to mode \"{now}\" (checked: {}); stopped", asker.mode));
                         let _ = conn.notify("session/cancel", json!({"sessionId": session})).await;
                         break Ended::Lost("the agent switched to a permission mode the chat does not use".into());
                     }
                 }
                 Some(Incoming::Notification { .. }) => {}
+                // Codex asks only to leave its sandbox, which `codex exec` never does: always refused,
+                // and listed under the answer like what its sandbox refused (`codex_acp::refusal`).
+                Some(Incoming::Request { id, method, params }) if method == "session/request_permission" && matches!(view, View::Codex(_)) => {
+                    if let View::Codex(v) = &mut view { v.refused(&params["toolCall"]); }
+                    let _ = conn.respond(&id, acp::permission_answer(crate::codex_acp::refusal(&params["options"]))).await;
+                }
                 Some(Incoming::Request { id, method, params }) if method == "session/request_permission" => {
                     tokio::spawn(answer_permission(state.clone(), conn.clone(), id, params, asker.clone()));
                 }
@@ -322,7 +390,7 @@ pub async fn drive(state: &Arc<AppState>, chat_id: &str, mut child: Child, conn:
     let exit = child.wait().await;
     if let Some(t) = err_task { let _ = tokio::time::timeout(std::time::Duration::from_secs(3), t).await; }
     let stderr = err_text.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    Followed { ended, exit, stderr }
+    (Followed { ended, exit, stderr }, view)
 }
 
 /// What `GET /api/ai/<program>/options` adds from the agent's own report: its models first (with

@@ -218,9 +218,19 @@ pub async fn choose(conn: &Conn, session: &str, option: Option<&str>, offered: &
 // ---------- permission requests ----------
 
 /// How much a permission mode lets the agent do without asking, least first. A mode not listed is
-/// unknown and counts as no mode at all (never "within" another).
+/// unknown and counts as no mode at all (never "within" another). Claude Code's adapter names its
+/// modes as Claude Code does; Codex's (`codex_acp`) by its sandbox: `read-only` (nothing changes),
+/// `workspace-write` (the folders it works in), `agent` (the same, with a model approving what it
+/// asks), `agent-full-access` (no sandbox). Its permission profiles (`permission-profile:…`) are unknown.
 pub fn strictness(mode: &str) -> Option<u8> {
-    match mode { "plan" => Some(0), "default" => Some(1), "acceptEdits" => Some(2), crate::settings::AUTO => Some(3), crate::settings::BYPASS => Some(4), _ => None }
+    match mode {
+        "plan" | "read-only" => Some(0),
+        "default" => Some(1),
+        "acceptEdits" | "workspace-write" => Some(2),
+        crate::settings::AUTO | "agent" => Some(3),
+        crate::settings::BYPASS | "agent-full-access" => Some(4),
+        _ => None,
+    }
 }
 
 /// May a session checked for mode `checked` be in mode `now`? Only the same mode or a stricter one.
