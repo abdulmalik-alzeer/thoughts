@@ -6,7 +6,8 @@
 //!   adapter reports (`session/options`, else `session/new`), never from a list in the app (`probe`);
 //! - Claude Code's ordinary chats (`claude::start_run`, kind `chat`): the same rules file, hooks,
 //!   system text and guards as the command-line path, handed to the adapter as SDK options; the
-//!   adapter's permission requests become the app's approval cards (`approvals::ask`).
+//!   adapter's permission requests become the app's approval cards (`approvals::ask`);
+//! - Codex's ordinary chats (`codex_acp.rs`), where every guard of `codex exec` travels.
 //!
 //! The protocol is small and its unstable parts (session config options, resume, fork) are what this
 //! needs, so it is spoken here directly over tokio with `serde_json` rather than through the
@@ -218,9 +219,19 @@ pub async fn choose(conn: &Conn, session: &str, option: Option<&str>, offered: &
 // ---------- permission requests ----------
 
 /// How much a permission mode lets the agent do without asking, least first. A mode not listed is
-/// unknown and counts as no mode at all (never "within" another).
+/// unknown and counts as no mode at all (never "within" another). Claude Code's adapter names its
+/// modes as Claude Code does; Codex's (`codex_acp`) by its sandbox: `read-only` (nothing changes),
+/// `workspace-write` (the folders it works in), `agent` (the same, with a model approving what it
+/// asks), `agent-full-access` (no sandbox). Its permission profiles (`permission-profile:…`) are unknown.
 pub fn strictness(mode: &str) -> Option<u8> {
-    match mode { "plan" => Some(0), "default" => Some(1), "acceptEdits" => Some(2), crate::settings::AUTO => Some(3), crate::settings::BYPASS => Some(4), _ => None }
+    match mode {
+        "plan" | "read-only" => Some(0),
+        "default" => Some(1),
+        "acceptEdits" | "workspace-write" => Some(2),
+        crate::settings::AUTO | "agent" => Some(3),
+        crate::settings::BYPASS | "agent-full-access" => Some(4),
+        _ => None,
+    }
 }
 
 /// May a session checked for mode `checked` be in mode `now`? Only the same mode or a stricter one.
@@ -293,6 +304,8 @@ pub struct Translator {
     calls: HashMap<String, bool>,
     pub cost: f64,
     pub mode: Option<String>,
+    /// The `usage` of the turn's answer (ACP's names; Claude Code's input counts no cached part).
+    pub usage: Value,
 }
 
 impl Translator {
@@ -365,6 +378,12 @@ impl Translator {
         let mut r = json!({"type": "result", "subtype": if ok { "success" } else { "error_during_execution" }, "is_error": !ok,
             "session_id": session, "total_cost_usd": self.cost});
         if let Some(t) = text { r["result"] = json!(t); }
+        // The turn's tokens as the command line's `result` names them, for the usage page (`meter::claude_records`).
+        if self.usage.is_object() {
+            let n = |k: &str| self.usage[k].as_u64().unwrap_or(0);
+            r["usage"] = json!({"input_tokens": n("inputTokens"), "output_tokens": n("outputTokens"),
+                "cache_read_input_tokens": n("cachedReadTokens"), "cache_creation_input_tokens": n("cachedWriteTokens")});
+        }
         out.push(r);
         out
     }

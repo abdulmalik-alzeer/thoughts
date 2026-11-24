@@ -55,6 +55,16 @@
     return k ? t(k, { version: versionNumber(opts.codexVersion || codex.version) }) : '';
   });
 
+  /** Why chats with Codex cannot use the newer connection here, when the user can do something about it. */
+  const acpNote = $derived.by(() => {
+    const a = opts.acpChats;
+    if (!a || a.on) return '';
+    if (a.why === 'codexTooOld' && a.need) return t('cxacp.tooOld', { have: a.have || versionNumber(codex.version) || '?', need: a.need });
+    if (a.why === 'codexTooOld' || a.why === 'noAppServer') return t('cxacp.noAppServer');
+    if (a.why === 'noNode') return t('cxacp.noNode');
+    return '';
+  });
+
   async function check() {
     if (busy.check) return;
     busy.check = true;
@@ -147,8 +157,10 @@
       <li>{t('codex.lim.claude')}</li>
       <li>{t('revsec.codex.customize')}</li>
       <li>{t('codex.lim.cost')}</li>
-      <li>{t('codex.lim.stream')}</li>
+      <!-- Over the newer connection (ACP) answers stream in; else they come whole, and Settings says why. -->
+      <li>{t(opts.acpChats?.on ? 'cxacp.stream' : 'codex.lim.stream')}</li>
     </ul>
+    {#if acpNote}<p class="sm note-old" role="status"><Icon name="info" size={13} /> <span>{acpNote}</span></p>{/if}
   {/if}
 {:else if part === 'advanced' && ai.codex && vis('codex.set.model', 'codex.set.effort', 'codex.set.mini', 'codex.set.binary')}
   <h3><bdi>Codex</bdi></h3>

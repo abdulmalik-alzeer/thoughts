@@ -110,6 +110,32 @@ where F: FnOnce() -> Fut, Fut: std::future::Future<Output = String> {
     v
 }
 
+/// `codex --version`, kept like `exec_help` (asked before every chat's turn: `codex_acp::codex_fits`).
+pub async fn version_kept(state: &AppState) -> String {
+    static V: Cached = std::sync::Mutex::new(None);
+    let Some(bin) = binary(state).await else { return String::new() };
+    let b = bin.clone();
+    cached(&V, &bin, || async move {
+        let mut c = cmd(&b);
+        c.arg("--version");
+        crate::proc::output_timeout(&mut c, Duration::from_secs(20)).await.ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default()
+    }).await
+}
+
+/// `codex --help` of the installed program: its sub-commands (`app-server` on versions the ACP adapter can drive).
+pub async fn top_help(state: &AppState) -> String {
+    static HELP: Cached = std::sync::Mutex::new(None);
+    let Some(bin) = binary(state).await else { return String::new() };
+    let b = bin.clone();
+    cached(&HELP, &bin, || async move {
+        let mut c = cmd(&b);
+        c.arg("--help");
+        crate::proc::output_timeout(&mut c, Duration::from_secs(15)).await.ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default()
+    }).await
+}
+
 /// `codex exec --help` of the installed program (never without a time limit).
 pub async fn exec_help(state: &AppState) -> String {
     static HELP: Cached = std::sync::Mutex::new(None);
@@ -303,7 +329,7 @@ fn note_auth_failed(state: &AppState) {
 }
 
 /// A Codex run went through: its sign-in and the network evidently work.
-fn note_run_ok(state: &AppState) {
+pub(crate) fn note_run_ok(state: &AppState) {
     state.mini_wraps_blocked.store(false, Ordering::Relaxed);
     if state.codex.auth_failed.swap(false, Ordering::Relaxed) { state.emit(json!({"type": "auth.changed", "provider": ID, "loggedIn": true})); }
 }
@@ -425,6 +451,8 @@ async fn options_with(state: &AppState, bin: &Path, detected: Option<crate::code
         "sandboxes": modes.iter().map(|m| (m.to_string(), json!(sandbox_for(m)))).collect::<serde_json::Map<String, Value>>(),
         "images": has_flag(&help, "--image"),
         "machineReadable": json_flag(&help).is_some(),
+        // Whether its ordinary chats run over ACP here, and if not why (`codex_acp::status`).
+        "acpChats": crate::codex_acp::status(state).await,
     });
     if let (Some(o), Value::Object(m)) = (out.as_object_mut(), models) { o.extend(m); }
     out
@@ -778,7 +806,7 @@ pub enum Ev {
 fn text(v: &Value) -> String { v.as_str().unwrap_or("").to_string() }
 
 /// A command as people would type it: `["bash","-lc","ls -la"]` is `ls -la`.
-fn command_text(v: &Value) -> String {
+pub(crate) fn command_text(v: &Value) -> String {
     match v {
         Value::Array(parts) => {
             let p: Vec<String> = parts.iter().map(text).collect();
@@ -883,7 +911,7 @@ fn item(it: &Value, done: bool) -> Vec<Ev> {
     }
 }
 
-fn plan_text(steps: Vec<(String, bool)>) -> String {
+pub(crate) fn plan_text(steps: Vec<(String, bool)>) -> String {
     steps.into_iter().filter(|(s, _)| !s.is_empty()).map(|(s, done)| format!("{} {s}", if done { "☑" } else { "☐" })).collect::<Vec<_>>().join("\n")
 }
 
@@ -909,7 +937,7 @@ pub fn problem(text: &str) -> Problem {
 /// The chat message for a run that failed with `text`: always in plain words — marked when the
 /// reason is known, so the chat offers the way forward — with Codex's own words as detail
 /// ("Show details").
-fn error_msg(state: &AppState, text: &str) -> Msg {
+pub(crate) fn error_msg(state: &AppState, text: &str) -> Msg {
     let detail: String = text.chars().take(2000).collect();
     let (key, code) = match problem(text) {
         Problem::SignedOut => { crate::log::warn("Codex refused a run: not signed in, or the sign-in has expired"); note_auth_failed(state); ("codex.signed_out", "signedOut") }
@@ -936,25 +964,25 @@ pub fn refused_by_sandbox(exit: Option<i64>, output: &str) -> bool {
 
 /// What is followed while a run goes.
 #[derive(Default)]
-struct Track {
-    session: Option<String>,
-    model: Option<String>,
-    error: Option<String>,
-    aborted: bool,
-    messages: usize,
-    tokens: u64,
-    commands: BTreeMap<String, String>,
-    refused: Vec<Value>,
+pub(crate) struct Track {
+    pub(crate) session: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) error: Option<String>,
+    pub(crate) aborted: bool,
+    pub(crate) messages: usize,
+    pub(crate) tokens: u64,
+    pub(crate) commands: BTreeMap<String, String>,
+    pub(crate) refused: Vec<Value>,
 }
 
-fn short(s: &str, n: usize) -> String {
+pub(crate) fn short(s: &str, n: usize) -> String {
     let mut out: String = s.chars().take(n).collect();
     if s.chars().count() > n { out.push('…'); }
     out
 }
 
 /// Put one reported thing into the chat. Returns `Some(success)` when the turn has ended.
-async fn handle(state: &AppState, id: &str, ev: Ev, t: &mut Track) -> Option<bool> {
+pub(crate) async fn handle(state: &AppState, id: &str, ev: Ev, t: &mut Track) -> Option<bool> {
     let tool = |name: &str, label: String, input: Value, call: &str| {
         let mut m = Msg::new("tool", label);
         m.tool = Some(json!({"name": name, "input": crate::chats::stored_input(&input), "id": call}));
@@ -1105,7 +1133,7 @@ pub fn remove_sessions(home: &Path, ids: &[String]) -> usize {
 
 /// Short-lived files of one run (copies of the pictures it is shown), gone when it is over.
 #[derive(Default)]
-struct RunFiles(Option<PathBuf>);
+pub(crate) struct RunFiles(pub(crate) Option<PathBuf>);
 impl RunFiles {
     fn dir(&mut self) -> std::io::Result<PathBuf> {
         if let Some(d) = &self.0 { return Ok(d.clone()); }
@@ -1119,11 +1147,11 @@ impl Drop for RunFiles {
     fn drop(&mut self) { if let Some(d) = &self.0 { let _ = std::fs::remove_dir_all(d); } }
 }
 
-const PICTURES: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+pub(crate) const PICTURES: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
 
 /// The pictures attached to the message being answered, copied under plain names of their own (a
 /// name with a comma would be split in two by the program).
-fn pictures(attached: &[String], files: &mut RunFiles) -> Vec<PathBuf> {
+pub(crate) fn pictures(attached: &[String], files: &mut RunFiles) -> Vec<PathBuf> {
     let mut out = vec![];
     for a in attached {
         let p = Path::new(a);
@@ -1289,8 +1317,19 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     let args = exec_args(&Plan { help: &help, sandbox, model: l.spec.options.model.as_deref(), effort: effort.as_deref(), web: sw.web,
         own_setup: sw.own_setup, mcp: sw.mcp, network: sw.network, images: &images, writable: &writable, resume: resume.as_ref(), provider: provider_args.as_deref() });
     let args = match &unrestricted { Some(flag) => without_sandbox(args, flag), None => args };
+    let stopped = if l.language == "ar" { "تم الإيقاف." } else { "Stopped." };
+    let after = After { kind: l.kind.clone(), record: l.record, touches_library: l.touches_library, on_done: l.on_done, resumed: resume.is_some(),
+        mark: mark.clone(), chosen_model: l.spec.options.model.clone(), stopped, snapshots, files };
+    // An ordinary chat runs over Codex's ACP adapter when every guard above travels there
+    // (`codex_acp::start`); it comes back here, before anything was sent, when one does not.
+    let try_acp = crate::codex_acp::Try { spec: &l.spec, kind: &l.kind, profile: &l.profile, sandbox, unrestricted: unrestricted.is_some(), outer,
+        full: l.full_access, writable: &writable, effort: effort.as_deref(), args: &args, service: service.as_ref(), images: &images, prompt: &prompt };
+    let after = match crate::codex_acp::start(&state, try_acp, after).await? {
+        None => return Ok(()),
+        Some(after) => after,
+    };
     let mut c = if outer {
-        let folders = outer_folders(&crate::paths::home(), dirs::home_dir().as_deref(), &l.spec.cwd, &writable, files.0.as_deref());
+        let folders = outer_folders(&crate::paths::home(), dirs::home_dir().as_deref(), &l.spec.cwd, &writable, after.files.0.as_deref());
         let mut c = cmd(Path::new(SANDBOX_EXEC));
         c.arg("-p").arg(outer_profile(&folders)).arg(&bin);
         c
@@ -1305,7 +1344,6 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
     };
     let pid = child.id();
     crate::runs::record(pid, &id);
-    let (started, started_at) = (Instant::now(), SystemTime::now());
     crate::log::info(format!("run {id} started on Codex (pid {}, sandbox {}, profile {}, in {})", pid.unwrap_or(0), unrestricted.as_deref().unwrap_or(sandbox), l.profile.name, l.spec.cwd.display()));
     tokio::spawn(async move {
         let _ = stdin.write_all(prompt.as_bytes()).await;
@@ -1323,18 +1361,11 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
         crate::runs::forget(pid);
         return Err(crate::tr::err("full_access.off", &[]));
     }
-    state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.clone(), l.spec.cwd.clone());
-    state.ack_interrupted(&id).await;
-    if let Some(ch) = state.chats.update(&id, |c| { c.running = true; c.provider = ID.into(); }).await {
-        state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
-    }
+    running(&state, &id, &l.spec.cwd).await;
     let limits = crate::claude::run_limits(&l.kind);
-    let stopped = if l.language == "ar" { "تم الإيقاف." } else { "Stopped." };
-    let (kind, record, touches_library, on_done, resumed) = (l.kind, l.record, l.touches_library, l.on_done, resume.is_some());
-    let chosen_model = l.spec.options.model.clone();
     tokio::spawn(async move {
         let guard = crate::claude::RunGuard::new(&state, &id);
-        let _files = files;
+        let (started, started_at) = (Instant::now(), SystemTime::now());
         let track = Arc::new(tokio::sync::Mutex::new(Track::default()));
         let (st, cid, tr) = (state.clone(), id.clone(), track.clone());
         // What the run used, for the usage page (`meter.rs`).
@@ -1351,69 +1382,103 @@ pub async fn launch(state: Arc<AppState>, l: Launch) -> anyhow::Result<()> {
             }
         }).await;
         drop(kill_rx);
-        for s in snapshots { crate::claude::put_back_standing(&state, &id, s).await; }
-        if state.stopping.load(Ordering::Relaxed) { guard.disarm(); return; }
-        crate::runs::forget(pid);
         let t = std::mem::take(&mut *track.lock().await);
-        let secs = started.elapsed().as_secs();
-        // Codex 0.2x does not say which session it started: it is found by the run's mark.
-        if t.session.is_none() && !resumed {
-            let home = codex_home();
-            let mark2 = mark.clone();
-            if let Some((sid, _)) = tokio::task::spawn_blocking(move || find_session(&home, started_at, &mark2)).await.ok().flatten() {
-                state.chats.update(&id, |c| c.session_id = Some(sid)).await;
-            }
-        }
-        if t.tokens > 0 { state.chats.update(&id, |c| c.usage_tokens += t.tokens).await; }
         let run = std::mem::take(&mut *meter.lock().unwrap_or_else(|e| e.into_inner()));
-        let sid = state.chats.with(&id, |c| c.session_id.clone()).await.flatten();
-        crate::meter::record_codex(&state, Some(&id), sid, run, t.model.clone().or(chosen_model)).await;
-        let exited_ok = f.exit.as_ref().map_or(false, |s| s.success());
-        let ok = match &f.ended {
-            Ended::Result(r) => *r && t.error.is_none() && !t.aborted,
-            Ended::NoResult => exited_ok && t.error.is_none() && !t.aborted && t.messages > 0,
-            _ => false,
-        };
-        let mins = |d: &Duration| (d.as_secs() / 60).max(1).to_string();
-        let ended_by_app = match &f.ended {
-            Ended::Stalled(d) => Some(crate::tr::text("run.stalled", &[("minutes", &mins(d))])),
-            Ended::TooLong(d) => Some(crate::tr::text("run.too_long", &[("minutes", &mins(d))])),
-            Ended::Lost(_) => Some(crate::tr::text("run.lost", &[])),
-            _ => None,
-        };
-        // What the sandbox did not allow goes under the answer, before an error (which stays last).
-        if !t.refused.is_empty() {
-            let lines = t.refused.iter().map(|d| format!("- {}: {}", d["tool"].as_str().unwrap_or(""), d["target"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n");
-            let mut m = Msg::new("denied", format!("{}\n{lines}", crate::tr::text("run.denied", &[])));
-            m.tool = Some(json!({"code": "denied", "provider": ID, "denials": t.refused}));
-            crate::claude::push(&state, &id, m).await;
-        }
-        match (&f.ended, ended_by_app) {
-            (_, Some(text)) => {
-                crate::log::error(format!("run {id} ended by the app after {secs}s: {:?}", f.ended));
-                crate::claude::push(&state, &id, Msg::new("error", &text)).await;
-                if !matches!(kind.as_str(), "wrap" | "workflow") { state.notify(&crate::tr::text("run.ended_title", &[]), &text); }
-            }
-            (Ended::Stopped, _) => crate::claude::push(&state, &id, Msg::new("system", stopped)).await,
-            _ if t.aborted => crate::claude::push(&state, &id, Msg::new("system", stopped)).await,
-            _ => {
-                let stderr = f.stderr.lines().filter(|l| !l.trim().is_empty() && !l.contains("Reading prompt from stdin")).collect::<Vec<_>>().join("\n");
-                if let Some(e) = &t.error { crate::claude::push(&state, &id, error_msg(&state, e)).await; }
-                else if !ok && !stderr.trim().is_empty() { crate::claude::push(&state, &id, error_msg(&state, stderr.trim())).await; }
-                else if !ok { crate::claude::push(&state, &id, Msg::new("error", crate::tr::text("codex.no_answer", &[]))).await; }
-            }
-        }
-        if ok {
-            note_run_ok(&state);
-            crate::log::info(format!("run {id} finished ok on Codex in {secs}s ({} tokens as Codex reported them; it reports no cost)", t.tokens));
-        } else {
-            let status = f.exit.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
-            crate::log::warn(format!("run {id} on Codex did not finish ({status}, {secs}s, {:?})", f.ended));
-        }
-        crate::claude::finish(state, id, ok, record, touches_library, on_done).await;
-        guard.disarm();
+        after_run(state, id, f, t, run, after, pid, (started, started_at), guard).await;
     });
     Ok(())
+}
+
+/// The chat is at work from here on (its run holds the Stop switch).
+pub(crate) async fn running(state: &AppState, id: &str, cwd: &Path) {
+    state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), cwd.to_path_buf());
+    state.ack_interrupted(id).await;
+    if let Some(ch) = state.chats.update(id, |c| { c.running = true; c.provider = ID.into(); }).await {
+        state.emit(json!({"type": "chat.updated", "chat": ch.summary()}));
+    }
+}
+
+/// What a Codex run is finished with, however it ran (`codex exec`, or over ACP: `codex_acp`).
+pub(crate) struct After {
+    pub(crate) kind: String,
+    pub(crate) record: Option<PathBuf>,
+    pub(crate) touches_library: bool,
+    pub(crate) on_done: Option<crate::claude::OnDone>,
+    pub(crate) resumed: bool,
+    pub(crate) mark: String,
+    pub(crate) chosen_model: Option<String>,
+    pub(crate) stopped: &'static str,
+    /// What is put back when it is over (`keep_for`).
+    pub(crate) snapshots: Vec<StandingSnapshot>,
+    /// Its short-lived files (the copies of its pictures), gone with it.
+    pub(crate) files: RunFiles,
+}
+
+/// The end of a Codex run: what it changed among the kept files put back, its session found, its
+/// use recorded, what went wrong said in plain words, and the chat let go (`claude::finish`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn after_run(state: Arc<AppState>, id: String, f: crate::claude::Followed, t: Track, run: crate::meter::CodexRun, a: After,
+    pid: Option<u32>, (started, started_at): (Instant, SystemTime), guard: crate::claude::RunGuard) {
+    let _files = a.files;
+    for s in a.snapshots { crate::claude::put_back_standing(&state, &id, s).await; }
+    if state.stopping.load(Ordering::Relaxed) { guard.disarm(); return; }
+    crate::runs::forget(pid);
+    let secs = started.elapsed().as_secs();
+    // Codex 0.2x does not say which session it started: it is found by the run's mark.
+    if t.session.is_none() && !a.resumed {
+        let home = codex_home();
+        let mark2 = a.mark.clone();
+        if let Some((sid, _)) = tokio::task::spawn_blocking(move || find_session(&home, started_at, &mark2)).await.ok().flatten() {
+            state.chats.update(&id, |c| c.session_id = Some(sid)).await;
+        }
+    }
+    if t.tokens > 0 { state.chats.update(&id, |c| c.usage_tokens += t.tokens).await; }
+    let sid = state.chats.with(&id, |c| c.session_id.clone()).await.flatten();
+    crate::meter::record_codex(&state, Some(&id), sid, run, t.model.clone().or(a.chosen_model)).await;
+    let exited_ok = f.exit.as_ref().map_or(false, |s| s.success());
+    let ok = match &f.ended {
+        Ended::Result(r) => *r && t.error.is_none() && !t.aborted,
+        Ended::NoResult => exited_ok && t.error.is_none() && !t.aborted && t.messages > 0,
+        _ => false,
+    };
+    let mins = |d: &Duration| (d.as_secs() / 60).max(1).to_string();
+    let ended_by_app = match &f.ended {
+        Ended::Stalled(d) => Some(crate::tr::text("run.stalled", &[("minutes", &mins(d))])),
+        Ended::TooLong(d) => Some(crate::tr::text("run.too_long", &[("minutes", &mins(d))])),
+        Ended::Lost(_) => Some(crate::tr::text("run.lost", &[])),
+        _ => None,
+    };
+    // What the sandbox did not allow goes under the answer, before an error (which stays last).
+    if !t.refused.is_empty() {
+        let lines = t.refused.iter().map(|d| format!("- {}: {}", d["tool"].as_str().unwrap_or(""), d["target"].as_str().unwrap_or(""))).collect::<Vec<_>>().join("\n");
+        let mut m = Msg::new("denied", format!("{}\n{lines}", crate::tr::text("run.denied", &[])));
+        m.tool = Some(json!({"code": "denied", "provider": ID, "denials": t.refused}));
+        crate::claude::push(&state, &id, m).await;
+    }
+    match (&f.ended, ended_by_app) {
+        (_, Some(text)) => {
+            crate::log::error(format!("run {id} ended by the app after {secs}s: {:?}", f.ended));
+            crate::claude::push(&state, &id, Msg::new("error", &text)).await;
+            if !matches!(a.kind.as_str(), "wrap" | "workflow") { state.notify(&crate::tr::text("run.ended_title", &[]), &text); }
+        }
+        (Ended::Stopped, _) => crate::claude::push(&state, &id, Msg::new("system", a.stopped)).await,
+        _ if t.aborted => crate::claude::push(&state, &id, Msg::new("system", a.stopped)).await,
+        _ => {
+            let stderr = f.stderr.lines().filter(|l| !l.trim().is_empty() && !l.contains("Reading prompt from stdin")).collect::<Vec<_>>().join("\n");
+            if let Some(e) = &t.error { crate::claude::push(&state, &id, error_msg(&state, e)).await; }
+            else if !ok && !stderr.trim().is_empty() { crate::claude::push(&state, &id, error_msg(&state, stderr.trim())).await; }
+            else if !ok { crate::claude::push(&state, &id, Msg::new("error", crate::tr::text("codex.no_answer", &[]))).await; }
+        }
+    }
+    if ok {
+        note_run_ok(&state);
+        crate::log::info(format!("run {id} finished ok on Codex in {secs}s ({} tokens as Codex reported them; it reports no cost)", t.tokens));
+    } else {
+        let status = f.exit.map(|s| s.to_string()).unwrap_or_else(|e| e.to_string());
+        crate::log::warn(format!("run {id} on Codex did not finish ({status}, {secs}s, {:?})", f.ended));
+    }
+    crate::claude::finish(state, id, ok, a.record, a.touches_library, a.on_done).await;
+    guard.disarm();
 }
 
 /// The session a chat was to continue is gone from Codex. Nothing is started: the chat is told in

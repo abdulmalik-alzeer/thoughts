@@ -35,10 +35,41 @@ The daemon speaks ACP (agentclientprotocol.com) to the official adapters over th
   the checked one ends it). Permission
   requests become the chat's approval cards (`approvals::ask`) or are refused when nobody can be
   asked. Resume is `session/resume` of the stored session id (the same id the CLI path uses), a
-  branch is `session/fork`. Providers: `ANTHROPIC_*` env for Claude Code; Codex's
-  `model_providers` as `CODEX_CONFIG` JSON with the key in `THOUGHTS_PROVIDER_KEY`.
+  branch is `session/fork`. Providers: `ANTHROPIC_*` env for Claude Code. The turn's tokens come
+  from the answer's `usage` (with the cost from `usage_update`) for the usage page.
+- **Codex chats** (kind `chat`, `codex_acp.rs`, round 0.7.0): `codex::launch` decides everything as
+  for `codex exec` (it builds the same command line), then hands the turn to codex-acp when every
+  guard travels (table below); otherwise, or when the adapter fails before the turn is sent, the
+  same turn goes on through `codex exec` and the log says why (`codex_acp::Stay`). The adapter
+  starts `codex app-server`, so it is only used with a Codex at least as new as its own
+  `@openai/codex` dependency (read from its `package.json`, `codex_acp::required_codex`) that lists
+  `app-server` (`codex_fits`; detection is gated the same way: an older Codex takes the word for a
+  prompt and starts its terminal screen). `GET /api/ai/codex/options` says `acpChats: {on, why,
+  need, have}`; Settings shows why when the user can act on it. `ai.classicChats` covers both
+  programs. Updates are shown as `codex exec`'s events (`codex_acp::View` → `codex::handle`), with
+  the text streaming in; usage is the answer's `usage` (`meter_of` → `meter::record_codex`). Resume
+  is `session/resume` of the stored id (the thread id `codex exec` stores too); a branch of a Codex
+  chat replays its history as before (`branch::fork_from` forks Claude Code sessions only).
+
+| Guard on `codex exec` | Over ACP |
+|---|---|
+| Trust, strict private folders, plain-password file, customise never on Codex, bypass only for chats, sign-in, access keys, subscription acknowledgement | Unchanged: checked before the way of running is chosen (`claude::start_run`, `codex::launch`, the API) |
+| Sandbox (`read-only` / `workspace-write` / `danger-full-access`, web lookups read only) | The adapter's mode of the same name (`agent-full-access` for no sandbox), from the start (`INITIAL_AGENT_MODE`) and set over ACP; a mode not offered → `codex exec`; a switch mid-turn to one doing more (incl. `agent`, where a model approves) ends the turn. Tested |
+| Writable roots (`sandbox_workspace_write.writable_roots`) | The session's `additionalDirectories`, which the adapter adds to every turn's sandbox. Tested |
+| `-c` settings: no MCP servers / notifier where the profile says so, network off for commands, web search, `history.persistence=none`, analytics off, model, effort | The same keys, dotted, as the session config (`CODEX_CONFIG`, `session_config` reads them off the `codex exec` arguments); the adapter's per-turn sandbox has the network off in any case. Tested |
+| Never asks, never leaves its sandbox | Every permission request (they are all about leaving the sandbox) is refused from an allowlist of plain noes (`decline`, `reject_permissions`, `cancel`) and listed under the answer as refused by the sandbox. Tested |
+| macOS outer sandbox around a Bypass run (`outer_sandbox`) | No checked equivalent around node + `codex app-server`: such a turn stays on `codex exec`. Tested |
+| The folder's own Codex settings are not loaded | The adapter marks the session's folders trusted, so Codex would load a `.codex/config.toml` there or above: such a turn stays on `codex exec` (`own_settings`). Tested |
+| Another provider: address via `-c`, key only in `THOUGHTS_PROVIDER_KEY`, inherited OpenAI keys removed | The provider table in the session config (no key), the key in the environment only (`adapter_command`, `providers::apply_codex_env`). Tested |
+| The app's notes in front of the prompt on stdin | The first text block of the prompt. Tested |
+| Kept files put back afterwards (`keep_for`, snapshots) | The same snapshots, taken before, put back by the same end (`codex::after_run`) |
+| Pictures (`--image`) | Image blocks, where the adapter says it takes them; else `codex exec`. Tested |
+| Spending: no per-run limit on Codex (said in the log), the month's figure from what it used | The same: the answer's tokens priced and added (`record_codex`). Tested |
+| Stop, one run per chat, full access switched off while starting | `session/cancel`, then the adapter's process group is ended; the same switch and checks. Tested |
+| Full access yields everything | The same: no snapshots or outer sandbox, the folder-settings check and the mode check yield, Bypass is `agent-full-access` |
+
 - **Still on the command line**: everything the app starts itself (wrap, reorganize, set-up,
   modules, workflows, customise), MADO planning and build runs (their `--setting-sources ""`,
   `--restricted` and allow-only confinement have no checked equivalent over ACP yet), one-shot
-  completions, and all Codex runs (their sandbox, writable roots and macOS outer sandbox are set
-  per `codex exec`; codex-acp is used for detection only).
+  completions, Codex chats in Bypass on macOS or in a folder with its own Codex settings, and Codex
+  chats with a Codex too old for the adapter (0.27.0, for one, has no `app-server`).
