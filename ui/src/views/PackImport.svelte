@@ -11,6 +11,7 @@
   import { readPack, stagePack } from '../lib/layer';
   import { inspectPack } from '../lib/packs';
   import { importLines, type PluginLook } from '../lib/plugins';
+  import { PICK_ACCEPT } from '../lib/packfile';
 
   let { label = 'layer.import', checking = 'ldc.imp.checking', primary = false }: { label?: string; checking?: string; primary?: boolean } = $props();
 
@@ -31,9 +32,9 @@
     if (!f || busy) return;
     busy = true;
     (async () => {
-      const r = await readPack(f);
-      if (r.unsupported) { toast(t('layer3.packNewer'), { kind: 'error' }); return; }
-      const look = await inspectPack(r.pack);
+      // The file goes to the service as it is (a zip of real files, or a legacy .json): it is never opened here.
+      const { body } = await readPack(f);
+      const look = await inspectPack(body);
       // As a plugin: new, an update of one you have, older than yours, or one this version cannot run.
       const plugin = importLines((look as { plugin?: PluginLook | null }).plugin, packWords);
       if (plugin.refused) { toast(plugin.refused, { kind: 'error' }); return; }
@@ -57,10 +58,10 @@
         confirmLabel: t('layer3.importGo'),
         danger: look.matches === false,
       });
-      if (ok) await stagePack(r.pack);
+      if (ok) await stagePack(body);
     })().catch((err) => failed(t('ldc.imp.failed'), err)).finally(() => { busy = false; });
   }
 </script>
 
 <button type="button" class="btn" class:primary disabled={busy} aria-busy={busy} onclick={() => picker?.click()}><Icon name="upload" size={15} /> {busy ? t(checking) : t(label)}</button>
-<input type="file" accept=".json,application/json" hidden bind:this={picker} onchange={pick} />
+<input type="file" accept={PICK_ACCEPT} hidden bind:this={picker} onchange={pick} />

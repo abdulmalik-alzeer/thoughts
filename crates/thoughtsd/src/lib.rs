@@ -48,6 +48,7 @@ pub mod machine;
 pub mod mentions;
 pub mod modules;
 pub mod packs;
+pub mod pack_file;
 pub mod paths;
 pub mod people;
 pub mod proc;

@@ -6,6 +6,7 @@ import { app } from './store.svelte';
 import { t } from './i18n';
 import { checkPending, loadLayer } from './layer';
 import { fingerprintCode } from './packs';
+import { asPackFile, packFileName, savePackFile } from './packfile';
 
 export type PluginKind = 'bundle' | 'addon' | 'page' | 'task' | 'theme' | 'home' | 'sidebar' | 'todos' | 'pages' | 'look' | 'keys';
 export interface PluginPart { kind: Exclude<PluginKind, 'bundle'> | 'css'; label: string; path?: string }
@@ -68,12 +69,9 @@ export function originText(p: PluginItem): string {
   return p.origin === 'loose' ? '' : t('plg.origin.' + p.origin);
 }
 
-/** The file a plugin is saved as: its name in whatever script it is written, then `.thoughts-plugin`
- *  (the shell adds `.json`). Only characters a file name cannot hold are dropped. */
-export function exportFileName(name: string): string {
-  const base = String(name ?? '').normalize('NFC').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-+|-+$/g, '').slice(0, 60);
-  return (base || 'plugin') + '.thoughts-plugin';
-}
+/** The file a plugin is saved as: its name in whatever script it is written, then `.thoughts-plugin`.
+ *  Only characters a file name cannot hold are dropped. */
+export function exportFileName(name: string): string { return packFileName(name, 'thoughts-plugin'); }
 
 /** After the live layer changed here, the running app loads it again (unless a change is being tried). */
 async function reload() { if (!app.preview) await loadLayer().catch(() => {}); }
@@ -99,44 +97,19 @@ export async function describePlugin(id: string, who: PluginWords): Promise<{ id
   return { id: String(r?.id ?? id), entry: String(r?.entry ?? '') };
 }
 
-/** Hand a pack to the user as a file. → how it went. */
-async function saveFile(name: string, pack: any): Promise<'saved' | 'copied' | 'cancelled'> {
-  const text = JSON.stringify(pack, null, 2);
-  if ((window as any).__TAURI_INTERNALS__) {
-    // The native window has no download bar: the shell opens the save dialog itself and writes the file.
-    try {
-      const { invoke } = await import('@tauri-apps/api/core');
-      return (await invoke('save_pack', { name, contents: text })) ? 'saved' : 'cancelled';
-    } catch (e) {
-      try { await navigator.clipboard.writeText(text); return 'copied'; }
-      catch { throw e instanceof Error ? e : new Error(String(e)); }
-    }
-  }
-  const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
-  const a = document.createElement('a');
-  a.href = url; a.download = name + '.json';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 10000);
-  return 'saved';
-}
-
 export type Saved = { result: 'saved' | 'copied' | 'cancelled'; fingerprint: string };
 
-/** Save the named plugin `id` as `<name>.thoughts-plugin.json`. → how it went and the code of its fingerprint. */
+/** Save the named plugin `id` as `<name>.thoughts-plugin`: a zip of its real files. → how it went and the code of its fingerprint. */
 export async function exportPlugin(id: string): Promise<Saved> {
-  const pack = await api('/plugins/export?id=' + encodeURIComponent(id));
-  if (pack?.format !== 'thoughts-pack') throw new Error(t('layer.packInvalid'));
-  return { result: await saveFile(exportFileName(String(pack.name ?? '')), pack), fingerprint: fingerprintCode(String(pack.fingerprint ?? '')) };
+  const f = asPackFile(await api('/plugins/export?id=' + encodeURIComponent(id)));
+  return { result: await savePackFile(f.name, f), fingerprint: fingerprintCode(f.fingerprint) };
 }
 
-/** Save every plugin as one file (with which are on and off; what add-ons saved is not in it). */
+/** Save every plugin as one `.thoughts-pack` file (with which are on and off; what add-ons saved is not in it). */
 export async function exportAllPlugins(): Promise<Saved> {
   const name = t('plg.all.fileName');
-  const pack = await api('/plugins/export?all=1&name=' + encodeURIComponent(name));
-  if (pack?.format !== 'thoughts-pack') throw new Error(t('layer.packInvalid'));
-  return { result: await saveFile(exportFileName(name), pack), fingerprint: fingerprintCode(String(pack.fingerprint ?? '')) };
+  const f = asPackFile(await api('/plugins/export?all=1&name=' + encodeURIComponent(name)));
+  return { result: await savePackFile(name, f), fingerprint: fingerprintCode(f.fingerprint) };
 }
 
 /** Start a customisation chat whose change updates this plugin. → the chat's id. */
