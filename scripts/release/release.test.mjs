@@ -1025,7 +1025,10 @@ function fakeGit(tags) {
   };
 }
 const sha = (text) => createHash('sha256').update(text).digest('hex');
-const committedKit = () => readFileSync(join(ROOT, KIT_OUT), 'utf8');
+// The committed file as it stood at the frozen release: from 0.7.2 on it also lists the releases tagged
+// after 0.7.0, which these tests must not depend on. With no tag at all the generator gives back exactly
+// the frozen part (and refuses a file whose frozen part was changed), so that is the starting point.
+const committedKit = () => kitHistory({ current: readFileSync(join(ROOT, KIT_OUT), 'utf8'), git: fakeGit({}) }).text;
 
 test('kit history: with no tag after 0.7.0 the committed file is reproduced, and old tags change nothing', () => {
   const current = committedKit();
