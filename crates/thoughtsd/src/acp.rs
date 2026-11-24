@@ -303,6 +303,8 @@ pub struct Translator {
     calls: HashMap<String, bool>,
     pub cost: f64,
     pub mode: Option<String>,
+    /// The `usage` of the turn's answer (ACP's names; Claude Code's input counts no cached part).
+    pub usage: Value,
 }
 
 impl Translator {
@@ -375,6 +377,12 @@ impl Translator {
         let mut r = json!({"type": "result", "subtype": if ok { "success" } else { "error_during_execution" }, "is_error": !ok,
             "session_id": session, "total_cost_usd": self.cost});
         if let Some(t) = text { r["result"] = json!(t); }
+        // The turn's tokens as the command line's `result` names them, for the usage page (`meter::claude_records`).
+        if self.usage.is_object() {
+            let n = |k: &str| self.usage[k].as_u64().unwrap_or(0);
+            r["usage"] = json!({"input_tokens": n("inputTokens"), "output_tokens": n("outputTokens"),
+                "cache_read_input_tokens": n("cachedReadTokens"), "cache_creation_input_tokens": n("cachedWriteTokens")});
+        }
         out.push(r);
         out
     }

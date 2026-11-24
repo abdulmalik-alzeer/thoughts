@@ -143,6 +143,13 @@ fn updates_become_the_stream_the_chat_already_shows() {
     let failed = Translator::default().end(Err("overloaded".into()), "s1");
     assert_eq!(failed[0]["is_error"], true);
     assert_eq!(failed[0]["result"], "overloaded");
+    // The turn's tokens from its answer reach the usage page as the command line's `result` has them.
+    let mut t = Translator { cost: 0.5, usage: json!({"inputTokens": 10, "outputTokens": 20, "cachedReadTokens": 300, "cachedWriteTokens": 40, "totalTokens": 370}), ..Default::default() };
+    let r = t.end(Ok("end_turn"), "s1").pop().unwrap();
+    let recs = crate::meter::claude_records(&r, Some("c"), chrono::Utc::now());
+    assert_eq!(recs.len(), 1);
+    assert_eq!((recs[0].tokens.input, recs[0].tokens.output, recs[0].tokens.cache_read, recs[0].tokens.cache_write), (10, 20, 300, 40));
+    assert_eq!((recs[0].cost_usd, recs[0].estimated), (Some(0.5), false));
 }
 
 /// A fake ACP agent as a shell script over stdio: it answers by request id and plays one turn

@@ -307,6 +307,7 @@ impl View {
         match self {
             View::Claude(tr) => {
                 let mut result = None;
+                if let Ok(r) = &stop { tr.usage = r["usage"].clone(); }
                 let stop = stop.map(|r| r["stopReason"].as_str().unwrap_or("end_turn").to_string());
                 for ev in tr.end(stop.as_deref().map_err(|e| e.clone()), session) {
                     if let Some(r) = crate::claude::handle_event(state, chat_id, &ev).await { result = Some(r); }
