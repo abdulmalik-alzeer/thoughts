@@ -1,5 +1,16 @@
 # What's new in Thoughts
 
+## 0.7.1
+
+Thoughts is now open source, and its code and releases are public on GitHub. Nothing else changes from 0.7.0.
+
+### Changed
+- **Updates need no sign-in.** Thoughts finds new versions at the public release page by itself. Nobody has to run a command in a terminal or sign in to GitHub any more.
+- **The "Updates for testers" card is gone** from Settings › Maintenance, with the terminal switch it explained. If you switched it on, there is nothing to undo.
+
+### Before you rely on it
+- An update from an older copy to 0.7.1 has not been tried yet.
+
 ## 0.7.0
 
 Plugins and packs now travel as real files instead of one JSON file, the Customise page keeps its explanations behind `?` icons, and Codex chats can run through ACP like Claude Code chats. Read "Before you rely on it": none of it has been seen in the app window yet.
