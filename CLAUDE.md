@@ -78,4 +78,9 @@
   subscription sign-in stays inside the unmodified CLIs. Another service is Claude Code's own `ANTHROPIC_BASE_URL`
   or Codex's own `model_providers` (`-c` per run, key only in `THOUGHTS_PROVIDER_KEY`, kept from commands); a keyless
   service on this computer gets the stand-in `NO_KEY`, never the sign-in. Only the address check yields to full access.
+  The page (Settings › Assistant › "Use another service", `ProviderConnect.svelte`, logic in `ui/src/lib/providers.ts`) offers a
+  handful of ready-made services (`providers::SERVICES`: each address read in the service's own documentation, for
+  Claude Code and/or Codex) and one form for any other; it says which assistant each works with. Keep the list short:
+  a service whose own documentation does not show it working with one of the two programs stays out. Codex only speaks
+  the Responses API, so "OpenAI-compatible" means a service that answers it.
 - Verify with `cargo test -p thoughtsd`, `npx vite build` and `cargo build -p thoughts`.

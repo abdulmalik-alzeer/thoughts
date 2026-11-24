@@ -43,8 +43,9 @@ export const LONG: RegExp[] = [
   // The assistants: signing in, testing a connection, asking the command line what it offers. A
   // key saved into the system keychain can wait for the person to answer the keychain's question.
   /^POST \/ai\/(claude|codex)\/(login|recheck)$/,
-  /^POST \/ai\/claude\/(provider\/test|token)$/,
-  /^(PUT|DELETE) \/ai\/claude\/provider$/,
+  /^POST \/ai\/claude\/token$/,
+  /^POST \/ai\/(claude|codex)\/provider\/test$/,
+  /^(PUT|DELETE) \/ai\/(claude|codex)\/provider$/,
   /^GET \/ai\/(claude|codex)\/(options|status)$/,
   // Opening or adding another library.
   /^POST \/libraries\/(switch|add)$/,
