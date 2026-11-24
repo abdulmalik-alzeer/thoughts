@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { api, connect, daemonStale, del, on, post, reconnect, reloadApp } from './lib/api';
+  import { followMeter } from './lib/meter.svelte';
   import { a11y, app, applyTheme, cachedLook, command, go, goBack, goForward, refreshChats, refreshWrap, reloadSettings, saveSettings, setSidebarCollapsed, toast, track, versionLabel, zoomStep, APP_VERSION } from './lib/store.svelte';
   import { recheckSignIn, signIn } from './lib/auth';
   import { loadLayer, reloadLayer, retryLayer, checkPending, openReview, closeReview, addonTag, safeCrashText, viewLabel, keyFromAddOn, keyMayComeFromAddOn, newCustomise, findView } from './lib/layer';
@@ -114,6 +115,8 @@
       const opened = secondary && app.settings.onboarded ? initialRoute(location.search) : null;
       if (opened) await go(opened, { replace: true });
       app.ready = true;
+      // The plans' usage is asked for as the window opens, whichever page is shown first.
+      followMeter();
       statusNotices();
       if (secondary) return;
       // No check for a new version here: the app asks by itself only while the setting for that is on (startAutoUpdateChecks).
