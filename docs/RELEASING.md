@@ -884,7 +884,7 @@ repository is public:** the rulesets for `main` and for the release tags (below)
 (the lead fills in the date).
 
 - **Rules for `main` and for the release tags.** The repository is public, so rulesets are
-  available on the free plan (before, they needed GitHub Pro). They are **to be switched on**.
+  available on the free plan (before, they needed GitHub Pro). Both were **switched on 2026-11-24** ("main: only the owner", "release tags: only the owner"), together with secret scanning with push protection, private vulnerability reporting, and approval for every outside contributor's workflow run.
   Until they are, everyone with write access (on a repository owned by a personal account, every
   collaborator) can push to `main`, move or create a `v*` tag, and create or delete a release.
   What holds either way: an installed copy only installs what the updater key signed, and that
