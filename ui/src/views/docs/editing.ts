@@ -510,7 +510,8 @@ export function blockStarts(text: string): Block[] {
   const out: Block[] = [];
   let at = 0, line = text.slice(0, fm).split('\n').length - 1, counted = 0;
   for (const t of tokens) {
-    if (t.type === 'space' || !t.raw) continue;
+    // A link definition (`[ref]: address`) draws nothing; marked 18 lists it, older ones did not.
+    if (t.type === 'space' || t.type === 'def' || !t.raw) continue;
     const i = body.indexOf(t.raw, at);
     if (i < 0) continue;
     for (let k = counted; k < i; k++) if (body.charCodeAt(k) === 10) line++;

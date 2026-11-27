@@ -12,7 +12,7 @@ mostly waiting.
 |---|---|---|
 | Xcode command-line tools | `xcode-select -p` | `xcode-select --install` |
 | git | `git --version` | included with the tools above |
-| Node.js 20+ | `node --version` | [nodejs.org](https://nodejs.org) or `brew install node` |
+| Node.js 24.15+ (or 22.22.2+) | `node --version` | [nodejs.org](https://nodejs.org) or `brew install node@24`. The UI tests need it (jsdom 31); CI uses Node 24 |
 | Rust | `cargo --version` | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh`, then open a new terminal |
 | Claude Code | `claude --version` | [claude.com/claude-code](https://claude.com/claude-code) |
 

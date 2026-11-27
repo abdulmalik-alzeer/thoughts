@@ -277,7 +277,8 @@ pub fn codex_args(svc: &CodexService, user_excludes: &[String]) -> Vec<String> {
 /// The names the user's own Codex `config.toml` keeps from commands (`[shell_environment_policy]
 /// exclude`), so the run's setting adds to them instead of replacing them.
 pub fn user_excludes(config_toml: &str) -> Vec<String> {
-    let Ok(v) = config_toml.parse::<toml::Value>() else { return vec![] };
+    // A whole file is a table: from toml 0.9 on, parsing a `Value` reads one value, not a document.
+    let Ok(v) = config_toml.parse::<toml::Table>() else { return vec![] };
     v.get("shell_environment_policy").and_then(|p| p.get("exclude")).and_then(|e| e.as_array())
         .map(|a| a.iter().filter_map(|x| x.as_str()).filter(|s| s.len() <= 200).map(String::from).take(200).collect()).unwrap_or_default()
 }
