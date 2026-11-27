@@ -1691,7 +1691,8 @@ mod tests {
     fn a_daemon_that_cannot_prove_itself_is_never_trusted_and_only_stopped_when_certain() {
         use thoughtsd::hello::Probe;
         let exe = "Thoughts";
-        let daemon = "/Applications/Thoughts.app/Contents/MacOS/Thoughts --daemon";
+        // (Windows knows a process by its program's file name only: see `is_daemon_command`.)
+        let daemon = if cfg!(windows) { "Thoughts.exe" } else { "/Applications/Thoughts.app/Contents/MacOS/Thoughts --daemon" };
         let held = || -> std::io::Result<Option<std::fs::File>> { Ok(None) };
         // Without a proof there is nobody to send the token to, whatever the lock says: there is no
         // code path from an unproven responder to a (port, token) pair. `daemon_alive` is
@@ -1712,6 +1713,7 @@ mod tests {
         // The recorded pid is gone, or belongs to some other program: never stop that.
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 4242, None, exe), Unproven::Leave);
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 4242, Some("/usr/bin/vim notes.md"), exe), Unproven::Leave);
+        #[cfg(not(windows))]
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), 4242, Some("/Applications/Thoughts.app/Contents/MacOS/Thoughts"), exe), Unproven::Leave);
         // Never this process, and never pid 0 or 1.
         assert_eq!(unproven_daemon(&Probe::Legacy, &held(), std::process::id(), Some(daemon), exe), Unproven::Leave);
