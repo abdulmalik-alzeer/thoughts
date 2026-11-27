@@ -56,9 +56,24 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
-      - name: TEMP the screen-check tests alone
+      - name: TEMP one screen-check test, watched
         if: runner.os == 'macOS'
-        run: cargo test -p thoughtsd screen -- --nocapture 2>&1 | tail -80
+        run: |
+          cargo test -p thoughtsd --no-run 2>&1 | tail -2
+          (cargo test -p thoughtsd with_no_window_the_screen_check -- --nocapture > t.txt 2>&1 &)
+          for i in $(seq 1 40); do
+            sleep 2
+            pid=$(pgrep -f "http.server" | head -1 || true)
+            if [ -n "$pid" ]; then
+              echo "== found after $((i*2))s"; ps axo pid,ppid,pgid,etime,command | grep -E "http.server|sandbox-exec" | grep -v grep
+              sleep 4
+              lsof -nP -iTCP -sTCP:LISTEN | grep -i -E "python|COMMAND" || echo "no python listener"
+              for q in $(pgrep -f "http.server"); do echo "--- sample $q"; sample $q 2 2>&1 | sed -n '/Call graph/,/Total number/p' | head -70; done
+              log show --last 1m --predicate 'sender == "Sandbox"' --style compact 2>/dev/null | grep -i -E "python|deny" | tail -30 || true
+              break
+            fi
+          done
+          sleep 20; tail -15 t.txt
       - name: Daemon tests
         if: runner.os != 'Windows'
         run: cargo test -p thoughtsd
