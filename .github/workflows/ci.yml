@@ -56,6 +56,19 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
+      - name: TEMP python under the sandbox
+        if: runner.os == 'macOS'
+        run: |
+          which -a python3 || true
+          zsh -lc 'echo $PATH' || true
+          mkdir -p "$RUNNER_TEMP/h"
+          for py in $(which -a python3); do
+            echo "== $py -> $(python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$py")"
+            env -i PATH="$PATH" HOME="$RUNNER_TEMP/h" sandbox-exec -p '(version 1)(allow default)' "$py" -m http.server 49555 --bind 127.0.0.1 > out.txt 2>&1 &
+            p=$!
+            for i in $(seq 1 25); do sleep 1; if curl -s -o /dev/null http://127.0.0.1:49555/; then echo "answered after ${i}s"; break; fi; done
+            kill $p || true; wait $p || true; tail -5 out.txt
+          done
       - name: Daemon tests
         run: cargo test -p thoughtsd
       - name: Build the UI

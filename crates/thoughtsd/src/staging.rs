@@ -1360,6 +1360,7 @@ mod tests {
         std::fs::remove_dir_all(&d.home).unwrap();
     }
 
+    #[cfg(unix)] // makes a symbolic link the Unix way
     #[tokio::test]
     async fn nothing_outside_the_fingerprint_reaches_a_preview() {
         let (st, d) = testutil::layer("preview-cover").await;
