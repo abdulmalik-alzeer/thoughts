@@ -1,5 +1,17 @@
 # What's new in Thoughts
 
+## 0.7.3
+
+A maintenance release: the parts Thoughts is built from were brought up to date. There is nothing new to learn.
+
+### Changed
+- **Newer building blocks.** The window and its notifications (Tauri 2.12.7), the watcher that notices changed files (notify 9), the reader of Codex's own settings file (toml 1.2), the part that turns markdown into a formatted page (marked 18), the interface framework (Svelte 5.59), and smaller ones (zip, url, regex, uuid, DOMPurify).
+
+### Before you rely on it
+- **Nothing here has been seen in the app window.** The app's own tests pass with the new parts; nobody has looked at it running.
+- The markdown part moved up three major versions. If a note or an answer is drawn differently from 0.7.2, that is where to look.
+- For developers: the interface tests now need Node.js 24.15 or later (22.22.2 and later also works).
+
 ## 0.7.2
 
 Eight things asked for after 0.7.1: no more stretchy scrolling, closing and quitting behave, a shorter page for connecting another service, a model list you can read, a sidebar you edit in place, and plan usage that shows without sending a message first. Read "Before you rely on it": none of it has been seen in the app window yet.
