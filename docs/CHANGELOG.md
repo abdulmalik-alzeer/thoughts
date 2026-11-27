@@ -1,5 +1,22 @@
 # What's new in Thoughts
 
+## 0.7.4
+
+A maintenance release: two fixes in the parts Thoughts is built from, and a tidier code base. Nothing looks or works differently.
+
+### Fixed
+- **A fault in a building block of the Linux version** (glib, GHSA-wrw7-89jp-8q8g). The fixed version cannot be used with the window toolkit Thoughts needs on Linux, so Thoughts now builds with its own copy of the old version carrying the same one-line fix. Nothing in Thoughts used the faulty code, and macOS and Windows never included it.
+- **A newer cookie library** (cookie 0.18.3, RUSTSEC-2026-0594).
+
+### Changed
+- The background service's code now passes the Rust linter, and every change is checked by it. About 520 small rewrites, none meant to change what the app does.
+- Every change is now tested on macOS, Linux and Windows before it is accepted.
+
+### Before you rely on it
+- **Nothing here has been seen in the app window.** The app's own tests pass.
+- Linux and Windows builds are still not offered: only macOS is released.
+- On Windows the background service's tests are compiled but about fifty of them do not pass yet, for a reason in the tests themselves.
+
 ## 0.7.3
 
 A maintenance release: the parts Thoughts is built from were brought up to date. There is nothing new to learn.
