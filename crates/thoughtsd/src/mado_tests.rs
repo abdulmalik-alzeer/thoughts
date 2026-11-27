@@ -158,6 +158,7 @@ fn a_damaged_or_odd_state_is_put_right() {
 
 // ---------- path safety ----------
 
+#[cfg(unix)] // makes a symbolic link the Unix way
 #[test]
 fn names_inside_mado_are_plain_and_never_lead_outside() {
     for bad in ["", "..", "../x", "a/../b", "/etc/passwd", ".hidden", "a//b", "a\\b", "x y", "design/.x"] { assert!(!clean_rel(bad), "{bad:?}"); }
@@ -1241,6 +1242,7 @@ fn every_comment_of_the_user_reaches_the_plan_step_as_quoted_data() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)] // makes a symbolic link the Unix way
 #[tokio::test]
 async fn the_conventions_are_a_document_of_the_tech_step_that_old_plans_do_without() {
     let (st, pid, dir) = with_project("conventions").await;
@@ -1327,6 +1329,7 @@ async fn a_run_takes_the_plans_choice_else_the_apps_default_and_never_hands_a_cl
     std::fs::remove_dir_all(record_dir(&pid).unwrap()).unwrap();
 }
 
+#[cfg(unix)] // makes a symbolic link the Unix way
 #[tokio::test]
 async fn the_model_and_effort_of_a_plan_are_kept_by_the_app_and_checked() {
     let (st, pid, dir) = with_project("options").await;
@@ -1419,6 +1422,7 @@ async fn every_planning_run_starts_with_the_plans_own_model_and_effort() {
     std::fs::remove_dir_all(record_dir(&pid).unwrap()).unwrap();
 }
 
+#[cfg(unix)] // makes a symbolic link the Unix way
 #[tokio::test]
 async fn the_list_of_plans_has_every_started_plan_and_skips_what_is_broken() {
     let st = Arc::new(AppState::for_test());
@@ -1499,6 +1503,7 @@ use super::existing as ex;
 
 fn start_body(v: Value) -> axum::body::Bytes { axum::body::Bytes::from(v.to_string()) }
 
+#[cfg(unix)] // makes a symbolic link the Unix way
 #[test]
 fn detection_counts_code_by_names_only_within_its_limits_and_follows_no_link() {
     let dir = tmp("detect");

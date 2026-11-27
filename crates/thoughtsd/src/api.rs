@@ -4436,6 +4436,7 @@ mod tests {
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)] // makes a symbolic link the Unix way
     #[tokio::test]
     async fn a_wrap_in_the_library_left_behind_does_not_hold_the_one_now_open() {
         let (st, a) = t::library().await;
@@ -4463,6 +4464,7 @@ mod tests {
         std::fs::remove_dir_all(a.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)] // makes a symbolic link the Unix way
     #[tokio::test]
     async fn an_add_on_sets_the_status_only_of_a_listed_item_with_its_permission_and_inside_its_folders() {
         let (st, lib) = t::library().await;
@@ -4531,6 +4533,7 @@ mod tests {
     /// FEAT-44, FEAT-47: an add-on that lists `read` folders sees nothing of the library outside
     /// them — files, search, ideas, todo lists — by name or through a link, and adds todos only to
     /// lists it can see that already exist.
+    #[cfg(unix)] // makes a symbolic link the Unix way
     #[tokio::test]
     async fn an_add_on_with_read_folders_changes_only_files_it_reads_and_only_adds_new_ones_elsewhere() {
         let (st, lib) = t::library().await;
@@ -4623,6 +4626,7 @@ mod tests {
         std::fs::remove_dir_all(lib.parent().unwrap()).unwrap();
     }
 
+    #[cfg(unix)] // makes a symbolic link the Unix way
     #[tokio::test]
     async fn an_add_on_with_read_folders_sees_only_them_and_adds_todos_only_to_lists_there() {
         let (st, lib) = t::library().await;

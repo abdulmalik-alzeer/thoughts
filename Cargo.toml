@@ -1,8 +1,14 @@
 [workspace]
 resolver = "2"
 members = ["crates/thoughtsd", "src-tauri"]
+exclude = ["vendor"]
 
 [workspace.package]
 version = "0.7.3"
 edition = "2021"
 license = "MIT"
+
+# glib 0.18.5 with the fix for GHSA-wrw7-89jp-8q8g (see vendor/glib/PATCHED.md). gtk 0.18, which
+# Tauri 2 needs on Linux, cannot use the fixed glib 0.20.
+[patch.crates-io]
+glib = { path = "vendor/glib" }

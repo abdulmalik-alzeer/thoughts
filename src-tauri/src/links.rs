@@ -407,7 +407,12 @@ mod tests {
         assert_eq!(locate(&root, "مجلد عربي/ملاحظة.md", &private), Ok(("مجلد عربي/ملاحظة.md".into(), false)));
         // Private folders are found (and then asked about), whatever the spelling.
         assert_eq!(locate(&root, "me/finances/budget.md", &private), Ok(("me/finances/budget.md".into(), true)));
-        assert_eq!(locate(&root, "Me/Finances/budget.md", &private).map(|(_, p)| p), Ok(true));
+        // (Only a file system that ignores letter case finds the other spelling at all.)
+        if root.join("Me/Finances/budget.md").is_file() {
+            assert_eq!(locate(&root, "Me/Finances/budget.md", &private).map(|(_, p)| p), Ok(true));
+        } else {
+            assert_eq!(locate(&root, "Me/Finances/budget.md", &private), Err(Missing::Gone));
+        }
         // Missing files and folders without a front page.
         assert_eq!(locate(&root, "ideas/gone.md", &private), Err(Missing::Gone));
         assert_eq!(locate(&root, "me/finances/", &private), Err(Missing::Gone));
