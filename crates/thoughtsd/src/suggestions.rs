@@ -68,7 +68,7 @@ fn item(id: &str, arabic: bool, en: (&str, &str), ar: (&str, &str), prompt: Stri
 pub fn overdue_todos(library: &Path, today: NaiveDate) -> usize {
     crate::todos::list(library).iter().flat_map(|f| f["items"].as_array().cloned().unwrap_or_default())
         .filter(|i| i["done"] == false)
-        .filter(|i| i["due"].as_str().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).map_or(false, |d| d < today))
+        .filter(|i| i["due"].as_str().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).is_some_and(|d| d < today))
         .count()
 }
 
@@ -112,7 +112,7 @@ pub fn compute(i: &Input) -> Vec<Value> {
     }
 
     // (c) A page that has not been opened in three weeks (only once the log itself goes back that far).
-    let log_is_old_enough = i.events.first().map_or(false, |(t, _)| *t <= since(21));
+    let log_is_old_enough = i.events.first().is_some_and(|(t, _)| *t <= since(21));
     if log_is_old_enough {
         for (_, view, en, ar) in MODULE_VIEWS {
             if !i.enabled_views.contains(view) { continue; }
@@ -143,7 +143,7 @@ pub fn compute(i: &Input) -> Vec<Value> {
 
     // (e) Once a month, when the app is really in use: one tune-up proposal based on how it was used.
     let month_events = recent(30).count();
-    let log_two_weeks = i.events.first().map_or(false, |(t, _)| *t <= since(14));
+    let log_two_weeks = i.events.first().is_some_and(|(t, _)| *t <= since(14));
     if month_events >= 30 && log_two_weeks {
         let id = format!("tuneup-{}", i.now.format("%Y-%m"));
         let summary = crate::usage::summary(i.events, i.now);

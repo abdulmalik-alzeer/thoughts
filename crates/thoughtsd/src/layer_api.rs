@@ -116,7 +116,7 @@ fn remember_request(home: &std::path::Path, hash: &str, request: &str, usage: bo
 
 fn recall_request(home: &std::path::Path, hash: &str) -> Option<String> {
     let list: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(requests_file(home)).ok()?).ok()?;
-    list.iter().rev().find(|e| e["hash"].as_str().map_or(false, |h| !hash.is_empty() && (h.starts_with(hash) || hash.starts_with(h))))
+    list.iter().rev().find(|e| e["hash"].as_str().is_some_and(|h| !hash.is_empty() && (h.starts_with(hash) || hash.starts_with(h))))
         .and_then(|e| e["request"].as_str().map(String::from))
 }
 
@@ -126,7 +126,7 @@ async fn layer(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let _g = LAYER_LOCK.lock().await;
     let d = Dirs::real();
     let ar = arabic(&st).await;
-    let preview = q.get("preview").map_or(false, |v| v == "1" || v == "true");
+    let preview = q.get("preview").is_some_and(|v| v == "1" || v == "true");
     // Only what the user kept is ever loaded: anything else found in the live layer is taken out
     // first and offered for review like any other change.
     if staging::guard(Git(Some(&st)), &d, ar).await { st.emit(json!({"type": "layer.pending"})); }
@@ -296,11 +296,11 @@ async fn pending_continue(State(st): S) -> R {
     let d = Dirs::real();
     let id = staging::load_meta(&d).and_then(|m| m.chat_id).unwrap_or_default();
     // Only a customise chat that is still there can take the conversation up again.
-    if st.chats.get(&id).await.map_or(true, |c| c.kind != "customize") { return Err(crate::tr::err("layer.no_chat", &[]).into()); }
+    if st.chats.get(&id).await.is_none_or(|c| c.kind != "customize") { return Err(crate::tr::err("layer.no_chat", &[]).into()); }
     let chat = staging::cycle::continue_chat(Git(Some(&st)), &d).await?;
-    let last_is_note = st.chats.with(&chat, |c| c.messages.last().map_or(false, |m| m.role == "system" && m.tool.as_ref().map_or(false, |t| t["continued"] == true))).await.unwrap_or(false);
+    let last_is_note = st.chats.with(&chat, |c| c.messages.last().is_some_and(|m| m.role == "system" && m.tool.as_ref().is_some_and(|t| t["continued"] == true))).await.unwrap_or(false);
     if !last_is_note {
-        let mut note = crate::chats::Msg::new("system", &crate::tr::text("layer.continued_note", &[]));
+        let mut note = crate::chats::Msg::new("system", crate::tr::text("layer.continued_note", &[]));
         note.tool = Some(json!({"continued": true}));
         crate::claude::push(&st, &chat, note).await;
     }
@@ -605,7 +605,7 @@ pub fn storage_write(home: &std::path::Path, plugin: &str, bytes: &[u8], arabic:
     let dir = home.join("plugin-data");
     crate::paths::create_private_dir(&dir)?;
     // Never write through a link someone planted in the data folder.
-    if std::fs::symlink_metadata(&file).map_or(false, |m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
+    if std::fs::symlink_metadata(&file).is_ok_and(|m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
     keep_version(home, plugin, false, chrono::Local::now())?;
     crate::paths::write_atomic(&file, serde_json::to_string(&v)?.as_bytes(), true)?;
     Ok(())
@@ -619,7 +619,7 @@ pub fn storage_replace(home: &std::path::Path, plugin: &str, v: &Value) -> anyho
     if !v.is_object() || text.len() > STORAGE_MAX_BYTES { anyhow::bail!("storage must be a JSON object of at most 256 KB"); }
     let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     crate::paths::create_private_dir(&home.join("plugin-data"))?;
-    if std::fs::symlink_metadata(&file).map_or(false, |m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
+    if std::fs::symlink_metadata(&file).is_ok_and(|m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
     keep_version(home, plugin, true, chrono::Local::now())?;
     crate::paths::write_atomic(&file, text.as_bytes(), true)?;
     Ok(())
@@ -644,7 +644,7 @@ fn valid_version(id: &str) -> bool {
 /// The kept copies of `plugin`'s data, newest first: `(id, path)`.
 fn versions(home: &std::path::Path, plugin: &str) -> Vec<(String, std::path::PathBuf)> {
     let mut v: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(versions_dir(home, plugin)).into_iter().flatten().flatten()
-        .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| { let n = e.file_name().to_string_lossy().to_string(); n.strip_suffix(".json").filter(|id| valid_version(id)).map(|id| (id.to_string(), e.path())) })
         .collect();
     v.sort_by(|a, b| b.0.cmp(&a.0));
@@ -657,7 +657,7 @@ fn versions(home: &std::path::Path, plugin: &str) -> Vec<(String, std::path::Pat
 /// most `VERSIONS_KEPT` in all.
 fn keep_version(home: &std::path::Path, plugin: &str, force: bool, now: chrono::DateTime<chrono::Local>) -> anyhow::Result<()> {
     let file = storage_file(home, plugin)?;
-    if !std::fs::symlink_metadata(&file).map_or(false, |m| m.is_file()) { return Ok(()); }
+    if !std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) { return Ok(()); }
     let current = std::fs::read(&file)?;
     let list = versions(home, plugin);
     let stamp = |t: chrono::DateTime<chrono::Local>| t.format("%Y%m%d-%H%M%S-%3f").to_string();
@@ -700,10 +700,10 @@ pub fn data_info(home: &std::path::Path, plugin: &str) -> Option<Value> {
 /// The names of add-ons that have saved data (or earlier copies of it).
 pub fn stored_names(home: &std::path::Path) -> Vec<String> {
     let mut out: std::collections::BTreeSet<String> = std::fs::read_dir(home.join("plugin-data")).into_iter().flatten().flatten()
-        .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| e.file_name().to_string_lossy().strip_suffix(".json").map(String::from)).filter(|n| valid_plugin_name(n)).collect();
     out.extend(std::fs::read_dir(home.join("plugin-data").join(".versions")).into_iter().flatten().flatten()
-        .filter(|e| e.file_type().map_or(false, |t| t.is_dir())).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| valid_plugin_name(n)));
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| valid_plugin_name(n)));
     out.into_iter().collect()
 }
 
@@ -714,10 +714,10 @@ pub fn storage_restore(home: &std::path::Path, plugin: &str, version: &str) -> a
     let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let src = versions_dir(home, plugin).join(format!("{version}.json"));
     let bytes = std::fs::symlink_metadata(&src).ok().filter(|m| m.is_file() && m.len() as usize <= STORAGE_MAX_BYTES)
-        .and_then(|_| std::fs::read(&src).ok()).filter(|b| serde_json::from_slice::<Value>(b).map_or(false, |v| v.is_object()))
+        .and_then(|_| std::fs::read(&src).ok()).filter(|b| serde_json::from_slice::<Value>(b).is_ok_and(|v| v.is_object()))
         .ok_or_else(|| crate::tr::err("addon.version_gone", &[]))?;
     crate::paths::create_private_dir(&home.join("plugin-data"))?;
-    if std::fs::symlink_metadata(&file).map_or(false, |m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
+    if std::fs::symlink_metadata(&file).is_ok_and(|m| !m.is_file()) { anyhow::bail!("storage is not available for this plugin"); }
     keep_version(home, plugin, true, chrono::Local::now())?;
     crate::paths::write_atomic(&file, &bytes, true)?;
     Ok(())
@@ -727,7 +727,7 @@ pub fn storage_restore(home: &std::path::Path, plugin: &str, version: &str) -> a
 pub fn storage_clear(home: &std::path::Path, plugin: &str) -> anyhow::Result<()> {
     let file = storage_file(home, plugin)?;
     let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if !std::fs::symlink_metadata(&file).map_or(false, |m| m.is_file()) { return Ok(()); }
+    if !std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) { return Ok(()); }
     keep_version(home, plugin, true, chrono::Local::now())?;
     std::fs::remove_file(&file)?;
     Ok(())
@@ -739,15 +739,15 @@ pub fn storage_forget(home: &std::path::Path, plugin: &str) -> anyhow::Result<()
     let _g = STORAGE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if std::fs::symlink_metadata(&file).is_ok() { std::fs::remove_file(&file)?; }
     let dir = versions_dir(home, plugin);
-    if std::fs::symlink_metadata(&dir).map_or(false, |m| m.is_dir()) { std::fs::remove_dir_all(&dir)?; }
+    if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) { std::fs::remove_dir_all(&dir)?; }
     else if std::fs::symlink_metadata(&dir).is_ok() { std::fs::remove_file(&dir)?; }
     Ok(())
 }
 
 /// Every add-on's saved document (valid JSON objects within the limit), for a move file.
 pub fn storage_all(home: &std::path::Path) -> std::collections::BTreeMap<String, Value> {
-    stored_names(home).into_iter().filter(|n| storage_file(home, n).map_or(false, |f| std::fs::symlink_metadata(f).map_or(false, |m| m.is_file())))
-        .filter_map(|n| storage_read(home, &n).ok().filter(|v| v.as_object().map_or(false, |o| !o.is_empty())).map(|v| (n, v))).collect()
+    stored_names(home).into_iter().filter(|n| storage_file(home, n).is_ok_and(|f| std::fs::symlink_metadata(f).is_ok_and(|m| m.is_file())))
+        .filter_map(|n| storage_read(home, &n).ok().filter(|v| v.as_object().is_some_and(|o| !o.is_empty())).map(|v| (n, v))).collect()
 }
 
 /// `GET /api/layer/storage/<plugin>` → the plugin's JSON object (`{}` when empty).
@@ -791,7 +791,7 @@ struct WorkflowRef { file: String, hash: String }
 /// Allow the task the user was shown to run on its own, in exactly that form.
 async fn workflow_approve(State(st): S, Json(w): Json<WorkflowRef>) -> R {
     let l = workflows::approve(&crate::paths::app_layer_dir(), &crate::paths::home(), &w.file, &w.hash)?;
-    workflows::bind_to_open(&st, &[l.file.clone()]).await;
+    workflows::bind_to_open(&st, std::slice::from_ref(&l.file)).await;
     crate::log::info(format!("workflow \"{}\" ({}) approved", l.workflow.name, l.file));
     st.emit(json!({"type": "workflows.changed"}));
     ok()
@@ -841,7 +841,7 @@ async fn suggestion_list(State(st): S) -> R {
     let events = usage::read(&home);
     let overdue = s.library().map_or(0, |l| suggestions::overdue_todos(&l, now.date_naive()));
     let enabled: Vec<&str> = suggestions::MODULE_VIEWS.iter()
-        .filter(|(module, ..)| s.modules.get(*module).copied().unwrap_or_else(|| crate::modules::get(module).map_or(false, |m| m.default_on)))
+        .filter(|(module, ..)| s.modules.get(*module).copied().unwrap_or_else(|| crate::modules::get(module).is_some_and(|m| m.default_on)))
         .map(|(_, view, ..)| *view).collect();
     let chips: Vec<String> = applayer::manifest_of(&layer)["home"]["chips"].as_array().into_iter().flatten()
         .filter_map(|c| c["prompt"].as_str().map(String::from)).collect();
@@ -888,7 +888,7 @@ async fn update_resolve(State(st): S, Json(r): Json<Resolve>) -> R {
         let id = crate::api::start_customize(st.clone(), prompt, "update", Some(title)).await?;
         // The conflict stays on record until the merged file is kept (see `pending_apply`).
         staging::set_resolves(&d, &r.path);
-        return Ok(Json(json!({"ok": true, "chatId": id, "status": updates::explained(updates::status_merging(&d.home, &[r.path.clone()]), &d.home, applayer::SHIPPED)})));
+        return Ok(Json(json!({"ok": true, "chatId": id, "status": updates::explained(updates::status_merging(&d.home, std::slice::from_ref(&r.path)), &d.home, applayer::SHIPPED)})));
     }
     updates::resolve(Git(Some(&st)), &d, applayer::SHIPPED, &r.path, &r.choice).await?;
     if r.choice == "new" { st.emit(json!({"type": "layer.changed"})); }

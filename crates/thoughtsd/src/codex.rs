@@ -294,7 +294,7 @@ pub async fn status(state: &AppState) -> Value {
     let provider = crate::providers::codex_provider_of(&state.settings.read().await.ai.codex);
     let service = matches!(provider, crate::providers::CodexProvider::Service(_));
     json!({"installed": true, "path": bin, "version": version, "known": said.is_some() || service,
-        "loggedIn": (said.map_or(false, |s| s.0) || service) && !failed, "method": said.and_then(|s| s.1), "authFailed": failed, "provider": provider.name()})
+        "loggedIn": (said.is_some_and(|s| s.0) || service) && !failed, "method": said.and_then(|s| s.1), "authFailed": failed, "provider": provider.name()})
 }
 
 /// How long a "signed in" answer is trusted before a chat asks again.
@@ -309,7 +309,7 @@ pub async fn require_signed_in(state: &AppState) -> anyhow::Result<()> {
         crate::providers::CodexProvider::Own => {}
     }
     if state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).is_some() { return Ok(()); }
-    let fresh = state.codex.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()).map_or(false, |at| at.elapsed() < AUTH_TTL);
+    let fresh = state.codex.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|at| at.elapsed() < AUTH_TTL);
     if fresh { return Ok(()); }
     let bin = binary(state).await.ok_or_else(|| crate::tr::err("codex.missing", &[]))?;
     match login_status(&bin).await {
@@ -444,7 +444,7 @@ async fn options_with(state: &AppState, bin: &Path, detected: Option<crate::code
         let refreshing = crate::codex_models::refreshing();
         crate::codex_models::options_part(detected.as_ref().filter(|d| d.key.bin == bin), &config, &seen().models, [own, mini], refreshing)
     };
-    if models["codexVersion"].as_str().map_or(true, str::is_empty) { models["codexVersion"] = json!(version(state).await); }
+    if models["codexVersion"].as_str().is_none_or(str::is_empty) { models["codexVersion"] = json!(version(state).await); }
     let mut out = json!({
         "efforts": efforts(state).await,
         "permissionModes": modes,
@@ -852,7 +852,7 @@ fn older(m: &Value) -> Vec<Ev> {
         "mcp_tool_call_begin" => vec![Ev::Tool { id: id(), name: format!("{} ({})", text(&m["invocation"]["tool"]), text(&m["invocation"]["server"])) }],
         "mcp_tool_call_end" => {
             let r = &m["result"];
-            let ok = r.get("Ok").map_or(false, |o| !o["isError"].as_bool().unwrap_or(false) && !o["is_error"].as_bool().unwrap_or(false));
+            let ok = r.get("Ok").is_some_and(|o| !o["isError"].as_bool().unwrap_or(false) && !o["is_error"].as_bool().unwrap_or(false));
             let out = r.get("Ok").map(|o| o["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n"))
                 .unwrap_or_else(|| text(&r["Err"]));
             vec![Ev::ToolDone { id: id(), ok, output: out }]
@@ -959,7 +959,7 @@ pub(crate) fn error_msg(state: &AppState, text: &str) -> Msg {
 /// Did a command fail because the sandbox did not allow it (rather than for a reason of its own)?
 pub fn refused_by_sandbox(exit: Option<i64>, output: &str) -> bool {
     let o = output.to_lowercase();
-    exit.map_or(true, |e| e != 0) && ["operation not permitted", "read-only file system", "sandbox", "permission denied"].iter().any(|k| o.contains(k))
+    (exit != Some(0)) && ["operation not permitted", "read-only file system", "sandbox", "permission denied"].iter().any(|k| o.contains(k))
 }
 
 /// What is followed while a run goes.
@@ -1031,7 +1031,7 @@ pub(crate) async fn handle(state: &AppState, id: &str, ev: Ev, t: &mut Track) ->
                 let item = json!({"tool": "Command", "what": "command", "target": short(&command, 160), "why": "codexSandbox"});
                 if !t.refused.contains(&item) { t.refused.push(item); }
             }
-            crate::claude::push(state, id, result(&call, &output, exit.map_or(false, |e| e != 0))).await;
+            crate::claude::push(state, id, result(&call, &output, exit.is_some_and(|e| e != 0))).await;
         }
         Ev::Change { id: call, files } => {
             let what = files.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ");
@@ -1075,10 +1075,10 @@ fn plain_id(id: &str) -> bool { (8..=64).contains(&id.len()) && id.bytes().all(|
 /// with `since`, only those written since then. Links are never followed.
 fn rollouts(home: &Path, since: Option<SystemTime>) -> Vec<(SystemTime, PathBuf)> {
     let slack = Duration::from_secs(5);
-    let recent = |m: &std::fs::Metadata| since.map_or(true, |t| m.modified().map_or(true, |m| m + slack >= t));
+    let recent = |m: &std::fs::Metadata| since.is_none_or(|t| m.modified().map_or(true, |m| m + slack >= t));
     let mut out = vec![];
     let root = home.join("sessions");
-    if !std::fs::symlink_metadata(&root).map_or(false, |m| m.is_dir()) { return out; }
+    if !std::fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()) { return out; }
     let mut dirs = vec![(root, 0usize)];
     while let Some((d, depth)) = dirs.pop() {
         for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
@@ -1091,7 +1091,7 @@ fn rollouts(home: &Path, since: Option<SystemTime>) -> Vec<(SystemTime, PathBuf)
             }
         }
     }
-    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.sort_by_key(|a| std::cmp::Reverse(a.0));
     out
 }
 
@@ -1118,14 +1118,14 @@ pub fn find_session(home: &Path, since: SystemTime, mark: &str) -> Option<(Strin
 pub fn session_file(home: &Path, id: &str) -> Option<PathBuf> {
     if !plain_id(id) { return None; }
     let tail = format!("-{id}.jsonl");
-    rollouts(home, None).into_iter().map(|(_, p)| p).find(|p| p.file_name().map_or(false, |n| n.to_string_lossy().ends_with(&tail)))
+    rollouts(home, None).into_iter().map(|(_, p)| p).find(|p| p.file_name().is_some_and(|n| n.to_string_lossy().ends_with(&tail)))
 }
 
 /// Delete what Codex kept of these sessions (their files, by exact name). Returns how many went.
 pub fn remove_sessions(home: &Path, ids: &[String]) -> usize {
     let tails: Vec<String> = ids.iter().filter(|i| plain_id(i)).map(|i| format!("-{i}.jsonl")).collect();
     if tails.is_empty() { return 0; }
-    rollouts(home, None).into_iter().filter(|(_, p)| p.file_name().map_or(false, |n| { let n = n.to_string_lossy(); tails.iter().any(|t| n.ends_with(t)) }))
+    rollouts(home, None).into_iter().filter(|(_, p)| p.file_name().is_some_and(|n| { let n = n.to_string_lossy(); tails.iter().any(|t| n.ends_with(t)) }))
         .filter(|(_, p)| std::fs::remove_file(p).is_ok()).count()
 }
 
@@ -1156,7 +1156,7 @@ pub(crate) fn pictures(attached: &[String], files: &mut RunFiles) -> Vec<PathBuf
     for a in attached {
         let p = Path::new(a);
         let Some(ext) = p.extension().and_then(|e| e.to_str()).map(str::to_lowercase).filter(|e| PICTURES.contains(&e.as_str())) else { continue };
-        if !std::fs::symlink_metadata(p).map_or(false, |m| m.is_file()) { continue; }
+        if !std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()) { continue; }
         let Ok(dir) = files.dir() else { break };
         let copy = dir.join(format!("{}.{ext}", out.len() + 1));
         if std::fs::copy(p, &copy).is_ok() { out.push(copy); }
@@ -1171,7 +1171,7 @@ pub(crate) fn pictures(attached: &[String], files: &mut RunFiles) -> Vec<PathBuf
 /// files Codex itself obeys, AGENTS.md and AGENTS.override.md in any folder.
 fn has_dir(rel: &str, dir: &str) -> bool { rel.to_lowercase().split('/').rev().skip(1).any(|c| c == dir) }
 pub fn is_agents_file(rel: &str) -> bool {
-    rel.rsplit('/').next().map_or(false, |n| { let n = n.to_lowercase(); n == "agents.md" || n == "agents.override.md" })
+    rel.rsplit('/').next().is_some_and(|n| { let n = n.to_lowercase(); n == "agents.md" || n == "agents.override.md" })
 }
 fn guarded(rel: &str) -> bool { rel.eq_ignore_ascii_case(".mcp.json") || has_dir(rel, ".claude") || has_dir(rel, ".codex") }
 fn guarded_setup(rel: &str) -> bool { rel.eq_ignore_ascii_case(".mcp.json") || has_dir(rel, ".codex") }
@@ -1435,7 +1435,7 @@ pub(crate) async fn after_run(state: Arc<AppState>, id: String, f: crate::claude
     if t.tokens > 0 { state.chats.update(&id, |c| c.usage_tokens += t.tokens).await; }
     let sid = state.chats.with(&id, |c| c.session_id.clone()).await.flatten();
     crate::meter::record_codex(&state, Some(&id), sid, run, t.model.clone().or(a.chosen_model)).await;
-    let exited_ok = f.exit.as_ref().map_or(false, |s| s.success());
+    let exited_ok = f.exit.as_ref().is_ok_and(|s| s.success());
     let ok = match &f.ended {
         Ended::Result(r) => *r && t.error.is_none() && !t.aborted,
         Ended::NoResult => exited_ok && t.error.is_none() && !t.aborted && t.messages > 0,
@@ -1566,7 +1566,7 @@ fn one_shot_outcome(state: &AppState, stdout: &str, stderr: &str) -> anyhow::Res
     }
     if tokens > 0 { crate::log::info(format!("one-shot Codex answer: {tokens} tokens (Codex reports no cost)")); }
     if let Some(a) = answer.filter(|_| error.is_none()) { note_run_ok(state); return Ok(a.trim().to_string()); }
-    let why = error.unwrap_or_else(|| stderr.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("Codex gave no answer").to_string());
+    let why = error.unwrap_or_else(|| stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("Codex gave no answer").to_string());
     if problem(&why) == Problem::SignedOut { note_auth_failed(state); }
     anyhow::bail!("{why}")
 }

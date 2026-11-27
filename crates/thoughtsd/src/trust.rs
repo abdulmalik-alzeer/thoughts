@@ -58,7 +58,7 @@ pub fn refresh_starter_hook(path: &Path) -> bool { swap_starter_hook(path, || {}
 fn swap_starter_hook(path: &Path, meanwhile: impl FnOnce()) -> bool {
     let file = path.join(".claude/settings.json");
     // A plain file only: never write through a link.
-    let plain = |f: &Path| std::fs::symlink_metadata(f).map_or(false, |m| m.is_file());
+    let plain = |f: &Path| std::fs::symlink_metadata(f).is_ok_and(|m| m.is_file());
     if !plain(&file) { return false; }
     let Ok(text) = std::fs::read_to_string(&file) else { return false };
     let Some(current) = starter_hook_in_file() else { return false };
@@ -237,7 +237,7 @@ fn nested_files(path: &Path) -> Nested {
 /// The first `max` bytes of the regular file at `p` as text (never a device or a pipe).
 fn text_start(p: &Path, max: u64) -> String {
     use std::io::Read;
-    if !std::fs::symlink_metadata(p).map_or(false, |m| m.is_file()) { return String::new(); }
+    if !std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()) { return String::new(); }
     let mut buf = vec![];
     if let Ok(f) = std::fs::File::open(p) { let _ = f.take(max).read_to_end(&mut buf); }
     String::from_utf8_lossy(&buf).into_owned()
@@ -266,7 +266,7 @@ fn from_starter(rel: &str, real: &Path, symlink: bool) -> bool {
     if symlink { return false; }
     if let Some(want) = starter_version(rel) {
         // Size first: no need to read a large file to know it differs.
-        if std::fs::metadata(real).map_or(false, |m| m.len() == want.len() as u64) && std::fs::read(real).map_or(false, |b| b == want) { return true; }
+        if std::fs::metadata(real).is_ok_and(|m| m.len() == want.len() as u64) && std::fs::read(real).is_ok_and(|b| b == want) { return true; }
     }
     shipped_by(rel, real, None)
 }
@@ -284,11 +284,11 @@ fn shipped_by(rel: &str, real: &Path, release: Option<&str>) -> bool {
     use sha2::{Digest, Sha256};
     let kit = kit_paths(rel);
     let known = |sha: Option<&str>| crate::kit_history::SHIPPED.iter().any(|(path, hash, releases)| {
-        kit.iter().any(|k| k == path) && sha.map_or(true, |s| s == *hash) && release.map_or(true, |r| releases.contains(&r))
+        kit.iter().any(|k| k == path) && sha.is_none_or(|s| s == *hash) && release.is_none_or(|r| releases.contains(&r))
     });
     // Only a file at one of the kit's paths is read, and never a large one: the kit's are small.
     if !known(None) { return false; }
-    let plain = std::fs::symlink_metadata(real).map_or(false, |m| m.is_file() && m.len() <= 1 << 20);
+    let plain = std::fs::symlink_metadata(real).is_ok_and(|m| m.is_file() && m.len() <= 1 << 20);
     let Some(bytes) = plain.then(|| std::fs::read(real).ok()).flatten() else { return false };
     known(Some(&format!("{:x}", Sha256::digest(&bytes))))
 }
@@ -482,7 +482,7 @@ fn setting_findings(key: &str, value: &Value, starter: &Value) -> Vec<(&'static 
             let mut parts = vec![];
             if let Some(m) = value.get("defaultMode").and_then(Value::as_str) { parts.push(format!("defaultMode: {m}")); }
             for k in ["allow", "additionalDirectories"] {
-                if let Some(v) = value.get(k).filter(|v| v.as_array().map_or(false, |a| !a.is_empty())) { parts.push(format!("{k}: {}", plain(v))); }
+                if let Some(v) = value.get(k).filter(|v| v.as_array().is_some_and(|a| !a.is_empty())) { parts.push(format!("{k}: {}", plain(v))); }
             }
             one("permissions", if parts.is_empty() { plain(value) } else { parts.join("; ") })
         }
@@ -517,7 +517,7 @@ fn file_mark(real: &Path, link: bool) -> Option<String> {
     const LIMIT: u64 = 16 << 20;
     let target = if link { format!("link:{}:", std::fs::read_link(real).map(|t| t.display().to_string()).unwrap_or_default()) } else { String::new() };
     // Regular files only (never devices or pipes), wherever they live; the byte cap bounds the read.
-    let regular = dunce::canonicalize(real).ok().filter(|r| std::fs::metadata(r).map_or(false, |m| m.is_file()));
+    let regular = dunce::canonicalize(real).ok().filter(|r| std::fs::metadata(r).is_ok_and(|m| m.is_file()));
     let Some(regular) = regular else { return Some(format!("{target}-")) };
     let Ok(f) = std::fs::File::open(regular) else { return Some(format!("{target}unreadable")) };
     use std::io::Read;
@@ -663,14 +663,14 @@ impl Scan {
         if dunce::canonicalize(&common).ok() != dunce::canonicalize(&dirs[0]).ok() { dirs.push(common); }
         for d in &dirs {
             let mut hooks: Vec<PathBuf> = std::fs::read_dir(d.join("hooks")).into_iter().flatten().flatten().map(|e| e.path())
-                .filter(|p| !p.file_name().map_or(true, |n| n.to_string_lossy().ends_with(".sample"))).collect();
+                .filter(|p| !p.file_name().is_none_or(|n| n.to_string_lossy().ends_with(".sample"))).collect();
             hooks.sort();
             if !hooks.is_empty() {
                 let names: Vec<String> = hooks.iter().filter_map(|p| p.file_name().map(|n| n.to_string_lossy().to_string())).collect();
                 self.add(G, "git_hooks", &place(&d.join("hooks")), "", &names.join(", "), Some("git hooks".into()));
             }
             for h in hooks {
-                let is_link = std::fs::symlink_metadata(&h).map_or(false, |m| m.file_type().is_symlink());
+                let is_link = std::fs::symlink_metadata(&h).is_ok_and(|m| m.file_type().is_symlink());
                 match file_mark(&h, is_link) { Some(m) => self.git_marks.push(format!("hook {}={m}", h.display())), None => self.trustable = false }
             }
             for name in ["config", "config.worktree"] {
@@ -939,7 +939,7 @@ fn legacy_fingerprint(path: &Path, f: &[String]) -> String {
     for p in files {
         h.update(p.to_string_lossy().as_bytes()); h.update([0]);
         let real = dunce::canonicalize(&p).ok();
-        if real.as_ref().and_then(|r| std::fs::metadata(r).ok()).map_or(false, |m| m.is_file()) {
+        if real.as_ref().and_then(|r| std::fs::metadata(r).ok()).is_some_and(|m| m.is_file()) {
             const LIMIT: u64 = 16 << 20;
             if let Ok(f) = std::fs::File::open(real.unwrap()) {
                 use std::io::Read;
@@ -1051,7 +1051,7 @@ fn check(path: &Path, scope: Scope) -> anyhow::Result<()> {
         Some(Stored::Parts(e)) => (Some(e), true),
         Some(Stored::Legacy(fp)) => {
             // Trusted by 0.0.8 and untouched since: carry the trust over without asking.
-            if scan.trustable && scan.legacy_findings().map_or(false, |f| legacy_fingerprint(path, &f) == fp) {
+            if scan.trustable && scan.legacy_findings().is_some_and(|f| legacy_fingerprint(path, &f) == fp) {
                 crate::log::ok_or_warn("could not update the record of a trusted folder", record(&key, now));
                 return Ok(());
             }
@@ -1078,7 +1078,7 @@ fn check(path: &Path, scope: Scope) -> anyhow::Result<()> {
     if !a_ok && old_a.is_some() { changed.push("assistant"); }
     if !g_ok && old_g.is_some() { changed.push("git"); }
     let seen = old.as_ref().filter(|_| detailed).map(|e| &e.seen);
-    let items = scan.findings.iter().map(|f| (f.clone(), seen.map_or(false, |s| !s.contains(&f.key())))).collect();
+    let items = scan.findings.iter().map(|f| (f.clone(), seen.is_some_and(|s| !s.contains(&f.key())))).collect();
     let mut files = vec![];
     if let Some(e) = old.as_ref().filter(|_| detailed && changed.contains(&"assistant")) {
         for (f, mark) in &scan.files {
@@ -1096,14 +1096,14 @@ fn check(path: &Path, scope: Scope) -> anyhow::Result<()> {
 /// A folder whose `.claude` folders hold anything the starter kit did not put there always has its
 /// state on record — written silently the first time when nothing in it is risky — so that a later
 /// change to those files asks again.
-pub fn require(path: &Path) -> anyhow::Result<()> { Ok(check(path, Scope::Whole)?) }
+pub fn require(path: &Path) -> anyhow::Result<()> { check(path, Scope::Whole) }
 
 /// Before the daemon itself runs git in a library: nothing that makes git run programs (hooks,
 /// filters, aliases, ssh commands…) may have appeared or changed since the folder was trusted.
 /// The assistant's files are not git's business: a changed routine never stops a sync.
 /// Without a real git it fails (`git.missing`) and runs nothing: a git that turns up afterwards
 /// must not run against settings nobody looked at.
-pub fn require_git(path: &Path) -> anyhow::Result<()> { Ok(check(path, Scope::Git)?) }
+pub fn require_git(path: &Path) -> anyhow::Result<()> { check(path, Scope::Git) }
 
 /// The folder open question `id` is about, while it is open. The desktop app names the folder from
 /// here in its own confirmation, never from what the window says.
@@ -1135,7 +1135,7 @@ pub fn accept(id: &str) -> anyhow::Result<()> {
     if too_large { return Err(crate::tr::err("trust.too_large", &[])); }
     // Not what was shown. If it still needs asking, that is a new question; if it no longer
     // does (the risky file is gone again), there is nothing to record.
-    Ok(check(&q.path, Scope::Whole)?)
+    check(&q.path, Scope::Whole)
 }
 
 /// Record a folder as trusted the way it is right now, without a question. Never for a path or a
@@ -1205,10 +1205,10 @@ pub fn differing_assistant_files(trusted: &Path, copy: &Path) -> Vec<String> {
     for (rel, real, link) in check {
         let other = trusted.join(&rel);
         let same = if link {
-            std::fs::symlink_metadata(&other).map_or(false, |m| m.file_type().is_symlink())
+            std::fs::symlink_metadata(&other).is_ok_and(|m| m.file_type().is_symlink())
                 && std::fs::read_link(&real).ok() == std::fs::read_link(&other).ok()
         } else {
-            std::fs::symlink_metadata(&other).map_or(false, |m| m.is_file())
+            std::fs::symlink_metadata(&other).is_ok_and(|m| m.is_file())
                 && matches!((std::fs::read(&real), std::fs::read(&other)), (Ok(a), Ok(b)) if a == b)
         };
         if !same { out.push(rel); }

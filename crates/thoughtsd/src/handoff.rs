@@ -169,7 +169,7 @@ pub async fn prefix(state: &AppState, chat: &Chat) -> Option<String> {
 }
 
 /// The move is complete once the new program has a session of its own for the chat.
-pub fn settled(chat: &Chat) -> bool { chat.session_id.is_some() && chat.meta.get("handoff").map_or(false, Value::is_object) }
+pub fn settled(chat: &Chat) -> bool { chat.session_id.is_some() && chat.meta.get("handoff").is_some_and(Value::is_object) }
 
 #[cfg(test)]
 mod tests {

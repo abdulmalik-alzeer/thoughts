@@ -185,7 +185,7 @@ impl Store {
         if !same(&k.hash, &want) { return None; }
         let caller = Caller { id: k.id.clone(), scopes: k.scopes.clone() };
         let now = Utc::now();
-        if k.last_used.map_or(true, |t| (now - t).num_seconds() >= LAST_USED_EVERY) {
+        if k.last_used.is_none_or(|t| (now - t).num_seconds() >= LAST_USED_EVERY) {
             k.last_used = Some(now);
             crate::log::ok_or_warn("could not note when an access key was used", self.save(&keys));
         }

@@ -62,7 +62,7 @@ impl Keyring for SystemKeyring {
             while n < 50 {
                 let done = crate::proc::std_command("security").args(["delete-generic-password", "-s", service])
                     .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
-                if !done.map_or(false, |s| s.success()) { break; }
+                if !done.is_ok_and(|s| s.success()) { break; }
                 n += 1;
             }
             n
@@ -98,7 +98,7 @@ pub fn plan(home: &Path, library: Option<&Path>, linked: &[PathBuf]) -> Plan {
     let mut p = Plan { home: home.to_path_buf(), items: vec![], left: vec![], blocked: None };
     let user_home = dirs::home_dir();
     let unsafe_home = home.parent().is_none() || home.file_name().is_none() || !home.is_absolute()
-        || user_home.as_deref().map_or(false, |u| crate::paths::canonical_lenient(u) == crate::paths::canonical_lenient(home));
+        || user_home.as_deref().is_some_and(|u| crate::paths::canonical_lenient(u) == crate::paths::canonical_lenient(home));
     if unsafe_home { p.blocked = Some("unsafe"); return p; }
     match std::fs::symlink_metadata(home) {
         Ok(m) if m.file_type().is_symlink() => { p.blocked = Some("link"); return p; }
@@ -119,7 +119,7 @@ pub fn plan(home: &Path, library: Option<&Path>, linked: &[PathBuf]) -> Plan {
     for user_dir in library.into_iter().chain(linked.iter().map(PathBuf::as_path)) {
         if crate::paths::inside_ci(home, user_dir) { p.blocked = Some("inside-library"); break; }
         if crate::paths::inside_ci(user_dir, home) {
-            let is_library = library.map_or(false, |l| l == user_dir);
+            let is_library = library == Some(user_dir);
             p.blocked = Some(if is_library { "library-inside" } else { "folder-inside" });
             break;
         }

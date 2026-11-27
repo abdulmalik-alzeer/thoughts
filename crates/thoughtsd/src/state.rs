@@ -108,13 +108,13 @@ impl LibraryLocks {
     /// Is the library at `lib` held right now?
     pub fn busy_at(&self, lib: &Path) -> bool {
         let key = crate::paths::canonical_lenient(lib);
-        self.slots().get(&key).map_or(false, |s| s.lock.try_lock().is_err())
+        self.slots().get(&key).is_some_and(|s| s.lock.try_lock().is_err())
     }
 
     /// Is a sync started from the window what holds the library at `lib`?
     pub fn syncing_at(&self, lib: &Path) -> bool {
         let key = crate::paths::canonical_lenient(lib);
-        self.slots().get(&key).map_or(false, |s| s.syncing.load(Ordering::SeqCst))
+        self.slots().get(&key).is_some_and(|s| s.syncing.load(Ordering::SeqCst))
     }
 
     /// Is any library held right now?
@@ -295,7 +295,7 @@ impl AppState {
     /// Forget that a chat's run was cut off (the user has seen it, or the chat is running again).
     pub async fn ack_interrupted(&self, chat_id: &str) {
         self.interrupted.lock().await.retain(|(c, _)| c != chat_id);
-        if self.chats.get(chat_id).await.map_or(false, |c| c.interrupted) {
+        if self.chats.get(chat_id).await.is_some_and(|c| c.interrupted) {
             if let Some(ch) = self.chats.update(chat_id, |c| c.interrupted = false).await {
                 self.emit(serde_json::json!({"type": "chat.updated", "chat": ch.summary()}));
             }
@@ -306,7 +306,7 @@ impl AppState {
     pub fn note_run_ok(&self) {
         self.mini_wraps_blocked.store(false, Ordering::Relaxed);
         // Something went through, so a refusal for the plan's limit is over (a warning stays until its reset).
-        if self.plan_limit.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(false, |(l, _)| l.reached) { crate::spend::set_plan_limit(self, None); }
+        if self.plan_limit.lock().unwrap_or_else(|e| e.into_inner()).as_ref().is_some_and(|(l, _)| l.reached) { crate::spend::set_plan_limit(self, None); }
         if self.auth_failed.swap(false, Ordering::Relaxed) { self.emit(serde_json::json!({"type": "auth.changed", "loggedIn": true})); }
     }
 

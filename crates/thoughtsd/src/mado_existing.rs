@@ -120,7 +120,7 @@ fn has_readme(project: &Path) -> bool {
     let Ok(rd) = std::fs::read_dir(project) else { return false };
     rd.flatten().any(|e| {
         let n = e.file_name().to_string_lossy().to_ascii_lowercase();
-        (n == "readme" || n.starts_with("readme.")) && e.file_type().map_or(false, |t| t.is_file())
+        (n == "readme" || n.starts_with("readme.")) && e.file_type().is_ok_and(|t| t.is_file())
     })
 }
 
@@ -162,7 +162,7 @@ pub fn detect(project: &Path) -> Found {
     let has_code = !manifests.is_empty() || program_files >= CODE_FILES;
     let mut top: Vec<String> = std::fs::read_dir(project).map(|rd| rd.flatten().filter_map(|e| {
         let n = e.file_name().to_string_lossy().to_string();
-        let dir = e.file_type().map_or(false, |t| t.is_dir());
+        let dir = e.file_type().is_ok_and(|t| t.is_dir());
         (plain_name(&n) && !n.eq_ignore_ascii_case(crate::mado::DIR)).then(|| if dir { format!("{n}/") } else { n })
     }).collect()).unwrap_or_default();
     top.sort();

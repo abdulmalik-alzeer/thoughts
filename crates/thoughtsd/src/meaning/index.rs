@@ -37,7 +37,7 @@ pub const SAVE_EVERY: usize = 500;
 const NOT_INDEXED: [&str; 4] = ["json", "csv", "tsv", "log"];
 
 pub fn indexed(p: &Path) -> bool {
-    crate::search::is_text(p) && p.extension().and_then(|e| e.to_str()).map_or(false, |e| !NOT_INDEXED.contains(&e.to_ascii_lowercase().as_str()))
+    crate::search::is_text(p) && p.extension().and_then(|e| e.to_str()).is_some_and(|e| !NOT_INDEXED.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 pub fn lib_key(root: &Path) -> String {
@@ -91,7 +91,7 @@ fn blocks(text: &str, from: usize) -> Vec<Block> {
         let t = line.trim_start();
         if let Some((c, n)) = fence {
             if let Some(b) = cur.as_mut() { b.end = content_end; }
-            if fence_of(t).map_or(false, |(c2, n2)| c2 == c && n2 >= n) && t.trim_start_matches(c).trim().is_empty() {
+            if fence_of(t).is_some_and(|(c2, n2)| c2 == c && n2 >= n) && t.trim_start_matches(c).trim().is_empty() {
                 fence = None;
                 out.extend(cur.take());
             }
@@ -205,7 +205,7 @@ impl Index {
             let chunks: Vec<Chunk> = serde_json::from_str(&std::fs::read_to_string(dir.join("chunks.json")).ok()?).ok()?;
             let raw = std::fs::read(dir.join("vectors.f32")).ok()?;
             if raw.len() != chunks.len() * DIMS * 4 { return None; }
-            let vecs = raw.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+            let vecs = raw.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
             // Every piece belongs to a file the state lists.
             if chunks.iter().any(|c| !st.files.contains_key(&c.path)) { return None; }
             Some(Index { dir: dir.to_path_buf(), model: model.to_string(), chunks, vecs, files: st.files, updated: st.updated })
@@ -312,10 +312,10 @@ pub fn run_pass(ix: &RwLock<Index>, root: &Path, private: &[String], emb: &dyn E
     let mut todo: Vec<(String, FileMeta, String, Vec<(usize, usize)>)> = vec![];
     for s in &seen {
         let known = ix.read().unwrap_or_else(|e| e.into_inner()).files.get(&s.rel).cloned();
-        if known.as_ref().map_or(false, |k| k.len == s.len && k.mtime == s.mtime) { continue; }
+        if known.as_ref().is_some_and(|k| k.len == s.len && k.mtime == s.mtime) { continue; }
         let Ok(text) = std::fs::read_to_string(&s.path) else { continue };
         let meta = FileMeta { len: s.len, mtime: s.mtime, sha: short_sha(text.as_bytes()) };
-        if known.as_ref().map_or(false, |k| k.sha == meta.sha) {
+        if known.as_ref().is_some_and(|k| k.sha == meta.sha) {
             ix.write().unwrap_or_else(|e| e.into_inner()).files.insert(s.rel.clone(), meta);
             continue;
         }

@@ -98,7 +98,7 @@ pub struct Scan {
 }
 
 fn is_note(name: &str) -> bool {
-    name.rsplit_once('.').map_or(false, |(_, e)| NOTE_EXT.contains(&e.to_lowercase().as_str()))
+    name.rsplit_once('.').is_some_and(|(_, e)| NOTE_EXT.contains(&e.to_lowercase().as_str()))
 }
 
 /// A name the library hides or never touches (see `library::skip`), or a hidden one.
@@ -175,7 +175,7 @@ impl Scan {
 pub fn source(raw: &str, library: Option<&Path>) -> anyhow::Result<PathBuf> {
     let typed = raw.trim();
     let path = paths::expand_tilde(typed).ok().filter(|p| !typed.is_empty() && p.is_absolute()).ok_or_else(|| tr::err("import.no_folder", &[]))?;
-    if !std::fs::metadata(&path).map_or(false, |m| m.is_dir()) { return Err(tr::err("import.no_folder", &[])); }
+    if !std::fs::metadata(&path).is_ok_and(|m| m.is_dir()) { return Err(tr::err("import.no_folder", &[])); }
     let real = paths::canonical(&path)?;
     if let Some(lib) = library {
         let lib = paths::canonical_lenient(lib);
@@ -378,7 +378,7 @@ pub async fn take_back(st: &AppState, root: &Path, hash: &str, into: &str) -> an
             let mut failed = 0;
             for f in &files {
                 match library::resolve(root, f) {
-                    Ok(p) if std::fs::symlink_metadata(&p).map_or(false, |m| m.is_file()) => { if std::fs::remove_file(&p).is_err() { failed += 1; } }
+                    Ok(p) if std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) && std::fs::remove_file(&p).is_err() => { failed += 1; }
                     _ => {}
                 }
             }
@@ -478,7 +478,7 @@ pub fn check_adopt(path: &Path) -> anyhow::Result<Scan> {
     }
     let real = paths::canonical_lenient(path);
     if real.starts_with(paths::canonical_lenient(&paths::home())) { return Err(tr::err("import.app_data", &[])); }
-    if dirs::home_dir().map_or(false, |h| paths::canonical_lenient(&h) == real) || real.parent().is_none() {
+    if dirs::home_dir().is_some_and(|h| paths::canonical_lenient(&h) == real) || real.parent().is_none() {
         return Err(tr::err("import.adopt_too_big", &[]));
     }
     let scan = Scan::of(path, u64::MAX);
@@ -582,7 +582,7 @@ async fn import_folder(State(st): S, Json(r): Json<FolderReq>) -> R {
     if scan.too_big { return Err(tr::err("import.too_big", &[]).into()); }
     if scan.files.is_empty() { return Err(tr::err("import.nothing", &[]).into()); }
     let keep = Keep::parse(&r.keep)?;
-    let scan = if sent_somewhere(&st, &root).await { decide(scan, keep, limits())? } else if keep == Keep::Notes { decide(scan, keep, limits())? } else { scan };
+    let scan = if sent_somewhere(&st, &root).await || keep == Keep::Notes { decide(scan, keep, limits())? } else { scan };
     // Nothing else changes the library meanwhile (a Wrap waits), and what was there before is
     // recorded first when the history starts here, so the copy is an entry of its own.
     let _guard = st.library_lock.of(&root).try_lock_owned().map_err(|_| tr::err("busy", &[]))?;
@@ -595,7 +595,7 @@ async fn import_folder(State(st): S, Json(r): Json<FolderReq>) -> R {
     let scan = Arc::new(scan);
     let s2 = scan.clone();
     let (copied, late) = tokio::task::spawn_blocking(move || copy_in(&s2, &root2, &into2)).await??;
-    let hash = if history && copied > 0 { record(&st, &root, &subject(&into, copied), &[into.clone()]).await } else { None };
+    let hash = if history && copied > 0 { record(&st, &root, &subject(&into, copied), std::slice::from_ref(&into)).await } else { None };
     crate::log::info(format!("brought in {copied} file(s) from a folder of notes (history entry: {})", hash.is_some()));
     st.emit(json!({"type": "library.changed"}));
     st.emit(json!({"type": "todos.changed"}));

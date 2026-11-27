@@ -140,7 +140,7 @@ pub fn search(dirs: &[&Path], cands: &[String], windows: bool, exists: impl Fn(&
 /// Is this program a Windows batch shim (`claude.cmd` from npm)? Those cannot take multi-line or
 /// quote-heavy arguments, so such values are handed over in files instead.
 pub fn is_cmd_shim(bin: &Path) -> bool {
-    bin.extension().and_then(|e| e.to_str()).map_or(false, |e| matches!(e.to_lowercase().as_str(), "cmd" | "bat"))
+    bin.extension().and_then(|e| e.to_str()).is_some_and(|e| matches!(e.to_lowercase().as_str(), "cmd" | "bat"))
 }
 
 /// File names to look for when searching for program `name`. On Windows a real `.exe` wins over
@@ -431,7 +431,7 @@ async fn try_connection(state: &AppState, typed: Option<(Option<&str>, Option<&s
             let keep = token.is_none() && saved.has_api_token && same;
             // "No key needed" (typed, or saved for this very address): the stand-in, never a real key.
             let keyless = token.is_none() && !keep && destination(url).is_some() && (no_key || (saved.keyless && same));
-            if keyless && !url.map_or(false, |u| crate::settings::keyless_allowed(u, full)) { return Err(crate::tr::err("provider.key_remote", &[])); }
+            if keyless && !url.is_some_and(|u| crate::settings::keyless_allowed(u, full)) { return Err(crate::tr::err("provider.key_remote", &[])); }
             let key = if keep { saved_key() } else if keyless { Some(crate::providers::NO_KEY.to_string()) } else { token };
             let p = match (destination(url), key.is_some()) {
                 (None, false) => Provider::Account,
@@ -486,7 +486,7 @@ pub async fn set_provider_with(state: &AppState, store: &dyn KeyStore, base_url:
     let cur = s.ai.claude.clone();
     let moved = destination(cur.base_url.as_deref()) != destination(url);
     let keyless = destination(url).is_some() && key.is_none() && (no_key || (cur.keyless && !moved));
-    if keyless && !url.map_or(false, |u| crate::settings::keyless_allowed(u, full)) { return Err(crate::tr::err("provider.key_remote", &[])); }
+    if keyless && !url.is_some_and(|u| crate::settings::keyless_allowed(u, full)) { return Err(crate::tr::err("provider.key_remote", &[])); }
     let keeps_key = cur.has_api_token && !moved && !keyless;
     if destination(url).is_some() && key.is_none() && !keeps_key && !keyless { return Err(crate::tr::err("provider.key_needed", &[])); }
     let drops_old_key = key.is_none() && cur.has_api_token && (moved || keyless);
@@ -552,7 +552,7 @@ pub async fn require_signed_in(state: &AppState) -> anyhow::Result<()> {
         Provider::Account => {}
     }
     if state.run_hook.lock().unwrap_or_else(|e| e.into_inner()).is_some() { return Ok(()); }
-    let fresh = state.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()).map_or(false, |at| at.elapsed() < AUTH_TTL);
+    let fresh = state.auth_ok_at.lock().unwrap_or_else(|e| e.into_inner()).is_some_and(|at| at.elapsed() < AUTH_TTL);
     if fresh { return Ok(()); }
     let bin = binary(state).await.ok_or_else(|| crate::tr::err("assistant.missing", &[]))?;
     match auth_status(&bin).await.get("loggedIn").and_then(Value::as_bool) {
@@ -723,7 +723,7 @@ pub fn models_seen(dest: &str) -> Vec<String> {
 async fn note_models(state: &AppState, names: impl IntoIterator<Item = String>) {
     let dest = destination(state.settings.read().await.ai.claude.base_url.as_deref()).unwrap_or("").to_string();
     let fresh: Vec<String> = names.into_iter()
-        .filter(|n| n.len() <= 80 && n.chars().next().map_or(false, |c| c.is_ascii_alphanumeric()) && !n.contains('<') && crate::settings::check_cli_value("model", Some(n)).is_ok())
+        .filter(|n| n.len() <= 80 && n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) && !n.contains('<') && crate::settings::check_cli_value("model", Some(n)).is_ok())
         .collect();
     if fresh.is_empty() { return; }
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -749,7 +749,7 @@ pub async fn has_flag(state: &AppState, flag: &str) -> bool {
 /// Does this `--help` text list `flag`? Either on a line of its own, or — for a `…-file` variant
 /// the help only names in passing — as `--append-system-prompt[-file]`.
 pub fn supports(help: &str, flag: &str) -> bool {
-    !flag_block(help, flag).is_empty() || flag.strip_suffix("-file").map_or(false, |base| help.contains(&format!("{base}[-file]")))
+    !flag_block(help, flag).is_empty() || flag.strip_suffix("-file").is_some_and(|base| help.contains(&format!("{base}[-file]")))
 }
 
 /// The help text belonging to one flag: its line plus indented continuation lines.
@@ -1286,7 +1286,7 @@ pub fn private_deny_settings(library: Option<&Path>, cwd: &Path, private: &[Stri
         let mut pats = vec![];
         // Pattern characters in a name are escaped; such a folder is also closed under a second
         // spelling that does not depend on escapes being understood (`glob_wild`).
-        let quotes: &[fn(&str) -> String] = if rel.contains(GLOB_CHARS) || library.map_or(false, |l| l.to_string_lossy().contains(GLOB_CHARS)) { &[glob_escape, any_case, glob_wild] } else { &[glob_escape, any_case] };
+        let quotes: &[fn(&str) -> String] = if rel.contains(GLOB_CHARS) || library.is_some_and(|l| l.to_string_lossy().contains(GLOB_CHARS)) { &[glob_escape, any_case, glob_wild] } else { &[glob_escape, any_case] };
         for quote in quotes {
             if let Some(lib) = library {
                 if lib == cwd { pats.push(format!("./{}", quote(&rel))); }
@@ -1730,7 +1730,7 @@ pub(crate) async fn record_app_write(state: &AppState, lib: &Path, subject: &str
 /// or a folder it was given beside it is the library, and it is not read-only (plan mode) or the
 /// app-layer's own run.
 fn touches_library(library: Option<&Path>, cwd: &Path, add_dirs: &[PathBuf], kind: &str, mode: &str) -> bool {
-    kind != "customize" && mode != "plan" && library.map_or(false, |l| cwd == l || add_dirs.iter().any(|d| d == l))
+    kind != "customize" && mode != "plan" && library.is_some_and(|l| cwd == l || add_dirs.iter().any(|d| d == l))
 }
 
 /// Give a new run of chat `id` its Stop switch (`AppState::runs`). Refused while another run of the
@@ -1754,7 +1754,7 @@ pub(crate) async fn take_switch(state: &AppState, id: &str) -> anyhow::Result<to
 async fn release(state: &AppState, id: &str) -> Option<crate::chats::ChatMeta> {
     {
         let mut runs = state.runs.lock().await;
-        if runs.get(id).map_or(false, |k| !k.is_closed()) { return None; }
+        if runs.get(id).is_some_and(|k| !k.is_closed()) { return None; }
         runs.remove(id);
     }
     state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).remove(id);
@@ -2086,9 +2086,8 @@ pub async fn start_run(
     }
     let bin = binary(&state).await.ok_or_else(|| anyhow::anyhow!("Claude Code CLI not found"))?;
     let mut c = cmd(&bin);
-    let budget = budget_arg(spec.options.max_budget_usd, &help).map_err(|e| {
+    let budget = budget_arg(spec.options.max_budget_usd, &help).inspect_err(|_| {
         crate::log::error(format!("run {}: not started — this version of the assistant cannot limit spending", spec.chat_id));
-        e
     })?;
     // The rules always travel in a private file, never on the command line: they grow with the
     // library (private folders, other chats' attachments), one argument may only be so long, and
@@ -2406,7 +2405,7 @@ fn closed_by(p: &Profile) -> &'static str { if p.name != "chat" { "app" } else i
 pub fn is_standing(rel: &str) -> bool {
     let parts: Vec<String> = rel.replace('\\', "/").split('/').filter(|c| !c.is_empty() && *c != ".").map(str::to_lowercase).collect();
     let Some(last) = parts.last() else { return false };
-    STANDING_NAMES.iter().any(|n| n.to_lowercase() == *last) || parts.first().map_or(false, |f| f == STANDING_DIR)
+    STANDING_NAMES.iter().any(|n| n.to_lowercase() == *last) || parts.first().is_some_and(|f| f == STANDING_DIR)
 }
 
 /// Is library-relative `rel` a file the backstop keeps (`StandingSnapshot`): a standing file, or
@@ -2481,7 +2480,7 @@ impl StandingSnapshot {
                 if ft.is_dir() {
                     if !name.eq_ignore_ascii_case(".git") { stack.push((e.path(), r)); }
                 } else if keep(&r) {
-                    let small = ft.is_file() && e.metadata().map_or(false, |m| m.len() <= KEPT_MAX);
+                    let small = ft.is_file() && e.metadata().is_ok_and(|m| m.len() <= KEPT_MAX);
                     let kept = if small { std::fs::read(e.path()).map(Kept::Bytes).unwrap_or(Kept::Untouched) } else { Kept::Untouched };
                     out.insert(r, kept);
                 }
@@ -2494,9 +2493,9 @@ impl StandingSnapshot {
     /// ever written through a link: a file whose folder became a link is left as it is.
     pub fn restore(&self) -> Vec<String> {
         let now = Self::scan(&self.root, self.keep, self.links);
-        let through_link = |p: &Path| p.strip_prefix(&self.root).ok().map_or(true, |rel| {
+        let through_link = |p: &Path| p.strip_prefix(&self.root).ok().is_none_or(|rel| {
             let mut cur = self.root.clone();
-            rel.parent().into_iter().flat_map(|r| r.components()).any(|c| { cur.push(c); std::fs::symlink_metadata(&cur).map_or(false, |m| m.file_type().is_symlink()) })
+            rel.parent().into_iter().flat_map(|r| r.components()).any(|c| { cur.push(c); std::fs::symlink_metadata(&cur).is_ok_and(|m| m.file_type().is_symlink()) })
         });
         let mut put_back = vec![];
         // Links first: a new or changed one under a kept name goes (the next session would read
@@ -2522,7 +2521,7 @@ impl StandingSnapshot {
             let p = self.root.join(rel);
             if through_link(&p) { crate::log::warn(format!("standing file {rel} sits behind a link now; not put back")); continue; }
             // A link put in its place goes; a folder put in its place is left (and said).
-            if std::fs::symlink_metadata(&p).map_or(false, |m| m.file_type().is_symlink()) { let _ = std::fs::remove_file(&p); }
+            if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) { let _ = std::fs::remove_file(&p); }
             if let Some(dir) = p.parent() { let _ = std::fs::create_dir_all(dir); }
             match std::fs::write(&p, bytes) {
                 Ok(()) => put_back.push(rel.clone()),
@@ -2551,7 +2550,7 @@ pub(crate) async fn put_back_standing(state: &AppState, id: &str, snap: Standing
     // Before a closing error, which must stay the last message of a run that failed.
     let mv = serde_json::to_value(&m).unwrap_or(Value::Null);
     state.chats.update(id, |c| {
-        let at = c.messages.len() - usize::from(c.messages.last().map_or(false, |x| x.role == "error"));
+        let at = c.messages.len() - usize::from(c.messages.last().is_some_and(|x| x.role == "error"));
         c.messages.insert(at, m);
     }).await;
     state.emit(json!({"type": "chat.message", "chatId": id, "message": mv}));
@@ -2580,7 +2579,7 @@ fn file_denial(raw: &str, change: bool, cx: &DenialContext) -> (String, Option<&
 
 /// The chat message listing what a run was refused (`role: "denied"`), or `None` when nothing was.
 async fn denied_msg(state: &AppState, id: &str, list: &Value) -> Option<Msg> {
-    if list.as_array().map_or(true, |a| a.is_empty()) { return None; }
+    if list.as_array().is_none_or(|a| a.is_empty()) { return None; }
     let (kind, options) = state.chats.with(id, |c| (c.kind.clone(), c.options.clone())).await?;
     let mode = crate::settings::effective_permission_mode(options.permission_mode.as_deref()).to_string();
     let cwd = state.run_dirs.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned().unwrap_or_default();
@@ -2595,7 +2594,7 @@ async fn denied_msg(state: &AppState, id: &str, list: &Value) -> Option<Msg> {
     let cx = DenialContext { profile: prof, mode: &mode, cwd: &cwd, library: library.as_deref(), private: &private, home: &home };
     // What the user refused on a card (or let run out) is on that card already.
     let carded = state.approvals.carded(id);
-    let list = Value::Array(list.as_array().into_iter().flatten().filter(|d| d["tool_use_id"].as_str().map_or(true, |t| !carded.contains(t))).cloned().collect());
+    let list = Value::Array(list.as_array().into_iter().flatten().filter(|d| d["tool_use_id"].as_str().is_none_or(|t| !carded.contains(t))).cloned().collect());
     let items = denials(&list, &cx);
     if items.is_empty() { return None; }
     crate::log::info(format!("run {id}: the assistant was refused {} thing(s): {}", items.len(),
@@ -2709,7 +2708,7 @@ pub(crate) async fn handle_event(state: &AppState, id: &str, ev: &Value) -> Opti
                     .unwrap_or_else(|| format!("Run ended: {}", ev["subtype"].as_str().unwrap_or("error")));
                 // The CLI often echoes the error as assistant text first; show it once, as an error.
                 state.chats.update(id, |c| {
-                    if c.messages.last().map_or(false, |m| m.role == "assistant" && m.text.trim() == txt.trim()) { c.messages.pop(); }
+                    if c.messages.last().is_some_and(|m| m.role == "assistant" && m.text.trim() == txt.trim()) { c.messages.pop(); }
                 }).await;
                 if let Some(m) = denied { push(state, id, m).await; }
                 push(state, id, error_msg(state, &txt).await).await;

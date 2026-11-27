@@ -117,7 +117,7 @@ impl Batch {
     /// When it will be due if nothing more arrives.
     pub fn due_at(&self) -> Instant { (self.last + QUIET).min(self.first + MOST) }
     /// Did news of the app's own at `app` (the latest) come while this was collected?
-    pub fn apps(&self, app: Option<Instant>) -> bool { self.tainted || app.map_or(false, |t| t + SLACK >= self.first) }
+    pub fn apps(&self, app: Option<Instant>) -> bool { self.tainted || app.is_some_and(|t| t + SLACK >= self.first) }
 }
 
 /// At most `max` paths to record `paths` by: the paths themselves, or, for a big batch (a cloud drive

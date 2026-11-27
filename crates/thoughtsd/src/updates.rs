@@ -111,7 +111,7 @@ pub fn explained(mut v: Value, home: &Path, shipped: &[(&str, &str)]) -> Value {
 /// Compare two version strings by their numeric parts (`0.10.0` is newer than `0.9.3`).
 pub fn older(a: &str, b: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> {
-        v.split(|c: char| c == '-' || c == '+').next().unwrap_or("").split('.').map(|p| p.trim().parse().unwrap_or(0)).collect()
+        v.split(['-', '+']).next().unwrap_or("").split('.').map(|p| p.trim().parse().unwrap_or(0)).collect()
     };
     let (mut x, mut y) = (parts(a), parts(b));
     let n = x.len().max(y.len());

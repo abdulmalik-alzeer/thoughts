@@ -43,7 +43,7 @@ fn lock_age(g: &Path, now: SystemTime) -> Option<Duration> {
 
 /// Can git read the index (its list of what each recorded file looks like)?
 async fn index_readable(state: &AppState, dir: &Path, g: Option<&Path>) -> bool {
-    if g.map_or(false, |g| !g.join("index").exists()) { return true; }
+    if g.is_some_and(|g| !g.join("index").exists()) { return true; }
     // A name that matches nothing: the whole index is still read and checked.
     match git::git(state, dir, &["ls-files", "--", ":(top,literal).thoughts-index-check"]).await {
         Ok(_) => true,
@@ -161,7 +161,7 @@ async fn branch_to_use(state: &AppState, dir: &Path, hint: Option<&str>) -> Opti
 /// it was recorded and the snapshot holds whatever differed.
 async fn reattach(state: &AppState, dir: &Path, hint: Option<&str>) -> anyhow::Result<()> {
     let current = git::git(state, dir, &["symbolic-ref", "-q", "--short", "HEAD"]).await.ok().map(|s| s.trim().to_string());
-    if current.as_deref().map_or(false, |b| !git::internal_branch(b)) { return Ok(()); }
+    if current.as_deref().is_some_and(|b| !git::internal_branch(b)) { return Ok(()); }
     let head = git::head(state, dir).await;
     let Some(target) = branch_to_use(state, dir, hint).await else {
         // No branch of the person's own at all: one is made where the history is.
@@ -246,7 +246,7 @@ pub async fn repair(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
     }
     let g = crate::health::git_dir(dir).ok_or_else(|| crate::tr::err("no_history", &[]))?;
     let locked = before["problems"].as_array().and_then(|a| a.iter().find(|p| p["id"] == "locked")).cloned();
-    if locked.as_ref().map_or(false, |l| l["stale"] != true) { return Err(crate::tr::err("history.in_use", &[])); }
+    if locked.as_ref().is_some_and(|l| l["stale"] != true) { return Err(crate::tr::err("history.in_use", &[])); }
     crate::trust::require_git(dir)?;
     let index_ok = !found.iter().any(|i| i == "index");
     let (snap, branch) = snapshot(state, dir, Some(&g), index_ok).await?;
@@ -321,7 +321,7 @@ pub async fn rebuild(state: &AppState, dir: &Path) -> anyhow::Result<Value> {
             let _g = state.git_lock.lock().await;
             crate::trust::require_git(dir)?;
             let own = dir.join(".git");
-            if !std::fs::symlink_metadata(&own).map_or(false, |m| m.is_dir()) { return Err(crate::tr::err("repair.cannot", &[])); }
+            if !std::fs::symlink_metadata(&own).is_ok_and(|m| m.is_dir()) { return Err(crate::tr::err("repair.cannot", &[])); }
             // What is needed from the old history: its online locations and its branch.
             let conf = own.join("config").to_string_lossy().to_string();
             let listed = git::git(state, dir, &["config", "-f", &conf, "--get-regexp", r"^remote\..*\.url$"]).await.unwrap_or_default();

@@ -219,7 +219,7 @@ pub fn transcript_parts(messages: &[Msg], since: Option<DateTime<Utc>>, max: usi
     let max = max.max(8);
     let mut parts: Vec<String> = vec![];
     let mut cur = String::new();
-    for m in messages.iter().filter(|m| since.map_or(true, |s| m.ts > s)) {
+    for m in messages.iter().filter(|m| since.is_none_or(|s| m.ts > s)) {
         let line = match m.role.as_str() {
             "user" => format!("USER: {}\n\n", m.text),
             "assistant" => format!("ASSISTANT: {}\n\n", m.text),
@@ -362,7 +362,7 @@ pub async fn status(state: &AppState) -> Value {
     let interrupted = interrupted_wrap(state).await;
     // Whether "Undo" can be offered for it (a library without history has nothing to go back to).
     let can_undo = match &interrupted {
-        Some(id) => state.chats.meta(id).await.map_or(false, |w| w.meta["snapshot"].is_string() && w.meta["canRollback"] != false),
+        Some(id) => state.chats.meta(id).await.is_some_and(|w| w.meta["snapshot"].is_string() && w.meta["canRollback"] != false),
         None => false,
     };
     // Background summaries that keep failing (three tries in a row for some chat) are said so in Settings.
@@ -621,7 +621,7 @@ async fn prepare_preview(st: Arc<AppState>, wid: String, pending: Vec<ChatMeta>,
         }
     }
     // Replaced or discarded while the chats were being read?
-    if st.chats.meta(&wid).await.map_or(true, |w| w.meta["phase"] != "preparing") { return; }
+    if st.chats.meta(&wid).await.is_none_or(|w| w.meta["phase"] != "preparing") { return; }
     if !unread.is_empty() {
         let names = name_list(ar, &unread.iter().map(|c| c.title.clone()).collect::<Vec<_>>());
         claude::push(&st, &wid, Msg::new("system", if ar {
@@ -789,8 +789,8 @@ type Done = Box<dyn FnOnce(Arc<AppState>, bool) -> futures::future::BoxFuture<'s
 /// session it was asked to continue? (It clears old sessions out, and a session belongs to the
 /// folder it ran in.)
 async fn session_lost(state: &AppState, id: &str) -> bool {
-    state.chats.with(id, |c| c.messages.last().map_or(false, |m| m.role == "error"
-        && m.tool.as_ref().map_or(false, |t| t["code"] == claude::SESSION_LOST))).await.unwrap_or(false)
+    state.chats.with(id, |c| c.messages.last().is_some_and(|m| m.role == "error"
+        && m.tool.as_ref().is_some_and(|t| t["code"] == claude::SESSION_LOST))).await.unwrap_or(false)
 }
 
 /// Start a run of a wrap. When it was to continue the assistant's session and the assistant turns
@@ -1119,7 +1119,7 @@ fn plan_marks(w: &ChatMeta) -> (Vec<String>, HashMap<String, DateTime<Utc>>) {
 /// A newer wrap may have saved these chats since this plan was made: never save them twice.
 async fn never_twice(state: &AppState, ids: &[String], marks: &HashMap<String, DateTime<Utc>>) -> anyhow::Result<()> {
     for id in ids {
-        if state.chats.meta(id).await.and_then(|c| c.wrapped_at).map_or(false, |at| at >= marks[id]) {
+        if state.chats.meta(id).await.and_then(|c| c.wrapped_at).is_some_and(|at| at >= marks[id]) {
             return Err(crate::tr::err("wrap.already_saved", &[]));
         }
     }
@@ -2068,7 +2068,7 @@ pub(crate) async fn recover_chats(state: &AppState) -> bool {
                 }
             }
             // Changes waiting for review whose working copy is gone: the plan is still there.
-            ("wrap", Some("review")) if !c.meta["copy"]["dir"].as_str().map_or(false, |d| is_copy(Path::new(d)) && Path::new(d).is_dir()) => {
+            ("wrap", Some("review")) if !c.meta["copy"]["dir"].as_str().is_some_and(|d| is_copy(Path::new(d)) && Path::new(d).is_dir()) => {
                 crate::log::warn(format!("wrap {}: the working copy it was waiting in is gone; back to its plan", c.id));
                 if let Some(home) = &home { close_copy(state, home, &c.id).await; }
                 state.chats.update(&c.id, |c| { c.meta["phase"] = json!("preview"); c.meta["copy"] = Value::Null; c.meta["inCopy"] = Value::Null; }).await;

@@ -78,7 +78,7 @@ pub struct Entry {
 /// ended (ask from that time on). `watching`: a window is there.
 pub fn due(e: &Entry, now: i64, forced: bool, poke: Option<i64>, watching: bool) -> bool {
     let since = now - e.checked_at;
-    let poked = poke.map_or(false, |t| now >= t);
+    let poked = poke.is_some_and(|t| now >= t);
     if e.checked_at == 0 { return forced || watching || poked; }
     match e.state.as_str() {
         // Cheap to look at again (no program is started for the figures), and a sign-in may just have happened.
@@ -213,7 +213,7 @@ pub fn claude_rows(limits: &[Value], now: i64) -> Vec<(String, Window)> {
 /// Did this `result` use a model? A command Claude Code answers itself names the command
 /// (`local_command`) and costs nothing.
 fn spent(result: &Value) -> bool {
-    if result.get("local_command").map_or(false, |c| !c.is_null()) { return false; }
+    if result.get("local_command").is_some_and(|c| !c.is_null()) { return false; }
     result["total_cost_usd"].as_f64().unwrap_or(0.0) > 0.0 || result["usage"]["output_tokens"].as_u64().unwrap_or(0) > 0
 }
 
@@ -262,7 +262,7 @@ pub fn claude_facts(on: bool, noticed: bool, status: &Value, help: &str, e: &Ent
     if how.contains("api") || how.contains("console") { return Facts::No("key"); }
     if !noticed { return Facts::No("notice"); }
     let version = status["version"].as_str().unwrap_or("");
-    if parse_version(version).map_or(true, |v| v < CLAUDE_MIN) || !crate::claude::supports(help, "--no-session-persistence") { return Facts::No("oldProgram"); }
+    if parse_version(version).is_none_or(|v| v < CLAUDE_MIN) || !crate::claude::supports(help, "--no-session-persistence") { return Facts::No("oldProgram"); }
     if e.unsafe_version.as_deref() == Some(version) { return Facts::No("noReport"); }
     Facts::Ask
 }
@@ -308,7 +308,7 @@ pub fn read_codex(account: &Value, limits: &Value, now: chrono::DateTime<chrono:
     if !r.is_object() { return Outcome::Failed(limits["error"]["message"].as_str().unwrap_or("no answer").chars().take(200).collect()); }
     // Several limits can be reported; Codex's own plan limit is the one shown.
     let bucket = [&r["rateLimitsByLimitId"]["codex"], &r["rateLimits"]].into_iter().find(|b| b.is_object()).cloned().unwrap_or(Value::Null);
-    if bucket["limitId"].as_str().map_or(false, |id| !id.eq_ignore_ascii_case("codex")) { return Outcome::Unavailable("noReport"); }
+    if bucket["limitId"].as_str().is_some_and(|id| !id.eq_ignore_ascii_case("codex")) { return Outcome::Unavailable("noReport"); }
     let windows = crate::meter::codex_windows(&json!({"primary": codex_window(&bucket["primary"]), "secondary": codex_window(&bucket["secondary"])}), now);
     if windows.is_empty() { Outcome::Unavailable("noReport") } else { Outcome::Known(windows) }
 }
@@ -319,7 +319,7 @@ pub fn codex_facts(on: bool, noticed: bool, status: &Value, help: &str) -> Facts
     if status["installed"] != true { return Facts::No("missing"); }
     match status["provider"].as_str() { Some("service") => return Facts::No("service"), Some("incomplete") => return Facts::No("signedOut"), _ => {} }
     if status["loggedIn"] != true { return Facts::No("signedOut"); }
-    if status["method"].as_str().map_or(false, |m| m != "chatgpt") { return Facts::No("key"); }
+    if status["method"].as_str().is_some_and(|m| m != "chatgpt") { return Facts::No("key"); }
     if !noticed { return Facts::No("notice"); }
     // An older Codex would take the word for a prompt and start its terminal screen.
     if !crate::codex::subcommands(help).iter().any(|c| c == "app-server") { return Facts::No("oldProgram"); }

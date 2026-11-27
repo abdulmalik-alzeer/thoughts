@@ -173,9 +173,9 @@ struct Target<'a> { path: String, suffix: &'a str, rooted: bool, dot: bool, slas
 fn target(dest: &str) -> Option<Target<'_>> {
     if dest.is_empty() || dest.starts_with('#') || dest.starts_with("//") { return None; }
     // Any scheme (`https:`, `mailto:`, `file:`, `C:`) is not a library link.
-    let scheme = dest.find(':').map_or(false, |c| {
+    let scheme = dest.find(':').is_some_and(|c| {
         let s = &dest[..c];
-        !s.is_empty() && s.chars().next().map_or(false, |x| x.is_ascii_alphabetic()) && s.chars().all(|x| x.is_ascii_alphanumeric() || "+.-".contains(x))
+        !s.is_empty() && s.chars().next().is_some_and(|x| x.is_ascii_alphabetic()) && s.chars().all(|x| x.is_ascii_alphanumeric() || "+.-".contains(x))
     });
     if scheme { return None; }
     let cut = dest.find(['#', '?']).unwrap_or(dest.len());
@@ -252,7 +252,7 @@ fn relative(from: &str, target: &str) -> String {
     let dir = &dir[..dir.len() - 1];
     let tgt: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
     let common = dir.iter().zip(&tgt).take_while(|(a, b)| a == b).count();
-    let mut parts: Vec<&str> = std::iter::repeat("..").take(dir.len() - common).collect();
+    let mut parts: Vec<&str> = std::iter::repeat_n("..", dir.len() - common).collect();
     parts.extend(&tgt[common..]);
     if parts.is_empty() { ".".into() } else { parts.join("/") }
 }
@@ -358,7 +358,7 @@ pub fn plan_move(root: &Path, from: &str, to: &str, may_write: &dyn Fn(&str) -> 
     let mut plan = MovePlan { from: from.to_string(), to: to.to_string(), ..Default::default() };
     let mut exists: HashMap<String, bool> = HashMap::new();
     let mut existed = |p: &str| *exists.entry(p.to_string()).or_insert_with(|| {
-        crate::library::resolve(root, p).map_or(false, |p| std::fs::symlink_metadata(p).is_ok())
+        crate::library::resolve(root, p).is_ok_and(|p| std::fs::symlink_metadata(p).is_ok())
     });
     for (rel, abs) in markdown_files(root) {
         let new_src = moved(&rel, from, to).unwrap_or_else(|| rel.clone());
@@ -382,7 +382,7 @@ pub fn apply(root: &Path, plan: &MovePlan) -> anyhow::Result<usize> {
     let mut exists: HashMap<String, bool> = HashMap::new();
     let mut existed = |p: &str| *exists.entry(p.to_string()).or_insert_with(|| {
         let now = moved(p, from, to).unwrap_or_else(|| p.to_string());
-        crate::library::resolve(root, &now).map_or(false, |p| std::fs::symlink_metadata(p).is_ok())
+        crate::library::resolve(root, &now).is_ok_and(|p| std::fs::symlink_metadata(p).is_ok())
     });
     let (mut changed, mut failed) = (0, None);
     for w in &plan.writes {
@@ -463,13 +463,13 @@ pub fn index_with_status(index: &str, readme: &str, status: &str, was: Option<&s
         let (start, end) = (pos, pos + raw.len());
         pos = end;
         let hit = links.iter().filter(|l| l.start >= start && l.end <= end).any(|l| {
-            target(&index[l.start..l.end]).and_then(|t| resolve("INDEX.md", &t.path)).map_or(false, |p| p == readme)
+            target(&index[l.start..l.end]).and_then(|t| resolve("INDEX.md", &t.path)).is_some_and(|p| p == readme)
         });
         if !hit || changed { out.push_str(raw); continue; }
         let eol = &raw[raw.trim_end_matches(['\r', '\n']).len()..];
         let line = &raw[..raw.len() - eol.len()];
         let mut parts: Vec<String> = line.split(" · ").map(str::to_string).collect();
-        let known = |p: &str| STATUSES.contains(&p) || was.map_or(false, |w| !w.is_empty() && w == p);
+        let known = |p: &str| STATUSES.contains(&p) || was.is_some_and(|w| !w.is_empty() && w == p);
         if parts.len() >= 3 && known(parts[1].trim()) {
             parts[1] = status.to_string();
             let last = parts.len() - 1;
@@ -522,10 +522,10 @@ fn each_note(root: &Path, exclude: &[String], mut f: impl FnMut(&str, &Cached)) 
     let mut hidden_dirs: HashMap<PathBuf, bool> = HashMap::new();
     for (rel, abs) in files {
         if crate::paths::is_under(&rel, exclude) { continue; }
-        if !exclude.is_empty() && abs.parent().map_or(false, |p| *hidden_dirs.entry(p.to_path_buf()).or_insert_with(|| hidden.dir(p))) { continue; }
+        if !exclude.is_empty() && abs.parent().is_some_and(|p| *hidden_dirs.entry(p.to_path_buf()).or_insert_with(|| hidden.dir(p))) { continue; }
         let Ok(meta) = std::fs::metadata(&abs) else { continue };
         let (modified, len) = (meta.modified().ok(), meta.len());
-        let fresh = c.get(&abs).map_or(false, |e| e.modified == modified && e.len == len && modified.is_some());
+        let fresh = c.get(&abs).is_some_and(|e| e.modified == modified && e.len == len && modified.is_some());
         if !fresh {
             let Ok(text) = std::fs::read_to_string(&abs) else { continue };
             let fm = crate::library::frontmatter(&text).0;
@@ -605,7 +605,7 @@ pub fn graph(root: &Path, exclude: &[String], focus: Option<&str>, depth: usize,
         adj.entry(to).or_default().push(from);
     }
     let asked = focus.map(|f| f.trim_matches('/')).filter(|f| !f.is_empty());
-    let focus = asked.and_then(|f| lead(f));
+    let focus = asked.and_then(lead);
     let mut keep: Vec<&str> = match &focus {
         // Asked about a note that is not here (gone, private, not a note): nothing to show.
         None if asked.is_some() => vec![],

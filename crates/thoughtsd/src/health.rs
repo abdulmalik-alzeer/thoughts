@@ -52,7 +52,7 @@ pub fn unfinished_step(git_dir: &Path) -> Option<&'static str> {
 /// Is the history off its branch (its HEAD names a commit instead of a branch)? A HEAD that cannot be
 /// read is left to the history's own check.
 pub fn detached(git_dir: &Path) -> bool {
-    std::fs::read_to_string(git_dir.join("HEAD")).map_or(false, |h| { let h = h.trim(); !h.is_empty() && !h.starts_with("ref:") })
+    std::fs::read_to_string(git_dir.join("HEAD")).is_ok_and(|h| { let h = h.trim(); !h.is_empty() && !h.starts_with("ref:") })
 }
 
 /// The history tool's lock file, when it was left behind by a program that is long gone.
@@ -67,7 +67,7 @@ pub fn stale_lock(git_dir: &Path, now: SystemTime) -> Option<PathBuf> {
 pub fn unreadable_chats(dir: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = std::fs::read_dir(dir).into_iter().flatten().flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |x| x == "json") && std::fs::symlink_metadata(p).map_or(false, |m| m.is_file()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json") && std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file()))
         .filter(|p| std::fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Chat>(&t).ok()).is_none())
         .collect();
     out.sort();
@@ -111,7 +111,7 @@ pub struct Facts<'a> {
 pub fn check(f: &Facts) -> Vec<Issue> {
     let s = f.settings;
     let mut out = vec![];
-    let library = s.library().filter(|_| s.library_path.as_deref().map_or(false, |p| !p.trim().is_empty()));
+    let library = s.library().filter(|_| s.library_path.as_deref().is_some_and(|p| !p.trim().is_empty()));
     match &library {
         Some(l) if !l.is_dir() => out.push(issue("library-missing", "choose-library")),
         Some(l) => {

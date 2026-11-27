@@ -85,7 +85,7 @@ pub fn append(home: &Path, recs: &[Record]) -> anyhow::Result<()> {
     if recs.is_empty() { return Ok(()); }
     let path = file(home);
     let _one = WRITE.lock().unwrap_or_else(|e| e.into_inner());
-    if std::fs::metadata(&path).map_or(false, |m| m.len() > MAX_BYTES) {
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         crate::paths::write_atomic(&path, newest(&text, KEEP_BYTES, Utc::now() - chrono::Duration::days(MAX_DAYS)).as_bytes(), true)?;
     }
@@ -109,7 +109,7 @@ fn newest(text: &str, keep: usize, since: DateTime<Utc>) -> String {
     for l in text.lines().rev() {
         if l.trim().is_empty() { continue; }
         if size + l.len() + 1 > keep { break; }
-        if serde_json::from_str::<At>(l).map_or(false, |a| a.t < since) { break; }
+        if serde_json::from_str::<At>(l).is_ok_and(|a| a.t < since) { break; }
         size += l.len() + 1;
         kept.push(l);
     }
@@ -427,7 +427,7 @@ pub fn merge(known: &mut BTreeMap<String, Window>, new: Vec<(String, Window)>) -
         if let Some(old) = known.get(&k) {
             if old.seen_at > w.seen_at { continue; }
             if w.percent.is_none() && old.resets_at == w.resets_at { w.percent = old.percent; }
-            if w.resets_at.is_none() && old.resets_at.map_or(false, |r| r > w.seen_at) { w.resets_at = old.resets_at; }
+            if w.resets_at.is_none() && old.resets_at.is_some_and(|r| r > w.seen_at) { w.resets_at = old.resets_at; }
         }
         if known.get(&k) != Some(&w) { known.insert(k, w); changed = true; }
     }
@@ -479,7 +479,7 @@ fn plan_json(windows: &BTreeMap<String, Window>, now: i64) -> Value {
     ws.sort_by(|a, b| rank(a.0).cmp(&rank(b.0)).then(a.0.cmp(b.0)));
     let list: Vec<Value> = ws.iter().map(|(k, w)| {
         // A window whose reset time has passed says nothing about now.
-        let reset = w.resets_at.map_or(false, |r| r <= now);
+        let reset = w.resets_at.is_some_and(|r| r <= now);
         json!({"id": k, "percent": if reset { None } else { w.percent }, "resetsAt": w.resets_at, "minutes": w.minutes,
             "status": if reset { None } else { w.status.clone() }, "seenAt": w.seen_at, "hasReset": reset, "label": w.label})
     }).collect();
@@ -523,7 +523,7 @@ pub struct Item {
 /// The `*.jsonl` files under `root` (to `depth` folders down, links never followed) changed since `since`.
 fn jsonl_files(root: &Path, depth: usize, since: SystemTime, name_ok: fn(&str) -> bool) -> Vec<(PathBuf, u64, SystemTime)> {
     let mut out = vec![];
-    if !std::fs::symlink_metadata(root).map_or(false, |m| m.is_dir()) { return out; }
+    if !std::fs::symlink_metadata(root).is_ok_and(|m| m.is_dir()) { return out; }
     let mut dirs = vec![(root.to_path_buf(), 0usize)];
     while let Some((d, lv)) = dirs.pop() {
         for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
@@ -614,7 +614,7 @@ pub fn scan(claude: &Path, codex: &Path, since: SystemTime) -> Scan {
     for ((path, len, modified), provider) in claude_files.chain(codex_files) {
         seen.insert(path.clone());
         s.files += 1;
-        let fresh = cache.get(&path).map_or(false, |c| c.len == len && c.modified == modified);
+        let fresh = cache.get(&path).is_some_and(|c| c.len == len && c.modified == modified);
         if !fresh {
             let Ok(f) = std::fs::File::open(&path) else { s.unreadable += 1; continue };
             let lines = std::io::BufReader::new(f).lines().map_while(Result::ok);
@@ -626,7 +626,7 @@ pub fn scan(claude: &Path, codex: &Path, since: SystemTime) -> Scan {
         }
         let c = &cache[&path];
         s.items.extend(c.items.iter().cloned());
-        if let Some((l, at)) = &c.limits { if s.codex_limits.as_ref().map_or(true, |(_, b)| at > b) { s.codex_limits = Some((l.clone(), *at)); } }
+        if let Some((l, at)) = &c.limits { if s.codex_limits.as_ref().is_none_or(|(_, b)| at > b) { s.codex_limits = Some((l.clone(), *at)); } }
     }
     cache.retain(|p, _| seen.contains(p));
     s
@@ -670,7 +670,7 @@ pub fn combine(records: &[Record], scanned: Vec<Item>, chat_sessions: &HashMap<S
         if let Some(k) = &it.key { if !keys.insert(k.clone()) { continue; } }
         if let Some(s) = it.session.as_deref() {
             // A record is written when its run ends; the run's messages are earlier.
-            if first.get(s).map_or(false, |f| it.t >= *f - chrono::Duration::hours(6)) { continue; }
+            if first.get(s).is_some_and(|f| it.t >= *f - chrono::Duration::hours(6)) { continue; }
             if let Some(c) = chat_sessions.get(s) { it.chat = Some(c.clone()); it.outside = false; }
         }
         items.push(it);
@@ -720,7 +720,7 @@ pub fn summarise(items: &[Item], chats: &HashMap<String, ChatInfo>, since: DateT
         about
     }).collect();
     let mut model_rows: Vec<(&(&str, String), &Sum)> = models.iter().collect();
-    model_rows.sort_by(|a, b| b.1.tokens.total().cmp(&a.1.tokens.total()));
+    model_rows.sort_by_key(|a| std::cmp::Reverse(a.1.tokens.total()));
     json!({
         "totals": totals.iter().map(|(k, s)| (k.to_string(), s.json())).collect::<serde_json::Map<_, _>>(),
         "days": days.iter().map(|(d, m)| json!({"day": d.to_string(), "usage": m.iter().map(|(k, s)| (k.to_string(), s.json())).collect::<serde_json::Map<_, _>>()})).collect::<Vec<_>>(),

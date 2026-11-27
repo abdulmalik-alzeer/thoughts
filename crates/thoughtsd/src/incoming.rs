@@ -217,7 +217,7 @@ async fn round(state: &AppState) {
     // The library changed here (a Sync took the changes in, say): count again, without the network.
     if recount { recount_now(state, &lib).await; }
     if WINDOWS.load(Ordering::SeqCst) == 0 { return; }
-    if due.map_or(false, |d| d > now) { return; }
+    if due.is_some_and(|d| d > now) { return; }
     // A wrap, a sync, an undo or a repair is changing the library: not now.
     if state.library_busy_at(&lib) || state.library_lock.syncing_at(&lib) {
         seen().entry(k).or_default().due = Some(now + BUSY_RETRY);

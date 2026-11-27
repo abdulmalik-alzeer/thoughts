@@ -272,7 +272,7 @@ async fn answer_permission(state: Arc<AppState>, conn: Arc<Conn>, id: Value, par
 /// One turn: send the prompt, show what comes back in the chat (`claude::handle_event`), answer
 /// permission requests, and end it all — the adapter and whatever it started — when the turn is
 /// over or Stop is pressed. The outcome reads like the command-line path's (`claude::follow`).
-pub async fn drive(state: &Arc<AppState>, chat_id: &str, child: Child, conn: Arc<Conn>, rx: UnboundedReceiver<Incoming>,
+pub(crate) async fn drive(state: &Arc<AppState>, chat_id: &str, child: Child, conn: Arc<Conn>, rx: UnboundedReceiver<Incoming>,
     session: String, prompt: String, asker: Asker, kill: &mut tokio::sync::oneshot::Receiver<()>) -> Followed {
     let blocks = vec![json!({"type": "text", "text": prompt})];
     drive_with(state, chat_id, child, conn, rx, session, blocks, asker, kill, View::Claude(Default::default())).await.0
@@ -399,7 +399,7 @@ pub(crate) async fn drive_with(state: &Arc<AppState>, chat_id: &str, mut child: 
 /// whose chats take its modes directly — the permission modes it offers that the daemon accepts, in
 /// its order and under its names (`modeNames`). Nothing is added until the report is in.
 pub async fn merge_options(state: &Arc<AppState>, program: Program, out: &mut Value, refresh: bool) {
-    if !out.is_object() || out.as_object().map_or(true, |o| o.is_empty()) { return; }
+    if !out.is_object() || out.as_object().is_none_or(|o| o.is_empty()) { return; }
     let Some(c) = catalog(state, program, refresh).await else { return };
     apply_catalog(program, &c, out);
 }

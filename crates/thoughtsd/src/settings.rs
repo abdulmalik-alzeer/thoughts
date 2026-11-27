@@ -220,7 +220,7 @@ impl SpendingSettings {
             self.monthly_limit_usd = Some((l * 100.0).round() / 100.0);
         }
         if !(50..=95).contains(&self.warn_percent) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
-        if self.build_hold_percent.map_or(false, |p| !(10..=100).contains(&p)) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
+        if self.build_hold_percent.is_some_and(|p| !(10..=100).contains(&p)) { return Err(crate::tr::err("spend.limit_invalid", &[])); }
         Ok(())
     }
     pub const BUILD_HOLD_DEFAULT: u8 = 80;
@@ -419,7 +419,7 @@ pub fn check_base_url_for(url: &str, full: bool) -> anyhow::Result<()> { base_ur
 /// it through — a private address on the user's own network? Only such a service may be used
 /// without a key (`keyless`): it gets a stand-in key, never the user's sign-in.
 pub fn keyless_allowed(url: &str, full: bool) -> bool {
-    base_url_host_for(url, full).map_or(false, |h| is_this_computer(h) || (full && is_private_ipv4(h)))
+    base_url_host_for(url, full).is_ok_and(|h| is_this_computer(h) || (full && is_private_ipv4(h)))
 }
 
 fn is_this_computer(host: &str) -> bool { host == "localhost" || host == "127.0.0.1" }
@@ -450,11 +450,11 @@ fn base_url_host_for(url: &str, full: bool) -> anyhow::Result<&str> {
 /// Is this Anthropic's own API address (with or without a path)? Naming it is the same as naming
 /// no address at all: requests go where Claude Code sends them anyway.
 pub fn is_anthropic_url(url: &str) -> bool {
-    url.starts_with("https://") && base_url_host(url).map_or(false, |h| h.eq_ignore_ascii_case("api.anthropic.com"))
+    url.starts_with("https://") && base_url_host(url).is_ok_and(|h| h.eq_ignore_ascii_case("api.anthropic.com"))
 }
 
 fn none_if_blank(v: &mut Option<String>) {
-    if v.as_deref().map_or(false, |s| s.trim().is_empty()) { *v = None; }
+    if v.as_deref().is_some_and(|s| s.trim().is_empty()) { *v = None; }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -731,7 +731,7 @@ impl Settings {
                 };
             }
         };
-        let newer = version_of(&text).map_or(false, |v| v > SCHEMA_VERSION as u64);
+        let newer = version_of(&text).is_some_and(|v| v > SCHEMA_VERSION as u64);
         match parse(&text) {
             Ok(s) => Loaded { settings: s, reset: false, restored: false, newer },
             Err(e) if newer => {
@@ -873,7 +873,7 @@ impl Settings {
         check_cli_value("mini-wrap model", c.mini_wrap_model.as_deref())?;
         if let Some(b) = c.binary.as_deref().filter(|b| Some(*b) != old.ai.claude.binary.as_deref()) {
             let p = std::path::Path::new(b);
-            let named_claude = p.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.to_lowercase().starts_with("claude"));
+            let named_claude = p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_lowercase().starts_with("claude"));
             if !p.is_absolute() || !named_claude { anyhow::bail!("the assistant program must be a full path to a file named claude"); }
             if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) { anyhow::bail!("the assistant program was not found at {b}"); }
         }
@@ -886,7 +886,7 @@ impl Settings {
         check_cli_value("mini-wrap model", x.mini_wrap_model.as_deref())?;
         if let Some(b) = x.binary.as_deref().filter(|b| Some(*b) != old.ai.codex.binary.as_deref()) {
             let p = std::path::Path::new(b);
-            let named_codex = p.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.to_lowercase().starts_with("codex"));
+            let named_codex = p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_lowercase().starts_with("codex"));
             if !p.is_absolute() || !named_codex { anyhow::bail!("the Codex program must be a full path to a file named codex"); }
             if !std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false) { anyhow::bail!("the Codex program was not found at {b}"); }
         }
@@ -979,7 +979,7 @@ impl Settings {
 
     /// Is `lib` the open library's folder?
     pub fn is_open_library(&self, lib: &std::path::Path) -> bool {
-        self.library_path.as_deref().map_or(false, |p| !p.trim().is_empty() && same_folder(std::path::Path::new(p), lib))
+        self.library_path.as_deref().is_some_and(|p| !p.trim().is_empty() && same_folder(std::path::Path::new(p), lib))
     }
 
     /// The settings of the library at `lib`: the open one's, another listed one's (what was parked,
@@ -1054,7 +1054,7 @@ impl Settings {
         if let Some(p) = self.library_path.clone().filter(|p| !p.trim().is_empty()) {
             if self.open_index().is_none() { all.push(Library { id: String::new(), name: String::new(), path: p, parked: None }); }
         }
-        all.into_iter().filter(|l| except.map_or(true, |e| l.id != e)).find(|l| {
+        all.into_iter().filter(|l| except.is_none_or(|e| l.id != e)).find(|l| {
             let other = crate::paths::canonical_lenient(std::path::Path::new(&l.path));
             other != real && (other.starts_with(&real) || real.starts_with(&other))
         })

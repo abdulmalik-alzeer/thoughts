@@ -243,7 +243,7 @@ async fn list(State(st): S, Query(q): Q, Json(b): Json<ListBody>) -> R {
     let mut entries = vec![];
     while let Ok(Some(e)) = rd.next_entry().await {
         let m = e.metadata().await.ok();
-        entries.push(json!({"name": e.file_name().to_string_lossy(), "dir": m.as_ref().map_or(false, |m| m.is_dir()), "size": m.map_or(0, |m| m.len())}));
+        entries.push(json!({"name": e.file_name().to_string_lossy(), "dir": m.as_ref().is_some_and(|m| m.is_dir()), "size": m.map_or(0, |m| m.len())}));
         if entries.len() >= 10_000 { break; }
     }
     Ok(Json(json!({"entries": entries})))
@@ -273,7 +273,7 @@ pub fn open_command(target: &str, app: Option<&str>) -> (String, Vec<String>) {
 
 async fn open(State(st): S, Query(q): Q, Json(b): Json<OpenBody>) -> R {
     require_on(&st, &q).await?;
-    if b.target.trim().is_empty() && b.app.as_deref().map_or(true, |a| a.trim().is_empty()) { return Err(bad("nothing to open was named").into()); }
+    if b.target.trim().is_empty() && b.app.as_deref().is_none_or(|a| a.trim().is_empty()) { return Err(bad("nothing to open was named").into()); }
     if b.target.contains('\0') { return Err(bad("nothing to open was named").into()); }
     let (prog, args) = open_command(b.target.trim(), b.app.as_deref());
     let out = crate::proc::command(&prog).args(&args).stdin(std::process::Stdio::null()).output().await.map_err(|e| bad(&e.to_string()))?;

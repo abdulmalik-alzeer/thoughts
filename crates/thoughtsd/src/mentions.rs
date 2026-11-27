@@ -32,7 +32,7 @@ fn title_of(p: &Path, mtime: Option<SystemTime>, len: u64, cache: &mut Seen) -> 
 }
 
 fn is_markdown(rel: &str) -> bool {
-    rel.rsplit_once('.').map_or(false, |(_, e)| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+    rel.rsplit_once('.').is_some_and(|(_, e)| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
 }
 
 /// `[{path, kind, title}]`, `kind` one of `idea` (an idea's front page), `note` (any other markdown

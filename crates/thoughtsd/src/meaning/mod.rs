@@ -218,7 +218,7 @@ async fn wait_for_change(rx: &mut tokio::sync::broadcast::Receiver<Value>, cance
     let mut since: Option<Instant> = None;
     loop {
         if cancel.load(Ordering::Relaxed) { return Err(model::Stopped::Cancelled.into()); }
-        if since.map_or(false, |t| t.elapsed() >= QUIET) { return Ok(()); }
+        if since.is_some_and(|t| t.elapsed() >= QUIET) { return Ok(()); }
         match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
             Ok(Ok(v)) => {
                 if matches!(v["type"].as_str(), Some("library.changed" | "library.switched" | "settings.changed")) { since = Some(Instant::now()); }
@@ -248,7 +248,7 @@ fn disk_bytes(home: &Path) -> u64 {
 // ---------- suggestions ----------
 
 fn snoozed(m: &crate::settings::MeaningSettings) -> bool {
-    m.snooze_until.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).map_or(false, |t| t > chrono::Utc::now())
+    m.snooze_until.as_deref().and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok()).is_some_and(|t| t > chrono::Utc::now())
 }
 /// Is it not to be suggested now ("Don't ask again", or "Not now" not yet over)?
 fn quiet(m: &crate::settings::MeaningSettings) -> bool { m.never || snoozed(m) }
@@ -267,7 +267,7 @@ fn library_size(root: &Path, private: &[String]) -> usize {
 /// message, and the marker in every other kind of run, passes as it is.
 pub async fn screen(st: &AppState, chat_id: &str, mut m: Msg) -> (Msg, Option<Value>) {
     if m.role != "assistant" || !m.text.contains(MARKER) { return (m, None); }
-    if st.chats.meta(chat_id).await.map_or(true, |c| c.kind != "chat") { return (m, None); }
+    if st.chats.meta(chat_id).await.is_none_or(|c| c.kind != "chat") { return (m, None); }
     m.text = strip_marker(&m.text);
     let mut s = st.settings.write().await;
     let ms = &mut s.search.meaning;

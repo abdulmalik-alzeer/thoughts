@@ -36,7 +36,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 pub fn decl_in(dir: &std::path::Path, name: &str, view: bool) -> Option<Value> {
     let (sub, ext) = if view { ("views", ".html") } else { ("plugins", ".js") };
     if !crate::layer_api::valid_plugin_name(name) || !name.ends_with(ext) { return None; }
-    if !std::fs::symlink_metadata(dir.join(sub).join(name)).map_or(false, |m| m.is_file()) { return None; }
+    if !std::fs::symlink_metadata(dir.join(sub).join(name)).is_ok_and(|m| m.is_file()) { return None; }
     let shared = std::fs::read_to_string(dir.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
     Some(applayer::resolve_decl(dir, sub, name, &shared, false)).filter(|d| d["unsupported"] != true)
 }
@@ -64,7 +64,7 @@ pub fn reads_of(decl: Option<&Value>) -> Option<Vec<String>> {
 pub fn reads(q: &HashMap<String, String>) -> Option<Vec<String>> {
     let name = q.get("plugin")?;
     let view = q.get("kind").map(String::as_str) == Some("view");
-    let preview = q.get("preview").map_or(false, |v| v == "1");
+    let preview = q.get("preview").is_some_and(|v| v == "1");
     reads_of(decl_for(&Dirs::real(), preview, name, view).as_ref())
 }
 
@@ -72,7 +72,7 @@ pub fn reads(q: &HashMap<String, String>) -> Option<Vec<String>> {
 /// permission" refusal.
 fn granted(d: &Dirs, preview: bool, name: &str, perm: &str) -> anyhow::Result<Value> {
     decl_for(d, preview, name, false)
-        .filter(|d| d["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == perm)))
+        .filter(|d| d["permissions"].as_array().is_some_and(|a| a.iter().any(|p| p == perm)))
         .ok_or_else(|| crate::tr::err("addon.permission", &[("name", &short(name))]))
 }
 
@@ -290,7 +290,7 @@ pub fn md_as_text(md: &str) -> String {
     while let Some(c) = it.next() {
         match c {
             '!' if it.peek() == Some(&'[') => {}
-            '<' if it.peek().map_or(false, |n| n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?')) => out.push_str("&lt;"),
+            '<' if it.peek().is_some_and(|n| n.is_ascii_alphabetic() || matches!(n, '/' | '!' | '?')) => out.push_str("&lt;"),
             _ => out.push(c),
         }
     }

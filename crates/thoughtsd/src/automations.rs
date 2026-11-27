@@ -121,8 +121,8 @@ fn names_folder(text: &str, dir: &str) -> bool {
         let at = from + i;
         let before = text[..at].chars().next_back();
         let after = text[at + dir.len()..].chars().next();
-        let starts = before.map_or(true, |c| !c.is_alphanumeric() && c != '-' && c != '_');
-        let ends = after.map_or(true, |c| !c.is_alphanumeric() && c != '-' && c != '_');
+        let starts = before.is_none_or(|c| !c.is_alphanumeric() && c != '-' && c != '_');
+        let ends = after.is_none_or(|c| !c.is_alphanumeric() && c != '-' && c != '_');
         // A one-word folder ("me") counts only when it is written as a path: `me/…` or `@me`.
         let as_path = nested || after == Some('/') || before == Some('@') || before == Some('/');
         if starts && ends && as_path { return true; }
@@ -195,7 +195,7 @@ pub fn walk_files(lib: &Path, private: &[String], now: std::time::SystemTime) ->
         let rel = e.path().strip_prefix(lib).map(Path::to_path_buf).unwrap_or_default();
         let top = if rel.components().count() > 1 { rel.components().next().map(|c| c.as_os_str().to_string_lossy().to_string()).unwrap_or_default() } else { String::new() };
         let ext = rel.extension().map(|x| x.to_string_lossy().to_lowercase()).unwrap_or_default();
-        let fresh = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| now.duration_since(m).ok()).map_or(false, |d| d < month);
+        let fresh = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|m| now.duration_since(m).ok()).is_some_and(|d| d < month);
         let f = out.folders.entry(top).or_default();
         f.0 += 1;
         if fresh { f.1 += 1; }
@@ -216,7 +216,7 @@ pub fn todo_facts(lib: &Path, private: &[String], today: NaiveDate) -> TodoFacts
             if i["done"] == true { t.done += 1; continue; }
             t.open += 1;
             if i["every"].is_string() { t.repeating += 1; }
-            if i["due"].as_str().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).map_or(false, |d| d < today) { t.overdue += 1; }
+            if i["due"].as_str().and_then(|d| NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()).is_some_and(|d| d < today) { t.overdue += 1; }
         }
     }
     t
@@ -226,9 +226,9 @@ pub fn todo_facts(lib: &Path, private: &[String], today: NaiveDate) -> TodoFacts
 /// Only names are looked at, never the files, so a private `people/` is counted and never read.
 pub fn count_people(lib: &Path) -> Option<usize> {
     let dir = lib.join("people");
-    if !std::fs::symlink_metadata(&dir).map_or(false, |m| m.is_dir()) { return None; }
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) { return None; }
     Some(std::fs::read_dir(&dir).into_iter().flatten().flatten()
-        .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|n| n.to_lowercase().ends_with(".md") && !n.eq_ignore_ascii_case("README.md") && !n.starts_with('.')).count())
 }
@@ -248,7 +248,7 @@ pub async fn gather(st: &AppState, lib: &Path) -> Facts {
     let manifest = crate::applayer::manifest_of(&layer);
     let bound = crate::workflows::load_bound(&crate::paths::home());
     let tasks: Vec<(String, String)> = crate::workflows::load_files(&layer).into_iter()
-        .filter(|l| bound.get(&l.file).map_or(true, |b| scope.holds(Some(b))))
+        .filter(|l| bound.get(&l.file).is_none_or(|b| scope.holds(Some(b))))
         .map(|l| (clean(&l.workflow.name, 80), trigger_words(&l.workflow.trigger))).collect();
     let addons: Vec<String> = crate::applayer::addons_of(&layer, false).iter().filter(|a| a["kind"] == "plugin").filter_map(|a| a["label"].as_str().map(|l| clean(l, 60))).collect();
     let pages: Vec<String> = manifest["views"].as_array().into_iter().flatten().filter_map(|v| v["name"].as_str().map(|n| clean(&crate::applayer::item_label(&format!("views/{n}")), 60))).collect();
@@ -296,7 +296,7 @@ fn has_word(text: &str, word: &str) -> bool {
         let at = from + i;
         let before = text[..at].chars().next_back();
         let after = text[at + word.len()..].chars().next();
-        if before.map_or(true, |c| !c.is_alphanumeric()) && (!whole || after.map_or(true, |c| !c.is_alphanumeric())) { return true; }
+        if before.is_none_or(|c| !c.is_alphanumeric()) && (!whole || after.is_none_or(|c| !c.is_alphanumeric())) { return true; }
         from = at + word.len();
     }
     false
@@ -317,7 +317,7 @@ fn address(tok: &str) -> Option<&str> {
     let local_ok = !local.is_empty() && local.chars().all(|c| c.is_ascii_alphanumeric() || "._%+-".contains(c));
     let labels: Vec<&str> = domain.split('.').collect();
     let domain_ok = labels.len() >= 2 && labels.iter().all(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
-        && labels.last().map_or(false, |l| l.len() >= 2 && l.chars().all(|c| c.is_ascii_alphabetic()));
+        && labels.last().is_some_and(|l| l.len() >= 2 && l.chars().all(|c| c.is_ascii_alphabetic()));
     (local_ok && domain_ok).then_some(tok)
 }
 
@@ -503,7 +503,7 @@ pub fn render_summary(s: &Summary) -> String {
             out.push_str(&line);
             out.push('\n');
         }
-        if out.len() + 1 <= SUMMARY_MAX { out.push('\n'); }
+        if out.len() < SUMMARY_MAX { out.push('\n'); }
     }
     out.trim_end().to_string()
 }
@@ -590,7 +590,7 @@ pub fn suggestion_id(kind: &str, title: &str) -> String {
 }
 
 pub fn valid_suggestion_id(id: &str) -> bool {
-    id.split_once('-').map_or(false, |(k, h)| KINDS.contains(&k) && h.len() == 8 && h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+    id.split_once('-').is_some_and(|(k, h)| KINDS.contains(&k) && h.len() == 8 && h.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
 }
 
 /// The request text: control and invisible characters gone except line breaks, cut at `max` characters.

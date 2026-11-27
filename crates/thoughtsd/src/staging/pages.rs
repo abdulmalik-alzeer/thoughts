@@ -90,14 +90,14 @@ const MAX_INSERTS: usize = 12;
 fn id_like(s: &str) -> bool {
     !s.is_empty() && s.len() <= 120 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
-fn widget_key(s: &str) -> bool { s.strip_prefix("widget:").map_or(false, id_like) }
+fn widget_key(s: &str) -> bool { s.strip_prefix("widget:").is_some_and(id_like) }
 
 /// `{ "en": …, "ar": … }`: at least one language, each a non-empty single line of at most `max` characters.
 pub fn text_ok(v: &Value, max: usize) -> bool {
-    v.as_object().map_or(false, |m| {
+    v.as_object().is_some_and(|m| {
         (m.contains_key("en") || m.contains_key("ar"))
             && m.keys().all(|k| k == "en" || k == "ar")
-            && m.values().all(|t| t.as_str().map_or(false, |s| !s.trim().is_empty() && s.chars().count() <= max && !s.contains(['\n', '\r'])))
+            && m.values().all(|t| t.as_str().is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= max && !s.contains(['\n', '\r'])))
     })
 }
 
@@ -155,7 +155,7 @@ fn sections_problems(p: &Page, v: &Value, add: Add) {
             None => add(format!("`{id}.sections.size` must be an object: {{ \"<section>\": \"half\" }}."), format!("يجب أن تكون `{id}.sections.size` كائناً: {{ \"<القسم>\": \"half\" }}.")),
             Some(m) => for (s, v) in m {
                 if !widget_key(s) { section_problem(p, "size", s, add); }
-                if !v.as_str().map_or(false, |x| reference().sizes.iter().any(|y| y == x)) {
+                if !v.as_str().is_some_and(|x| reference().sizes.iter().any(|y| y == x)) {
                     add(format!("The size of `{id}.sections.size.{s}` must be one of {}.", join(&reference().sizes, ", ")),
                         format!("يجب أن يكون حجم `{id}.sections.size.{s}` واحداً من {}.", join(&reference().sizes, "، ")));
                 }
@@ -169,7 +169,7 @@ fn sections_problems(p: &Page, v: &Value, add: Add) {
                 if section_problem(p, "replace", s, add) { continue; }
                 if !crate::full_access::on() && p.locked.iter().any(|x| x == current_id(s)) {
                     add(format!("The `{s}` section of `{id}` cannot be replaced."), format!("لا يمكن استبدال القسم `{s}` في `{id}`."));
-                } else if !v.as_str().map_or(false, widget_key) {
+                } else if !v.as_str().is_some_and(widget_key) {
                     add(format!("`{id}.sections.replace.{s}` must be an add-on box, `widget:<id>` (the `id` given to `ui.addHomeWidget`)."),
                         format!("يجب أن تكون `{id}.sections.replace.{s}` مربع إضافة `widget:<id>` (المعرّف المعطى لـ `ui.addHomeWidget`)."));
                 }
@@ -181,8 +181,8 @@ fn sections_problems(p: &Page, v: &Value, add: Add) {
             format!("يجب أن تكون `{id}.sections.insert` قائمة ({MAX_INSERTS} على الأكثر) من {{ \"box\": \"widget:<id>\", \"before\": \"<القسم>\" }} أو مع \"after\"."));
         match ins.as_array() {
             Some(a) if a.len() <= MAX_INSERTS => for e in a {
-                let box_ok = e["box"].as_str().map_or(false, widget_key);
-                let keys_ok = e.as_object().map_or(false, |m| m.keys().all(|k| k == "box" || k == "before" || k == "after"));
+                let box_ok = e["box"].as_str().is_some_and(widget_key);
+                let keys_ok = e.as_object().is_some_and(|m| m.keys().all(|k| k == "box" || k == "before" || k == "after"));
                 let place = match (e["before"].as_str(), e["after"].as_str()) { (Some(s), None) | (None, Some(s)) => Some(s), _ => None };
                 match place {
                     Some(s) if box_ok && keys_ok => { section_problem(p, "insert", s, add); }
@@ -284,7 +284,7 @@ pub fn problems(v: &Value, staging: &Path) -> Vec<(String, String)> {
                             add(format!("`{place}` in `{id}.boxes` is not a place: use `top` or `bottom`."), format!("`{place}` في `{id}.boxes` ليس موضعاً: استخدم `top` أو `bottom`."));
                             continue;
                         }
-                        let ok = list.as_array().map_or(false, |a| a.len() <= MAX_BOXES && a.iter().all(|x| x.as_str().map_or(false, widget_key)));
+                        let ok = list.as_array().is_some_and(|a| a.len() <= MAX_BOXES && a.iter().all(|x| x.as_str().is_some_and(widget_key)));
                         if !ok {
                             add(format!("`{id}.boxes.{place}` must be a list of at most {MAX_BOXES} add-on boxes, each `widget:<id>` (the `id` given to `ui.addHomeWidget`)."),
                                 format!("يجب أن تكون `{id}.boxes.{place}` قائمة من {MAX_BOXES} مربعات على الأكثر، كل منها `widget:<id>` (المعرّف المعطى لـ `ui.addHomeWidget`)."));

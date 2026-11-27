@@ -207,7 +207,7 @@ pub fn file_effects(path: &str, before: Option<&str>, after: Option<&str>) -> Op
 }
 
 fn text_of(p: &Path) -> Option<String> {
-    if !std::fs::symlink_metadata(p).map_or(false, |m| m.is_file() && m.len() as usize <= crate::packs::MAX_FILE_BYTES) { return None; }
+    if !std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && m.len() as usize <= crate::packs::MAX_FILE_BYTES) { return None; }
     std::fs::read_to_string(p).ok()
 }
 

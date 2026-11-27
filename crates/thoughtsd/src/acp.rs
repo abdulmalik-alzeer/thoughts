@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// The ACP version this client speaks.
@@ -131,7 +131,7 @@ pub async fn initialize(conn: &Conn) -> anyhow::Result<Value> {
         "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false},
         "clientInfo": {"name": "thoughts", "version": env!("CARGO_PKG_VERSION")},
     })).await?;
-    if r["protocolVersion"].as_u64().map_or(false, |v| v < PROTOCOL_VERSION) {
+    if r["protocolVersion"].as_u64().is_some_and(|v| v < PROTOCOL_VERSION) {
         anyhow::bail!("the agent speaks an older version of ACP ({})", r["protocolVersion"]);
     }
     Ok(r)

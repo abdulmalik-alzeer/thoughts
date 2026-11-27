@@ -72,7 +72,7 @@ pub fn main() -> i32 {
     let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
     let v: serde_json::Value = serde_json::from_str(&input).unwrap_or_default();
     // Only commands are checked (the hook is registered for the two shells alone).
-    if v["tool_name"].as_str().map_or(false, |t| t != "Bash" && t != "PowerShell") { return 0; }
+    if v["tool_name"].as_str().is_some_and(|t| t != "Bash" && t != "PowerShell") { return 0; }
     let (Some(cmd), false) = (v["tool_input"]["command"].as_str(), home.is_empty()) else {
         eprintln!("The Thoughts app could not check this command, so it was not run.");
         return 2;

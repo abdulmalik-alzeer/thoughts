@@ -76,7 +76,7 @@ pub fn plausible_email(s: &str) -> bool {
     let labels: Vec<&str> = domain.split('.').collect();
     let domain_ok = labels.len() >= 2 && labels.iter().all(|l| !l.is_empty() && l.len() <= 63 && !l.starts_with('-') && !l.ends_with('-')
         && l.chars().all(|c| c.is_alphanumeric() || c == '-'))
-        && labels.last().map_or(false, |t| t.chars().count() >= 2 && t.chars().all(char::is_alphabetic));
+        && labels.last().is_some_and(|t| t.chars().count() >= 2 && t.chars().all(char::is_alphabetic));
     local_ok && domain_ok
 }
 
@@ -203,7 +203,7 @@ fn other_lines(yaml: &str) -> Vec<String> {
         }
         if keep && !(line.trim().is_empty() && out.is_empty()) { out.push(line.trim_end_matches('\r').to_string()); }
     }
-    while out.last().map_or(false, |l: &String| l.trim().is_empty()) { out.pop(); }
+    while out.last().is_some_and(|l: &String| l.trim().is_empty()) { out.pop(); }
     out
 }
 
@@ -223,7 +223,7 @@ fn scalar(s: &str) -> String {
     if s.is_empty() { return String::new(); }
     let plain = !s.starts_with(|c: char| "-?:,[]{}#&*!|>'\"%@`".contains(c)) && !s.contains(": ") && !s.contains(" #") && !s.ends_with(':')
         && yaml_serde::from_str::<yaml_serde::Value>(&format!("k: {s}")).ok().and_then(|y| serde_json::to_value(y).ok())
-            .map_or(false, |v| v["k"].as_str() == Some(s));
+            .is_some_and(|v| v["k"].as_str() == Some(s));
     if plain { format!(" {s}") } else { format!(" {}", serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())) }
 }
 
@@ -272,7 +272,7 @@ pub fn render(p: &Person, updated: &str, old: Option<&str>) -> String {
 
 // ---------- the folder ----------
 
-fn is_link(p: &Path) -> bool { std::fs::symlink_metadata(p).map_or(false, |m| m.file_type().is_symlink()) }
+fn is_link(p: &Path) -> bool { std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) }
 
 /// A plain regular file (never a link), small enough: its bytes.
 fn read_plain(p: &Path) -> Option<Vec<u8>> {
@@ -307,7 +307,7 @@ impl Entry {
 pub fn list(lib: &Path) -> Vec<Entry> {
     let Some(dir) = folder(lib) else { return vec![] };
     let mut slugs: Vec<String> = std::fs::read_dir(&dir).into_iter().flatten().flatten()
-        .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".md")).map(str::to_string))
         .filter(|s| valid_slug(s)).collect();
     slugs.sort();
@@ -364,7 +364,7 @@ pub fn front_page(old: Option<&str>, people: &[Entry], arabic: bool) -> String {
     let mut out: Vec<String> = lines[..start].iter().map(|s| s.to_string()).collect();
     if list.is_empty() {
         // Nothing left to list: do not leave two blank lines where the list was.
-        while out.last().map_or(false, |l| l.trim().is_empty()) && lines.get(end + 1).map_or(true, |l| l.trim().is_empty()) { out.pop(); }
+        while out.last().is_some_and(|l| l.trim().is_empty()) && lines.get(end + 1).is_none_or(|l| l.trim().is_empty()) { out.pop(); }
     } else {
         out.extend(list);
     }
@@ -380,8 +380,8 @@ fn no_links(lib: &Path, slug: Option<&str>) -> anyhow::Result<()> {
     let mut check = vec![dir.clone(), dir.join(FRONT)];
     if let Some(s) = slug { check.push(dir.join(format!("{s}.md"))); }
     if check.iter().any(|p| is_link(p)) { return Err(err("people.link")); }
-    if std::fs::symlink_metadata(&dir).map_or(false, |m| !m.is_dir()) { return Err(err("people.link")); }
-    if std::fs::symlink_metadata(dir.join(FRONT)).map_or(false, |m| !m.is_file() || m.len() > MAX_FILE) { return Err(err("people.link")); }
+    if std::fs::symlink_metadata(&dir).is_ok_and(|m| !m.is_dir()) { return Err(err("people.link")); }
+    if std::fs::symlink_metadata(dir.join(FRONT)).is_ok_and(|m| !m.is_file() || m.len() > MAX_FILE) { return Err(err("people.link")); }
     Ok(())
 }
 
@@ -407,7 +407,7 @@ pub fn save(lib: &Path, slug: Option<&str>, base: Option<&str>, p: &Person, arab
             if !valid_slug(s) { return Err(err("people.gone")); }
             no_links(lib, Some(s))?;
             let cur = read_plain(&dir.join(format!("{s}.md"))).ok_or_else(|| err("people.gone"))?;
-            if base.map_or(true, |b| b != crate::workflows::content_hash(&cur)) { return Err(err("people.changed")); }
+            if base.is_none_or(|b| b != crate::workflows::content_hash(&cur)) { return Err(err("people.changed")); }
             (s.to_string(), Some(String::from_utf8_lossy(&cur).to_string()))
         }
         None => {
@@ -420,7 +420,7 @@ pub fn save(lib: &Path, slug: Option<&str>, base: Option<&str>, p: &Person, arab
     // A summary the app made earlier follows the details; one the user wrote stays.
     let before = old.as_deref().map(|t| parse(&slug, t).0);
     let made = |q: &Person| [auto_summary(q, false), auto_summary(q, true)].contains(&p.summary);
-    if p.summary.is_empty() || before.as_ref().map_or(false, |b| made(b)) { p.summary = auto_summary(&p, arabic); }
+    if p.summary.is_empty() || before.as_ref().is_some_and(made) { p.summary = auto_summary(&p, arabic); }
     let text = render(&p, &today(), old.as_deref());
     std::fs::create_dir_all(&dir)?;
     crate::paths::write_atomic(&dir.join(format!("{slug}.md")), text.as_bytes(), false)?;

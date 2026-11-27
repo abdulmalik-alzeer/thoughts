@@ -44,13 +44,13 @@ fn offends(chars: &[char], i: usize, multiline: bool) -> bool {
     if !is_hidden_char(c) { return false; }
     let at = |j: Option<usize>| j.and_then(|j| chars.get(j)).copied();
     let (prev, next) = (at(i.checked_sub(1)), at(Some(i + 1)));
-    let shown = |x: Option<char>| x.map_or(false, |x| !is_hidden_char(x) && !x.is_control() && !x.is_whitespace());
-    let wide = |x: Option<char>| shown(x) && x.map_or(false, |x| !x.is_ascii());
+    let shown = |x: Option<char>| x.is_some_and(|x| !is_hidden_char(x) && !x.is_control() && !x.is_whitespace());
+    let wide = |x: Option<char>| shown(x) && x.is_some_and(|x| !x.is_ascii());
     match c as u32 {
         0xFE0E | 0xFE0F => !shown(prev),
         0x200D => !((wide(prev) || (prev == Some('\u{FE0F}') && shown(at(i.checked_sub(2))))) && wide(next)),
         0x200C => !(wide(prev) && wide(next)),
-        0x200E | 0x200F | 0x061C => prev.map_or(false, is_hidden_char) || next.map_or(false, is_hidden_char),
+        0x200E | 0x200F | 0x061C => prev.is_some_and(is_hidden_char) || next.is_some_and(is_hidden_char),
         _ => true,
     }
 }
@@ -115,7 +115,7 @@ fn id_like(s: &str) -> bool {
     !s.is_empty() && s.len() <= 80 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
 
-fn strings<'a>(v: &'a Value) -> Option<Vec<&'a str>> {
+fn strings(v: &Value) -> Option<Vec<&str>> {
     v.as_array()?.iter().map(Value::as_str).collect()
 }
 
@@ -262,7 +262,7 @@ fn declaration(out: &mut Out, path: &str, o: &Map<String, Value>, view: bool, ow
     // `read` narrows what it reads (files, todos, ideas) to these folders. Left out, it reads the
     // whole library except private folders.
     if let Some(r) = o.get("read") {
-        let reads = strings(o.get("permissions").unwrap_or(&Value::Null)).map_or(false, |l| l.iter().any(|p| READ_PERMISSIONS.contains(p)));
+        let reads = strings(o.get("permissions").unwrap_or(&Value::Null)).is_some_and(|l| l.iter().any(|p| READ_PERMISSIONS.contains(p)));
         match strings(r) {
             None => out.add(path, "`read` must be a list of folder names.", "يجب أن يكون `read` قائمة بأسماء مجلدات."),
             Some(list) => {
@@ -284,7 +284,7 @@ fn declaration(out: &mut Out, path: &str, o: &Map<String, Value>, view: bool, ow
             }
         }
     }
-    if o.get("description").map_or(false, |d| !d.is_string()) {
+    if o.get("description").is_some_and(|d| !d.is_string()) {
         out.add(path, "`description` must be text.", "يجب أن يكون `description` نصّاً.");
     }
 }
@@ -315,14 +315,14 @@ fn manifest(out: &mut Out, path: &str, v: &Value) {
 fn home(out: &mut Out, path: &str, v: &Value) {
     let Some(o) = v.as_object() else { return not_object(out, path) };
     if let Some(chips) = o.get("chips") {
-        let ok = chips.as_array().map_or(false, |a| a.iter().all(|c| c["label"].as_str().map_or(false, |l| !l.trim().is_empty()) && c["prompt"].is_string()));
+        let ok = chips.as_array().is_some_and(|a| a.iter().all(|c| c["label"].as_str().is_some_and(|l| !l.trim().is_empty()) && c["prompt"].is_string()));
         if !ok { out.add(path, "`chips` must be a list of { \"label\": text, \"prompt\": text }.", "يجب أن يكون `chips` قائمة من { \"label\": نص، \"prompt\": نص }."); }
     }
     if let Some(hidden) = o.get("hidden") {
         match strings(hidden) {
             None => out.add(path, "`hidden` must be a list of section names.", "يجب أن يكون `hidden` قائمة بأسماء الأقسام."),
             Some(list) => for s in list {
-                if !HOME_SECTIONS.contains(&s) && s != "suggestions" && s != "automate" && !s.strip_prefix("widget:").map_or(false, id_like) {
+                if !HOME_SECTIONS.contains(&s) && s != "suggestions" && s != "automate" && !s.strip_prefix("widget:").is_some_and(id_like) {
                     out.add(path, format!("`{s}` in `hidden` is not a Home section. Sections: {}.", HOME_SECTIONS.join(", ")),
                         format!("`{s}` في `hidden` ليس قسماً من أقسام الصفحة الرئيسية. الأقسام: {}.", HOME_SECTIONS.join("، ")));
                 }
@@ -333,7 +333,7 @@ fn home(out: &mut Out, path: &str, v: &Value) {
         match strings(order) {
             None => out.add(path, "`order` must be a list of section names.", "يجب أن يكون `order` قائمة بأسماء الأقسام."),
             Some(list) => for s in list {
-                if !HOME_SECTIONS.contains(&s) && s != "suggestions" && s != "automate" && !s.strip_prefix("widget:").map_or(false, id_like) {
+                if !HOME_SECTIONS.contains(&s) && s != "suggestions" && s != "automate" && !s.strip_prefix("widget:").is_some_and(id_like) {
                     out.add(path, format!("`{s}` in `order` is not something Home can place. Use a section ({}), `suggestions`, `automate`, or `widget:<id>`.", HOME_SECTIONS.join(", ")),
                         format!("`{s}` في `order` ليس عنصراً يمكن ترتيبه في الصفحة الرئيسية. استخدم قسماً ({})، أو `suggestions`، أو `automate`، أو `widget:<id>`.", HOME_SECTIONS.join("، ")));
                 }
@@ -385,9 +385,9 @@ fn nav(out: &mut Out, path: &str, v: &Value) {
         match labels.as_object() {
             None => out.add(path, "`labels` must be an object: { \"<page id>\": { \"en\": text, \"ar\": text } }.", "يجب أن يكون `labels` كائناً: { \"<معرّف الصفحة>\": { \"en\": نص، \"ar\": نص } }."),
             Some(map) => for (id, l) in map {
-                let texts_ok = l.as_object().map_or(false, |m| {
+                let texts_ok = l.as_object().is_some_and(|m| {
                     (m.contains_key("en") || m.contains_key("ar"))
-                        && ["en", "ar"].iter().all(|k| m.get(*k).map_or(true, |t| t.as_str().map_or(false, |s| !s.trim().is_empty() && s.chars().count() <= 40)))
+                        && ["en", "ar"].iter().all(|k| m.get(*k).is_none_or(|t| t.as_str().is_some_and(|s| !s.trim().is_empty() && s.chars().count() <= 40)))
                 });
                 if fixed_look(id) {
                     out.add(path, format!("`{id}` keeps the app's own name in the sidebar: remove its label."), format!("يحتفظ `{id}` باسمه الأصلي في الشريط الجانبي: احذف تسميته."));
@@ -404,7 +404,7 @@ fn nav(out: &mut Out, path: &str, v: &Value) {
             Some(map) => for (id, icon) in map {
                 if fixed_look(id) {
                     out.add(path, format!("`{id}` keeps the app's own icon in the sidebar: remove it from `icons`."), format!("يحتفظ `{id}` بأيقونته الأصلية: احذفه من `icons`."));
-                } else if !id_like(id) || !icon.as_str().map_or(false, |i| r.icons.iter().any(|x| x == i)) {
+                } else if !id_like(id) || !icon.as_str().is_some_and(|i| r.icons.iter().any(|x| x == i)) {
                     let list = r.icons.iter().map(|x| format!("`{x}`")).collect::<Vec<_>>();
                     out.add(path, format!("The icon for `{id}` must be one of {}.", list.join(", ")), format!("يجب أن تكون أيقونة `{id}` واحدة من {}.", list.join("، ")));
                 }
@@ -418,10 +418,10 @@ fn nav(out: &mut Out, path: &str, v: &Value) {
             Some(a) if a.len() <= r.nav.max_groups => {
                 let mut seen: Vec<&str> = vec![];
                 for g in a {
-                    let ok = g["id"].as_str().map_or(false, id_like)
+                    let ok = g["id"].as_str().is_some_and(id_like)
                         && super::pages::text_ok(&g["label"], 40)
-                        && g.as_object().map_or(false, |m| m.keys().all(|k| k == "id" || k == "label" || k == "items"))
-                        && strings(&g["items"]).map_or(false, |l| l.iter().all(|x| id_like(x)));
+                        && g.as_object().is_some_and(|m| m.keys().all(|k| k == "id" || k == "label" || k == "items"))
+                        && strings(&g["items"]).is_some_and(|l| l.iter().all(|x| id_like(x)));
                     if !ok { let (en, ar) = bad(); out.add(path, en, ar); continue; }
                     for item in strings(&g["items"]).unwrap_or_default() {
                         if seen.contains(&item) {
@@ -447,21 +447,21 @@ fn todos(out: &mut Out, path: &str, v: &Value) {
     let Some(o) = v.as_object() else { return not_object(out, path) };
     for (key, allowed) in [("groupBy", &["list", "due", "tag", "none"][..]), ("sort", &["list", "due"][..]), ("filter", &["all", "soon", "overdue"][..])] {
         if let Some(val) = o.get(key) {
-            if !val.as_str().map_or(false, |s| allowed.contains(&s)) {
+            if !val.as_str().is_some_and(|s| allowed.contains(&s)) {
                 let options = allowed.iter().map(|a| format!("\"{a}\"")).collect::<Vec<_>>();
                 out.add(path, format!("`{key}` must be one of {}.", options.join(", ")), format!("يجب أن تكون قيمة `{key}` واحدة من: {}.", options.join("، ")));
             }
         }
     }
-    if o.get("showDone").map_or(false, |b| !b.is_boolean()) {
+    if o.get("showDone").is_some_and(|b| !b.is_boolean()) {
         out.add(path, "`showDone` must be true or false.", "يجب أن تكون قيمة `showDone` إما true أو false.");
     }
 }
 
 fn themes(out: &mut Out, path: &str, v: &Value) {
-    let ok = v.as_array().map_or(false, |a| a.iter().all(|t| {
-        t["id"].as_str().map_or(false, |id| !id.is_empty() && id.len() <= 40 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
-            && t["name"].as_str().map_or(false, |n| !n.trim().is_empty())
+    let ok = v.as_array().is_some_and(|a| a.iter().all(|t| {
+        t["id"].as_str().is_some_and(|id| !id.is_empty() && id.len() <= 40 && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+            && t["name"].as_str().is_some_and(|n| !n.trim().is_empty())
     }));
     if !ok {
         out.add(path, "This must be a list of themes like [{ \"id\": \"sand\", \"name\": \"Sand\" }]; `id` uses lowercase letters, digits and dashes.",
@@ -471,20 +471,20 @@ fn themes(out: &mut Out, path: &str, v: &Value) {
 
 fn workflow(out: &mut Out, path: &str, v: &Value) {
     let Some(o) = v.as_object() else { return not_object(out, path) };
-    if o.get("name").map_or(false, |n| !n.as_str().map_or(false, |s| s.chars().count() <= 80 && !s.chars().any(char::is_control))) {
+    if o.get("name").is_some_and(|n| !n.as_str().is_some_and(|s| s.chars().count() <= 80 && !s.chars().any(char::is_control))) {
         out.add(path, "`name` must be a short line of text.", "يجب أن يكون `name` نصّاً قصيراً في سطر واحد.");
     }
-    if !o.get("prompt").and_then(Value::as_str).map_or(false, |p| !p.trim().is_empty() && p.len() <= 20_000) {
+    if !o.get("prompt").and_then(Value::as_str).is_some_and(|p| !p.trim().is_empty() && p.len() <= 20_000) {
         out.add(path, "`prompt` is missing: say what the assistant should do when this runs.", "الحقل `prompt` مفقود: اكتب ما على المساعد فعله عند التشغيل.");
     }
     let t = &o.get("trigger").cloned().unwrap_or(Value::Null);
     let probe = json!({"name": "x", "prompt": "x", "trigger": t});
-    let understood = serde_json::from_value::<crate::workflows::Workflow>(probe).map_or(false, |w| crate::workflows::valid(&w));
+    let understood = serde_json::from_value::<crate::workflows::Workflow>(probe).is_ok_and(|w| crate::workflows::valid(&w));
     if understood { return; }
     let (en, ar): (String, String) = match (t["type"].as_str(), t["every"].as_str()) {
         (Some("event"), _) => ("An event trigger must be { \"type\": \"event\", \"on\": \"wrap.done\" } or \"app.start\".".into(),
             "مشغّل الحدث يجب أن يكون { \"type\": \"event\", \"on\": \"wrap.done\" } أو \"app.start\".".into()),
-        (Some("schedule"), _) if !t["at"].as_str().map_or(false, |a| a.len() == 5 && chrono::NaiveTime::parse_from_str(a, "%H:%M").is_ok()) =>
+        (Some("schedule"), _) if !t["at"].as_str().is_some_and(|a| a.len() == 5 && chrono::NaiveTime::parse_from_str(a, "%H:%M").is_ok()) =>
             ("`at` must be a 24-hour time such as \"09:00\".".into(), "يجب أن يكون `at` وقتاً بنظام ٢٤ ساعة مثل \"09:00\".".into()),
         (Some("schedule"), Some("month")) => ("A monthly schedule needs `day`: a number from 1 to 28, or \"last\".".into(),
             "الجدول الشهري يحتاج إلى `day`: رقم من 1 إلى 28، أو \"last\".".into()),
@@ -518,7 +518,7 @@ fn css_norm(raw: &str) -> String {
             if let Some(n) = it.next() { if n != '\n' { out.push(n); } }
             continue;
         }
-        if it.peek().map_or(false, |w| w.is_whitespace()) { it.next(); }
+        if it.peek().is_some_and(|w| w.is_whitespace()) { it.next(); }
         out.push(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32).filter(|c| *c != '\0').unwrap_or('\u{FFFD}'));
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
@@ -600,7 +600,7 @@ fn css_flags(d: &Decl) -> Vec<&'static str> {
         "content-visibility" => v == "hidden",
         "opacity" | "font-size" | "width" | "height" | "max-width" | "max-height" | "line-height" | "scale" | "zoom" => zero(v),
         "color" | "-webkit-text-fill-color" => v.starts_with("transparent"),
-        "text-indent" => number(v).map_or(false, |n| n.abs() >= 500.0),
+        "text-indent" => number(v).is_some_and(|n| n.abs() >= 500.0),
         "clip" | "clip-path" | "mask" | "mask-image" | "-webkit-mask" | "-webkit-mask-image" => v != "none",
         "transform" => v.replace(' ', "").contains("scale(0)") || v.replace(' ', "").contains("scale(0,"),
         _ => false,
