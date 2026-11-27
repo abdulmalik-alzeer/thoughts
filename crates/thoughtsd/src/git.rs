@@ -173,8 +173,8 @@ pub fn usable() -> bool {
         }
         // A git from somewhere else (Homebrew, MacPorts…) is the real thing; Apple's needs its tools installed.
         let own = ["/opt/homebrew/bin/git", "/usr/local/bin/git"].iter().any(|p| Path::new(p).exists())
-            || crate::claude::find_binary(&None, "git").map_or(false, |p| p != Path::new("/usr/bin/git"));
-        let yes = own || crate::proc::std_output_timeout(crate::proc::std_command("xcode-select").arg("-p"), Duration::from_secs(15)).map_or(false, |o| o.status.success());
+            || crate::claude::find_binary(&None, "git").is_some_and(|p| p != Path::new("/usr/bin/git"));
+        let yes = own || crate::proc::std_output_timeout(crate::proc::std_command("xcode-select").arg("-p"), Duration::from_secs(15)).is_ok_and(|o| o.status.success());
         *seen = Some((yes, Instant::now()));
         yes
     }
@@ -684,7 +684,7 @@ async fn push_all(state: &AppState, dir: &Path, rs: &[Value], branch: &str, log:
 pub async fn lfs_in_use(state: &AppState, dir: &Path) -> bool {
     let mut set = false;
     for key in ["filter.lfs.process", "filter.lfs.clean"] {
-        set |= git(state, dir, &["config", "--get", key]).await.map_or(false, |v| !v.trim().is_empty());
+        set |= git(state, dir, &["config", "--get", key]).await.is_ok_and(|v| !v.trim().is_empty());
     }
     if !set { return false; }
     let mut rules: Vec<PathBuf> = vec![];
@@ -697,7 +697,7 @@ pub async fn lfs_in_use(state: &AppState, dir: &Path) -> bool {
     if let Ok(p) = git(state, dir, &["config", "--type=path", "--get", "core.attributesFile"]).await {
         if !p.trim().is_empty() { rules.push(PathBuf::from(p.trim())); }
     }
-    rules.iter().any(|f| std::fs::read_to_string(f).map_or(false, |t| t.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("filter=lfs"))))
+    rules.iter().any(|f| std::fs::read_to_string(f).is_ok_and(|t| t.lines().any(|l| !l.trim_start().starts_with('#') && l.contains("filter=lfs"))))
 }
 
 /// The plain reason a location of `kind` (see `location_kind`) did not take the library, or could
@@ -836,7 +836,7 @@ pub async fn backup_health(state: &AppState, dir: &Path) -> Value {
         let why_key = n["why"].as_str();
         let present = if r["kind"] == "folder" { Some(folder_present(url).await) } else { None };
         let this = if why_key.is_some() { "failed" }
-            else if unsent > 0 && ok.map_or(true, |t| (now - t).num_days() >= STALE_DAYS) { "stale" }
+            else if unsent > 0 && ok.is_none_or(|t| (now - t).num_days() >= STALE_DAYS) { "stale" }
             else if unsent > 0 { "waiting" } else { "ok" };
         if rank(this) > rank(overall) { overall = this; }
         out.push(json!({"name": name, "kind": r["kind"], "main": r["main"], "at": n["ok"], "tried": n["tried"],
@@ -1087,7 +1087,7 @@ pub async fn resolve(state: &AppState, dir: &Path, strategy: &str) -> anyhow::Re
 /// `backup/<YYYYMMDD-HHMMSS>`; when there is nothing to settle (the call was not needed) no backup
 /// is made and this is an ordinary sync.
 pub async fn resolve_each(state: &AppState, dir: &Path, default: Option<&str>, choices: &std::collections::HashMap<String, String>) -> anyhow::Result<Value> {
-    if default.map_or(false, |d| !CHOICES.contains(&d)) || choices.values().any(|c| !CHOICES.contains(&c.as_str())) {
+    if default.is_some_and(|d| !CHOICES.contains(&d)) || choices.values().any(|c| !CHOICES.contains(&c.as_str())) {
         return Err(crate::tr::err("git.strategy", &[]));
     }
     // As in `sync`: the files are held while git changes them, and free while it waits on the network.
@@ -1538,7 +1538,7 @@ pub async fn restore_file_from(state: &AppState, dir: &Path, rel: &str, hash: &s
     // pointed again at what they meant, from where it is now.
     if let Some(was) = was.filter(|w| *w != rel && crate::links::is_markdown(rel)) {
         if let Ok(text) = String::from_utf8(bytes.clone()) {
-            let exists = |p: &str| crate::library::resolve(dir, p).map_or(false, |a| std::fs::symlink_metadata(a).is_ok());
+            let exists = |p: &str| crate::library::resolve(dir, p).is_ok_and(|a| std::fs::symlink_metadata(a).is_ok());
             let (relinked, n) = crate::links::relink_moved(&text, was, rel, &exists);
             if n > 0 { crate::log::info(format!("history: {n} link(s) of the restored version pointed again from its new place")); bytes = relinked.into_bytes(); }
         }

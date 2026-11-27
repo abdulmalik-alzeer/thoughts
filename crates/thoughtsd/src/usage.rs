@@ -78,7 +78,7 @@ pub fn append(home: &Path, event: &str, now: DateTime<Local>) -> anyhow::Result<
     let event = clean_event(event)?;
     let path = file(home);
     let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
-    if std::fs::metadata(&path).map_or(false, |m| m.len() > MAX_BYTES) {
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > MAX_BYTES) {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let lines: Vec<&str> = text.lines().collect();
         let kept = lines[lines.len().saturating_sub(KEEP_LINES)..].join("\n") + "\n";

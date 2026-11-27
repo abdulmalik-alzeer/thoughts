@@ -555,14 +555,14 @@ impl Lexer {
     fn escape_at(&self, k: usize) -> bool { self.peek(k) == Some('\\') && self.peek(k + 1) != Some('\n') }
     fn ident_at(&self, k: usize) -> bool {
         match self.peek(k) {
-            Some('-') => self.peek(k + 1).map_or(false, |c| name_start(c) || c == '-') || self.escape_at(k + 1),
+            Some('-') => self.peek(k + 1).is_some_and(|c| name_start(c) || c == '-') || self.escape_at(k + 1),
             Some('\\') => self.escape_at(k),
             Some(c) => name_start(c),
             None => false,
         }
     }
     fn number_at(&self, k: usize) -> bool {
-        let digit = |n: usize| self.peek(n).map_or(false, |c| c.is_ascii_digit());
+        let digit = |n: usize| self.peek(n).is_some_and(|c| c.is_ascii_digit());
         match self.peek(k) {
             Some('+') | Some('-') => digit(k + 1) || (self.peek(k + 1) == Some('.') && digit(k + 2)),
             Some('.') => digit(k + 1),
@@ -573,13 +573,13 @@ impl Lexer {
     /// The backslash is already passed: the character it stands for.
     fn escaped(&mut self) -> char {
         let mut hex = String::new();
-        while hex.len() < 6 && self.peek(0).map_or(false, |c| c.is_ascii_hexdigit()) { hex.push(self.c[self.i]); self.i += 1; }
+        while hex.len() < 6 && self.peek(0).is_some_and(|c| c.is_ascii_hexdigit()) { hex.push(self.c[self.i]); self.i += 1; }
         if hex.is_empty() {
             let Some(c) = self.peek(0) else { return '\u{fffd}' };
             self.i += 1;
             return c;
         }
-        if self.peek(0).map_or(false, css_space) { self.i += 1; }
+        if self.peek(0).is_some_and(css_space) { self.i += 1; }
         match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) { Some('\0') | None => '\u{fffd}', Some(c) => c }
     }
     fn name(&mut self) -> String {
@@ -592,7 +592,7 @@ impl Lexer {
             }
         }
     }
-    fn skip_space(&mut self) { while self.peek(0).map_or(false, css_space) { self.i += 1; } }
+    fn skip_space(&mut self) { while self.peek(0).is_some_and(css_space) { self.i += 1; } }
 
     fn string(&mut self, quote: char) -> Tok {
         let mut out = String::new();
@@ -653,7 +653,7 @@ impl Lexer {
         self.i += 1;
         if name.eq_ignore_ascii_case("url") {
             let mut k = 0;
-            while self.peek(k).map_or(false, css_space) { k += 1; }
+            while self.peek(k).is_some_and(css_space) { k += 1; }
             if !matches!(self.peek(k), Some('"') | Some('\'')) { return self.url(); }
         }
         Tok::Function(name)
@@ -661,16 +661,16 @@ impl Lexer {
 
     fn number(&mut self) -> Tok {
         if matches!(self.peek(0), Some('+') | Some('-')) { self.i += 1; }
-        while self.peek(0).map_or(false, |c| c.is_ascii_digit()) { self.i += 1; }
-        if self.peek(0) == Some('.') && self.peek(1).map_or(false, |c| c.is_ascii_digit()) {
+        while self.peek(0).is_some_and(|c| c.is_ascii_digit()) { self.i += 1; }
+        if self.peek(0) == Some('.') && self.peek(1).is_some_and(|c| c.is_ascii_digit()) {
             self.i += 1;
-            while self.peek(0).map_or(false, |c| c.is_ascii_digit()) { self.i += 1; }
+            while self.peek(0).is_some_and(|c| c.is_ascii_digit()) { self.i += 1; }
         }
         if matches!(self.peek(0), Some('e') | Some('E')) {
             let sign = matches!(self.peek(1), Some('+') | Some('-')) as usize;
-            if self.peek(1 + sign).map_or(false, |c| c.is_ascii_digit()) {
+            if self.peek(1 + sign).is_some_and(|c| c.is_ascii_digit()) {
                 self.i += 1 + sign;
-                while self.peek(0).map_or(false, |c| c.is_ascii_digit()) { self.i += 1; }
+                while self.peek(0).is_some_and(|c| c.is_ascii_digit()) { self.i += 1; }
             }
         }
         if self.ident_at(0) { self.name(); } else if self.peek(0) == Some('%') { self.i += 1; }
@@ -688,7 +688,7 @@ impl Lexer {
                 if self.i >= self.c.len() { Tok::Unclosed } else { self.i += 2; Tok::Comment }
             }
             '"' | '\'' => { self.i += 1; self.string(c) }
-            '#' if self.peek(1).map_or(false, name_char) || self.escape_at(1) => { self.i += 1; self.name(); Tok::Hash }
+            '#' if self.peek(1).is_some_and(name_char) || self.escape_at(1) => { self.i += 1; self.name(); Tok::Hash }
             '(' | '[' | '{' => { self.i += 1; Tok::Open(c) }
             ')' | ']' | '}' => { self.i += 1; Tok::Close(c) }
             ',' => { self.i += 1; Tok::Comma }
@@ -812,7 +812,7 @@ impl Clock {
     fn late(&self) -> bool {
         if self.over.get() { return true; }
         self.asked.set(self.asked.get().wrapping_add(1));
-        if self.asked.get() % 64 == 0 && std::time::Instant::now() > self.end { self.over.set(true); }
+        if self.asked.get().is_multiple_of(64) && std::time::Instant::now() > self.end { self.over.set(true); }
         self.over.get()
     }
     fn late_now(&self) -> bool {
@@ -895,7 +895,7 @@ fn css_still_bad(css: &str) -> bool {
     while let Some(at) = flat[from..].find("behavior:") {
         let at = from + at;
         let prev = flat[..at].chars().last();
-        if !prev.map_or(false, |c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return true; }
+        if !prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') { return true; }
         from = at + 1;
     }
     let mut from = 0;

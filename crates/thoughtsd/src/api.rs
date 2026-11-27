@@ -322,7 +322,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         // Outermost: answer CORS preflights before auth, for the app's own origins only.
         .layer(tower_http::cors::CorsLayer::new()
-            .allow_origin(tower_http::cors::AllowOrigin::predicate(|o: &HeaderValue, _| o.to_str().map_or(false, origin_allowed)))
+            .allow_origin(tower_http::cors::AllowOrigin::predicate(|o: &HeaderValue, _| o.to_str().is_ok_and(origin_allowed)))
             .allow_methods([Method::GET, Method::POST, Method::PUT, Method::PATCH, Method::DELETE])
             .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::HeaderName::from_static(crate::libraries::HEADER)])
             // Without this a webview asks again (an extra request before every call) after five
@@ -356,7 +356,7 @@ fn dev_origins() -> bool {
 fn origin_allowed_in(origin: &str, dev: bool) -> bool {
     if ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].contains(&origin) { return true; }
     dev && ["http://localhost:", "http://127.0.0.1:"].iter().any(|pre| origin.strip_prefix(pre)
-        .map_or(false, |port| !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit())))
+        .is_some_and(|port| !port.is_empty() && port.len() <= 5 && port.bytes().all(|b| b.is_ascii_digit())))
 }
 
 fn origin_allowed(origin: &str) -> bool { origin_allowed_in(origin, dev_origins()) }
@@ -386,7 +386,7 @@ fn presented_token<'a>(path: &str, authorization: &'a str, protocols: &'a str) -
 async fn auth(State(st): S, mut req: Request, next: Next) -> Response {
     // A web page that is not the app has no business here, token or not.
     if let Some(o) = req.headers().get(header::ORIGIN) {
-        if !o.to_str().map_or(false, origin_allowed) { return (StatusCode::FORBIDDEN, "origin not allowed").into_response(); }
+        if !o.to_str().is_ok_and(origin_allowed) { return (StatusCode::FORBIDDEN, "origin not allowed").into_response(); }
     }
     let presented = {
         let text = |name: header::HeaderName| req.headers().get(name).and_then(|h| h.to_str().ok()).unwrap_or("");
@@ -446,6 +446,7 @@ fn check_remote_url(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // used on macOS, and by the tests everywhere
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
@@ -537,7 +538,7 @@ impl Scope {
     }
     /// Is `rel` inside the folders this add-on may read in (by name and by real location)?
     fn may_read(&self, root: &std::path::Path, rel: &str) -> bool {
-        self.read.as_ref().map_or(true, |dirs| library::inside_folders(root, rel, dirs))
+        self.read.as_ref().is_none_or(|dirs| library::inside_folders(root, rel, dirs))
     }
     /// Keep only the entries of `list` whose `key` (a library path) this add-on may read.
     fn keep_readable(&self, root: &std::path::Path, list: &mut Vec<Value>, key: &str) {
@@ -555,7 +556,7 @@ impl Scope {
     /// It may still make new files in its write folders.
     fn check_change(&self, root: &std::path::Path, rel: &str) -> anyhow::Result<()> {
         if self.read.is_none() || self.may_read(root, rel) { return Ok(()); }
-        let there = library::resolve(root, rel).map_or(false, |p| std::fs::symlink_metadata(p).is_ok());
+        let there = library::resolve(root, rel).is_ok_and(|p| std::fs::symlink_metadata(p).is_ok());
         if there { return Err(crate::tr::err("plugin.not_changeable", &[("path", rel)])); }
         Ok(())
     }
@@ -592,7 +593,7 @@ async fn status(State(st): S) -> R {
         "wrapInterrupted": wraps::interrupted_wrap(&st).await,
         "unreadableChats": st.chats.unreadable,
         "busy": s.library().map_or_else(|| st.library_busy(), |l| st.library_busy_at(&l)),
-        "libraryMissing": s.library().map_or(false, |l| !l.is_dir()),
+        "libraryMissing": s.library().is_some_and(|l| !l.is_dir()),
         "platform": std::env::consts::OS,
         "home": dirs::home_dir(),
         "newerVersion": crate::release::newer_value(&crate::release::load(&paths::home()), env!("CARGO_PKG_VERSION")),
@@ -605,7 +606,7 @@ async fn interrupted_here(st: &AppState) -> Vec<Value> {
     let scope = wraps::Scope::now(st).await;
     let mut out = vec![];
     for (id, title) in all {
-        if st.chats.meta(&id).await.map_or(true, |c| scope.holds(c.library.as_deref())) { out.push(json!({"chatId": id, "title": title})); }
+        if st.chats.meta(&id).await.is_none_or(|c| scope.holds(c.library.as_deref())) { out.push(json!({"chatId": id, "title": title})); }
     }
     out
 }
@@ -635,7 +636,7 @@ async fn ack_recovered(State(st): S) -> R {
 /// folders, addresses) is reduced to whether it is set, or to a count.
 fn redacted_settings(s: &Settings) -> Value {
     let mut v = serde_json::to_value(s).unwrap_or(Value::Null);
-    let set = |x: &Value| if x.is_null() || x.as_str().map_or(false, |t| t.is_empty()) { json!(null) } else { json!("(set)") };
+    let set = |x: &Value| if x.is_null() || x.as_str().is_some_and(|t| t.is_empty()) { json!(null) } else { json!("(set)") };
     for key in ["userName", "libraryPath", "profession"] { v[key] = set(&v[key]); }
     v["projects"] = json!(s.projects.len());
     v["privatePaths"] = json!(s.private_paths.len());
@@ -740,7 +741,7 @@ async fn library_keep_to_owner(State(st): S) -> R {
 async fn private_folder(st: &AppState, raw: &str) -> anyhow::Result<String> {
     let bad = || crate::tr::err("invalid.path", &[]);
     let rel = paths::clean_rel(raw).map_err(|_| bad())?;
-    let listed = st.settings.read().await.private_paths.iter().any(|p| paths::clean_rel(p).map_or(false, |p| p == rel));
+    let listed = st.settings.read().await.private_paths.iter().any(|p| paths::clean_rel(p).is_ok_and(|p| p == rel));
     if listed { Ok(rel) } else { Err(bad()) }
 }
 
@@ -793,7 +794,7 @@ fn linux_git_hint(has: impl Fn(&str) -> bool) -> &'static str {
 
 /// Body of `POST /api/shutdown`: `{force: true}` stops even while the library is being changed.
 fn shutdown_forced(body: &[u8]) -> bool {
-    serde_json::from_slice::<Value>(body).ok().map_or(false, |v| v["force"] == true)
+    serde_json::from_slice::<Value>(body).ok().is_some_and(|v| v["force"] == true)
 }
 
 async fn shutdown(State(st): S, body: axum::body::Bytes) -> R {
@@ -834,7 +835,7 @@ fn validate_with(s: &Settings, old: Option<&Settings>, synced: impl Fn(&str) -> 
     // A drive only ever gets what this computer sends it: it never brings changes into the folder.
     if !s.sync_enabled() || s.sync.allow_cloud || s.sync.target == "drive" { return Ok(()); }
     let Some(p) = &s.library_path else { return Ok(()) };
-    if old.map_or(false, |o| o.sync_enabled() && o.library_path.as_deref().map(str::trim) == Some(p.trim())) { return Ok(()); }
+    if old.is_some_and(|o| o.sync_enabled() && o.library_path.as_deref().map(str::trim) == Some(p.trim())) { return Ok(()); }
     if synced(p) { return Err(crate::tr::err("library.cloud", &[])); }
     Ok(())
 }
@@ -884,7 +885,7 @@ async fn put_settings(State(st): S, Query(q): Query<HashMap<String, String>>, Js
     // address and its key among them: those change through PUT /api/ai/claude/provider only).
     new.sanitize_update(&old)?;
     if let Some(p) = &chosen {
-        if moved || old.library_path.as_deref().map_or(true, |o| o.trim().is_empty()) { new.move_open_library(p)?; } else { new.open_folder(p, None)?; }
+        if moved || old.library_path.as_deref().is_none_or(|o| o.trim().is_empty()) { new.move_open_library(p)?; } else { new.open_folder(p, None)?; }
     }
     validate(&new, Some(&old))?;
     // Making "bypass permissions" the default for new chats needs the user's yes (the dialog in Settings).
@@ -988,6 +989,7 @@ fn windows_run_value(exe: &str) -> String { format!("\"{exe}\" --daemon") }
 
 /// Is this program running from macOS "App Translocation" — a random, read-only copy the system
 /// makes when an app is opened without having been moved out of Downloads?
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // used on macOS, and by the tests everywhere
 fn translocated(exe: &str) -> bool { exe.contains("/AppTranslocation/") }
 
 /// The process id launchd reports for a loaded job (`launchctl print`: a line `pid = 123`).
@@ -1039,7 +1041,7 @@ fn login_item(enable: bool) -> anyhow::Result<()> {
                 // If launchd started *this* daemon, unloading the job would end it (and every chat
                 // running in it): then only the file is removed, and launchd forgets at logout.
                 let ours = launchctl(&["print", &service]).ok().filter(|o| o.status.success())
-                    .map_or(false, |o| launchd_job_pid(&String::from_utf8_lossy(&o.stdout)) == Some(std::process::id()));
+                    .is_some_and(|o| launchd_job_pid(&String::from_utf8_lossy(&o.stdout)) == Some(std::process::id()));
                 if !ours { let _ = launchctl(&["bootout", &service]); }
             }
             let _ = std::fs::remove_file(plist);
@@ -1369,7 +1371,7 @@ async fn onboarding(State(st): S, Json(o): Json<Onboarding>) -> R {
         }
         let into = crate::import::default_into(&path, &scan.root);
         let (copied, _) = crate::import::copy_in(scan, &path, &into)?;
-        if history && copied > 0 { crate::import::record(&st, &path, &crate::import::subject(&into, copied), &[into.clone()]).await; }
+        if history && copied > 0 { crate::import::record(&st, &path, &crate::import::subject(&into, copied), std::slice::from_ref(&into)).await; }
         setup_note = crate::import::setup_note_imported(&into, copied);
     }
     if adopt {
@@ -1697,8 +1699,6 @@ async fn remove_provider(State(st): S) -> R {
     Ok(Json(json!({"ok": true, "provider": "account"})))
 }
 
-/// The ready-made services Settings offers (address and how the key is sent).
-
 /// Try the connection with one very short message, so a wrong key or address shows here instead of
 /// inside the first chat. With a body (`baseUrl`, `token`, as for saving) it tries what was typed
 /// and not saved yet; without, the saved set-up. `{ok}` or `{ok:false, refused, message}`.
@@ -1973,10 +1973,10 @@ fn plugin_may_set_status(layer: &std::path::Path, plugin: &str, root: &std::path
     let refused = || crate::tr::err("plugin.not_allowed", &[("path", rel)]);
     let plain = !plugin.is_empty() && plugin.len() <= 80 && plugin.ends_with(".js") && !plugin.starts_with('.')
         && plugin.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-    let kept = plain && std::fs::symlink_metadata(layer.join("plugins").join(plugin)).map_or(false, |m| m.is_file());
+    let kept = plain && std::fs::symlink_metadata(layer.join("plugins").join(plugin)).is_ok_and(|m| m.is_file());
     let shared = std::fs::read_to_string(layer.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
     let decl = if kept { crate::applayer::resolve_decl(layer, "plugins", plugin, &shared, false) } else { Value::Null };
-    let declared = decl["unsupported"] != true && decl["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == "ideas:write"));
+    let declared = decl["unsupported"] != true && decl["permissions"].as_array().is_some_and(|a| a.iter().any(|p| p == "ideas:write"));
     if !declared { return Err(refused()); }
     if !library::ideas(root).iter().any(|i| i["path"].as_str() == Some(rel)) { return Err(refused()); }
     let mut at = root.to_path_buf();
@@ -2173,7 +2173,7 @@ async fn repair_lib(st: &AppState) -> anyhow::Result<std::path::PathBuf> {
 /// anything, keeps the history from working (`repair::check`; `thorough` also reads every record).
 async fn history_check(State(st): S, Query(q): Query<HashMap<String, String>>) -> R {
     let l = repair_lib(&st).await?;
-    let thorough = q.get("thorough").map_or(false, |v| v == "1" || v == "true");
+    let thorough = q.get("thorough").is_some_and(|v| v == "1" || v == "true");
     Ok(Json(crate::repair::check(&st, &l, thorough).await?))
 }
 
@@ -2508,9 +2508,9 @@ async fn chat_list(State(st): S, Query(q): Query<HashMap<String, String>>) -> R 
     let s = st.settings.read().await.clone();
     let name = q.get("plugin").cloned().unwrap_or_default();
     let view = q.get("kind").map(String::as_str) == Some("view");
-    let preview = q.get("preview").map_or(false, |v| v == "1");
+    let preview = q.get("preview").is_some_and(|v| v == "1");
     let decl = crate::addons::decl_for(&applayer::Dirs::real(), preview, &name, view);
-    if !decl.as_ref().map_or(false, |d| d["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == "chats:read"))) {
+    if !decl.as_ref().is_some_and(|d| d["permissions"].as_array().is_some_and(|a| a.iter().any(|p| p == "chats:read"))) {
         return Err(crate::tr::err("addon.permission", &[("name", name.trim_end_matches(".js").trim_end_matches(".html"))]).into());
     }
     let reads = crate::addons::reads_of(decl.as_ref());
@@ -2889,7 +2889,7 @@ async fn resend_without_session(st: &Arc<AppState>, again: RunSpec, kind: &str) 
     let Some(_claim) = st.chats.claim_send(&id) else { return false };
     if st.chats.with(&id, |c| c.running).await != Some(false) { return false; }
     let lost = st.chats.with(&id, |c| c.messages.last()
-        .filter(|m| m.role == "error" && m.tool.as_ref().map_or(false, |t| t["code"] == claude::SESSION_LOST)).map(|m| m.id.clone())).await.flatten();
+        .filter(|m| m.role == "error" && m.tool.as_ref().is_some_and(|t| t["code"] == claude::SESSION_LOST)).map(|m| m.id.clone())).await.flatten();
     let Some(lost) = lost else { return false };
     crate::log::warn(format!("chat {id}: the assistant no longer has its session; continuing from the saved conversation"));
     let note = crate::tr::text("chat.session_lost", &[]);
@@ -2907,7 +2907,7 @@ async fn resend_without_session(st: &Arc<AppState>, again: RunSpec, kind: &str) 
     if let Some(m) = shown { st.emit(json!({"type": "chat.message", "chatId": id, "message": m})); }
     // As for any send: nothing else writes into the library while a wrap is changing it.
     let library = st.settings.read().await.library();
-    let touches_library = library.as_ref().map_or(false, |l| again.cwd == *l || (kind != "customize" && again.add_dirs.contains(l)));
+    let touches_library = library.as_ref().is_some_and(|l| again.cwd == *l || (kind != "customize" && again.add_dirs.contains(l)));
     let started = if touches_library && st.library_busy() { Err(crate::tr::err("busy", &[])) } else { claude::start_run(st.clone(), again, after_chat_run(kind, &id)).await };
     match started {
         Ok(()) => true,
@@ -3163,7 +3163,7 @@ struct BranchBody { message_id: String,
 /// they cannot be sent, no branch is left behind. `how`: "fork" (its first message continues a copy
 /// of this chat's own session), "replay" or "summary" (the conversation is passed on as text), "none".
 async fn chat_branch(State(st): S, Path(id): Path<String>, Json(b): Json<BranchBody>) -> R {
-    if b.text.as_deref().map_or(false, |t| t.trim().is_empty()) { return Err(crate::tr::err("branch.empty", &[]).into()); }
+    if b.text.as_deref().is_some_and(|t| t.trim().is_empty()) { return Err(crate::tr::err("branch.empty", &[]).into()); }
     let orig = st.chats.get(&id).await.ok_or_else(no_chat)?;
     let edit = b.text.is_some();
     let help = if crate::assistant::of_chat(&orig.provider) == crate::assistant::Program::Claude && !edit { crate::branch::help(&st).await } else { String::new() };
@@ -3223,7 +3223,7 @@ async fn chat_attachment(State(st): S, Path((id, name)): Path<(String, String)>)
     let plain = !name.is_empty() && name.len() <= 400 && !name.starts_with('.') && !name.chars().any(|c| matches!(c, '/' | '\\' | ':') || c.is_control());
     if !plain { return Err(gone()); }
     let dir = paths::attachments_dir().join(&id);
-    if !std::fs::symlink_metadata(&dir).map_or(false, |m| m.is_dir()) { return Err(gone()); }
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) { return Err(gone()); }
     let p = dir.join(&name);
     let meta = std::fs::symlink_metadata(&p).map_err(|_| gone())?;
     if !meta.file_type().is_file() || meta.len() > library::RAW_MAX_BYTES { return Err(gone()); }
@@ -3292,7 +3292,7 @@ async fn wrap_status(State(st): S) -> R { Ok(Json(wraps::status(&st).await)) }
 #[serde(default)]
 struct WrapStart { choose: bool }
 async fn wrap_start(State(st): S, body: Option<Json<WrapStart>>) -> R {
-    let choose = body.map_or(false, |b| b.0.choose);
+    let choose = body.is_some_and(|b| b.0.choose);
     Ok(Json(json!({"chatId": wraps::start(st.clone(), choose).await?})))
 }
 /// Make or revise a Wrap's plan: the chats it is for, the person's corrections of their summaries, a note.

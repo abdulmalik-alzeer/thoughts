@@ -434,7 +434,7 @@ fn message(lib: &Path, subject: &str, start: &str, end: &str, names: &[crate::ch
 async fn under_answer(state: &AppState, chat: &str, m: Msg) {
     let mv = serde_json::to_value(&m).unwrap_or(Value::Null);
     state.chats.update(chat, |c| {
-        let at = c.messages.len() - usize::from(c.messages.last().map_or(false, |x| x.role == "error"));
+        let at = c.messages.len() - usize::from(c.messages.last().is_some_and(|x| x.role == "error"));
         c.messages.insert(at, m);
     }).await;
     state.emit(json!({"type": "chat.message", "chatId": chat, "message": mv}));
@@ -483,7 +483,7 @@ fn target(lib: &Path, rel: &str) -> Option<PathBuf> {
     let mut at = lib.to_path_buf();
     for c in &parts[..parts.len() - 1] {
         at.push(c);
-        if std::fs::symlink_metadata(&at).map_or(false, |m| m.file_type().is_symlink()) { return None; }
+        if std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) { return None; }
     }
     Some(lib.join(rel))
 }
@@ -549,7 +549,7 @@ fn remove_file_at(lib: &Path, rel: &str) -> anyhow::Result<()> {
     let p = target(lib, rel).ok_or_else(|| anyhow::anyhow!("{rel} is reached through a link"))?;
     let Some(parent) = p.parent().filter(|d| d.is_dir()) else { return Ok(()) };
     inside(lib, parent)?;
-    if std::fs::symlink_metadata(&p).map_or(false, |m| !m.is_dir()) { std::fs::remove_file(&p)?; }
+    if std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir()) { std::fs::remove_file(&p)?; }
     // Folders that existed only for it go too (never one that still holds anything).
     let mut cur = Path::new(rel).parent();
     while let Some(r) = cur.filter(|r| !r.as_os_str().is_empty()) {
@@ -606,7 +606,7 @@ fn write_beside(dir: &Path, mode: Option<u32>, bytes: &[u8], exec: bool) -> anyh
 fn nearest_folder(lib: &Path, p: &Path) -> anyhow::Result<PathBuf> {
     let mut at = p.parent();
     while let Some(d) = at {
-        if std::fs::symlink_metadata(d).map_or(false, |m| m.is_dir()) { inside(lib, d)?; return Ok(d.to_path_buf()); }
+        if std::fs::symlink_metadata(d).is_ok_and(|m| m.is_dir()) { inside(lib, d)?; return Ok(d.to_path_buf()); }
         if d == lib { break; }
         at = d.parent();
     }
@@ -629,7 +629,7 @@ fn missing_folders(lib: &Path, p: &Path) -> Vec<PathBuf> {
 /// Put `p` back as it was. Best effort: used only while taking back a `carry_out` that failed.
 fn put_back(lib: &Path, p: &Path, was: &Was) -> anyhow::Result<()> {
     let here = std::fs::symlink_metadata(p).ok();
-    if here.as_ref().map_or(false, |m| m.is_dir()) { anyhow::bail!("{} is a folder now", p.display()); }
+    if here.as_ref().is_some_and(|m| m.is_dir()) { anyhow::bail!("{} is a folder now", p.display()); }
     let clear = |p: &Path| -> std::io::Result<()> { if here.is_some() { std::fs::remove_file(p) } else { Ok(()) } };
     match was {
         Was::Missing => clear(p)?,
@@ -637,8 +637,8 @@ fn put_back(lib: &Path, p: &Path, was: &Was) -> anyhow::Result<()> {
             let parent = p.parent().ok_or_else(|| anyhow::anyhow!("{} has no folder", p.display()))?;
             std::fs::create_dir_all(parent)?;
             inside(lib, parent)?;
-            if here.as_ref().map_or(false, |m| m.file_type().is_symlink()) { clear(p)?; }
-            let tmp = write_beside(parent, *mode, bytes, mode.map_or(false, |m| m & 0o111 != 0))?;
+            if here.as_ref().is_some_and(|m| m.file_type().is_symlink()) { clear(p)?; }
+            let tmp = write_beside(parent, *mode, bytes, mode.is_some_and(|m| m & 0o111 != 0))?;
             if let Err(e) = std::fs::rename(&tmp, p) { let _ = std::fs::remove_file(&tmp); return Err(e.into()); }
         }
         #[cfg(unix)]
@@ -691,7 +691,7 @@ fn carry_out_into(lib: &Path, steps: &[(String, Step)], journal: &mut Journal) -
         let here = std::fs::symlink_metadata(&p).ok();
         // A folder there that the removals do not empty is refused before anything changes.
         let inner = format!("{rel}/");
-        if here.as_ref().map_or(false, |m| m.is_dir()) && !steps.iter().any(|(r, s)| matches!(s, Step::Remove) && r.starts_with(&inner)) {
+        if here.as_ref().is_some_and(|m| m.is_dir()) && !steps.iter().any(|(r, s)| matches!(s, Step::Remove) && r.starts_with(&inner)) {
             anyhow::bail!("{rel} is a folder now");
         }
         let tmp = write_beside(&nearest_folder(lib, &p)?, here.as_ref().and_then(mode_of), bytes, *exec)?;

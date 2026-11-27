@@ -481,7 +481,7 @@ fn walk(xml: &[u8], clock: &Clock, mut f: impl FnMut(Node) -> Res<()>) -> Res<()
     let mut n = 0u32;
     loop {
         n = n.wrapping_add(1);
-        if n % 8192 == 0 { clock.check()?; }
+        if n.is_multiple_of(8192) { clock.check()?; }
         match reader.read_event() {
             Ok(Event::Start(e)) => f(Node::Open(local(e.name().0.as_bytes()), &e))?,
             Ok(Event::Empty(e)) => { let name = e.name(); let l = local(name.0.as_bytes()); f(Node::Open(l, &e))?; f(Node::Close(l))?; }
@@ -688,7 +688,7 @@ fn slide_text(xml: &[u8], notes: bool, clock: &Clock) -> Res<Vec<String>> {
                 else if lines.len() < 50_000 { lines.push(text); }
             }
             Node::Close(b"tc") if in_table => row.push(std::mem::take(&mut cell).replace('|', "\\|")),
-            Node::Close(b"tr") if in_table => { if !row.is_empty() { lines.push(format!("| {} |", row.join(" | "))); row.clear(); } }
+            Node::Close(b"tr") if in_table && !row.is_empty() => { lines.push(format!("| {} |", row.join(" | "))); row.clear(); }
             _ => {}
         }
         Ok(())
@@ -775,7 +775,7 @@ fn odf_text(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
             Node::Close(b"list") => lists = lists.saturating_sub(1),
             Node::Open(b"list-item" | b"list-header", _) => item_new = true,
             Node::Text(s) if depth > 0 => para.push_str(s),
-            Node::Open(b"s", e) if depth > 0 => { let n = attr(e, b"c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).min(100); para.extend(std::iter::repeat(' ').take(n)); }
+            Node::Open(b"s", e) if depth > 0 => { let n = attr(e, b"c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).min(100); para.extend(std::iter::repeat_n(' ', n)); }
             Node::Open(b"tab", _) if depth > 0 => para.push('\t'),
             Node::Open(b"line-break", _) if depth > 0 => para.push('\n'),
             Node::Close(b"p" | b"h") if depth > 0 => {
@@ -880,7 +880,7 @@ fn ods(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
                 text.push_str(&s[..room]);
                 dropped += s[room..].chars().count();
             }
-            Node::Open(b"s", e) if in_cell && depth > 0 => { let n = attr(e, b"c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).min(100); text.extend(std::iter::repeat(' ').take(n)); }
+            Node::Open(b"s", e) if in_cell && depth > 0 => { let n = attr(e, b"c").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1).min(100); text.extend(std::iter::repeat_n(' ', n)); }
             Node::Open(b"tab", _) if in_cell && depth > 0 => text.push(' '),
             Node::Open(b"line-break", _) if in_cell && depth > 0 => text.push('\n'),
             _ => {}
@@ -931,7 +931,7 @@ fn rtf(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
     macro_rules! newline { () => {{ flush!(); let l = clean(&line); line.clear(); if in_row { out.line(&format!("| {}", l.trim())); in_row = false; } else { out.line(l.trim_end()); } }}; }
     while i < n {
         steps = steps.wrapping_add(1);
-        if steps % 65_536 == 0 { clock.check()?; }
+        if steps.is_multiple_of(65_536) { clock.check()?; }
         if out.cut { break; }
         match bytes[i] {
             b'{' => { flush!(); if stack.len() >= 4096 { return Err("the file is nested too deeply".into()); } stack.push(st); i += 1; }
@@ -997,7 +997,7 @@ fn rtf(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
                         b'\\' | b'{' | b'}' => if to_skip > 0 { to_skip -= 1; } else if !st.skip && !st.fonts { flush!(); line.push(c as char); },
                         b'~' => if !st.skip && !st.fonts { flush!(); line.push('\u{a0}'); },
                         b'_' => if !st.skip && !st.fonts { flush!(); line.push('-'); },
-                        b'\n' | b'\r' => if !st.skip && !st.fonts { newline!(); },
+                        b'\n' | b'\r' if !st.skip && !st.fonts => { newline!(); },
                         _ => {}
                     }
                 }
@@ -1052,17 +1052,17 @@ impl<'a> Ole<'a> {
             next = le32(s, size - 4)?;
         }
         let mut fat = Vec::with_capacity(fat_at.len() * (size / 4));
-        for s in fat_at { let s = sector(s)?; fat.extend(s.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))); }
+        for s in fat_at { let s = sector(s)?; fat.extend(s.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))); }
         let mut ole = Ole { bytes, shift, sectors, fat, mini_fat: vec![], mini: vec![], cutoff: le32(bytes, 56)? as u64, dir: vec![], clock };
         let dir = ole.chain(le32(bytes, 48)?, u64::MAX);
-        for e in dir.chunks_exact(128).take(100_000) {
+        for e in dir.as_chunks::<128>().0.iter().take(100_000) {
             let len = (le16(e, 64)? as usize).min(64);
-            let name = String::from_utf16_lossy(&e[..len].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
+            let name = String::from_utf16_lossy(&e[..len].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
             let size = if shift == 9 { le32(e, 120)? as u64 } else { u64::from_le_bytes(e.get(120..128)?.try_into().ok()?) };
             ole.dir.push((name.trim_end_matches('\0').to_string(), e[66], le32(e, 116)?, size));
         }
         let mini_fat = ole.chain(le32(bytes, 60)?, u64::MAX);
-        ole.mini_fat = mini_fat.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        ole.mini_fat = mini_fat.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
         if let Some(root) = ole.dir.iter().find(|d| d.1 == 5).cloned() { ole.mini = ole.chain(root.2, root.3); }
         if clock.over() { return None; }
         Some(ole)
@@ -1196,7 +1196,7 @@ fn doc(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
             text.push_str(&encoding_rs::WINDOWS_1252.decode_without_bom_handling(raw).0);
         } else {
             let raw = main.get(start..start.saturating_add(chars.saturating_mul(2))).ok_or_else(not_word)?;
-            let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let units: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             text.push_str(&String::from_utf16_lossy(&units));
         }
     }
@@ -1260,7 +1260,7 @@ fn ppt(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
         }
         let body = &s[at + 8..end];
         let text = match kind {
-            0x0FA0 => Some(String::from_utf16_lossy(&body.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>())),
+            0x0FA0 => Some(String::from_utf16_lossy(&body.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>())),
             0x0FA8 => Some(body.iter().map(|b| *b as char).collect::<String>()),
             _ => None,
         };
@@ -1268,7 +1268,7 @@ fn ppt(bytes: &[u8], out: &mut Out, clock: &Clock) -> Res<()> {
             (In::Outline, 0x03F3, _) => if slides.len() < SLIDES_MAX { slides.push(vec![]); },
             (In::Outline, _, Some(t)) => { if slides.is_empty() { slides.push(vec![]); } if let Some(last) = slides.last_mut() { if last.len() < 10_000 { last.push(t); } } }
             (In::Slide, _, Some(t)) => if boxes.len() < 100_000 { boxes.push(t); },
-            (In::Notes, _, Some(t)) => if notes.len() < 100_000 { notes.push(t); },
+            (In::Notes, _, Some(t)) if notes.len() < 100_000 => { notes.push(t); },
             _ => {}
         }
         at = end;

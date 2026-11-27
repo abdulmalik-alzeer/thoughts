@@ -30,7 +30,7 @@ fn stamp(p: &Path) -> String {
     }
 }
 
-fn in_mado(rel: &str) -> bool { rel.split('/').next().map_or(false, |f| f.eq_ignore_ascii_case(crate::mado::DIR)) }
+fn in_mado(rel: &str) -> bool { rel.split('/').next().is_some_and(|f| f.eq_ignore_ascii_case(crate::mado::DIR)) }
 
 /// The walk outside git: every file under `dir` but `mado/` and the skipped folders, at most `cap` entries.
 pub fn walk(dir: &Path, cap: usize) -> Snapshot {

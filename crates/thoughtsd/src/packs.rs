@@ -51,7 +51,7 @@ pub fn check_pack(pack: &Value) -> anyhow::Result<BTreeMap<String, String>> {
     if pack["format"] != "thoughts-pack" { return Err(no("pack.not_pack", &[])); }
     if pack["version"] != 1 { return Err(no("pack.newer", &[])); }
     // Older packs carry no apiVersion: they are version 1.
-    if !pack["apiVersion"].is_null() && pack["apiVersion"].as_u64().map_or(true, |v| v == 0 || v > crate::applayer::API_VERSION) {
+    if !pack["apiVersion"].is_null() && pack["apiVersion"].as_u64().is_none_or(|v| v == 0 || v > crate::applayer::API_VERSION) {
         return Err(no("pack.newer", &[]));
     }
     if !pack["kind"].is_null() && pack["kind"] != "full" && pack["kind"] != "feature" { return Err(no("pack.newer", &[])); }
@@ -375,11 +375,11 @@ pub async fn import_as(g: Git<'_>, d: &Dirs, pack: &Value, arabic: bool, own_sum
         for (path, text) in &files {
             let target = d.staging.join(path);
             if let Some(parent) = target.parent() { std::fs::create_dir_all(parent)?; }
-            if std::fs::symlink_metadata(&target).map_or(false, |m| m.file_type().is_symlink()) { std::fs::remove_file(&target)?; }
+            if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) { std::fs::remove_file(&target)?; }
             let mine = std::fs::read_to_string(&target).ok();
             let out = if feature { merged_file(path, mine.as_deref(), text, &css_key)? } else { text.clone() };
             if out.len() > MAX_FILE_BYTES { return Err(crate::tr::err("pack.grows_too_big", &[("path", &shown_path(path))])); }
-            if feature && path.contains('/') && mine.as_deref().map_or(false, |m| m != out) { replaced.push(path.as_str()); }
+            if feature && path.contains('/') && mine.as_deref().is_some_and(|m| m != out) { replaced.push(path.as_str()); }
             std::fs::write(&target, out)?;
         }
         Ok(())

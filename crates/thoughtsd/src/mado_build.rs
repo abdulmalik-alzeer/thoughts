@@ -231,7 +231,7 @@ pub fn load_build(project: &Path) -> anyhow::Result<Option<BuildState>> {
 
 fn save_build(project: &Path, b: &BuildState) -> anyhow::Result<()> {
     let p = mado_dir(project)?.join("build.json");
-    if std::fs::symlink_metadata(&p).map_or(false, |m| !m.is_file()) { return Err(crate::tr::err("mado_build.bad_file", &[("file", "build.json")])); }
+    if std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_file()) { return Err(crate::tr::err("mado_build.bad_file", &[("file", "build.json")])); }
     crate::paths::write_atomic(&p, serde_json::to_string_pretty(b)?.as_bytes(), false)?;
     Ok(())
 }
@@ -286,7 +286,7 @@ async fn full(state: &AppState) -> bool { state.settings.read().await.full_acces
 // ---------- git ----------
 
 async fn git(state: &AppState, dir: &Path, args: &[&str]) -> anyhow::Result<String> { crate::git::git(state, dir, args).await }
-async fn git_ok(state: &AppState, dir: &Path, args: &[&str]) -> bool { crate::git::git_output(state, dir, args).await.map_or(false, |(ok, _)| ok) }
+async fn git_ok(state: &AppState, dir: &Path, args: &[&str]) -> bool { crate::git::git_output(state, dir, args).await.is_ok_and(|(ok, _)| ok) }
 fn s(p: &Path) -> String { p.to_string_lossy().to_string() }
 
 /// Refused when the repository's own config makes git start programs (filters, merge drivers, diff
@@ -385,7 +385,7 @@ fn copy_docs(project: &Path, wt: &Path, full: bool) -> anyhow::Result<()> {
     // A `mado` in the repository that is a link (or a file) is left alone: nothing is written through it.
     match std::fs::symlink_metadata(&dst) {
         Ok(m) if !m.is_dir() => return Ok(()),
-        Err(_) => if std::fs::create_dir(&dst).is_err() { return Ok(()) },
+        Err(_) if std::fs::create_dir(&dst).is_err() => { return Ok(()) },
         _ => {}
     }
     let mut names: Vec<String> = ["brief.md", "spec.md", "tech.md", "design.md", "plan.json", "flow.graph.json", "architecture.graph.json", "schema.graph.json",
@@ -403,10 +403,10 @@ fn copy_docs(project: &Path, wt: &Path, full: bool) -> anyhow::Result<()> {
         let to = dst.join(&rel);
         if let Some(parent) = to.parent() {
             // Every folder on the way is a real folder inside `dst`.
-            if std::fs::create_dir_all(parent).is_err() || !std::fs::symlink_metadata(parent).map_or(false, |m| m.is_dir()) { continue; }
+            if std::fs::create_dir_all(parent).is_err() || !std::fs::symlink_metadata(parent).is_ok_and(|m| m.is_dir()) { continue; }
             if crate::paths::canonical(parent).map_or(true, |p| !p.starts_with(crate::paths::canonical(&dst).unwrap_or_default())) { continue; }
         }
-        if std::fs::symlink_metadata(&to).map_or(false, |m| !m.is_file()) { continue; }
+        if std::fs::symlink_metadata(&to).is_ok_and(|m| !m.is_file()) { continue; }
         let _ = std::fs::copy(&from, &to);
     }
     Ok(())
@@ -452,7 +452,7 @@ struct Ready { plan: PlanDoc, bytes: Vec<u8>, hash: String, branch: String, head
 async fn check_ready(state: &AppState, pid: &str, project: &Path, commit: bool) -> anyhow::Result<Ready> {
     // A repository of its own, the project's folder at its top.
     let top = git(state, project, &["rev-parse", "--show-toplevel"]).await.ok().map(|t| PathBuf::from(t.trim()));
-    let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
+    let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).is_some_and(|t| crate::paths::canonical(project).is_ok_and(|p| p == t));
     if !same { return Err(crate::tr::err("mado_build.not_repo", &[])); }
     if !full(state).await { crate::trust::require_git(project)?; }
     git_safe(state, project).await?;
@@ -509,7 +509,7 @@ async fn commit_pending(state: &AppState, project: &Path) -> anyhow::Result<()> 
 /// `uncommitted` only tells what the build will commit first (up to five names, then `…`).
 pub async fn repo_findings(state: &AppState, project: &Path) -> Vec<(&'static str, &'static str, String)> {
     let top = git(state, project, &["rev-parse", "--show-toplevel"]).await.ok().map(|t| PathBuf::from(t.trim()));
-    let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).map_or(false, |t| crate::paths::canonical(project).map_or(false, |p| p == t));
+    let same = top.as_deref().and_then(|t| crate::paths::canonical(t).ok()).is_some_and(|t| crate::paths::canonical(project).is_ok_and(|p| p == t));
     if !same { return vec![("no-repo", "mado_build.not_repo", String::new())]; }
     // The same guards as a build's start, before any git command that reads the working tree
     // (`git status` runs the repository's filters): a repository that is not trusted, or whose own
@@ -554,7 +554,7 @@ pub async fn start(state: &Arc<AppState>, pid: &str, max_parallel: Option<u32>) 
         let l = lock_of(&STATE_LOCKS, pid);
         let _g = l.lock().await;
         let old = load_build(&project)?;
-        if old.as_ref().map_or(false, BuildState::under_way) || !live_of(pid).is_empty() { return Err(crate::tr::err("mado_build.busy", &[])); }
+        if old.as_ref().is_some_and(BuildState::under_way) || !live_of(pid).is_empty() { return Err(crate::tr::err("mado_build.busy", &[])); }
         let r = check_ready(state, pid, &project, true).await?;
         let gl = lock_of(&GIT_LOCKS, pid);
         let _gg = gl.lock().await;
@@ -786,7 +786,7 @@ async fn tick_inner(state: &Arc<AppState>, pid: &str) -> anyhow::Result<()> {
         let live = live_of(pid);
         // The plan as approved: whether waves have a `verify` gate, and what follows the last wave.
         let plan = snapshot(pid, &b.plan_hash).ok();
-        let gate = plan.as_ref().map_or(false, finish::has_verify);
+        let gate = plan.as_ref().is_some_and(finish::has_verify);
         // The screen check or the review was under way and nobody works on it (a restart): it goes on.
         if matches!(b.status, BuildStatus::Checking | BuildStatus::Reviewing) && !live.contains(finish::FINISH) { finishing = true; }
         if b.status == BuildStatus::Running {
@@ -897,7 +897,7 @@ fn usage_percent(pid: &str) -> Option<f64> {
     let _ = pid;
     let plans = crate::meter::plans_json(chrono::Utc::now().timestamp());
     [crate::meter::CLAUDE, crate::meter::CODEX].iter().flat_map(|p| plans[*p]["windows"].as_array().cloned().unwrap_or_default())
-        .filter(|w| w["hasReset"] != true && (w["id"] == "five_hour" || w["minutes"].as_i64().map_or(false, |m| m <= 300)))
+        .filter(|w| w["hasReset"] != true && (w["id"] == "five_hour" || w["minutes"].as_i64().is_some_and(|m| m <= 300)))
         .filter_map(|w| w["percent"].as_f64()).fold(None, |a: Option<f64>, p| Some(a.map_or(p, |a| a.max(p))))
 }
 
@@ -928,7 +928,7 @@ async fn lane_worker(state: Arc<AppState>, pid: String, project: PathBuf, wi: us
         }).await;
     }
     live_remove(&pid, &key(wi, li));
-    let stopped = load_build(&project).ok().flatten().map_or(false, |b| b.status == BuildStatus::Stopped);
+    let stopped = load_build(&project).ok().flatten().is_some_and(|b| b.status == BuildStatus::Stopped);
     if stopped {
         if live_of(&pid).is_empty() { cleanup_stopped(&state, &project, &pid).await; }
         mado::tell(&state, &pid, "build").await;
@@ -1191,7 +1191,7 @@ const GRAPH_FILES: usize = 12;
 
 /// Has the graph of this project been built (the tool's database in the daemon's folder)? Cheap:
 /// with none, nothing is walked or asked, and every prompt is what it was before 0.5.0.
-pub(crate) fn has_graph(pid: &str) -> bool { crate::code_graph::graph_dir(pid).map_or(false, |g| g.join("work/db/graph.db").is_file()) }
+pub(crate) fn has_graph(pid: &str) -> bool { crate::code_graph::graph_dir(pid).is_some_and(|g| g.join("work/db/graph.db").is_file()) }
 
 /// The plain project files that `owns` (paths or patterns, project-relative) names, at most `max`,
 /// each once. A path is taken as it is; a pattern is matched against the names under its fixed
@@ -1424,7 +1424,7 @@ fn sb_regex(p: &Path) -> String {
 
 /// Are `wt` and `cache` real folders, not links (checked before every command a build runs confined)?
 fn real_dirs(wt: &Path, cache: &Path) -> bool {
-    [wt, cache].iter().all(|p| std::fs::symlink_metadata(p).map_or(false, |m| m.file_type().is_dir()))
+    [wt, cache].iter().all(|p| std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir()))
 }
 
 fn sb_str(p: &Path) -> String {
@@ -1448,7 +1448,7 @@ fn toolchains(home: &Path) -> Vec<PathBuf> {
         if !d.starts_with(&home) || d == home { continue; }
         let parent = d.parent().map(Path::to_path_buf);
         let root = match (d.file_name().map(|n| n == "bin").unwrap_or(false), parent) {
-            (true, Some(p)) if p.parent().map_or(false, |pp| pp != home) && p != home => p,
+            (true, Some(p)) if p.parent().is_some_and(|pp| pp != home) && p != home => p,
             _ => d,
         };
         if !out.contains(&root) { out.push(root); }
@@ -1603,7 +1603,7 @@ pub async fn run_check(cmd: &str, cwd: &Path, project: &Path, full: bool, how: &
     };
     match tokio::time::timeout(CHECK_LIMIT, run).await {
         Ok((o, e, status)) => {
-            if status.as_ref().map_or(false, |s| s.success()) { return Ok(()); }
+            if status.as_ref().is_ok_and(|s| s.success()) { return Ok(()); }
             let mut text = shown_output(o);
             let e = shown_output(e);
             // The sandbox itself refused to start (its own words, before the command ran).
@@ -1783,7 +1783,7 @@ async fn wave_inner(state: &Arc<AppState>, pid: &str, project: &Path, wi: usize)
     let fix = new_chat(state, pid, &task, &format!("{} — {}", tr("mado_build.chat_title_wave", &[]), wi + 1)).await;
     update(pid, project, |b| if let Some(w) = b.waves.get_mut(wi) { w.fix_chat_id = Some(fix.clone()); }).await?;
     mado::tell(state, pid, "build").await;
-    let brief = wave_fix_brief(&out, graph_around(state, pid, project, &owns_of(&plan, &[task.clone()])).await.as_deref());
+    let brief = wave_fix_brief(&out, graph_around(state, pid, project, &owns_of(&plan, std::slice::from_ref(&task))).await.as_deref());
     let ended = run_and_wait(state, project, pid, &fix, &bwt, &brief, None, deny_for(project, pid, &b, &bwt)).await;
     if status_now(project) == BuildStatus::Stopped { reset_wt(state, project, &bwt).await; return Ok(()); }
     // The fix may not change what a done `contracts` or `tests` task agreed on: that is undone, and

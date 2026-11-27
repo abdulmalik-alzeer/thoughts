@@ -8,7 +8,7 @@ use walkdir::WalkDir;
 const SKIP: &[&str] = &[".git", "node_modules", ".thoughts-search", "target"];
 
 pub(crate) fn skip(e: &walkdir::DirEntry) -> bool {
-    e.file_name().to_str().map_or(false, |n| SKIP.contains(&n) || (e.depth() > 0 && denied_component(n)))
+    e.file_name().to_str().is_some_and(|n| SKIP.contains(&n) || (e.depth() > 0 && denied_component(n)))
 }
 
 /// Names the file API never touches: git internals and config (`.git`, `.gitignore`, `.gitmodules`,
@@ -122,7 +122,7 @@ pub fn remove_all(root: &Path, rel: &str) -> anyhow::Result<()> {
     if crate::paths::canonical_lenient(&p) == crate::paths::canonical_lenient(root) { return Err(crate::tr::err("invalid.path", &[])); }
     for e in WalkDir::new(&p).min_depth(1).follow_links(false) {
         let e = e?;
-        if e.file_name().to_str().map_or(true, denied_component) { return Err(crate::tr::err("folder.protected", &[])); }
+        if e.file_name().to_str().is_none_or(denied_component) { return Err(crate::tr::err("folder.protected", &[])); }
     }
     std::fs::remove_dir_all(&p)?;
     Ok(())
@@ -142,7 +142,7 @@ pub fn set_idea_status(root: &Path, rel: &str, status: &str, today: chrono::Naiv
     let mut lines: Vec<String> = body.split_inclusive('\n').map(String::from).collect();
     let end_of = |l: &str| if l.ends_with("\r\n") { "\r\n" } else { "\n" };
     let is_fence = |l: &str| l.trim_end_matches(['\r', '\n']) == "---";
-    let close = if lines.first().map_or(false, |l| is_fence(l)) { lines.iter().skip(1).position(|l| is_fence(l)).map(|i| i + 1) } else { None };
+    let close = if lines.first().is_some_and(|l| is_fence(l)) { lines.iter().skip(1).position(|l| is_fence(l)).map(|i| i + 1) } else { None };
     let Some(close) = close else { return Err(crate::tr::err("idea.no_details", &[])) };
     let old = lines[1..close].iter().find_map(|l| l.strip_prefix("status:"))
         .map(|v| v.trim().trim_matches(|c| c == '"' || c == '\'').to_string()).filter(|v| !v.is_empty());
@@ -190,7 +190,7 @@ pub fn check_plugin_write(root: &Path, rel: &str, allow: &[String]) -> anyhow::R
     let target = resolve(root, rel)?;
     // An add-on's own notes must never become instructions for the assistant: not under that name,
     // and not through a link that leads to such a file.
-    let named = |p: &Path| p.file_name().map_or(false, |n| instruction_file(&n.to_string_lossy()));
+    let named = |p: &Path| p.file_name().is_some_and(|n| instruction_file(&n.to_string_lossy()));
     if named(&target) || named(&crate::paths::canonical_lenient(&target)) { return Err(crate::tr::err("plugin.instructions", &[])); }
     let inside = allow.iter().filter_map(|a| crate::paths::clean_rel(a).ok())
         .any(|a| { let dir = root.join(&a); crate::paths::inside_ci(&target, &dir) && crate::paths::canonical_lenient(&target) != crate::paths::canonical_lenient(&dir) });
@@ -522,7 +522,7 @@ pub fn key_dates(body: &str) -> Vec<Value> {
         let t = l.trim();
         let hashes = t.chars().take_while(|c| *c == '#').count();
         if hashes > 0 && t.chars().nth(hashes) == Some(' ') {
-            if level.map_or(false, |lv| hashes <= lv) { level = None; }
+            if level.is_some_and(|lv| hashes <= lv) { level = None; }
             if level.is_none() && heading.is_match(&t[hashes..]) { level = Some(hashes); }
             continue;
         }
@@ -629,7 +629,7 @@ pub fn item(root: &Path, rel: &str, exclude: &[String]) -> anyhow::Result<Value>
         "created": s("created"), "updated": s("updated"),
         "tags": match &fm["tags"] { Value::Array(a) => json!(a), Value::String(t) if !t.trim().is_empty() => json!(t.split(',').map(|x| x.trim()).filter(|x| !x.is_empty()).collect::<Vec<_>>()), _ => json!([]) },
         "details": details.is_some(),
-        "detailsUnreadable": details.as_ref().map_or(false, |d| d.1 && s("title").is_empty() && s("status").is_empty() && s("summary").is_empty()),
+        "detailsUnreadable": details.as_ref().is_some_and(|d| d.1 && s("title").is_empty() && s("status").is_empty() && s("summary").is_empty()),
         "readme": {"content": text, "body": body, "hash": content_hash(raw.as_bytes())},
         "keyDates": key_dates(&body),
         "todo": {"file": todo_rel, "exists": todo_text.is_some(),
@@ -836,12 +836,12 @@ pub(crate) fn via_link(root: &Path, path: &Path) -> bool {
     let mut parts: Vec<_> = rel.components().collect();
     parts.pop();
     let mut at = root.to_path_buf();
-    parts.into_iter().any(|c| { at.push(c); std::fs::symlink_metadata(&at).map_or(false, |m| m.file_type().is_symlink()) })
+    parts.into_iter().any(|c| { at.push(c); std::fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) })
 }
 
 pub fn install_presets(root: &Path) -> bool {
     let (top, home) = (root.join("presets"), root.join(".claude/presets"));
-    let is = |p: &Path, dir: bool| std::fs::symlink_metadata(p).map_or(false, |m| if dir { m.is_dir() } else { m.is_file() });
+    let is = |p: &Path, dir: bool| std::fs::symlink_metadata(p).is_ok_and(|m| if dir { m.is_dir() } else { m.is_file() });
     // A real folder only: a link named `presets` is somebody else's business.
     let Some(kit) = STARTER.get_dir("presets").filter(|_| is(&top, true)) else { return false };
     let (mut changed, mut dirs, mut stack) = (false, vec![], vec![kit]);
@@ -900,9 +900,9 @@ const KIT_0_0_8: &[(&str, &str)] = &[
 /// Is the library's file at `rel` still exactly what a kit shipped there (this version's, or 0.0.8's)?
 fn untouched_kit_file(root: &Path, rel: &str) -> bool {
     let file = root.join(rel);
-    if !std::fs::symlink_metadata(&file).map_or(false, |m| m.is_file() && m.len() < 1 << 20) { return false; }
+    if !std::fs::symlink_metadata(&file).is_ok_and(|m| m.is_file() && m.len() < 1 << 20) { return false; }
     let Ok(bytes) = std::fs::read(&file) else { return false };
-    if STARTER.get_file(rel).map_or(false, |f| f.contents() == bytes) { return true; }
+    if STARTER.get_file(rel).is_some_and(|f| f.contents() == bytes) { return true; }
     let hash = content_hash(&bytes);
     KIT_0_0_8.iter().any(|(r, h)| *r == rel && *h == hash)
 }
@@ -963,10 +963,10 @@ fn system_file(rel: &str) -> bool {
 pub fn stats(root: &Path) -> Value {
     let (mut files, mut notes, mut bytes) = (0usize, 0usize, 0u64);
     for e in WalkDir::new(root).into_iter().filter_entry(|e| !skip(e)).flatten() {
-        if e.file_type().is_file() && e.path().extension().map_or(false, |x| x == "md") {
+        if e.file_type().is_file() && e.path().extension().is_some_and(|x| x == "md") {
             files += 1;
             bytes += e.metadata().map(|m| m.len()).unwrap_or(0);
-            if rel_of(root, e.path()).map_or(false, |r| !system_file(&r)) { notes += 1; }
+            if rel_of(root, e.path()).is_some_and(|r| !system_file(&r)) { notes += 1; }
         }
     }
     json!({"markdownFiles": files, "notes": notes, "bytes": bytes})
@@ -1035,7 +1035,7 @@ fn untouched_starter(dest: &Path) -> bool {
         } else if kind.is_file() {
             if os_dropping(&e.file_name().to_string_lossy()) { continue; }
             let Some(f) = STARTER.get_file(&rel) else { return false };
-            let same = e.metadata().map_or(false, |m| m.len() == f.contents().len() as u64) && std::fs::read(e.path()).map_or(false, |b| b == f.contents());
+            let same = e.metadata().is_ok_and(|m| m.len() == f.contents().len() as u64) && std::fs::read(e.path()).is_ok_and(|b| b == f.contents());
             if !same { return false; }
         } else {
             return false; // a link, or something stranger
@@ -1128,7 +1128,7 @@ fn link_path(target: &str) -> Option<String> {
 fn index_line_in(root: &Path, line: &str, dir: &[String]) -> Option<String> {
     let t = line.trim_start();
     if !(t.starts_with("- ") || t.starts_with("* ") || t.starts_with("+ ")) { return None; }
-    links_on(t).into_iter().find(|(_, target)| link_path(target).map_or(false, |p| crate::paths::is_private(root, &p, dir))).map(|(title, _)| title)
+    links_on(t).into_iter().find(|(_, target)| link_path(target).is_some_and(|p| crate::paths::is_private(root, &p, dir))).map(|(title, _)| title)
 }
 
 /// The item lines of the library's index (`INDEX.md`) that point into `dir`, a library-relative

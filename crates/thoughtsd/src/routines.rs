@@ -126,7 +126,7 @@ pub fn list(lib: &Path) -> Vec<Value> {
     let dir = skills_dir(lib);
     if std::fs::symlink_metadata(&dir).map_or(true, |m| !m.is_dir()) { return vec![]; }
     let mut ids: Vec<String> = std::fs::read_dir(&dir).into_iter().flatten().flatten()
-        .filter(|e| e.file_type().map_or(false, |t| t.is_dir()))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .map(|e| e.file_name().to_string_lossy().to_string())
         .filter(|id| valid_id(id) && !HIDDEN.contains(&id.as_str())).collect();
     ids.sort();
@@ -161,7 +161,7 @@ pub fn new_id(lib: &Path, title: &str) -> String {
 /// writes through one into some other place.
 fn no_links(lib: &Path, id: &str) -> anyhow::Result<()> {
     for p in [lib.join(".claude"), skills_dir(lib), skills_dir(lib).join(id), skill_file(lib, id)] {
-        if std::fs::symlink_metadata(&p).map_or(false, |m| m.file_type().is_symlink()) { return Err(crate::tr::err("routine.not_kept", &[])); }
+        if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) { return Err(crate::tr::err("routine.not_kept", &[])); }
     }
     Ok(())
 }
@@ -215,7 +215,7 @@ fn save_with(lib: &Path, id: Option<&str>, base: Option<&str>, d: &Draft, betwee
             if !valid_id(id) { return Err(crate::tr::err("routine.gone", &[])); }
             no_links(lib, id)?;
             let cur = read_plain(&skill_file(lib, id)).ok_or_else(|| crate::tr::err("routine.gone", &[]))?;
-            if base.map_or(true, |b| b != crate::workflows::content_hash(&cur)) { return Err(crate::tr::err("routine.changed", &[])); }
+            if base.is_none_or(|b| b != crate::workflows::content_hash(&cur)) { return Err(crate::tr::err("routine.changed", &[])); }
             (id.to_string(), Some(cur))
         }
         None => (new_id(lib, &d.title), None),

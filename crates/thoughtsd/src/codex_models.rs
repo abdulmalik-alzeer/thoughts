@@ -308,9 +308,9 @@ pub async fn app_server_models(bin: &Path, home: &Path, limit: Duration) -> Resu
 fn cache_files(home: &Path) -> Vec<PathBuf> {
     let mut v: Vec<(u64, PathBuf)> = std::fs::read_dir(home).into_iter().flatten().flatten()
         .filter(|e| { let n = e.file_name().to_string_lossy().to_string(); n.starts_with("models_cache") && n.ends_with(".json") })
-        .filter(|e| e.file_type().map_or(false, |t| t.is_file()))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
         .map(|e| (mtime(&e.path()).unwrap_or(0), e.path())).collect();
-    v.sort_by(|a, b| b.0.cmp(&a.0));
+    v.sort_by_key(|a| std::cmp::Reverse(a.0));
     v.into_iter().map(|(_, p)| p).collect()
 }
 
@@ -422,7 +422,7 @@ pub fn current(bin: &Path, events: &tokio::sync::broadcast::Sender<Value>) -> Op
 pub fn current_with(bin: &Path, events: &tokio::sync::broadcast::Sender<Value>, auto: bool) -> Option<Detected> {
     let key = key_for(bin, &crate::codex::codex_home());
     let d = last_for(bin);
-    if auto && !d.as_ref().map_or(false, |d| fresh(d, &key)) && !REFRESHING.swap(true, Ordering::Relaxed) {
+    if auto && !d.as_ref().is_some_and(|d| fresh(d, &key)) && !REFRESHING.swap(true, Ordering::Relaxed) {
         let (bin, events) = (bin.to_path_buf(), events.clone());
         tokio::spawn(async move { refresh(&bin, Some(&events), false).await; });
     }
@@ -449,7 +449,7 @@ pub fn context_of(model: Option<&str>) -> Option<u64> {
 pub fn options_part(d: Option<&Detected>, config: &[String], seen: &[String], picks: [Option<String>; 2], refreshing: bool) -> Value {
     let catalog: Vec<String> = d.map(|d| d.models.iter().map(|m| m.id.clone()).collect()).unwrap_or_default();
     let names = crate::claude::model_choices(catalog, &[config, seen].concat(), picks);
-    let detected = d.map_or(false, |d| !d.source.is_empty() && !d.models.is_empty());
+    let detected = d.is_some_and(|d| !d.source.is_empty() && !d.models.is_empty());
     let source = if detected { d.map(|d| d.source.clone()).unwrap_or_default() }
         else if !config.is_empty() { CONFIG.into() } else if !seen.is_empty() { SEEN.into() } else { NONE.into() };
     json!({
@@ -457,7 +457,7 @@ pub fn options_part(d: Option<&Detected>, config: &[String], seen: &[String], pi
         "modelInfo": d.filter(|_| detected).map(|d| d.models.clone()).unwrap_or_default(),
         "modelsSource": source,
         "modelsDetected": detected,
-        "modelsTooOld": d.map_or(false, Detected::too_old),
+        "modelsTooOld": d.is_some_and(Detected::too_old),
         "modelsCheckedAt": d.map(|d| d.checked_at),
         "modelsTried": d.map(|d| d.tried.clone()).unwrap_or_default(),
         "modelsRefreshing": refreshing,

@@ -102,7 +102,7 @@ pub fn copy(home: &Path, chat_id: &str) -> std::io::Result<PathBuf> {
     let mut kept: std::collections::HashSet<std::ffi::OsString> = Default::default();
     let att = home.join("attachments");
     let src = att.join(chat_id);
-    let plain_dir = |p: &Path| std::fs::symlink_metadata(p).map_or(false, |m| m.is_dir());
+    let plain_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
     if plain_dir(&att) && plain_dir(&src) {
         let real = crate::paths::canonical(&src)?;
         for e in std::fs::read_dir(&src)?.flatten() {
@@ -221,7 +221,7 @@ fn texts(home: &Path, mine: &Path, dest: &Path, kept: &std::collections::HashSet
         }
         return;
     }
-    if !plain_path(home, &dir, true).unwrap_or(false) { crate::log::warn("the folder for text versions of attached files is not a plain folder: none were made".to_string()); return; }
+    if !plain_path(home, &dir, true).unwrap_or(false) { crate::log::warn("the folder for text versions of attached files is not a plain folder: none were made"); return; }
     let until = std::time::Instant::now() + TEXTS_TIME;
     let mut keep: std::collections::HashSet<std::ffi::OsString> = Default::default();
     for name in office { keep.extend(text_of(&dir, &dest.join(name), name, until)); }
@@ -248,7 +248,7 @@ pub fn library_texts(home: &Path, chat_id: &str, files: &[PathBuf]) {
     let dir = mine.join(LIBRARY);
     let office: Vec<&PathBuf> = files.iter()
         .filter(|f| crate::as_text::convertible(&f.to_string_lossy()))
-        .filter(|f| std::fs::symlink_metadata(f).map_or(false, |m| m.file_type().is_file()))
+        .filter(|f| std::fs::symlink_metadata(f).is_ok_and(|m| m.file_type().is_file()))
         .collect();
     if office.is_empty() {
         // Nothing may stay: the folder goes (only ever as a plain folder of this chat's own).
@@ -272,13 +272,13 @@ pub fn forget_library_texts(home: &Path) {
         let Ok(list) = std::fs::read_dir(dir) else { return };
         for e in list.flatten() {
             let p = e.path();
-            if !std::fs::symlink_metadata(&p).map_or(false, |m| m.is_dir()) { continue; }
+            if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) { continue; }
             if depth == DEPTH { if e.file_name() == LIBRARY { let _ = std::fs::remove_dir_all(&p); } }
             else { walk(&p, depth + 1); }
         }
     }
     let root = root(home);
-    if std::fs::symlink_metadata(&root).map_or(false, |m| m.is_dir()) { walk(&root, 0); }
+    if std::fs::symlink_metadata(&root).is_ok_and(|m| m.is_dir()) { walk(&root, 0); }
 }
 
 
@@ -295,7 +295,7 @@ pub enum Text {
 fn text_in(dir: &Path, name: &std::ffi::OsStr, file: &str) -> Text {
     if !crate::as_text::convertible(file) { return Text::NotNeeded; }
     let ok = dir.join(with_ext(name, TEXT_EXT));
-    if std::fs::symlink_metadata(&ok).map_or(false, |m| m.file_type().is_file()) { return Text::Ready(ok); }
+    if std::fs::symlink_metadata(&ok).is_ok_and(|m| m.file_type().is_file()) { return Text::Ready(ok); }
     let why = std::fs::read_to_string(dir.join(with_ext(name, FAILED_EXT))).ok().map(|w| w.chars().take(200).collect::<String>().replace(['\n', '\r'], " "));
     Text::Failed(why.filter(|w| !w.trim().is_empty()).unwrap_or_else(|| "no text version could be made".to_string()))
 }
@@ -304,7 +304,7 @@ fn text_in(dir: &Path, name: &std::ffi::OsStr, file: &str) -> Text {
 /// any other path (an office file that was not copied has none).
 pub fn text_for(file: &Path) -> Text {
     let name = file.file_name().unwrap_or_default();
-    match file.parent().filter(|d| d.file_name().map_or(false, |n| n == COPIES)).and_then(Path::parent) {
+    match file.parent().filter(|d| d.file_name().is_some_and(|n| n == COPIES)).and_then(Path::parent) {
         Some(mine) => text_in(&mine.join(TEXTS), name, &file.to_string_lossy()),
         None => no_text(file),
     }
@@ -339,7 +339,7 @@ pub fn listed(path: &str, text: Text) -> String {
 /// versions of the office files among them are. Empty when there are none.
 pub fn earlier_note(copies: &Path) -> String {
     let Some(dir) = copies.parent().map(|m| m.join(TEXTS)) else { return String::new() };
-    let any = std::fs::read_dir(&dir).map_or(false, |d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(TEXT_EXT)));
+    let any = std::fs::read_dir(&dir).is_ok_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(TEXT_EXT)));
     if !any { return String::new(); }
     format!("Spreadsheets, Word documents and slide decks among them cannot be opened by the Read tool: read their text versions in {}, each named after its file with {TEXT_EXT} added.\n", dir.display())
 }

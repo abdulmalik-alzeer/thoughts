@@ -38,7 +38,7 @@ fn is_capture(name: &str) -> bool {
 fn files(root: &Path) -> Vec<(String, std::fs::Metadata, std::path::PathBuf)> {
     let dir = root.join(DIR);
     // `inbox` must be a real folder inside the library, not a link leading elsewhere.
-    if !std::fs::symlink_metadata(&dir).map_or(false, |m| m.is_dir()) { return vec![]; }
+    if !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) { return vec![]; }
     let Ok(rd) = std::fs::read_dir(&dir) else { return vec![] };
     rd.flatten().filter_map(|e| {
         let name = e.file_name().to_string_lossy().to_string();
@@ -109,7 +109,7 @@ pub fn list(root: &Path) -> Vec<Value> {
         let title = if title.is_empty() { name.trim_end_matches(|c| c != '.').trim_end_matches('.').to_string() } else { title };
         (at, json!({"path": path, "name": name, "title": title, "text": text, "raw": raw, "captured": at.to_rfc3339(), "big": big}))
     }).collect();
-    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.sort_by_key(|a| std::cmp::Reverse(a.0));
     out.into_iter().take(MAX_LISTED).map(|(_, v)| v).collect()
 }
 
@@ -201,7 +201,7 @@ fn add_to_files(readme: &str, line: &str, arabic: bool) -> String {
             match related {
                 Some(r) => { for (k, s) in section.into_iter().enumerate() { lines.insert(r + k, s); } }
                 None => {
-                    while lines.last().map_or(false, |l| l.trim().is_empty()) { lines.pop(); }
+                    while lines.last().is_some_and(|l| l.trim().is_empty()) { lines.pop(); }
                     if !lines.is_empty() { lines.push(String::new()); }
                     lines.extend(section.into_iter().take(3));
                 }
@@ -334,7 +334,7 @@ async fn api_list(State(st): State<Arc<AppState>>, Query(q): Query<HashMap<Strin
     let (lib, private) = { let s = st.settings.read().await; (s.library(), s.private_paths.clone()) };
     let Some(lib) = lib.filter(|l| l.is_dir()) else { return Ok(Json(json!({"count": 0, "items": []}))) };
     if is_private(&lib, &private) { return Ok(Json(json!({"count": 0, "items": []}))); }
-    if q.get("count").is_some() {
+    if q.contains_key("count") {
         return Ok(Json(json!({"count": tokio::task::spawn_blocking(move || count(&lib)).await.unwrap_or(0)})));
     }
     let items = tokio::task::spawn_blocking(move || list(&lib)).await.unwrap_or_default();

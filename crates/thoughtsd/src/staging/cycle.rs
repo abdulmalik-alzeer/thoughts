@@ -90,7 +90,7 @@ pub fn run_started(d: &Dirs, chat_id: &str) {
 
 /// What the next run is told when the user went back to the chat from a version they tried.
 pub fn prompt_note(d: &Dirs) -> &'static str {
-    if load_meta(d).map_or(false, |m| m.continued) {
+    if load_meta(d).is_some_and(|m| m.continued) {
         "\n\nThe staging folder holds the version of this change the user just tried in the app. They chose to keep talking \
          instead of keeping it: they want changes. Build on those files rather than starting again (unless they ask to start \
          over), and rewrite SUMMARY.md so it describes the change as it will be after this turn."

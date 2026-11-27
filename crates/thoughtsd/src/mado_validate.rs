@@ -200,7 +200,7 @@ fn change(bytes: &[u8]) -> Vec<String> {
     for k in o.keys().filter(|k| !matches!(k.as_str(), "title" | "features" | "files")) {
         p.push(format!("\"change\" has an unknown field \"{}\" (only title, features and files)", k.chars().take(40).collect::<String>()));
     }
-    if !o.get("title").and_then(Value::as_str).map_or(false, |t| text_ok(t, MAX_LABEL)) { p.push(format!("\"change.title\" must be a short non-empty text (at most {MAX_LABEL} characters)")); }
+    if !o.get("title").and_then(Value::as_str).is_some_and(|t| text_ok(t, MAX_LABEL)) { p.push(format!("\"change.title\" must be a short non-empty text (at most {MAX_LABEL} characters)")); }
     match o.get("features").and_then(Value::as_array) {
         None => p.push("\"change.features\" must be a list of feature ids like [\"F2\"]".into()),
         Some(list) => {
@@ -220,7 +220,7 @@ fn change(bytes: &[u8]) -> Vec<String> {
         Some(Value::Array(list)) => {
             if list.len() > MAX_LIST { p.push(format!("\"change.files\" has more than {MAX_LIST} entries")); }
             for f in list.iter().take(MAX_LIST) {
-                if !f.as_str().map_or(false, owned_path_ok) { p.push(format!("\"change.files\": {} is not a project-relative path (no /, .., mado/ or .git/ at the start)", f.to_string().chars().take(80).collect::<String>())); }
+                if !f.as_str().is_some_and(owned_path_ok) { p.push(format!("\"change.files\": {} is not a project-relative path (no /, .., mado/ or .git/ at the start)", f.to_string().chars().take(80).collect::<String>())); }
             }
         }
         Some(_) => p.push("\"change.files\" must be a list of project-relative paths".into()),
@@ -272,7 +272,7 @@ fn styles(bytes: &[u8], existing: bool) -> Vec<String> {
         let id = s["id"].as_str().unwrap_or_default();
         if !id_ok(id) { p.push(format!("styles[{i}].id \"{id}\" must match ^[a-z0-9][a-z0-9-]{{0,63}}$")); }
         if !seen.insert(id.to_string()) { p.push(format!("style id \"{id}\" is used twice")); }
-        if !s["name"].as_str().map_or(false, |n| text_ok(n, 100)) { p.push(format!("style \"{id}\" needs a \"name\"")); }
+        if !s["name"].as_str().is_some_and(|n| text_ok(n, 100)) { p.push(format!("style \"{id}\" needs a \"name\"")); }
         if !s["tokens"].is_object() { p.push(format!("style \"{id}\" needs \"tokens\" (DesignTokens)")); }
         if s["source"] != "assistant" { p.push(format!("style \"{id}\": \"source\" must be \"assistant\"")); }
     }

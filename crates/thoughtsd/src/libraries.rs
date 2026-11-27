@@ -226,7 +226,7 @@ pub fn of_run(s: &Settings, cwd: &std::path::Path, add_dirs: &[PathBuf], chat_li
     };
     for d in add_dirs {
         if let Some(l) = library_holding(s, d) {
-            if !lib.as_deref().map_or(false, |x| crate::settings::same_folder(x, &l)) { return Err(other(&l)); }
+            if !lib.as_deref().is_some_and(|x| crate::settings::same_folder(x, &l)) { return Err(other(&l)); }
         }
     }
     Ok(lib)

@@ -231,7 +231,7 @@ pub fn read(bytes: &[u8]) -> anyhow::Result<Value> {
     // it needs is checked here.
     if m["kind"] == "full" {
         if let Some(v) = m["minApp"].as_str().filter(|v| crate::bundles::needs_newer_app(v)) { return Err(no("plugin.newer_app", &[("version", &packs::clean_line(v, 20))])); }
-        if m["layerFormat"].as_u64().map_or(false, |f| f > crate::bundles::FORMAT) { return Err(no("pack.newer", &[])); }
+        if m["layerFormat"].as_u64().is_some_and(|f| f > crate::bundles::FORMAT) { return Err(no("pack.newer", &[])); }
     }
     let pack = to_pack(&m, files);
     packs::check_pack(&pack)?;

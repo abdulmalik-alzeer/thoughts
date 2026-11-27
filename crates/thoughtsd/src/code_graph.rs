@@ -191,7 +191,7 @@ pub async fn detect(project_id: &str) -> ToolInfo {
 }
 
 fn info(bin: PathBuf, version: Option<String>) -> ToolInfo {
-    let usable = version.as_deref().map_or(false, version_ok);
+    let usable = version.as_deref().is_some_and(version_ok);
     ToolInfo { found: true, version, usable, path: Some(bin) }
 }
 
@@ -327,7 +327,7 @@ async fn ready(state: &AppState, project: &Project) -> Result<Ctx, Refused> {
         // Reading the project must not open the user's whole home, nor the app's own folder.
         let app = crate::paths::canonical(&crate::paths::home()).unwrap_or_else(|_| crate::paths::home());
         let user = crate::paths::user_home().ok().and_then(|h| crate::paths::canonical(&h).ok());
-        if app.starts_with(&dir) || dir.starts_with(&app) || user.as_deref().map_or(false, |h| h.starts_with(&dir)) {
+        if app.starts_with(&dir) || dir.starts_with(&app) || user.as_deref().is_some_and(|h| h.starts_with(&dir)) {
             return Err(refused("unsafe-place", crate::tr::err("code_graph.unsafe_place", &[])));
         }
     }
@@ -342,7 +342,7 @@ async fn ready(state: &AppState, project: &Project) -> Result<Ctx, Refused> {
     for d in [graph.clone(), work.clone(), work.join("db"), work.join("home"), work.join("crg"), work.join("tmp"), cache.clone()] {
         // Plain folders of the app's own, never links (made private; anything else is refused).
         let plain = std::fs::symlink_metadata(&d).map_or(true, |m| m.file_type().is_dir()) && crate::paths::create_private_dir(&d).is_ok()
-            && std::fs::symlink_metadata(&d).map_or(false, |m| m.file_type().is_dir());
+            && std::fs::symlink_metadata(&d).is_ok_and(|m| m.file_type().is_dir());
         if !plain { return Err(refused("unsafe-place", crate::tr::err("code_graph.unsafe_place", &[]))); }
     }
     Ok(Ctx { bin, dir, work, cache, confined: how.confined, port: how.port, version: tool.version.unwrap_or_default() })
@@ -355,7 +355,7 @@ pub fn tool_roots(bin: &Path) -> Vec<PathBuf> {
     let root_of = |p: &Path| -> Option<PathBuf> {
         let real = crate::paths::canonical(p).ok()?;
         let parent = real.parent()?;
-        Some(if parent.file_name().map_or(false, |n| n == "bin") { parent.parent()?.to_path_buf() } else { parent.to_path_buf() })
+        Some(if parent.file_name().is_some_and(|n| n == "bin") { parent.parent()?.to_path_buf() } else { parent.to_path_buf() })
     };
     let mut cands: Vec<PathBuf> = vec![];
     if let Some(r) = root_of(bin) {
@@ -364,7 +364,7 @@ pub fn tool_roots(bin: &Path) -> Vec<PathBuf> {
             if let Some(("home", v)) = l.split_once('=').map(|(k, v)| (k.trim(), v.trim())) {
                 let home = Path::new(v);
                 if home.is_absolute() {
-                    if let Some(h) = crate::paths::canonical(home).ok().map(|h| if h.file_name().map_or(false, |n| n == "bin") { h.parent().map(Path::to_path_buf).unwrap_or(h) } else { h }) { cands.push(h); }
+                    if let Some(h) = crate::paths::canonical(home).ok().map(|h| if h.file_name().is_some_and(|n| n == "bin") { h.parent().map(Path::to_path_buf).unwrap_or(h) } else { h }) { cands.push(h); }
                 }
             }
         }
@@ -382,7 +382,7 @@ pub fn tool_roots(bin: &Path) -> Vec<PathBuf> {
     let user = crate::paths::user_home().ok().and_then(|h| crate::paths::canonical(&h).ok());
     let mut out: Vec<PathBuf> = vec![];
     for c in cands {
-        let too_wide = c.parent().is_none() || user.as_deref().map_or(false, |h| h.starts_with(&c));
+        let too_wide = c.parent().is_none() || user.as_deref().is_some_and(|h| h.starts_with(&c));
         if !too_wide && !out.contains(&c) { out.push(c); }
     }
     out.truncate(6);
@@ -505,7 +505,6 @@ async fn run(cx: &Ctx, args: &[String], limit: Duration, max_out: usize, read_on
             }
         }
         if over {
-            buf = vec![];
             drop(out);
             if let Some(id) = id { crate::proc::end_tree(id).await; }
             return Err(Fail::TooLarge);
@@ -531,7 +530,7 @@ async fn run(cx: &Ctx, args: &[String], limit: Duration, max_out: usize, read_on
                 crate::log::warn(format!("code graph: the sandbox did not start: {}", clean_line(&e, 300)));
                 return Err(Fail::NoSandbox);
             }
-            if status.as_ref().map_or(false, |s| s.success()) { return Ok(o); }
+            if status.as_ref().is_ok_and(|s| s.success()) { return Ok(o); }
             let code = status.ok().and_then(|s| s.code()).map(|c| c.to_string()).unwrap_or_else(|| "?".into());
             Err(Fail::Exit(format!("(exit {code}) {}", tidy(&e, cx))))
         }
@@ -572,7 +571,7 @@ fn read_built(project_id: &str) -> Option<Built> {
     let m = std::fs::symlink_metadata(&p).ok()?;
     if !m.is_file() || m.len() > 64 << 10 { return None; }
     let b: Built = serde_json::from_slice(&std::fs::read(&p).ok()?).ok()?;
-    let sane = b.built_at.len() <= 40 && b.tool.len() <= 20 && b.commit.as_deref().map_or(true, |c| c.len() <= 64 && c.bytes().all(|x| x.is_ascii_hexdigit()));
+    let sane = b.built_at.len() <= 40 && b.tool.len() <= 20 && b.commit.as_deref().is_none_or(|c| c.len() <= 64 && c.bytes().all(|x| x.is_ascii_hexdigit()));
     sane.then_some(b)
 }
 
@@ -580,7 +579,7 @@ fn read_built(project_id: &str) -> Option<Built> {
 fn built_graph(project_id: &str) -> Option<Built> {
     let b = read_built(project_id)?;
     let db = graph_dir(project_id)?.join("work/db/graph.db");
-    std::fs::symlink_metadata(&db).map_or(false, |m| m.is_file()).then_some(b)
+    std::fs::symlink_metadata(&db).is_ok_and(|m| m.is_file()).then_some(b)
 }
 
 fn num(v: &Value, k: &str) -> Option<u64> { v.get(k).and_then(Value::as_u64).filter(|n| *n < 100_000_000) }
@@ -602,9 +601,9 @@ pub async fn status(state: &AppState, project: &Project) -> GraphStatus {
     let reason = match ready(state, project).await { Ok(_) => None, Err(r) => Some(Reason { code: r.code.into(), message: crate::tr::classify(&r.err).message }) };
     let built = built_graph(&project.id);
     // HEAD only once the guards before the tool passed (the tool itself may be missing or old).
-    let guarded = reason.as_ref().map_or(true, |r| r.code == "missing" || r.code == "old-tool");
+    let guarded = reason.as_ref().is_none_or(|r| r.code == "missing" || r.code == "old-tool");
     let head = if built.is_some() && guarded { crate::git::head(state, &project.dir).await } else { None };
-    let stale = built.as_ref().map_or(false, |b| b.incomplete || (head.is_some() && b.commit != head) || tool.version.as_deref().map_or(false, |v| v != b.tool));
+    let stale = built.as_ref().is_some_and(|b| b.incomplete || (head.is_some() && b.commit != head) || tool.version.as_deref().is_some_and(|v| v != b.tool));
     GraphStatus {
         recommend: recommend(&tool), tool, built: built.is_some(), built_at: built.as_ref().map(|b| b.built_at.clone()), files: built.as_ref().and_then(|b| b.files),
         stale, building, progress, reason: if building { None } else { reason }, error,
@@ -651,7 +650,7 @@ fn failure(f: Fail) -> Value {
 async fn build_now(state: &AppState, project: &Project, cx: &Ctx) -> Result<(), Value> {
     let repo = cx.dir.to_string_lossy().to_string();
     let had_local = std::fs::symlink_metadata(cx.dir.join(".code-review-graph")).is_ok();
-    let update = read_built(&project.id).map_or(false, |b| b.tool == cx.version) && built_graph(&project.id).is_some();
+    let update = read_built(&project.id).is_some_and(|b| b.tool == cx.version) && built_graph(&project.id).is_some();
     let args = |cmd: &str| vec![cmd.to_string(), "--repo".into(), repo.clone(), "--no-follow-symlinks".into()];
     let mut res = run(cx, &args(if update { "update" } else { "build" }), BUILD_LIMIT, LOG_TAIL, false, Some(&project.id)).await;
     if update && matches!(res, Err(Fail::Exit(_))) { res = run(cx, &args("build"), BUILD_LIMIT, LOG_TAIL, false, Some(&project.id)).await; }
@@ -659,7 +658,7 @@ async fn build_now(state: &AppState, project: &Project, cx: &Ctx) -> Result<(), 
         crate::log::warn("code graph: the tool made a .code-review-graph folder in the project");
     }
     res.map_err(failure)?;
-    if !graph_dir(&project.id).map_or(false, |g| g.join("work/db/graph.db").is_file()) { return Err(failure(Fail::Exit(String::new()))); }
+    if !graph_dir(&project.id).is_some_and(|g| g.join("work/db/graph.db").is_file()) { return Err(failure(Fail::Exit(String::new()))); }
     let st = query(cx, &["status", "--json"]).await.unwrap_or(Value::Null);
     let b = Built {
         built_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true), commit: crate::git::head(state, &cx.dir).await, tool: cx.version.clone(),
@@ -805,7 +804,7 @@ pub fn around_text(dir: &Path, answers: &[(String, Vec<Option<Value>>)], budget:
             if !tests.contains(&t) && tests.len() < 15 { tests.push(t); }
         }
         if !tests.is_empty() { lines.push(format!("Tests: {}", tests.join(", "))); }
-        if lines.last().map_or(false, |l| l.starts_with("## ")) { lines.push("(the graph knows nothing more about this file)".into()); }
+        if lines.last().is_some_and(|l| l.starts_with("## ")) { lines.push("(the graph knows nothing more about this file)".into()); }
     }
     if !any { return None; }
     fit(&lines, budget)

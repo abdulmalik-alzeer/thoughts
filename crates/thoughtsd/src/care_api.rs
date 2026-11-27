@@ -150,7 +150,7 @@ async fn move_inspect(State(st): S, Json(i): Json<Inspect>) -> R {
     let b = read_bundle(&i.bundle)?;
     let here = st.chats.chats.read().await;
     let existing = b.chats.iter().filter(|c| here.contains_key(&c.id)).count();
-    let running = b.chats.iter().filter(|c| here.get(&c.id).map_or(false, |h| h.running)).count();
+    let running = b.chats.iter().filter(|c| here.get(&c.id).is_some_and(|h| h.running)).count();
     drop(here);
     let cur = st.settings.read().await.clone();
     let projects: Vec<Value> = transfer::projects_in(&b).iter().map(|p| {
@@ -171,7 +171,7 @@ async fn move_inspect(State(st): S, Json(i): Json<Inspect>) -> R {
 
 /// Has add-on `name` saved anything on this computer?
 fn has_addon_data(home: &Path, name: &str) -> bool {
-    crate::layer_api::storage_read(home, name).map_or(false, |v| v.as_object().map_or(false, |o| !o.is_empty()))
+    crate::layer_api::storage_read(home, name).is_ok_and(|v| v.as_object().is_some_and(|o| !o.is_empty()))
 }
 
 /// How many of a pack's files differ from the customisation layer here (a file identical to the
@@ -263,14 +263,14 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
     }
     // 3. Chats.
     let (mut added, mut replaced, mut skipped, mut files) = (0usize, 0usize, 0usize, 0usize);
-    let here = crate::wraps::Scope::now(&st).await.key();
+    let here = crate::wraps::Scope::now(st).await.key();
     if ch.chats {
         for c in b.chats {
             let mut c = c;
             // Its attachments in the file, whatever id it ends up with here.
             let in_file = c.id.clone();
             let existing = st.chats.meta(&c.id).await;
-            if existing.as_ref().map_or(false, |h| !ch.replace || h.running) { skipped += 1; continue; }
+            if existing.as_ref().is_some_and(|h| !ch.replace || h.running) { skipped += 1; continue; }
             // A new chat whose id is another chat's here in other letter case, or whose files would
             // land where something already is (on a disk that ignores case, the same place): it gets
             // an id of its own, so nothing of another chat is ever replaced.
@@ -331,7 +331,7 @@ async fn import(st: &AppState, b: transfer::Bundle, ch: &Choices, home: &Path) -
 
 async fn user_folders(s: &Settings) -> (Option<PathBuf>, Vec<PathBuf>) {
     // Every other library in the switcher, and their linked folders, are left alone just the same.
-    (s.library().filter(|_| s.library_path.as_deref().map_or(false, |p| !p.trim().is_empty())), s.projects.iter().map(|p| PathBuf::from(&p.path)).chain(s.other_folders()).collect())
+    (s.library().filter(|_| s.library_path.as_deref().is_some_and(|p| !p.trim().is_empty())), s.projects.iter().map(|p| PathBuf::from(&p.path)).chain(s.other_folders()).collect())
 }
 
 /// What "Remove Thoughts from this computer" would do, for the confirmation screen.
@@ -346,7 +346,7 @@ async fn remove_plan(State(st): S) -> R {
             .chain(s.libraries.iter().filter(|l| !s.is_open_library(Path::new(&l.path))).map(|l| json!({"name": l.display_name(), "path": l.path}))).collect::<Vec<_>>(),
         "shared": removal::shares_with_real_app(), "busy": working(&st).await,
         "hasKey": s.ai.claude.has_api_token, "loginItem": s.daemon.run_at_login,
-        "keptHistory": std::fs::read_dir(home.join("history")).map_or(false, |mut d| d.next().is_some()),
+        "keptHistory": std::fs::read_dir(home.join("history")).is_ok_and(|mut d| d.next().is_some()),
         "confirm": REMOVE_CONFIRM,
     })))
 }
