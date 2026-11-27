@@ -1,5 +1,21 @@
 # What's new in Thoughts
 
+## 0.7.5
+
+The first release with a Windows installer. Nothing changes on the Mac.
+
+### New
+- **Thoughts for Windows.** Every release now carries an installer for Windows beside the one for the Mac: `Thoughts_0.7.5_x64-setup.exe`, for 64-bit Intel and AMD computers. It installs for your own account, with no administrator question, and from then on it updates itself from inside the app as the Mac version does.
+
+### Changed
+- For developers: the Windows installer is built on GitHub's machines from the release's own commit, installed and started there, and then signed for updates on the release Mac, so the key that signs updates is still kept in one place only.
+
+### Before you rely on it
+- **Nobody has used Thoughts on a real Windows computer yet.** Before each release the installer is installed on a test machine, the background service is started and the app is opened and left running for twenty seconds. Nobody looks at the window. Expect rough edges, and please report them.
+- The installer is not signed by Microsoft, so Windows shows "Windows protected your PC" the first time: choose **More info**, then **Run anyway**.
+- On Windows the background service's tests are compiled but about fifty of them do not pass yet, for a reason in the tests themselves.
+- Linux is still not released.
+
 ## 0.7.4
 
 A maintenance release: two fixes in the parts Thoughts is built from, and a tidier code base. Nothing looks or works differently.

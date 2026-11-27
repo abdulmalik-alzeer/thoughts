@@ -20,11 +20,12 @@ import { assemble, changelogSection, notesFor, updaterManifest } from './assembl
 import { decide, verdict } from './ci-status.mjs';
 import { collect } from './collect.mjs';
 import { GitHub, PLATFORMS, ROOT, Stop } from './lib.mjs';
-import { ALWAYS_ASK_ACCOUNT, checkInstalled, commitsByOthers, isOwnersNoreply, sinceWords, findKey, findPassword, installProblem, keychainPath, KEYCHAIN_SERVICE, preflightProblems, publicEndpoint, repoFromRemote, TESTS, workflowsToSwitch } from './local.mjs';
+import { ALWAYS_ASK_ACCOUNT, checkInstalled, commitsByOthers, isOwnersNoreply, sinceWords, findKey, findPassword, installProblem, keychainPath, KEYCHAIN_SERVICE, neededFiles, preflightProblems, publicEndpoint, repoFromRemote, TESTS, workflowsToSwitch } from './local.mjs';
 import { executable, MANIFEST, pack, place } from './compiled.mjs';
 import { checkSignature } from './minisign.mjs';
 import { plan } from './plan.mjs';
 import { publish, refusePublished } from './publish.mjs';
+import { adopt, pickRun, runProblem, WORKFLOW_PATH } from './windows.mjs';
 
 const REPO = 'someone/thoughts';
 const SHA = 'a'.repeat(40);
@@ -1081,4 +1082,133 @@ test('kit history: a changed or missing frozen part is refused, and so is --befo
   assert.equal(parseBefore(['node', 'x', '--before', '0.7.1-rc.1']), '0.7.1');
   assert.equal(parseBefore(['node', 'x', '--before', 'soon']), '');
   assert.equal(parseBefore(['node', 'x', '--check']), null);
+});
+
+// ------------------------------------------------ the Windows installer of a release made on a Mac
+
+/** A downloaded `installers-windows` artifact, as the pipeline leaves it with no updater key. */
+function windowsArtifact({ version = '1.2.3', commit = SHA, info = {}, extra = null } = {}) {
+  const from = tmp();
+  const name = `Thoughts_${version}_x64-setup.exe`;
+  writeFileSync(join(from, name), 'MZ installer bytes');
+  const sum = createHash('sha256').update('MZ installer bytes').digest('hex');
+  const report = { schema: 1, platform: 'windows', version, commit, updater: false, signLater: true, signed: { windows: false }, files: [{ name, kind: 'nsis', arch: 'x86_64', bytes: 18, sha256: sum, signature: null }], ...info };
+  writeFileSync(join(from, 'build-info-windows.json'), JSON.stringify(report));
+  if (extra) writeFileSync(join(from, extra), 'x');
+  return { from, name };
+}
+const fakeSign = (file) => writeFileSync(`${file}.sig`, 'c2lnbmF0dXJl\n');
+
+test('release-config: with the key elsewhere the updater is on in the app and nothing is signed in the build', () => {
+  const later = releaseConfig({ env: { UPDATER_ENDPOINT: 'https://a.example/latest.json', UPDATER_SIGNING: 'later' }, committedKey: 'KEY\n' });
+  assert.equal(later.plugins.updater.pubkey, 'KEY');
+  assert.equal(later.plugins.updater.requireSignedVersion, true);
+  assert.equal(later.bundle, undefined, 'no update files are asked of a build that has no key');
+  const here = releaseConfig({ env: { UPDATER_ENDPOINT: 'https://a.example/latest.json', UPDATER_SIGNING: 'here' }, committedKey: 'KEY\n' });
+  assert.equal(here.bundle.createUpdaterArtifacts, true);
+});
+
+test('collect: a Windows build whose installer is signed later says so', () => {
+  const root = tmp();
+  mkdirSync(join(root, 'src-tauri'), { recursive: true });
+  writeFileSync(join(root, 'src-tauri', 'tauri.conf.json'), JSON.stringify({ productName: 'Thoughts' }));
+  const nsis = join(root, 'target', 'release', 'bundle', 'nsis');
+  mkdirSync(nsis, { recursive: true });
+  writeFileSync(join(nsis, 'Thoughts_1.2.3_x64-setup.exe'), 'MZ');
+  const info = collect({ platform: 'windows', version: '1.2.3', updater: false, signLater: true, root, out: join(root, 'out'), commit: SHA });
+  assert.equal(info.updater, false);
+  assert.equal(info.signLater, true);
+  assert.equal(collect({ platform: 'windows', version: '1.2.3', updater: false, root, out: join(root, 'out2'), commit: SHA }).signLater, undefined);
+});
+
+test('windows: the installer GitHub built is signed here and becomes an update file', () => {
+  const { from, name } = windowsArtifact();
+  const out = tmp();
+  const info = adopt({ from, out, version: '1.2.3', commit: SHA, sign: fakeSign });
+  assert.equal(info.updater, true);
+  assert.deepEqual(info.files.map((f) => [f.name, f.kind, f.signature]), [[name, 'nsis', `${name}.sig`], [`${name}.sig`, 'signature', null]]);
+  assert.equal(readFileSync(join(out, name), 'utf8'), 'MZ installer bytes');
+
+  // Beside a macOS build it assembles into one release whose latest.json serves both.
+  writeFileSync(join(out, 'Thoughts_1.2.3_universal.app.tar.gz'), 'app');
+  writeFileSync(join(out, 'Thoughts_1.2.3_universal.app.tar.gz.sig'), 'bWFj\n');
+  const h = (t) => createHash('sha256').update(t).digest('hex');
+  writeFileSync(join(out, 'build-info-macos.json'), JSON.stringify({ schema: 1, platform: 'macos', version: '1.2.3', commit: SHA, updater: true, signed: { macos: false, notarized: false }, files: [
+    { name: 'Thoughts_1.2.3_universal.app.tar.gz', kind: 'app', arch: 'universal', bytes: 3, sha256: h('app'), signature: 'Thoughts_1.2.3_universal.app.tar.gz.sig' },
+    { name: 'Thoughts_1.2.3_universal.app.tar.gz.sig', kind: 'signature', bytes: 5, sha256: h('bWFj\n'), signature: null },
+  ] }));
+  const meta = tmp();
+  const release = assemble({ assetsDir: out, metaDir: meta, mode: 'release', partial: true, version: '1.2.3', tag: 'v1.2.3', platforms: ['macos', 'windows'], repo: REPO, commit: SHA });
+  assert.deepEqual(release.platforms, ['macos', 'windows']);
+  const latest = JSON.parse(readFileSync(join(meta, 'latest.json'), 'utf8'));
+  assert.equal(latest.platforms['windows-x86_64'].url, `https://github.com/${REPO}/releases/download/v1.2.3/${name}`);
+  assert.equal(latest.platforms['windows-x86_64'].signature, 'c2lnbmF0dXJl');
+  assert.equal(latest.platforms['windows-x86_64-nsis'].url, latest.platforms['windows-x86_64'].url);
+  assert.ok(latest.platforms['darwin-aarch64']);
+});
+
+test('windows: an installer that is not exactly this release is never signed', () => {
+  const signed = [];
+  const sign = (file) => { signed.push(file); fakeSign(file); };
+  const refuse = (made, pattern, args = {}) => {
+    assert.throws(() => adopt({ from: made.from, out: tmp(), version: '1.2.3', commit: SHA, sign, ...args }), stops(pattern));
+  };
+  refuse(windowsArtifact({ version: '1.2.2' }), /version 1\.2\.2/);
+  refuse(windowsArtifact({ commit: 'b'.repeat(40) }), /built from bbbbbbb/);
+  refuse(windowsArtifact({ info: { signLater: undefined } }), /without the updater/);
+  refuse(windowsArtifact({ info: { updater: true } }), /already carries/);
+  refuse(windowsArtifact({ info: { platform: 'linux' } }), /not a Windows build report/);
+  refuse(windowsArtifact({ extra: 'extra.exe' }), /should hold exactly/);
+  const changed = windowsArtifact();
+  writeFileSync(join(changed.from, changed.name), 'MZ installer bytez');
+  refuse(changed, /size or checksum differ/);
+  refuse({ from: join(tmp(), 'nothing') }, /was not downloaded/);
+  assert.deepEqual(signed, [], 'nothing reached the key');
+  // A signer that writes nothing, or one that changes the installer, is caught.
+  assert.throws(() => adopt({ ...windowsArtifact(), out: tmp(), version: '1.2.3', commit: SHA, sign: () => {} }), stops(/could not be signed/));
+  assert.throws(() => adopt({ ...windowsArtifact(), out: tmp(), version: '1.2.3', commit: SHA, sign: (f) => { fakeSign(f); writeFileSync(f, 'other'); } }), stops(/changed while/));
+});
+
+test('windows: which run of the pipeline to take the installer from', () => {
+  const run = (id, status, conclusion, createdAt, more = {}) => ({ databaseId: id, status, conclusion, headSha: SHA, event: 'workflow_dispatch', createdAt, ...more });
+  assert.equal(pickRun([], SHA), null);
+  assert.equal(pickRun([run(1, 'completed', 'failure', '2026-01-01T00:00:00Z')], SHA), null, 'a failed run is not used: a new one is started');
+  assert.equal(pickRun([run(1, 'completed', 'success', '2026-01-01T00:00:00Z'), run(2, 'completed', 'failure', '2026-01-02T00:00:00Z')], SHA).databaseId, 1);
+  assert.equal(pickRun([run(1, 'completed', 'failure', '2026-01-01T00:00:00Z'), run(2, 'in_progress', null, '2026-01-02T00:00:00Z')], SHA).databaseId, 2);
+  assert.equal(pickRun([run(1, 'completed', 'success', '2026-01-01T00:00:00Z', { headSha: 'b'.repeat(40) })], SHA), null, 'another commit');
+  assert.equal(pickRun([run(1, 'completed', 'success', '2026-01-01T00:00:00Z', { event: 'push' })], SHA), null, 'not started by hand');
+
+  const record = { repository: { full_name: 'Someone/Thoughts' }, path: WORKFLOW_PATH, event: 'workflow_dispatch', head_sha: SHA, status: 'completed', conclusion: 'success' };
+  const about = { repo: REPO, commit: SHA };
+  assert.equal(runProblem(record, about), null);
+  assert.match(runProblem({ ...record, repository: { full_name: 'fork/thoughts' } }, about), /belongs to fork\/thoughts/);
+  assert.match(runProblem({ ...record, path: '.github/workflows/other.yml' }, about), /not of/);
+  assert.match(runProblem({ ...record, event: 'pull_request' }, about), /not by hand/);
+  assert.match(runProblem({ ...record, head_sha: 'b'.repeat(40) }, about), /built bbbbbbb/);
+  assert.match(runProblem({ ...record, status: 'in_progress', conclusion: null }, about), /not finished/);
+  assert.match(runProblem({ ...record, conclusion: 'failure' }, about), /ended as "failure"/);
+  assert.match(runProblem(null, about), /no such run/);
+});
+
+test('local: a release is not made public without its Windows installer unless asked', () => {
+  assert.deepEqual(neededFiles(), ['latest.json', '.app.tar.gz', '.app.tar.gz.sig', '.dmg', '-setup.exe', '-setup.exe.sig']);
+  assert.deepEqual(neededFiles({ macOnly: true }), ['latest.json', '.app.tar.gz', '.app.tar.gz.sig', '.dmg']);
+});
+
+test('release.yml: Windows is installed and started before anything is published, with no secret', () => {
+  const jobs = jobsOf(WORKFLOW);
+  const smoke = jobs['smoke-windows'];
+  assert.ok(smoke, 'a job that installs and starts the Windows installer');
+  assert.match(smoke, /needs: \[preflight, sign\]/);
+  assert.match(smoke, /runs-on: windows-latest/);
+  assert.doesNotMatch(smoke, /secrets\.|permissions:/);
+  assert.match(smoke, /-ArgumentList '\/S'/, 'a silent install');
+  assert.match(smoke, /THOUGHTS_HOME/, 'its own home folder');
+  assert.match(jobs.publish, /needs: \[preflight, ci-status, tests, assemble, smoke-windows\]/);
+  assert.match(jobs.publish, /needs\.smoke-windows\.result == 'success'/);
+  // The updater is compiled in whenever the public key is committed; only signing needs the secret.
+  for (const job of [jobs.compile, jobs.sign]) {
+    assert.match(job, /UPDATER_SIGNING: \$\{\{ needs\.preflight\.outputs\.updater == 'true' && 'here' \|\| 'later' \}\}/);
+    assert.match(job, /needs\.preflight\.outputs\.updater-later == 'true'\) && format\(/);
+  }
 });

@@ -1,15 +1,18 @@
 #!/usr/bin/env node
-// A release made on this Mac (macOS only), for as long as the pipeline cannot run. It does what
-// .github/workflows/release.yml does, with the same scripts, and nothing it builds leaves this
-// computer until it is asked to:
+// A release made on this Mac: macOS built here, the Windows installer built by GitHub and signed
+// here (scripts/release/windows.mjs). It does what .github/workflows/release.yml does, with the
+// same scripts, and nothing it builds leaves this computer until it is asked to:
 //
-//   node scripts/release/local.mjs             build, sign, assemble and check. Nothing is sent.
+//   node scripts/release/local.mjs             build macOS, sign, assemble and check. Nothing is sent.
 //   node scripts/release/local.mjs --draft     the same, then push `main` and the tag (with the
-//                                              GitHub workflows switched off meanwhile) and attach
-//                                              the files to a DRAFT release. Nobody is offered a draft.
+//                                              GitHub workflows switched off meanwhile), have GitHub
+//                                              build the Windows installer for that commit, wait
+//                                              for it, sign it, and attach everything to a DRAFT
+//                                              release. Nobody is offered a draft.
 //   node scripts/release/local.mjs --publish   make that draft public. This is the moment the
 //                                              update reaches every installed copy.
 //
+//   --mac-only         a release without the Windows installer (with --draft and --publish)
 //   --skip-tests       do not run the tests first (TESTS below; the summary says so)
 //   --include-others   build although commits since the last release were made by someone else:
 //                      you have read them
@@ -58,6 +61,7 @@ import { collect } from './collect.mjs';
 import { GitHub, isMain, megabytes, PLATFORMS, readVersion, ROOT, run, stop } from './lib.mjs';
 import { checkSignature } from './minisign.mjs';
 import { publish, refusePublished } from './publish.mjs';
+import { adopt, ARTIFACT, pickRun, runProblem } from './windows.mjs';
 
 const MAC = PLATFORMS.find((p) => p.id === 'macos');
 export const DEFAULT_KEY = join(homedir(), '.tauri', 'thoughts-updater.key');
@@ -410,6 +414,7 @@ function builtEarlier(f) {
   try {
     const release = JSON.parse(readFileSync(join(meta, 'release.json'), 'utf8'));
     if (release.mode !== 'release' || release.tag !== f.tag || release.commit !== f.head || release.updater !== true) return null;
+    if (!release.platforms.includes('macos')) return null;
     if (!release.files.every((x) => existsSync(join(x.name === 'latest.json' ? meta : out, x.name)))) return null;
     checkSigned(f, out, release);
     return { out, meta, release };
@@ -442,25 +447,91 @@ async function withWorkflowsOff(repo, work) {
   }
 }
 
-async function draft(f, built) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** The finished run of the Release workflow that built the Windows installer for this commit:
+ *  one that already exists, or a new one, started here and waited for (about 15 to 30 minutes). */
+async function windowsRun(f) {
+  const list = () => JSON.parse(sh('gh', ['run', 'list', '-R', f.repo, '--workflow', 'release.yml', '--event', 'workflow_dispatch', '--commit', f.head, '--limit', '20', '--json', 'databaseId,status,conclusion,headSha,event,createdAt'], { capture: true }).out || '[]');
+  let run = pickRun(list(), f.head);
+  if (run) {
+    console.log(`Using the Windows build GitHub already ${run.status === 'completed' ? 'made' : 'started'} for ${f.head.slice(0, 7)} (run ${run.databaseId}).`);
+  } else {
+    sh('gh', ['workflow', 'run', 'release.yml', '-R', f.repo, '--ref', f.tag, '-f', 'platforms=windows'], { capture: true });
+    for (let i = 0; i < 24 && !run; i++) {
+      await sleep(5000);
+      run = pickRun(list(), f.head);
+    }
+    if (!run) stop(`GitHub did not start the Windows build. Start it by hand (gh workflow run release.yml --ref ${f.tag} -f platforms=windows), then run this again.`);
+    console.log(`GitHub is building the Windows installer (run ${run.databaseId}): https://github.com/${f.repo}/actions/runs/${run.databaseId}`);
+  }
+  const read = () => JSON.parse(sh('gh', ['api', `repos/${f.repo}/actions/runs/${run.databaseId}`], { capture: true }).out);
+  let record = read();
+  for (let minutes = 0; record.status !== 'completed'; minutes++) {
+    if (minutes >= 90) stop(`The Windows build (run ${run.databaseId}) has not finished after 90 minutes. Run this again later: it picks the same run up.`);
+    if (minutes % 5 === 0) console.log(`  waiting for the Windows build… (${minutes} min)`);
+    await sleep(60_000);
+    record = read();
+  }
+  const problem = runProblem(record, { repo: f.repo, commit: f.head });
+  if (problem) stop(`The Windows build (run ${run.databaseId}) cannot be used: ${problem}. See https://github.com/${f.repo}/actions/runs/${run.databaseId} — fix it and run this again, or release without Windows (--mac-only).`);
+  return run.databaseId;
+}
+
+/** Adds the Windows installer to what `built` holds: fetched from GitHub's build of this commit,
+ *  checked, signed with the updater key, and listed in latest.json beside the macOS files. */
+async function addWindows(f, built) {
+  const id = await windowsRun(f);
+  const dir = mkdtempSync(join(tmpdir(), 'thoughts-windows-'));
+  try {
+    sh('gh', ['run', 'download', String(id), '-R', f.repo, '-n', ARTIFACT, '-D', dir], { capture: true });
+    const cli = join(ROOT, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
+    const env = { ...process.env, TAURI_SIGNING_PRIVATE_KEY: f.key, TAURI_SIGNING_PRIVATE_KEY_PASSWORD: f.password };
+    adopt({
+      from: dir, out: built.out, version: f.version, commit: f.head,
+      sign: (file) => sh(process.execPath, [cli, 'signer', 'sign', '--app-version', f.version, file], { env, capture: true }),
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const release = assemble({
+    assetsDir: built.out, metaDir: built.meta, mode: 'release', partial: true, version: f.version, tag: f.tag, platforms: ['macos', 'windows'],
+    repo: f.repo, commit: f.head, notes: f.notes, notesAr: f.notesAr,
+  });
+  checkSigned(f, built.out, release);
+  if (!release.files.some((x) => x.platform === 'windows' && x.signature)) stop('The Windows installer did not end up signed.');
+  return { ...built, release };
+}
+
+/** Push `main` and the tag, add the Windows installer (unless `macOnly`), attach everything to
+ *  the draft. Running it again after a failure carries on: nothing is pushed or built twice. */
+async function draft(f, built, { macOnly = false } = {}) {
   const gh = new GitHub({ token: ghToken(), repo: f.repo });
   await refusePublished({ gh, tag: f.tag });
-  return withWorkflowsOff(f.repo, async () => {
+  await withWorkflowsOff(f.repo, async () => {
     sh('git', ['push', 'origin', 'main']);
     if (!f.tagAt) sh('git', ['tag', f.tag, f.head]);
     sh('git', ['push', 'origin', f.tag]);
-    return publish({ gh, tag: f.tag, commit: f.head, assetsDir: built.out, metaDir: built.meta, notes: f.changelog });
   });
+  // The workflows are on again here: the Windows build is a run of the Release workflow.
+  if (!macOnly && !built.release.platforms.includes('windows')) built = await addWindows(f, built);
+  const result = await publish({ gh, tag: f.tag, commit: f.head, assetsDir: built.out, metaDir: built.meta, notes: f.changelog });
+  return { ...result, release: built.release };
 }
 
-async function makePublic(f) {
+/** The kinds of file a draft must hold before it is made public. */
+export function neededFiles({ macOnly = false } = {}) {
+  return ['latest.json', '.app.tar.gz', '.app.tar.gz.sig', '.dmg', ...(macOnly ? [] : ['-setup.exe', '-setup.exe.sig'])];
+}
+
+async function makePublic(f, { macOnly = false } = {}) {
   const gh = new GitHub({ token: ghToken(), repo: f.repo });
   const drafts = (await gh.list(`/repos/${gh.repo}/releases`)).filter((r) => r.tag_name === f.tag);
   if (drafts.some((r) => !r.draft)) stop(`Release ${f.tag} is already public.`);
   if (drafts.length !== 1) stop(`Expected one draft release for ${f.tag}, found ${drafts.length}. Run with --draft first.`);
   const names = (await gh.list(`/repos/${gh.repo}/releases/${drafts[0].id}/assets`)).filter((a) => a.state === 'uploaded').map((a) => a.name);
-  for (const need of ['latest.json', '.app.tar.gz', '.app.tar.gz.sig', '.dmg']) {
-    if (!names.some((n) => n.endsWith(need))) stop(`The draft for ${f.tag} has no ${need} file. Run with --draft again.`);
+  for (const need of neededFiles({ macOnly })) {
+    if (!names.some((n) => n.endsWith(need))) stop(`The draft for ${f.tag} has no ${need} file. Run with --draft again${need.includes('setup.exe') ? ', or publish without the Windows installer (--publish --mac-only)' : ''}.`);
   }
   // The tag is on GitHub already (--draft pushed it), so making the release public creates
   // nothing and starts no workflow.
@@ -472,8 +543,9 @@ async function makePublic(f) {
 if (isMain(import.meta.url)) {
   await run(async () => {
     const args = new Set(process.argv.slice(2));
-    const unknown = [...args].filter((a) => !['--draft', '--publish', '--skip-tests', '--include-others'].includes(a));
-    if (unknown.length || (args.has('--draft') && args.has('--publish'))) stop('usage: local.mjs [--draft | --publish] [--skip-tests] [--include-others]');
+    const unknown = [...args].filter((a) => !['--draft', '--publish', '--mac-only', '--skip-tests', '--include-others'].includes(a));
+    if (unknown.length || (args.has('--draft') && args.has('--publish'))) stop('usage: local.mjs [--draft | --publish] [--mac-only] [--skip-tests] [--include-others]');
+    const macOnly = args.has('--mac-only');
     if (process.platform !== 'darwin') stop('This command builds the macOS release, so it runs on a Mac.');
     // Before anything else: the key check below already runs the Tauri CLI from node_modules.
     if (!args.has('--publish')) {
@@ -485,7 +557,7 @@ if (isMain(import.meta.url)) {
     if (!f.repo) stop('The origin remote is not a GitHub repository.');
 
     if (args.has('--publish')) {
-      const url = await makePublic(f);
+      const url = await makePublic(f, { macOnly });
       console.log(`\n${f.tag} is public: ${url}\nEvery copy that checks for updates is offered it from now on.`);
       return;
     }
@@ -514,10 +586,16 @@ if (isMain(import.meta.url)) {
       : `  Every commit ${sinceWords(f.since)} is yours.`);
 
     if (!args.has('--draft')) {
-      console.log(`\nNothing was sent anywhere. The files are in release-out/ and release-meta/.\nNext: node scripts/release/local.mjs --draft`);
+      console.log(`\nNothing was sent anywhere. The files are in release-out/ and release-meta/.\nNext: node scripts/release/local.mjs --draft   (pushes, has GitHub build the Windows installer, signs it here)`);
       return;
     }
-    const result = await draft(f, built);
-    console.log(`\nDraft release ${f.tag} holds ${result.files.length} files: ${result.url}\nNobody is offered a draft. Try the .dmg, then: node scripts/release/local.mjs --publish`);
+    const result = await draft(f, built, { macOnly });
+    const windows = result.release.platforms.includes('windows');
+    console.log(`\nDraft release ${f.tag} holds ${result.files.length} files: ${result.url}`);
+    for (const file of result.release.files) console.log(`  ${file.name}  ${megabytes(file.bytes)}`);
+    console.log(windows
+      ? '  The Windows installer was built by GitHub from this commit, installed and started there, and signed here for updates.'
+      : '  NO WINDOWS INSTALLER in this release (--mac-only).');
+    console.log(`Nobody is offered a draft. Try the installers, then: node scripts/release/local.mjs --publish${windows ? '' : ' --mac-only'}`);
   });
 }

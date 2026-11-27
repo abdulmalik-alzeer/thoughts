@@ -9,6 +9,11 @@
 //
 // With none of them it writes `{}`, and the build is the same as a local one.
 //
+// UPDATER_SIGNING=later: the updater is switched on in the app (public key and address compiled
+// in) but this build makes no signed update files, because the private key is not on this
+// machine. The installer is signed afterwards where the key is kept
+// (scripts/release/windows.mjs, used by scripts/release/local.mjs for the Windows installer).
+//
 // The public key is read from src-tauri/updater.pub, the committed file, so that a build made on
 // this computer and one made in CI cannot disagree about it: a copy built with the wrong public
 // key can never be updated. UPDATER_PUBKEY (the CI variable from before the file existed) is
@@ -51,7 +56,7 @@ export function releaseConfig({ env = {}, committedKey = '', existing = null, ad
     const pubkey = committed || given;
     const endpoints = get('UPDATER_ENDPOINT').split(/[\s,]+/).filter(Boolean);
     if (pubkey && endpoints.length) {
-      conf.bundle = { createUpdaterArtifacts: true };
+      if (get('UPDATER_SIGNING') !== 'later') conf.bundle = { createUpdaterArtifacts: true };
       conf.plugins = { updater: { pubkey, endpoints, requireSignedVersion: true } };
     }
   }
@@ -77,7 +82,7 @@ if (isMain(import.meta.url)) {
       addWindowsSigning: process.argv.includes('--add-windows-signing'),
     });
     writeFileSync(OUT, JSON.stringify(conf, null, 2) + '\n');
-    console.log(`release.conf.json: updater ${conf.plugins ? 'on' : 'off'}, Windows signing ${conf.bundle?.windows ? 'on' : 'off'}`);
+    console.log(`release.conf.json: updater ${conf.plugins ? (conf.bundle?.createUpdaterArtifacts ? 'on' : 'on, update files signed later') : 'off'}, Windows signing ${conf.bundle?.windows ? 'on' : 'off'}`);
   } catch (e) {
     console.error(String(e?.message ?? e));
     process.exit(1);

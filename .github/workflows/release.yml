@@ -15,7 +15,8 @@ name: Release
 #              job only checks that and stops (about 6 counted runner minutes per run; delete the
 #              `schedule` lines below to turn the timed runs off).
 #
-# Jobs:  preflight ─┬─ compile ── sign (macOS | Windows | Linux, each in parallel) ── assemble ─┐
+# Jobs:  preflight ─┬─ compile ── sign (macOS | Windows | Linux, each in parallel) ─┬─ assemble ─┐
+#                   │                                     smoke-windows (install and start) ─┤
 #                   └─ ci-status ── tests (only if this commit has no passing CI) ────────────┴─ publish
 #
 # Every signing step is skipped when its secrets are missing, so all of this also works with no
@@ -94,6 +95,7 @@ jobs:
       matrix: ${{ steps.plan.outputs.matrix }}
       artifact-days: ${{ steps.plan.outputs.artifact-days }}
       updater: ${{ steps.conf.outputs.updater }}
+      updater-later: ${{ steps.conf.outputs.updater-later }}
       macos-signing: ${{ steps.conf.outputs.macos-signing }}
       macos-notarisation: ${{ steps.conf.outputs.macos-notarisation }}
     steps:
@@ -121,16 +123,27 @@ jobs:
           HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' && secrets.APPLE_SIGNING_IDENTITY != '' }}
           HAS_APPLE_NOTARISATION: ${{ secrets.APPLE_ID != '' && secrets.APPLE_PASSWORD != '' && secrets.APPLE_TEAM_ID != '' }}
         run: |
+          later=false
           if [ -n "$UPDATER_PUBKEY" ] && [ "$HAS_UPDATER_KEY" = "true" ]; then
             echo "updater=true" >> "$GITHUB_OUTPUT"
             echo "Updater: on"
           else
             echo "updater=false" >> "$GITHUB_OUTPUT"
-            echo "Updater: off (this build will say updates are not configured)"
-            if [ -n "$UPDATER_PUBKEY" ] || [ "$HAS_UPDATER_KEY" = "true" ]; then
-              echo "::warning::Only one half of the updater key is configured (UPDATER_PUBKEY variable, TAURI_SIGNING_PRIVATE_KEY secret). The updater stays off."
+            if [ "$HAS_UPDATER_KEY" = "true" ]; then
+              echo "::warning::Only one half of the updater key is configured (UPDATER_PUBKEY variable, TAURI_SIGNING_PRIVATE_KEY secret). Nothing is signed here."
+            fi
+            # No private key here, but the public key is committed: the app is built with the
+            # updater switched on and its installers leave this run without update signatures. The
+            # local release command signs the Windows installer where the key is kept
+            # (scripts/release/windows.mjs). Nothing unsigned is ever offered as an update.
+            if [ -s src-tauri/updater.pub ]; then
+              later=true
+              echo "Updater: on in the app; update files are signed later, where the key is kept"
+            else
+              echo "Updater: off (this build will say updates are not configured)"
             fi
           fi
+          echo "updater-later=$later" >> "$GITHUB_OUTPUT"
           echo "macos-signing=$HAS_APPLE_SIGNING" >> "$GITHUB_OUTPUT"
           echo "macos-notarisation=$HAS_APPLE_NOTARISATION" >> "$GITHUB_OUTPUT"
       # crates/thoughtsd/src/kit_history.rs must list what every earlier release's starter kit
@@ -261,7 +274,8 @@ jobs:
         shell: bash
         env:
           UPDATER_PUBKEY: ${{ needs.preflight.outputs.updater == 'true' && vars.UPDATER_PUBKEY || '' }}
-          UPDATER_ENDPOINT: ${{ needs.preflight.outputs.updater == 'true' && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
+          UPDATER_ENDPOINT: ${{ (needs.preflight.outputs.updater == 'true' || needs.preflight.outputs.updater-later == 'true') && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
+          UPDATER_SIGNING: ${{ needs.preflight.outputs.updater == 'true' && 'here' || 'later' }}
         run: node scripts/release-config.mjs
 
       # The UI build and `cargo build --release`: the build scripts and procedural macros of every
@@ -356,7 +370,8 @@ jobs:
         shell: bash
         env:
           UPDATER_PUBKEY: ${{ needs.preflight.outputs.updater == 'true' && vars.UPDATER_PUBKEY || '' }}
-          UPDATER_ENDPOINT: ${{ needs.preflight.outputs.updater == 'true' && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
+          UPDATER_ENDPOINT: ${{ (needs.preflight.outputs.updater == 'true' || needs.preflight.outputs.updater-later == 'true') && format('https://github.com/{0}/releases/latest/download/latest.json', github.repository) || '' }}
+          UPDATER_SIGNING: ${{ needs.preflight.outputs.updater == 'true' && 'here' || 'later' }}
         run: node scripts/release-config.mjs
 
       # Downloaded outside the checkout, then only the expected file is copied in.
@@ -429,6 +444,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ needs.preflight.outputs.version }}
           UPDATER: ${{ needs.preflight.outputs.updater }}
+          UPDATER_LATER: ${{ needs.preflight.outputs.updater-later }}
           MACOS_SIGNED: ${{ needs.preflight.outputs.macos-signing }}
           MACOS_NOTARIZED: ${{ needs.preflight.outputs.macos-notarisation }}
           WINDOWS_SIGNED: ${{ steps.wincert.outputs.thumbprint != '' }}
@@ -441,6 +457,68 @@ jobs:
           retention-days: ${{ needs.preflight.outputs.artifact-days }}
           compression-level: 0 # installers are already compressed
           overwrite: true # a re-run of this job replaces what its first attempt uploaded
+
+  # WINDOWS ONLY: the installer this run built is installed and started on a fresh Windows
+  # machine, the way a person would, before anything can be attached anywhere. No secrets, no
+  # write access. It proves three things and no more: the installer installs without questions for
+  # the current user, the background service of the installed copy starts and answers on its
+  # port, and the app itself is still running twenty seconds after it was opened. Nobody looks at
+  # the window.
+  smoke-windows:
+    name: Install and start on Windows
+    needs: [preflight, sign]
+    if: ${{ !cancelled() && needs.sign.result != 'skipped' && needs.sign.result != 'cancelled' && needs.preflight.outputs.mode != 'warm' && contains(needs.preflight.outputs.platforms, 'windows') }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: installers-windows
+          path: installer
+      - name: Install, start the background service, open the app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = @(Get-ChildItem installer -Filter *-setup.exe)
+          if ($setup.Count -ne 1) { throw "Expected one installer, found $($setup.Count)" }
+          Write-Host "Installing $($setup[0].Name) silently, for this user"
+          $p = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($p.ExitCode -ne 0) { throw "The installer ended with code $($p.ExitCode)" }
+          $exe = Join-Path $env:LOCALAPPDATA 'Thoughts\thoughts.exe'
+          if (-not (Test-Path $exe)) {
+            $found = @(Get-ChildItem $env:LOCALAPPDATA -Recurse -Filter thoughts.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\Temp\\' })
+            if ($found.Count -lt 1) { throw "thoughts.exe was not installed under $env:LOCALAPPDATA" }
+            $exe = $found[0].FullName
+          }
+          Write-Host "Installed: $exe"
+          $uninstall = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object { $_.DisplayName -eq 'Thoughts' }
+          if (-not $uninstall) { throw 'No uninstall entry for Thoughts (Settings > Apps would not list it)' }
+          Write-Host "Uninstall entry: version $($uninstall.DisplayVersion)"
+
+          # The background service alone, with its own empty home folder.
+          $env:THOUGHTS_HOME = Join-Path $env:RUNNER_TEMP 'thoughts-home'
+          New-Item -ItemType Directory -Force $env:THOUGHTS_HOME | Out-Null
+          $daemon = Start-Process -FilePath $exe -ArgumentList '--daemon' -PassThru
+          $info = Join-Path $env:THOUGHTS_HOME 'daemon.json'
+          for ($i = 0; $i -lt 60 -and -not (Test-Path $info); $i++) { Start-Sleep -Seconds 1 }
+          if (-not (Test-Path $info)) { throw 'The background service wrote no daemon.json within 60 seconds' }
+          $port = (Get-Content $info -Raw | ConvertFrom-Json).port
+          $open = $false
+          for ($i = 0; $i -lt 30 -and -not $open; $i++) {
+            $open = (Test-NetConnection -ComputerName 127.0.0.1 -Port $port -WarningAction SilentlyContinue).TcpTestSucceeded
+            if (-not $open) { Start-Sleep -Seconds 1 }
+          }
+          if (-not $open) { throw "The background service does not answer on port $port" }
+          if ($daemon.HasExited) { throw "The background service ended with code $($daemon.ExitCode)" }
+          Write-Host "The background service is running and listens on port $port"
+
+          # The app itself, against the same home folder.
+          $app = Start-Process -FilePath $exe -PassThru
+          Start-Sleep -Seconds 20
+          if ($app.HasExited) { throw "The app ended by itself with code $($app.ExitCode) within 20 seconds" }
+          Write-Host 'The app is still running after 20 seconds'
+          Get-Process | Where-Object { $_.Path -eq $exe } | Stop-Process -Force -ErrorAction SilentlyContinue
+          "## Windows installer`n`nInstalled silently for the current user, the background service started and listened on its port, and the app was still running after 20 seconds. Nobody looked at the window." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
   # Once, after every platform has built: checks the set of installers is complete and intact,
   # and writes the updater manifest (latest.json) from all platforms in one go. Read-only.
@@ -479,11 +557,12 @@ jobs:
   # The only job that can write to the repository; it runs none of the project's dependencies.
   publish:
     name: Draft release
-    needs: [preflight, ci-status, tests, assemble]
+    needs: [preflight, ci-status, tests, assemble, smoke-windows]
     if: >-
       ${{ !cancelled()
       && needs.preflight.outputs.mode == 'release'
       && needs.assemble.result == 'success'
+      && needs.smoke-windows.result == 'success'
       && needs.ci-status.result == 'success'
       && (needs.tests.result == 'success'
       || (needs.tests.result == 'skipped' && needs.ci-status.outputs.tests-needed == 'false')) }}
