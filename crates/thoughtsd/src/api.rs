@@ -446,6 +446,7 @@ fn check_remote_url(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // used on macOS, and by the tests everywhere
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
 }
@@ -988,6 +989,7 @@ fn windows_run_value(exe: &str) -> String { format!("\"{exe}\" --daemon") }
 
 /// Is this program running from macOS "App Translocation" — a random, read-only copy the system
 /// makes when an app is opened without having been moved out of Downloads?
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))] // used on macOS, and by the tests everywhere
 fn translocated(exe: &str) -> bool { exe.contains("/AppTranslocation/") }
 
 /// The process id launchd reports for a loaded job (`launchctl print`: a line `pid = 123`).
