@@ -98,12 +98,12 @@ impl<'a> Git<'a> {
     }
 
     pub async fn chat_running(&self, chat_id: &str) -> bool {
-        match self.0 { Some(state) => state.chats.get(chat_id).await.map_or(false, |c| c.running), None => false }
+        match self.0 { Some(state) => state.chats.get(chat_id).await.is_some_and(|c| c.running), None => false }
     }
 
     /// Was this chat's last run cut off by the app stopping?
     pub async fn chat_interrupted(&self, chat_id: &str) -> bool {
-        match self.0 { Some(state) => state.chats.get(chat_id).await.map_or(false, |c| c.interrupted), None => false }
+        match self.0 { Some(state) => state.chats.get(chat_id).await.is_some_and(|c| c.interrupted), None => false }
     }
 
     /// Run a git command that records something, as the app itself (the staging copy's own
@@ -233,7 +233,7 @@ impl LayerFiles for &Path {
     fn has_file(&self, rel: &str) -> bool { self.join(rel).is_file() }
     fn file_names(&self, sub: &str) -> Vec<String> {
         std::fs::read_dir(self.join(sub)).into_iter().flatten().flatten()
-            .filter(|e| !e.file_name().to_string_lossy().starts_with('.') && e.file_type().map_or(false, |t| t.is_file()))
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.') && e.file_type().is_ok_and(|t| t.is_file()))
             .map(|e| e.file_name().to_string_lossy().to_string()).collect()
     }
     fn workflows(&self) -> Vec<crate::workflows::Workflow> { crate::workflows::load(self) }
@@ -301,7 +301,7 @@ fn resolve_decl_in(dir: &dyn LayerFiles, sub: &str, file: &str, shared: &Value, 
     // The only folders it may read in (empty: the whole library but private folders). A folder that
     // cannot be one is dropped; when nothing is left of a list that was given, it reads nothing.
     let read: Option<Vec<String>> = decl["read"].as_array().map(|l| l.iter().filter_map(Value::as_str).filter_map(|w| clean_write_folder(w).ok()).take(20).collect());
-    let reads_nothing = read.as_ref().map_or(false, Vec::is_empty);
+    let reads_nothing = read.as_ref().is_some_and(Vec::is_empty);
     let unsupported = version > API_VERSION;
     let mut v = json!({
         "permissions": permissions, "write": write, "read": read.unwrap_or_default(), "readsNothing": reads_nothing, "apiVersion": version,
@@ -338,7 +338,7 @@ fn manifest_with(dir: &dyn LayerFiles, arabic: bool, off: &BTreeSet<String>, bun
     // What the user switched off is not handed to the UI at all: it is listed under `off` only.
     let list = |sub: &str, ext: &str| -> Vec<Value> {
         let mut v: Vec<Value> = dir.file_names(sub).into_iter()
-            .filter(|name| Path::new(name).extension().map_or(false, |x| x == ext))
+            .filter(|name| Path::new(name).extension().is_some_and(|x| x == ext))
             .filter(|name| !off.contains(&format!("{sub}/{name}")))
             .map(|name| {
                 let mut item = resolve_decl_in(dir, sub, &name, &shared, arabic);
@@ -457,7 +457,7 @@ pub(crate) async fn app_change(g: Git<'_>, dir: &Path, subject: &str, act: Act, 
 }
 
 fn known_item<'p>(dir: &Path, path: &'p str) -> anyhow::Result<(&'static str, &'p str)> {
-    let item = item_path(path).filter(|_| std::fs::symlink_metadata(dir.join(path)).map_or(false, |m| m.is_file()));
+    let item = item_path(path).filter(|_| std::fs::symlink_metadata(dir.join(path)).is_ok_and(|m| m.is_file()));
     item.ok_or_else(|| crate::tr::err("addon.gone", &[]))
 }
 
@@ -482,7 +482,7 @@ pub async fn switch_in(g: Git<'_>, dir: &Path, path: &str, on: bool) -> anyhow::
 fn builtin_pages_of(dir: &dyn LayerFiles) -> Vec<String> {
     let v: Value = dir.file(ADDONS_FILE).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
     let mut out: Vec<String> = v["builtin"].as_array().into_iter().flatten().filter_map(Value::as_str)
-        .filter(|p| crate::staging::pages::page(p).map_or(false, |pg| pg.replace)).map(String::from).collect();
+        .filter(|p| crate::staging::pages::page(p).is_some_and(|pg| pg.replace)).map(String::from).collect();
     out.sort();
     out.dedup();
     out
@@ -503,7 +503,7 @@ pub fn page_words(id: &str, ar: bool) -> String {
 /// Keep showing the app's own `page` although a customisation replaces it (`on = true`), or use
 /// the replacement again. One history entry of its own, undoable like any other.
 pub async fn builtin_in(g: Git<'_>, dir: &Path, page: &str, on: bool) -> anyhow::Result<String> {
-    if !crate::staging::pages::page(page).map_or(false, |p| p.replace) { return Err(anyhow::anyhow!("not a page that can be replaced: {page}")); }
+    if !crate::staging::pages::page(page).is_some_and(|p| p.replace) { return Err(anyhow::anyhow!("not a page that can be replaced: {page}")); }
     let mut list = builtin_pages_of(&dir);
     if list.iter().any(|p| p == page) == on { return Ok(String::new()); }
     let act = Act { kind: "builtin".into(), item: page.to_string(), detail: (if on { "on" } else { "off" }).into() };
@@ -525,7 +525,7 @@ pub async fn nav_in(g: Git<'_>, dir: &Path, nav: &Value, arabic: bool) -> anyhow
     if !problems.is_empty() { return Err(anyhow::anyhow!(problems.join("\n"))); }
     let act = Act { kind: "sidebar".into(), item: "nav.json".into(), ..Default::default() };
     app_change(g, dir, "Edit the sidebar", act, |dir| {
-        let empty = nav.as_object().map_or(true, |o| o.is_empty());
+        let empty = nav.as_object().is_none_or(|o| o.is_empty());
         if empty {
             if !dir.join("nav.json").exists() { return Ok(vec![]); }
             std::fs::remove_file(dir.join("nav.json"))?;
@@ -547,7 +547,7 @@ pub async fn remove_in(g: Git<'_>, dir: &Path, path: &str) -> anyhow::Result<Str
         let mut touched = vec![path.to_string()];
         std::fs::remove_file(dir.join(path))?;
         let decl = format!("{sub}/{stem}.json");
-        if std::fs::symlink_metadata(dir.join(&decl)).map_or(false, |m| m.is_file()) {
+        if std::fs::symlink_metadata(dir.join(&decl)).is_ok_and(|m| m.is_file()) {
             std::fs::remove_file(dir.join(&decl))?;
             touched.push(decl);
         }
@@ -571,7 +571,7 @@ pub async fn remove_in(g: Git<'_>, dir: &Path, path: &str) -> anyhow::Result<Str
 pub async fn withdraw_in(g: Git<'_>, dir: &Path, path: &str, permission: &str) -> anyhow::Result<String> {
     let (sub, file) = known_item(dir, path)?;
     let shared_of = |dir: &Path| std::fs::read_to_string(dir.join("manifest.json")).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).unwrap_or(Value::Null);
-    let granted = |dir: &Path| resolve_decl(dir, sub, file, &shared_of(dir), false)["permissions"].as_array().map_or(false, |a| a.iter().any(|p| p == permission));
+    let granted = |dir: &Path| resolve_decl(dir, sub, file, &shared_of(dir), false)["permissions"].as_array().is_some_and(|a| a.iter().any(|p| p == permission));
     if !granted(dir) { return Err(crate::tr::err("addon.no_permission", &[])); }
     let act = Act { kind: "permission".into(), item: path.to_string(), detail: permission.to_string() };
     app_change(g, dir, &format!("Take away {permission} from {path}"), act, |dir| {
@@ -610,7 +610,7 @@ pub fn addons_of(dir: &Path, arabic: bool) -> Vec<Value> {
     let mut out = vec![];
     for (sub, ext, kind) in [("plugins", "js", "plugin"), ("views", "html", "view")] {
         let mut names: Vec<String> = std::fs::read_dir(dir.join(sub)).into_iter().flatten().flatten()
-            .filter(|e| e.file_type().map_or(false, |t| t.is_file()) && e.path().extension().map_or(false, |x| x == ext))
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && e.path().extension().is_some_and(|x| x == ext))
             .map(|e| e.file_name().to_string_lossy().to_string()).filter(|n| !n.starts_with('.')).collect();
         names.sort();
         for name in names {
@@ -748,7 +748,7 @@ async fn seed_marks(g: Git<'_>, dir: &Path) -> Marks {
         }
         let Some(of) = bodies.get(hash).and_then(|b| b.trim_end_matches(['\n', '\r']).strip_prefix("Reverts: ")).filter(|h| full_hash(h)) else { continue };
         let older = recs[i + 1..].iter().find(|o| o[0] == of);
-        if older.map_or(false, |o| subject == format!("Undo: {}", o[1].trim()) || subject == format!("Undo: {}", clean_subject(&o[1]))) {
+        if older.is_some_and(|o| subject == format!("Undo: {}", o[1].trim()) || subject == format!("Undo: {}", clean_subject(&o[1]))) {
             m.undo.insert(hash.clone(), of.to_string());
         }
     }

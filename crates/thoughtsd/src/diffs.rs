@@ -41,7 +41,7 @@ fn edit_script(a: &[&str], b: &[&str]) -> Vec<Op> {
     while suf < a.len() - pre && suf < b.len() - pre && a[a.len() - 1 - suf] == b[b.len() - 1 - suf] { suf += 1; }
     let mut ops = vec![Op::Same; pre];
     ops.extend(middle(&a[pre..a.len() - suf], &b[pre..b.len() - suf]));
-    ops.extend(std::iter::repeat(Op::Same).take(suf));
+    ops.extend(std::iter::repeat_n(Op::Same, suf));
     ops
 }
 
@@ -148,7 +148,7 @@ pub fn lines_between(old: &str, new: &str, max: usize) -> (usize, usize, Vec<(us
 
 /// One document for the window: its two versions (None where it does not exist) compared.
 pub fn document(path: &str, from: Option<&str>, change: &str, old: Option<&[u8]>, new: Option<&[u8]>) -> Value {
-    let binary = old.map_or(false, is_binary) || new.map_or(false, is_binary);
+    let binary = old.is_some_and(is_binary) || new.is_some_and(is_binary);
     if binary {
         return json!({"path": path, "from": from, "change": change, "binary": true, "detail": false, "added": null, "removed": null, "more": 0, "hunks": []});
     }
@@ -276,10 +276,10 @@ pub async fn with_now(state: &AppState, dir: &Path, rel: &str, hash: &str, was: 
     // Both sizes are looked at before either side is read.
     if crate::git::valid_hash(hash) {
         let then_at = format!("{hash}:{}", was.unwrap_or(rel).trim_start_matches("./").trim_start_matches('/').replace('\\', "/"));
-        if size_of(state, dir, &then_at).await.map_or(false, |n| n > MAX_BYTES) { return big(); }
+        if size_of(state, dir, &then_at).await.is_some_and(|n| n > MAX_BYTES) { return big(); }
     }
     let target = crate::library::resolve(dir, rel)?;
-    if std::fs::metadata(&target).map_or(false, |m| m.is_file() && m.len() > MAX_BYTES) { return big(); }
+    if std::fs::metadata(&target).is_ok_and(|m| m.is_file() && m.len() > MAX_BYTES) { return big(); }
     let then = crate::git::file_at(state, dir, was.unwrap_or(rel), hash).await?;
     let now = match std::fs::metadata(&target) {
         Ok(m) if m.is_file() && m.len() > MAX_BYTES => return big(),
@@ -305,7 +305,7 @@ pub async fn clash(state: &AppState, dir: &Path, rel: &str) -> anyhow::Result<Va
     }
     let (mine_size, theirs_size) = (size("HEAD").await, size("FETCH_HEAD").await);
     if mine_size.is_none() && theirs_size.is_none() { return Err(crate::tr::err("not_found.version", &[])); }
-    if mine_size.map_or(false, |n| n > MAX_BYTES) || theirs_size.map_or(false, |n| n > MAX_BYTES) {
+    if mine_size.is_some_and(|n| n > MAX_BYTES) || theirs_size.is_some_and(|n| n > MAX_BYTES) {
         return Ok(listing(vec![too_large(rel, None, "edited")]));
     }
     let (mine, theirs) = (side("HEAD", mine_size.is_some()).await?, side("FETCH_HEAD", theirs_size.is_some()).await?);

@@ -161,8 +161,8 @@ pub async fn between(state: &AppState, dir: &Path, from: &str, to: &str) -> anyh
     let (before, after) = if entries.is_empty() { Default::default() } else { (sizes(state, dir, from).await, sizes(state, dir, to).await) };
     let large: Vec<bool> = entries.iter().map(|e| {
         let was = e.from.as_deref().unwrap_or(&e.path);
-        (e.change != "added" && before.get(was).map_or(false, |n| *n > crate::diffs::MAX_BYTES))
-            || (e.change != "deleted" && after.get(&e.path).map_or(false, |n| *n > crate::diffs::MAX_BYTES))
+        (e.change != "added" && before.get(was).is_some_and(|n| *n > crate::diffs::MAX_BYTES))
+            || (e.change != "deleted" && after.get(&e.path).is_some_and(|n| *n > crate::diffs::MAX_BYTES))
     }).collect();
     // Only the documents shown line by line are read, each by its exact name (both names for a move).
     let mut names: Vec<String> = vec![];
@@ -191,7 +191,7 @@ pub async fn between(state: &AppState, dir: &Path, from: &str, to: &str) -> anyh
         let d = d.as_ref();
         json!({
             "path": e.path, "from": e.from, "change": e.change, "detail": d.is_some(), "tooLarge": big,
-            "binary": d.map_or(false, |d| d.binary),
+            "binary": d.is_some_and(|d| d.binary),
             "added": d.map(|d| d.added), "removed": d.map(|d| d.removed), "more": d.map_or(0, |d| d.more),
             "hunks": d.map(|d| d.hunks.iter().map(|(line, lines)| json!({
                 "line": line, "lines": lines.iter().map(|(k, t)| json!([k.to_string(), t])).collect::<Vec<_>>(),

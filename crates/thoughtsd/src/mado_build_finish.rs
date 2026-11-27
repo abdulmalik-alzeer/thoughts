@@ -148,7 +148,7 @@ pub struct ScreenSeen {
 }
 
 impl ScreenSeen {
-    fn ok(&self) -> bool { self.status.map_or(false, |s| s < 400) && self.looked.as_ref().map_or(true, |l| l.ok && l.errors.is_empty()) }
+    fn ok(&self) -> bool { self.status.is_some_and(|s| s < 400) && self.looked.as_ref().is_none_or(|l| l.ok && l.errors.is_empty()) }
 }
 
 // ---------- which phase comes next ----------
@@ -162,8 +162,8 @@ pub fn is_round4(plan: &PlanDoc) -> bool { has_verify(plan) || plan.run.is_some(
 /// What comes after the last wave, while it is not finished: the screen check (with `plan.run`), then
 /// the review. `None`: the build is done.
 pub fn next_phase(b: &BuildState, plan: &PlanDoc) -> Option<BuildStatus> {
-    if plan.run.is_some() && !b.screens.as_ref().map_or(false, BuildScreens::finished) { return Some(BuildStatus::Checking); }
-    if is_round4(plan) && !b.review.as_ref().map_or(false, |r| r.finished) { return Some(BuildStatus::Reviewing); }
+    if plan.run.is_some() && !b.screens.as_ref().is_some_and(BuildScreens::finished) { return Some(BuildStatus::Checking); }
+    if is_round4(plan) && !b.review.as_ref().is_some_and(|r| r.finished) { return Some(BuildStatus::Reviewing); }
     None
 }
 
@@ -210,7 +210,7 @@ fn read_plain(p: &Path, full: bool, max: u64) -> Option<Vec<u8>> {
 pub fn conventions(project: &Path, full: bool) -> Option<String> {
     let dir = mado::mado_dir_of(project, full).ok()?;
     let p = mado::resolve_in(&dir, "conventions.md", full).ok()?;
-    if read_plain(&p, full, 0).is_none() { return None; }
+    read_plain(&p, full, 0)?;
     let bytes = match mado::read_in(&dir, "conventions.md", full, CONVENTIONS_READ) {
         Ok(b) => b?,
         Err(e) => { crate::log::warn(format!("mado build: conventions.md was not given to the runs ({})", crate::tr::classify(&e).message)); return None; }
@@ -248,7 +248,7 @@ pub async fn undo_locked(state: &AppState, wt: &Path, locked: &[String], exempt:
         } else {
             // A new file (git names it relative to the worktree; nothing outside it is removed).
             let p = wt.join(f);
-            if !f.split('/').any(|s| s == ".." || s.is_empty()) && std::fs::symlink_metadata(&p).map_or(false, |m| !m.is_dir()) { let _ = std::fs::remove_file(&p); }
+            if !f.split('/').any(|s| s == ".." || s.is_empty()) && std::fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir()) { let _ = std::fs::remove_file(&p); }
         }
     }
     git_safe(state, wt).await?;

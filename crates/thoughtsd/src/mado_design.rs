@@ -79,7 +79,7 @@ fn read_text(mado: &Path, rel: &str, max: u64) -> anyhow::Result<Option<String>>
 
 /// Is `rel` an ordinary file really inside the plan folder?
 fn has_file(mado: &Path, rel: &str) -> bool {
-    core::resolve_in(mado, rel, full()).map_or(false, |p| std::fs::symlink_metadata(&p).map_or(false, |m| m.is_file()))
+    core::resolve_in(mado, rel, full()).is_ok_and(|p| std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()))
 }
 
 /// The core's state of the project, as the core believes it (`None` before planning started).
@@ -136,7 +136,7 @@ async fn list_styles(State(st): S, UrlPath(project): UrlPath<String>) -> R {
     let mado = mado_dir(&st, &project).await?;
     let (styles, dropped) = candidates(&mado);
     // Round 0.5.0: the candidate that is the product's look today, for the window to offer first.
-    let current = core::existing_in(&mado, full()) && styles.first().map_or(false, |s| s["id"] == CURRENT);
+    let current = core::existing_in(&mado, full()) && styles.first().is_some_and(|s| s["id"] == CURRENT);
     let mut out = json!({"styles": styles, "dropped": dropped});
     if let Some(id) = picked(&project, &mado) { out["picked"] = json!(id); }
     if current { out["current"] = json!(CURRENT); }

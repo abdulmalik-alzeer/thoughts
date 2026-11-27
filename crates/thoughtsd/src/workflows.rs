@@ -62,7 +62,7 @@ fn fits(trigger: &Trigger, day: NaiveDate) -> Option<bool> {
         "month" => match month_day(month)? {
             MonthDay::On(n) => day.day() == n,
             // The last day of a month is the one whose tomorrow is the 1st.
-            MonthDay::Last => day.succ_opt().map_or(true, |t| t.day() == 1),
+            MonthDay::Last => day.succ_opt().is_none_or(|t| t.day() == 1),
         },
         _ => return None,
     })
@@ -75,8 +75,8 @@ pub fn valid(w: &Workflow) -> bool {
     match &w.trigger {
         Trigger::Schedule { every, at, weekday, day, days } => parse_at(at).is_some() && match every.as_str() {
             "day" => true,
-            "week" => weekday.map_or(true, |d| d <= 6),
-            "weekdays" => days.as_ref().map_or(true, |d| !d.is_empty() && d.len() <= 7 && d.iter().all(|x| *x <= 6)),
+            "week" => weekday.is_none_or(|d| d <= 6),
+            "weekdays" => days.as_ref().is_none_or(|d| !d.is_empty() && d.len() <= 7 && d.iter().all(|x| *x <= 6)),
             "month" => month_day(day).is_some(),
             _ => false,
         },
@@ -106,7 +106,7 @@ pub fn content_hash(bytes: &[u8]) -> String {
 /// name: neither hides the other (each is its own workflow, approved on its own).
 pub fn load_files(layer: &Path) -> Vec<Loaded> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(layer.join("workflows")).into_iter().flatten().flatten().map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |x| x == "json") && p.is_file()).collect();
+        .filter(|p| p.extension().is_some_and(|x| x == "json") && p.is_file()).collect();
     files.sort();
     load_entries(files.into_iter().take(50).filter_map(|f| Some((f.file_name()?.to_string_lossy().to_string(), std::fs::read(&f).ok()?))).collect())
 }
@@ -117,7 +117,7 @@ pub fn load_entries(entries: Vec<(String, Vec<u8>)>) -> Vec<Loaded> {
     let mut out: Vec<Loaded> = vec![];
     for (file, bytes) in entries.into_iter().take(50) {
         let Some(mut v) = serde_json::from_slice::<Value>(&bytes).ok() else { continue };
-        if v["name"].as_str().map_or(true, |n| n.trim().is_empty()) {
+        if v["name"].as_str().is_none_or(|n| n.trim().is_empty()) {
             if let Some(o) = v.as_object_mut() { o.insert("name".into(), json!(Path::new(&file).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())); }
         }
         let Ok(w) = serde_json::from_value::<Workflow>(v) else { continue };
@@ -254,7 +254,7 @@ pub fn bind(home: &Path, files: &[String], lib: &str, listed: impl Fn(&str) -> b
     let mut b = load_bound(home);
     let mut changed = false;
     for f in files {
-        if b.get(f).map_or(false, |l| l != lib && listed(l)) { continue; }
+        if b.get(f).is_some_and(|l| l != lib && listed(l)) { continue; }
         if b.get(f).map(String::as_str) != Some(lib) { b.insert(f.clone(), lib.to_string()); changed = true; }
     }
     if changed { save_bound(home, &b)?; }
@@ -455,8 +455,8 @@ pub fn due_at(w: &Workflow, seen: Option<&Seen>, now: NaiveDateTime) -> Option<N
 pub fn due(workflows: &[Loaded], state: &State, now: NaiveDateTime) -> Vec<String> {
     workflows.iter().filter(|l| {
         let seen = state.get(&l.file);
-        if seen.map_or(false, |s| s.chat_id.is_some()) { return false; }
-        missed(&l.workflow, seen, now).is_some() || seen.and_then(|s| s.retry_at).map_or(false, |t| t <= now)
+        if seen.is_some_and(|s| s.chat_id.is_some()) { return false; }
+        missed(&l.workflow, seen, now).is_some() || seen.and_then(|s| s.retry_at).is_some_and(|t| t <= now)
     }).map(|l| l.file.clone()).collect()
 }
 
@@ -473,7 +473,7 @@ pub fn note_result(seen: &mut Seen, ok: bool, now: NaiveDateTime) {
 
 /// A scheduled run of `seen`'s workflow is starting at `now`. A retry keeps its mark, so it is not retried again.
 pub fn note_start(seen: &mut Seen, now: NaiveDateTime) {
-    let retry = seen.retry_at.map_or(false, |t| t <= now);
+    let retry = seen.retry_at.is_some_and(|t| t <= now);
     seen.retried = retry;
     seen.retry_at = None;
     seen.last_run = Some(now);
@@ -515,7 +515,7 @@ fn record(seen: &mut Seen, r: RunResult) {
 
 /// Has the run in progress gone past its time limit?
 pub fn over_time(seen: &Seen, now: NaiveDateTime) -> bool {
-    seen.chat_id.is_some() && seen.started_at.map_or(false, |t| now - t >= Duration::minutes(seen.minutes() as i64))
+    seen.chat_id.is_some() && seen.started_at.is_some_and(|t| now - t >= Duration::minutes(seen.minutes() as i64))
 }
 
 /// The user's limits for one workflow: 1–240 minutes, $0.10–$100.
@@ -551,7 +551,7 @@ pub fn status(layer: &Path, home: &Path, now: NaiveDateTime) -> Vec<Value> {
         let is_off = off.contains(&l.file);
         let last = seen.and_then(|s| s.results.first());
         // A skip is news only until something ran after it.
-        let skipped = seen.and_then(|s| s.skipped).filter(|t| seen.and_then(|s| s.last_run).map_or(true, |r| r < *t));
+        let skipped = seen.and_then(|s| s.skipped).filter(|t| seen.and_then(|s| s.last_run).is_none_or(|r| r < *t));
         json!({
             "name": w.name, "file": l.file, "hash": l.hash, "trigger": w.trigger, "prompt": w.prompt, "approved": ok,
             "duplicateName": l.duplicate_name,
@@ -559,7 +559,7 @@ pub fn status(layer: &Path, home: &Path, now: NaiveDateTime) -> Vec<Value> {
             // Switched off (itself or with its plugin): allowed or not, it does not run.
             "off": is_off,
             "nextRun": if ok && !is_off { due_at(w, seen, now).map(local_iso) } else { None },
-            "running": seen.map_or(false, |s| s.chat_id.is_some()),
+            "running": seen.is_some_and(|s| s.chat_id.is_some()),
             "chatId": seen.and_then(|s| s.chat_id.clone()),
             "last": last.map(result_json),
             "history": seen.map(|s| s.results.iter().map(result_json).collect::<Vec<_>>()).unwrap_or_default(),
@@ -611,7 +611,7 @@ pub(crate) async fn start(state: &Arc<AppState>, file: &str, w: &Workflow, budge
 
 /// Did the user stop this run themselves? (Then it is not a failure to retry.)
 async fn stopped_by_user(state: &AppState, chat_id: &str) -> bool {
-    state.chats.get(chat_id).await.map_or(true, |c| c.messages.last().map_or(false, |m| m.role == "system"))
+    state.chats.get(chat_id).await.is_none_or(|c| c.messages.last().is_some_and(|m| m.role == "system"))
 }
 
 /// Tell the app how a run it did not start by hand ended (or that one was skipped), so the user hears of it.
@@ -632,7 +632,7 @@ pub async fn run_now(state: &Arc<AppState>, file: &str, hash: &str) -> anyhow::R
     refuse_if_off(&layer, &l.file)?;
     let mut st = load_state(&home);
     migrate(&mut st, &load_files(&layer));
-    if busy(state).await || st.get(&l.file).map_or(false, |s| s.chat_id.is_some()) { return Err(crate::tr::err("workflow.busy", &[])); }
+    if busy(state).await || st.get(&l.file).is_some_and(|s| s.chat_id.is_some()) { return Err(crate::tr::err("workflow.busy", &[])); }
     let budget = st.get(&l.file).map_or(DEFAULT_BUDGET_USD, Seen::budget);
     let id = start(state, &l.file, &l.workflow, budget).await?;
     note_manual_start(st.entry(l.file.clone()).or_default(), &id, Local::now().naive_local());
@@ -662,7 +662,7 @@ async fn chat_facts(state: &AppState, chat: &str) -> (String, f64, bool, bool) {
         // The sentence shown, and the assistant's own words behind it ("Run ended: error_max_budget_usd").
         let error = c.messages.iter().rev().take(3).find(|m| m.role == "error")
             .map(|m| format!("{} {}", m.text, m.tool.as_ref().and_then(|t| t["detail"].as_str()).unwrap_or_default())).unwrap_or_default();
-        (error, c.cost_usd, c.interrupted, c.messages.last().map_or(false, |m| m.role == "error"))
+        (error, c.cost_usd, c.interrupted, c.messages.last().is_some_and(|m| m.role == "error"))
     }).await.unwrap_or_default()
 }
 
@@ -721,7 +721,7 @@ pub async fn run_loop(state: Arc<AppState>) {
                 if seen.approved_hash.is_some() || seen.first_seen.is_none() { seen.first_seen = Some(now); seen.retry_at = None; }
                 seen.approved_hash = Some(l.hash.clone());
                 changed = true;
-            } else if !ok && seen.approved_hash.as_deref().map_or(true, |h| !h.is_empty()) {
+            } else if !ok && seen.approved_hash.as_deref().is_none_or(|h| !h.is_empty()) {
                 seen.approved_hash = Some(String::new());
                 seen.retry_at = None;
                 changed = true;
@@ -746,7 +746,7 @@ pub async fn run_loop(state: Arc<AppState>) {
             let (error, cost, interrupted, ends_in_error) = chat_facts(&state, &chat).await;
             // No word of it and it is not running: the daemon restarted under it, or the event was missed.
             let ok = finished.iter().find(|(id, _)| *id == chat).map_or(!ends_in_error && !interrupted, |(_, ok)| *ok);
-            let by_limit = { let mut l = LIMITED.lock().unwrap_or_else(|e| e.into_inner()); let was = l.iter().any(|c| *c == chat); l.retain(|c| *c != chat); was };
+            let by_limit = { let mut l = LIMITED.lock().unwrap_or_else(|e| e.into_inner()); let was = l.contains(&chat); l.retain(|c| *c != chat); was };
             let by_user = !ok && stopped_by_user(&state, &chat).await;
             let out = outcome(ok, by_user, by_limit, interrupted, cost, seen.budget(), &error);
             if out == "spendLimit" {

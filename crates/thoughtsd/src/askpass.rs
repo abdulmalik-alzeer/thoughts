@@ -83,6 +83,12 @@ impl Ticket {
     pub fn code(&self) -> &str { &self.code }
 }
 
+impl Default for Ticket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for Ticket {
     fn drop(&mut self) { live().retain(|c| c != &self.code); }
 }
@@ -153,7 +159,7 @@ pub fn answered(host: &str) -> bool {
 /// address the app sets up signs in with one.
 pub(crate) fn host_asked(prompt: &str) -> Option<String> {
     let url = prompt.split('\'').nth(1)?;
-    if !url.get(..8).map_or(false, |s| s.eq_ignore_ascii_case("https://")) { return None; }
+    if !url.get(..8).is_some_and(|s| s.eq_ignore_ascii_case("https://")) { return None; }
     crate::git::host_of(url)
 }
 

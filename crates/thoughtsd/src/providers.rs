@@ -318,7 +318,7 @@ pub fn decide(cur: (Option<&str>, bool, bool), url: Option<&str>, key: Option<&s
     let (cur_dest, cur_has, cur_keyless) = cur;
     let moved = cur_dest != url;
     let keyless = url.is_some() && key.is_none() && (no_key || (cur_keyless && !moved));
-    if keyless && !url.map_or(false, |u| crate::settings::keyless_allowed(u, full)) { return Err(crate::tr::err("provider.key_remote", &[])); }
+    if keyless && !url.is_some_and(|u| crate::settings::keyless_allowed(u, full)) { return Err(crate::tr::err("provider.key_remote", &[])); }
     let keeps_key = cur_has && !moved && !keyless;
     if url.is_some() && key.is_none() && !keeps_key && !keyless { return Err(crate::tr::err("provider.key_needed", &[])); }
     Ok(Change { has_api_token: url.is_some() && (key.is_some() || keeps_key), keyless, drops_old_key: key.is_none() && cur_has && (moved || keyless || url.is_none()), moved })

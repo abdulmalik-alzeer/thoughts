@@ -54,7 +54,7 @@ const READY: &str = "ready.json";
 pub fn installed(home: &Path) -> bool {
     let d = dir(home);
     let ready = std::fs::read_to_string(d.join(READY)).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok());
-    ready.map_or(false, |r| r["model"] == tag()) && FILES.iter().all(|f| checked(&d, f))
+    ready.is_some_and(|r| r["model"] == tag()) && FILES.iter().all(|f| checked(&d, f))
 }
 
 /// Where the files come from: the Hub at the pinned commit. Tests point it at a local server.
@@ -71,9 +71,9 @@ pub fn checked_url(raw: &str) -> Option<url::Url> {
     let u = url::Url::parse(raw).ok()?;
     if test_url(&u) { return Some(u); }
     if u.scheme() != "https" || !u.username().is_empty() || u.password().is_some() { return None; }
-    if u.port().map_or(false, |p| p != 443) { return None; }
+    if u.port().is_some_and(|p| p != 443) { return None; }
     let Some(url::Host::Domain(host)) = u.host() else { return None };
-    let ok = host == HOST || host.strip_suffix(".hf.co").map_or(false, |sub| !sub.is_empty() && sub.split('.').all(|l| !l.is_empty()));
+    let ok = host == HOST || host.strip_suffix(".hf.co").is_some_and(|sub| !sub.is_empty() && sub.split('.').all(|l| !l.is_empty()));
     ok.then_some(u)
 }
 
@@ -117,8 +117,8 @@ pub(crate) fn download_files(home: &Path, base: &str, files: &[File], cancel: &A
 
 /// A file already in place that was checked when it was fetched (its `.ok` mark holds the hash).
 fn checked(d: &Path, f: &File) -> bool {
-    std::fs::symlink_metadata(d.join(f.name)).map_or(false, |m| m.is_file() && m.len() == f.bytes)
-        && std::fs::read_to_string(d.join(format!("{}.ok", f.name))).map_or(false, |s| s == f.sha256)
+    std::fs::symlink_metadata(d.join(f.name)).is_ok_and(|m| m.is_file() && m.len() == f.bytes)
+        && std::fs::read_to_string(d.join(format!("{}.ok", f.name))).is_ok_and(|s| s == f.sha256)
 }
 
 /// The partial file's companion: where it came from, the server's tag for it, and how much is in.

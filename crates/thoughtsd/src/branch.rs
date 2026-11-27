@@ -101,7 +101,7 @@ pub fn kept_files(chat: &str, of: &Msg, wanted: &[String]) -> Vec<String> {
     let named = |n: &str| wanted.iter().any(|w| w == n || Path::new(w).file_name().and_then(|x| x.to_str()) == Some(n));
     of.attachments.iter().filter(|p| {
         let p = Path::new(p);
-        p.parent() == Some(dir.as_path()) && p.file_name().and_then(|n| n.to_str()).map_or(false, named)
+        p.parent() == Some(dir.as_path()) && p.file_name().and_then(|n| n.to_str()).is_some_and(named)
     }).cloned().collect()
 }
 
@@ -118,7 +118,7 @@ pub fn copy_files(from: &str, to: &str, files: &[String]) -> anyhow::Result<Vec<
         for n in &names {
             let s = src.join(n);
             // A plain file only, never a link out of the folder.
-            if !std::fs::symlink_metadata(&s).map_or(false, |m| m.is_file()) { continue; }
+            if !std::fs::symlink_metadata(&s).is_ok_and(|m| m.is_file()) { continue; }
             let d = dst.join(n);
             if d.exists() { done.push((s.to_string_lossy().into(), d.to_string_lossy().into())); continue; }
             std::fs::copy(&s, &d)?;
@@ -143,8 +143,8 @@ fn session_ends_at(orig: &Chat, at: &str, help: &str) -> Option<String> {
     let sid = orig.session_id.clone()?;
     let ok = orig.kind == "chat" && crate::assistant::of_chat(&orig.provider) == Program::Claude && !orig.running
         // A move to the other program that has not happened yet: the session is on its way out.
-        && !orig.meta.get("handoff").map_or(false, Value::is_object)
-        && last_said(orig).map_or(false, |m| m.id == at && m.role == "assistant")
+        && !orig.meta.get("handoff").is_some_and(Value::is_object)
+        && last_said(orig).is_some_and(|m| m.id == at && m.role == "assistant")
         && crate::claude::supports(help, "--resume") && crate::claude::supports(help, "--fork-session");
     ok.then_some(sid)
 }
@@ -223,7 +223,7 @@ pub fn fork_from(orig: Option<&Chat>, b: &Chat, help: &str) -> Option<String> {
     let point = info["point"].as_str()?;
     if last_said(b).map(|m| m.id.as_str()) != Some(point) { return None; }
     let found = session_ends_at(orig?, point, help)?;
-    (found == sid).then(|| found)
+    (found == sid).then_some(found)
 }
 
 #[cfg(test)]

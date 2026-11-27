@@ -107,7 +107,7 @@ pub fn supported(help: &str) -> bool {
 /// the app starts by itself have no commands already, except set-up and Reorganize.
 pub fn strict_applies(on: bool, private: &[String], kind: &str, mode: &str) -> bool {
     on && matches!(kind, "chat" | "customize") && mode != crate::settings::BYPASS
-        && private.iter().any(|p| crate::paths::clean_rel(p).map_or(false, |c| !c.is_empty()))
+        && private.iter().any(|p| crate::paths::clean_rel(p).is_ok_and(|c| !c.is_empty()))
 }
 
 /// The MCP config a run that asks is started with: this daemon's endpoint and the run's token.
@@ -442,7 +442,7 @@ fn in_private(abs: &Path, ctx: &RunCtx) -> bool {
     let Some(lib) = &ctx.library else { return false };
     if ctx.private.is_empty() { return false; }
     let private: Vec<String> = ctx.private.iter().filter_map(|p| crate::paths::clean_rel(p).ok()).filter(|p| !p.is_empty()).collect();
-    library_rel(abs, lib).map_or(false, |rel| crate::paths::is_private(lib, &rel, &private))
+    library_rel(abs, lib).is_some_and(|rel| crate::paths::is_private(lib, &rel, &private))
 }
 
 fn inside_dirs(abs: &Path, ctx: &RunCtx) -> bool {
@@ -558,12 +558,12 @@ pub async fn ask(state: &Arc<AppState>, token: &str, req: Request, wait: Duratio
     let (ctx, asked_before) = {
         let mut g = state.approvals.lock();
         let Some(run) = g.runs.get_mut(token) else { return Verdict::Deny(ENDED.into()) };
-        let before = req.tool_use_id.as_ref().map_or(false, |id| !run.seen.insert(id.clone()));
+        let before = req.tool_use_id.as_ref().is_some_and(|id| !run.seen.insert(id.clone()));
         (run.ctx.clone(), before)
     };
     // A tool use that already has its result ran (or was refused) long ago: not something to ask about.
     let done = match &req.tool_use_id {
-        Some(id) => state.chats.with(&ctx.chat_id, |c| c.messages.iter().any(|m| m.role == "tool_result" && m.tool.as_ref().map_or(false, |t| t["toolUseId"] == id.as_str()))).await.unwrap_or(false),
+        Some(id) => state.chats.with(&ctx.chat_id, |c| c.messages.iter().any(|m| m.role == "tool_result" && m.tool.as_ref().is_some_and(|t| t["toolUseId"] == id.as_str()))).await.unwrap_or(false),
         None => false,
     };
     let always = state.approvals.always(&ctx.chat_id);
@@ -770,7 +770,7 @@ async fn mcp_post(State(st): State<Arc<AppState>>, headers: HeaderMap, body: axu
         Err(_) => return (StatusCode::BAD_REQUEST, Json(rpc_err(&Value::Null, -32700, "parse error"))).into_response(),
     };
     if !msg.is_object() { return (StatusCode::BAD_REQUEST, Json(rpc_err(&Value::Null, -32600, "one message per request"))).into_response(); }
-    let is_call = msg["method"] == "tools/call" && msg.get("id").map_or(false, |v| !v.is_null());
+    let is_call = msg["method"] == "tools/call" && msg.get("id").is_some_and(|v| !v.is_null());
     if !is_call {
         return match reply_to(&msg) { Some(v) => Json(v).into_response(), None => StatusCode::ACCEPTED.into_response() };
     }
@@ -779,7 +779,7 @@ async fn mcp_post(State(st): State<Arc<AppState>>, headers: HeaderMap, body: axu
         return Json(rpc_ok(&id, json!({"content": [{"type": "text", "text": "unknown tool"}], "isError": true}))).into_response();
     }
     let req = Request::from_args(&msg["params"]["arguments"]);
-    let streams = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok()).map_or(false, |a| a.contains("text/event-stream"));
+    let streams = headers.get(header::ACCEPT).and_then(|h| h.to_str().ok()).is_some_and(|a| a.contains("text/event-stream"));
     let work = async move {
         let v = ask(&st, &token, req, WAIT).await;
         rpc_ok(&id, json!({"content": [{"type": "text", "text": v.text()}]}))

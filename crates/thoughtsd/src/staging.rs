@@ -86,7 +86,7 @@ pub fn set_request(d: &Dirs, text: &str) {
 /// `set_request` for the first message of a customisation chat: the words that started the change.
 /// A later message in the same chat keeps building on that change and leaves them as they are.
 pub fn note_request(d: &Dirs, text: &str) {
-    if load_meta(d).map_or(false, |m| m.request.is_empty()) { set_request(d, text); }
+    if load_meta(d).is_some_and(|m| m.request.is_empty()) { set_request(d, text); }
 }
 
 /// Remember what an imported pack calls itself.
@@ -315,14 +315,14 @@ pub async fn prepare_run(state: &AppState, chat_id: &str) -> anyhow::Result<Path
     let g = Git(Some(state));
     crate::applayer::ensure_in(g, &d).await?;
     sync(g, &d).await;
-    let mine = |d: &Dirs| staged(d) && load_meta(d).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id));
+    let mine = |d: &Dirs| staged(d) && load_meta(d).is_some_and(|m| m.chat_id.as_deref() == Some(chat_id));
     if !mine(&d) {
         if let Some(x) = drafts(&d).into_iter().rev().find(|x| x.meta.chat_id.as_deref() == Some(chat_id)) {
             if let Ok(Some(a)) = open_draft(g, &d, &x.id).await { announce(g, &a.draft); }
             sync(g, &d).await;
         }
     }
-    let reuse = mine(&d) && load_meta(&d).map_or(false, |m| m.stale_at.is_empty());
+    let reuse = mine(&d) && load_meta(&d).is_some_and(|m| m.stale_at.is_empty());
     if !reuse { replace_for(g, &d, "customize", chat_id).await?; }
     let (library, private) = { let s = state.settings.read().await; (s.library(), s.private_paths.clone()) };
     // The staging copy is the app's own folder (exempt from the trust check like the layer itself);
@@ -364,7 +364,7 @@ async fn outside_of_run(g: Git<'_>, d: &Dirs, m: &Meta, library: Option<&Path>, 
         // A private file can only be recognised in the steps by its real name, which is looked up now
         // and never written down (one that was deleted has no name left to find).
         let names: std::collections::HashMap<String, String> = uncommitted(g, l).await.into_iter().map(|(_, p)| (snapshot_key(l, &p, private), p)).collect();
-        hidden_by_run = secret.iter().filter(|k| names.get(*k).map_or(false, |p| named_by(steps, l, p))).count();
+        hidden_by_run = secret.iter().filter(|k| names.get(*k).is_some_and(|p| named_by(steps, l, p))).count();
         by_run = named.iter().filter(|p| named_by(steps, l, p)).cloned().collect();
         outside = named;
     }
@@ -485,7 +485,7 @@ pub async fn set_aside(g: Git<'_>, d: &Dirs) -> anyhow::Result<usize> {
     for (xy, path) in &found {
         let src = d.layer.join(path);
         let meta = std::fs::symlink_metadata(&src).ok();
-        let regular = meta.as_ref().map_or(false, |m| m.is_file());
+        let regular = meta.as_ref().is_some_and(|m| m.is_file());
         let untracked = *xy == "??";
         if crate::packs::check_path(path).is_ok() && (regular || meta.is_none()) {
             let dest = d.held.join("files").join(path);
@@ -583,13 +583,13 @@ pub async fn sync(g: Git<'_>, d: &Dirs) {
         Ok(_) => m.stale_at.clear(),
         Err(e) => {
             // Stale only when the two really clash; anything else (git busy for a moment) is tried again next time.
-            let clash = g.run(&d.staging, &["ls-files", "-u"]).await.map_or(false, |o| !o.trim().is_empty());
+            let clash = g.run(&d.staging, &["ls-files", "-u"]).await.is_ok_and(|o| !o.trim().is_empty());
             let _ = g.run(&d.staging, &["merge", "--abort"]).await;
             if !clash {
                 crate::log::warn(format!("layer: could not bring the pending change up to date: {e}"));
                 return;
             }
-            crate::log::warn("layer: the pending change no longer fits the app's current customisations".to_string());
+            crate::log::warn("layer: the pending change no longer fits the app's current customisations");
             m.stale_at = live;
         }
     }
@@ -772,7 +772,7 @@ pub async fn replace_for(g: Git<'_>, d: &Dirs, origin: &str, chat_id: &str) -> a
     }
     // Only a follow-up in the chat that made the open change gets here with it still open, and only
     // when that change no longer fits the app (see `prepare_run`): the new run takes its place.
-    let own = load_meta(d).filter(|_| staged(d)).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id));
+    let own = load_meta(d).filter(|_| staged(d)).is_some_and(|m| m.chat_id.as_deref() == Some(chat_id));
     let aside = put_aside(g, d).await.map(|a| Aside { superseded: own, ..a });
     if let Err(e) = recreate(g, d, origin, Some(chat_id)).await {
         if let Some(a) = aside { put_back(g, d, a).await; }
@@ -791,7 +791,7 @@ pub async fn run_start_result(g: Git<'_>, d: &Dirs, chat_id: &str, started: bool
     let aside = replaced().lock().unwrap_or_else(|e| e.into_inner()).remove(&(d.staging.clone(), chat_id.to_string()));
     let Some(a) = aside else { return };
     // Put back only when the staging copy is still the one made for this request.
-    if !started && load_meta(d).map_or(false, |m| m.chat_id.as_deref() == Some(chat_id)) { put_back(g, d, a).await; } else { let_go(g, d, a).await; }
+    if !started && load_meta(d).is_some_and(|m| m.chat_id.as_deref() == Some(chat_id)) { put_back(g, d, a).await; } else { let_go(g, d, a).await; }
 }
 
 /// Open the draft `id` for review. The change that was open is set aside in its place (and
@@ -837,7 +837,7 @@ async fn changes(g: Git<'_>, d: &Dirs) -> anyhow::Result<(Vec<(String, &'static 
 
 fn read_summary(d: &Dirs) -> String {
     let p = d.staging.join("SUMMARY.md");
-    if !std::fs::symlink_metadata(&p).map_or(false, |m| m.is_file() && m.len() < 64 * 1024) { return String::new(); }
+    if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file() && m.len() < 64 * 1024) { return String::new(); }
     // Shown as it is: anything in it that would not show is written out.
     validate::show_hidden(std::fs::read_to_string(p).unwrap_or_default().trim(), true)
 }
@@ -852,7 +852,7 @@ fn read_staged(d: &Dirs, files: &[(String, &'static str)]) -> Vec<Staged> {
     files.iter().take(crate::packs::MAX_FILES * 2).map(|(path, status)| {
         let src = d.staging.join(path);
         let bytes = if *status == "deleted" { None } else {
-            let fits = std::fs::symlink_metadata(&src).map_or(false, |m| m.is_file() && m.len() as usize <= crate::packs::MAX_FILE_BYTES && total + m.len() as usize <= crate::packs::MAX_TOTAL_BYTES * 2);
+            let fits = std::fs::symlink_metadata(&src).is_ok_and(|m| m.is_file() && m.len() as usize <= crate::packs::MAX_FILE_BYTES && total + m.len() as usize <= crate::packs::MAX_TOTAL_BYTES * 2);
             let b = if fits { std::fs::read(&src).unwrap_or_default() } else { vec![] };
             total += b.len();
             Some(b)
@@ -882,7 +882,7 @@ fn signature_of(staged: &[Staged]) -> String {
 }
 
 fn text_of(p: &Path) -> String {
-    if !std::fs::symlink_metadata(p).map_or(false, |m| m.is_file() && m.len() as usize <= crate::packs::MAX_FILE_BYTES) { return String::new(); }
+    if !std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file() && m.len() as usize <= crate::packs::MAX_FILE_BYTES) { return String::new(); }
     std::fs::read_to_string(p).unwrap_or_default()
 }
 
@@ -950,7 +950,7 @@ fn describe_staged(d: &Dirs, m: &Meta, files: &[(String, &'static str)], ignored
         "css": css, "pack": pack, "resolves": m.resolves, "signature": signature,
         "effects": described["effects"], "installed": described["installed"],
         "phase": match cycle::phase_of(m, running) { cycle::Phase::Running => "running", cycle::Phase::Pending => "pending", cycle::Phase::Continued => "continued" },
-        "continued": !running && m.continued, "canContinue": !running && m.chat_id.as_deref().map_or(false, |c| !c.is_empty()),
+        "continued": !running && m.continued, "canContinue": !running && m.chat_id.as_deref().is_some_and(|c| !c.is_empty()),
         // The plugin this change will be kept as (`bundles::pending_plugin`).
         "plugin": crate::bundles::pending_plugin(d, m, &files, &summary),
     })
@@ -987,12 +987,12 @@ pub async fn details(g: Git<'_>, d: &Dirs) -> Value {
 /// (characters that would not show are written out, so the review hides nothing).
 fn staged_workflow(d: &Dirs, path: &str) -> Option<Value> {
     let p = d.staging.join(path);
-    if !std::fs::symlink_metadata(&p).map_or(false, |m| m.is_file() && m.len() < 256 * 1024) { return None; }
+    if !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_file() && m.len() < 256 * 1024) { return None; }
     let v: Value = serde_json::from_str(&std::fs::read_to_string(&p).ok()?).unwrap_or(Value::Null);
     let stem = Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     let name = v["name"].as_str().filter(|n| !n.trim().is_empty()).map(String::from).unwrap_or(stem);
     let valid = serde_json::from_value::<crate::workflows::Workflow>(json!({"name": name, "trigger": v["trigger"], "prompt": v["prompt"]}))
-        .map_or(false, |w| crate::workflows::valid(&w));
+        .is_ok_and(|w| crate::workflows::valid(&w));
     Some(json!({"path": path, "name": validate::show_hidden(&name, false), "trigger": v["trigger"],
         "prompt": validate::show_hidden(v["prompt"].as_str().unwrap_or_default(), true), "valid": valid}))
 }
@@ -1110,7 +1110,7 @@ pub async fn apply(g: Git<'_>, d: &Dirs, arabic: bool, signature: Option<&str>) 
     if let Some(sig) = signature {
         if sig != current { anyhow::bail!("{}", changed_error(arabic)); }
     }
-    if p["incomplete"] == true && load_meta(d).map_or(true, |m| m.accepted != current) { anyhow::bail!("{}", incomplete_error(arabic)); }
+    if p["incomplete"] == true && load_meta(d).is_none_or(|m| m.accepted != current) { anyhow::bail!("{}", incomplete_error(arabic)); }
     // With full access on, the report is advice only: nothing is refused.
     let problems = if crate::full_access::on() { vec![] } else { validate::problems(&d.staging, &files, arabic) };
     if let Some(first) = problems.first() {

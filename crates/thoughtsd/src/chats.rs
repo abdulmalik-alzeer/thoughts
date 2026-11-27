@@ -132,7 +132,7 @@ pub fn short_title(text: &str) -> String {
     if line.chars().count() <= TITLE_MAX { return line; }
     let cut: String = line.chars().take(TITLE_MAX).collect();
     // Back to the last whole word, unless that would leave almost nothing.
-    let at_word = line.chars().nth(TITLE_MAX).map_or(true, char::is_whitespace);
+    let at_word = line.chars().nth(TITLE_MAX).is_none_or(char::is_whitespace);
     let head = if at_word { cut.as_str() } else {
         match cut.rfind(' ') { Some(i) if cut[..i].chars().count() >= TITLE_MAX / 3 => &cut[..i], _ => cut.as_str() }
     };
@@ -188,7 +188,7 @@ impl ChatMeta {
 
     /// Chats that count toward the next Wrap.
     pub fn is_unwrapped(&self) -> bool {
-        self.kind == "chat" && self.has_user_message && self.wrapped_at.map_or(true, |w| self.updated > w)
+        self.kind == "chat" && self.has_user_message && self.wrapped_at.is_none_or(|w| self.updated > w)
     }
 
     pub fn summary(&self) -> Value {
@@ -248,7 +248,7 @@ impl Chat {
     pub fn is_unwrapped(&self) -> bool {
         self.kind == "chat"
             && self.messages.iter().any(|m| m.role == "user")
-            && self.wrapped_at.map_or(true, |w| self.updated > w)
+            && self.wrapped_at.is_none_or(|w| self.updated > w)
     }
 
     /// The chat without its messages.
@@ -435,7 +435,7 @@ impl ChatStore {
         if let Ok(rd) = std::fs::read_dir(dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.extension().map_or(true, |x| x != "json") { continue; }
+                if p.extension().is_none_or(|x| x != "json") { continue; }
                 let parsed = std::fs::read_to_string(&p).map_err(anyhow::Error::from)
                     .and_then(|s| serde_json::from_str::<Chat>(&s).map_err(anyhow::Error::from));
                 // The id inside the file is what later saves are named after: it must be a plain one.
@@ -527,7 +527,7 @@ impl ChatStore {
             if let Some(d) = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get_mut(id) { d.dirty = true; }
             crate::log::error(format!("chat {id} could not be saved: {e}"));
             let mut last = self.last_error_event.lock().unwrap_or_else(|e| e.into_inner());
-            if last.map_or(true, |t| t.elapsed() > std::time::Duration::from_secs(30)) {
+            if last.is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(30)) {
                 *last = Some(std::time::Instant::now());
                 if let Some(tx) = self.events.get() {
                     let _ = tx.send(serde_json::json!({"type": "chat.persistError", "chatId": id, "error": e.to_string()}));
@@ -568,7 +568,7 @@ impl ChatStore {
         /// The "thinking" line shows only its last words: no need to keep more than this.
         const THINKING_KEEP: usize = 2000;
         // Not for a chat that has just been deleted while its run was still winding down.
-        if self.chats.try_read().map_or(false, |m| !m.contains_key(id)) { return 0; }
+        if self.chats.try_read().is_ok_and(|m| !m.contains_key(id)) { return 0; }
         let mut all = self.partial.lock().unwrap_or_else(|e| e.into_inner());
         let p = all.entry(id.to_string()).or_default();
         if thinking {
@@ -628,7 +628,7 @@ impl ChatStore {
         if c.running != was_running { self.partial.lock().unwrap_or_else(|e| e.into_inner()).remove(id); }
         else if c.messages.len() > had { if let Some(m) = c.messages.last() { self.settle_partial(id, &m.role); } }
         let streaming = was_running && c.running;
-        let due = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get(id).map_or(true, |d| d.last.elapsed() >= PERSIST_DEBOUNCE);
+        let due = self.disk.lock().unwrap_or_else(|e| e.into_inner()).get(id).is_none_or(|d| d.last.elapsed() >= PERSIST_DEBOUNCE);
         self.changed(id);
         // Copied under the lock, written after it is let go: other chats never wait for this file.
         let save = (!streaming || due).then(|| self.save_of(c));
@@ -658,14 +658,14 @@ impl ChatStore {
         let _ = tokio::task::spawn_blocking(move || crate::run_files::clear(&home, Some(&cid))).await;
         // Only a real folder: a link placed there is never followed to whatever it points at.
         let files = crate::paths::attachments_dir().join(id);
-        if std::fs::symlink_metadata(&files).map_or(false, |m| m.is_dir()) { let _ = std::fs::remove_dir_all(&files); }
+        if std::fs::symlink_metadata(&files).is_ok_and(|m| m.is_dir()) { let _ = std::fs::remove_dir_all(&files); }
         Some(chat)
     }
 
     /// Every chat, newest first, without messages — safe to call from periodic loops.
     pub async fn list(&self) -> Vec<ChatMeta> {
         let mut v: Vec<ChatMeta> = self.chats.read().await.values().map(Chat::meta_only).collect();
-        v.sort_by(|a, b| b.updated.cmp(&a.updated));
+        v.sort_by_key(|a| std::cmp::Reverse(a.updated));
         v
     }
 

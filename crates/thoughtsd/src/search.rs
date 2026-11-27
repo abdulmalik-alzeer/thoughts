@@ -190,7 +190,7 @@ pub(crate) fn title_of(text: &str) -> Option<String> {
 }
 
 pub(crate) fn is_text(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).map_or(false, |e| TEXT_EXT.contains(&e.to_ascii_lowercase().as_str()))
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| TEXT_EXT.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 /// Notes (any library file) containing every term. `exclude` = folders left out (private folders).
@@ -209,7 +209,7 @@ pub fn notes(root: &Path, terms: &[String], limit: usize, exclude: &[String]) ->
         let (mtime, len) = (meta.as_ref().and_then(|m| m.modified().ok()), meta.as_ref().map_or(0, |m| m.len()));
         let path = e.path().to_path_buf();
         seen.insert(path.clone());
-        let fresh = cache.get(&path).map_or(false, |c| c.mtime == mtime && c.len == len);
+        let fresh = cache.get(&path).is_some_and(|c| c.mtime == mtime && c.len == len);
         if !fresh {
             let text = if is_text(&path) && len <= TEXT_MAX_BYTES { std::fs::read_to_string(&path).unwrap_or_default() } else { String::new() };
             let title = title_of(&text);
@@ -271,7 +271,7 @@ pub fn chats<'a>(all: impl Iterator<Item = &'a crate::chats::Chat>, terms: &[Str
     let mut out: Vec<(i64, chrono::DateTime<chrono::Utc>, Value)> = vec![];
     for c in all.filter(|c| c.kind == "chat" && !c.archived) {
         seen.insert(c.id.clone());
-        let fresh = cache.get(&c.id).map_or(false, |e| e.updated == c.updated && e.count == c.messages.len() && e.title == c.title);
+        let fresh = cache.get(&c.id).is_some_and(|e| e.updated == c.updated && e.count == c.messages.len() && e.title == c.title);
         if !fresh {
             let msgs = c.messages.iter().filter(|m| shown(&m.role)).enumerate().map(|(i, m)| (i, fold(&m.text))).collect();
             cache.insert(c.id.clone(), ChatEntry { updated: c.updated, count: c.messages.len(), title: c.title.clone(), title_folded: fold(&c.title), msgs });

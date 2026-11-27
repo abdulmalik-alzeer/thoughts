@@ -116,7 +116,7 @@ pub async fn check_now(home: &Path) -> (Stored, bool) {
 
 /// Is an automatic check due?
 pub fn due(s: &Stored, now: chrono::DateTime<chrono::Utc>) -> bool {
-    s.checked_at.map_or(true, |t| now - t >= EVERY || t > now)
+    s.checked_at.is_none_or(|t| now - t >= EVERY || t > now)
 }
 
 /// The weekly check, for users who switched it on. Waits a little after start, then looks every

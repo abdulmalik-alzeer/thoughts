@@ -4,6 +4,14 @@
 //! and bearer token (written to `~/.thoughts/daemon.json`). It owns every AI
 //! session process, so chats survive app restarts and updates.
 
+// Lints this crate does not follow, each for a reason:
+// - `too_many_arguments`, `type_complexity`: a run is described by many separate things, and a
+//   one-off static's type reads better in place than behind a name used once.
+// - `doc_lazy_continuation`: doc comments here wrap list items without indenting the next line.
+// - `possible_missing_else`: short independent `if`s share a line on purpose; none is a lost `else`
+//   (each was read when the lint was switched on for CI).
+#![allow(clippy::too_many_arguments, clippy::type_complexity, clippy::doc_lazy_continuation, clippy::possible_missing_else)]
+
 pub mod addons;
 pub mod api;
 pub mod applayer;

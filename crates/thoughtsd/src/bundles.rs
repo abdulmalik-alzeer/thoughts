@@ -32,7 +32,7 @@ pub const FIRST_APP: &str = "0.5.0";
 
 /// `FIRST_APP`, but never more than this app's own version (a build made before the version number
 /// was raised must still be able to read what it writes).
-pub fn first_app() -> &'static str { if semver(FIRST_APP).map_or(false, |v| v > app_version()) { env!("CARGO_PKG_VERSION") } else { FIRST_APP } }
+pub fn first_app() -> &'static str { if semver(FIRST_APP).is_some_and(|v| v > app_version()) { env!("CARGO_PKG_VERSION") } else { FIRST_APP } }
 
 const MAX_BYTES: usize = 512 * 1024;
 const MAX_BUNDLES: usize = 300;
@@ -161,7 +161,7 @@ pub fn semver(s: &str) -> Option<(u64, u64, u64)> {
 fn app_version() -> (u64, u64, u64) { semver(env!("CARGO_PKG_VERSION")).unwrap_or((0, 0, 0)) }
 
 /// Does a plugin that asks for `min_app` need a newer Thoughts than this one?
-pub fn needs_newer_app(min_app: &str) -> bool { semver(min_app).map_or(false, |v| v > app_version()) }
+pub fn needs_newer_app(min_app: &str) -> bool { semver(min_app).is_some_and(|v| v > app_version()) }
 
 /// A version as its maker wrote it: at most 20 characters of digits, letters, `.`, `+` and `-`, else nothing.
 pub fn clean_version(v: &str) -> String {
@@ -277,7 +277,7 @@ fn save(dir: &Path, f: &BundlesFile) -> anyhow::Result<()> {
     if f.migrated.is_empty() { f.migrated = env!("CARGO_PKG_VERSION").into(); }
     let text = text_of(&f)?;
     let target = dir.join(FILE);
-    if std::fs::symlink_metadata(&target).map_or(false, |m| !m.is_file()) { std::fs::remove_file(&target)?; }
+    if std::fs::symlink_metadata(&target).is_ok_and(|m| !m.is_file()) { std::fs::remove_file(&target)?; }
     std::fs::write(target, text)?;
     Ok(())
 }
@@ -512,7 +512,7 @@ impl<'a> Snap<'a> {
             Claim::File { path } => self.dir.has_file(path),
             Claim::Css { block } => self.blocks.contains(block),
             Claim::Key { file, pointer } => self.value(file).pointer(pointer).is_some(),
-            Claim::Item { file, pointer, matches } => self.value(file).pointer(pointer).and_then(Value::as_array).map_or(false, |a| a.iter().any(|i| item_matches(i, matches))),
+            Claim::Item { file, pointer, matches } => self.value(file).pointer(pointer).and_then(Value::as_array).is_some_and(|a| a.iter().any(|i| item_matches(i, matches))),
         }
     }
 
@@ -566,7 +566,7 @@ pub fn subtract_for_load(dir: &dyn LayerFiles, f: &BundlesFile, out: &mut Value)
         if claims.is_empty() || out[key].is_null() { continue; }
         let left = subtract(&out[key], &claims);
         // A file with nothing left in it reads as no file at all (but Home, which always has one).
-        out[key] = if key != "home" && left.as_object().map_or(false, |o| o.is_empty()) { Value::Null } else { left };
+        out[key] = if key != "home" && left.as_object().is_some_and(|o| o.is_empty()) { Value::Null } else { left };
     }
     let css = out["css"].as_str().unwrap_or_default().to_string();
     let css = css_without(&css, &inactive.iter().flat_map(|b| b.claims.iter()).filter_map(|c| match c { Claim::Css { block } => Some(block.clone()), _ => None }).collect());
@@ -576,7 +576,7 @@ pub fn subtract_for_load(dir: &dyn LayerFiles, f: &BundlesFile, out: &mut Value)
     files.extend(f.off.iter().filter_map(|id| id.strip_prefix("task:")).filter(|p| f.owner_of_file(p).is_none()).map(String::from));
     for sub in ["plugins", "views"] {
         if let Some(list) = out[sub].as_array_mut() {
-            list.retain(|x| !x["name"].as_str().map_or(false, |n| files.contains(&format!("{sub}/{n}"))));
+            list.retain(|x| !x["name"].as_str().is_some_and(|n| files.contains(&format!("{sub}/{n}"))));
         }
     }
     for path in files.iter().filter(|p| task_file(p).is_some()) {
@@ -658,7 +658,7 @@ impl Seen<'_> {
     /// What the add-ons, pages and automatic tasks among `files` may do.
     fn of_files(&self, files: &[&str], ar: bool) -> Does {
         let mut perms: Vec<String> = vec![];
-        for a in self.addons.iter().filter(|a| a["path"].as_str().map_or(false, |p| files.contains(&p))) {
+        for a in self.addons.iter().filter(|a| a["path"].as_str().is_some_and(|p| files.contains(&p))) {
             for p in a["permissions"].as_array().into_iter().flatten().filter_map(Value::as_str) { if !perms.iter().any(|x| x == p) { perms.push(p.into()); } }
         }
         let words = perms.iter().map(|p| applayer::permission_words(p, ar).to_string()).collect();
@@ -833,7 +833,7 @@ pub async fn switch_in(g: Git<'_>, d: &Dirs, id: &str, on: bool) -> anyhow::Resu
 /// Write a top JSON file after something was taken out of it. A file left with nothing in it goes,
 /// unless it is one the app ships (those always exist).
 fn write_top(dir: &Path, file: &str, v: &Value) -> anyhow::Result<()> {
-    let empty = v.is_null() || v.as_object().map_or(false, |o| o.is_empty());
+    let empty = v.is_null() || v.as_object().is_some_and(|o| o.is_empty());
     if empty && !applayer::SHIPPED.iter().any(|(s, _)| *s == file) {
         if dir.join(file).exists() { std::fs::remove_file(dir.join(file))?; }
         return Ok(());
@@ -850,7 +850,7 @@ pub(crate) fn remove_claims(dir: &Path, claims: &[Claim]) -> anyhow::Result<Vec<
     let mut items = vec![];
     for c in claims {
         let Claim::File { path } = c else { continue };
-        if packs::check_path(path).is_err() || !std::fs::symlink_metadata(dir.join(path)).map_or(false, |m| m.is_file()) { continue; }
+        if packs::check_path(path).is_err() || !std::fs::symlink_metadata(dir.join(path)).is_ok_and(|m| m.is_file()) { continue; }
         std::fs::remove_file(dir.join(path))?;
         touched.push(path.clone());
         if applayer::item_path(path).is_some() { items.push(path.clone()); }
@@ -1094,7 +1094,7 @@ pub fn inspect_plugin(pack: &Value, layer: &Path) -> anyhow::Result<Value> {
         "id": p.id, "name": p.name, "version": p.version, "minApp": p.min_app, "layerFormat": p.layer_format,
         "compatible": why.is_none(), "why": why,
         "replaces": old.map(|b| json!({"id": b.id, "version": b.version, "name": b.name})),
-        "olderThanYours": old.map_or(false, |b| older(&p.version, &b.version)),
+        "olderThanYours": old.is_some_and(|b| older(&p.version, &b.version)),
         "migrates": p.layer_format < FORMAT,
     }))
 }
@@ -1605,7 +1605,7 @@ async fn export_route(State(st): S, Query(q): Query<HashMap<String, String>>) ->
     let _g = crate::layer_api::LAYER_LOCK.lock().await;
     let (g, d) = (Git(Some(&st)), Dirs::real());
     ensure(g, &d).await;
-    let pack = if q.get("all").map_or(false, |a| a == "1") { export_all(&d, q.get("name").map_or("", String::as_str))? } else { export_in(&d, q.get("id").map_or("", String::as_str))? };
+    let pack = if q.get("all").is_some_and(|a| a == "1") { export_all(&d, q.get("name").map_or("", String::as_str))? } else { export_in(&d, q.get("id").map_or("", String::as_str))? };
     Ok(Json(crate::pack_file::answer(&pack)?))
 }
 

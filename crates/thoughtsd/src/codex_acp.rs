@@ -140,7 +140,7 @@ pub fn own_settings(dirs: &[&Path], codex_home: &Path) -> bool {
     let home = crate::paths::canonical(codex_home).unwrap_or_else(|_| codex_home.to_path_buf());
     dirs.iter().any(|d| d.ancestors().any(|a| {
         let c = a.join(".codex");
-        if c == codex_home || crate::paths::canonical(&c).map_or(false, |x| x == home) { return false; }
+        if c == codex_home || crate::paths::canonical(&c).is_ok_and(|x| x == home) { return false; }
         std::fs::symlink_metadata(c.join("config.toml")).is_ok()
     }))
 }
@@ -192,7 +192,7 @@ pub fn open_request(cwd: &Path, writable: &[PathBuf], resume: Option<&str>) -> (
 pub fn refusal(options: &Value) -> Option<String> {
     const NO: [&str; 3] = ["decline", "reject_permissions", "cancel"];
     let list: Vec<&Value> = options.as_array().into_iter().flatten().collect();
-    NO.iter().find_map(|id| list.iter().find(|o| o["optionId"] == *id && o["kind"].as_str().map_or(false, |k| k.starts_with("reject"))))
+    NO.iter().find_map(|id| list.iter().find(|o| o["optionId"] == *id && o["kind"].as_str().is_some_and(|k| k.starts_with("reject"))))
         .and_then(|o| o["optionId"].as_str().map(String::from))
 }
 

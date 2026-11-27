@@ -123,7 +123,7 @@ pub fn same_process(process_age: u64, record_age: u64) -> bool { process_age + S
 pub fn started_by_run(process_age: u64, record_age: u64) -> bool { process_age <= record_age + SLACK_SECS }
 
 /// Has the computer been restarted since the record was written? Then nothing recorded is still running.
-pub fn restarted_since(uptime: Option<u64>, record_age: u64) -> bool { uptime.map_or(false, |up| record_age > up + SLACK_SECS) }
+pub fn restarted_since(uptime: Option<u64>, record_age: u64) -> bool { uptime.is_some_and(|up| record_age > up + SLACK_SECS) }
 
 /// How long a live process has been running, in seconds; None when there is no such process.
 #[cfg(unix)]
@@ -179,7 +179,7 @@ pub fn reap_stale(file: &Path) -> usize {
             match command_line(r.pid) {
                 Some(cmd) => {
                     if !looks_like_assistant_run(&cmd) { continue; }
-                    if !process_age(r.pid).map_or(false, |p| same_process(p, age)) {
+                    if !process_age(r.pid).is_some_and(|p| same_process(p, age)) {
                         crate::log::info(format!("process {} is not the run recorded for chat {} (it started later); left alone", r.pid, r.chat_id));
                         continue;
                     }
@@ -194,7 +194,7 @@ pub fn reap_stale(file: &Path) -> usize {
                 // run's — unless every one of them is older than the run, which its children cannot be.
                 None => {
                     let members = group_members(r.pid);
-                    if members.is_empty() || !members.iter().all(|m| process_age(*m).map_or(true, |p| started_by_run(p, age))) { continue; }
+                    if members.is_empty() || !members.iter().all(|m| process_age(*m).is_none_or(|p| started_by_run(p, age))) { continue; }
                     let ok = quiet_kill(&["-TERM", "--", &group]);
                     crate::log::warn(format!("ended {} process(es) the assistant had started for chat {} ({})", members.len(), r.chat_id, if ok { "ok" } else { "failed" }));
                     if ok { ended += 1; }

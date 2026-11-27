@@ -48,9 +48,9 @@ fn is_plan_slug(s: &str) -> bool {
 }
 
 /// A regular file — not a folder and not a link to anything.
-fn is_plain_file(p: &Path) -> bool { std::fs::symlink_metadata(p).map_or(false, |m| m.file_type().is_file()) }
+fn is_plain_file(p: &Path) -> bool { std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_file()) }
 /// A real folder — not a link to one.
-fn is_real_dir(p: &Path) -> bool { std::fs::symlink_metadata(p).map_or(false, |m| m.file_type().is_dir()) }
+fn is_real_dir(p: &Path) -> bool { std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_dir()) }
 
 /// What was deleted. `plans` counts plan files (a session's own and its helpers'); `other` counts
 /// the session's per-session folders (helper transcripts, file copies) and its to-do files.

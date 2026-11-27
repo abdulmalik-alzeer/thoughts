@@ -94,7 +94,7 @@ pub fn waves(plan: &PlanDoc) -> Vec<Wave> {
         let tasks: Vec<&crate::mado::PlanTask> = plan.tasks.iter().filter(|t| lv.get(&t.id).copied().flatten() == Some(w)).collect();
         // Lanes: tasks joined whenever what they own overlaps (directly or through another).
         let mut lane_of: Vec<usize> = (0..tasks.len()).collect();
-        fn root(l: &mut Vec<usize>, i: usize) -> usize { let mut r = i; while l[r] != r { r = l[r]; } l[i] = r; r }
+        fn root(l: &mut [usize], i: usize) -> usize { let mut r = i; while l[r] != r { r = l[r]; } l[i] = r; r }
         for i in 0..tasks.len() {
             for j in 0..i {
                 if owns_overlap(&tasks[i].owns, &tasks[j].owns).is_some() {
@@ -200,7 +200,7 @@ pub fn review_scoped(ar: bool, spec: &str, flow: Option<&GraphDoc>, plan: &PlanD
             }
         }
     }
-    for f in features.iter().filter(|f| f.tasks.is_empty() && scope.map_or(true, |s| s.contains(&f.id))) {
+    for f in features.iter().filter(|f| f.tasks.is_empty() && scope.is_none_or(|s| s.contains(&f.id))) {
         problems.push(problem(ar, "untraced-feature", "mado.p.untraced_feature", &[("feature", &format!("{} — {}", f.id, f.name))], vec![]));
     }
     for s in screen_traces.iter().filter(|s| s.tasks.is_empty()) {

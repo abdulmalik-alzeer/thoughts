@@ -93,8 +93,8 @@ fn intact(home: &Path, dir: &Path, guide: bool) -> bool {
     if !plain(home, dir) { return false; }
     wanted(guide).iter().all(|f| {
         let p = dir.join(f.path());
-        std::fs::symlink_metadata(&p).map_or(false, |m| m.file_type().is_file() && m.len() == f.contents().len() as u64)
-            && std::fs::read(&p).map_or(false, |have| have == f.contents())
+        std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_file() && m.len() == f.contents().len() as u64)
+            && std::fs::read(&p).is_ok_and(|have| have == f.contents())
     })
 }
 
@@ -134,7 +134,7 @@ fn unpack(home: &Path, dir: &Path, guide: bool) -> std::io::Result<()> {
     if let Ok(rd) = std::fs::read_dir(parent) {
         for e in rd.flatten() {
             let p = e.path();
-            if p != dir && std::fs::symlink_metadata(&p).map_or(false, |m| m.is_dir()) { let _ = std::fs::remove_dir_all(&p); }
+            if p != dir && std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_dir()) { let _ = std::fs::remove_dir_all(&p); }
         }
     }
     Ok(())
@@ -198,7 +198,7 @@ pub fn prepare(source: &str) -> Result<(String, Value), Refused> {
     // A brand given as an object carries an address Archify would fetch; a plain name is its own list.
     for list in obj.values_mut().filter_map(Value::as_array_mut) {
         for item in list.iter_mut().filter_map(Value::as_object_mut) {
-            if item.get("brand").map_or(false, |b| !b.is_string()) { item.remove("brand"); }
+            if item.get("brand").is_some_and(|b| !b.is_string()) { item.remove("brand"); }
         }
     }
     Ok((kind, doc))
@@ -298,7 +298,7 @@ pub fn repair(doc: &mut Value, printed: &str) -> bool {
         for comp in doc["components"].as_array_mut().into_iter().flatten().filter_map(Value::as_object_mut) {
             if comp.get("id").and_then(Value::as_str) != Some(id) { continue; }
             let h = comp.get("size").and_then(|s| s.get(1)).and_then(Value::as_i64).unwrap_or(60);
-            if comp.get("size").and_then(|s| s.get(0)).and_then(Value::as_i64).map_or(true, |have| have < w) {
+            if comp.get("size").and_then(|s| s.get(0)).and_then(Value::as_i64).is_none_or(|have| have < w) {
                 comp.insert("size".into(), json!([w, h]));
                 changed = true;
             }

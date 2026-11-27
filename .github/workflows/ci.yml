@@ -95,13 +95,11 @@ jobs:
       - run: npm ci
       - run: npm run check
 
-  # Lints. NOT blocking yet: `cargo clippy -p thoughtsd -- -D warnings` does not pass today.
-  # Remove `continue-on-error` once it does.
+  # Lints of the daemon. The lints the crate leaves out, and why, are at the top of its `lib.rs`.
   clippy:
-    name: Clippy (not blocking)
+    name: Clippy
     runs-on: ubuntu-22.04
     timeout-minutes: 20
-    continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

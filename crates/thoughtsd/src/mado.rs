@@ -506,7 +506,7 @@ pub fn later_steps(step: &str) -> Vec<&'static str> {
     out
 }
 
-fn is_approved(st: &MadoState, step: &str) -> bool { st.steps.get(step).map_or(false, |s| s.status == "approved") }
+fn is_approved(st: &MadoState, step: &str) -> bool { st.steps.get(step).is_some_and(|s| s.status == "approved") }
 
 /// Put the state right: every step present with a known status, and `locked` / `ready` following
 /// from the steps before (a step that is further along keeps its status and its files).
@@ -519,7 +519,7 @@ pub fn normalize(st: &mut MadoState) {
         let e = st.steps.entry(s.to_string()).or_default();
         if !["locked", "ready", "drafting", "review", "approved", "stale"].contains(&e.status.as_str()) { e.status = "locked".into(); }
         if RUN_STEPS.iter().all(|r| *r != s) { e.chat_id = None; e.strayed = None; e.stray_unchecked = None; }
-        if e.strayed.as_ref().map_or(false, |l| l.is_empty()) { e.strayed = None; }
+        if e.strayed.as_ref().is_some_and(|l| l.is_empty()) { e.strayed = None; }
         if e.stray_unchecked == Some(false) { e.stray_unchecked = None; }
         // The review and the build have no run: nothing for them to be drafting.
         if (s == "review" || s == "build") && e.status == "drafting" { e.status = "ready".into(); }
@@ -649,7 +649,7 @@ pub fn load_state(project_id: &str, mado: &Path, full: bool) -> anyhow::Result<O
     normalize(&mut st);
     if is_approved(&st, "review") {
         let now = read_in(mado, PLAN, full, DOC_MAX).ok().flatten();
-        let ok = approved_plan_in(project_id).zip(now).map_or(false, |(a, b)| approval_matches(&a, &b));
+        let ok = approved_plan_in(project_id).zip(now).is_some_and(|(a, b)| approval_matches(&a, &b));
         if !ok { if let Some(e) = st.steps.get_mut("review") { e.status = "stale".into(); } normalize(&mut st); }
     }
     Ok(Some(st))
@@ -821,7 +821,7 @@ pub fn check_step(mado: &Path, step: &str, full: bool) -> (Vec<String>, Vec<Stri
 pub fn existing_in(mado: &Path, full: bool) -> bool {
     read_in(mado, "state.json", full, DOC_MAX).ok().flatten()
         .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
-        .map_or(false, |v| v["mode"] == EXISTING)
+        .is_some_and(|v| v["mode"] == EXISTING)
 }
 
 /// A fingerprint of every file of `mado/` a run may write (to tell whether a run changed anything).
@@ -982,9 +982,9 @@ pub async fn prepare_run(state: &AppState, kind: &str, mut spec: crate::claude::
         let engine = record_dir(&role.project_id).and_then(|d| crate::paths::canonical(&d).ok());
         let cwd = crate::paths::canonical(&spec.cwd).ok();
         let inside = match (&engine, &cwd) {
-            (Some(e), Some(c)) => c.strip_prefix(e).ok().and_then(|r| r.components().next()).map_or(false, |first| {
+            (Some(e), Some(c)) => c.strip_prefix(e).ok().and_then(|r| r.components().next()).is_some_and(|first| {
                 let n = first.as_os_str().to_string_lossy();
-                n == "build" || n.strip_prefix("lane-").map_or(false, |r| r.split('-').count() == 2 && r.split('-').all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit())))
+                n == "build" || n.strip_prefix("lane-").is_some_and(|r| r.split('-').count() == 2 && r.split('-').all(|x| !x.is_empty() && x.bytes().all(|b| b.is_ascii_digit())))
             }),
             _ => false,
         };
@@ -1258,7 +1258,7 @@ async fn run_step(state: &Arc<AppState>, project_id: &str, step: &str, text: Str
     if !full { crate::trust::require(&project)?; }
     let mado = mado_dir_of(&project, full)?;
     let st = load_state(project_id, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
-    if st.steps.get(step).map_or(true, |s| s.status == "locked") { return Err(crate::tr::err("mado.locked", &[])); }
+    if st.steps.get(step).is_none_or(|s| s.status == "locked") { return Err(crate::tr::err("mado.locked", &[])); }
     let id = step_chat(state, project_id, step).await?;
     crate::api::send_text(state.clone(), id.clone(), text).await?;
     Ok(id)
@@ -1312,7 +1312,7 @@ fn files_of(mado: &Path) -> Vec<String> {
 /// and distrusted a state.json the daemon did not write: the file is rewritten when it says otherwise.)
 fn reconcile(_pid: &str, mado: &Path, st: &MadoState, full: bool) -> bool {
     let raw = read_in(mado, "state.json", full, DOC_MAX).ok().flatten().and_then(|b| serde_json::from_slice::<MadoState>(&b).ok());
-    raw.map_or(true, |mut r| { normalize(&mut r); r != *st })
+    raw.is_none_or(|mut r| { normalize(&mut r); r != *st })
 }
 
 /// `GET /api/mado/:project` → `{project, exists, state, files}`.
@@ -1383,8 +1383,7 @@ pub async fn start_in(st: &AppState, pid: &str, mode: Option<Option<String>>) ->
             s
         }
         None => {
-            let mut s = MadoState::default();
-            s.mode = mode.flatten();
+            let mut s = MadoState { mode: mode.flatten(), ..Default::default() };
             normalize(&mut s);
             save_state(pid, &mado, &s, full)?;
             s
@@ -1474,10 +1473,10 @@ struct RunBody { note: Option<String> }
 /// `POST /steps/:step/run {note?}` → `{chatId}`.
 async fn step_run(State(st): S, UrlPath((pid, step)): UrlPath<(String, String)>, body: Option<Json<RunBody>>) -> R {
     let note = body.and_then(|b| b.0.note).filter(|n| !n.trim().is_empty());
-    if note.as_ref().map_or(false, |n| n.len() > 20_000) { return Err(crate::tr::err("mado.too_large", &[("path", "note")]).into()); }
+    if note.as_ref().is_some_and(|n| n.len() > 20_000) { return Err(crate::tr::err("mado.too_large", &[("path", "note")]).into()); }
     let (_, mado, full) = ctx(&st, &pid).await?;
     let state = load_state(&pid, &mado, full)?.ok_or_else(|| crate::tr::err("mado.not_started", &[]))?;
-    let again = state.steps.get(&step).map_or(false, |s| s.status != "ready");
+    let again = state.steps.get(&step).is_some_and(|s| s.status != "ready");
     let text = crate::mado_prompts::run_message(&step, again, note.as_deref());
     let id = run_step(&st, &pid, &step, text).await?;
     Ok(Json(json!({"chatId": id})))
@@ -1614,7 +1613,7 @@ async fn changes(State(st): S, UrlPath(pid): UrlPath<String>, Json(b): Json<Chan
         check_ops(&g.ops)?;
         ops.push(g.clone());
     }
-    if chosen.is_empty() && ops.iter().all(|g| g.ops.is_empty()) && b.note.as_deref().map_or(true, |n| n.trim().is_empty()) {
+    if chosen.is_empty() && ops.iter().all(|g| g.ops.is_empty()) && b.note.as_deref().is_none_or(|n| n.trim().is_empty()) {
         return Err(crate::tr::err("mado.nothing_to_send", &[]).into());
     }
     let text = crate::mado_comments::change_prompt(&mado, full, &chosen, &ops, b.note.as_deref());
@@ -1677,7 +1676,7 @@ fn option_value(what: &str, v: Option<String>) -> anyhow::Result<Option<String>>
 /// that would not be accepted today, counts as not chosen.
 pub fn options_in(project_id: &str) -> Options {
     let Some(f) = record_dir(project_id).map(|d| d.join(OPTIONS_FILE)) else { return Options::default() };
-    let plain = std::fs::symlink_metadata(&f).map_or(false, |m| m.is_file() && m.len() <= 4096);
+    let plain = std::fs::symlink_metadata(&f).is_ok_and(|m| m.is_file() && m.len() <= 4096);
     if !plain { return Options::default(); }
     let o: Options = std::fs::read(&f).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
     Options { model: option_value("model", o.model).unwrap_or(None), effort: option_value("effort", o.effort).unwrap_or(None) }

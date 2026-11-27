@@ -105,7 +105,7 @@ pub async fn output_within(child: &mut tokio::process::Child, input: Option<&[u8
 }
 
 /// Did `e` come from a time limit of this module's (`output_timeout`, `output_within`)?
-pub fn timed_out(e: &std::io::Error) -> bool { e.get_ref().map_or(false, |i| i.is::<TimedOut>()) }
+pub fn timed_out(e: &std::io::Error) -> bool { e.get_ref().is_some_and(|i| i.is::<TimedOut>()) }
 
 /// The command did not finish within its time limit and was ended.
 #[derive(Debug)]

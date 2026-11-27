@@ -109,7 +109,7 @@ pub fn export(settings: &Settings, chats: Vec<Chat>, attachments_dir: &Path, lay
             let mut kept = vec![];
             for a in &m.attachments {
                 let Some((name, path)) = own_attachment(attachments_dir, &c.id, a) else { continue };
-                if files.get(&c.id).map_or(false, |f| f.contains_key(&name)) { kept.push(name); continue; }
+                if files.get(&c.id).is_some_and(|f| f.contains_key(&name)) { kept.push(name); continue; }
                 match std::fs::read(&path) {
                     Ok(bytes) if total + bytes.len() <= MAX_ATTACHMENT_BYTES => {
                         total += bytes.len();
@@ -127,7 +127,7 @@ pub fn export(settings: &Settings, chats: Vec<Chat>, attachments_dir: &Path, lay
     }
     info.chats = out_chats.len();
     let pack = crate::packs::export(layer, "Moved from another computer");
-    let pack = if pack["files"].as_object().map_or(false, |f| !f.is_empty()) {
+    let pack = if pack["files"].as_object().is_some_and(|f| !f.is_empty()) {
         info.customisations = pack["files"].as_object().map_or(0, |f| f.len());
         pack
     } else { Value::Null };

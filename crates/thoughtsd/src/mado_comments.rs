@@ -70,7 +70,7 @@ pub fn clean_target(t: CommentTarget) -> anyhow::Result<CommentTarget> {
         }
         // (An edge of the task diagram is a dependency, `<task>--<task>`, of `plan.json`.)
         CommentTarget::Edge { file, edge_id } if file == mado::PLAN => {
-            let ok = edge_id.split_once("--").map_or(false, |(a, b)| id_ok(a) && id_ok(b));
+            let ok = edge_id.split_once("--").is_some_and(|(a, b)| id_ok(a) && id_ok(b));
             if !ok { return Err(bad()); }
             CommentTarget::Edge { file, edge_id }
         }
@@ -178,12 +178,12 @@ fn graph(m: &Path, file: &str, full: bool) -> Option<GraphDoc> {
 fn target_exists(m: &Path, t: &CommentTarget, full: bool) -> bool {
     match t {
         CommentTarget::Text { file, quote, prefix, suffix, heading } => {
-            mado::read_text(m, file, full).ok().flatten().map_or(false, |text| anchor(&text, quote, prefix, suffix, heading.as_deref()).is_some())
+            mado::read_text(m, file, full).ok().flatten().is_some_and(|text| anchor(&text, quote, prefix, suffix, heading.as_deref()).is_some())
         }
-        CommentTarget::Node { file, node_id } => graph(m, file, full).map_or(false, |g| g.nodes.iter().any(|n| &n.id == node_id)),
-        CommentTarget::Edge { file, edge_id } => graph(m, file, full).map_or(false, |g| g.edges.iter().any(|e| &e.id == edge_id)),
-        CommentTarget::Screen { screen_id, .. } => graph(m, "flow.graph.json", full).map_or(false, |g| g.nodes.iter().any(|n| &n.id == screen_id && n.kind == "screen")),
-        CommentTarget::Task { task_id } => mado::read_plan(m, full).ok().flatten().map_or(false, |p| p.tasks.iter().any(|t| &t.id == task_id)),
+        CommentTarget::Node { file, node_id } => graph(m, file, full).is_some_and(|g| g.nodes.iter().any(|n| &n.id == node_id)),
+        CommentTarget::Edge { file, edge_id } => graph(m, file, full).is_some_and(|g| g.edges.iter().any(|e| &e.id == edge_id)),
+        CommentTarget::Screen { screen_id, .. } => graph(m, "flow.graph.json", full).is_some_and(|g| g.nodes.iter().any(|n| &n.id == screen_id && n.kind == "screen")),
+        CommentTarget::Task { task_id } => mado::read_plan(m, full).ok().flatten().is_some_and(|p| p.tasks.iter().any(|t| &t.id == task_id)),
         CommentTarget::Token { .. } => true,
     }
 }
