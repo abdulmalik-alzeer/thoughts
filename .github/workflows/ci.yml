@@ -56,24 +56,6 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: npm ci
-      - name: TEMP one screen-check test, watched
-        if: runner.os == 'macOS'
-        run: |
-          cargo test -p thoughtsd --no-run 2>&1 | tail -2
-          (cargo test -p thoughtsd with_no_window_the_screen_check -- --nocapture > t.txt 2>&1 &)
-          for i in $(seq 1 40); do
-            sleep 2
-            pid=$(pgrep -f "http.server" | head -1 || true)
-            if [ -n "$pid" ]; then
-              echo "== found after $((i*2))s"; ps axo pid,ppid,pgid,etime,command | grep -E "http.server|sandbox-exec" | grep -v grep
-              sleep 6
-              lsof -nP -iTCP -sTCP:LISTEN | grep -i -E "python|COMMAND" || echo "no python listener"
-              for q in $(pgrep -f "http.server"); do echo "--- sample $q"; sample $q 2 -file s.txt >/dev/null 2>&1 || true; sed -n '/Call graph/,/Total number/p' s.txt | head -90; done
-              log show --last 1m --predicate 'sender == "Sandbox"' --style compact 2>/dev/null | grep -i -E "python" | grep -v file-write-create | cut -c1-400 | tail -15 || true
-              break
-            fi
-          done
-          sleep 20; grep -E 'test with_no|left:|right:' t.txt | cut -c1-300
       - name: Daemon tests
         if: runner.os != 'Windows'
         run: cargo test -p thoughtsd
