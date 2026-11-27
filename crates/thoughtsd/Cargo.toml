@@ -52,7 +52,7 @@ ureq = "2.12"
 url = "2.5"
 # Reading the user's own Codex `config.toml` (the commands' environment rules a provider run adds to). MIT OR Apache-2.0,
 # already built for the desktop shell.
-toml = "0.8"
+toml = "1.2"
 
 [dev-dependencies]
 # Builds the old-format (.xls, .ppt) test files of as_text.rs. MIT.
