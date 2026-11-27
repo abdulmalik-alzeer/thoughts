@@ -58,8 +58,13 @@ GitHub, and the installers are on the
 - **macOS** is where Thoughts is used today, on Apple Silicon Macs (M1 or later). Each release is
   set up to make one app for Apple Silicon and Intel Macs, but it has not been run on an Intel Mac
   yet.
-- **Windows** (an installer) and **Linux** (a `.deb` package and an AppImage) come out of the same
-  release but have never been run on a real computer. Treat them as experiments.
+- **Windows** has an installer in every release from 0.7.5 on (`Thoughts_…_x64-setup.exe`, for
+  64-bit Intel and AMD computers). Before each release it is installed and started on a test
+  machine, which shows that it installs, that the background service starts and that the app
+  stays open. Nobody has used it on a real Windows computer yet: treat it as an early version,
+  and please report what you find. It updates itself from inside the app, like the Mac version.
+- **Linux** (a `.deb` package and an AppImage) can be built from the code but is not released,
+  and has never been run on a real computer.
 
 ### Opening Thoughts the first time
 

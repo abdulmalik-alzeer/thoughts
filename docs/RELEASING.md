@@ -14,9 +14,12 @@ first time; after that the [checklist](#release-checklist) is enough.
   files (Apple Silicon + Intel) made on a Mac with the local release command; the Intel half has
   never been run. The README states the user-facing version of this in
   its "Where it runs today" section; change the two together.
-- Windows and Linux builds are wired up in CI but **have never been tested on a real machine**.
-  Treat the first Windows/Linux installers as experiments, and run the
-  [first-run test plan](#first-run-test-plan) before giving one to anybody.
+- **Windows is released from 0.7.5 on**: an NSIS installer (`Thoughts_X.Y.Z_x64-setup.exe`) built
+  by the pipeline on GitHub's machines and signed for updates on the release Mac (see
+  [The Windows installer](#the-windows-installer)). The pipeline installs and starts it on a
+  fresh Windows machine before it can be released. It **has never been used on a real machine**:
+  run the [first-run test plan](#first-run-test-plan) when one is at hand.
+- Linux builds are wired up in CI, are not released, and have never been run.
 - See [Known unverified](#known-unverified) for the full list of things nobody has checked.
 - No Apple or Windows certificate exists and nothing is notarised: installers are unsigned
   (decided 2026-11-15: no Apple developer account for now). The release workflow works without
@@ -27,8 +30,9 @@ first time; after that the [checklist](#release-checklist) is enough.
   sign-in. The GitHub fallback for the time the repository was private (`thoughts updates gh
   on`, in 0.0.12 to 0.7.0) was removed in 0.7.1. The user guides (README, CUSTOMISING, PRIVACY)
   describe all of this; change them together.
-- Releases are made on a Mac with one command while the pipeline cannot run (see
-  [A release made on this Mac](#a-release-made-on-this-mac)).
+- Releases are made on a Mac with one command (see
+  [A release made on this Mac](#a-release-made-on-this-mac)): macOS is built there, Windows by
+  the pipeline. The pipeline has not yet published a release on its own.
 - An update was rehearsed on this Mac on 2026-11-16. [Known unverified](#known-unverified)
   says what that showed and what it did not.
 
@@ -171,15 +175,17 @@ only changed something that concerns one platform, rehearse that platform.
 
 ## A release made on this Mac
 
-While the pipeline is not used (it has not yet published a release), a release is made with one
-command. It builds macOS only, with the same scripts the pipeline
-uses, and sends nothing anywhere until it is asked to:
+A release is made with one command, in three steps. It builds macOS on this Mac with the same
+scripts the pipeline uses, has the pipeline build the Windows installer, and sends nothing
+anywhere until it is asked to:
 
 ```bash
-node scripts/release/local.mjs             # build, sign, assemble, check. Nothing leaves this Mac.
-node scripts/release/local.mjs --draft     # push main and the tag, attach the files to a DRAFT
+node scripts/release/local.mjs             # build macOS, sign, assemble, check. Nothing leaves this Mac.
+node scripts/release/local.mjs --draft     # push main and the tag, add the Windows installer, attach all to a DRAFT
 node scripts/release/local.mjs --publish   # make the draft public: the update reaches every copy
 ```
+
+`--mac-only` (with `--draft` and `--publish`) makes a release without the Windows installer.
 
 Before it:
 
@@ -225,9 +231,38 @@ counts as built, every update file is checked the way an installed copy will che
 `updater.pub`, and for exactly this version.
 
 **`--draft`** reuses those files when they were built from the commit that is checked out. It
-switches the CI, Release and Advisories workflows off, pushes `main` and the tag, attaches the
-files to a draft release, and switches the workflows back on. (A push would otherwise start
-CI, and the tag would start the pipeline's own release.) Nobody is offered a draft.
+switches the CI, Release and Advisories workflows off, pushes `main` and the tag, and switches
+the workflows back on. (A push would otherwise start CI, and the tag would start the pipeline's
+own release.) Then it adds [the Windows installer](#the-windows-installer), which takes 15 to
+30 minutes, and attaches everything to a draft release. Nobody is offered a draft. If it stops
+part-way (the Windows build failed, the connection dropped), run it again: nothing is pushed or
+built twice, and a Windows build that is still running is picked up.
+
+### The Windows installer
+
+A Mac cannot build it, and the updater's private key is not given to GitHub. So:
+
+1. `--draft` starts the Release workflow by hand for the release's tag, Windows only
+   (`gh workflow run release.yml --ref vX.Y.Z -f platforms=windows`; a
+   [rehearsal](#rehearsal), which can write nothing to the repository), or takes a run that
+   already exists for that commit. With no updater secret in the repository, that run builds the
+   app with the updater switched on (the public key is the committed `src-tauri/updater.pub`) and
+   leaves the installer without an update signature; its `build-info-windows.json` says
+   `signLater`.
+2. The same run installs the installer silently on a fresh Windows machine, starts the
+   background service of the installed copy in an empty home folder and waits for it to listen
+   on its port, then opens the app and checks it is still running after twenty seconds (job
+   "Install and start on Windows"). A run that fails there is not used.
+3. This Mac asks GitHub about the run (this repository, this workflow file, started by hand,
+   this commit, finished and passed), downloads the installer, checks it against the size and
+   checksum the run recorded, and signs it with the updater key for exactly this version
+   (`tauri signer sign --app-version`). `scripts/release/windows.mjs` holds these checks.
+4. `latest.json` is written again with `windows-x86_64` beside the macOS entries, every signed
+   file is verified against `updater.pub` once more, and the draft gets all of it.
+
+What this trusts: that GitHub's runner built the installer from the commit it names. A release
+made wholly by the pipeline would trust the same, and would also need the key as a secret.
+`--publish` refuses a draft with no Windows installer unless `--mac-only` is given.
 
 **`--publish`** makes the draft public. From that moment every copy that checks is offered
 the update. A published release is never changed: to fix something, release a new version.
@@ -761,7 +796,10 @@ OS version and result of each line in the release notes draft.
 Things written or configured but never observed working. Each stays here until someone has
 seen it work and noted the version and date.
 
-- **Windows has never been run.** Compiles in CI; nothing else is known. Specific risks from the
+- **Windows has never been used by a person.** From 0.7.5 the pipeline installs the installer on
+  GitHub's Windows machine, starts the background service and opens the app (see
+  [The Windows installer](#the-windows-installer)); nobody has looked at the window, started a
+  chat, or updated an installed copy from inside the app. Specific risks from the
   review: the `claude.cmd` shim and multi-line arguments, `\\?\` paths, the credential helper
   path with spaces, console windows, autostart.
 - **Linux has never been run.** Compiles in CI. Specific risks: secrets lost on reboot with some

@@ -11,6 +11,8 @@
 //   PLATFORM  macos | windows | linux        VERSION  the app version (no "v")
 //   TARGET    the --target the build used, or empty
 //   UPDATER   "true" when signed update files were built
+//   UPDATER_LATER  "true" when the updater is compiled in but the update files are signed
+//             afterwards, where the key is kept (recorded as `signLater` in the report)
 //   OUT       output folder (default: release-out)
 //
 // File names follow what tauri-action produced for 0.0.8 and earlier, so the release page and
@@ -40,7 +42,7 @@ function archToken(name) {
   return m[1];
 }
 
-export function collect({ platform, version, target = '', updater = false, root = ROOT, out, commit = '', signed = {}, tar = defaultTar }) {
+export function collect({ platform, version, target = '', updater = false, signLater = false, root = ROOT, out, commit = '', signed = {}, tar = defaultTar }) {
   if (!PLATFORMS.some((p) => p.id === platform)) stop(`Unknown platform "${platform}"`);
   if (!version) stop('VERSION is not set');
   const bundle = join(root, 'target', target, 'release', 'bundle');
@@ -96,7 +98,7 @@ export function collect({ platform, version, target = '', updater = false, root 
     take(appimage, only(appimage, '.AppImage', 'AppImage'), 'appimage');
   }
 
-  const info = { schema: 1, platform, version, commit, updater, signed, files };
+  const info = { schema: 1, platform, version, commit, updater, ...(signLater && !updater ? { signLater: true } : {}), signed, files };
   writeFileSync(join(out, `build-info-${platform}.json`), JSON.stringify(info, null, 2) + '\n');
   return info;
 }
@@ -122,6 +124,7 @@ if (isMain(import.meta.url)) {
       version: process.env.VERSION,
       target: process.env.TARGET || '',
       updater: flag('UPDATER'),
+      signLater: flag('UPDATER_LATER'),
       out: join(ROOT, process.env.OUT || 'release-out'),
       commit: process.env.GITHUB_SHA || '',
       signed,
